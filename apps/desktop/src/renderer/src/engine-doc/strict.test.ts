@@ -231,6 +231,21 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     expect(doc.failures().length).toBeGreaterThan(0);
   });
 
+  it('evaluates an explicit group list natively and refuses detached edit scopes without legacy answers', async () => {
+    const { PM, doc } = await editor('audit');
+    const group = PM.mkLayer('group');
+    const layer = PM.mkLayer('solid'); layer.group = group.id;
+    const list = [layer, group];
+    expect(doc.api!.groupAncestors(layer, list)).toEqual([group]);
+    expect(fallbacks(doc)).toEqual({});
+    expect(doc.dual!.total().mismatched).toBe(0);
+    const legacy = vi.fn();
+    expect(() => doc.edits!.align([layer], 'left', 0, legacy)).toThrow(/edit.align.*context/);
+    expect(() => doc.edits!.leaveAttributes(layer, 0, legacy)).toThrow(/edit.leaveAttributes.*context/);
+    expect(() => doc.edits!.anchorReference(layer, 'font', 0, legacy)).toThrow(/edit.anchorReference.*context/);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
   it('keeps the development modes out of a profile override in production builds', () => {
     expect(profileOverride('audit', false)!.name).toBe('on');
     expect(profileOverride('strict', false)!.dual).toBe(false);

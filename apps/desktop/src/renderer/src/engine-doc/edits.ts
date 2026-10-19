@@ -224,6 +224,12 @@ export class NativeEdits {
 
   private count(table: Record<string, number>, key: string) { table[key] = (table[key] ?? 0) + 1; }
 
+  private fallback<T>(name: string, reason: string, legacy: () => T): T {
+    this.count(this.stats.fallbacks, `${name}:${reason}`);
+    if (this.onFallback) return this.onFallback(`edit.${name}`, reason);
+    return legacy();
+  }
+
   /** The open composition, the composition being edited, and its live layers. */
   private scope(): { open: string; comp: string; layers: any[] } | null {
     const proj = this.unwrap(this.PM.proj);
@@ -335,7 +341,7 @@ export class NativeEdits {
   } = {}): T {
     this.count(this.stats.calls, name);
     const got = this.ask(name, request, options.wide);
-    if ('fallback' in got) { this.count(this.stats.fallbacks, `${name}:${got.fallback}`); if (this.onFallback) return this.onFallback(`edit.${name}`, got.fallback); return legacy(); }
+    if ('fallback' in got) return this.fallback(name, got.fallback, legacy);
     if (this.dual && !this.noReference.has(name)) return this.compare(name, got, legacy, options.where ?? (() => request), options.compareWith);
     if ('threw' in got) throw got.threw;
     this.apply(got.reply.ops);
@@ -353,7 +359,7 @@ export class NativeEdits {
   answer<T>(name: string, request: Record<string, unknown>, native: (reply: KernelReply) => T, legacy: () => T, compare: (native: T, legacy: T) => string | null = (a, b) => differs(a, b, close), options: { wide?: boolean } = {}): T {
     this.count(this.stats.calls, name);
     const got = this.ask(name, request, options.wide);
-    if ('fallback' in got) { this.count(this.stats.fallbacks, `${name}:${got.fallback}`); if (this.onFallback) return this.onFallback(`edit.${name}`, got.fallback); return legacy(); }
+    if ('fallback' in got) return this.fallback(name, got.fallback, legacy);
     const value = 'threw' in got ? undefined : native(got.reply);
     if (this.dual && !this.noReference.has(name)) {
       let expected: { value?: T; threw?: unknown };
@@ -380,7 +386,8 @@ export class NativeEdits {
    */
   align<T>(layers: any[], mode: string, time: number, legacy: () => T): T {
     const indexes = layers.map(layer => this.index(layer));
-    if (!indexes.length || indexes.some(i => i < 0)) return legacy();
+    if (!indexes.length) return [] as unknown as T;
+    if (indexes.some(i => i < 0)) return this.fallback('align', 'context', legacy);
     const live = this.scope()?.layers ?? [];
     const commands = (reply: KernelReply) => (reply.moves as Array<{ layer: number; channel: string; value: number }>).map(move => ({
       type: 'set_property', target: live[move.layer]?.id, path: move.channel, value: move.value, time, mode: 'auto', preserveHandEdits: false,
@@ -397,7 +404,7 @@ export class NativeEdits {
     const index = this.index(layer);
     type Answer = LeaveBounds & { ops: PatchOp[] | null };
     const plain = (): Answer => ({ ...legacy(), ops: null });
-    if (index < 0) return plain();
+    if (index < 0) return this.fallback('leaveAttributes', 'context', plain);
     const box = (b: LeaveBounds) => ({ w: b.w, h: b.h, ax: b.ax, ay: b.ay });
     return this.answer<Answer>('leaveAttributes', { layer: index, t: time },
       reply => ({ w: reply.w as number, h: reply.h as number, ax: reply.ax as number, ay: reply.ay as number, ops: reply.ops }), plain,
@@ -413,7 +420,7 @@ export class NativeEdits {
    */
   anchorReference(layer: any, kind: 'font' | 'size', time: number, legacy: () => any): any {
     const index = this.index(layer);
-    if (index < 0) return legacy();
+    if (index < 0) return this.fallback('anchorReference', 'context', legacy);
     const box = (b: any) => (b ? { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 } : null);
     const compare = kind === 'font'
       ? (a: any, b: any) => differs(box(a), box(b), (x, y) => Math.abs(x - y) <= 0.25)

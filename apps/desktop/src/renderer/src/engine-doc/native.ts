@@ -748,7 +748,9 @@ export class NativeApi {
   groupAncestors(L: any, layers?: any[]): any[] {
     if (layers !== undefined) {
       const c = this.comps();
-      if (!c || this.unwrap(layers) !== c.cur.layers) return this.legacy.groupAncestors(L, layers);
+      if (!c || this.unwrap(layers) !== c.cur.layers) return this.answer('groups.ancestors',
+        () => this.query('groupAncestors', { comp: c?.comp ?? '', open: c?.open ?? '', compJson: { ...(c?.cur ?? {}), layers: asJson(layers) }, layer: asJson(L) }, (indexes: number[]) => indexes.map(i => layers[i])),
+        () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id }));
     }
     return this.shaped('groups.ancestors', L, 'groupAncestors',
       () => this.answer('groups.ancestors', () => this.layerQuery('groupAncestors', L, {}, (indexes: number[], ctx) => indexes.map(i => ctx.live[i])),
