@@ -114,6 +114,8 @@ pub struct SnapshotJob {
     pub blender: Option<BlenderPrep>,
     /// Times its Blender frame was sent to the worker.
     pub blender_attempts: u8,
+    /// One deadline shared by every re-plan, starting at the first attempt.
+    blender_until: Option<i64>,
 }
 
 impl SnapshotJob {
@@ -137,6 +139,7 @@ impl SnapshotJob {
             waiting_for: Vec::new(),
             blender: None,
             blender_attempts: 0,
+            blender_until: None,
         }
     }
 
@@ -163,7 +166,7 @@ impl SnapshotJob {
         let bound = i64::from(self.request.blender_wait_ms) * 1_000;
         self.blender = Some(BlenderPrep::Running {
             token,
-            until: now + bound,
+            until: *self.blender_until.get_or_insert(now + bound),
         });
     }
 
@@ -311,7 +314,10 @@ impl SnapshotQueue {
     /// Removes the job whose Blender frame the worker prepares under
     /// `token` (the worker failed).
     pub fn take_preparing(&mut self, token: u64) -> Option<SnapshotJob> {
-        let index = self.jobs.iter().position(|j| j.preparing() == Some(token))?;
+        let index = self
+            .jobs
+            .iter()
+            .position(|j| j.preparing() == Some(token))?;
         self.jobs.remove(index)
     }
 
@@ -715,7 +721,8 @@ mod tests {
         assert!(q.next(|_| Some(0), |_| false, idle(), 600_000).is_none());
         assert!(!q.waiting());
         // ... and an idle job is not held behind it.
-        q.push(job(SnapshotClass::Idle, key(3, 2), None, 0)).unwrap();
+        q.push(job(SnapshotClass::Idle, key(3, 2), None, 0))
+            .unwrap();
         assert_eq!(
             q.next(|_| Some(0), |_| false, idle(), 600_000)
                 .unwrap()
@@ -734,6 +741,23 @@ mod tests {
         let ready = q.next(|_| Some(0), |_| false, idle(), 9_500_000).unwrap();
         assert!(matches!(ready.blender, Some(BlenderPrep::Ready(_))));
         assert_eq!(ready.deadline, 10_000_000);
+    }
+
+    #[test]
+    fn blender_replans_share_one_deadline() {
+        let mut j = job(SnapshotClass::Async, key(3, 1), None, 0);
+        j.request.blender_wait_ms = 2_000;
+        j.start_blender(1, 100_000);
+        let until = j.expires_at();
+        j.blender_done(Arc::new(Vec::new()), 1_500_000);
+        j.start_blender(2, 1_800_000);
+        assert_eq!(j.expires_at(), until);
+        j.blender_done(Arc::new(Vec::new()), 2_000_000);
+        j.start_blender(3, 2_200_000);
+        assert!(
+            j.expires_at() < 2_200_000,
+            "a third attempt has no fresh budget"
+        );
     }
 
     #[test]

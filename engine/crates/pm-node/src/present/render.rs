@@ -3128,24 +3128,33 @@ impl Thread {
             video_end: pm_render::VideoEnd::of(purpose),
         };
         if needs_blender {
-            match blender_frames(
-                renderer,
-                doc,
-                &job,
-                &request,
-                self.blender.as_deref(),
-            ) {
+            match blender_frames(renderer, doc, &job, &request, self.blender.as_deref()) {
                 BlenderFrames::Draw(surfaces) => {
                     request.blender = pm_render::blender::BlenderRender::Final(surfaces);
                 }
                 BlenderFrames::Prepare(snapshots) => {
                     let Some(blender) = self.blender.clone() else {
+                        self.stats().snapshot_failures += 1;
+                        self.snapshot_error(
+                            &job,
+                            ErrorCode::BlenderFailed,
+                            "The Blender capture worker is unavailable.",
+                        );
                         return;
                     };
                     self.blender_token += 1;
                     let token = self.blender_token;
                     let mut job = job;
                     job.start_blender(token, now());
+                    if job.expires_at() <= now() {
+                        self.stats().snapshot_failures += 1;
+                        self.snapshot_error(
+                            &job,
+                            ErrorCode::Timeout,
+                            "The Blender capture exceeded its time limit.",
+                        );
+                        return;
+                    }
                     blender.capture(token, job.key, snapshots);
                     self.stats().snapshot_blender += 1;
                     self.snapshots.requeue(job);

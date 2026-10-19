@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { install as installExporter } from '../legacy/core/exporter';
+import { renderState, onRenderState } from '../core/scene3d/rendering';
 import { CAPTURE_BUSY, installAppCaptures, usesBlender } from './app-captures';
 
 vi.mock('../legacy/core/export-preview', () => ({ animateExportPreview: () => () => {} }));
@@ -98,6 +99,27 @@ describe('the app’s captures with the new engine on', () => {
     await expect(PM.Export.snapshotAsync(0, 320)).rejects.toThrow(/Install Blender/);
     expect(calls).toEqual(['pause', 'play']);
     expect(PM.agentFrameCapture).toBe(false);
+  });
+
+  it('mirrors Blender capture busy and error through the existing rendering controls state', async () => {
+    const { PM } = legacyPM();
+    PM.proj.render3d = { enabled: true };
+    const states: Array<{ busy: boolean; error: string | null }> = [];
+    const off = onRenderState(PM, s => states.push({ busy: s.busy, error: s.error }));
+    const e = engine();
+    let finish!: (url: string) => void;
+    e.snapshotDataUrl.mockImplementation(() => new Promise<string>(resolve => { finish = resolve; }));
+    installAppCaptures(PM, e);
+    const capture = PM.EngineCaptures.snapshotAsync(0);
+    expect(renderState(PM).busy).toBe(true);
+    finish('data:ok');
+    await capture;
+    expect(renderState(PM).busy).toBe(false);
+    e.snapshotDataUrl.mockRejectedValue(new Error('Blender failed'));
+    await expect(PM.EngineCaptures.snapshotAsync(0)).rejects.toThrow('Blender failed');
+    expect(renderState(PM)).toMatchObject({ busy: false, error: 'Blender failed' });
+    expect(states).toContainEqual({ busy: true, error: null });
+    off();
   });
 
   it('knows a Blender document by any composition with render3d on', () => {
