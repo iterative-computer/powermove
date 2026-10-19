@@ -18,7 +18,7 @@ import type { RemoteClient } from './clients';
 
 /** Tools that need a real UI: pixels, panel DOM, synthetic input. */
 export const DISPLAY_TOOLS = new Set([
-  'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel',
+  'get_panel_layout', 'set_panel_layout', 'get_workspace_state', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel',
   'render_frames', '__panel_bounds', '__prepare_panel_input', '__agent_thread_control'
 ]);
 
@@ -27,7 +27,7 @@ export const DISPLAY_TOOLS = new Set([
    own copy, so a tab that has the run's project open is preferred. A tab on
    another project would look the asset up in the wrong document, so it is
    never used (media-tools lane). */
-export const TAB_FIRST_TOOLS = new Set([MEDIA_SOURCE_TOOL, 'get_workspace_state']);
+export const TAB_FIRST_TOOLS = new Set([MEDIA_SOURCE_TOOL]);
 
 const MAX_BUFFERED_EVENTS = 5000;
 
@@ -186,12 +186,19 @@ export class RunHub {
 
   targetFor(tool: string, owner: RunOwner): RemoteClient | null {
     if (tool === '__agent_thread_control') return owner.attachedTabs[0] ?? this.deps.tabs()[0] ?? null;
-    if (DISPLAY_TOOLS.has(tool)) return this.deps.tabs()[0] ?? null;
+    if (DISPLAY_TOOLS.has(tool)) return this.projectTab(owner);
     if (TAB_FIRST_TOOLS.has(tool)) {
       const tab = this.deps.tabsOn?.(owner.record.projectId).find((client) => !client.isDestroyed());
       return tab ?? this.deps.engine() ?? null;
     }
-    return this.deps.engine() ?? this.deps.tabs()[0] ?? null;
+    return this.deps.engine() ?? this.projectTab(owner);
+  }
+
+  private projectTab(owner: RunOwner): RemoteClient | null {
+    // When the host knows project membership, an unrelated tab can never
+    // answer a document or DOM tool for the pinned run.
+    const tabs = this.deps.tabsOn ? this.deps.tabsOn(owner.record.projectId) : this.deps.tabs();
+    return tabs.find(tab => !tab.isDestroyed()) ?? null;
   }
 
   /** Forget finished runs older than the retention window. */

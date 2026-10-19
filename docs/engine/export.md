@@ -618,3 +618,54 @@ snapshot session before resync. Host-service resolution selects those bindings
 by process and session until the export ends, independently of open windows.
 See `media-store.md` for the lifetime and regression cases. The original
 capability-handle checks still grant paths only to the owning engine port.
+
+## Phase 3c agents: strict batches, host packing and CLI delivery
+
+This section supersedes the capability-routing behavior described above for
+agent jobs. With the engine enabled, its presence selects native work even while
+it is recovering. `unsupported`, `mediaOffline` and other engine failures retain
+their named error; agent exports and frame batches never invoke a legacy fallback.
+User job statuses produced by `AgentJobs` no longer mark failures as routed.
+The broader sheet/router removal remains the derouter lane's work.
+
+`AgentHarness.capture` and `observeVisual` now use the authenticated
+`engine:agent-frames` batch endpoint, at JPEG 0.74 and motion blur off. The endpoint
+uses the job lane, pins the document revision, waits for media bindings and
+extension definitions, and never pauses/resumes playback or enters the exclusive
+compatibility capture helper. MCP composition contact sheets submit all cells as
+one engine batch so the document and definitions freeze together. A partial,
+duplicate or out-of-order native response is validated and restored to request
+order; missing frames fail the batch. Frame sessions pin media like export
+sessions, including across project changes.
+
+Native `save_project` asks for a single serialized document envelope, workspace
+and Undo snapshot, then uses the host's `ProjectSave` PMV4 writer. The shared
+`project-assets.ts` helpers preserve today's linked-original conversion and
+Undo-reachable media collection. Each save gets its own exclusive owner-only
+name and media binding scope. It streams original bytes in bounded chunks,
+checks source identity before and after, validates the container, atomically
+publishes through `publishFile`, and returns the real path. Offline originals
+fail by name; an incomplete file is not delivered. Private document-plan responses
+have a separate bounded budget from paginated public agent state.
+
+`powermove render <project> <output> [options]` invokes the native CLI without a
+shell, preserves its exit code and signals, and accepts user-chosen destinations
+outside the agent exports folder. A missing runtime is
+`native-renderer-unavailable`. `pm-cli render --param NAME=JSON` validates all
+values before applying them to its isolated document, retaining each parameter's
+definition. Existing definition snapshots, host fonts and Blender service remain
+in the native CLI; a missing WebGL runner remains a named headless failure.
+
+Targeted tests cover native failures before/after job acceptance and during
+recovery; pinning and playback isolation; incomplete frames; media binding
+lifetimes; PMV4 linked originals/Undo/exclusive naming; CLI argument boundaries;
+parameter validation and rendered expression changes. The desktop MCP smoke now
+checks native text, publication followed by frames, and host-packed PMV4 media and
+Undo. `e2e/engine-agent-observation.spec.ts` measures twenty five-frame 720 px
+observations during a UHD project's playback. Only measured runs establish its
+performance result.
+
+The native hidden host and its per-machine GLSL pin runner are not integrated.
+Its current refusal and remaining gates are in [hidden-host.md](hidden-host.md).
+CLI artifact assembly supports both macOS architectures, but distributing them
+requires separate matching FFmpeg artifacts and Node 22 load tests for each.

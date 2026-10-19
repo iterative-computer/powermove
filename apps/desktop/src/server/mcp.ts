@@ -1,3 +1,4 @@
+import { requireHiddenHostRuntime } from './hidden-engine-policy';
 import { mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
@@ -26,6 +27,7 @@ async function profileLock(userData: string) {
 /** Runtime rendering is intentionally done in Chromium using the production
  * editor, never a parallel implementation of Powermove's document model. */
 export async function runHeadlessMcp(options: ServeOptions): Promise<void> {
+  await requireHiddenHostRuntime(options.userData);
   const unlock = await profileLock(options.userData);
   let browser: Browser | undefined, host: RunningServer | undefined, page: Page | undefined;
   let external: { close(): Promise<void> } | undefined;
@@ -43,7 +45,7 @@ export async function runHeadlessMcp(options: ServeOptions): Promise<void> {
   process.once('SIGINT', signal); process.once('SIGTERM', signal);
   try {
     browser = await chromium.launch({ headless: true, channel: 'chromium', args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] }).catch(error => {
-      throw new Error(`Could not start the hidden renderer. Run powermove mcp-install-browser once, then retry. ${String(error)}`);
+      throw new Error(`chromium-unavailable: Could not start the hidden renderer. Run powermove mcp-install-browser once, then retry. ${String(error)}`);
     });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: false });
     page = await context.newPage();
