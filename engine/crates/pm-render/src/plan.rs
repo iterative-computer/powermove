@@ -188,6 +188,12 @@ pub struct Build<'r> {
     pub(crate) sampling: crate::sampling::Sampling,
     /// `videoPlaybackTime`'s `endPadding` for this output ([`VideoEnd`]).
     video_padding: f64,
+    /// Today's output scale at the composition level being built, where it
+    /// differs from the build's (the viewer below fit,
+    /// `BuildOptions::svg_scale`): level 1 SVG images pick their bucket at
+    /// it, and a level 1 precomp derives its child's from today's target
+    /// size. `None`: the level's own scale.
+    pub(crate) svg_scale: Option<(f64, f64)>,
     /// What every pass over one composition's layers reads of all of them
     /// (each boundary group is a pass), by the layer list's address and
     /// length (the document is borrowed for the whole build).
@@ -226,6 +232,9 @@ pub struct BuildOptions {
     pub shader_fallback: bool,
     /// The end-of-clip padding of video sources ([`VideoEnd`]).
     pub video_end: VideoEnd,
+    /// Today's output scale at the root for level 1 SVG image buckets
+    /// (`RenderRequest::svg_scale`); `None`: the build's scale.
+    pub svg_scale: Option<(f64, f64)>,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -352,6 +361,7 @@ pub(crate) fn build_blender<'r>(
                 blur: options.blur,
                 video_padding: video_padding.to_bits(),
                 view_override: options3d.view.is_some(),
+                svg_scale: options.svg_scale.map(|(x, y)| (x.to_bits(), y.to_bits())),
             },
         );
     }
@@ -373,6 +383,7 @@ pub(crate) fn build_blender<'r>(
         video_center: None,
         sampling: options.sampling,
         video_padding,
+        svg_scale: options.svg_scale,
         passes: Vec::new(),
         reuse,
     };
@@ -1213,8 +1224,11 @@ fn native_content_quad<'d>(
                     let bw = js::or_number(js::get(&d, "w"), wf);
                     let bh = js::or_number(js::get(&d, "h"), hf);
                     let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
-                    // `svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H))`.
-                    let world = scaled_world(scope, layer, time, scale)?;
+                    // `svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H))`,
+                    // at today's output scale (`outputScale(W, H)`): the
+                    // viewer's below fit and where today does not crop,
+                    // the level's own otherwise.
+                    let world = scaled_world(scope, layer, time, b.svg_scale.unwrap_or(scale))?;
                     let (width, height, _) = pm_vector::render::svg::svg_raster_dimensions(
                         sw, sh, bw, bh, &world, 8192.0,
                     );
@@ -1414,6 +1428,19 @@ fn native_content_quad<'d>(
                 b.video_center = Some(crate::retime::keep_frame_rate(layer, &sub, c));
             }
             let inner_scale = derived_scale(&sub, tw, th);
+            // Today's child target at today's scale (`Math.round(w * sx)`),
+            // where the level's differs from today's (level 1 only: today
+            // has no continuous precomp density).
+            let outer_svg_scale = b.svg_scale;
+            b.svg_scale = match outer_svg_scale {
+                Some(today) if !crate::sampling::is_level2(layer) => {
+                    let tw = js::max(2.0, js::round(w * today.0));
+                    let th = js::max(2.0, js::round(hh * today.1));
+                    (tw.is_finite() && th.is_finite())
+                        .then(|| derived_scale(&sub, tw as u32, th as u32))
+                }
+                _ => None,
+            };
             b.precomp_depth += 1;
             b.blender.path.push(scope.comp.id().to_string_lossy());
             let project = scope.project;
@@ -1434,6 +1461,7 @@ fn native_content_quad<'d>(
             b.precomp_depth -= 1;
             b.blender.path.pop();
             b.video_center = outer_center;
+            b.svg_scale = outer_svg_scale;
             Ok(Some(Quad::Texture {
                 source: Source::Comp(Box::new(inner)),
                 w,

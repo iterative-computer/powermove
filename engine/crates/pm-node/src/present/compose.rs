@@ -530,6 +530,9 @@ impl Composer {
                     pm_render::sampling::Sampling::Final
                 },
                 video_end: pm_render::VideoEnd::Preview,
+                // Level 1 SVG buckets at today's viewer scale (the canvas
+                // today's viewer sizes for this view), not the engine's.
+                svg_scale: state.svg_scale.map(|[x, y]| (x, y)),
             };
             let reuse = self
                 .scratch
@@ -735,6 +738,7 @@ mod tests {
             view_seq: Seq::new(1).unwrap(),
             vsync: None,
             depth_id: None,
+            svg_scale: None,
         }
     }
 

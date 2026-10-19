@@ -535,6 +535,18 @@ pub struct ViewerState {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub depth_id: Option<bool>,
+    /// Today's output scale for this view, per axis: the legacy
+    /// compositor's `outputScale` over the canvas today's viewer sizes for
+    /// it (`previewRenderSize` or the cropped `previewRenderViewport`), in
+    /// canvas pixels per composition pixel. Level 1 SVG images pick their
+    /// raster bucket at it (decision S1, docs/engine/vector.md): today's
+    /// viewer draws below fit at most one pixel per composition pixel,
+    /// where the engine draws at zoom × DPR. Absent: the bucket follows
+    /// the engine's output scale. Added as an optional field (RFC 02
+    /// version notes); a change of it is a new view.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub svg_scale: Option<[f64; 2]>,
 }
 
 /// A display's refresh grid on the host clock: refreshes (BeginFrame times)
@@ -590,6 +602,20 @@ impl Validate for ViewerState {
         ensure(self.pan.iter().all(|v| v.is_finite()), C, || {
             "pan must be finite".into()
         })?;
+        if let Some(scale) = &self.svg_scale {
+            ensure(
+                scale
+                    .iter()
+                    .all(|v| v.is_finite() && *v > 0.0 && *v <= MAX_SCALE * 4.0),
+                C,
+                || {
+                    format!(
+                        "svg scale {scale:?} must be positive and at most {}",
+                        MAX_SCALE * 4.0
+                    )
+                },
+            )?;
+        }
         if let Some(vsync) = &self.vsync {
             let (min, max) = VsyncHint::PERIOD_RANGE_US;
             ensure(
@@ -722,6 +748,7 @@ mod tests {
                 period_us: 8_333.333,
             }),
             depth_id: Some(true),
+            svg_scale: None,
         }
     }
 

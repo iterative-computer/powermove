@@ -1280,6 +1280,7 @@ pub fn events() -> Vec<Envelope> {
                 period_us: 8_333.333_333_333_334,
             }),
             depth_id: Some(true),
+            svg_scale: Some([1.0, 0.75]),
         })),
         event(Event::Transport(TransportCommand::Seek {
             time: ticks(-705_600_000),

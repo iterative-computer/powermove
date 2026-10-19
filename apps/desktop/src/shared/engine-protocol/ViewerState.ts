@@ -50,4 +50,16 @@ vsync?: VsyncHint | null,
  * surface (plan section 8; the Phase 3c render transport). Absent or
  * false: no depth pool. A change of it is a new view.
  */
-depthId?: boolean | null, };
+depthId?: boolean | null, 
+/**
+ * Today's output scale for this view, per axis: the legacy
+ * compositor's `outputScale` over the canvas today's viewer sizes for
+ * it (`previewRenderSize` or the cropped `previewRenderViewport`), in
+ * canvas pixels per composition pixel. Level 1 SVG images pick their
+ * raster bucket at it (decision S1, docs/engine/vector.md): today's
+ * viewer draws below fit at most one pixel per composition pixel,
+ * where the engine draws at zoom × DPR. Absent: the bucket follows
+ * the engine's output scale. Added as an optional field (RFC 02
+ * version notes); a change of it is a new view.
+ */
+svgScale?: [number, number] | null, };
