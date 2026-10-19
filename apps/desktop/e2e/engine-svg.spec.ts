@@ -4,11 +4,14 @@
  * bucket rasters in the window (engine-connection/svg-rasters.ts) and the
  * engine composites them. The viewer's frames ask for them, a synchronous
  * snapshot draws them on the calling thread, and an export in the job
- * engine gets them through host services from this window. Every frame is
- * compared byte for byte with today's compositor (`PM.GL.renderToPixels`,
- * the corpus capture's opaque frame) drawing the same document in the same
- * window, and the exported still with today's exporter's still of the same
- * project.
+ * engine gets them through host services from this window. Snapshot frames
+ * are compared byte for byte with today's compositor
+ * (`PM.GL.renderToPixels`, the corpus capture's opaque frame) drawing the
+ * same document in the same window, and the exported still with today's
+ * exporter's still of the same project. The viewer's presented frames
+ * cannot be read back (they are IOSurfaces in main's layer), so the viewer
+ * is compared by the buckets it asks for: the same buckets today's viewer
+ * rasterizes at fit, at a cropped high zoom and below fit.
  *
  * Run serially, one Electron at a time:
  *   pm-electron-lock bunx playwright test e2e/engine-svg.spec.ts --workers=1
@@ -138,7 +141,7 @@ const compareFrame = (page: Page, time: number) => page.evaluate((t) => {
 test.describe('Use New Engine: level 1 SVG images', () => {
   test.use({ desktopLaunchOptions: { env: ON } });
 
-  test('the viewer and snapshots draw Chromium’s rasters exactly as today’s compositor', async ({ session }) => {
+  test('snapshots draw Chromium’s rasters exactly as today’s compositor', async ({ session }) => {
     const { page } = session;
     await openEngine(session);
     // The viewer's frame asked for its buckets and the window answered.
@@ -231,6 +234,34 @@ test.describe('Use New Engine: level 1 SVG images', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('playback of a scale animation: stand-in frames are counted, and the paused frame is exact', async ({ session }) => {
+    // The Stretch layer scales 60% → 310% over the 2 s: every frame of it
+    // may need a new bucket. Today redraws the bucket synchronously in the
+    // frame; the engine draws the content's previous bucket until the
+    // window's raster arrives (vector.md, "A miss"). Measured, not judged:
+    // the count is the evidence for the stand-in decision.
+    const { page } = session;
+    await openEngine(session);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
+    const run = await page.evaluate(async () => {
+      const PM = (window as any).PM, presentation = PM.Kernel.services.get('viewer').enginePresentation;
+      let frames = 0, standIns = 0;
+      const off = presentation.onPresented((frame: any) => { frames++; if (frame.standIn) standIns++; });
+      const asked = PM.EngineSvgRasters.asks.length;
+      PM.loop = false; PM.setTime(0); PM.play();
+      const until = performance.now() + 4000;
+      while (PM.playing && performance.now() < until) await new Promise((r) => requestAnimationFrame(r));
+      PM.pause();
+      off();
+      return { frames, standIns, asks: PM.EngineSvgRasters.asks.length - asked, slowestMs: Math.round(PM.EngineSvgRasters.stats.slowestMs) };
+    });
+    console.log(`playback of a scale animation: ${JSON.stringify(run)}`);
+    expect(run.frames).toBeGreaterThan(10);
+    await page.evaluate(() => (window as any).PM.setTime(1.5, { raw: true, force: true }));
+    await expect.poll(async () => (await compareFrame(page, 1.5)).differ, { timeout: 20_000 }).toBe(0);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('a restarted engine starts with no rasters and asks the window for them again', async ({ session }) => {
     const { page } = session;
     await openEngine(session);
@@ -317,5 +348,143 @@ test('an export in the job engine gets the rasters from the window: the still eq
     expect({ svg }).toEqual({ svg: { differ: 0, max: 0 } });
   } finally {
     if (!keep) await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** A viewer state: fit, or a zoom with a pan (composition pixels). */
+type ViewerCase = { name: string; zoom: number | 'fit'; pan?: [number, number] };
+const VIEWER_CASES: ViewerCase[] = [
+  { name: 'fit', zoom: 'fit' },
+  // A cropped preview viewport (`activePreviewViewport`): part of the
+  // composition, at more than one output pixel per composition pixel.
+  { name: 'zoom 237%, panned', zoom: 2.37, pan: [-140, 60] },
+  { name: 'zoom 61%', zoom: 0.61 },
+];
+
+/** Puts the viewer in `c` (as the zoom control and a pan do). */
+const setViewer = (page: Page, c: ViewerCase) => page.evaluate((c) => {
+  const PM = (window as any).PM, V = PM.Kernel.services.get('viewer');
+  // Today's bucket log restarts with the state, before any frame of it.
+  (window as any).__svgBuckets?.clear();
+  (window as any).__svgOther?.clear();
+  if (c.zoom === 'fit') V.returnToComposition();
+  else {
+    V.setZoom(c.zoom);
+    if (c.pan) { V.pan = [...c.pan]; V.layout(); }
+  }
+  PM.invalidate?.('render');
+  return { stage: [V._sw, V._sh], shown: V.shown, fit: V.fit, pan: [...V.pan], dpr: window.devicePixelRatio, quality: Number(PM.quality ?? 0) };
+}, c);
+
+test('the viewer asks for the buckets today’s viewer rasterizes, at fit and at other zooms', async () => {
+  type Seen = { geometry: Awaited<ReturnType<typeof setViewer>>; buckets: string[] };
+  // Today's viewer: the buckets its frames pass to `PM.rasterSvgAsset`.
+  const todays = async (): Promise<Record<string, Seen>> => {
+    const session = await launchApp({ env: {} });
+    try {
+      await session.openEditor();
+      const { page } = session;
+      await svgProject(page);
+      await page.evaluate(() => {
+        const PM = (window as any).PM, w = window as any;
+        // Only the viewer's frames (`PM.GL.render`, the editor loop's
+        // call); thumbnails and captures (`renderToPixels`) draw buckets
+        // of their own sizes, kept apart.
+        w.__svgBuckets = new Set<string>();
+        w.__svgOther = new Set<string>();
+        w.__inViewer = 0;
+        const render = PM.GL.render;
+        PM.GL.render = function (...args: unknown[]) {
+          w.__inViewer++;
+          try { return render.apply(this, args); } finally { w.__inViewer--; }
+        };
+        const raster = PM.rasterSvgAsset;
+        PM.rasterSvgAsset = (asset: any, width: number, height: number) => {
+          (w.__inViewer > 0 ? w.__svgBuckets : w.__svgOther).add(`${width}x${height}`);
+          return raster(asset, width, height);
+        };
+      });
+      const out: Record<string, Seen> = {};
+      for (const c of VIEWER_CASES) {
+        const geometry = await setViewer(page, c);
+        // The viewer's next frames, settled (no new bucket over 20 frames).
+        const buckets = await page.evaluate(async () => {
+          const w = window as any, frame = () => new Promise((r) => requestAnimationFrame(r));
+          const until = performance.now() + 10_000;
+          let last = -1, quiet = 0;
+          while (performance.now() < until && quiet < 20) {
+            await frame();
+            const size = w.__svgBuckets.size;
+            quiet = size > 0 && size === last ? quiet + 1 : 0;
+            last = size;
+          }
+          return [...w.__svgBuckets].sort() as string[];
+        });
+        const other = await page.evaluate(() => { const w = window as any, o = [...w.__svgOther].sort(); w.__svgOther.clear(); return o; });
+        if (other.length) console.log(`today at ${c.name}: buckets drawn outside the viewer's frames (thumbnails, captures): ${JSON.stringify(other)}`);
+        out[c.name] = { geometry, buckets };
+      }
+      expect(session.diagnostics.pageErrors).toEqual([]);
+      return out;
+    } finally {
+      await session.close();
+    }
+  };
+  // The engine's viewer: in each state, a restarted engine (holding no
+  // raster) asks this window for every bucket its frames draw
+  // (`EngineSvgRasters.asks`).
+  const engines = async (): Promise<Record<string, Seen & { standIns: number }>> => {
+    const session = await launchApp({ env: ON });
+    try {
+      await openEngine(session);
+      const { page } = session;
+      await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
+      const out: Record<string, Seen & { standIns: number }> = {};
+      for (const c of VIEWER_CASES) {
+        const geometry = await setViewer(page, c);
+        await page.evaluate(() => new Promise((r) => setTimeout(r, 500)));
+        const before = await page.evaluate(() => ({ connections: (window as any).PM.EngineConnection.status().connections, from: (window as any).PM.EngineSvgRasters.asks.length }));
+        const pid = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.status().interactive.pid as number);
+        process.kill(pid, 'SIGKILL');
+        await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().connections), { timeout: 45_000 }).toBeGreaterThan(before.connections);
+        await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+        // Settled: the new engine asked, and no new ask or answer came over
+        // 60 frames (the answered rasters drew without asking again).
+        const asked = await page.evaluate(async (from) => {
+          const w = window as any, PM = w.PM, rasters = PM.EngineSvgRasters, frame = () => new Promise((r) => requestAnimationFrame(r));
+          let presented = 0, standIns = 0;
+          const off = PM.Kernel.services.get('viewer').enginePresentation.onPresented((f: any) => { presented++; if (f.standIn) standIns++; });
+          const until = performance.now() + 20_000;
+          const done = () => rasters.stats.posted + rasters.stats.failed;
+          let last = -1, answered = -1, quiet = 0;
+          while (performance.now() < until && quiet < 60) {
+            await frame();
+            const n = rasters.asks.length, a = done();
+            if (n !== last || a !== answered) { last = n; answered = a; quiet = 0; continue; }
+            quiet = n > from ? quiet + 1 : 0;
+          }
+          off();
+          return { asks: rasters.asks.slice(from).map((a: any) => `${a.width}x${a.height}`), standIns, presented, settled: quiet >= 60, stats: { ...rasters.stats } };
+        }, before.from);
+        expect(asked.settled, `the engine viewer settled at ${c.name}: ${JSON.stringify(asked)}`).toBe(true);
+        out[c.name] = { geometry, buckets: [...new Set<string>(asked.asks)].sort(), standIns: asked.standIns };
+      }
+      expect(await page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.failed)).toBe(0);
+      expect(session.diagnostics.pageErrors).toEqual([]);
+      return out;
+    } finally {
+      await session.close();
+    }
+  };
+  const today = await todays();
+  const engine = await engines();
+  for (const c of VIEWER_CASES) {
+    const t = today[c.name]!, e = engine[c.name]!;
+    console.log(`viewer ${c.name}: today ${JSON.stringify(t)} engine ${JSON.stringify(e)}`);
+    // The same viewer (stage, zoom, density, preview quality) in both.
+    expect(e.geometry).toEqual(t.geometry);
+    expect(t.buckets.length).toBeGreaterThan(0);
+    // The engine's viewer drew exactly today's buckets.
+    expect({ case: c.name, buckets: e.buckets }).toEqual({ case: c.name, buckets: t.buckets });
   }
 });
