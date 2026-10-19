@@ -563,7 +563,10 @@ impl Painter<'_> {
             let color_face = bitmap_face && super::bitmap::has_color_bitmaps(run.face);
             // Canvas2D draws Apple Color Emoji lower than CoreGraphics does,
             // by whole pixels (`apple_emoji_shift`, measured on `fit-emoji`).
-            let emoji_shift = if color_face && super::bitmap::is_apple_color_emoji(run.face) {
+            let emoji_shift = if color_face
+                && self.profile.canvas_emoji_shift
+                && super::bitmap::is_apple_color_emoji(run.face)
+            {
                 Some(
                     super::bitmap::apple_emoji_shift(dsize, run.bitmap_size.unwrap_or(dsize))
                         as i32,
@@ -609,11 +612,22 @@ impl Painter<'_> {
                 }
                 if bitmap_face && let Some(bmp) = self.bitmaps.get(run.face, g.id, dsize, bsize) {
                     let (x, y) = if place.axis_aligned {
-                        self.profile.position(p.x, p.y, device_size, true)
+                        self.profile.bitmap_position(p.x, p.y, device_size)
                     } else {
                         (p.x, p.y)
                     };
-                    let t = Affine::translate((x, y)) * place.residual * bmp.transform;
+                    // The cached glyph carries Canvas2D's whole-pixel Apple
+                    // Color Emoji shift (its outermost translation); CoreText
+                    // draws the strike on the baseline.
+                    let unshift = if !self.profile.canvas_emoji_shift
+                        && color_face
+                        && super::bitmap::is_apple_color_emoji(run.face)
+                    {
+                        Affine::translate((0.0, -super::bitmap::apple_emoji_shift(dsize, bsize)))
+                    } else {
+                        Affine::IDENTITY
+                    };
+                    let t = Affine::translate((x, y)) * place.residual * unshift * bmp.transform;
                     let b = t.transform_rect_bbox(Rect::new(
                         0.0,
                         0.0,
@@ -838,7 +852,11 @@ impl Painter<'_> {
                 } else if place.axis_aligned {
                     (p.x, p.y + dy)
                 } else {
-                    let d = place.residual * kurbo::Point::new(0.0, dy);
+                    let d = if self.profile.device_space_offset {
+                        kurbo::Point::new(0.0, dy)
+                    } else {
+                        place.residual * kurbo::Point::new(0.0, dy)
+                    };
                     (p.x + d.x, p.y + d.y)
                 };
                 let t = Affine::translate((x, y)) * place.residual;
@@ -1152,11 +1170,13 @@ impl Painter<'_> {
             let skew = skew_of(run);
             let bitmap_face = has_bitmaps(run.face);
             let color_face = bitmap_face && super::bitmap::has_color_bitmaps(run.face);
-            let emoji_shift =
-                (color_face && super::bitmap::is_apple_color_emoji(run.face)).then(|| {
-                    let dsize = device_size as f32;
-                    super::bitmap::apple_emoji_shift(dsize, run.bitmap_size.unwrap_or(dsize)) as i32
-                });
+            let emoji_shift = (color_face
+                && self.profile.canvas_emoji_shift
+                && super::bitmap::is_apple_color_emoji(run.face))
+            .then(|| {
+                let dsize = device_size as f32;
+                super::bitmap::apple_emoji_shift(dsize, run.bitmap_size.unwrap_or(dsize)) as i32
+            });
             for g in run.glyphs {
                 let bsize = run.bitmap_size.unwrap_or(device_size as f32);
                 let p = place.glyph_origin(origin, (g.x, g.y));

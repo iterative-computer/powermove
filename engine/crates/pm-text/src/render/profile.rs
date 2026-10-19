@@ -42,6 +42,10 @@ pub enum Snap {
     /// `SkPackedGlyphID` subpixel positioning for axis-aligned horizontal
     /// text; the rounding bias is half a step).
     QuarterRound,
+    /// x and y rounded to whole pixels (CoreText draws color bitmap glyphs
+    /// at the nearest device pixel: measured on Apple Color Emoji at 24 to
+    /// 64 px and quarter-pixel phases).
+    Round,
 }
 
 impl Snap {
@@ -49,6 +53,7 @@ impl Snap {
         match self {
             Snap::Exact => (x, y),
             Snap::QuarterRound => ((x * 4.0 + 0.5).floor() / 4.0, (y + 0.5).floor()),
+            Snap::Round => ((x + 0.5).floor(), (y + 0.5).floor()),
         }
     }
 }
@@ -136,10 +141,28 @@ pub struct Profile {
     #[serde(default = "one")]
     pub fake_bold_y: f64,
     pub stroke: StrokeProfile,
+    /// Apple Color Emoji sits lower by `bitmap::apple_emoji_shift` whole
+    /// pixels, as Canvas2D draws it; CoreText draws it on the baseline.
+    #[serde(default = "yes")]
+    pub canvas_emoji_shift: bool,
+    /// Under a rotated, skewed or non-uniform matrix the smoothing's
+    /// upward ink offset (`Point::dy`) stays in device space, as CoreText
+    /// grows glyphs toward the top of the bitmap whatever the text's
+    /// orientation (measured on rotations of 90° and 180°); otherwise it
+    /// turns with the glyph.
+    #[serde(default)]
+    pub device_space_offset: bool,
+    /// Where axis-aligned bitmap glyphs are placed, when not as `snap`.
+    #[serde(default)]
+    pub bitmap_snap: Option<Snap>,
 }
 
 fn one() -> f64 {
     1.0
+}
+
+fn yes() -> bool {
+    true
 }
 
 const fn p(size: f64, expand_x: f64, expand_y: f64, dy: f64, gamma: f64) -> Point {
@@ -220,6 +243,9 @@ impl Profile {
             widen: 0.0,
             gamma: 1.0,
         },
+        canvas_emoji_shift: true,
+        device_space_offset: false,
+        bitmap_snap: None,
     };
 
     /// `compat` level 2: CoreText with font smoothing (the macOS look),
@@ -242,6 +268,9 @@ impl Profile {
             widen: 0.0,
             gamma: 1.0,
         },
+        canvas_emoji_shift: false,
+        device_space_offset: true,
+        bitmap_snap: Some(Snap::Round),
     };
 
     /// `compat` level 1: today's Canvas2D (Chromium's Skia over CoreText's
@@ -266,6 +295,9 @@ impl Profile {
             widen: -0.025,
             gamma: 0.612,
         },
+        canvas_emoji_shift: true,
+        device_space_offset: false,
+        bitmap_snap: None,
     };
 
     fn as_path(&self, size: f64) -> bool {
@@ -342,6 +374,17 @@ impl Profile {
     pub fn position(&self, x: f64, y: f64, size: f64, bitmap: bool) -> (f64, f64) {
         let (x, y) = self.snap.apply(x, y);
         (x, y + self.dy(size, bitmap))
+    }
+
+    /// An axis-aligned bitmap glyph's origin in device space.
+    pub fn bitmap_position(&self, x: f64, y: f64, size: f64) -> (f64, f64) {
+        match self.bitmap_snap {
+            Some(snap) => {
+                let (x, y) = snap.apply(x, y);
+                (x, y + self.dy(size, true))
+            }
+            None => self.position(x, y, size, true),
+        }
     }
 
     /// A stroked glyph's origin in device space.
