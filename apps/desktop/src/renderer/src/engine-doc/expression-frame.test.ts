@@ -42,6 +42,10 @@ it('batches resident expression channels exactly, across time, edits, errors and
   PM.proj.layers[0].p.opacity.expr = '"changed"';
   PM.touch();
   compare(1.5); compare(2.5); // Nonnumeric answers retain their exact scalar decoding.
+  delete PM.proj.layers[0].p.opacity.expr;
+  PM.touch();
+  compare(2.6); compare(3.6); // Removing one id updates all live frame-slot indexes.
+  expect(batch.mock.calls.at(-1)![0].length).toBe(119);
   api.reset();
   compare(2.5); compare(3.5);
   doc.wasm!.x.memory.grow(1);

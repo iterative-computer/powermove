@@ -236,3 +236,16 @@ independent. pm-wasm can also evaluate a replacement-time `compJson` through
 Ad-hoc scope queries clear per-document evaluator caches (interned ids remain
 valid), because their temporary nodes must never share cached answers with a
 later replacement scope at the same document revision.
+
+## P6 resident expression plans (2026-10-19)
+
+Interned static and keyed expressions now retain their compiled source in a
+plan. Same-revision frames reuse the validated layer position and resolve each
+composition once per batch. `CompiledExpression::bind` optionally binds pure
+document inputs; every root revision discards the binding. Time, local time,
+frame and the keyed base stay dynamic. Mixed/keyed bases still use the existing
+keyframe evaluator. Last-answer keys remain the exact f64 bits and revision.
+`expression_error_at` accepts the address's original JS strings, returning at
+once for an empty error map without allocating UTF-8 strings per channel.
+The 400-source regression, invalidation vectors and native/wasm V8 comparisons
+cover this path; measurements and remaining gates are in `perf.md`.

@@ -537,11 +537,7 @@ impl Engine {
     /// The expression error recorded for an id's channel, if any.
     pub fn expression_error(&self, id: PropId) -> Option<&str> {
         let a = self.ev.address(id)?;
-        self.ev.expression_error(
-            &a.comp.to_string_lossy(),
-            &a.layer.to_string_lossy(),
-            &a.key.to_string_lossy(),
-        )
+        self.ev.expression_error_at(a)
     }
 
     // ── fonts ─────────────────────────────────────────────────────────────

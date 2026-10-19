@@ -25,7 +25,7 @@ import type { DualAnswers } from './dual';
 import { layer3DRole } from '../core/scene3d/layers';
 import { COMP_FIELDS, canonicalPath } from '../legacy/core/compositions';
 import type { FontLoader } from './fonts';
-import { ExpressionFrames } from './expression-frame';
+import { ExpressionFrames, type ExpressionFrameSlot } from './expression-frame';
 
 type Legacy = Record<string, any>;
 
@@ -282,7 +282,7 @@ export class NativeApi {
   private depth = 0;
   private answeredNatively = false;
   /** Live channel object → interned id (validated on every use). */
-  private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown; wasm: PmWasm; time?: number; number?: number }>();
+  private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown; wasm: PmWasm; time?: number; number?: number; frame?: ExpressionFrameSlot }>();
   /** A detached property's validated address; its inputs are rechecked by DetachedScopes. */
   private detachedProps = new WeakMap<object, { layer: object; cur: unknown; key: unknown; path: PathPart[]; request: Record<string, unknown> }>();
   /** Live layer → interned transform channels, valid at the current revision and scope. */
@@ -760,7 +760,12 @@ export class NativeApi {
       this.expressionComps.delete(id);
       return;
     }
-    if (comp && !this.dual) { this.expressionFrames.register(comp, id, raw); this.expressionComps.set(id, comp); }
+    if (comp && !this.dual) {
+      const slot = this.expressionFrames.register(comp, id, raw);
+      const entry = this.props.get(raw);
+      if (entry?.id === id) entry.frame = slot;
+      this.expressionComps.set(id, comp);
+    }
     const message = (wasm.evaluationStatus() & 0x80) ? wasm.expressionError(id) : null;
     if (message == null) this.errors.delete(raw);
     else this.errors.set(raw, message);
@@ -895,6 +900,17 @@ export class NativeApi {
             this.stats.calls.evP = this.stats.calls.evP! + 1;
             return entry.number;
           }
+        }
+        const frame = entry.frame;
+        if (rawProp.expr && frame && !entry.wasm.dead && Object.is(frame.group.time, T)
+          && frame.group.revision === entry.revision && (frame.group.kinds![frame.index]! & 0x7f) === 0) {
+          const value = frame.group.values![frame.index]!;
+          const message = (frame.group.kinds![frame.index]! & 0x80) ? entry.wasm.expressionError(entry.id) : null;
+          if (message == null) this.errors.delete(rawProp); else this.errors.set(rawProp, message);
+          entry.time = T; entry.number = value;
+          this.stats.fastPath += 1;
+          this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1;
+          return value;
         }
         const value = this.fastValue(entry.id, T, rawProp);
         if (typeof value === 'number') { entry.time = T; entry.number = value; }

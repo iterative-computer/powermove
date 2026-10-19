@@ -513,6 +513,21 @@ impl Evaluator {
             .map(String::as_str)
     }
 
+    /// An interned address already owns the exact JS strings. Avoid round trips
+    /// through UTF-8 (and all allocation on the usual empty-error-map path).
+    pub fn expression_error_at(&self, address: &PropAddress) -> Option<&str> {
+        if self.errors.is_empty() {
+            return None;
+        }
+        self.errors
+            .get(&ErrorKey {
+                comp: address.comp.clone(),
+                layer: address.layer.clone(),
+                key: address.key.clone(),
+            })
+            .map(String::as_str)
+    }
+
     /// All recorded expression errors.
     pub fn expression_errors(&self) -> impl Iterator<Item = (&ErrorKey, &str)> {
         self.errors.iter().map(|(k, v)| (k, v.as_str()))

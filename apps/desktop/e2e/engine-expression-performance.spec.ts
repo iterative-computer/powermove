@@ -1,8 +1,10 @@
 import { requireEngineDiskSpace } from './helpers/engine-fixups-resources';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { expect, launchApp, test } from './helpers/app';
+import { expect, launchApp, repoRoot, test } from './helpers/app';
 
 // Run under pm-electron-lock on a quiet machine. Correctness has separate
 // committed vector and dual/audit gates; timings never relax their results.
@@ -57,6 +59,14 @@ test('pairs hundreds of frame expressions against today in the same V8', async (
           if (!Object.is(engine.sum, legacy.sum)) throw new Error('paired frame sums differ');
           rows.push({ pair, engine, today: legacy });
         }
+        const ids = channels.map((c: any) => api.props.get(c.prop).id);
+        const diagnostic = [];
+        for (let source = 0; source < 4; source++) {
+          const selected = ids.filter((_: number, i: number) => i % 4 === source);
+          const start = performance.now();
+          for (let frame = 0; frame < 2000; frame++) doc.wasm.evBatch(selected, frame / 30);
+          diagnostic.push({ source: sources[source], wasmNsPerCall: (performance.now() - start) * 1e6 / 2000 / selected.length });
+        }
         // Measure a separate one-channel fixture for extension scalar calls.
         PM.proj.layers = [PM.proj.layers[0]];
         for (let k = 1; k < 4; k++) delete PM.proj.layers[0].p[`expr${k}`];
@@ -69,11 +79,12 @@ test('pairs hundreds of frame expressions against today in the same V8', async (
           if (!Object.is(engine.sum, legacy.sum)) throw new Error('paired scalar sums differ');
           scalar.push({ pair, engine, today: legacy });
         }
-        return { channels: channels.length, framesPerPair: 2000, rows, scalar, stats: doc.stats(), heap: doc.wasm.heap() };
+        return { channels: channels.length, framesPerPair: 2000, rows, scalar, diagnostic, stats: doc.stats(), heap: doc.wasm.heap() };
       } finally { PM.proj = original; PM.scope = scope; PM.touch(); }
     });
     const loadAfter = os.loadavg();
-    const output = { ...result, loadAfter };
+    const moduleSha256 = createHash("sha256").update(readFileSync(path.join(repoRoot, "out/renderer/engine/pm_wasm.wasm"))).digest("hex");
+    const output = { ...result, loadAfter, moduleSha256 };
     if (process.env.PM_FIXUPS3_EVIDENCE) {
       await mkdir(process.env.PM_FIXUPS3_EVIDENCE, { recursive: true });
       await writeFile(path.join(process.env.PM_FIXUPS3_EVIDENCE, 'expressions.json'), JSON.stringify(output, null, 2));
