@@ -36,6 +36,9 @@ export interface SnapshotEngine {
   isReady(process: 'interactive'): boolean;
   clientPort(id: number, process: 'interactive'): { port: number; generation: number } | null;
   request(process: 'interactive', body: Request, session?: number | null, revision?: number | null): Promise<Response>;
+  /** The textures the engine sent ahead of a `needsRenderer` answer for
+   *  one of its fallback requests (fallback-inputs.ts). */
+  fallbackTextures?(key: string, count: number, width: number, height: number): Uint8Array[] | null;
 }
 
 /** Maps an engine's shared-memory segment once and unlinks it (pm-bridge). */
@@ -82,6 +85,8 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (v['session'] === null ? document === undefined : !safeUint(v['session'])) return false;
   const fallback = v['fallbackPixels'];
   if (fallback !== undefined && (document === undefined || !validFallback(fallback))) return false;
+  const svg = v['svgPixels'];
+  if (svg !== undefined && (document === undefined || !validSvgPixels(svg))) return false;
   if (v['revision'] !== null && !safeUint(v['revision'])) return false;
   const s = v['snapshot'] as Record<string, unknown> | null;
   if (!s || typeof s !== 'object') return false;
@@ -98,6 +103,7 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   // a blocked thread.
   const blender = s['blenderWaitMs'];
   if (blender !== undefined && (!Number.isInteger(blender) || (blender as number) < 0 || (blender as number) > MAX_BLENDER_WAIT_MS || ((blender as number) > 0 && s['class'] === 'sync'))) return false;
+  if (s['captionsHidden'] !== undefined && typeof s['captionsHidden'] !== 'boolean') return false;
   const uploaded = s['uploaded'];
   if (!Array.isArray(uploaded) || uploaded.length > 64 || !uploaded.every((k) => typeof k === 'string' && k.length > 0 && k.length <= 512)) return false;
   const target = s['target'] as Record<string, unknown> | null;
@@ -121,6 +127,12 @@ export const MAX_DOCUMENT_BYTES = 512 * 1024 * 1024;
 /** Most fallback programs one request carries, and their bytes. */
 export const MAX_FALLBACK_PIXELS = 16;
 export const MAX_FALLBACK_BYTES = 256 * 1024 * 1024;
+/** Most level 1 SVG rasters one request carries, and their bytes (one
+ *  raster may be today's largest bucket, 8192 × 8192). */
+export const MAX_SVG_PIXELS = 64;
+export const MAX_SVG_BYTES = 512 * 1024 * 1024;
+/** Largest SVG raster edge (`svgRasterDimensions`' limit). */
+const MAX_SVG_EDGE = 8192;
 
 function validDocument(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -130,6 +142,21 @@ function validDocument(value: unknown): boolean {
   if (json === undefined || json === null) return d['hash'] === undefined || d['hash'] === null || (typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']));
   // A document's body comes with its canonical hash.
   return typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']) && json instanceof Uint8Array && json.byteLength > 0 && json.byteLength <= MAX_DOCUMENT_BYTES;
+}
+
+function validSvgPixels(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > MAX_SVG_PIXELS) return false;
+  let bytes = 0;
+  for (const p of value as Record<string, unknown>[]) {
+    const key = p?.['key'] as Record<string, unknown> | undefined;
+    if (!key || typeof key !== 'object' || typeof key['content'] !== 'string' || !/^[0-9a-f]{64}$/.test(key['content'])) return false;
+    const w = key['width'], h = key['height'];
+    if (!Number.isInteger(w) || !Number.isInteger(h) || (w as number) < 1 || (h as number) < 1 || (w as number) > MAX_SVG_EDGE || (h as number) > MAX_SVG_EDGE) return false;
+    const data = p['data'];
+    if (!(data instanceof Uint8Array) || data.byteLength !== (w as number) * (h as number) * 4) return false;
+    bytes += data.byteLength;
+  }
+  return bytes <= MAX_SVG_BYTES;
 }
 
 function validFallback(value: unknown): boolean {
@@ -227,7 +254,7 @@ export class SnapshotService {
       try {
         // Bounded like the snapshot itself: a blocked window always gets a reply.
         prepared = await Promise.race([
-          sessions.prepare(windowId, request.document, (request.fallbackPixels ?? []).map((p) => ({ ...p }))),
+          sessions.prepare(windowId, request.document, (request.fallbackPixels ?? []).map((p) => ({ ...p })), (request.svgPixels ?? []).map((p) => ({ key: { ...p.key }, data: p.data }))),
           new Promise<'timeout'>((resolve) => {
             prepareTimer = setTimeout(() => resolve('timeout'), Math.max(0, deadline - now()));
           })
@@ -294,7 +321,19 @@ export class SnapshotService {
     }
     if (outcome.outcome === 'needsRenderer') {
       this.stats.needsRenderer++;
-      return { status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat };
+      // An effect's or a transition's textures arrived ahead of the answer
+      // (the renderer may be blocked on it and cannot read its own port).
+      const fallbackTextures: { key: string; textures: Uint8Array[] }[] = [];
+      for (const r of outcome.fallback) {
+        const count = r.textures ?? 0;
+        if (count === 0) continue;
+        const textures = this.options.engine.fallbackTextures?.(r.key, count, r.width, r.height) ?? null;
+        if (textures) fallbackTextures.push({ key: r.key, textures });
+      }
+      return {
+        status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat, svg: outcome.svg ?? [],
+        ...(fallbackTextures.length ? { fallbackTextures } : {})
+      };
     }
     const expected = outcome.width * outcome.height * 4;
     let data: Uint8Array;

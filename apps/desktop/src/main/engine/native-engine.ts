@@ -31,16 +31,19 @@ import type {
   MediaFacts,
   Request,
   Response,
+  ShaderFallbackRequest,
   SlicingPolicy
 } from '../../shared/engine-protocol';
 import type { HardwareArbiter, LeaseGrant, MemoryArbiter } from './arbiter';
 import type { HostHandler, Log } from './connection';
 import { CrashLedger, isAttributable } from './crash';
 import { DefinitionRelay } from './definitions';
-import type { HandleTable } from './handles';
+import { FallbackInputs } from './fallback-inputs';
+import { HandleRejected, type HandleTable } from './handles';
 import type { OutputDestinations } from './outputs';
 import type { ChannelFactory, ClientPortInfo, PortLike, SpawnEngine } from './ports';
 import { isRecord, isSafeUint, ProtocolError } from './protocol';
+import { serveHostFallback, type ShaderFallbackResult } from './shader-fallback-relay';
 import { CACHE_DIRS, HostServicesCore } from './services';
 import { EngineBlender, type BlenderLocator } from './blender';
 import { EngineSupervisor, type Launch, type SupervisorState } from './supervisor';
@@ -84,6 +87,10 @@ export type NativeEngineOptions = {
    *  pixels drawn by the document's window (compat-frames.ts). Without it
    *  they answer `notHeadlessRenderable`. */
   compatFrame?: (request: import('../../shared/engine-protocol').CompatFrameRequest) => Promise<Response>;
+  /** Runs a job engine fallback request in a window's runner
+   *  (`shader-fallback-relay.ts`); without it such requests answer
+   *  `unsupported` and the job fails naming the program. */
+  shaderFallback?: (session: number, request: ShaderFallbackRequest, textures: Uint16Array[]) => Promise<ShaderFallbackResult>;
 };
 
 export type EngineProcessStatus = { state: SupervisorState; generation: number; pid: number | null; attempts: number };
@@ -92,6 +99,8 @@ export type NativeEngineStatus = Record<EngineProcess, EngineProcessStatus>;
 export type ClientDeliver = (info: ClientPortInfo, port: PortLike) => void;
 
 type Client = {
+  /** The window (its webContents id) or main's own client id. */
+  id: number;
   deliver: ClientDeliver;
   ports: Map<EngineProcess, { port: number; generation: number }>;
   kind: ClientKind;
@@ -136,6 +145,9 @@ export class NativeEngine {
   /** Blender supervision for both engines (contract 11, `blender.ts`). */
   readonly blender: EngineBlender | null;
   readonly definitions = new DefinitionRelay();
+  /** Texture bands the interactive engine sends ahead of a snapshot's
+   *  `needsRenderer` answer (fallback-inputs.ts). */
+  readonly fallbackInputs = new FallbackInputs();
   readonly ledger = new CrashLedger();
   private readonly supervisors: Record<EngineProcess, EngineSupervisor>;
   private nextPort = 1;
@@ -271,7 +283,7 @@ export class NativeEngine {
   /** Connects a client to every running engine now and after every restart. */
   addClient(id: number, deliver: ClientDeliver, kind: ClientKind = RENDERER_CLIENT): void {
     this.removeClient(id);
-    const client: Client = { deliver, ports: new Map(), kind };
+    const client: Client = { id, deliver, ports: new Map(), kind };
     this.clients.set(id, client);
     for (const process of kind.processes) {
       const launch = this.supervisors[process].current;
@@ -304,7 +316,7 @@ export class NativeEngine {
     if (previous && previous.generation === launch.generation) launch.control({ type: 'disconnect', port: previous.port });
     const { port1, port2 } = this.options.channel();
     const port = this.nextPort++;
-    launch.control({ type: 'connect', port, peer: client.kind.peer }, [port1]);
+    launch.control({ type: 'connect', port, peer: client.kind.peer, ...(client.kind.peer === 'renderer' ? { owner: client.id } : {}) }, [port1]);
     client.ports.set(launch.process, { port, generation: launch.generation });
     client.deliver({ process: launch.process, port, generation: launch.generation }, port2);
   }
@@ -330,6 +342,11 @@ export class NativeEngine {
   /** Posts an event to `process` for a session main opened. */
   event(process: EngineProcess, body: Event, session: number | null): void {
     this.supervisors[process].event(body, session);
+  }
+
+  /** The textures of a snapshot's fallback request (fallback-inputs.ts). */
+  fallbackTextures(key: string, count: number, width: number, height: number): Uint8Array[] | null {
+    return this.fallbackInputs.take(key, count, width, height);
   }
 
   clientPort(id: number, process: EngineProcess): { port: number; generation: number } | null {
@@ -574,6 +591,10 @@ export class NativeEngine {
             return Promise.resolve({ type: 'jobsCancelled', jobs: blender.cancel(body.job) ? [body.job] : [] } as Response);
           }
         }
+        if (body.type === 'shaderFallback') {
+          if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks the host to run fallback requests.'));
+          return this.runShaderFallback(body, session ?? 0, current.hostPort);
+        }
         if (body.type === 'compatFrame') {
           if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks for compatibility frames.'));
           if (!this.options.compatFrame) return Promise.reject(new ProtocolError('notHeadlessRenderable', 'This host draws no compatibility frames.'));
@@ -586,7 +607,31 @@ export class NativeEngine {
     };
   }
 
+  /**
+   * A job engine fallback request (contract 14): the textures are read
+   * from the session's scratch area, the request runs in a window's runner,
+   * and the result is written back as the named output file.
+   */
+  private async runShaderFallback(body: Extract<Request, { type: 'shaderFallback' }>, session: number, hostPort: number): Promise<Response> {
+    const run = this.options.shaderFallback;
+    await serveHostFallback(body, (handle) => {
+      try {
+        return this.services.handles.resolve(handle, session, hostPort);
+      } catch (error) {
+        if (error instanceof HandleRejected) throw new ProtocolError('capabilityRejected', error.message);
+        throw error;
+      }
+    }, run ? (request, textures) => run(session, request, textures) : null);
+    return { type: 'ack' };
+  }
+
   private onEvent(process: EngineProcess, body: Event, session: number | null): void {
+    // The textures of a snapshot's fallback requests, ahead of its answer
+    // (fallback-inputs.ts): for whichever session the snapshot is of.
+    if (process === 'interactive' && body.type === 'shaderFallback' && (body as { fallback?: string }).fallback === 'input') {
+      if (!this.fallbackInputs.receive(body)) this.options.log('warn', 'the interactive engine sent a damaged fallback texture band; dropped');
+      return;
+    }
     // What a session main opened itself reports (window snapshot sessions,
     // window-sessions.ts): main only snapshots them.
     if (session !== null && SESSION_EVENTS.has(body.type)) return;

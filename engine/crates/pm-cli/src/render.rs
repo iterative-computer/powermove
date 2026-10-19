@@ -31,6 +31,10 @@ use crate::corpus::{member, string};
 pub enum Failure {
     Usage(String),
     Unsupported(Vec<String>),
+    /// Programs only a WebGL runner draws (decision 19): `pm-cli` has none,
+    /// so the project is not headless-renderable (exit 4). Named per layer
+    /// and definition; the same answer on every run.
+    NotHeadless(Vec<String>),
     Failed(String),
 }
 
@@ -79,6 +83,13 @@ pub struct Options {
     pub reel: Option<String>,
     /// Leave captions layers out of the picture.
     pub no_captions: bool,
+    /// A definition set snapshot (contract 10, `DefinitionSetSnapshot` as
+    /// JSON) to render with instead of the built-in definitions: the
+    /// winning registrations of the app that made the project, forks and
+    /// overrides by id included.
+    pub definitions: Option<PathBuf>,
+    /// The editor's display scale factor (`crate::fonts`).
+    pub ui_scale: Option<f32>,
 }
 
 fn usage(m: impl Into<String>) -> Failure {
@@ -613,6 +624,36 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     };
     install_interrupt();
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+    crate::fonts::install(
+        &mut renderer,
+        options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
+    );
+    // No Chromium here: level 1 SVG images are drawn by resvg (decision S1),
+    // an approximation of the app's, reported below.
+    renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
+    let (definitions, source) = definitions(options)?;
+    if options.definitions.is_none() {
+        warn_built_in(&job.document, &job.composition);
+    }
+    // Programs WebGL refuses too are skipped, as the app skips them; the
+    // capability check reads the rest of each definition's status.
+    for refused in renderer
+        .set_definitions(&definitions)
+        .map_err(|e| Failure::Failed(format!("definitions: {e}")))?
+    {
+        if refused.code == pm_protocol::error::ErrorCode::ShaderCompile {
+            eprintln!("pm-cli: {} (skipped, as in the app)", refused.message);
+        }
+    }
+    let headless: Vec<String> = renderer
+        .unsupported_with_media(&job.document, &job.composition, &*job.media)
+        .into_iter()
+        .filter(|u| matches!(u.feature, pm_render::Feature::ShaderFallback(_)))
+        .map(|u| u.to_string())
+        .collect();
+    if !headless.is_empty() {
+        return Err(Failure::NotHeadless(headless));
+    }
     let started = std::time::Instant::now();
     let mut last = -1i64;
     let mut progress = |p: Progress| {
@@ -628,7 +669,7 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     // Blender compositions (contract 11): the CLI host runs the pinned
     // worker in the installed Blender itself.
     let mut blender = blender_stage(&job).map_err(|e| Failure::Failed(e.to_string()))?;
-    let delivered = pm_export::render::plan_export_with(&job, blender.is_some())
+    let delivered = pm_export::render::plan_export_for(&job, blender.is_some(), &renderer)
         .and_then(|plan| {
             let sink = pm_export::render::sink_for(&plan)?;
             pm_export::render::run_export_with_blender(
@@ -649,8 +690,13 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         })?;
     let r = &delivered.report;
     let seconds = started.elapsed().as_secs_f64();
+    let approximate = renderer.svg_approximated();
+    if approximate > 0 {
+        eprintln!("{}", approximate_svg_notice(approximate));
+    }
     Ok(serde_json::json!({
         "path": delivered.path,
+        "approximateSvg": approximate,
         "codec": r.codec,
         "profile": r.profile,
         "pixelFormat": r.pixel_format,
@@ -670,7 +716,70 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         "hardwareEncoder": r.hardware_encoder,
         "seconds": seconds,
         "fps": r.frames as f64 / seconds.max(1e-9),
+        "definitions": source,
     }))
+}
+
+/// Says so when a project that draws definitions (effects, transitions,
+/// adjustment layers, extension layers) is rendered with the built-in set:
+/// a project file does not carry the definitions it was made with, and an
+/// extension's, an override by id, or a fork of a built-in under its id
+/// draws differently in the app.
+fn warn_built_in(document: &pm_model::Document, composition: &str) {
+    let uses: std::collections::BTreeSet<String> =
+        pm_render::capability::unsupported(document, composition)
+            .into_iter()
+            .filter(|u| {
+                matches!(
+                    u.feature,
+                    pm_render::Feature::Effects
+                        | pm_render::Feature::Transition
+                        | pm_render::Feature::Adjustment
+                        | pm_render::Feature::ExtensionDefinition(_)
+                )
+            })
+            .map(|u| u.to_string())
+            .collect();
+    if uses.is_empty() {
+        return;
+    }
+    let list: Vec<String> = uses.into_iter().collect();
+    eprintln!(
+        "pm-cli: warning: drawing the built-in definitions for {}. A project whose effects, \
+         transitions, or layers came from an extension, an override by id, or a fork of a \
+         built-in draws differently in the app: pass --definitions <snapshot>.",
+        list.join(", ")
+    );
+}
+
+/// The definitions a render draws with: the `--definitions` snapshot, or
+/// the built-in effects, transitions, and layers as the kernel snapshots
+/// them. Returns the set and where it came from.
+fn definitions(
+    options: &Options,
+) -> Result<(pm_protocol::definitions::DefinitionSetSnapshot, String), Failure> {
+    let Some(path) = &options.definitions else {
+        return Ok((pm_render::all_builtin_definitions(), "built-in".into()));
+    };
+    let bytes = std::fs::read(path).map_err(|e| usage(format!("{}: {e}", path.display())))?;
+    let set: pm_protocol::definitions::DefinitionSetSnapshot = serde_json::from_slice(&bytes)
+        .map_err(|e| usage(format!("{}: not a definition set: {e}", path.display())))?;
+    for d in &set.definitions {
+        pm_protocol::validate::Validate::validate(d)
+            .map_err(|e| usage(format!("{}: {}: {e}", path.display(), d.id.as_str())))?;
+    }
+    Ok((set, path.display().to_string()))
+}
+
+/// The named notice for level 1 SVG images pm-cli drew with resvg: the app
+/// draws them with Chromium (decision S1), so these pixels are close to,
+/// not the same as, the app's.
+pub fn approximate_svg_notice(draws: u64) -> String {
+    format!(
+        "pm-cli: notice (approximate SVG): {draws} level 1 SVG image draw(s) were rasterized by \
+         resvg, not Chromium; the app draws SVG images with Chromium, so these pixels approximate \
+         an export from the app"
+    )
 }
 
 fn absolute(p: &Path) -> Result<PathBuf, Failure> {

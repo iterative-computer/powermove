@@ -1061,6 +1061,7 @@ fn capture_font_cache_seeds(manifest: Option<&Value>) -> Vec<FontCacheSeed> {
             italic: false,
             size: pm_text::compat::canvas::effective_font_size(css * dpr),
             specified: css,
+            cache_key: None,
         })
         .collect()
 }

@@ -10,9 +10,11 @@
  * `installEngineFontService`. It checks that the CoreText registry starts on
  * the utility process's JavaScript thread (AppKit needs the process's main
  * thread), answers and subsets reach the renderer's channels, project fonts
- * change the generation, the job engine gets no font port, and that after
- * the interactive engine is killed the restarted engine gets a new font
- * port, the project fonts are replayed, and the generation never goes back.
+ * change the generation, the job engine gets its own font port with the
+ * project fonts and seeds mirrored (its exports and agent frames lay text
+ * out with them), and that after an engine is killed the restarted engine
+ * gets a new font port, the project fonts and seeds are replayed, and the
+ * generation never goes back.
  */
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -21,8 +23,7 @@ import path from 'node:path';
 import { app, MessageChannelMain, utilityProcess } from 'electron';
 
 import { ENGINE_FONTS_IPC } from '../../../shared/engine-fonts-ipc';
-import { EngineFontClient, installEngineFontService } from '../../engine-fonts';
-import { FONT_CLIENT_ID } from '../index';
+import { EngineFontClient, FONT_CLIENT_ID, installEngineFontService, JOB_FONT_CLIENT_ID } from '../../engine-fonts';
 import { NativeEngine } from '../native-engine';
 import type { ChildLike, PortLike } from '../ports';
 import { mainHostClock } from './main-clock';
@@ -68,6 +69,7 @@ async function main(): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'pm-engine-fonts-it-'));
   const logs: string[] = [];
   const pids: number[] = [];
+  const jobPids: number[] = [];
 
   const engine = new NativeEngine({
     spawn: (kind) => {
@@ -77,6 +79,7 @@ async function main(): Promise<void> {
         env: { ...process.env, POWERMOVE_ENGINE_PROCESS: kind, POWERMOVE_ENGINE_ADDON: addon }
       });
       if (kind === 'interactive') child.on('spawn', () => { if (child.pid) pids.push(child.pid); });
+      if (kind === 'job') child.on('spawn', () => { if (child.pid) jobPids.push(child.pid); });
       child.stderr?.on('data', (chunk: Buffer) => logs.push(`[${kind} stderr] ${chunk.toString().trim()}`));
       return child as unknown as ChildLike;
     },
@@ -108,13 +111,25 @@ async function main(): Promise<void> {
     delivered.push({ process: info.process, generation: info.generation });
     client.connect(port);
   }, { peer: 'fonts', processes: ['interactive'] });
+  // The job engine's font port mirrors the interactive one's changes.
+  const jobClient = new EngineFontClient({ log: (level, message) => logs.push(`job ${level}: ${message}`) });
+  client.mirror(jobClient);
+  const jobDelivered: { process: string; generation: number }[] = [];
+  engine.addClient(JOB_FONT_CLIENT_ID, (info, port) => {
+    jobDelivered.push({ process: info.process, generation: info.generation });
+    jobClient.connect(port);
+  }, { peer: 'fonts', processes: ['job'] });
+  const seeds = '{"seeds":[{"family":"system-ui","weight":400,"italic":false,"size":24,"specified":12},{"family":"system-ui","weight":400,"italic":false,"size":26,"specified":13}]}';
+  void client.setSeeds(seeds);
 
   try {
     await engine.start();
     await waitFor('both engines ready', () => engine.status().interactive.state === 'ready' && engine.status().job.state === 'ready');
-    await waitFor('font port', () => client.connected);
-    check(delivered.length === 1 && delivered[0]!.process === 'interactive', `one font port, to the interactive engine (${JSON.stringify(delivered)})`);
-    step('engines started; main holds one font port, to the interactive engine', [...delivered]);
+    await waitFor('font ports', () => client.connected && jobClient.connected);
+    check(delivered.length === 1 && delivered[0]!.process === 'interactive', `one font port to the interactive engine (${JSON.stringify(delivered)})`);
+    check(jobDelivered.length === 1 && jobDelivered[0]!.process === 'job', `one font port to the job engine (${JSON.stringify(jobDelivered)})`);
+    const status = JSON.parse(JSON.stringify(engine.status()));
+    step('engines started; main holds a font port to each engine', { delivered: [...delivered], job: [...jobDelivered], status: status.job?.state });
 
     // A document's families, as pm-wasm asks for them on project open.
     const queries = JSON.stringify(['Helvetica', 'Menlo', 'system-ui'].map((name) => ({ kind: 'family', name, weight: bits(400), italic: false, size: bits(24) })));
@@ -152,6 +167,9 @@ async function main(): Promise<void> {
     check(added === before + 1, `a project font moves the generation (${before} → ${added})`);
     const brand = JSON.parse(await invoke<string>(ENGINE_FONTS_IPC.answer, JSON.stringify([{ kind: 'family', name: 'Brand Serif', weight: bits(400), italic: false, size: bits(24) }]))) as { generation: number; faces: { custom: boolean }[] };
     check(brand.generation === added && brand.faces.some((f) => f.custom), 'answers name the project font');
+    // The job engine got the same project font through the mirror.
+    const jobBrand = JSON.parse(await jobClient.answer(JSON.stringify([{ kind: 'family', name: 'Brand Serif', weight: bits(400), italic: false, size: bits(24) }]), null)) as { faces: { custom: boolean }[] };
+    check(jobBrand.faces.some((f) => f.custom), 'the job engine answers with the mirrored project font');
     const refused = (await handlers.get(ENGINE_FONTS_IPC.addProjectFont)!({ sender: trusted }, 'Bad', new Uint8Array([1, 2, 3, 4]))) as Result<number>;
     check(!refused.ok, 'data that is not a font is refused');
     const untrusted = await handlers.get(ENGINE_FONTS_IPC.generation)!({ sender: {} });
@@ -170,10 +188,19 @@ async function main(): Promise<void> {
     check(replayed.faces.some((f) => f.custom) && replayed.generation === after, 'the project font is replayed to the restarted engine');
     step('interactive engine killed: new font port, project fonts replayed, generation kept rising', { before: added, after });
 
+    // The job engine restarts too: a new font port, the project font and the
+    // seeds replayed.
+    process.kill(jobPids.at(-1)!, 'SIGKILL');
+    await waitFor('a new job font port', () => jobDelivered.length === 2 && jobClient.connected, 20_000);
+    const jobAfter = JSON.parse(await jobClient.answer(JSON.stringify([{ kind: 'family', name: 'Brand Serif', weight: bits(400), italic: false, size: bits(24) }]), null)) as { faces: { custom: boolean }[] };
+    check(jobAfter.faces.some((f) => f.custom), 'the project font is replayed to the restarted job engine');
+    step('job engine killed: new font port, project font replayed', { job: [...jobDelivered] });
+
     uninstall();
     check(handlers.size === 0, 'uninstall removes every channel');
   } finally {
     client.disconnect();
+    jobClient.disconnect();
     await engine.stop();
     await rm(dir, { recursive: true, force: true });
     process.stdout.write(`${JSON.stringify({ steps, totalMs: Math.round(performance.now() - started), log: logs.slice(-60) })}\n`);

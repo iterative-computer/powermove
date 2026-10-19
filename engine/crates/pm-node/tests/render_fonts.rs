@@ -9,7 +9,7 @@
 //!   for want of fonts), its fonts asked of the font service on the main
 //!   thread while the render thread waits;
 //! * the pixels equal a renderer laying the same text out over the CoreText
-//!   registry directly (the broker's replay over full fonts changes
+//!   registry directly (the scoped hub's replay over full fonts changes
 //!   nothing);
 //! * a text layer's raster (`render.raster`'s base) is the same raster
 //!   `Renderer::text_raster` paints over the registry;
@@ -191,9 +191,9 @@ mod child {
                 |key: &str| std::env::var(key).ok(),
             )
             .unwrap();
-            host.attach(HOST.0, "host").unwrap();
+            host.attach(HOST.0, "host", None).unwrap();
             inbox.push(host.receive(HOST.0, &hello(PeerRole::Host)));
-            host.attach(WINDOW.0, "renderer").unwrap();
+            host.attach(WINDOW.0, "renderer", Some(WINDOW.0)).unwrap();
             inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
             let mut child = Child {
                 host,
@@ -313,6 +313,7 @@ mod child {
                         view_seq: None,
                         wait_ms: 20_000,
                         blender_wait_ms: 0,
+                        captions_hidden: false,
                         uploaded: Vec::new(),
                     },
                 }),
@@ -341,12 +342,17 @@ mod child {
 
         /// Main's font port, opened as main opens it.
         fn font_port(&mut self) {
-            self.host.attach(FONTS, pm_node::FONTS_PEER).unwrap();
+            self.host.attach(FONTS, pm_node::FONTS_PEER, None).unwrap();
             let actions = self.host.receive(
                 FONTS,
                 &wire::encode_request(1, Op::Open, "{\"generationBase\":100}", &[]),
             );
             assert_eq!(actions.len(), 1, "the open is answered");
+            let actions = self.host.receive(
+                FONTS,
+                &wire::encode_request(2, Op::Seeds, "{\"seeds\":[]}", &[]),
+            );
+            assert_eq!(actions.len(), 1, "the final seed replay opens rendering");
         }
     }
 
@@ -438,7 +444,7 @@ mod child {
         let inked = ink(&engine_px, [0x20, 0x20, 0x20]);
         assert!(inked > 400, "the text draws ({inked} ink pixels)");
         let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
-        let asked = status["renderFonts"]["asked"].as_u64().unwrap();
+        let asked = status["fonts"]["roundTrips"].as_u64().unwrap();
         assert!(
             asked > 0,
             "the render thread asked the font service: {status}"
@@ -485,7 +491,7 @@ mod child {
             .count();
         assert_eq!(
             differing, 0,
-            "the broker's replay draws what the registry draws"
+            "the scoped hub's replay draws what the registry draws"
         );
 
         // 3. The layer raster equals `text_raster` over the registry.
@@ -603,7 +609,10 @@ mod child {
         let outcome = silent.snapshot(20, frame(), size, SnapshotPixels::Opaque);
         let took = started.elapsed();
         assert_eq!(outcome.err(), Some(ErrorCode::Timeout), "a named failure");
-        assert!(took < Duration::from_secs(20), "bounded ({took:?})");
+        assert!(
+            took < pm_node::fonts::hub::OPEN_TIMEOUT + Duration::from_secs(5),
+            "bounded ({took:?})"
+        );
         println!("silent font service: failed with timeout after {took:?}");
     }
 }

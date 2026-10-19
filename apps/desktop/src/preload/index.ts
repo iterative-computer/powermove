@@ -41,7 +41,7 @@ import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/clou
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
 import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineCompatAsk, type EngineExportStart, type EngineExportStatus, type EngineProbeResult, type EngineSnapshotReply, type EngineSnapshotRequest, type EngineStatusMessage, type RenderQueueState, type StageDocumentResult } from '../shared/engine-ipc';
-import { ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
+import { ENGINE_FONTS_EVENTS, ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
 import { MEDIA_STORE_IPC, type MediaStoreConfig } from '../shared/media-store';
 import { installFrameBridgeReceiver, RELEASE_NOTICE_CHANNEL, type ReceiverModule } from './frame-bridge';
 
@@ -65,6 +65,9 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
   }
   if (Array.isArray(request?.fallbackPixels)) {
     plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0) }));
+  }
+  if (Array.isArray(request?.svgPixels)) {
+    plain.svgPixels = request.svgPixels.map((p) => ({ key: { content: String(p?.key?.content), width: Number(p?.key?.width), height: Number(p?.key?.height) }, data: bytes(p?.data) ?? new Uint8Array(0) }));
   }
   return plain;
 }
@@ -117,7 +120,14 @@ function engineFontsBridge(): EngineFontsBridge {
     ),
     setFontSource: (family, data) => invoke(ENGINE_FONTS_IPC.setFontSource, String(family), data),
     clearProjectFonts: () => invoke(ENGINE_FONTS_IPC.clearProjectFonts),
-    generation: () => invoke(ENGINE_FONTS_IPC.generation)
+    generation: () => invoke(ENGINE_FONTS_IPC.generation),
+    seeds: () => invoke(ENGINE_FONTS_IPC.seeds),
+    reportUiFonts: (json) => invoke(ENGINE_FONTS_IPC.uiFonts, String(json)),
+    onSeedsChanged: (listener) => {
+      const handler = (_event: unknown, json: unknown) => listener(String(json));
+      ipcRenderer.on(ENGINE_FONTS_EVENTS.seedsChanged, handler);
+      return () => { ipcRenderer.removeListener(ENGINE_FONTS_EVENTS.seedsChanged, handler); };
+    }
   };
 }
 
@@ -626,7 +636,25 @@ const bridge: PowermoveBridge = {
       ipcRenderer.on(ENGINE_IPC.compatAsk, handler);
       return () => { ipcRenderer.removeListener(ENGINE_IPC.compatAsk, handler); };
     },
-    answerCompat: (answer) => ipcRenderer.send(ENGINE_IPC.compatAnswer, answer)
+    answerCompat: (answer) => ipcRenderer.send(ENGINE_IPC.compatAnswer, answer),
+    // The job engine's fallback requests, run in this window's runner
+    // (main/engine/shader-fallback-relay.ts).
+    onShaderFallback: (run) => {
+      const handler = (_event: Electron.IpcRendererEvent, job: { id: number; request: never; textures: Uint16Array[] }) => {
+        // Acknowledged at once: main passes over a window that does not.
+        ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, received: true });
+        void Promise.resolve()
+          .then(() => run({ request: job.request, textures: job.textures }))
+          .then(
+            (rgba16f) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, ok: true, rgba16f }),
+            (error: { reason?: unknown; message?: unknown }) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, {
+              id: job.id, ok: false, reason: String(error?.reason ?? 'unavailable'), message: String(error?.message ?? error)
+            })
+          );
+      };
+      ipcRenderer.on(ENGINE_IPC.shaderFallback, handler);
+      return () => { ipcRenderer.removeListener(ENGINE_IPC.shaderFallback, handler); };
+    }
   },
   /* pm-wasm's font registry channels (docs/engine/text.md): main or the
      interactive engine answers, depending on "Use New Engine". */
@@ -702,6 +730,26 @@ ipcRenderer.on(ENGINE_IPC.status, (_event, status: unknown) => {
 contextBridge.executeInMainWorld({
   func: (value: unknown) => {
     Object.defineProperty(globalThis, 'powermove', { value, configurable: true, enumerable: false, writable: false });
+    // Fetch/compile while the editor's module graph loads, before its synchronous
+    // install chain. The renderer consumes this public module and setting once.
+    if (typeof location === 'undefined' || (location.pathname !== '/' && !location.pathname.endsWith('/index.html'))) return;
+    let enabled: boolean;
+    try { enabled = (value as typeof bridge).nativeEngine?.enabledSync?.() === true; } catch { return; }
+    const boot: { enabled: boolean; module?: Promise<WebAssembly.Module>; timing?: {sourceMs:number;compileMs:number} } = {enabled};
+    Object.defineProperty(globalThis, '__powermoveDocumentBoot', {value:boot,configurable:true});
+    if (!enabled) return;
+    const started = performance.now();
+    boot.module = fetch(new URL('engine/pm_wasm.wasm', location.href).href).then(async response => {
+      const fetched = performance.now();
+      if (!response.ok) throw new Error(`pm-wasm: ${response.status} fetching the module`);
+      const module = typeof WebAssembly.compileStreaming === 'function' && response.headers.get('content-type')?.includes('wasm')
+        ? await WebAssembly.compileStreaming(response)
+        : await WebAssembly.compile(await response.arrayBuffer());
+      boot.timing = {sourceMs:fetched-started,compileMs:performance.now()-fetched};
+      return module;
+    });
+    // The activation gate reports a named load failure; avoid an early unhandled rejection.
+    void boot.module.catch(() => {});
   },
   args: [bridge]
 });

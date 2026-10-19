@@ -164,4 +164,10 @@ indefinitely, so no snapshot field is ever removed for it.
    renderer and is marked not headless-renderable. Whether that mark
    travels in `DefinitionsApplied` (per definition) or only in
    `FailureReport` events. Current answer: `DefinitionsApplied.failures`
-   with `ErrorCode::NotHeadlessRenderable`.
+   with `ErrorCode::NotHeadlessRenderable`. A viewer that has the runner
+   draws such definitions through it (effects and transitions with their
+   textures and passes, shader and fragment layers; `docs/engine/effects.md`,
+   "The fallback runner"); a job asks the host to run them in a window's
+   runner (`Request::ShaderFallback`, contract 14). Late compile failures
+   arrive as definition-scoped `FailureReport` events whose `revision` is
+   the definitions generation they were translated at (rfc 07).

@@ -123,6 +123,9 @@ fn main() {
         let mut painter = Painter {
             outlines: &mut outlines,
             bitmaps: &mut bitmaps,
+            masks: None,
+            viewport: None,
+            path_rasterizer: None,
             profile: profile.clone(),
             unsupported: Vec::new(),
         };

@@ -16,17 +16,22 @@
  * viewer (capability routing, section 21); a frame means the engine draws
  * it.
  */
-import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
 
 /** What the session needs of the shader fallback runner (`ShaderFallbackRunner`). */
 export interface FallbackRunner {
-  render(request: ShaderFallbackRequest): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array }>;
+  render(request: ShaderFallbackRequest, textures?: Uint16Array[]): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array }>;
 }
+
+/** A request whose textures are still arriving (`input` bands). */
+interface WaitingFallback { request: ShaderFallbackRequest; textures: Uint16Array[]; rows: Set<number>[] }
 
 /** Largest pixel band in one message (pm_protocol shader_fallback::MAX_BAND_BYTES). */
 export const MAX_FALLBACK_BAND_BYTES = 8 * 1024 * 1024;
+/** Effect and transition requests waiting for their textures at once (the engine's `effects::fallback::WAITING`). */
+export const MAX_FALLBACK_WAITING = 32;
 
 /** What the session needs from `PM.EngineDoc` (engine-doc/install.ts). */
 export interface DocumentStream {
@@ -41,7 +46,14 @@ export type StreamBatch = { baseRevision: number; revision: number; origin: Patc
 /** Stages a large resync document with main (`nativeEngine.stageDocument`). */
 export type StageDocument = (session: number, bytes: Uint8Array) => Promise<{ handle: string; length: number }>;
 
-/** Where the session's composition is drawn. */
+/**
+ * Where the session's composition stands: `pending` (not decided yet),
+ * `engine` (drawn by the engine), `legacy` (something in it the engine
+ * cannot draw yet, with the reason; the name is the capability-routing
+ * scaffolding's, amendment 21). With "Use New Engine" on nothing else draws
+ * a `legacy` composition: the viewer shows the reason and the engine's
+ * clock and audio run as for `engine`.
+ */
 export type Route = 'pending' | 'engine' | 'legacy';
 
 /** Messages for the viewer's presentation (engine-present/protocol.ts). */
@@ -49,13 +61,14 @@ export type ViewerMessage =
   | { type: 'frame'; frame: FrameDescriptor }
   | { type: 'surfacePool'; pool: SurfacePool }
   | { type: 'clock'; sample: ClockSample }
-  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number };
+  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number };
 
 /** The kernel's definition stream (`PM.EngineDefinitions`, kernel/engine-definitions.ts; contract 10). */
 export interface DefinitionsSource {
   session(send: (update: DefinitionsUpdate) => boolean | void): DefinitionStream;
   applied(applied: DefinitionsApplied): void;
-  failure(report: FailureReport): void;
+  /** `stream`: this session's stream (a definition failure older than its latest push of that definition is stale). */
+  failure(report: FailureReport, stream?: DefinitionStream | null): void;
   /** A frame at this revision is shown: layer reports it did not repeat are cleared. */
   frame?(revision: number): void;
 }
@@ -66,6 +79,8 @@ export interface DefinitionStream {
   full(): void;
   /** Makes the next registry change send the whole set. */
   stale(): void;
+  /** The generation of the latest update sent that changed a definition. */
+  changedAt?(kind: string, id: string): number | undefined;
   dispose(): void;
 }
 
@@ -113,6 +128,8 @@ export type SessionOptions = {
   definitionsRetryMs?: number;
   /** The decision 19 shader fallback runner (created on the first request when absent). */
   fallbackRunner?: () => FallbackRunner;
+  /** Level 1 SVG rasters the engine asks this window for (svg-rasters.ts). */
+  svgRasters?: () => { answer(target: { post(event: Record<string, unknown> & { type: string }): boolean }, requests: readonly SvgRasterRequest[]): Promise<void> } | null;
 };
 
 export const DEFAULT_COLOR: ProjectColor = { mode: 'standard', linearBlending: false, precision: 'float16', blendDomain: 'hdrSafe' };
@@ -163,6 +180,8 @@ export class DocumentSession {
   private queued: StreamBatch[] = [];
   private resyncing: Promise<void> | null = null;
   private fallbackRunner: FallbackRunner | null = null;
+  /** Effect and transition requests waiting for their textures, by key. */
+  private fallbackWaiting = new Map<string, WaitingFallback>();
   private resyncAgain = false;
   /** The revision the stream will base its next batch on. */
   private streamRevision = 0;
@@ -171,9 +190,23 @@ export class DocumentSession {
   /** Definitions pushes the engine refused in a row, and the pending retry. */
   private definitionRefusals = 0;
   private definitionRetry: ReturnType<typeof setTimeout> | null = null;
-  /** The revision the engine routed the composition to the legacy viewer at:
-   *  frames of that revision or older, still in flight, are stale. */
-  private legacyRevision: number | null = null;
+  /** The newest frame `seq` the engine had given the view when it last said
+   *  it cannot draw the view's composition (the report's
+   *  `ErrorDetail::Unsupported.lastFrame`). A frame at or below it was
+   *  drawn before the decision and is stale; one above it is a later
+   *  decision at any revision: a composition switch draws the new
+   *  composition at the very revision the old one was reported at (the
+   *  document batch reaches the engine before the viewer state), so the
+   *  revision alone cannot tell them apart.
+   *
+   *  The engine's number, not the newest frame received: arrival order is
+   *  not the engine's decision order. Paused frames leave from the engine's
+   *  completion thread once the GPU finishes them, so a frame drawn before
+   *  the report could arrive after it with a higher seq than any frame
+   *  received so far. The engine also sends those frames before the report
+   *  (it drains the completion thread first); the seq makes the gate hold
+   *  whatever the order. */
+  private routedSeq: number | null = null;
 
   constructor(private readonly options: SessionOptions) {}
 
@@ -360,8 +393,9 @@ export class DocumentSession {
       case 'frame': {
         const { type: _t, ...frame } = event;
         const revision = Number((frame as { revision?: unknown }).revision) || 0;
-        if (this.legacyRevision !== null && revision <= this.legacyRevision) return;
-        this.legacyRevision = null;
+        const seq = Number((frame as { seq?: unknown }).seq) || 0;
+        if (this.routedSeq !== null && seq <= this.routedSeq) return;
+        this.routedSeq = null;
         this.frames++;
         this.lastFrame = frame as unknown as FrameDescriptor;
         this.setRoute('engine', null);
@@ -378,14 +412,14 @@ export class DocumentSession {
       case 'clock': {
         const { type: _t, ...sample } = event;
         this.clock = sample as unknown as ClockSample;
-        if (this.headless && message.revision !== null && Number(message.revision) >= this.applied) {
-          // Headless clocks are published only once the engine has the
-          // document/media and accepts transport, tagged with that revision.
-          const revision = Number(message.revision) || 0;
-          if (this.legacyRevision === null || revision > this.legacyRevision) {
-            this.legacyRevision = null;
-            this.setRoute('engine', null);
-          }
+        if (this.headless && message.revision !== null && Number(message.revision) >= this.applied && this.route !== 'engine') {
+          // A headless clock carries the document revision only while the
+          // engine draws the composition (it runs untagged for one the
+          // engine cannot draw): with no frames to learn the route from, a
+          // tagged clock is the engine's word that it draws this one, after
+          // a load or after an edit or switch made it drawable again.
+          this.routedSeq = null;
+          this.setRoute('engine', null);
         }
         this.options.onClock?.(this.clock);
         this.options.handlers.message({ type: 'clock', sample: this.clock }, arrivedMs);
@@ -405,23 +439,64 @@ export class DocumentSession {
         this.applied = Math.max(this.applied, Number(event['revision']) || 0);
         return;
       case 'shaderFallback': {
+        if (event['fallback'] === 'input') {
+          this.fallbackInput(event);
+          return;
+        }
         if (event['fallback'] !== 'requests') return;
-        for (const request of (event['requests'] as ShaderFallbackRequest[]) ?? []) void this.runFallback(request);
+        for (const request of (event['requests'] as ShaderFallbackRequest[]) ?? []) {
+          const n = request.textures ?? 0;
+          if (n === 0) {
+            void this.runFallback(request, []);
+            continue;
+          }
+          // An effect's or a transition's textures follow in row bands.
+          // At most as many wait as the engine keeps textures for (its
+          // `WAITING`); the oldest is failed as transient, so the engine
+          // asks for it again rather than wait for it.
+          while (this.fallbackWaiting.size >= MAX_FALLBACK_WAITING && !this.fallbackWaiting.has(request.key)) {
+            const [oldest] = this.fallbackWaiting.keys();
+            this.fallbackWaiting.delete(oldest!);
+            if (this.id !== null && !this.closed) {
+              this.options.connection.event({ type: 'shaderFallback', fallback: 'failed', key: oldest, reason: 'unavailable', message: 'its textures did not arrive before newer requests' } as never, this.id);
+            }
+          }
+          this.fallbackWaiting.set(request.key, {
+            request,
+            textures: Array.from({ length: n }, () => new Uint16Array(request.width * request.height * 4)),
+            rows: Array.from({ length: n }, () => new Set<number>())
+          });
+        }
+        return;
+      }
+      case 'compat': {
+        // Level 1 SVG rasters a frame drew without (decision S1).
+        if (event['compat'] !== 'svgRequests') return;
+        const requests = (event['requests'] as SvgRasterRequest[]) ?? [];
+        const rasters = this.options.svgRasters?.();
+        if (!rasters) {
+          for (const r of requests) this.post({ type: 'compat', compat: 'svgFailed', key: r.key, reason: 'unavailable', message: 'This window draws no SVG rasters.' });
+          return;
+        }
+        void rasters.answer(this, requests);
         return;
       }
       case 'failure': {
         const error = (event as unknown as { error: { code: string; message: string; retry: { kind: string } } }).error;
         if (error.code === 'unsupported') {
           const revision = Number(event['revision']) || 0;
-          this.legacyRevision = revision;
+          const detail = (error as { detail?: ErrorDetail | null }).detail;
+          const received = Number(this.lastFrame?.seq) || 0;
+          const seq = detail?.kind === 'unsupported' ? Number(detail.lastFrame) || 0 : received;
+          this.routedSeq = seq;
           this.setRoute('legacy', error.message);
-          this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision }, arrivedMs);
+          this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision, seq }, arrivedMs);
           return;
         }
         this.failures.push(`${error.code}: ${error.message}`);
         if (this.failures.length > 32) this.failures.shift();
         // Shader meta and compile errors at the report's revision.
-        this.options.definitions?.()?.failure(event as unknown as FailureReport);
+        this.options.definitions?.()?.failure(event as unknown as FailureReport, this.definitions);
         if (error.retry.kind === 'afterResync' || error.code === 'staleRevision') {
           void this.resync(error.code);
           return;
@@ -431,6 +506,35 @@ export class DocumentSession {
       }
       default:
         return;
+    }
+  }
+
+  /** One band of a texture a waiting request samples; the request runs
+   *  once every row of every texture has arrived. */
+  private fallbackInput(event: Record<string, unknown>): void {
+    const key = String(event['key'] ?? '');
+    const waiting = this.fallbackWaiting.get(key);
+    if (!waiting) return;
+    const texture = Number(event['texture']);
+    const row = Number(event['row']);
+    const rows = Number(event['rows']);
+    const width = Number(event['width']);
+    const bytes = event['rgba16f'] as Uint8Array;
+    const target = waiting.textures[texture];
+    const { request } = waiting;
+    if (!target || width !== request.width || Number(event['height']) !== request.height
+      || !(bytes instanceof Uint8Array) || bytes.byteLength !== width * rows * 8 || row + rows > request.height) {
+      this.fallbackWaiting.delete(key);
+      void this.runFallback(request, null);
+      return;
+    }
+    const values = new Uint16Array(bytes.byteLength / 2);
+    new Uint8Array(values.buffer).set(bytes);
+    target.set(values, row * width * 4);
+    for (let r = row; r < row + rows; r++) waiting.rows[texture]!.add(r);
+    if (waiting.rows.every((set) => set.size === request.height)) {
+      this.fallbackWaiting.delete(key);
+      void this.runFallback(request, waiting.textures);
     }
   }
 
@@ -468,24 +572,27 @@ export class DocumentSession {
 
   /**
    * Draws one program the engine's pipeline cannot translate with the
-   * fallback runner and uploads its pixels in row bands that fit a message
-   * (plan section 11, decision 19), or tells the engine why it could not.
+   * fallback runner (with the textures an effect or transition samples)
+   * and uploads its pixels in row bands that fit a message (plan section
+   * 11, decision 19), or tells the engine why it could not. `null`
+   * textures: they arrived damaged (the request fails as `size`).
    */
-  private async runFallback(request: ShaderFallbackRequest): Promise<void> {
+  private async runFallback(request: ShaderFallbackRequest, textures: Uint16Array[] | null): Promise<void> {
     const session = this.id;
     if (session === null || this.closed) return;
     const send = (body: Record<string, unknown>) => {
       if (this.id === session && !this.closed) this.options.connection.event({ type: 'shaderFallback', ...body } as never, session);
     };
     try {
+      if (textures === null) throw new ShaderFallbackError(request.key, 'size', 'a texture band did not fit its request');
       this.fallbackRunner ??= this.options.fallbackRunner?.() ?? null;
       if (!this.fallbackRunner) throw new ShaderFallbackError(request.key, 'unavailable', 'no shader fallback runner');
-      const pixels = await this.fallbackRunner.render(request);
+      const pixels = await this.fallbackRunner.render(request, textures);
       if (this.id === session) this.uploadFallback(pixels);
     } catch (error) {
       const reason = error instanceof ShaderFallbackError ? error.reason : 'unavailable';
       const message = error instanceof Error ? error.message : String(error);
-      this.options.log('warn', `engine: the shader fallback runner could not draw layer ${request.layer} (${reason}: ${message})`);
+      this.options.log('warn', `engine: the shader fallback runner could not draw a program of layer ${request.layer} (${reason}: ${message})`);
       send({ fallback: 'failed', key: request.key, reason, message: message.slice(0, 1024) });
     }
   }
@@ -496,6 +603,11 @@ export class DocumentSession {
   /** A session owns the clock independently of any presentation channel. */
   headless = false;
   private lastState: ViewerState | null = null;
+
+  /** The composition of the newest viewer state sent (null before one). */
+  get composition(): string | null {
+    return this.lastState ? String(this.lastState.composition) : null;
+  }
 
   sendHeadless(composition: string): void {
     this.sendViewerState({
@@ -562,6 +674,7 @@ export class DocumentSession {
     this.offClose?.();
     this.offClose = null;
     this.queued = [];
+    this.fallbackWaiting.clear();
     this.setRoute('pending', null);
   }
 }

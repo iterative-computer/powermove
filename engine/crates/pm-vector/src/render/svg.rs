@@ -27,6 +27,7 @@
 
 use kurbo::{Affine, BezPath, Cap, Join, Stroke};
 
+use super::svg_depth::{MAX_ELEMENT_DEPTH, element_depth, with_stack};
 use crate::canvas2d::shape::Bitmap;
 use crate::render::scene::{CoverageItem, CoverageScene, FillRule, ItemStyle, PixelRect};
 
@@ -44,9 +45,22 @@ impl std::error::Error for SvgError {}
 
 /// A parsed SVG.
 pub struct SvgDocument {
-    tree: usvg::Tree,
+    /// Dropped on a stack sized to `depth` (see `Drop`).
+    tree: core::mem::ManuallyDrop<usvg::Tree>,
     has_text: bool,
     data: Vec<u8>,
+    /// The element nesting ([`super::svg_depth::element_depth`]): recursive
+    /// work over the tree runs on a stack sized to it.
+    depth: usize,
+}
+
+impl Drop for SvgDocument {
+    fn drop(&mut self) {
+        // SAFETY: the tree is taken once, here, and never used again.
+        let tree = unsafe { core::mem::ManuallyDrop::take(&mut self.tree) };
+        // usvg's groups drop recursively.
+        with_stack(self.depth, move || drop(tree));
+    }
 }
 
 impl core::fmt::Debug for SvgDocument {
@@ -82,15 +96,33 @@ fn options(text: bool) -> usvg::Options<'static> {
 
 impl SvgDocument {
     /// Parses SVG bytes (SVGZ is not read: usvg's compression feature is
-    /// off).
+    /// off). The nesting is scanned first without recursion: deeper than
+    /// [`MAX_ELEMENT_DEPTH`] is an error (Chromium shows a broken image),
+    /// and a deep document parses on a stack sized to its nesting.
     pub fn parse(data: &[u8]) -> Result<Self, SvgError> {
-        let tree = usvg::Tree::from_data(data, &options(contains_text(data))).map_err(|e| SvgError(e.to_string()))?;
-        let has_text = contains_text(data);
+        let depth = element_depth(data);
+        if depth > MAX_ELEMENT_DEPTH {
+            return Err(SvgError(format!(
+                "elements nest {depth} deep; Chromium's XML parser stops at {MAX_ELEMENT_DEPTH}"
+            )));
+        }
+        let (tree, has_text) = with_stack(depth, || {
+            let has_text = contains_text(data);
+            usvg::Tree::from_data(data, &options(has_text))
+                .map(|tree| (tree, has_text))
+                .map_err(|e| SvgError(e.to_string()))
+        })?;
         Ok(Self {
-            tree,
+            tree: core::mem::ManuallyDrop::new(tree),
             has_text,
             data: data.to_vec(),
+            depth,
         })
+    }
+
+    /// The element nesting the document was parsed with.
+    pub fn depth(&self) -> usize {
+        self.depth
     }
 
     /// The SVG's size in user units (`width`/`height`, else the viewBox).
@@ -129,11 +161,16 @@ impl SvgDocument {
         };
         let to_rect = Affine::translate((-f64::from(rect.x), -f64::from(rect.y)));
         let c = (to_rect * transform).as_coeffs().map(|v| v as f32);
-        resvg::render(
-            &self.tree,
-            tiny_skia::Transform::from_row(c[0], c[1], c[2], c[3], c[4], c[5]),
-            &mut pixmap.as_mut(),
-        );
+        let tree: &usvg::Tree = &self.tree;
+        let target = &mut pixmap;
+        // resvg renders groups recursively.
+        with_stack(self.depth, move || {
+            resvg::render(
+                tree,
+                tiny_skia::Transform::from_row(c[0], c[1], c[2], c[3], c[4], c[5]),
+                &mut target.as_mut(),
+            )
+        });
         if let Some(points) = clip {
             let mut pb = tiny_skia::PathBuilder::new();
             for (i, p) in points.iter().enumerate() {
@@ -148,7 +185,12 @@ impl SvgDocument {
             let (Some(path), Some(mut mask)) = (pb.finish(), tiny_skia::Mask::new(w, h)) else {
                 return empty();
             };
-            mask.fill_path(&path, tiny_skia::FillRule::Winding, true, tiny_skia::Transform::identity());
+            mask.fill_path(
+                &path,
+                tiny_skia::FillRule::Winding,
+                true,
+                tiny_skia::Transform::identity(),
+            );
             pixmap.apply_mask(&mask);
         }
         Bitmap {
@@ -163,10 +205,13 @@ impl SvgDocument {
             return Err(SvgError("SVG text needs pm-text".into()));
         }
 
-        let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
-        let tree = usvg::Tree::from_data(&annotated, &options(false)).map_err(|e| SvgError(e.to_string()))?;
-        crate::canvas2d::svg::raster(&tree, &elements, width, height, &mut |_, _, _, _| {
-            Err(SvgError("SVG text needs pm-text".into()))
+        let data = &self.data;
+        with_stack(self.depth, move || {
+            let (annotated, elements) = crate::canvas2d::svg::annotate(data)?;
+            let tree = usvg::Tree::from_data(&annotated, &options(false)).map_err(|e| SvgError(e.to_string()))?;
+            crate::canvas2d::svg::raster(&tree, &elements, width, height, &mut |_, _, _, _| {
+                Err(SvgError("SVG text needs pm-text".into()))
+            })
         })
     }
 
@@ -178,10 +223,21 @@ impl SvgDocument {
         height: u32,
         compat: &mut pm_text::compat::Compat<R>,
     ) -> Result<Bitmap, SvgError> {
+        // The caller's resolver cannot move to another thread: deep
+        // documents are refused here rather than recursing on its stack.
+        if self.depth > super::svg_depth::INLINE_DEPTH {
+            return Err(SvgError(format!(
+                "elements nest {} deep (diagnostic text rasters stop at {})",
+                self.depth,
+                super::svg_depth::INLINE_DEPTH
+            )));
+        }
         let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
         let tree = usvg::Tree::from_data(&annotated, &options(self.has_text)).map_err(|e| SvgError(e.to_string()))?;
         let mut renderer = crate::canvas2d::svg_text::TextRenderer::new(compat);
-        crate::canvas2d::svg::raster(&tree, &elements, width, height, &mut move |t, m, w, h| renderer.raster(t, m, w, h))
+        crate::canvas2d::svg::raster(&tree, &elements, width, height, &mut move |t, m, w, h| {
+            renderer.raster(t, m, w, h)
+        })
     }
 
     /// User-space bounds of everything the SVG draws (strokes and filter
@@ -191,6 +247,7 @@ impl SvgDocument {
         if !root.has_children() {
             return None;
         }
+        // Bounds are computed at parse time; reading them does not recurse.
         let b = root.abs_layer_bounding_box();
         Some(kurbo::Rect::new(
             f64::from(b.left()),
@@ -204,9 +261,12 @@ impl SvgDocument {
     /// pixels), or `None` when it draws anything but solid fills and strokes
     /// in plain groups.
     pub fn scene(&self, transform: Affine) -> Option<CoverageScene> {
-        let mut scene = CoverageScene::default();
-        push_group(self.tree.root(), transform, &mut scene)?;
-        Some(scene)
+        let root = self.tree.root();
+        with_stack(self.depth, move || {
+            let mut scene = CoverageScene::default();
+            push_group(root, transform, &mut scene)?;
+            Some(scene)
+        })
     }
 }
 
@@ -224,7 +284,8 @@ fn contains_text(data: &[u8]) -> bool {
     ) else {
         return false;
     };
-    doc.descendants().any(|n| n.is_element() && n.tag_name().name() == "text")
+    doc.descendants()
+        .any(|n| n.is_element() && n.tag_name().name() == "text")
 }
 
 fn affine(t: tiny_skia::Transform) -> Affine {
@@ -387,9 +448,17 @@ fn continuous_raster_scale(m: &[f64; 6], density: f64, max_scale: f64) -> f64 {
     let cc = m2 * m2 + m3 * m3;
     let discriminant = js::max(0.0, (aa - cc) * (aa - cc) + 4.0 * bb * bb).sqrt();
     let largest = js::max(0.0, (aa + cc + discriminant) / 2.0).sqrt();
-    let density = if density.is_nan() || density == 0.0 { 1.0 } else { density };
+    let density = if density.is_nan() || density == 0.0 {
+        1.0
+    } else {
+        density
+    };
     let requested = largest * js::max(0.01, density);
-    let max_scale = if max_scale.is_nan() || max_scale == 0.0 { 32.0 } else { max_scale };
+    let max_scale = if max_scale.is_nan() || max_scale == 0.0 {
+        32.0
+    } else {
+        max_scale
+    };
     let bounded = js::max(0.25, js::min(js::max(0.25, max_scale), requested));
     libm::ceil(bounded * 4.0 - 1e-9) / 4.0
 }
@@ -452,5 +521,52 @@ mod tests {
         // The left half is covered: the 10 × 10 user space spans 40 × 10.
         assert_eq!(b.rgba[(5 * 40 + 10) * 4 + 3], 255);
         assert_eq!(b.rgba[(5 * 40 + 30) * 4 + 3], 0);
+    }
+
+    fn nested(levels: usize) -> String {
+        // `levels` elements in all: the root and levels − 2 groups around a rect.
+        let groups = levels - 2;
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">{}<rect width="10" height="10" fill="#4C8DFF"/>{}</svg>"##,
+            "<g>".repeat(groups),
+            "</g>".repeat(groups)
+        )
+    }
+
+    /// Engine worker threads have 2 MiB. usvg converts at most 1,024
+    /// levels (deeper is its `NodesLimitReached` error); a document that
+    /// deep parses, draws (resvg and the level 2 scene), and drops there,
+    /// one at Chromium's limit fails cleanly, and one past it is refused
+    /// before anything recursive runs.
+    #[test]
+    fn deep_documents_are_safe_on_a_small_stack() {
+        let deep = nested(1000);
+        assert_eq!(element_depth(deep.as_bytes()), 1000);
+        let inline = nested(super::super::svg_depth::INLINE_DEPTH);
+        let limit = nested(MAX_ELEMENT_DEPTH);
+        let too_deep = nested(MAX_ELEMENT_DEPTH + 1);
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || {
+                let doc = SvgDocument::parse(deep.as_bytes()).unwrap();
+                assert_eq!(doc.depth(), 1000);
+                let b = doc.raster(8, 8);
+                assert_eq!(&b.rgba[..4], &[0x4C, 0x8D, 0xFF, 255]);
+                assert_eq!(doc.scene(Affine::IDENTITY).map(|s| s.items.len()), Some(1));
+                assert!(doc.user_bounds().is_some());
+                drop(doc);
+                // Shallow enough to run on this thread itself.
+                let doc = SvgDocument::parse(inline.as_bytes()).unwrap();
+                assert_eq!(doc.raster(4, 4).rgba[3], 255);
+                assert!(doc.scene(Affine::IDENTITY).is_some());
+                drop(doc);
+                let e = SvgDocument::parse(limit.as_bytes()).unwrap_err();
+                assert!(e.0.contains("limit"), "{e}");
+                let e = SvgDocument::parse(too_deep.as_bytes()).unwrap_err();
+                assert!(e.0.contains("nest 5001 deep"), "{e}");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

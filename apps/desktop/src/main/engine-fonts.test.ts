@@ -285,7 +285,8 @@ describe('the engine font client', () => {
     expect(second.sent.map(r => [r.op, r.json])).toEqual([
       [FONT_OP.open, '{"generationBase":4}'],
       [FONT_OP.addProjectFont, '{"family":"Brand","weight":"400"}'],
-      [FONT_OP.setFontSource, '{"family":"Brand"}']
+      [FONT_OP.setFontSource, '{"family":"Brand"}'],
+      [FONT_OP.seeds, '{"seeds":[]}']
     ]);
     second.serve(engine);
     expect(client.generationSeen).toBe(6);
@@ -296,7 +297,7 @@ describe('the engine font client', () => {
     second.goAway();
     const third = new FakeFontPort();
     client.connect(third);
-    expect(third.sent.map(r => r.op)).toEqual([FONT_OP.open]);
+    expect(third.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.seeds]);
     expect(third.sent[0]!.json).toBe('{"generationBase":8}');
   });
 
@@ -323,13 +324,13 @@ describe('the engine font client', () => {
     const queued = client.manifest('system-ui');
     const first = new FakeFontPort();
     client.connect(first);
-    expect(first.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.manifest]);
+    expect(first.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.seeds, FONT_OP.manifest]);
     // The engine dies before answering.
     first.goAway();
     expect(client.connected).toBe(false);
     const second = new FakeFontPort();
     client.connect(second);
-    expect(second.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.manifest]);
+    expect(second.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.seeds, FONT_OP.manifest]);
     second.serve({ generation: 0 });
     expect(await queued).toBe('{"generation":1}');
     // Replies on a port that was replaced are ignored.
@@ -347,7 +348,7 @@ describe('the engine font client', () => {
     first.goAway();
     const second = new FakeFontPort();
     client.connect(second);
-    expect(second.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.addProjectFont, FONT_OP.generation]);
+    expect(second.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.addProjectFont, FONT_OP.seeds, FONT_OP.generation]);
     second.serve({ generation: 0 });
     // Base 2 (above the 1 seen), then the replayed font.
     expect(await added).toBe(3);
@@ -372,6 +373,7 @@ describe('the engine font client', () => {
     expect(second.sent.map(r => [r.op, r.json])).toEqual([
       [FONT_OP.open, '{"generationBase":3}'],
       [FONT_OP.addProjectFont, '{"family":"Old"}'],
+      [FONT_OP.seeds, '{"seeds":[]}'],
       [FONT_OP.addProjectFont, '{"family":"Brand"}'],
       [FONT_OP.setFontSource, '{"family":"Brand"}']
     ]);
@@ -388,6 +390,7 @@ describe('the engine font client', () => {
       [FONT_OP.addProjectFont, '{"family":"Old"}'],
       [FONT_OP.addProjectFont, '{"family":"Brand"}'],
       [FONT_OP.setFontSource, '{"family":"Brand"}'],
+      [FONT_OP.seeds, '{"seeds":[]}'],
       [FONT_OP.clearProjectFonts, '{}'],
       [FONT_OP.addProjectFont, '{"family":"New"}']
     ]);
@@ -400,7 +403,8 @@ describe('the engine font client', () => {
     client.connect(fourth);
     expect(fourth.sent.map(r => [r.op, r.json])).toEqual([
       [FONT_OP.open, '{"generationBase":13}'],
-      [FONT_OP.addProjectFont, '{"family":"New"}']
+      [FONT_OP.addProjectFont, '{"family":"New"}'],
+      [FONT_OP.seeds, '{"seeds":[]}']
     ]);
   });
 
@@ -425,7 +429,8 @@ describe('the engine font client', () => {
     client.connect(next);
     expect(next.sent.map(r => [r.op, r.json])).toEqual([
       [FONT_OP.open, '{"generationBase":3}'],
-      [FONT_OP.addProjectFont, '{"family":"Slow"}']
+      [FONT_OP.addProjectFont, '{"family":"Slow"}'],
+      [FONT_OP.seeds, '{"seeds":[]}']
     ]);
   });
 
@@ -441,7 +446,7 @@ describe('the engine font client', () => {
     port.goAway();
     const next = new FakeFontPort();
     client.connect(next);
-    expect(next.sent.map(r => r.op)).toEqual([FONT_OP.open]);
+    expect(next.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.seeds]);
     // Malformed messages are dropped with a note.
     (next as any).message({ data: new Uint8Array([1]) });
     expect(log.mock.calls.at(-1)![1]).toMatch(/malformed/);
@@ -455,11 +460,138 @@ describe('the engine font client', () => {
     await expect(waiting).rejects.toThrow(/did not answer within 50 ms/);
     const port = new FakeFontPort();
     client.connect(port);
-    expect(port.sent.map(r => r.op)).toEqual([FONT_OP.open]);
+    expect(port.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.seeds]);
     const pending = client.familyFaces('Georgia');
     client.disconnect();
     await expect(pending).rejects.toThrow(/stopped/);
     expect(port.closed).toBe(true);
+  });
+
+  it('replays the latest seeds last on every port and sends changes at once', async () => {
+    const client = new EngineFontClient();
+    const engine = { generation: 0 };
+    const first = new FakeFontPort();
+    client.connect(first);
+    first.serve(engine);
+    const two = '{"seeds":[{"family":"system-ui","weight":400,"italic":false,"size":24,"specified":12}]}';
+    const sent = client.setSeeds(two);
+    expect(first.sent.map(r => [r.op, r.json])).toEqual([[FONT_OP.seeds, two]]);
+    first.serve(engine);
+    expect(await sent).toBe(1);
+    // The same seeds again send nothing.
+    expect(await client.setSeeds(two)).toBeNull();
+    expect(first.sent).toEqual([]);
+    const added = client.addProjectFont('Brand', new Uint8Array([1]), {}, undefined);
+    first.serve(engine);
+    expect(await added).toBe(2);
+    first.goAway();
+    const second = new FakeFontPort();
+    client.connect(second);
+    expect(second.sent.map(r => [r.op, r.json])).toEqual([
+      [FONT_OP.open, '{"generationBase":3}'],
+      [FONT_OP.addProjectFont, '{"family":"Brand"}'],
+      [FONT_OP.seeds, two]
+    ]);
+    // While the engine is down, the newest seeds wait for the next port.
+    second.goAway();
+    expect(await client.setSeeds('{"seeds":[]}')).toBeNull();
+    const third = new FakeFontPort();
+    client.connect(third);
+    expect(third.sent.at(-1)).toMatchObject({ op: FONT_OP.seeds, json: '{"seeds":[]}' });
+  });
+
+  it('mirrors project fonts and seeds to the job engine\'s font port, also while it is down', async () => {
+    const interactive = new EngineFontClient();
+    const job = new EngineFontClient();
+    interactive.mirror(job);
+    const a = new FakeFontPort();
+    interactive.connect(a);
+    a.serve({ generation: 0 });
+    // The job engine is not up yet: changes join its replay.
+    void interactive.addProjectFont('Brand', new Uint8Array([1, 2]), { weight: '700' }, undefined);
+    void interactive.setSeeds('{"seeds":[{"family":"system-ui","weight":400,"italic":false,"size":26,"specified":13}]}');
+    const b = new FakeFontPort();
+    job.connect(b);
+    expect(b.sent.map(r => [r.op, r.json])).toEqual([
+      [FONT_OP.open, '{"generationBase":1}'],
+      [FONT_OP.addProjectFont, '{"family":"Brand","weight":"700"}'],
+      [FONT_OP.seeds, '{"seeds":[{"family":"system-ui","weight":400,"italic":false,"size":26,"specified":13}]}']
+    ]);
+    b.serve({ generation: 0 });
+    // Up: changes go out to both ports; a clear empties both replays.
+    void interactive.clearProjectFonts();
+    expect(b.sent.map(r => r.op)).toEqual([FONT_OP.clearProjectFonts]);
+    b.serve({ generation: 0 });
+    b.goAway();
+    const c = new FakeFontPort();
+    job.connect(c);
+    expect(c.sent.map(r => r.op)).toEqual([FONT_OP.open, FONT_OP.seeds]);
+  });
+
+  it('tells the job engine which window each export session is for, after the next replay when it is down', async () => {
+    const interactive = new EngineFontClient();
+    const timers = manualSchedule();
+    const job = new EngineFontClient({ schedule: timers.schedule });
+    interactive.mirror(job);
+    const table = '{"seeds":[],"owners":[{"owner":4,"seeds":[]}]}';
+    void interactive.setSeeds(table);
+    const port = new FakeFontPort();
+    job.connect(port);
+    expect(port.sent.at(-1)).toMatchObject({ op: FONT_OP.seeds, json: table });
+    port.serve({ generation: 0 });
+    let done = false;
+    const owned = job.setSessionOwner(9, 4).then(() => { done = true; });
+    expect(port.sent.map(r => [r.op, JSON.parse(r.json)])).toEqual([[FONT_OP.seeds, { ...JSON.parse(table), sessions: [{ session: 9, owner: 4 }] }]]);
+    await Promise.resolve();
+    expect(done).toBe(false);
+    port.serve({ generation: 0 });
+    await owned;
+    // The same owner again sends nothing; new seeds from main keep the sessions.
+    await job.setSessionOwner(9, 4);
+    expect(port.sent).toEqual([]);
+    void interactive.setSeeds('{"seeds":[]}');
+    expect(JSON.parse(port.sent.at(-1)!.json)).toEqual({ seeds: [], sessions: [{ session: 9, owner: 4 }] });
+    port.serve({ generation: 0 });
+    // The interactive engine never gets job sessions.
+    expect(port.sent).toEqual([]);
+    // While the job engine is down a new session waits for the next replay.
+    port.goAway();
+    let later = false;
+    const waiting = job.setSessionOwner(10, 4).then(() => { later = true; });
+    await Promise.resolve();
+    expect(later).toBe(false);
+    const next = new FakeFontPort();
+    job.connect(next);
+    expect(JSON.parse(next.sent.at(-1)!.json).sessions).toEqual([{ session: 9, owner: 4 }, { session: 10, owner: 4 }]);
+    next.serve({ generation: 0 });
+    await waiting;
+    // A closed session leaves the table; an engine that never answers does
+    // not hold the export up.
+    const closed = job.setSessionOwner(9, null);
+    expect(JSON.parse(next.sent.at(-1)!.json).sessions).toEqual([{ session: 10, owner: 4 }]);
+    timers.fire();
+    await closed;
+    // Naming a window the engine never takes fails: the export would
+    // otherwise lay text out with every window's seeds.
+    const named = job.setSessionOwner(11, 4);
+    timers.fire();
+    await expect(named).rejects.toThrow(/did not take the font cache seeds of window 4/);
+  });
+
+  it('rejects refused seed updates and retries the same session owner', async () => {
+    const client = new EngineFontClient();
+    const port = new FakeFontPort();
+    client.connect(port);
+    port.serve({ generation: 0 });
+    const owned = client.setSessionOwner(9, 4);
+    const request = port.sent.shift()!;
+    port.reply(request.id, FONT_STATUS.error, new TextEncoder().encode('invalid seeds'));
+    await expect(owned).rejects.toThrow('invalid seeds');
+    const retry = client.setSessionOwner(9, 4);
+    expect(port.sent).toHaveLength(1);
+    expect(port.sent[0]!.op).toBe(FONT_OP.seeds);
+    port.serve({ generation: 0 });
+    await retry;
   });
 
   it('serves the channels, and main\'s own registry then stays unloaded', async () => {

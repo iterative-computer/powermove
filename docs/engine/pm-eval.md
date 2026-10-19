@@ -104,8 +104,11 @@ patches invalidates exactly the affected ids with no notification.
   unchanged; for expression plans only while the document root is unchanged.
 - **Layer indexes** (positions by id, used by interned ids and by `active`'s group
   ancestry) are reused only for the same `layers` node: the same document root (address),
-  the same path (`Comp::at_root`), the same `layers` node address, and a `layers` revision
-  no newer than the one it was built at. The interned path also checks that the layer at
+  the same path (`Comp::at_root`), the same `layers` node address, and unchanged
+  indexed inputs at each position. A newer `layers` subtree revision validates
+  the nullish flag and the `id` member's address and revision before reusing
+  the index; a value edit leaves them alone, and reconciliation's reorders
+  move the id addresses. No layer or id is inferred from a hash. The interned path also checks that the layer at
   the indexed position has the addressed id; a mismatch rebuilds the index and counts in
   `CacheStats::stale_indexes`, which stays zero unless the contract below is broken.
 - **Content-keyed caches** (spring tables, compiled expressions) never go stale.

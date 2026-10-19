@@ -11,17 +11,53 @@
  * the runner draws into an RGBA16F target cleared to transparent with
  * blending off, as the compositor's `grab` buffers, and reads it back in GL
  * row order as binary16. The engine draws the pixels as the layer's content,
- * uploaded like the `raster` override. Texture units are left empty, so a
- * sampler reads (0, 0, 0, 1), as nothing is bound to one in the compositor
- * either.
+ * uploaded like the `raster` override.
  *
- * Compiles are asynchronous (`KHR_parallel_shader_compile`) and bounded by a
- * deadline; a lost context is recreated, and a program whose draw lost it is
- * not run again (it would lose it again).
+ * Effects and transitions sample textures: the request names how many
+ * (each the target's size, binary16 RGBA in GL row order, sent after the
+ * request), which unit samples which (`units`; a `chain` unit samples the
+ * previous pass's output from the second pass on), and the calls of every
+ * pass after the first (`morePasses`, each into a new target, as the
+ * compositor's ping-pong `runEffects`). Textures are RGBA16F, sampled linear
+ * with clamp-to-edge like the compositor's `grab` buffers. Units no request
+ * names are left empty, so a sampler reads (0, 0, 0, 1), as nothing is bound
+ * to one in the compositor either. A parameter call carries `setParam`'s
+ * positional alias: applied to the alias when the named uniform is not
+ * active.
+ *
+ * Compiles are asynchronous (`KHR_parallel_shader_compile`): a request
+ * waits up to a deadline, and a compile past it goes on and is waited for
+ * again by the program's next request (the engine asks again), so a large
+ * program draws once WebGL has compiled it, as today. Every pass's draw is bounded by the draw deadline
+ * (the runner's watchdog): a draw that has not finished by then loses the
+ * context on purpose, fails with `watchdog`, and its program is never run
+ * again. Asynchronous requests poll each pass's fence, so a runaway program
+ * never blocks the renderer in `readPixels`; a synchronous request waits
+ * with `finish` (WebGL cannot signal a fence within the task) and judges
+ * the deadline when the pass returns (`finishedSync`).
+ *
+ * A target edge past the context's `MAX_TEXTURE_SIZE` fails with
+ * `tooLarge`: the GPU cannot hold it, today's compositor could not either,
+ * and asking again at that size changes nothing (the engine keeps the
+ * failure for the program at that size).
+ *
+ * Only two failures are kept for a program: WebGL refusing it (`compile`)
+ * and the draw deadline (`watchdog`). A context lost for any other reason
+ * (a GPU-process restart, another context's loss) says nothing about the
+ * program, as today's compositor treats it (`compositor.ts` clears its
+ * errors and programs on `webglcontextrestored` and draws again): the
+ * runner makes a new context and draws the request again once, and if
+ * that loses it too fails with `contextLost`, which the engine retries
+ * later. A compile past its deadline (`deadline`) is not kept either.
  */
 
 export type FallbackCallFn = '1f' | '2f' | '3f' | '4f' | '1i' | 'm3';
-export interface FallbackCall { fn: FallbackCallFn; name: string; v: number[] }
+/** One uniform call. `fn` is a `FallbackCallFn`; the protocol's type
+ *  (`ShaderFallbackCall`) carries it as a string, and a name the runner
+ *  does not know changes nothing (`applyCalls`). */
+export interface FallbackCall { fn: FallbackCallFn | (string & {}); name: string; v: number[]; alias?: string }
+/** Unit `unit` samples texture `texture` (or, with `chain`, the previous pass's output from the second pass on). */
+export interface FallbackUnit { unit: number; texture: number; chain: boolean }
 
 /** `pm_render::shader_layers::FallbackRequest`. */
 export interface ShaderFallbackRequest {
@@ -34,13 +70,18 @@ export interface ShaderFallbackRequest {
   calls: FallbackCall[];
   stage: string;
   message: string;
+  /** Textures sampled (each `width × height`), passed to `render`. */
+  textures?: number;
+  units?: FallbackUnit[];
+  /** Calls of the passes after the first. */
+  morePasses?: FallbackCall[][];
 }
 
 /** The runner's answer: binary16 RGBA, rows in GL order (row 0 at the bottom). */
 export interface ShaderFallbackPixels { key: string; width: number; height: number; rgba16f: Uint16Array }
 
 export class ShaderFallbackError extends Error {
-  constructor(readonly key: string, readonly reason: 'compile' | 'deadline' | 'contextLost' | 'unavailable' | 'size', message: string) {
+  constructor(readonly key: string, readonly reason: 'compile' | 'deadline' | 'contextLost' | 'unavailable' | 'size' | 'tooLarge' | 'watchdog', message: string) {
     super(message);
   }
 }
@@ -50,46 +91,43 @@ export interface RunnerOptions {
   createCanvas?: () => OffscreenCanvas | HTMLCanvasElement;
   /** How long a compile may take before the program is failed (ms). */
   compileDeadlineMs?: number;
-  /** Largest target edge (the compositor's 4,096 px cap on shader layers). */
+  /** Largest target edge (tests). By default the context's
+   *  `MAX_TEXTURE_SIZE`, the limit today's compositor draws effects and
+   *  transitions under (its `grab` buffers are textures of the
+   *  composition's size). Shader layers arrive already capped at 4,096 px
+   *  by the engine (`shader_layers::plan`, the compositor's own cap). */
   maxSize?: number;
+  /** How long one pass's draw may take before it is stopped (ms): the
+   *  runner's watchdog. Chromium's own GPU watchdog loses a context after
+   *  about this long, so a draw today's compositor finishes, this finishes. */
+  drawDeadlineMs?: number;
+  /** The clock and the wait between fence polls (tests). */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/** Default draw deadline (ms). */
+export const DRAW_DEADLINE_MS = 10_000;
 
 type GL = WebGL2RenderingContext;
 interface Program { program: WebGLProgram; position: number; locations: Map<string, WebGLUniformLocation | null> }
 
 const MAX_PROGRAMS = 32;
+const MAX_COMPILING = 4;
+/** How long one request waits for its program to compile (ms). */
+export const COMPILE_DEADLINE_MS = 10_000;
 const POLL_MS = 16;
 
-/** f32 to binary16 bits, round to nearest even (values from RGBA16F storage convert exactly). */
-export function toHalf(value: number): number {
-  const f = new Float32Array([value]);
-  const x = new Uint32Array(f.buffer)[0]!;
-  const sign = (x >>> 16) & 0x8000;
-  const exp = (x >>> 23) & 0xff;
-  let mant = x & 0x7fffff;
-  if (exp === 0xff) return sign | 0x7c00 | (mant ? 0x200 : 0);
-  const e = exp - 127 + 15;
-  if (e >= 0x1f) return sign | 0x7c00;
-  if (e <= 0) {
-    if (e < -10) return sign;
-    mant |= 0x800000;
-    const shift = 14 - e;
-    let half = mant >>> shift;
-    const rem = mant & ((1 << shift) - 1);
-    const mid = 1 << (shift - 1);
-    if (rem > mid || (rem === mid && (half & 1))) half++;
-    return sign | half;
-  }
-  let half = (e << 10) | (mant >>> 13);
-  const rem = mant & 0x1fff;
-  if (rem > 0x1000 || (rem === 0x1000 && (half & 1))) half++;
-  return sign | half;
-}
+export { toHalf, toHalfArray } from './half-float';
+import { toHalfArray } from './half-float';
+import { FallbackReadback } from './fallback-readback';
+import { FallbackSurfaces, type SurfaceLease } from './fallback-surfaces';
 
-/** Replays the compositor's uniform calls. A call of the wrong type raises a GL error and changes nothing, as in the compositor. */
+/** Replays the compositor's uniform calls. A call of the wrong type raises a GL error and changes nothing, as in the compositor. A parameter goes to its positional alias when the named uniform is not active (`setParam`). */
 export function applyCalls(gl: GL, locate: (name: string) => WebGLUniformLocation | null, calls: FallbackCall[]): void {
   for (const call of calls) {
-    const location = locate(call.name);
+    let location = locate(call.name);
+    if (location === null && call.alias) location = locate(call.alias);
     if (location === null) continue;
     const v = call.v;
     switch (call.fn) {
@@ -112,47 +150,153 @@ export class ShaderFallbackRunner {
   private quad: WebGLBuffer | null = null;
   private programs = new Map<string, Program>();
   private failed = new Map<string, ShaderFallbackError>();
+  /** Compiles past a request's deadline, still going in the driver. */
+  private compiling = new Map<string, { program: WebGLProgram; vs: WebGLShader; fs: WebGLShader }>();
   private lost = false;
+  private disposed = false;
   private queue: Promise<unknown> = Promise.resolve();
+  private readback: FallbackReadback | null = null;
+  private surfaces: FallbackSurfaces | null = null;
 
   constructor(private readonly options: RunnerOptions = {}) {}
 
-  /** Renders requests one at a time (one context). */
-  render(request: ShaderFallbackRequest): Promise<ShaderFallbackPixels> {
-    const run = this.queue.then(() => this.run(request));
-    this.queue = run.catch(() => undefined);
-    return run;
+  /** Renders requests one at a time (one context). `textures` are the
+   *  request's (binary16 RGBA, GL row order, `width × height × 4` each). */
+  render(request: ShaderFallbackRequest, textures: Uint16Array[] = []): Promise<ShaderFallbackPixels> {
+    const attempt = (): Promise<ShaderFallbackPixels> => {
+      let submitted!: () => void;
+      const gate = new Promise<void>(resolve => { submitted = resolve; });
+      const run = this.queue.then(() => this.run(request, textures, submitted));
+      this.queue = run.then(() => undefined, () => undefined);
+      // Only GL submission is serial. Once a PBO owns the read command,
+      // another request may submit while its GPU fence/copy is pending.
+      this.queue = Promise.race([this.queue, gate]);
+      void run.then(submitted, submitted);
+      return run;
+    };
+    return attempt().catch(error => {
+      if (this.disposed || !(error instanceof ShaderFallbackError) || error.reason !== 'contextLost') throw error;
+      return attempt();
+    });
   }
 
   /**
-   * Renders one request on the calling thread (the synchronous snapshot
-   * path, render-transport.ts: the thread is blocked on a snapshot that
-   * needs these pixels, so nothing may wait for a task). Linking without
-   * `KHR_parallel_shader_compile` polling blocks until the program is
-   * ready, as WebGL's `LINK_STATUS` query does.
+   * Renders one request on the calling thread: the synchronous snapshot
+   * path (render-transport.ts), where the thread is blocked on a snapshot
+   * that needs these pixels and nothing may wait for a task. The program
+   * links as WebGL's `LINK_STATUS` query does (blocking, so no compile
+   * deadline), and every pass finishes on this thread before its pixels are read.
+   * Chromium's GPU watchdog bounds the blocking driver call, and the
+   * elapsed draw deadline is checked before delivering pixels. A context lost
+   * under it is made again and the request drawn once more, as `render`.
    */
-  renderSync(request: ShaderFallbackRequest): ShaderFallbackPixels {
-    return this.draw(request, this.programSync(this.context(), request));
+  renderSync(request: ShaderFallbackRequest, textures: Uint16Array[] = []): ShaderFallbackPixels {
+    try {
+      return this.runSync(request, textures);
+    } catch (error) {
+      if (this.disposed || !(error instanceof ShaderFallbackError) || error.reason !== 'contextLost') throw error;
+      return this.runSync(request, textures);
+    }
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? performance.now();
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return this.options.sleep?.(ms) ?? new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /** Waits for a pass's draw to finish, within the draw deadline (the
+   *  runner's watchdog). */
+  private async finished(gl: GL, id: string, request: ShaderFallbackRequest): Promise<void> {
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!sync) return;
+    gl.flush();
+    const deadline = this.now() + (this.options.drawDeadlineMs ?? DRAW_DEADLINE_MS);
+    try {
+      for (;;) {
+        const status = gl.clientWaitSync(sync, 0, 0);
+        if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return;
+        if (status === gl.WAIT_FAILED || this.lost || gl.isContextLost()) {
+          this.lost = true;
+          throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
+        }
+        if (this.now() > deadline) {
+          const ms = this.options.drawDeadlineMs ?? DRAW_DEADLINE_MS;
+          // Abandon the draw: the context goes (and is made again for the
+          // next request), the program is never run again.
+          const error = this.fail(id, request, 'watchdog', `its draw did not finish within ${Math.round(ms / 1000)} s`);
+          gl.getExtension('WEBGL_lose_context')?.loseContext();
+          this.lost = true;
+          throw error;
+        }
+        await this.sleep(1);
+      }
+    } finally {
+      if (!gl.isContextLost()) gl.deleteSync(sync);
+    }
+  }
+
+  /**
+   * `finished` on the calling thread. WebGL lets a fence signal only once
+   * the user agent's event loop runs again (WebGL 2.0, "Fences" in the
+   * differences from OpenGL ES 3.0), so a fence polled inside this task
+   * never signals and the poll would always end at the deadline. The pass
+   * is waited for with `finish` instead, which blocks until the GPU has run
+   * it (Chromium's command buffer round trip). The calling thread cannot cut
+   * a draw short, so the deadline is judged when it returns: a pass that
+   * took longer fails with `watchdog`, loses the context and its program is
+   * never run again, as in `finished`. A draw that hangs the GPU is cut by
+   * the GPU process and surfaces as `contextLost`.
+   */
+  private finishedSync(gl: GL, id: string, request: ShaderFallbackRequest): void {
+    const ms = this.options.drawDeadlineMs ?? DRAW_DEADLINE_MS;
+    const started = this.now();
+    gl.finish();
+    if (this.lost || gl.isContextLost()) {
+      this.lost = true;
+      throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
+    }
+    if (this.now() - started > ms) {
+      const error = this.fail(id, request, 'watchdog', `its draw did not finish within ${Math.round(ms / 1000)} s`);
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      this.lost = true;
+      throw error;
+    }
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.readback?.dispose();
+    this.readback = null;
+    this.surfaces?.dispose();
+    this.surfaces = null;
     const gl = this.gl;
     if (gl && !gl.isContextLost()) {
       for (const p of this.programs.values()) gl.deleteProgram(p.program);
+      for (const c of this.compiling.values()) { gl.deleteProgram(c.program); gl.deleteShader(c.vs); gl.deleteShader(c.fs); }
       if (this.quad) gl.deleteBuffer(this.quad);
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     }
     this.programs.clear();
+    this.compiling.clear();
     this.gl = null;
     this.canvas = null;
   }
 
   private context(): GL {
+    if (this.disposed) throw new ShaderFallbackError('', 'unavailable', 'the shader fallback runner was disposed');
     if (this.gl && !this.lost && !this.gl.isContextLost()) return this.gl;
+    this.readback?.dispose();
+    this.readback = null;
+    this.surfaces?.dispose();
+    this.surfaces = null;
     this.programs.clear();
+    this.compiling.clear();
     this.lost = false;
     const canvas = this.options.createCanvas?.() ?? new OffscreenCanvas(4, 4);
-    canvas.addEventListener('webglcontextlost', (event) => { event.preventDefault(); this.lost = true; }, false);
+    canvas.addEventListener('webglcontextlost', (event) => { event.preventDefault(); if (this.canvas === canvas) this.lost = true; }, false);
     const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: true, preserveDrawingBuffer: false, depth: false, stencil: false }) as GL | null;
     if (!gl) throw new ShaderFallbackError('', 'unavailable', 'WebGL2 is not available for the shader fallback runner');
     if (!gl.getExtension('EXT_color_buffer_float')) throw new ShaderFallbackError('', 'unavailable', 'EXT_color_buffer_float is not available');
@@ -163,11 +307,13 @@ export class ShaderFallbackRunner {
     gl.disable(gl.DEPTH_TEST);
     this.canvas = canvas;
     this.gl = gl;
+    this.surfaces = new FallbackSurfaces(gl);
     return gl;
   }
 
-  private cached(request: ShaderFallbackRequest): Program | null {
-    const id = `${request.vertex}\u0000${request.fragment}`;
+  /** The program's linked entry (most recently used last), or its kept
+   *  failure; null when it has not been linked. */
+  private cached(id: string, request: ShaderFallbackRequest): Program | null {
     const cached = this.programs.get(id);
     if (cached) {
       this.programs.delete(id);
@@ -179,44 +325,68 @@ export class ShaderFallbackRunner {
     return null;
   }
 
-  private compile(gl: GL, request: ShaderFallbackRequest): { vs: WebGLShader; fs: WebGLShader; program: WebGLProgram } {
+  /** The program's compile: one already going on in the driver (a request
+   *  past its deadline, or another request waiting for it), or a new one. */
+  private start(gl: GL, id: string, request: ShaderFallbackRequest): { program: WebGLProgram; vs: WebGLShader; fs: WebGLShader } {
+    const going = this.compiling.get(id);
+    if (going) return going;
     const vs = gl.createShader(gl.VERTEX_SHADER)!, fs = gl.createShader(gl.FRAGMENT_SHADER)!, program = gl.createProgram()!;
     gl.shaderSource(vs, request.vertex); gl.compileShader(vs);
     gl.shaderSource(fs, request.fragment); gl.compileShader(fs);
     gl.attachShader(program, vs); gl.attachShader(program, fs); gl.linkProgram(program);
-    return { vs, fs, program };
-  }
-
-  private programSync(gl: GL, request: ShaderFallbackRequest): Program {
-    const cached = this.cached(request);
-    if (cached) return cached;
-    const { vs, fs, program } = this.compile(gl, request);
-    return this.linked(gl, request, vs, fs, program);
+    const started = { program, vs, fs };
+    this.compiling.set(id, started);
+    return started;
   }
 
   private async program(gl: GL, request: ShaderFallbackRequest): Promise<Program> {
     const id = `${request.vertex}\u0000${request.fragment}`;
-    const cached = this.cached(request);
+    const cached = this.cached(id, request);
     if (cached) return cached;
-    const { vs, fs, program } = this.compile(gl, request);
+    // A compile that passed an earlier request's deadline goes on in the
+    // driver: this request waits for the same compile, not a new one, so a
+    // program WebGL takes long to compile (today's compositor waits for it)
+    // draws once it is done.
+    const started = this.start(gl, id, request);
     if (this.parallel) {
-      const deadline = performance.now() + (this.options.compileDeadlineMs ?? 10_000);
-      while (!gl.getProgramParameter(program, this.parallel.COMPLETION_STATUS_KHR)) {
+      const deadline = this.now() + (this.options.compileDeadlineMs ?? COMPILE_DEADLINE_MS);
+      while (!gl.getProgramParameter(started.program, this.parallel.COMPLETION_STATUS_KHR)) {
         if (this.lost || gl.isContextLost()) throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while compiling');
-        if (performance.now() > deadline) {
-          gl.deleteProgram(program); gl.deleteShader(vs); gl.deleteShader(fs);
-          throw this.fail(id, request, 'deadline', 'the program did not compile within the deadline');
+        if (this.now() > deadline) {
+          // Kept compiling for the next request (at most a few programs).
+          while (this.compiling.size > MAX_COMPILING) {
+            const [oldest, c] = [...this.compiling.entries()].find(([key]) => key !== id)!;
+            gl.deleteProgram(c.program); gl.deleteShader(c.vs); gl.deleteShader(c.fs);
+            this.compiling.delete(oldest);
+          }
+          throw this.fail(id, request, 'deadline', `the program has not finished compiling after ${Math.round((this.options.compileDeadlineMs ?? COMPILE_DEADLINE_MS) / 1000)} s; it is still compiling and is drawn once it has`);
         }
-        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+        await this.sleep(POLL_MS);
+        // A synchronous request may have linked (or refused) it meanwhile.
+        const done = this.cached(id, request);
+        if (done) return done;
       }
     }
-    return this.linked(gl, request, vs, fs, program);
+    return this.linked(gl, id, request, started);
   }
 
-  private linked(gl: GL, request: ShaderFallbackRequest, vs: WebGLShader, fs: WebGLShader, program: WebGLProgram): Program {
+  /** The program for the synchronous path: `LINK_STATUS` blocks until the
+   *  compile (a new one, or one already going on) is done. */
+  private programSync(gl: GL, request: ShaderFallbackRequest): Program {
     const id = `${request.vertex}\u0000${request.fragment}`;
+    return this.cached(id, request) ?? this.linked(gl, id, request, this.start(gl, id, request));
+  }
+
+  private linked(gl: GL, id: string, request: ShaderFallbackRequest, started: { program: WebGLProgram; vs: WebGLShader; fs: WebGLShader }): Program {
+    const { program, vs, fs } = started;
+    this.compiling.delete(id);
     const linked = gl.getProgramParameter(program, gl.LINK_STATUS);
     const log = (gl.getShaderInfoLog(fs) || '') + (gl.getProgramInfoLog(program) || '');
+    // A lost context answers every query with null: not a refusal.
+    if (this.lost || gl.isContextLost()) {
+      this.lost = true;
+      throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while compiling');
+    }
     gl.deleteShader(vs); gl.deleteShader(fs);
     if (!linked) {
       gl.deleteProgram(program);
@@ -232,75 +402,156 @@ export class ShaderFallbackRunner {
     return entry;
   }
 
+  /** A failure; kept for the program only when it says something about
+   *  it (WebGL refused it, or its draw passed the deadline). */
   private fail(id: string, request: ShaderFallbackRequest, reason: ShaderFallbackError['reason'], message: string): ShaderFallbackError {
     const error = new ShaderFallbackError(request.key, reason, message);
-    if (reason !== 'contextLost') this.failed.set(id, error);
+    if (reason === 'compile' || reason === 'watchdog') this.failed.set(id, error);
     return error;
   }
 
-  private checkSize(request: ShaderFallbackRequest): void {
-    const max = this.options.maxSize ?? 4096;
-    const { width, height } = request;
-    if (!(Number.isInteger(width) && Number.isInteger(height) && width >= 1 && height >= 1 && width <= max && height <= max)) {
-      throw new ShaderFallbackError(request.key, 'size', `target ${width}×${height} is outside 1..${max}`);
+  private async run(request: ShaderFallbackRequest, textures: Uint16Array[], submitted: () => void): Promise<ShaderFallbackPixels> {
+    const { gl, id } = this.prepare(request, textures);
+    // Real WebGL2 supports PBO readback. Minimal GL doubles in protocol
+    // tests use the same synchronous read pair after their pass fences.
+    const readback = typeof gl.getBufferSubData === 'function' ? (this.readback ??= new FallbackReadback(gl)) : null;
+    await readback?.ready();
+    const program = await this.program(gl, request);
+    if (gl !== this.gl || this.lost || gl.isContextLost()) throw this.fail(id, request, 'contextLost', 'the WebGL context was replaced before drawing');
+    const steps = this.draw(gl, program, id, request, textures, readback);
+    for (let step = steps.next(); ; step = steps.next()) {
+      if (step.done) {
+        submitted();
+        try { return await step.value; }
+        catch (error) {
+          if (gl !== this.gl || gl.isContextLost()) {
+            if (gl === this.gl) this.lost = true;
+            throw this.fail(id, request, 'contextLost', 'the WebGL context was lost during readback');
+          }
+          throw error;
+        }
+      }
+      try { await this.finished(gl, id, request); }
+      catch (error) { steps.return(undefined as never); throw error; }
     }
   }
 
-  private async run(request: ShaderFallbackRequest): Promise<ShaderFallbackPixels> {
-    this.checkSize(request);
-    const gl = this.context();
-    return this.draw(request, await this.program(gl, request));
+  private runSync(request: ShaderFallbackRequest, textures: Uint16Array[]): ShaderFallbackPixels {
+    const { gl, id } = this.prepare(request, textures);
+    const steps = this.draw(gl, this.programSync(gl, request), id, request, textures);
+    for (let step = steps.next(); ; step = steps.next()) {
+      if (step.done) return step.value as ShaderFallbackPixels;
+      try {
+        this.finishedSync(gl, id, request);
+      } catch (error) {
+        steps.return(undefined as never);
+        throw error;
+      }
+    }
   }
 
-  private draw(request: ShaderFallbackRequest, p: Program): ShaderFallbackPixels {
-    this.checkSize(request);
-    const gl = this.gl!;
+  /** Checks a request against its textures and the context's limit. */
+  private prepare(request: ShaderFallbackRequest, textures: Uint16Array[]): { gl: GL; id: string } {
     const { width, height } = request;
-    const texture = gl.createTexture()!;
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.bindTexture(gl.TEXTURE_2D, null);
-    const framebuffer = gl.createFramebuffer()!;
+    if (!(Number.isInteger(width) && Number.isInteger(height) && width >= 1 && height >= 1)) {
+      throw new ShaderFallbackError(request.key, 'size', `target ${width}×${height} is not a size`);
+    }
+    const wanted = request.textures ?? 0;
+    if (textures.length !== wanted || textures.some((t) => t.length !== width * height * 4)) {
+      throw new ShaderFallbackError(request.key, 'size', `the request samples ${wanted} textures of ${width}×${height}, ${textures.length} were given`);
+    }
+    const id = `${request.vertex}\u0000${request.fragment}`;
+    const gl = this.context();
+    const max = this.options.maxSize ?? Number(gl.getParameter(gl.MAX_TEXTURE_SIZE));
+    if (width > max || height > max) {
+      throw new ShaderFallbackError(request.key, 'tooLarge', `target ${width}×${height} is larger than this GPU's ${max} px WebGL texture limit`);
+    }
+    return { gl, id };
+  }
+
+  /**
+   * Draws a request's passes, yielding after each pass's draw is issued so
+   * the caller waits for it (`finished`'s fence, or `finishedSync`), and
+   * returns the read-back pixels. Every pass binds all it uses, and the
+   * target is bound again before the read: a synchronous request may run
+   * on the context between an asynchronous request's passes.
+   */
+  private *draw(gl: GL, p: Program, id: string, request: ShaderFallbackRequest, textures: Uint16Array[], readback: FallbackReadback | null = null): Generator<void, ShaderFallbackPixels | Promise<ShaderFallbackPixels>, void> {
+    const { width, height } = request;
+    const surfaces = this.surfaces!;
+    const leases: SurfaceLease[] = [];
+    const framebuffers: WebGLFramebuffer[] = [];
     try {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-      gl.viewport(0, 0, width, height);
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.useProgram(p.program);
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
-      if (p.position >= 0) { gl.enableVertexAttribArray(p.position); gl.vertexAttribPointer(p.position, 2, gl.FLOAT, false, 0, 0); }
-      // Nothing is bound to any unit: samplers read (0, 0, 0, 1).
-      for (let unit = 0; unit < 16; unit++) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, null); }
-      gl.activeTexture(gl.TEXTURE0);
-      const locate = (name: string) => {
-        if (!p.locations.has(name)) p.locations.set(name, gl.getUniformLocation(p.program, name));
-        return p.locations.get(name)!;
-      };
-      applyCalls(gl, locate, request.calls);
-      gl.disable(gl.BLEND);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      // A draw WebGL rejects renders nothing (the target stays transparent), as in the compositor.
-      while (gl.getError() !== gl.NO_ERROR) { /* drained */ }
-      const pixels = new Float32Array(width * height * 4);
-      gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, pixels);
-      if (this.lost || gl.isContextLost()) {
-        throw this.fail(`${request.vertex}\u0000${request.fragment}`, request, 'compile', 'the program lost the WebGL context when drawn');
+      const inputs = textures.map(pixels => {
+        const input = surfaces.input(width, height, pixels);
+        leases.push(input);
+        return input.texture;
+      });
+      const passes = [request.calls, ...(request.morePasses ?? [])];
+      let previous: WebGLTexture | null = null;
+      for (let pass = 0; pass < passes.length; pass++) {
+        const output = surfaces.target(width, height);
+        leases.push(output);
+        const target = output.texture, framebuffer = output.framebuffer!;
+        framebuffers.push(framebuffer);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+        gl.viewport(0, 0, width, height);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(p.program);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+        if (p.position >= 0) { gl.enableVertexAttribArray(p.position); gl.vertexAttribPointer(p.position, 2, gl.FLOAT, false, 0, 0); }
+        // Units the request does not name stay empty: samplers read (0, 0, 0, 1).
+        for (let unit = 0; unit < 16; unit++) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, null); }
+        for (const u of request.units ?? []) {
+          const source = u.chain && previous ? previous : inputs[u.texture] ?? null;
+          gl.activeTexture(gl.TEXTURE0 + u.unit);
+          gl.bindTexture(gl.TEXTURE_2D, source);
+        }
+        gl.activeTexture(gl.TEXTURE0);
+        const locate = (name: string) => {
+          if (!p.locations.has(name)) p.locations.set(name, gl.getUniformLocation(p.program, name));
+          return p.locations.get(name)!;
+        };
+        applyCalls(gl, locate, passes[pass]!);
+        gl.disable(gl.BLEND);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        // A draw WebGL rejects renders nothing (the target stays transparent), as in the compositor.
+        while (gl.getError() !== gl.NO_ERROR) { /* drained */ }
+        yield;
+        previous = target;
       }
-      const rgba16f = new Uint16Array(pixels.length);
-      for (let i = 0; i < pixels.length; i++) rgba16f[i] = toHalf(pixels[i]!);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[framebuffers.length - 1]!);
+      if (readback) {
+        // Enqueues readPixels into its own PBO before returning/yielding.
+        // Deleting these textures is safe after the read command is queued.
+        return readback.read(width, height).then(rgba16f => ({ key: request.key, width, height, rgba16f }));
+      }
+      // The target's binary16 values as stored: read as half floats when
+      // the implementation reads RGBA16F that way (ANGLE does), else as
+      // floats, which convert back exactly.
+      const values = width * height * 4;
+      let rgba16f: Uint16Array;
+      if (gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RGBA && gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.HALF_FLOAT) {
+        rgba16f = new Uint16Array(values);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.HALF_FLOAT, rgba16f);
+      } else {
+        const pixels = new Float32Array(values);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, pixels);
+        rgba16f = toHalfArray(pixels);
+      }
+      if (this.lost || gl.isContextLost()) {
+        this.lost = true;
+        throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
+      }
       return { key: request.key, width, height, rgba16f };
     } finally {
       if (!gl.isContextLost()) {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        gl.deleteFramebuffer(framebuffer);
-        gl.deleteTexture(texture);
+        for (let unit = 0; unit < 16; unit++) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, null); }
+        gl.activeTexture(gl.TEXTURE0);
       }
+      for (const lease of leases) lease.release();
     }
   }
 }

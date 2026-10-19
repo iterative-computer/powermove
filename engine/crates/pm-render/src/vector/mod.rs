@@ -6,11 +6,13 @@
 //! Canvas2D) and drawn exactly as the compositor draws the uploaded canvas.
 //! Level 2 content is rendered at output resolution with analytic area
 //! coverage ([`level2`]); level 2 SVG images are vectors or resvg rasters
-//! at output resolution ([`svg`]).
+//! at output resolution ([`svg`]). Level 1 SVG images are Chromium's
+//! rasters at today's buckets ([`svg`], [`cache`]).
 
 pub mod cache;
 pub mod level2;
 pub mod svg;
+pub mod svg_rasters;
 
 use pm_eval::transform::Mat2d;
 use pm_eval::{JsResult, JsValue, Scope};
@@ -51,6 +53,16 @@ pub enum VectorSource {
         transform: [f64; 6],
         rect: PixelRect,
         clip: [[f64; 2]; 4],
+    },
+    /// Level 1: an SVG image's raster at today's bucket
+    /// (`rasterSvgAsset`), drawn by Chromium in the renderer that owns the
+    /// document (decision S1; `cache`, "Level 1 SVG rasters"). Only the
+    /// content and the bucket decide the pixels; the asset and its file
+    /// say where the renderer and `pm-cli` find the SVG.
+    SvgImage {
+        key: pm_protocol::svg_raster::SvgRasterKey,
+        asset: String,
+        path: std::path::PathBuf,
     },
 }
 
@@ -107,6 +119,12 @@ impl VectorSource {
                     h.update(v.to_bits().to_le_bytes());
                 }
                 h.update(format!("{rect:?}").as_bytes());
+            }
+            VectorSource::SvgImage { key, .. } => {
+                h.update(b"svgimage");
+                h.update(key.content.as_bytes());
+                h.update(key.width.to_le_bytes());
+                h.update(key.height.to_le_bytes());
             }
         }
         h.finalize().into()

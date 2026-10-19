@@ -39,12 +39,13 @@ import {
 import { SIDECAR_SUFFIX_PATTERN } from '../../shared/ipc';
 import { sidecarPath } from '../export-sidecar';
 import { atomicWrite } from '../project-files';
+import type { DefinitionsUpdate } from '../../shared/engine-protocol';
 import type { UserExportStatus } from './agent-jobs';
 
 /** What the queue needs from the job engine (AgentJobs). */
 export interface QueueEngine {
   readonly available: boolean;
-  exportQueued(project: unknown, options: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail'): Promise<{ jobId: string; frames: number }>;
+  exportQueued(project: unknown, options: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', definitions?: DefinitionsUpdate[], seedOwner?: number | null): Promise<{ jobId: string; frames: number }>;
   cancelQueued(jobId: string): Promise<void>;
 }
 
@@ -95,10 +96,13 @@ export type RenderQueueOptions = {
   /** Called with the new state after every change. */
   onChange?(state: RenderQueueState): void;
   now?: () => number;
+  windowOpen?(owner: number): boolean;
 };
 
 export class RenderQueue {
   private jobs: StoredJob[] = [];
+  // Runtime only: webContents ids must never survive an app relaunch.
+  private seedOwners = new Map<string, number>();
   private agents: AgentEntry[] = [];
   private running = false;
   /** The engine job of the queue job that is rendering. */
@@ -117,6 +121,13 @@ export class RenderQueue {
 
   private get file(): string {
     return path.join(this.options.directory, 'queue.json');
+  }
+
+  /** The definitions a job renders with, captured from its window when it
+   *  was queued (contract 10: a queued job renders the effects of the
+   *  extensions the user had then, forks and overrides by id included). */
+  private definitionsFile(id: string): string {
+    return path.join(this.options.directory, `${id}.definitions.json`);
   }
 
   private snapshotFile(id: string): string {
@@ -191,6 +202,9 @@ export class RenderQueue {
     destination: string;
     sidecars?: CaptionSidecar[];
     preset?: string;
+    /** The window's definitions as the updates a job session starts with. */
+    definitions?: DefinitionsUpdate[];
+    owner?: number;
   }): Promise<string> {
     await this.loaded;
     if (!validSheetExportOptions(input.options)) throw new Error('Invalid export settings.');
@@ -209,6 +223,10 @@ export class RenderQueue {
       (s.extension === 'srt' || s.extension === 'vtt') && typeof s.text === 'string' && (s.suffix === undefined || SIDECAR_SUFFIX_PATTERN.test(s.suffix)));
     await mkdir(this.options.directory, { recursive: true, mode: 0o700 });
     await atomicWrite(this.snapshotFile(id), new TextEncoder().encode(JSON.stringify(project)));
+    if (input.definitions?.length) {
+      await atomicWrite(this.definitionsFile(id), new TextEncoder().encode(JSON.stringify(input.definitions)));
+    }
+    if (input.owner !== undefined) this.seedOwners.set(id, input.owner);
     this.jobs.push({
       id,
       name: input.name,
@@ -298,9 +316,28 @@ export class RenderQueue {
       this.end(job, 'failed', 'The project snapshot of this job is missing.');
       return;
     }
+    // Jobs queued before definitions were captured have none (their
+    // effects are reported as the engine cannot draw them, never drawn
+    // from another set). A file that cannot be read is logged: the job's
+    // effects are then reported, not drawn.
+    const definitions: DefinitionsUpdate[] = await readFile(this.definitionsFile(job.id), 'utf8')
+      .then((text) => {
+        const parsed: unknown = JSON.parse(text);
+        if (!Array.isArray(parsed)) throw new Error('it is not a list of definition updates');
+        return parsed as DefinitionsUpdate[];
+      })
+      .catch((error: unknown) => {
+        const missing = (error as NodeJS.ErrnoException)?.code === 'ENOENT';
+        this.options.platform.log?.(missing ? 'info' : 'warn', missing
+          ? `${job.name} was queued without definitions: its effects, transitions, and extension layers are reported as missing`
+          : `the definitions of ${job.name} could not be read (${error instanceof Error ? error.message : String(error)}): its effects, transitions, and extension layers are reported as missing`);
+        return [];
+      });
     const finished = new Promise<void>((resolve) => { this.waiters.set(job.id, resolve); });
     try {
-      const started = await this.options.engine.exportQueued(project, job.options, job.destination, ENGINE_POLICY[job.overwrite]);
+      const owner = this.seedOwners.get(job.id);
+      const seedOwner = owner !== undefined && this.options.windowOpen?.(owner) ? owner : null;
+      const started = await this.options.engine.exportQueued(project, job.options, job.destination, ENGINE_POLICY[job.overwrite], definitions, seedOwner);
       if (!this.current || this.current.id !== job.id) {
         // Cancelled while it was being submitted.
         await this.options.engine.cancelQueued(started.jobId);
@@ -452,6 +489,7 @@ export class RenderQueue {
         if (job && this.current?.id !== job.id) {
           this.jobs = this.jobs.filter((j) => j.id !== job.id);
           await unlink(this.snapshotFile(job.id)).catch(() => {});
+          await unlink(this.definitionsFile(job.id)).catch(() => {});
           this.changed();
         }
         this.agents = this.agents.filter((a) => !(a.id === action.id && a.finishedAt));
@@ -487,7 +525,10 @@ export class RenderQueue {
       case 'clearFinished': {
         const gone = this.jobs.filter((j) => j.state === 'done' || j.state === 'cancelled');
         this.jobs = this.jobs.filter((j) => !gone.includes(j));
-        for (const job of gone) await unlink(this.snapshotFile(job.id)).catch(() => {});
+        for (const job of gone) {
+          await unlink(this.snapshotFile(job.id)).catch(() => {});
+          await unlink(this.definitionsFile(job.id)).catch(() => {});
+        }
         this.agents = this.agents.filter((a) => !a.finishedAt);
         this.changed();
         break;

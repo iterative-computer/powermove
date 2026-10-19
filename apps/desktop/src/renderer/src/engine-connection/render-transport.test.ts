@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, EngineRenderTransport, EngineSnapshotError, type TransportSession, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, EngineRenderTransport, EngineSnapshotError, type TransportSession, type TransportSvgRasters, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -11,7 +11,7 @@ const rendered = (width: number, height: number, fill = 7, revision = 12): Engin
   status: 'rendered', revision, viewSeq: 4, width, height, pixels: 'opaque', data: new Uint8Array(width * height * 4).fill(fill), origin: [0, 0], layerBox: null, raster: null, quality, waitedUs: 1, renderUs: 2, mainMs: 3
 });
 
-const fallbackRequest = (key: string): ShaderFallbackRequest => ({ key, layer: 'sky', vertex: 'v', fragment: 'f', width: 2, height: 2, calls: [], stage: 'bind', message: '' });
+const fallbackRequest = (key: string): ShaderFallbackRequest => ({ key, layer: 'sky', vertex: 'v', fragment: 'f', width: 2, height: 2, calls: [], stage: 'bind', message: '', textures: 0, units: [], morePasses: [] });
 
 function session(): TransportSession & { uploads: string[]; posted: Record<string, unknown>[] } {
   const uploads: string[] = [];
@@ -30,7 +30,7 @@ function canvasFake() {
   return { canvas: canvas as unknown as HTMLCanvasElement, drawn };
 }
 
-function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void>; usesBlender?: () => boolean } = {}) {
+function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void>; usesBlender?: () => boolean; svgRasters?: TransportSvgRasters; captionsHidden?: () => boolean } = {}) {
   const asked: EngineSnapshotRequest[] = [];
   const s = session();
   const runner = { renderSync: vi.fn((r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })), render: vi.fn(async (r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })) };
@@ -49,10 +49,12 @@ function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; 
     windowDocument: options.windowDocument,
     wake: options.wake,
     usesBlender: options.usesBlender,
+    captionsHidden: options.captionsHidden,
     composition: () => 'comp-1',
     document: () => 'doc-1',
     viewSeq: () => 4,
     fallbackRunner: () => runner,
+    svgRasters: () => options.svgRasters ?? null,
     log: () => {},
     createCanvas: () => fake.canvas
   });
@@ -83,6 +85,59 @@ describe('EngineRenderTransport', () => {
     expect(asked[1]!.snapshot.uploaded).toEqual(['a'.repeat(64)]);
   });
 
+  it('draws an effect with the textures main handed back with the answer, on this thread and asynchronously', async () => {
+    const effect: ShaderFallbackRequest = { ...fallbackRequest('d'.repeat(64)), textures: 2, units: [{ unit: 0, texture: 0, chain: false }, { unit: 1, texture: 1, chain: false }], morePasses: [] };
+    // 2 × 2 binary16 RGBA: 32 bytes a texture, at an odd offset as IPC may give them.
+    const band = (value: number) => {
+      const backing = new Uint8Array(33);
+      const bytes = backing.subarray(1);
+      new DataView(bytes.buffer, 1).setUint16(0, value, true);
+      return bytes;
+    };
+    const needs = (): EngineSnapshotReply => ({ status: 'needsRenderer', revision: 12, fallback: [effect], compat: [], fallbackTextures: [{ key: effect.key, textures: [band(0x3c00), band(0x3800)] }] });
+    const sync = setup([needs(), rendered(2, 2)]);
+    sync.transport.snapshotSync({ time: 0, width: 2, height: 2 });
+    const [request, textures] = sync.runner.renderSync.mock.calls[0] as unknown as [ShaderFallbackRequest, Uint16Array[]];
+    expect(request.key).toBe(effect.key);
+    expect(textures.map((t) => [t.length, t[0]])).toEqual([[16, 0x3c00], [16, 0x3800]]);
+    expect(sync.session.uploads).toEqual([effect.key]);
+    const later = setup([needs(), rendered(2, 2)]);
+    await later.transport.snapshot({ time: 0, width: 2, height: 2 });
+    expect((later.runner.render.mock.calls[0] as unknown as [ShaderFallbackRequest, Uint16Array[]])[1].map((t) => t[0])).toEqual([0x3c00, 0x3800]);
+  });
+
+  it('fails an effect whose textures did not come with the answer rather than drawing it unsampled', () => {
+    const effect: ShaderFallbackRequest = { ...fallbackRequest('e'.repeat(64)), textures: 1, units: [{ unit: 0, texture: 0, chain: false }], morePasses: [] };
+    const { transport, runner } = setup([{ status: 'needsRenderer', revision: 12, fallback: [effect], compat: [] }]);
+    expect(() => transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(EngineSnapshotError);
+    expect(runner.renderSync).not.toHaveBeenCalled();
+  });
+
+  it('draws the level 1 SVG rasters a snapshot needs, posts them, and names them in the next ask', async () => {
+    const svg = { key: { content: 'c'.repeat(64), width: 3, height: 2 }, asset: 'art' };
+    const posted: unknown[] = [];
+    const svgRasters: TransportSvgRasters = {
+      drawSync: vi.fn(() => new Uint8Array(24)),
+      draw: vi.fn(async () => new Uint8Array(24)),
+      post: vi.fn((target, key, data) => { posted.push({ key, bytes: data.byteLength }); return target.post({ type: 'compat', compat: 'svgPixels', key, row: 0, rows: key.height, data }); })
+    };
+    const needs: EngineSnapshotReply = { status: 'needsRenderer', revision: 12, fallback: [], compat: [], svg: [svg] };
+    const sync = setup([needs, rendered(2, 2)], { svgRasters });
+    expect(sync.transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+    expect(svgRasters.drawSync).toHaveBeenCalledWith(svg);
+    expect(sync.session.posted[0]).toMatchObject({ compat: 'svgPixels', key: svg.key });
+    expect(sync.asked[1]!.snapshot.uploaded).toEqual([svgUploadKey(svg.key)]);
+    expect(svgUploadKey(svg.key)).toBe(`svg:${'c'.repeat(64)}:3x2`);
+    // Async snapshots draw asynchronously; a repeated ask is a failure.
+    const later = setup([needs, rendered(2, 2)], { svgRasters });
+    await later.transport.snapshot({ time: 0, width: 2, height: 2 });
+    expect(svgRasters.draw).toHaveBeenCalledWith(svg);
+    const repeat = setup([needs, needs], { svgRasters });
+    expect(() => repeat.transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(/asked again for an SVG raster/);
+    // Without a rasterizer the snapshot fails by name.
+    expect(() => setup([needs]).transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(/draws no SVG rasters/);
+  });
+
   it('gives up after bounded rounds and when the engine repeats a program', () => {
     const needs: EngineSnapshotReply = { status: 'needsRenderer', revision: 12, fallback: [fallbackRequest('b'.repeat(64))], compat: [] };
     const { transport } = setup([needs, needs]);
@@ -101,6 +156,26 @@ describe('EngineRenderTransport', () => {
     expect(asked[1]!.snapshot.target).toMatchObject({ kind: 'frame', motionBlurSamples: 16 });
     expect(transport.snapshotDataUrlSync(1, 480, { w: 1920, h: 1080 })).toBe('');
     expect(transport.stats.lastFailure).toBe('unsupported: x');
+  });
+
+  it('carries caption visibility on each sync and async frame without leaking it', async () => {
+    const { transport, asked } = setup([rendered(2, 2), rendered(2, 2), rendered(2, 2)]);
+    transport.snapshotDataUrlSync(0, 2, { w: 2, h: 2 }, { captionsHidden: true });
+    await transport.snapshotDataUrl(0, 2, { w: 2, h: 2 }, { captionsHidden: true });
+    transport.snapshotSync({ time: 0, width: 2, height: 2 });
+    expect(asked.map(r => r.snapshot.captionsHidden)).toEqual([true, true, false]);
+  });
+
+  it('inherits the current app caption flag for general frame captures, with per-request overrides', () => {
+    let hidden = true;
+    const { transport, asked } = setup(Array.from({ length: 4 }, () => rendered(2, 2)), { captionsHidden: () => hidden });
+    transport.renderFrameToSync(0, 2, 2);
+    hidden = false;
+    transport.snapshotDataUrlSync(0, 2, { w: 2, h: 2 });
+    transport.snapshotSync({ time: 0, width: 2, height: 2, captionsHidden: true });
+    hidden = true;
+    transport.snapshotSync({ time: 0, width: 2, height: 2, captionsHidden: false });
+    expect(asked.map(r => r.snapshot.captionsHidden)).toEqual([true, false, true, false]);
   });
 
   it('fails clearly without a session, and opens one on demand (never at boot)', async () => {
@@ -269,6 +344,23 @@ describe('EngineRenderTransport', () => {
       expect(runner.renderSync).toHaveBeenCalledTimes(1);
       expect(asked[1]).toMatchObject({ session: null, snapshot: { uploaded: ['c'.repeat(64)] } });
       expect((asked[1] as any).fallbackPixels[0]).toMatchObject({ key: 'c'.repeat(64), width: 2, height: 2 });
+    });
+
+    it('level 1 SVG rasters go along with the next round, with no session of the window\'s (boot)', () => {
+      const d = doc();
+      const svg = { key: { content: 'c'.repeat(64), width: 3, height: 2 }, asset: 'art' };
+      const svgRasters: TransportSvgRasters = { drawSync: vi.fn(() => new Uint8Array(24).fill(7)), draw: vi.fn(async () => new Uint8Array(24)), post: vi.fn(() => true) };
+      const { transport, asked } = setup([
+        { status: 'needsRenderer', revision: 12, fallback: [], compat: [], svg: [svg] },
+        rendered(2, 2)
+      ], { session: null, windowDocument: d.windowDocument, svgRasters });
+      expect(transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+      expect(svgRasters.drawSync).toHaveBeenCalledWith(svg);
+      expect(svgRasters.post).not.toHaveBeenCalled();
+      expect(asked[0]!.svgPixels).toBeUndefined();
+      expect(asked[1]).toMatchObject({ session: null, snapshot: { uploaded: [svgUploadKey(svg.key)] } });
+      // (`asked` holds JSON copies: the bytes as an index map.)
+      expect(asked[1]!.svgPixels!.map((p) => ({ key: p.key, data: Object.values(p.data) }))).toEqual([{ key: svg.key, data: Array(24).fill(7) }]);
     });
 
     it('a session with the document and no resync on its way serves it directly', () => {

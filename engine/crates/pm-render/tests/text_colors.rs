@@ -5,9 +5,12 @@
 //!   (black on a fresh canvas, the box fill under a caption box), never the
 //!   previous glyph's or word's color;
 //! - `hexToRgba` strings holding `NaN` are rejected the same way;
-//! - a valid CSS color the engine does not reproduce (`oklch()`, `lab()`,
-//!   `color()`, ...) refuses the layer, in `text_raster` and in `render`, and
-//!   the refusal is not left behind for the next layer.
+//! - CSS Color 4/5 colors (`oklch()`, `lab()`, `color()`, `color-mix()`,
+//!   relative colors, `currentcolor`) draw (`pm_text::render::color4`; their
+//!   pixels are gated on the closure capture in `text_raster`);
+//! - a valid CSS color the engine does not reproduce (`light-dark()`, system
+//!   colors not measured) refuses the layer, in `text_raster` and in
+//!   `render`, and the refusal is not left behind for the next layer.
 //!
 //! Runs without the harness (the CoreText registry needs the main thread).
 
@@ -16,7 +19,7 @@ mod support;
 #[cfg(target_os = "macos")]
 fn main() {
     use pm_protocol::color::Precision;
-    use pm_render::{Feature, RenderError, Renderer};
+    use pm_render::Renderer;
     use serde_json::{Value, json};
     use support::doc::{ch, layer, no_fill, project};
 
@@ -66,6 +69,19 @@ fn main() {
 
     // Equal scenes: the color a string draws is the color of `expected`.
     let same = [
+        (
+            "detached light-dark() retains black",
+            "text",
+            text("light-dark(red, blue)"),
+            text("#000000"),
+        ),
+        ("ButtonFace", "text", text("ButtonFace"), text("#efefef")),
+        (
+            "Highlight",
+            "text",
+            text("Highlight"),
+            text("rgba(128,188,254,0.6)"),
+        ),
         (
             "hsl() as hex",
             "text",
@@ -178,8 +194,8 @@ fn main() {
         }
     }
 
-    // Valid CSS colors the engine does not reproduce refuse the layer.
-    let refused = [
+    // CSS Color 4/5 colors draw.
+    for (name, ty, d) in [
         ("oklch() text", "text", text("oklch(62.8% 0.258 29.2)")),
         ("lab() text", "text", text("lab(50% 40 59.5)")),
         ("color() text", "text", text("color(display-p3 1 0 0)")),
@@ -200,49 +216,11 @@ fn main() {
                 true,
             ),
         ),
-    ];
-    let plain = text("#F2F2F2");
-    let request = pm_render::RenderRequest::sized(
-        pm_protocol::common::Size::new(640, 360),
-        Precision::Float16,
-    );
-    let resolver = pm_render::MapResolver::default();
-    for (name, ty, d) in &refused {
-        let is_color_refusal = |e: &RenderError| match e {
-            RenderError::Unsupported(u) => u.iter().any(|u| {
-                matches!(&u.feature, Feature::Text(w) if w.starts_with("text color"))
-                    && u.layer.as_deref() == Some("l")
-            }),
-            _ => false,
-        };
-        match raster(&mut r, ty, d) {
-            Err(e) if is_color_refusal(&e) => println!("{name:<72} refused ({e})"),
-            Err(e) => failures.push(format!("{name}: text_raster: unexpected error {e}")),
-            Ok(_) => failures.push(format!("{name}: text_raster drew it")),
-        }
-        // Nothing is left for the next layer.
-        if let Err(e) = raster(&mut r, "text", &plain) {
-            failures.push(format!("{name}: the next text_raster failed: {e}"));
-        }
-        match r.render(
-            &doc_of(ty, d),
-            "Ptest-root",
-            support::ticks(1.05),
-            &request,
-            &resolver,
-        ) {
-            Err(e) if is_color_refusal(&e) => {}
-            Err(e) => failures.push(format!("{name}: render: unexpected error {e}")),
-            Ok(_) => failures.push(format!("{name}: render drew it")),
-        }
-        if let Err(e) = r.render(
-            &doc_of("text", &plain),
-            "Ptest-root",
-            support::ticks(1.05),
-            &request,
-            &resolver,
-        ) {
-            failures.push(format!("{name}: the next render failed: {e}"));
+    ] {
+        match raster(&mut r, ty, &d) {
+            Ok(Some(_)) => println!("{name:<72} drawn"),
+            Ok(None) => failures.push(format!("{name}: text_raster drew nothing")),
+            Err(e) => failures.push(format!("{name}: text_raster refused: {e}")),
         }
     }
     for f in &failures {

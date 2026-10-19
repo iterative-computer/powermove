@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DefinitionsUpdate, Event, Request, Response } from '../../shared/engine-protocol';
-import { INLINE_LIMIT, WindowSnapshotSessions, type WindowSessionEngine } from './window-sessions';
+import { INLINE_LIMIT, MAX_SVG_BAND_BYTES, WindowSnapshotSessions, type WindowSessionEngine } from './window-sessions';
 
 const hash = 'ab'.repeat(32);
 const json = (n = 7) => new TextEncoder().encode(JSON.stringify({ n }));
@@ -26,7 +26,7 @@ function fakeEngine() {
     },
     event: (_p, body, session) => events.push({ body, session })
   };
-  return { engine, sent, events, staged, restart: () => { launch = { port: 9, generation: 2 }; } };
+  return { engine, sent, events, staged, restart: (session?: number) => { launch = { port: 9, generation: 2 }; if (session !== undefined) nextSession = session; } };
 }
 
 function defs(generation: number | null = 4) {
@@ -67,6 +67,53 @@ describe('main’s snapshot sessions for windows', () => {
     expect(sessions.stats).toMatchObject({ opened: 1, resyncs: 2, definitions: 2, needsDocument: 1 });
   });
 
+  it('waits for the originating window font seeds before sending its document, and forgets them on close', async () => {
+    const f = fakeEngine();
+    let release!: () => void;
+    const owner = vi.fn((_session: number, window: number | null) => window === null ? Promise.resolve() : new Promise<void>(r => { release = r; }));
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {}, undefined, owner);
+    const pending = sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() });
+    await vi.waitFor(() => expect(owner).toHaveBeenCalledWith(40, 9));
+    expect(f.sent.map(s => s.body.type)).toEqual(['openSession']);
+    release();
+    await pending;
+    expect(f.sent.map(s => s.body.type)).toContain('resync');
+    sessions.forget(9);
+    expect(owner).toHaveBeenLastCalledWith(40, null);
+  });
+
+  it('refuses and closes a snapshot session whose window font seeds were not accepted', async () => {
+    const f = fakeEngine();
+    const owner = vi.fn(async (_session: number, window: number | null) => {
+      if (window !== null) throw new Error('font seeds were refused');
+    });
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {}, undefined, owner);
+    await expect(sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() })).rejects.toThrow('font seeds were refused');
+    expect(sessions.has(9)).toBe(false);
+    expect(f.sent.map(s => s.body.type)).toEqual(['openSession', 'closeSession']);
+    expect(owner).toHaveBeenLastCalledWith(40, null);
+  });
+
+  it('forgets every old-launch font binding before session ids can be reused', async () => {
+    const f = fakeEngine();
+    const owners = new Map<number, number>();
+    const owner = async (session: number, window: number | null) => {
+      if (window === null) owners.delete(session);
+      else owners.set(session, window);
+    };
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {}, undefined, owner);
+    const doc = { id: 'doc', revision: 1, hash, json: json() };
+    await sessions.prepare(9, doc);
+    await sessions.prepare(10, doc);
+    f.restart(41); // New window 9 reuses the old session id of window 10.
+    await sessions.prepare(9, doc);
+    await sessions.prepare(10, doc);
+    expect(owners.get(41)).toBe(9);
+    expect(owners.get(42)).toBe(10);
+    expect(owners.has(40)).toBe(false);
+    sessions.dispose();
+  });
+
   it('stages a large document instead of sending it inline', async () => {
     const f = fakeEngine();
     const sessions = new WindowSnapshotSessions(f.engine, defs(null).relay, () => {});
@@ -83,6 +130,23 @@ describe('main’s snapshot sessions for windows', () => {
     await sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() }, [{ key: 'k'.repeat(64), width: 2, height: 3, rgba16f: new Uint8Array(2 * 3 * 8) }]);
     expect(f.events).toHaveLength(1);
     expect(f.events[0]).toMatchObject({ session: 40, body: { type: 'shaderFallback', fallback: 'pixels', key: 'k'.repeat(64), row: 0, rows: 3 } });
+  });
+
+  it('posts level 1 SVG rasters to the session in bands before the snapshot', async () => {
+    const f = fakeEngine();
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {});
+    const width = 2048, height = 1100, rowBytes = width * 4;
+    const key = { content: 'c'.repeat(64), width, height };
+    const data = new Uint8Array(rowBytes * height);
+    data[rowBytes * 1024] = 9;
+    await sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() }, [], [{ key, data }]);
+    const rows = Math.floor(MAX_SVG_BAND_BYTES / rowBytes);
+    expect(f.events.map((e) => [(e.body as any).row, (e.body as any).rows])).toEqual([[0, rows], [rows, height - rows]]);
+    expect(f.events[1]).toMatchObject({ session: 40, body: { type: 'compat', compat: 'svgPixels', key } });
+    expect((f.events[1]!.body as any).data[0]).toBe(9);
+    // Pixels that do not match their size are dropped.
+    await sessions.prepare(9, { id: 'doc', revision: 1 }, [], [{ key, data: new Uint8Array(4) }]);
+    expect(f.events).toHaveLength(2);
   });
 
   it('opens a new session after an engine restart, and asks for the document again', async () => {

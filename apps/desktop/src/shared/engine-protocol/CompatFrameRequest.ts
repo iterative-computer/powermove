@@ -4,6 +4,7 @@ import type { CompositionId } from "./CompositionId";
 import type { DocumentId } from "./DocumentId";
 import type { LayerId } from "./LayerId";
 import type { Revision } from "./Revision";
+import type { SvgRasterRequest } from "./SvgRasterRequest";
 import type { Ticks } from "./Ticks";
 
 /**
@@ -21,4 +22,11 @@ scale: number,
 /**
  * The document revision the export snapshot was taken at.
  */
-revision: Revision, };
+revision: Revision, 
+/**
+ * For [`CompatSource::SvgImage`] (and only then): the raster (its
+ * SVG's content hash and bucket) and the asset. The answer is that
+ * bucket's premultiplied RGBA8 pixels, keyed
+ * `<content>:<width>x<height>`.
+ */
+svg?: SvgRasterRequest, };

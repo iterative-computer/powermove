@@ -735,8 +735,9 @@ PM_BENCH_ROUTES=3000 target/release/examples/compose_bench doc.json <composition
 # A drag of one layer with and without the draw reuse and the frame prefix:
 PM_BENCH_EDIT=drag PM_BENCH_LAYER=150 target/release/examples/compose_bench doc.json <composition> 300
 PM_BENCH_EDIT=drag PM_BENCH_LAYER=150 PM_BENCH_REUSE=0 target/release/examples/compose_bench doc.json <composition> 300
-# (examples and test builds: CARGO_PROFILE_RELEASE_LTO=off where kache's objects
-# carry no bitcode, as pm-audio.md notes; the addons build with thin LTO.)
+# (measured with CARGO_PROFILE_RELEASE_LTO=off for examples and tests: their
+# thin-LTO links failed on pm-media's bundled CrabbyAvif archive, not on kache,
+# and the addons were not LTO'd at all; both fixed since, see release-build.md.)
 # The reuse's equivalence tests, longer:
 PM_REUSE_FUZZ=30 PM_REUSE_FRAMES=1500 cargo test --release -p pm-render --test draw_reuse
 
@@ -744,3 +745,591 @@ PM_REUSE_FUZZ=30 PM_REUSE_FRAMES=1500 cargo test --release -p pm-render --test d
 cd ../../engine && cargo build --release -p pm-node --example compose_bench
 PM_BENCH_EDIT=drag target/release/examples/compose_bench doc.json <composition> 240
 ```
+
+## Perf3 implementation (2026-10-19, in progress)
+
+- `pm-eval` retains the ID index across value edits after validating each
+  indexed member by address and node revision. Reorders, duplicate-ID edits,
+  different documents and composition resolution paths still rebuild it.
+  `index_identity`: 3 tests pass, including property edits followed by a
+  reorder and a duplicate-ID edit; no stale-index lookup is needed.
+- The viewer's `DrawReuse` also retains `LayerOwners`, the matte-source set
+  and the solo flag across frames. Validation reads only the exact three
+  fields those facts depend on, in order, and invalidates on a document
+  replacement or backward revision. The bounded cache holds at most 128
+  composition lists, independently of time and layer draw reuse.
+- A pass with no scene objects skips 2.5D ordering only when no layer of
+  its entire composition has `threeD` set (including enclosing groups).
+  Malformed nullish lists retain the original throwing lookup path.
+- `pm-render --test draw_reuse`: all 5 tests pass (seeded edited plans,
+  corpus plans, pixel-exact frames, on-disk image changes, and drag reuse).
+  These are correctness checks; no performance gate is claimed from them.
+
+### Worker commit deadlines (P4)
+
+The supplied fixups2 common-timeline traces locate the judder after submission:
+at HD the worker's canvas reaches viz p50 0.365 ms after its rAF, but viz
+starts drawing it either immediately (p50 0.436 ms after rAF) or one refresh
+later (p95 8.763 ms). UHD likewise splits one/two refreshes. Those are analyses
+of the supplied pre-change traces, not new performance measurements.
+
+Timed commits now target 0.75 refreshes after BeginFrame so they target the
+following compositor refresh consistently; the display prediction is two
+refreshes plus the existing 3.2 ms panel offset. Paused and gesture frames still
+draw on arrival. Every BeginFrame feeds the refresh estimator before scheduling
+the commit, including when a faster, initially unknown display supersedes a
+pending timer. A late timer uses the current refresh's decision. Retargeting and
+disposal cancel the outstanding timer. The presenter/worker regressions cover
+gestures, cancellation, timed frames and an unknown 120 Hz display.
+
+**Not gate-complete:** the initial run found and corrected starvation before the
+refresh period was known. The next paired run lost its awake display during the
+today row, so it is invalid and produced no native timing comparison. There is
+no valid final paired p50/p95/p99/max result at 30, 25 or 23.976 fps, or a final
+A/V-under-load result. Do not treat the changed phase or prediction as a P4 pass.
+
+### perf3 P5: mount preparation and the reverse shuttle sawtooth
+
+The native connection now prepares one detached canvas and presentation worker
+before a viewer opens. The worker initializes its GPU painter and asynchronously
+compiles both SDR and EDR pipelines before processing sessions. A viewer claims
+that canvas and worker without constructing another worker on its mount path.
+The main-thread painter is prepared instead when workers cannot draw. The spare
+has no session, surface imports, or animation loop. It belongs to one document;
+popouts create their own drawing. Closing a viewer prepares the next drawing,
+and disposing the connection disposes any unused drawing. Device-loss and worker
+failure callbacks transfer with a claimed drawing. No transport restart is used.
+
+The inferred refresh period also had a systematic quantization error. Chromium's
+0.1 ms rAF timestamps at 120 Hz have mostly 8.3 ms adjacent intervals, interspersed
+with 8.4 ms. The old median selected 8.3 ms. At 2× reverse this produces about
+0.133 ms of media-time phase drift per frame, then resets at the 500 ms refit:
+the reported sawtooth. The estimator now infers skipped refresh counts from the
+median and fits the fractional period across the window. Phase discontinuities
+are removed from the slope calculation while the phase fit still follows them.
+Known nominal display rates retain their existing path.
+
+A deterministic comparison uses identical 0.1 ms rounded 120 Hz timestamps,
+30 fps, 2× reverse, and 34 starting phases over three seconds each. Old estimator
+outside-frame-interval error (6,154 drawn frames), p50/p95/p99/max:
+1.033/11.767/14.167/16.267 ms. Fixed estimator (6,150 drawn frames):
+0/7.533/8.034/8.035 ms. The old implementation fails the unchanged tighter
+half-refresh bound; the new implementation passes. This is a clock simulation,
+not a paired app or physical display measurement. Warmup ownership, late
+initialization disposal, window isolation, both pipeline formats, and reverse
+scheduling have targeted regression tests.
+
+**P5 gates remain open:** the session was locked during the performance attempts.
+Neither equal-to-today mount stalls nor repeated J/K/L A/V performance is claimed
+from the simulation. Re-run paired mount, cadence, and A/V probes on an awake,
+unlocked display with load at most 8. The between-deadline worker submission
+change above also still needs its common-compositor-clock validation.
+
+### SVG buckets and runner pixels in the viewer: every wait ends promptly
+
+Waiting for the exact SVG bucket or fallback runner pixels (instead of a
+stand-in) introduced a per-view wait (`pm_node::present::wait`). Review found
+two freezes in its first version: a failed SVG raster held the viewer for 5 s
+and, for a permanent failure (`missing`, `decode`), forever, since every retry
+missed and waited again; a runner `Failed` (compile error, watchdog, lost
+context) or the end of a transient backoff only marked the view dirty, which a
+valid wait ignores, so the picture froze for up to 10 s. Every exit is now
+explicit and prompt:
+
+- the pixels arrive: drawn (unchanged);
+- `SvgFailed` or a refused band: the key is marked failed in the renderer
+  (`Renderer::fail_svg_raster`), views waiting for it draw at once without the
+  image (`Renderer::svg_waiting_viewer`; snapshots and exports still wait),
+  and the key is asked for again 5 s later while a view draws without it,
+  without drawing a frame for that;
+- runner `Failed`: the view's runner wait ends and it draws at once (a final
+  failure draws nothing or skips the step; a transient one follows the
+  renderer's backoff), and a backoff's end ends a runner wait too;
+- an edit, view change, or transport discontinuity: the wait is obsolete;
+- nothing arrives: the wait times out 5 s (SVG) or 10 s (runner, its own
+  compile and draw deadlines) after the first ask (re-rendering never extends
+  it); the timeout is a failure (`unanswered` for the runner, transient) and
+  the frame is drawn without it. `Stats::external_wait_timeouts` counts them.
+  `POWERMOVE_ENGINE_EXTERNAL_WAIT_MS` caps both bounds (tests only).
+
+Tests: `wait` unit tests (state, deadlines, bounds); `svg` unit tests
+(retry time, refused band names its key); pm-render
+`a_viewer_frame_draws_without_a_bucket_the_window_could_not_draw`; pm-node
+`an_svg_raster_the_window_cannot_draw_never_freezes_the_viewer` (frame within
+1 s of `SvgFailed`, not a stand-in, asked again at ≈5 s with no redraw, drawn
+when it lands), `an_unanswered_svg_raster_times_out_instead_of_freezing_the_viewer`
+(1.5 s cap), `a_runner_failure_or_silence_never_freezes_the_viewer` (a lost
+context asks again at once, a second draws the frame at once and asks again
+after the 250 ms backoff, silence times out at the 3 s cap), and the existing
+runner test now requires the compile-failure frame within 2 s. Each new
+integration assertion was checked to fail with its fix removed (frame after
+10.0 s, 4.7 s, and a re-ask after 3.0 s).
+
+Not covered by an integration test: a refused SVG band (it takes 256 rasters
+assembling at once or 512 MiB; the mapping is unit-tested and shares the
+`SvgFailed` path).
+
+### Repeating the paired perf3 rows
+
+All app commands below require the machine-wide `pm-electron-lock` wrapper,
+`--workers=1` for Playwright, at least 40 GiB free before builds/launches, load
+at most 8, and an awake, unlocked display. Evidence defaults to `/tmp` for the
+new probes. These are measurement entry points, not completed gate results.
+
+- Cadence: `PM_FIXUPS2_MEASURE=1 PM_PERF3_RATES=30,25,23.976023976023978`
+  with `e2e/path-mask-playback-measure.spec.ts`. It uses fixups2's common
+  `Graphics.Pipeline.DrawAndSwap` timeline for both paths. Set `PM_PERF3_HD=1`
+  for HD only; `PM_PERF3_SOLID=1` isolates pacing with an animated solid and is
+  diagnostic only, not a replacement for the mask case.
+- Typing: `PM_TEXT_TYPING_MEASURE=1 PM_TEXT_TYPING_PAIRED=1` with
+  `e2e/native-engine-text-typing.spec.ts` (fonts lane harness, with p99,
+  keydown/handler, patch/barrier revision, frame and worker traces added).
+- Mount: `PM_MOUNT_MEASURE=1` with
+  `e2e/native-engine-mount-measure.spec.ts`; `PM_MOUNT_PAIRS` controls repeats.
+  It alternates which mode runs first, starts with no viewer, and records the
+  page clock, playhead, and native line through the same mount probe.
+- Drag/pan/orbit: `scripts/frame-bridge-measure.mjs --max-load 8
+  --evidence-dir /tmp/powermove-perf3 --only <paired-run-names>`. Explicit
+  `--only` order is preserved so today's row can immediately precede native.
+  The orbit rows use the threed lane's measurement hooks and synthetic shadow
+  scene; integrating its viewport runtime is a separate lane responsibility.
+
+The perf3 attempt produced no valid final paired rows: the cadence run locked
+mid-pair, drag/pan/orbit were skipped by the display guard, and typing remains
+unmeasured. SVG exact-pixel and fallback PBO tests establish correctness only.
+The defs runner is now integrated, but export throughput and animated fallback
+playback still need its paired measurements. A 135 ms SVG scale edit was
+observed in an unpaired locked-session correctness run and is not a speed pass.
+
+P5's absolute viewer-join regression retains the **per-sample** `< 0.08 s`
+assertion in `e2e/engine-headless-playback.spec.ts`; an aggregate check does not
+replace it. After integrating defs, the hidden app passed it with 42.3 ms worst
+sample error, preserved its session/epoch across the join, and used zero
+host-clock runs. The J/K/L regression passed too: 42 frames at 2× reverse,
+zero samples above 10 ms, max 0.972 ms outside the frame interval using the
+presenter's predicted display time. These are functional regression results,
+not valid paired performance or physical-display A/V measurements: the display
+was locked/asleep and machine load exceeded 8 during the check window. The
+paired mount probe recorded its invalid display state and skipped.
+
+## P3/B2/COMPCLOSE-2 follow-up measurements
+
+Measured on the same M4 Max, with native release addons and the release wasm
+module built in this worktree. Electron runs use the shared lock, hidden windows,
+isolated profiles and one Playwright worker. Raw results remain outside Git under
+`/tmp/ne-fixups2-evidence/`. These are targeted follow-up results, not a full gate.
+
+### Composition scopes
+
+> **Superseded (history).** This round 1 table and its notes are kept as a
+> record. Round 2 replaced the detached path (about 10 µs, accepted by the owner),
+> and round 4 replaced the root-wrapper addressing, which answered expressions with
+> the project instead of the wrapper. Current figures: "fixups2 round 4" at the end
+> of this file.
+
+`scope-bench.test.ts` builds 100 layers with 40 keyed properties each (five keys
+per property), alternates native/legacy order over five samples, and warms both
+paths. Each root sample and each legacy sample times one million calls; detached
+native samples time 24 calls because each serializes the large scope. Assertions
+consume every answer, and the resident cache reports one miss and 134 hits.
+
+| Scope, repeated evP at one time | Native median | Today median | Strict no-slower gate |
+|---|---:|---:|---|
+| Fresh root wrapper sharing proj.layers | 34.92 ns | 34.39 ns | Not cleanly met across repeated runs; the final run is slightly slower |
+| Genuinely detached composition | 19.57 ms | 34.53 ns | Fails |
+
+The root wrapper no longer serializes a document or resets the evaluator (the
+reported regression was 62 ms/call). Repeated numeric answers retain pm-wasm's
+last value after validating revision, scope, property, key and module health.
+Other runs put the root path at 40–43 ns versus 41–47 ns; a run at 36.5 versus
+33.2 ns and the final run above prevent claiming the strict performance line.
+No timing tolerance was widened. The remaining root difference is nanoseconds,
+not the original frame-scale serialization, but it is still disclosed.
+
+Resident detached scopes avoid repeated Node construction and document-cache
+resets, but their exact contents still must cross the boundary and be hashed.
+This remains milliseconds versus nanoseconds: a cache hit alone does not clear
+P3 for arbitrary detached objects. An explicit detached-scope write/version
+contract or dependency-aware query transport is needed to remove that cost while
+still seeing arbitrary outside-document mutations; silently caching by identity
+and mirror revision would miss those mutations. A version contract can only be an
+additive opt-in for new callers; existing apiVersion 1–3 calls must retain their
+unannounced-mutation semantics.
+
+### Boot and activation
+
+`engine-doc-boot.spec.ts`: the activation regression and five alternating
+setting-off/on pairs pass (11 fresh launches including the separate regression).
+Every activation probe returns 10 from its keyed property; with the setting on
+it is a native evP answer, zero fallbacks and zero named failures.
+
+| Measurement | Setting off | Setting on |
+|---|---:|---:|
+| Time to installed UI, p50 / max | 590.38 / 603.65 ms | 583.53 / 597.45 ms |
+| Time to opened editor, p50 / max | 866.34 / 878.57 ms | 883.45 / 910.55 ms |
+
+On: streaming compile 11.1–14.4 ms (includes body delivery), module load
+76.3–81.5 ms (source headers 65.2–67.1 ms), instantiation 0.1–0.2 ms,
+mirror-ready 78.2–83.3 ms from engine-doc installation. The UI install chain never
+awaits any of these. UI availability is faster on this five-pair sample; opening
+the editor is 17.11 ms slower at p50. The latter is an additional observed
+performance gap, not a timing allowance or a claim that all boot behavior matches.
+Five observations per mode do not estimate tail latency.
+
+### Mask correctness and fill work
+
+The window keeps the original viewport math and global sample coordinates, and
+returns full-sized transparent alpha outside the filled mesh; the existing blur
+therefore keeps all feather margins and downsample phases. Exact rational
+scanline spans replace per-pixel edge walks. The mask's white alpha is resolved
+directly, without full-output multisampled RGBA storage.
+
+- GPU path-mask reference gate: 54/54 canvases bit-exact (zero differing pixels),
+  including HD/UHD and every blur pass structure.
+- Composite path-mask corpus: seven non-text frames, zero failures; the two
+  path-mask text/caption frames pass their existing text class, all other pixels
+  exact. No unsupported reason, corpus case, threshold or reference was changed.
+- Direct full-canvas/window comparison: exact at 317×233, HD and UHD with fractional,
+  clipped and reflected geometry; winding spans also match independent per-sample
+  point tests for both fill rules and sample patterns.
+- Canvas2D gate: unchanged 529-case result (503 exact, 22 within one, four existing
+  pinned exceptions). Those exceptions remain baseline parity gaps.
+- CPU-model test HD fill: 6.1 ms for hd-f24 and 17.6 ms for the subtract combination;
+  GPU reference test first-fill, including pipeline construction, HD 10.1 ms,
+  UHD 19.5 ms. These are test-harness timings, not viewer playback results.
+
+Reproduce with the opt-in `scope-bench.test.ts`, `engine-doc-boot.spec.ts` and
+`path-mask-playback-measure.spec.ts` (`PM_FIXUPS2_MEASURE=1`,
+`PM_FIXUPS2_EVIDENCE=<outside-repo-dir>`); Electron specs under pm-electron-lock.
+Rust selections: pm-wasm tests; pm-vector canvas2d/mask_coverage and unit tests;
+pm-render path_masks plus corpus with `PM_RENDER_ONLY=composite/path-masks`,
+and text_corpus with `PM_TEXT_ONLY=composite/path-masks`.
+
+
+### Actual viewer playback (strict performance gate still fails)
+
+The corrected measurement spec finishes successfully and records four rows; that
+means the measurement ran, not that the performance gate passed. Each composition
+is 30 fps, 120 seconds long, with a feathered curved path whose rotation and one
+vertex animate continuously. It does not loop, so each item raster in the measured
+span is new. Both hidden viewers have the same full-sized device canvas (asserted
+1920×1080 or 3840×2160), Full preview resolution and adaptive quality off. Each row
+has two seconds of playback warmup followed by twelve measured seconds.
+
+| Canvas | Today shown / skipped | Engine shown / skipped | Today interval p50 / p95 / p99 / max | Engine interval p50 / p95 / p99 / max |
+|---|---|---|---|---|
+| 1920×1080 | 360 / 0 | 357 / 3 | 33.30 / 34.20 / 34.50 / 40.50 ms | 33.20 / 41.50 / 41.50 / 126.70 ms |
+| 3840×2160 | 360 / 0 | 360 / 0 | 33.30 / 33.80 / 34.40 / 34.50 ms | 33.20 / 35.10 / 35.30 / 35.70 ms |
+
+Both rows fail the no-slower line at the tail; HD also loses three composition
+frames. UHD's zero skips alone does not clear the row. There are no repeated
+frames, render errors, layer failures, named evaluator failures or legacy routes
+in either engine row. Engine compose mean is 1.36 ms (HD) and 2.50 ms (UHD),
+including the warmup; maxima are 66.19 and 5.24 ms. HD's measured viewer changes
+from viewSeq 4 to 5 and presenter generation 2 to 3 during the span, with three
+generation drops; the result retains that event rather than dropping the sample.
+The cause of the view change was not isolated in this lane.
+
+Legacy timestamps come from the compositor's `preview:presented` submission event;
+engine timestamps come from the presentation worker's onPresented/displayUs
+reports. These are the real viewer paths, but different points in the compositor
+pipeline. A common viz/presentation trace (the bridge/S1 harness) is still needed
+for a physical-display timing comparison. The recorded skips and tail costs are
+not waived pending that measurement. The remaining playback gate belongs with
+the bridge/presentation follow-up; CPU fill windowing alone does not clear it.
+
+All app runs shut down their isolated Electron instance. The initial harness
+attempts used the wrong legacy event and then treated a Disposable as a function;
+both failed before yielding valid paired data. The corrected run is the table
+above, preserved in the evidence file together with the failed first zero-frame
+observation. No production behavior or test threshold was changed to correct
+those instrumentation errors.
+
+## fixups2 round 2: startup and a common playback clock
+
+The preload starts the editor's wasm fetch/compile while the renderer module
+graph loads. The renderer privately consumes that promise and the launch flag;
+`nativeEngine.enabledSync()` remains live for all other callers. A failed early
+load can retry normally. This is a small edit to the bridge-owned preload hook;
+no CSP or extension activation contract changed. Speculative font prewarming now
+waits for a paint opportunity and idle time. Visible queries still obtain their
+exact fonts on demand. Startup stats separate module wait, instantiation and
+mirror sync; install/connection/first-descriptor marks and separate V8 profiles
+make their timing inspectable.
+
+The viewer resize debounce restarted its 150 ms deadline whenever an update
+repeated the same pending size. The pending size now keeps its original deadline;
+a real new size restarts it. Moving to another window cancels the old window's
+timer and starts a new deadline there. Both regressions pass; Viewer is version
+1.2.2 so forks receive update notices. **This did not fix the observed HD spike:**
+the runtime trace establishes a different cause below. No gamut/EDR freeze was
+retained, and no production display semantics changed to stabilize the test.
+
+### Detached scope validation: large improvement, strict gate still fails
+
+The locked five-sample scope run uses the same 100-layer, 40-keyed-properties,
+five-keys/property fixture as round 1. Repeated root wrappers measure median
+45.25 ns native versus 46.08 ns today. Genuinely detached repeats measure median
+10.07 µs native versus 40.67 ns today, down from round 1's 19.57 ms. The native
+samples are 11.564, 10.633, 10.066, 9.821 and 9.828 µs. No full scope crosses the
+boundary on a stable repeat, and correctness tests assert no wasm query at all.
+This removes the frame-scale serialization cost but remains roughly 247 times
+the warmed legacy memo. The strict detached gate is not met. Structural checks
+must visit layer identities/order/parents, and exact read validation must inspect
+its inputs even when an object's identity did not change. No immutable/epoch
+contract was imposed on existing callers. The later serializer correctness guards
+passed unit tests but were not separately retimed after the disk stop.
+
+The real-wasm randomized test retains three independent cached operations across
+1,200 mutations and compares all 3,600 results with fresh full serialization.
+The final engine-doc plus kernel loader/install selection passes 147 tests with
+two opt-in measurement tests skipped; the strengthened mutation test was then
+rerun separately (nine detached tests pass).
+
+### Final five boot pairs: performance gate still fails
+
+The final production startup code was measured in five fresh alternating off/on
+pairs under the Electron lock. Times are launch-to-installed-UI and
+launch-to-opened-editor wall times. Every activation probe returned the exact
+native answer with zero fallbacks or named failures.
+
+| Wall time | Today p50 / max | Engine p50 / max |
+|---|---:|---:|
+| Installed UI | 1526.25 / 1636.00 ms | 1501.48 / 1528.24 ms |
+| Opened editor | 2065.01 / 2230.59 ms | 2129.16 / 2204.29 ms |
+
+| Pair | Engine minus today: UI | Engine minus today: opened editor |
+|---|---:|---:|
+| 1 | +58.72 ms | +86.96 ms |
+| 2 | -170.90 ms | +28.67 ms |
+| 3 | +164.46 ms | +150.10 ms |
+| 4 | +1.99 ms | +64.15 ms |
+| 5 | -123.87 ms | -26.30 ms |
+
+Four editor pairs regress; its p50 is 64.15 ms slower. Faster aggregate UI/maxima
+do not clear the owner's no-slower line. Other lanes' load changed substantially
+between runs; the paired results above remain failures, without a noise allowance.
+The earlier round-2 batch before preload overlap is preserved in
+`/tmp/ne-fixups2-evidence/before-preload/`; the final five pairs are `boot-r2.json`.
+Their old `openMs` field included a subsequent diagnostic page evaluation and is
+not an isolated open-action measurement. The harness now captures it immediately
+at editor-open completion, before that evaluation; no corrected five-pair rerun
+was possible after the disk stop.
+
+The early fetch takes 7.1–22.3 ms and compile 8.0–22.3 ms. The document installer
+still records a 122.1–147.0 ms module await: that interval includes the synchronous
+install chain before the promise continuation can run, not another compilation.
+Instantiation is 0.6–0.8 ms, mirror sync 3.0–3.5 ms and speculative font warmup
+0.0–0.3 ms. Module overlap alone has not closed editor-open latency.
+
+A separate profiled diagnostic (not one of the gate pairs) has isolated open
+164.93 ms today versus 169.42 ms native. The main engine reports `adapter: null`,
+zero pools and zero frames before open; afterward it has the M4 Max adapter, one
+pool and eight sent surfaces, still zero frames. Its connection is ready before
+open, but native GPU/pool initialization overlaps opening the editor. The renderer
+profile samples 396.2 ms today and 380.1 ms native: layout reads dominate both
+(88.9 / 92.9 ms `getBoundingClientRect`); native drawing initialization adds 4.2 ms
+self time. The profiles do not prove a single extra forced layout or justify
+changing canvas insertion speculatively. The editor metric is UI readiness, not
+proof of the first native image; these snapshots still have zero native frames.
+
+### HD playback: common feedback proves the display-capability transition
+
+The harness uses the same Chromium Graphics.Pipeline compositor-receive to
+DrawAndSwap presentation-feedback timeline for both canvas sinks, following S1.
+It retains every submission and flags missing/superseded/duplicate mappings.
+The windows are shown without activation entirely off every display using S1's
+existing helper, with bounds checked before and after showing. Both paths assert
+1920×1080 stage/raster size, Full resolution and adaptive quality off, with two
+seconds warmup and twelve measured seconds.
+
+| HD row | Shown / skipped | Feedback p50 / p95 / p99 / max |
+|---|---:|---:|
+| Today | 360 / 0 | 33.333 / 33.334 / 33.334 / 41.666 ms |
+| Engine | 357 / 3 | 33.333 / 41.667 / 44.848 / 125.000 ms |
+
+All 360 today and 357 native submissions match unique presentation feedback:
+zero missing, superseded or duplicate mappings, so the native tail was not
+removed by the parser's match bounds. The native row has zero render/layer
+errors, zero legacy routes and no named evaluator failure; it still fails.
+
+At page time 9670.1 ms, `MediaQueryList.refresh` changes only `colorSpace`
+(displayP3 to srgb) and `edr` (true to false). Device size remains 1920×1080,
+DPR 2, zoom 0.5, pan zero and Full resolution. No resize is pending. View sequence
+4 becomes 5, generation 2 becomes 3, and exactly three frames are generation
+drops. Raw display-query sampling observes the capability flip at 9659.7 ms.
+This reproduces and identifies the original HD mechanism; it is not a mask
+texture reallocation, size debounce, pool-budget change or DPR change. Whether
+the capability loss is physical display sleep or offscreen window reassociation
+is still unproven. First-show timing, both states and the callback stack are in
+`path-mask-playback-r2.jsonl` and the preserved `after-preload-first/` traces.
+
+The constant-generation assertion correctly failed on HD and stopped that run
+before UHD. It is now soft-but-failing so future diagnostic runs preserve every
+row. A later diagnostic records native display sleep/lock state and main-engine
+startup reports. It completed another today-HD row (360 frames, zero skips,
+feedback p95 33.334 ms, max 41.153 ms; physical display awake/unlocked), then was
+interrupted before a native row completed. Thus **UHD has no common-timeline
+result**; round 1's different-clock UHD comparison remains unresolved. The extra
+hidden-HD diagnostic also did not complete.
+
+### Validation and stop condition
+
+Targeted startup/handoff/retry/activation tests: 74 pass; viewer timer/popout
+suite: 15 pass. Web typecheck: zero errors and the existing IconCropper warning.
+Node typecheck still has the existing generated cloud-client and TS6307 errors;
+the one newly introduced optional-preload-field error was corrected. The latest
+metric-only `openMs` correction and native-display diagnostic instrumentation
+have not had a complete app rerun.
+
+The third app run was stopped with SIGINT when free disk fell below the mandatory
+40 GiB threshold (18 GiB observed). Its Electron and Playwright processes exited.
+No further app run or build was started. The first playback attempt failed before
+showing a window because the Electron evaluation context lacks `require`; it now
+loads the existing harness through `process.getBuiltinModule('module').createRequire`.
+All failed/interrupted evidence remains outside Git. There is no claim that the
+editor, steady-generation, or UHD common-clock gate passes.
+
+
+## fixups2 round 3: owner decisions and steady display configuration
+
+The owner's round-3 decision accepts exact detached read-set validation at the
+round-2 measured median **10.07 µs** (native samples 11.564, 10.633, 10.066,
+9.821, 9.828 µs; legacy median 40.67 ns). This supersedes the earlier strict
+nanosecond verdict. Exact validation stays in place; no further detached scope
+optimization is required.
+
+The owner also ruled that round-2 editor-open deltas (-26.30 to +150.10 ms) on
+this shared machine cannot decide the performance gate. Keep preload/module
+load overlap and deferred speculative font warmup. The five-pair boot harness
+is committed in `e2e/engine-doc-boot.spec.ts`; its isolated CPU profile test stays
+outside the timing pairs. The historical numbers above remain recorded, but
+are not a current pass/fail verdict for editor opening.
+
+### Phase 3c gate handoff: engine against today
+
+| Row | Evidence / rerun | Status |
+|---|---|---|
+| Detached repeated queries, 100 layers × 40 properties × five keys | 10.07 µs with exact arbitrary-reference validation; round-2 `scope.json` | Accepted by owner, round 3 |
+| Installed UI / opened editor | Five alternating off/on pairs, p50 and maximum, `e2e/engine-doc-boot.spec.ts` | Deferred by owner to the Phase 3c quiet-machine performance table; no new shared-machine timing claim |
+
+For the quiet-machine row, run the committed boot spec under `pm-electron-lock`
+with `PM_FIXUPS2_MEASURE=1`, an outside-repository `PM_FIXUPS2_EVIDENCE` directory,
+and `--workers=1`. Record load and all pair deltas; enable `PM_FIXUPS2_PROFILE=1`
+only for its separate profiling test. Reserve at least 40 GiB before build and
+every app launch.
+
+### Today's canvas on a gamut/EDR change
+
+`legacy/gl/compositor.ts:731` creates its WebGL2 context with alpha, antialias,
+premultiplication, preserve-buffer, power preference and desynchronization
+options. It does not set `drawingBufferColorSpace` or subscribe to
+`(color-gamut: p3)` / `(dynamic-range: high)`. Its context listeners at lines
+747–762 handle GPU context loss/restoration. The viewer initializes this context
+once (`extensions/viewer/viewer.ts:979`) and its resize observer updates size;
+there is no gamut/EDR canvas reconfiguration. Existing legacy canvases therefore
+retain their color configuration when those media queries change.
+
+Native presentation now follows that behavior: sample the host's color
+configuration at initial setup, retain it for capability-only changes and later
+geometry updates, and log the newly observed capabilities. A media-query flip
+alone neither sends a changed view nor retires the surface pool. Genuine size,
+DPR, zoom and host-window changes retain their existing behavior. This is the
+owner's explicit round-3 compatibility policy, superseding round 2's unresolved
+question about whether a frozen canvas configuration was appropriate.
+
+
+### Round-3 paired playback results
+
+After the integration merge, the rebuilt release addon speaks
+`protocol-2f8d7cab61015d02`. Both engines run the same animated feathered mask,
+Full resolution and adaptive quality off, with two seconds warmup and twelve
+seconds measured. One Electron process at a time runs under `pm-electron-lock`;
+the guard observed 67.37–68.04 GiB free before these four launches. The table
+uses the same Graphics.Pipeline receive → DrawAndSwap feedback parser for both
+canvas sinks. Worker-predicted display times and legacy submission times are
+retained only as separate diagnostics.
+
+| Canvas | Engine | Shown / skips | Feedback p50 / p95 / p99 / max |
+|---|---|---|---|
+| 1920×1080 | Today | 360 / 0 | 33.327 / 33.379 / 34.141 / 36.567 ms |
+| 1920×1080 | Native | 360 / 0 | 33.333 / 41.668 / 41.685 / 49.762 ms |
+| 3840×2160 | Today | 360 / 0 | 33.327 / 33.456 / 35.491 / 36.530 ms |
+| 3840×2160 | Native | 360 / 0 | 33.331 / 41.681 / 42.225 / 50.657 ms |
+
+Every row maps all 360 submissions to 360 unique feedback events, with zero
+missing, superseded or duplicate mappings. Both native rows keep generation 2,
+viewSeq 4 and the session count constant throughout the measured span, with
+zero skipped or repeated frames, render errors, layer failures or legacy routes.
+The steady-playback assertion passes at both resolutions. The legacy context
+stays the same object with `drawingBufferColorSpace: srgb` and unchanged context
+attributes before/after each span.
+
+This runtime sample did not observe a gamut/EDR query flip: both native hosts
+reported P3/EDR throughout. The deterministic regression covers the flip itself
+in both directions: native frames continue through independently changing gamut
+and EDR queries, retaining generation 7 and viewSeq 1 with no drops; later real
+DPR/geometry updates retain the configured color tuple. Logs record observed
+changes, repeated unchanged updates do not spam them, and dispose removes the
+listeners. The three targeted viewer suites pass 39/39 tests; renderer typecheck
+has zero errors and the existing IconCropper warning.
+
+The 125 ms generation-change stall is addressed by matching today's canvas
+lifetime, and the observed playback now has zero skips. **The no-slower playback
+performance gate is still not green:** the common-clock HD and UHD native tails
+are slower than today's. UHD's earlier different-clock p95 35.1/33.8 ms comparison
+is superseded by this completed common-clock row, not waived. No cadence samples
+or tails were removed, and no performance tolerance was introduced.
+
+Raw rows, all four traces, generation assertions, legacy context snapshots and
+logs are outside Git in `/tmp/ne-fixups2-evidence/r3/` (`summary.json`,
+`path-mask-playback-r3.jsonl`, `mask-r3-*.trace.json`, `playback.log`,
+`viewer-unit.log`, `types-web.log`, `addon-build.log`). The opt-in spec passed in
+1.3 minutes; that means collection and functional/generation assertions passed,
+not that the timing comparison passed. `PM_FIXUPS2_RUN` gives evidence a unique
+run tag; the extra hidden diagnostic is explicitly opt-in. After deleting
+`engine/target`, run with `POWERMOVE_PM_BRIDGE` pointing to the absolute built
+`apps/desktop/native/pm_bridge.node` path (as this run did), so the development
+bridge remains available. The build target is deleted and all own app/build
+processes exited.
+
+## fixups2 round 4: the rootComp wrapper view and fresh scope objects
+
+`scope-bench.test.ts` (opt-in `PM_FIXUPS2_MEASURE=1`), the same 100-layer fixture
+with 40 keyed channels per layer and one expression channel per layer that reads
+the scope (`param("amp") + (comp.params ? 1000 : 0) + comp.layers.length + time`),
+under the Electron lock, M4 Max shared with other lanes. Five samples alternate
+native and today's order; each row asserts every answer equals today's. Medians
+(all five samples are in `/tmp/ne-w5/fixups2-r4/scope-final.json`, outside Git):
+
+| Scope, `evP` | Native | Today | No slower? |
+|---|---:|---:|---|
+| Fresh `rootComp` per `PM.curComp()`, keyed channel | 18.4 ns | 34.2 ns | Yes |
+| Held `rootComp` (`PM.scope = [Comps.get(id)]`), keyed | 18.5 ns | 34.0 ns | Yes |
+| Held `rootComp`, expression, repeated time | 81.1 ns | 210.0 ns | Yes |
+| Fresh `rootComp`, expression, repeated time | 305.2 ns | 695.1 ns | Yes |
+| Partial wrapper `{ id, fps, layers }` made per call, keyed | 27.1 ns | 33.9 ns | Yes |
+| Genuinely detached object, keyed (owner-accepted, decision 1) | 8.26 µs | 38.7 ns | Accepted |
+| Genuinely detached object, expression | 3.67 µs | 218.5 ns | Accepted (decision 1) |
+| Detached object made anew per call, keyed | 9.19 µs | 37.6 ns | Accepted class (was 92 ms, and an out-of-memory loop) |
+| Detached object made anew per call, expression | 4.18 µs | 225.5 ns | Accepted class (was 64.7 ms; 97 µs before the property address was reused) |
+| Held `rootComp`, expression, new time every call | 1.83 µs | 221.8 ns | **No** (see below) |
+| No scope, expression, new time every call | 2.09 µs | 228.5 ns | **No** (see below) |
+
+The wrapper check costs nothing measurable here: keyed channels no longer call
+`PM.curComp()` at all, and an expression's check is about 30 ns of named reads and
+one for-in walk. "Repeated time" rows hit the per-channel numeric memo on the
+native side (today re-runs the compiled function).
+
+**Not from this lane, and not fixed here: an expression at a new time costs about
+2 µs natively against about 0.22 µs today, with or without a scope.** Every call
+crosses into pm-wasm and runs pm-expr's interpreter, where today runs a V8-compiled
+function (expressions.md measures 0.5 to 0.9 µs inside Rust with document reads;
+the rest is the facade and the `expressionError` read-back per call). The two
+bottom rows show the wrapper view does not add to it (1.83 against 2.09 µs). This
+is a per-expression-channel cost on every frame of a project with expressions;
+it belongs with the perf3 lane's items and is reported to the orchestrator.
+
+Exactness for these paths is in `strict.test.ts` (wrapper members, held and
+changed wrappers, stale wrappers, the stored form, a scope object made anew per
+call with scope and channel edits) and `detached.test.ts`.

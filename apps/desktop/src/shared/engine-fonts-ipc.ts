@@ -20,7 +20,19 @@ export const ENGINE_FONTS_IPC = {
   addProjectFont: 'engine-fonts:add-project-font',
   setFontSource: 'engine-fonts:set-font-source',
   clearProjectFonts: 'engine-fonts:clear-project-fonts',
-  generation: 'engine-fonts:generation'
+  generation: 'engine-fonts:generation',
+  /** → `{ seeds: FontCacheSeed[] }` JSON: the asking window's renderer font
+   *  cache seeds (shared/engine-fonts-seeds.ts). */
+  seeds: 'engine-fonts:seeds',
+  /** `UiFontCensus` JSON → whether main took it: system-font text the
+   *  asking window's renderer laid out (shared/engine-fonts-seeds.ts). */
+  uiFonts: 'engine-fonts:ui-fonts'
+} as const;
+
+/** Main → renderer messages on the font channels. */
+export const ENGINE_FONTS_EVENTS = {
+  /** The window's font cache seeds changed (`{ seeds }` JSON). */
+  seedsChanged: 'engine-fonts:seeds-changed'
 } as const;
 
 export type EngineFontsResult<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -45,4 +57,10 @@ export interface EngineFontsBridge {
   setFontSource(family: string, data: Uint8Array): Promise<EngineFontsResult<number>>;
   clearProjectFonts(): Promise<EngineFontsResult<number>>;
   generation(): Promise<EngineFontsResult<number>>;
+  /** This window's font cache seeds (`{ seeds }` JSON). */
+  seeds?(): Promise<EngineFontsResult<string>>;
+  /** Calls `listener` with the window's seeds whenever they change. */
+  onSeedsChanged?(listener: (json: string) => void): () => void;
+  /** Reports UI text this window's renderer laid out (`UiFontCensus` JSON). */
+  reportUiFonts?(json: string): Promise<EngineFontsResult<boolean>>;
 }

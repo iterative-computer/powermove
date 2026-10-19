@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-2f8d7cab61015d02";
+export const PROTOCOL_BUILD = "protocol-25292d6fdfffb933";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -121,6 +121,7 @@ export type { HardwareSessionKind } from "./HardwareSessionKind";
 export type { HardwareSessionRequest } from "./HardwareSessionRequest";
 export type { Hello } from "./Hello";
 export type { HostMicros } from "./HostMicros";
+export type { HostShaderFallback } from "./HostShaderFallback";
 export type { HostSnapshot } from "./HostSnapshot";
 export type { ImagePayload } from "./ImagePayload";
 export type { InFlight } from "./InFlight";
@@ -224,9 +225,11 @@ export type { SessionId } from "./SessionId";
 export type { SessionRole } from "./SessionRole";
 export type { ShaderDiagnostic } from "./ShaderDiagnostic";
 export type { ShaderFallbackCall } from "./ShaderFallbackCall";
+export type { ShaderFallbackInput } from "./ShaderFallbackInput";
 export type { ShaderFallbackMessage } from "./ShaderFallbackMessage";
 export type { ShaderFallbackPixels } from "./ShaderFallbackPixels";
 export type { ShaderFallbackRequest } from "./ShaderFallbackRequest";
+export type { ShaderFallbackUnit } from "./ShaderFallbackUnit";
 export type { Shading3d } from "./Shading3d";
 export type { Shutter } from "./Shutter";
 export type { ShutterSample } from "./ShutterSample";
@@ -246,6 +249,9 @@ export type { SurfaceDescriptor } from "./SurfaceDescriptor";
 export type { SurfaceFormat } from "./SurfaceFormat";
 export type { SurfacePool } from "./SurfacePool";
 export type { SurfaceRequest } from "./SurfaceRequest";
+export type { SvgRasterKey } from "./SvgRasterKey";
+export type { SvgRasterPixels } from "./SvgRasterPixels";
+export type { SvgRasterRequest } from "./SvgRasterRequest";
 export type { TickRange } from "./TickRange";
 export type { Ticks } from "./Ticks";
 export type { ToneMapping3d } from "./ToneMapping3d";

@@ -54,49 +54,6 @@ const STILL_CLASSES: &[(&str, bool)] = &[
     ("render/still-photo-progressive-jpg", true),
 ];
 
-/// The effects whose corpus frames are listed apart rather than failed:
-/// the part of `pm_render::effects::WEBGL_UNSTABLE` the app corpus has
-/// shown departing (Posterize's one-level boundary flips). Levels and Color
-/// are unstable at the shader level only; a corpus frame of theirs that
-/// departs fails.
-const CORPUS_UNSTABLE: &[&str] = &["posterize"];
-
-/// Whether any effect in the document is in [`CORPUS_UNSTABLE`].
-fn webgl_unstable(document: &pm_model::Document) -> bool {
-    fn walk(n: &pm_model::Node) -> bool {
-        match n.kind() {
-            pm_model::NodeKind::Object(map) => {
-                let unstable_fx = map.iter().any(|(k, v)| {
-                    k.to_string_lossy() == "fx"
-                        && matches!(v.kind(), pm_model::NodeKind::Array(items) if items.iter().any(|e| {
-                            e.get("type").is_some_and(|t| matches!(t.kind(), pm_model::NodeKind::String(s)
-                                if CORPUS_UNSTABLE.contains(&s.to_string_lossy().as_str())))
-                        }))
-                });
-                unstable_fx || map.iter().any(|(_, v)| walk(v))
-            }
-            pm_model::NodeKind::Array(items) => items.iter().any(walk),
-            _ => false,
-        }
-    }
-    document.root().is_some_and(walk)
-}
-
-/// Pixels whose every channel is within 1 CV (float values, 8-bit scale).
-fn float_fraction_within_one(a: &[f32], b: &[f32]) -> f64 {
-    let pixels = a.len() / 4;
-    let within = a
-        .chunks_exact(4)
-        .zip(b.chunks_exact(4))
-        .filter(|(x, y)| {
-            x.iter()
-                .zip(y.iter())
-                .all(|(p, q)| ((p - q).abs() * 255.0) <= 1.0 + 1e-3)
-        })
-        .count();
-    within as f64 / pixels.max(1) as f64
-}
-
 /// Frames outside the render class by a measured, explained residual:
 /// (project, most pixels off by more than 1, largest difference). A frame
 /// within its pin is listed as known instead of failed; one beyond it fails.
@@ -118,6 +75,25 @@ fn corpus_render_parity() {
         .ok()
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
+    // Level 1 SVG images (decision S1) draw Chromium's rasters: those the
+    // svg-rasters tool captured (PM_SVG_RASTERS, else the newest
+    // `svg-rasters-*` directory); uncaptured ones fail their frame and are
+    // listed in its needs.json. Without a directory resvg approximates them.
+    renderer.set_svg_wait(true);
+    let svg_rasters = std::env::var("PM_SVG_RASTERS")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| support::newest_capture("svg-rasters-"))
+        .map(|d| std::sync::Arc::new(pm_render::vector::svg_rasters::RasterDir::new(d)));
+    match &svg_rasters {
+        Some(dir) => renderer.set_svg_source(Some(dir.clone())),
+        None => {
+            eprintln!(
+                "no Chromium SVG rasters (PM_SVG_RASTERS): resvg approximates level 1 SVG images"
+            );
+            renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
+        }
+    }
     // The built-in effects, transitions, and extension layers as the kernel
     // snapshots them (the captures load only built-in and missing
     // definitions).
@@ -126,9 +102,6 @@ fn corpus_render_parity() {
         .expect("built-in definitions");
     let mut compared = 0;
     let mut failed = Vec::new();
-    // Frames of projects using a WebGL-unstable definition that fail only
-    // at isolated pixels (amendment 9; judged by review, listed apart).
-    let mut unstable: Vec<String> = Vec::new();
     let mut skipped = Vec::new();
     let mut seen = std::collections::BTreeMap::new();
     for (capture, dir) in captures
@@ -375,14 +348,7 @@ fn corpus_render_parity() {
                 );
                 eprintln!("{line}");
                 if max > 1.0 || bar.as_ref().is_some_and(|b| !b.pass()) {
-                    if bar.is_none()
-                        && webgl_unstable(&p.document)
-                        && float_fraction_within_one(&ours, &reference) >= 0.999
-                    {
-                        unstable.push(line);
-                    } else {
-                        failed.push(line);
-                    }
+                    failed.push(line);
                 }
             }
             let (d, bar) = match &three_d {
@@ -421,31 +387,43 @@ fn corpus_render_parity() {
             if known && !class {
                 eprintln!("  known residual: {}", p.name);
             } else if !class || bar.as_ref().is_some_and(|b| !b.pass()) {
-                if bar.is_none() && webgl_unstable(&p.document) && d.fraction_within_one() >= 0.999
-                {
-                    unstable.push(line);
-                    continue;
-                }
                 failed.push(line);
+                // Side by side (amendment 22): the engine's frame, today's,
+                // and the differing pixels in red over a dimmed copy of
+                // today's.
                 if let Some(dir) = &diffs {
                     std::fs::create_dir_all(dir).unwrap();
                     let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
                     write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
                     write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
+                    let marked: Vec<u8> = ours
+                        .chunks_exact(4)
+                        .zip(reference.chunks_exact(4))
+                        .flat_map(|(a, b)| {
+                            if a.iter().zip(b).any(|(x, y)| x.abs_diff(*y) > 1) {
+                                [255, 0, 0, 255]
+                            } else {
+                                [b[0] / 3, b[1] / 3, b[2] / 3, 255]
+                            }
+                        })
+                        .collect();
+                    write_png(&dir.join(format!("{stem}-diff.png")), w, h, &marked);
                 }
             }
         }
     }
+    if let Some(dir) = &svg_rasters
+        && !dir.missing().is_empty()
+    {
+        let listed = dir.write_needs().expect("needs.json");
+        eprintln!(
+            "\n{} Chromium SVG rasters were not captured ({listed} listed in needs.json; run engine/crates/pm-render/tools/svg-rasters/run.ts --needs <dir>)",
+            dir.missing().len()
+        );
+    }
     eprintln!("\nskipped (unsupported by this renderer):");
     for (name, why) in &skipped {
         eprintln!("  {name:<40} {why}");
-    }
-    eprintln!(
-        "\nWebGL-unstable class (amendment 9, judged by review): {} frames within 1 CV for 99.9% of pixels, over the maximum at isolated pixels",
-        unstable.len()
-    );
-    for u in &unstable {
-        eprintln!("  UNSTABLE {u}");
     }
     eprintln!("\ncompared {compared} frames; {} failed", failed.len());
     for f in &failed {

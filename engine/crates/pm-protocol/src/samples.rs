@@ -827,9 +827,31 @@ pub fn requests() -> Vec<Envelope> {
                 source: crate::snapshot::CompatSource::RasterOverride,
                 scale: 1.0,
                 revision: rev(42),
+                svg: None,
+            }),
+        ),
+        request(
+            id(29),
+            Request::ShaderFallback(crate::shader_fallback::HostShaderFallback {
+                request: fallback_effect_request(),
+                area: handle(14),
+                textures: vec!["fallback-0.rgba16f".into(), "fallback-1.rgba16f".into()],
+                output: "fallback-out.rgba16f".into(),
             }),
         ),
     ]
+}
+
+/// A level 1 SVG raster request (decision S1).
+pub fn svg_request() -> crate::svg_raster::SvgRasterRequest {
+    crate::svg_raster::SvgRasterRequest {
+        key: crate::svg_raster::SvgRasterKey {
+            content: "9f".repeat(32),
+            width: 2,
+            height: 2,
+        },
+        asset: "a-art".into(),
+    }
 }
 
 /// A synchronous `renderFrameTo` snapshot (the compatibility path).
@@ -848,7 +870,59 @@ pub fn snapshot_request() -> crate::snapshot::SnapshotRequest {
         view_seq: Some(seq(12)),
         wait_ms: 5_000,
         blender_wait_ms: 0,
+        captions_hidden: false,
         uploaded: vec!["5e".repeat(32)],
+    }
+}
+
+/// An effect only the fallback runner draws: its input and backdrop, two
+/// passes.
+fn fallback_effect_request() -> crate::shader_fallback::ShaderFallbackRequest {
+    use crate::shader_fallback::{ShaderFallbackCall, ShaderFallbackRequest, ShaderFallbackUnit};
+    let pass = |p: f64| {
+        vec![
+            ShaderFallbackCall {
+                function: "1i".into(),
+                name: "u_tex".into(),
+                v: vec![0.0],
+                alias: None,
+            },
+            ShaderFallbackCall {
+                function: "1i".into(),
+                name: "u_backdrop".into(),
+                v: vec![2.0],
+                alias: None,
+            },
+            ShaderFallbackCall {
+                function: "1i".into(),
+                name: "u_pass".into(),
+                v: vec![p],
+                alias: None,
+            },
+            ShaderFallbackCall {
+                function: "1f".into(),
+                name: "u_amount".into(),
+                v: vec![0.5],
+                alias: Some("u_p0".into()),
+            },
+        ]
+    };
+    ShaderFallbackRequest {
+        key: "7a".repeat(32),
+        layer: "layer-4".into(),
+        vertex: "#version 300 es\nvoid main(){}".into(),
+        fragment: "#version 300 es\nprecision highp float;\nuniform sampler2D u_tex;\nuniform highp isampler2D u_lut;\nout vec4 o;\nvoid main(){ o = texture(u_tex, vec2(0.5)); }".into(),
+        width: 2,
+        height: 1,
+        calls: pass(0.0),
+        stage: "bind".into(),
+        message: "sampler `u_lut` (integer)".into(),
+        textures: 2,
+        units: vec![
+            ShaderFallbackUnit { unit: 0, texture: 0, chain: true },
+            ShaderFallbackUnit { unit: 2, texture: 1, chain: false },
+        ],
+        more_passes: vec![pass(1.0)],
     }
 }
 
@@ -1241,11 +1315,28 @@ pub fn events() -> Vec<Envelope> {
                         function: "2f".into(),
                         name: "iResolution".into(),
                         v: vec![2.0, 1.0],
+                        alias: None,
                     }],
                     stage: "bind".into(),
                     message: "sampler `u` (Cube)".into(),
+                    textures: 0,
+                    units: vec![],
+                    more_passes: vec![],
                 }],
             },
+        )),
+        event(Event::ShaderFallback(
+            crate::shader_fallback::ShaderFallbackMessage::Input(
+                crate::shader_fallback::ShaderFallbackInput {
+                    key: "7a".repeat(32),
+                    texture: 1,
+                    width: 2,
+                    height: 1,
+                    row: 0,
+                    rows: 1,
+                    rgba16f: crate::common::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 0x3c, 0, 0x3c, 0, 0, 0, 0, 0, 0x3c]),
+                },
+            ),
         )),
         event(Event::ShaderFallback(
             crate::shader_fallback::ShaderFallbackMessage::Pixels(
@@ -1289,6 +1380,22 @@ pub fn events() -> Vec<Envelope> {
         event(Event::Compat(crate::snapshot::CompatMessage::Forget {
             composition: "comp-1".into(),
             layer: "L7".into(),
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::SvgRequests {
+            requests: vec![svg_request()],
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::SvgPixels(
+            crate::svg_raster::SvgRasterPixels {
+                key: svg_request().key,
+                row: 1,
+                rows: 1,
+                data: crate::common::Bytes(vec![255, 0, 0, 255, 0, 0, 0, 0]),
+            },
+        ))),
+        event(Event::Compat(crate::snapshot::CompatMessage::SvgFailed {
+            key: svg_request().key,
+            reason: "stale".into(),
+            message: "the window's SVG bytes hash differently".into(),
         })),
         event(Event::RenderStats(crate::snapshot::RenderStats {
             frames: Count::new(1_800).expect("count"),
@@ -1583,9 +1690,10 @@ pub const fn request_index(request: &Request) -> usize {
         Request::ProbeMedia(_) => 25,
         Request::Snapshot(_) => 26,
         Request::CompatFrame(_) => 27,
+        Request::ShaderFallback(_) => 28,
     }
 }
-pub const REQUEST_VARIANTS: usize = 28;
+pub const REQUEST_VARIANTS: usize = 29;
 
 /// Exhaustive index of response variants.
 pub const fn response_index(response: &Response) -> usize {

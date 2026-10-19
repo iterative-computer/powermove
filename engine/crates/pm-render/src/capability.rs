@@ -60,7 +60,8 @@ pub enum Feature {
     RequiresEngine,
     /// Blender-rendered 3D (`render3d.enabled`).
     Blender,
-    /// SVG images.
+    /// `compat` level 2 SVG images with `<text>` (level 1 SVG images are
+    /// Chromium's rasters, decision S1).
     SvgImage,
     /// Animated images and image sequences.
     ImageSequence,
@@ -115,7 +116,7 @@ impl fmt::Display for Feature {
             Feature::ProjectColor => write!(f, "non-default project color settings"),
             Feature::RequiresEngine => write!(f, "native-engine features"),
             Feature::Blender => write!(f, "Blender-rendered 3D"),
-            Feature::SvgImage => write!(f, "SVG images"),
+            Feature::SvgImage => write!(f, "level 2 SVG images with text"),
             Feature::ImageSequence => write!(f, "animated images and image sequences"),
             Feature::Media(m) => write!(f, "media: {m}"),
             Feature::Request(r) => write!(f, "request: {r}"),
@@ -241,6 +242,27 @@ pub fn unsupported_with_fonts(
     assets: Option<&dyn AssetResolver>,
 ) -> Vec<Unsupported> {
     check(document, composition, assets, None, true)
+}
+
+/// The check for a renderer as configured: media facts when `assets` is
+/// given, effects, transitions, and extension layers against `effects`
+/// when the renderer holds definitions (`Effects::configured`), and text
+/// drawn when it has fonts. What the job engine, stills, and `pm-cli` route
+/// with (`Renderer::unsupported_with_media`).
+pub fn unsupported_for(
+    document: &Document,
+    composition: &str,
+    assets: Option<&dyn AssetResolver>,
+    effects: Option<&crate::effects::Effects>,
+    fonts: bool,
+) -> Vec<Unsupported> {
+    check(
+        document,
+        composition,
+        assets,
+        effects.filter(|e| e.configured()),
+        fonts,
+    )
 }
 
 fn check(
@@ -650,28 +672,10 @@ fn check_media(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ty == "image" && format == "svg" {
-        // Valid level 1 SVG paint records still need Chromium parity.
-        // Only XML/image-document errors establish a broken <img>;
-        // usvg's unsupported paint features do not establish corruption.
+        // Level 1 SVG images are drawn: Chromium's raster at today's
+        // bucket, from the document's renderer (decision S1; broken and
+        // unreadable documents are handled at execution).
         if !crate::vector::level2(layer) {
-            // Offline media is a named layer failure at execution.
-            if let Some(assets) = assets
-                && assets
-                    .path(&asset_id, Some(record))
-                    .is_none_or(|p| std::fs::metadata(p).is_err())
-            {
-                return;
-            }
-            if let Some(path) = assets.and_then(|a| a.path(&asset_id, Some(record))) {
-                // Only a document Chromium is known to show as a broken
-                // <img> draws nothing; every other one stays gated.
-                match pm_media::image::svg::broken_image_file(&path) {
-                    Ok(true) => return,
-                    Err(_) => return, // Execution names the unreadable source.
-                    Ok(false) => {}
-                }
-            }
-            add(layer, Feature::SvgImage);
             return;
         }
         // Level 2: unreadable SVGs are named layer failures at execution.

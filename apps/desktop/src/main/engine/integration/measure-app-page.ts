@@ -34,8 +34,13 @@
  * and pans the view: the same viewer handler on both paths. Today moves
  * the WebGL canvas with CSS, so every animation frame is tagged with the
  * newest handled event; the engine renders the panned view, and its frames
- * echo the view sequence. Pointer coordinates encode their sequence
- * numbers.
+ * echo the view sequence. `orbit` (the Phase 3c 3D orbit row) presses the
+ * middle button on the stage in the 3D viewport's editor view and orbits
+ * (core/scene3d/navigation.ts): today's WebGL compositor draws the
+ * composition with the editor camera, the engine renders the orbited view
+ * (the editor camera in its view override), so both paths are tagged with
+ * the viewport pose revision they show. Pointer coordinates encode their
+ * sequence numbers.
  */
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, type EngineViewerService } from '../../../extensions/viewer/engine-present/presentation';
 import type { ClockSample } from '../../../extensions/viewer/engine-present/protocol';
@@ -49,7 +54,7 @@ import { buildSyntheticProject, type SyntheticOptions } from './synthetic-projec
  * the document revision they show.
  */
 type Mode = 'today' | 'engine' | 'tracer';
-type InputMode = 'drag' | 'pan';
+type InputMode = 'drag' | 'pan' | 'orbit';
 type InitOptions = { mode: Mode; displayHz: number | null; rawGestures: boolean; offMainThread: boolean };
 
 const w = window as any;
@@ -99,6 +104,12 @@ let inputs: [number, number[], number, number][] = [];
 let positions: [number, string][] = [];
 /** Today's pan: the newest handled pointer sequence. */
 let panSeq = -1;
+/** Orbit: the viewport pose revision (each `onViewChange` notice), the
+ *  sequences of pointer events not yet applied, and per engine view
+ *  update the view sequence it sent and the pose revision it carried. */
+let poseRev = 0;
+let pendingOrbit: { seqs: number[]; timeStamp: number; handled: number } | null = null;
+let viewUpdates: [number, number][] = [];
 let panLoop = false;
 
 /**
@@ -152,7 +163,7 @@ function viewSeq(): number {
 const viewer = (): any => PM()?.Kernel?.services?.get('viewer') ?? null;
 
 function onPointer(event: PointerEvent): void {
-  if (!inputMode) return;
+  if (!inputMode || inputMode === 'orbit') return;
   const handled = performance.now();
   const events = event.getCoalescedEvents?.().length ? event.getCoalescedEvents() : [event];
   const seqs = events.map((e) => {
@@ -184,6 +195,27 @@ function onPointer(event: PointerEvent): void {
     inputs.push([viewSeq() + (waiting ? 1 : 0), seqs, event.timeStamp, handled]);
   }
 }
+// Orbit: the viewport's gesture listens in the capture phase on the window
+// and stops the event, so the orbit's events are read by a capture listener
+// registered earlier (it runs first); the pose change the viewer then makes
+// records them (`onViewChange`).
+window.addEventListener('pointermove', (event) => {
+  if (inputMode !== 'orbit') return;
+  const handled = performance.now();
+  const events = event.getCoalescedEvents?.().length ? event.getCoalescedEvents() : [event];
+  const seqs = events.map((e) => {
+    const seq = decode(e.clientX, e.clientY);
+    lastSeq = Math.max(lastSeq, seq);
+    return seq;
+  });
+  pendingOrbit = { seqs: [...(pendingOrbit?.seqs ?? []), ...seqs], timeStamp: pendingOrbit?.timeStamp ?? event.timeStamp, handled };
+}, true);
+function onPose(): void {
+  poseRev++;
+  if (inputMode !== 'orbit' || !pendingOrbit) return;
+  inputs.push([poseRev, pendingOrbit.seqs, pendingOrbit.timeStamp, pendingOrbit.handled]);
+  pendingOrbit = null;
+}
 // Bubble phase on the window: after the viewer's own (capture-phase) drag
 // handlers applied the event.
 window.addEventListener('pointermove', (event) => onPointer(event));
@@ -204,7 +236,7 @@ function onPresented(frame: { time: number }): void {
   const pm = PM();
   const t = Number(frame?.time ?? pm.time);
   const now = Number(pm.time);
-  const rev = inputMode === 'drag' ? drawnRev() : -1;
+  const rev = inputMode === 'drag' ? drawnRev() : inputMode === 'orbit' ? poseRev : -1;
   const record = (rafMs: number): void => {
     draws.push([rafMs, Math.round(t * fps), 0, rev, now, rafMs - now * 1000, Number(pm.quality ?? 1)]);
   };
@@ -248,6 +280,29 @@ function startEngine(displayHz: number | null, offMainThread: boolean, testSourc
   }
 }
 
+/**
+ * The 3D orbit row's scene: the corpus `3d/primitives` layout (eight
+ * primitives over a ground plane, a sun casting soft shadows, a camera), at
+ * 1920 × 1080, built through the public scene3d API.
+ */
+function build3dShadowScene(): unknown {
+  const pm = PM();
+  pm.replaceProject(pm.mkProject({ name: '3D orbit (shadows)', w: 1920, h: 1080, fps: 30, dur: 10 }));
+  const scene3d = pm.Kernel.api('measure-app').scene3d;
+  scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 1.6, z: 7, targetX: 0, targetY: 0, targetZ: 0 } } });
+  scene3d.edit({ operation: 'add_object', object: { id: 'ground', source: { primitive: 'plane', parameters: { width: 12, height: 8 } }, p: { y: -1.2, rx: -90 }, material: { p: { color: '#3A3D4A', roughness: 0.9 } } } });
+  const kinds = ['box', 'sphere', 'cylinder', 'cone', 'torus', 'capsule', 'icosahedron', 'plane'];
+  const colors = ['#FF6B1A', '#4C8DFF', '#3FCF8E', '#F2C14E', '#A73366', '#E8E2CF', '#7DD3FC', '#FB7185'];
+  kinds.forEach((primitive, i) => scene3d.edit({ operation: 'add_object', object: { id: `p${i}`, source: { primitive }, castShadow: true,
+    p: { x: -3.3 + (i % 4) * 2.2, y: i < 4 ? 0.9 : -0.6, z: i < 4 ? -0.6 : 0.9, ry: 20 * i, rx: 15 },
+    material: { p: { color: colors[i]!, metalness: i % 3 === 0 ? 0.8 : 0.1, roughness: i % 2 ? 0.3 : 0.7 } } } }));
+  scene3d.edit({ operation: 'add_light', light: { id: 'sun', type: 'sun', castShadow: true, p: { x: -4, y: 6, z: 4, intensity: 2.5, color: '#FFF4E0' } } });
+  const camera = pm.proj.layers.find((l: any) => l.d?.definition === 'powermove.3d.camera');
+  if (camera) scene3d.edit({ operation: 'set_environment', target: camera.id, patch: { shadows: true } });
+  pm.setTime(0);
+  return { layers: pm.proj.layers.length, w: pm.proj.w, h: pm.proj.h, objects: kinds.length + 1, shadows: true };
+}
+
 /* ── the API measure-app-main.ts calls ────────────────────────────── */
 
 const api = {
@@ -259,6 +314,7 @@ const api = {
     if (mode === 'engine' || mode === 'tracer') startEngine(options.displayHz, options.offMainThread, mode === 'engine');
     // Before step 2: the viewer's drags keep pointermove.
     if (!options.rawGestures) viewer().rawGestures = () => false;
+    PM().Kernel.api('measure-app').scene3d?.onViewChange?.(onPose);
     // How long the viewer's layout (pan steps) holds the main thread.
     const v = viewer();
     const layout = v.layout.bind(v);
@@ -273,7 +329,8 @@ const api = {
     };
   },
   /** Builds a synthetic project of slice features (synthetic-project.ts). */
-  async synthetic(options: SyntheticOptions): Promise<unknown> {
+  async synthetic(options: SyntheticOptions & { scene3d?: boolean }): Promise<unknown> {
+    if (options.scene3d) return build3dShadowScene();
     return buildSyntheticProject(options);
   },
   ready(): boolean {
@@ -325,6 +382,8 @@ const api = {
     draws = [];
     rafs.length = 0;
     inputs = [];
+    viewUpdates = [];
+    pendingOrbit = null;
     positions = [];
     layoutMs = [];
     clocks.length = 0;
@@ -342,6 +401,25 @@ const api = {
     const rect = stage.getBoundingClientRect();
     lastSeq = -1;
     if (m === 'pan') {
+      origin = { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+      return { ...origin, button: 'middle' };
+    }
+    if (m === 'orbit') {
+      // The editor view (a user view of the composition's 3D scene).
+      const scene3d = PM().Kernel.api('measure-app').scene3d;
+      if (!scene3d?.viewport?.state?.().hasScene) return { error: 'no 3D scene to orbit' };
+      scene3d.setView('editor');
+      // Each engine view update: the view sequence it sent and the pose it showed.
+      const presentation = v.enginePresentation;
+      if (presentation && !presentation.__measureOrbit) {
+        const update = presentation.update.bind(presentation);
+        presentation.update = (...args: unknown[]): unknown => {
+          const out = update(...args);
+          viewUpdates.push([presentation.state?.viewSeq ?? 0, poseRev]);
+          return out;
+        };
+        presentation.__measureOrbit = true;
+      }
       origin = { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
       return { ...origin, button: 'middle' };
     }
@@ -365,6 +443,14 @@ const api = {
   },
   async collect(): Promise<unknown> {
     const pm = PM();
+    if (inputMode === null && viewUpdates.length && (mode === 'tracer' || mode === 'engine')) {
+      // Engine frames echo the view sequence: an orbit input is shown by the
+      // first view whose update carried its pose revision.
+      inputs = inputs.map(([rev, seqs, ts, handled]) => {
+        const first = viewUpdates.find(([, pose]) => pose >= rev);
+        return [first ? first[0] : Number.MAX_SAFE_INTEGER, seqs, ts, handled];
+      });
+    }
     const presentation = viewer()?.enginePresentation ?? null;
     const trace = (await presentation?.takeTrace?.()) ?? null;
     return {
@@ -379,6 +465,8 @@ const api = {
       clocks: clocks.splice(0),
       edits,
       inputs,
+      viewUpdates,
+      poseRev,
       layoutMs,
       dragLayer: dragLayer ? { id: dragLayer.id, type: dragLayer.type } : null,
       state: presentation?.state ?? null,

@@ -678,6 +678,9 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
   try {
     const request = { project: JSON.stringify(p), name: outputName(opts), options: sheetOptions(opts) };
     await PM.HostMedia?.flushBindings(p);
+    // Main captures this window's definitions for the job (contract 10):
+    // pending registrations and extension reloads reach it first.
+    await PM.EngineDefinitions?.settle?.();
     const started = await engine.exportVideo(request);
     if (started.status === 'cancelled') return { cancelled: true };
     if (started.status === 'locate') { locateMedia(started.assets); return { cancelled: true }; }
@@ -752,6 +755,8 @@ X.addToQueue = async (rawOpts: any) => {
   };
   try {
     await PM.HostMedia?.flushBindings(project);
+    // The queued job keeps this window's definitions as they are now.
+    await PM.EngineDefinitions?.settle?.();
     const result = await engine.queueAdd(request);
     if (result?.status === 'added') PM.toast('Added to render queue');
     return result;

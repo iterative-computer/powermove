@@ -31,7 +31,7 @@ use pm_bridge::rendezvous::{Rendezvous, SERVICE_PREFIX, random_service_name};
 use pm_engine::Action;
 use pm_engine::engine::testing::hello;
 use pm_node::EngineHost;
-use pm_node::present::{BRIDGE_ENV, HOST_CLOCK_ENV, SOURCE_ENV};
+use pm_node::present::{BRIDGE_ENV, HOST_CLOCK_ENV, SEND_DELAY_ENV, SOURCE_ENV};
 use pm_protocol::clock::{TransportCommand, TransportState};
 use pm_protocol::codec;
 use pm_protocol::color::{ProjectColor, ViewerColorSpace};
@@ -41,7 +41,7 @@ use pm_protocol::common::{
 use pm_protocol::envelope::{
     Envelope, Event, Message, OpenSession, Request, Response, SessionRole,
 };
-use pm_protocol::error::{EngineProcess, ErrorCode};
+use pm_protocol::error::{EngineProcess, ErrorCode, ErrorDetail};
 use pm_protocol::frame::{
     FrameDescriptor, FrameRelease, MediaPreference, PreviewResolution, ViewerState,
 };
@@ -186,6 +186,57 @@ fn headless_playback_draws_nothing_and_a_view_joins_its_running_clock() {
     );
 }
 
+/// A composition the renderer cannot draw (an effect without the kernel's
+/// definitions) still plays on the engine's clock (amendment 21: nothing
+/// hands the transport to another engine): the view is told why it draws
+/// nothing, again when a viewer attaches, and no frame is drawn.
+#[test]
+fn an_unsupported_composition_plays_on_the_engine_clock_and_says_why() {
+    for headless in ["0", "1"] {
+        let mut envs = vec![(SOURCE_ENV, "document"), ("PM_UNSUPPORTED_TEST", "1")];
+        if headless == "1" {
+            envs.push(("PM_HEADLESS_TEST", "1"));
+        }
+        let stdout = run_child("child_silent_play", &envs);
+        assert!(
+            stdout.contains("CHILD-OK"),
+            "child did not finish (headless {headless}): {stdout}"
+        );
+    }
+}
+
+/// A paused frame leaves from the completion thread once the GPU finishes
+/// it, while the render thread goes on to the next batch. When that batch
+/// makes the composition unsupported, the frame drawn before it (held in
+/// flight here by `SEND_DELAY_ENV`) reaches the viewer before the report,
+/// and the report names the newest frame seq the view was given, so the
+/// viewer can tell every older frame from a later decision.
+#[test]
+fn an_unsupported_report_follows_the_frames_drawn_before_it() {
+    let stdout = run_child(
+        "child_report_after_in_flight_frame",
+        &[
+            (SOURCE_ENV, "document"),
+            (HOST_CLOCK_ENV, "1"),
+            (SEND_DELAY_ENV, "600"),
+        ],
+    );
+    assert!(
+        stdout.contains("CHILD-OK"),
+        "child did not finish:\n{stdout}"
+    );
+}
+
+/// The message of the next unsupported failure.
+fn unsupported(envelope: &Envelope) -> Option<String> {
+    match &envelope.message {
+        Message::Event {
+            body: Event::Failure(f),
+        } if f.error.code == ErrorCode::Unsupported => Some(f.error.message.clone()),
+        _ => None,
+    }
+}
+
 #[test]
 #[ignore = "run by a_silent_composition_plays_from_play_without_waiting_for_the_audio_device"]
 fn child_silent_play() {
@@ -204,9 +255,9 @@ fn child_silent_play() {
         let actions = host.receive(WINDOW.0, &codec::encode(&envelope).unwrap());
         inbox.push(actions);
     };
-    host.attach(1, "host").unwrap();
+    host.attach(1, "host", None).unwrap();
     host.receive(1, &hello(PeerRole::Host));
-    host.attach(WINDOW.0, "renderer").unwrap();
+    host.attach(WINDOW.0, "renderer", None).unwrap();
     inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
     send(
         &mut host,
@@ -228,8 +279,15 @@ fn child_silent_play() {
         _ => None,
     });
     let event = |body: Event| Envelope::new(Message::Event { body }).with_session(session);
-    // A solid and nothing else: nothing to hear.
-    let doc = project(solid(100.0, json!([])));
+    // A solid and nothing else: nothing to hear. Unsupported: an effect
+    // without definitions (the renderer cannot draw it).
+    let unsupported_test = std::env::var("PM_UNSUPPORTED_TEST").is_ok();
+    let fx = if unsupported_test {
+        json!([{ "id": "fx1", "type": "blur", "on": true, "params": {} }])
+    } else {
+        json!([])
+    };
+    let doc = project(solid(100.0, fx));
     send(
         &mut host,
         Envelope::new(Message::Request {
@@ -250,16 +308,32 @@ fn child_silent_play() {
     let mut viewer = state(1);
     viewer.headless = Some(headless);
     send(&mut host, event(Event::Viewer(viewer)));
+    if unsupported_test {
+        let why = inbox.wait(Duration::from_secs(10), unsupported);
+        assert!(
+            why.starts_with("The new engine cannot draw this composition yet:"),
+            "{why}"
+        );
+    }
     if headless {
+        // A headless clock carries the revision only while the engine draws
+        // the composition: the renderer learns the route from it.
+        let tag = if unsupported_test {
+            None
+        } else {
+            Revision::new(1).ok()
+        };
         inbox.wait(Duration::from_secs(5), |m| match &m.message {
             Message::Event {
                 body: Event::Clock(_),
-            } if m.revision == Revision::new(1).ok() => Some(()),
+            } if m.revision == tag => Some(()),
             _ => None,
         });
         let status: Value = serde_json::from_str(&host.status_json()).unwrap();
         assert_eq!(status["presenter"]["pools"], 0);
         assert_eq!(status["presenter"]["frames"], 0);
+    } else if unsupported_test {
+        // Nothing to draw: the failure above is what the viewer shows.
     } else {
         let first = inbox.wait(Duration::from_secs(20), frame);
         send(
@@ -298,13 +372,20 @@ fn child_silent_play() {
         std::thread::sleep(Duration::from_millis(150));
         let status: Value = serde_json::from_str(&host.status_json()).unwrap();
         assert_eq!(status["presenter"]["frames"], 0);
+        inbox.take();
         send(&mut host, event(Event::Viewer(state(2))));
-        let joined = inbox.wait(Duration::from_secs(20), frame);
-        assert!(
-            joined.duration.is_some(),
-            "joins timed playback, without a pause or seek"
-        );
-        assert!(joined.pts.get() > 0);
+        if unsupported_test {
+            // The viewer that attaches is told why it draws nothing.
+            let why = inbox.wait(Duration::from_secs(10), unsupported);
+            assert!(why.contains("cannot draw"), "{why}");
+        } else {
+            let joined = inbox.wait(Duration::from_secs(20), frame);
+            assert!(
+                joined.duration.is_some(),
+                "joins timed playback, without a pause or seek"
+            );
+            assert!(joined.pts.get() > 0);
+        }
         let clock = inbox.wait(Duration::from_secs(2), |m| match &m.message {
             Message::Event {
                 body: Event::Clock(c),
@@ -322,8 +403,49 @@ fn child_silent_play() {
     });
     let status: Value = serde_json::from_str(&host.status_json()).unwrap();
     let presenter = &status["presenter"];
+    if unsupported_test {
+        assert_eq!(presenter["frames"], 0, "{presenter}");
+        assert!(
+            inbox.take().iter().filter_map(frame).next().is_none(),
+            "no frame is drawn for an unsupported composition"
+        );
+    }
     assert_eq!(presenter["silentRuns"], 1, "{presenter}");
     assert_eq!(presenter["hostClockRuns"], 0, "{presenter}");
+    if unsupported_test && headless {
+        // Viewerless again, and an edit makes the composition drawable: the
+        // clock comes tagged with the new revision (no frame says so).
+        let mut away = state(3);
+        away.headless = Some(true);
+        send(&mut host, event(Event::Viewer(away)));
+        let drawable = project(solid(100.0, json!([])));
+        inbox.take();
+        send(
+            &mut host,
+            Envelope::new(Message::Request {
+                id: RequestId::new(3).unwrap(),
+                body: Request::Resync(Resync {
+                    document: "Ptracer".into(),
+                    revision: Revision::new(2).unwrap(),
+                    encoding: DocumentEncoding::CanonicalJsonV1,
+                    source: ResyncSource::Inline {
+                        body: Bytes(drawable.to_string().into_bytes()),
+                    },
+                    hash: ContentHash(pm_model::hash::canonical_digest(&model(&drawable))),
+                }),
+            })
+            .with_session(session),
+        );
+        inbox.wait(Duration::from_secs(10), |m| match &m.message {
+            Message::Event {
+                body: Event::Clock(_),
+            } if m.revision == Revision::new(2).ok() => Some(()),
+            Message::Event {
+                body: Event::Clock(_),
+            } if m.revision.is_some() => panic!("a clock tagged {:?}", m.revision),
+            _ => None,
+        });
+    }
     // The view's audio thread never opened a device.
     for audio in presenter["audio"]
         .as_object()
@@ -473,9 +595,9 @@ fn child_engine() {
         let actions = host.receive(WINDOW.0, &codec::encode(&envelope).unwrap());
         inbox.push(actions);
     };
-    host.attach(1, "host").unwrap();
+    host.attach(1, "host", None).unwrap();
     host.receive(1, &hello(PeerRole::Host));
-    host.attach(WINDOW.0, "renderer").unwrap();
+    host.attach(WINDOW.0, "renderer", None).unwrap();
     inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
     send(
         &mut host,
@@ -673,10 +795,15 @@ fn child_engine() {
         })
         .with_session(session),
     );
-    let code = inbox.wait(Duration::from_secs(10), |m| {
-        failure(m).filter(|c| *c == ErrorCode::ShaderCompile)
+    // Reported at the definitions generation it was translated at (the
+    // kernel drops one older than its latest push of that definition).
+    let at = inbox.wait(Duration::from_secs(10), |m| match &m.message {
+        Message::Event {
+            body: Event::Failure(report),
+        } if report.error.code == ErrorCode::ShaderCompile => Some(report.revision),
+        _ => None,
     });
-    assert_eq!(code, ErrorCode::ShaderCompile);
+    assert_eq!(at.get(), 2, "the generation of the push that broke it");
 
     // Playback on the host clock at 30 fps.
     send(
@@ -751,4 +878,148 @@ fn child_engine() {
     );
     drop(host);
     println!("CHILD-OK timed={}", timed.len());
+}
+
+#[test]
+#[ignore = "run by an_unsupported_report_follows_the_frames_drawn_before_it"]
+fn child_report_after_in_flight_frame() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let inbox = Arc::new(Inbox::default());
+    let sink_inbox = inbox.clone();
+    let mut host = EngineHost::with_sink(
+        EngineProcess::Interactive,
+        Some(Arc::new(move |actions| sink_inbox.push(actions))),
+        |key: &str| std::env::var(key).ok(),
+    )
+    .unwrap();
+    let send = |host: &mut EngineHost, envelope: Envelope| {
+        let actions = host.receive(WINDOW.0, &codec::encode(&envelope).unwrap());
+        inbox.push(actions);
+    };
+    host.attach(1, "host", None).unwrap();
+    host.receive(1, &hello(PeerRole::Host));
+    host.attach(WINDOW.0, "renderer", None).unwrap();
+    inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
+    send(
+        &mut host,
+        Envelope::new(Message::Request {
+            id: RequestId::new(1).unwrap(),
+            body: Request::OpenSession(OpenSession {
+                document: "Ptracer".into(),
+                role: SessionRole::Interactive,
+                process: EngineProcess::Interactive,
+                color: ProjectColor::DEFAULT,
+            }),
+        }),
+    );
+    let session = inbox.wait(Duration::from_secs(5), |m| match &m.message {
+        Message::Response {
+            body: Response::SessionOpened { session },
+            ..
+        } => Some(*session),
+        _ => None,
+    });
+    let event = |body: Event| Envelope::new(Message::Event { body }).with_session(session);
+    let mut doc = project(solid(100.0, json!([])));
+    send(
+        &mut host,
+        Envelope::new(Message::Request {
+            id: RequestId::new(2).unwrap(),
+            body: Request::Resync(Resync {
+                document: "Ptracer".into(),
+                revision: Revision::new(1).unwrap(),
+                encoding: DocumentEncoding::CanonicalJsonV1,
+                source: ResyncSource::Inline {
+                    body: Bytes(doc.to_string().into_bytes()),
+                },
+                hash: ContentHash(pm_model::hash::canonical_digest(&model(&doc))),
+            }),
+        })
+        .with_session(session),
+    );
+    send(&mut host, event(Event::Viewer(state(1))));
+    let first = inbox.wait(Duration::from_secs(20), frame);
+    assert_eq!(first.revision.get(), 1);
+    send(
+        &mut host,
+        event(Event::ReleaseFrame(FrameRelease {
+            pool_index: first.pool_index,
+            seq: first.seq,
+        })),
+    );
+    let mut revision = 1;
+    let mut edit = |host: &mut EngineHost, next: Value, doc: &mut Value| {
+        let ops = pm_model::ops::diff_ops(Some(&model(doc)), Some(&model(&next)));
+        let batch = PatchBatch {
+            document: "Ptracer".into(),
+            base_revision: Revision::new(revision).unwrap(),
+            revision: Revision::new(revision + 1).unwrap(),
+            origin: PatchOrigin::Edit,
+            encoding: PatchEncoding::CanonicalV1,
+            patch_count: ops.len() as u32,
+            body: Bytes(pm_model::binary::encode(&ops).unwrap()),
+        };
+        revision += 1;
+        *doc = next;
+        send(host, event(Event::ApplyPatches(batch)));
+        revision
+    };
+
+    // A drawable edit: its paused frame is drawn and waits in the
+    // completion thread (600 ms) while the next batch makes the composition
+    // unsupported (an effect without the kernel's definitions).
+    let drawn = edit(&mut host, project(solid(130.0, json!([]))), &mut doc);
+    std::thread::sleep(Duration::from_millis(150));
+    let fx = json!([{ "id": "fx1", "type": "blur", "on": true, "params": {} }]);
+    let routed = edit(&mut host, project(solid(130.0, fx)), &mut doc);
+    // Everything the viewer receives, in order, until the report and for a
+    // while after it (a frame drawn before the report and sent after it
+    // would arrive in this time).
+    let mut seen: Vec<Envelope> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !seen.iter().any(|m| unsupported(m).is_some()) {
+        assert!(Instant::now() < deadline, "no report: {seen:?}");
+        std::thread::sleep(Duration::from_millis(5));
+        seen.extend(inbox.take());
+    }
+    std::thread::sleep(Duration::from_millis(1_200));
+    seen.extend(inbox.take());
+    let report = seen.iter().position(|m| unsupported(m).is_some()).unwrap();
+    let Message::Event {
+        body: Event::Failure(failure),
+    } = &seen[report].message
+    else {
+        unreachable!()
+    };
+    assert_eq!(failure.revision.get(), routed);
+    let Some(ErrorDetail::Unsupported { last_frame }) = failure.error.detail.clone() else {
+        panic!("the report names the view's newest frame: {failure:?}");
+    };
+    // The frame of the drawable edit was in flight when the batch that made
+    // the composition unsupported arrived; it reaches the viewer first.
+    let in_flight = seen[..report]
+        .iter()
+        .filter_map(frame)
+        .find(|d| d.revision.get() == drawn)
+        .unwrap_or_else(|| {
+            panic!(
+                "the in-flight frame (revision {drawn}) arrives before the report: {:?}",
+                seen.iter().map(|m| &m.message).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        in_flight.seq <= last_frame,
+        "the report covers the frame drawn before it: {} > {}",
+        in_flight.seq.get(),
+        last_frame.get()
+    );
+    let late: Vec<_> = seen[report + 1..].iter().filter_map(frame).collect();
+    assert!(
+        late.is_empty(),
+        "no frame reaches the viewer after the report: {late:?}"
+    );
+    println!("CHILD-OK drawn={drawn} routed={routed}");
+    drop(host);
 }

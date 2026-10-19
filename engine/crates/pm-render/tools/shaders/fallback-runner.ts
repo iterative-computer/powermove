@@ -6,9 +6,14 @@
  * `tests/shader_gate.rs` then draws those pixels through the engine and
  * compares the frame with the compositor's WebGL output.
  *
+ * `--fallback <dir>` answers `<dir>/requests` into `<dir>/pixels` instead,
+ * with each request's textures read from `<dir>/requests/<key>-<i>.f16`
+ * (the effects corpus's `fallback-effects`, written by
+ * `tests/effects_webgl.rs`'s `fallback_effects_match_webgl`).
+ *
  * Usage (under the machine-wide Electron lock):
  *   ~/Library/Caches/powermove-engine/bin/pm-electron-lock \
- *     bun engine/crates/pm-render/tools/shaders/fallback-runner.ts [--corpus <dir>]
+ *     bun engine/crates/pm-render/tools/shaders/fallback-runner.ts [--corpus <dir> | --fallback <dir>]
  * The browser is headless; nothing is shown on screen.
  */
 import { existsSync } from 'node:fs';
@@ -21,11 +26,13 @@ import { REPO } from '../effects/preambles';
 const { chromium } = await import(join(REPO, 'apps', 'desktop', 'node_modules', 'playwright', 'index.mjs'));
 const args = process.argv.slice(2);
 const ROOT = join(homedir(), 'Library', 'Application Support', 'Powermove Engine Corpus');
-const corpus = args.includes('--corpus')
-  ? resolve(args[args.indexOf('--corpus') + 1]!)
-  : join(ROOT, (await readdir(ROOT)).filter((d) => d.startsWith('shaders-')).sort().at(-1) ?? 'missing');
-const requests = join(corpus, 'fallback', 'requests');
-const pixels = join(corpus, 'fallback', 'pixels');
+const flag = (name: string) => (args.includes(name) ? resolve(args[args.indexOf(name) + 1]!) : null);
+const base = flag('--fallback') ?? join(
+  flag('--corpus') ?? join(ROOT, (await readdir(ROOT)).filter((d) => d.startsWith('shaders-')).sort().at(-1) ?? 'missing'),
+  'fallback',
+);
+const requests = join(base, 'requests');
+const pixels = join(base, 'pixels');
 await mkdir(pixels, { recursive: true });
 if (!existsSync(requests)) throw new Error(`no fallback requests in ${requests}: run tests/shader_gate.rs first`);
 
@@ -44,9 +51,19 @@ await page.evaluate(() => { (window as any).runner = new (window as any).PMShade
 let answered = 0, failed = 0;
 for (const file of (await readdir(requests)).filter((f) => f.endsWith('.json')).sort()) {
   const request = JSON.parse(await readFile(join(requests, file), 'utf8'));
-  const result = await page.evaluate(async (r: any) => {
+  const textures: string[] = [];
+  for (let i = 0; i < (request.textures ?? 0); i++) {
+    textures.push((await readFile(join(requests, `${request.key}-${i}.f16`))).toString('base64'));
+  }
+  const result = await page.evaluate(async ([r, encoded]: [any, string[]]) => {
     try {
-      const out = await (window as any).runner.render(r);
+      const inputs = encoded.map((b64) => {
+        const binary = atob(b64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return new Uint16Array(bytes.buffer);
+      });
+      const out = await (window as any).runner.render(r, inputs);
       const bytes = new Uint8Array(out.rgba16f.buffer);
       let binary = '';
       for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
@@ -54,7 +71,7 @@ for (const file of (await readdir(requests)).filter((f) => f.endsWith('.json')).
     } catch (error: any) {
       return { ok: false, error: `${error?.reason ?? 'error'}: ${error?.message ?? error}` };
     }
-  }, request);
+  }, [request, textures] as [any, string[]]);
   if (result.ok) {
     await writeFile(join(pixels, `${request.key}.f16`), Buffer.from(result.data, 'base64'));
     answered++;

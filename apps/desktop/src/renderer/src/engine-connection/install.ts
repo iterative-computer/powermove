@@ -28,7 +28,7 @@ import type { ClockSample } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
-import { DocumentSession, documentId, type DocumentStream } from './session';
+import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
 import { EngineRenderTransport } from './render-transport';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
@@ -37,8 +37,11 @@ import { installAppCaptures, usesBlender } from './app-captures';
 // kernel's `render.gl.init` binding uses it for viewers that do not present
 // by themselves (old forks of the viewer).
 import { ViewerPresentation } from '../../../extensions/viewer/engine-present/presentation';
-import { ShaderFallbackRunner } from './shader-fallback';
+import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
+import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
+import { SvgRasters } from './svg-rasters';
 import { EngineTransport } from './transport';
+import { followOpenComposition } from './composition-follow';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
 export const ENGINE_VIEWER_SERVICE = 'engine.viewer';
@@ -90,6 +93,17 @@ export interface EngineConnectionHandle {
   dispose(): void;
 }
 
+/**
+ * The route message a viewer attaching to `session` missed: the session
+ * already presents (no viewerless state in between, which would make the
+ * engine say it again) a composition the engine cannot draw. Null
+ * otherwise.
+ */
+export function missedRoute(session: { readonly headless: boolean; readonly route: Route; readonly routeReason: string | null }): { type: 'routed'; route: 'legacy'; reason: string } | null {
+  if (session.headless || session.route !== 'legacy') return null;
+  return { type: 'routed', route: 'legacy', reason: session.routeReason ?? '' };
+}
+
 export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHost | null | undefined, target: Window = window): EngineConnectionHandle | null {
   const native = host?.nativeEngine;
   let enabled = false;
@@ -106,6 +120,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     else if (level === 'warn') console.warn(line);
     else console.info(line);
   };
+  const drawingWarmup = new PresentationWarmup(target.document, () => new Worker(new URL('../../../extensions/viewer/engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' }));
+  drawingWarmup.warm();
   const hostClock = new HostClock(() => native.hostTime());
   hostClock.start();
   let connection: EngineConnection | null = null;
@@ -115,13 +131,22 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const sessions = new Set<DocumentSession>();
   let current: DocumentSession | null = null;
   let fallbackRunner: ShaderFallbackRunner | null = null;
+  // The job engine's fallback requests (exports, agent stills) run in this
+  // window's runner too: one WebGL2 context for the window (decision 19).
+  const offShaderFallback = native.onShaderFallback?.(async ({ request, textures }) =>
+    (await (fallbackRunner ??= new ShaderFallbackRunner()).render(request as ShaderFallbackRequest, textures)).rgba16f) ?? (() => {});
   // One session owns this window's clock. A viewer attaches to it; closing
   // that channel retires presentation only, leaving pm-audio and time alive.
   let viewerHandlers: EngineViewerHandlers | null = null;
   let viewerLease = 0;
   let sessionReady: Promise<void> | null = null;
+  /** The open composition (what Play plays and the viewer shows). */
+  const openComposition = (): string => String(PM.proj?.compId ?? PM.proj?.id ?? '');
+  /** A viewerless session follows the open composition (composition-follow.ts). */
+  const follower = followOpenComposition({ session: () => current, open: openComposition, bus: PM.bus });
   const transport = new EngineTransport(() => current, hostClock, {
-    exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); })
+    exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); }),
+    prepare: follower.follow
   });
   /** animVersion per revision sent, for `frame:rendered.version`. */
   const versions = new RevisionVersions();
@@ -151,7 +176,19 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     }
   });
   const unrouteAudio = routeAudioPanels(PM.Audio, audio, () => transport.active());
-  const offAssets = PM.bus?.on?.('assets', () => audio.sync()) ?? (() => {});
+  // Level 1 SVG images: Chromium draws today's bucket rasters for the
+  // engine (decision S1, svg-rasters.ts); their content hashes are taken
+  // ahead so a synchronous snapshot can draw one.
+  const svgRasters = new SvgRasters({
+    asset: (id) => PM.assets?.get?.(id) ?? null,
+    assets: () => (PM.assets?.map?.values?.() ?? []) as Iterable<Record<string, any>>,
+    log
+  });
+  svgRasters.prime();
+  const offAssets = PM.bus?.on?.('assets', () => {
+    audio.sync();
+    svgRasters.prime();
+  }) ?? (() => {});
 
   // Edits reach the engine as soon as the write that made them returns: a
   // write that leaves the barrier dirty schedules one flush at the end of
@@ -200,6 +237,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
       definitions: () => ((PM as any).EngineDefinitions ?? null),
       fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
+      svgRasters: () => svgRasters,
       handlers: {
         message: (message, arrivedMs) => {
           if (message.type === 'frame' && !firstFrame) {
@@ -235,11 +273,13 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       // overwrite the replacement document's requested UI position.
       onLoading: () => transport.seek(Number(PM.time) || 0, false),
       onLoaded: () => {
-        if (session.headless) session.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+        if (session.headless) session.sendHeadless(openComposition());
         PM.bus?.emit?.('layout');
       },
       onRoute: (route, reason) => {
         if (route === 'legacy') log('warn', `engine composition unavailable: ${reason ?? ''}`);
+        // Compile errors follow whoever draws (kernel/engine-definitions.ts).
+        (PM as any).EngineDefinitions?.meta?.setRoute?.(route);
         transport.refresh();
         if (route === 'engine') audio.sync();
         PM.bus?.emit?.('draw');
@@ -248,7 +288,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     sessions.add(session);
     current = session;
     transport.resetLoop();
-    session.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+    session.sendHeadless(openComposition());
     sessionReady = session.start().catch((error: unknown) => {
       log('warn', `engine session: ${error instanceof Error ? error.message : String(error)}`);
       session.close();
@@ -299,9 +339,15 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       };
     },
     usesBlender: () => usesBlender(PM.proj),
+    captionsHidden: () => PM.captionsHidden === true,
+    svgRasters: () => svgRasters,
     log
   });
   (PM as any).EngineRender = renderTransport;
+  // The job engine's export and agent frames ask this window for the SVG
+  // rasters of the document it has open (main's `compatFrame`).
+  const unprovideSvg = renderTransport.provideCompat('svgImage', (request) => svgRasters.produce(request));
+  (PM as any).EngineSvgRasters = svgRasters;
   // The app's own still captures (the Library's section thumbnails, the
   // agent's look and observe) draw through the engine too: with the new
   // engine on, nothing asks the current engine for pixels. The exporter's
@@ -358,6 +404,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     trace,
     source,
     exclusive: true,
+    drawingWarmup,
     // Frame events on presentation (presentation-events.ts), at most once
     // per animation frame for the newest frame on screen, as today's frame
     // loop emits them once per frame it draws.
@@ -384,6 +431,18 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const previous = viewerHandlers;
       viewerHandlers = handlers;
       previous?.closed('another viewer attached to the engine session');
+      // A viewer that replaces another on a session already presenting
+      // (no viewerless state in between, which would make the engine say
+      // it again) learns why a composition the engine cannot draw shows
+      // nothing. Its channel is in place by the next microtask.
+      const missed = missedRoute(opened);
+      if (missed) {
+        queueMicrotask(() => {
+          if (lease === viewerLease && viewerHandlers === handlers && opened.route === 'legacy') {
+            handlers.message(missed, performance.now());
+          }
+        });
+      }
       return {
         sendViewerState: (state) => {
           if (lease === viewerLease) opened.sendViewerState({ ...state, headless: false } as never);
@@ -392,8 +451,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         close: () => {
           if (lease !== viewerLease || opened.closed) return;
           viewerHandlers = null;
-          opened.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+          opened.sendHeadless(openComposition());
           transport.refresh();
+          drawingWarmup.warm();
         }
       };
     }
@@ -447,9 +507,13 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       clock: current?.clock ?? null
     }),
     dispose: () => {
+      drawingWarmup.dispose();
+      offShaderFallback();
       offPending();
       offEager();
       offAssets();
+      follower.dispose();
+      unprovideSvg();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);

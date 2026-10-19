@@ -8,7 +8,7 @@
  * sandbox frames), tells windows about crashes and restarts, and serves
  * the engines' host requests (native-engine.ts).
  */
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -24,7 +24,8 @@ import { routeToCurrentExporter } from '../render-encoder';
 import type { EngineProcess } from '../../shared/engine-protocol';
 import type { Log } from './connection';
 import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, type SharedTextureLike } from './bridge';
-import { EngineFontClient, installEngineFontService } from '../engine-fonts';
+import { EngineFontClient, FONT_CLIENT_ID, installEngineFontService, JOB_FONT_CLIENT_ID } from '../engine-fonts';
+import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
@@ -34,11 +35,10 @@ import { RenderQueue } from './render-queue';
 import { SnapshotService } from './snapshots';
 import { WindowSnapshotSessions } from './window-sessions';
 import { CompatFrames } from './compat-frames';
+import { ShaderFallbackRelay } from './shader-fallback-relay';
 import type { ChildLike, PortLike } from './ports';
 
-/** Main's own client id for its font port to the interactive engine (never
- *  a window id: those are positive). */
-export const FONT_CLIENT_ID = -1;
+export { FONT_CLIENT_ID, JOB_FONT_CLIENT_ID } from '../engine-fonts';
 
 export { NEW_ENGINE_ENV, NEW_ENGINE_STORE_KEY, newEngineEnabled } from './flag';
 
@@ -282,6 +282,27 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       })
     : null;
 
+  // The job engine's decision 19 fallback requests run in a window's
+  // runner (contract 14): the window the job works for, else any window.
+  let jobOwners: { ownerOf(session: number): number | null } | null = null;
+  const fallbackRelay = new ShaderFallbackRelay({
+    send: (id, job) => {
+      const contents = webContents.fromId(id);
+      if (!contents || contents.isDestroyed()) return false;
+      contents.send(ENGINE_IPC.shaderFallback, job);
+      return true;
+    },
+    windows: () => options.windows().filter((w) => !w.isDestroyed()).map((w) => w.webContents.id),
+    ownerOf: (session) => {
+      const owner = jobOwners?.ownerOf(session) ?? null;
+      return owner !== null && owner >= 0 ? owner : null;
+    }
+  });
+  options.ipc.on(ENGINE_IPC.shaderFallbackResult, (event, message: unknown) => {
+    if (!options.isTrustedSender(event)) return;
+    fallbackRelay.answer(event.sender.id, message);
+  });
+
   const engineNowUs = engineClock(bridgeAddon);
   const cacheDirectory = path.join(options.userData, 'Engine Cache');
   // Exports of layers only a window draws (a `raster` override, a
@@ -313,6 +334,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           ...(launch?.env ?? {}),
           POWERMOVE_ENGINE_PROCESS: process,
           POWERMOVE_ENGINE_ADDON: addon,
+          // Invalidate first-use parity on every engine/browser/OS update.
+          // GPU identity and native driver version are added by pm-render.
+          POWERMOVE_ENGINE_PARITY_ENV: JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() }),
           // Translated shader programs, kept across launches (plan section 11).
           POWERMOVE_ENGINE_SHADER_CACHE: path.join(cacheDirectory, CACHE_DIRS.shaderCache)
         }
@@ -353,6 +377,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           : { available: false, error: status.error ?? 'This composition renders with Blender. Install Blender 4.5 or later, or set its renderer to Native.' };
       }
     },
+    shaderFallback: (session, request, textures) => fallbackRelay.run(session, request, textures),
     log
   });
 
@@ -370,7 +395,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const windowSessions = new WindowSnapshotSessions(
     { isReady: (p) => engine.isReady(p), hostPort: (p) => engine.hostPort(p), request: (p, body, session, revision) => engine.request(p, body, session, revision), stageDocument: (p, session, bytes) => engine.stageDocument(p, session, bytes), event: (p, body, session) => engine.event(p, body, session) },
     engine.definitions,
-    log
+    log,
+    undefined,
+    (session, owner) => fontClient.setSessionOwner(session, owner)
   );
   snapshots = new SnapshotService({
     engine,
@@ -383,8 +410,12 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // section 12, Phase 2): main relays pm-wasm's font requests over its own
   // font port and keeps only the project fonts a restarted engine needs.
   const fontClient = new EngineFontClient({ log });
-  const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender }, fontClient);
+  const jobFontClient = new EngineFontClient({ log });
+  fontClient.mirror(jobFontClient);
+  const fontSeeds = startEngineFontSeeds(fontClient, log, options.windows);
+  const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender, seedsFor: fontSeeds.seedsFor, reportUiFonts: fontSeeds.reportUiFonts }, fontClient);
   engine.addClient(FONT_CLIENT_ID, (_info, port) => fontClient.connect(port), { peer: 'fonts', processes: ['interactive'] });
+  engine.addClient(JOB_FONT_CLIENT_ID, (_info, port) => jobFontClient.connect(port), { peer: 'fonts', processes: ['job'] });
 
   // The shared host clock for the renderer's engine connection: it maps
   // performance.now() onto the engines' host µs (clock samples, the
@@ -458,6 +489,10 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     engine,
     ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}),
     log,
+    // Each job renders its window's winning registrations (contract 10).
+    definitions: (owner) => engine!.definitions.current(owner),
+    // A window's exports measure text with its font cache seeds.
+    sessionOwner: (session, owner) => jobFontClient.setSessionOwner(session, owner),
     onDelivered: (owner, file) => rememberExport(owner, file),
     onUserStatus: (owner, status) => {
       const file = userDestinations.get(status.jobId);
@@ -475,7 +510,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     onQueueStatus: (jobId, status) => renderQueue?.status(jobId, status),
     onAgentJob: (job) => renderQueue?.agentJob(job)
   });
+  jobOwners = agentJobs;
   renderQueue = new RenderQueue({
+    windowOpen: (owner) => { const contents = webContents.fromId(owner); return !!contents && !contents.isDestroyed(); },
     directory: path.join(options.userData, 'Render Queue'),
     engine: agentJobs,
     platform: {
@@ -565,12 +602,14 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       ? chosen.filePath
       : `${chosen.filePath}.${panel.extension}`;
     const id = await renderQueue!.add({
+      owner: event.sender.id,
       name: path.basename(file),
       project: options.snapshotMedia ? await options.snapshotMedia(JSON.parse(queueRequest.project)) : JSON.parse(queueRequest.project),
       options: queueRequest.options,
       destination: file,
       ...(queueRequest.sidecars ? { sidecars: queueRequest.sidecars } : {}),
-      ...(typeof queueRequest.preset === 'string' ? { preset: queueRequest.preset.slice(0, 120) } : {})
+      ...(typeof queueRequest.preset === 'string' ? { preset: queueRequest.preset.slice(0, 120) } : {}),
+      definitions: engine!.definitions.current(event.sender.id)?.updates(1) ?? []
     });
     return { status: 'added' as const, id };
   });
@@ -614,6 +653,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       attached = true;
     });
     window.once('closed', () => {
+      fallbackRelay.forget(id);
       engine?.removeClient(id);
       windowSessions.forget(id);
       compatFrames.windowGone(id);
@@ -654,9 +694,12 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       await renderQueue?.dispose();
       for (const job of [...awake.keys()]) letSleep(job);
       uninstallFonts();
+      fontSeeds.stop();
       fontClient.disconnect();
+      jobFontClient.disconnect('the job engine stopped');
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
       options.ipc.removeAllListeners(ENGINE_IPC.playback);
+      options.ipc.removeAllListeners(ENGINE_IPC.shaderFallbackResult);
       agentJobs.dispose();
       await engine?.stop();
       frameBridge?.dispose();

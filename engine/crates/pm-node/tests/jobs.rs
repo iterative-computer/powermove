@@ -26,8 +26,8 @@ use pm_protocol::envelope::{
 };
 use pm_protocol::error::{EngineError, EngineProcess, ErrorCode, ErrorScope};
 use pm_protocol::host::{
-    CapabilityHandle, CapabilityKind, HandleAccess, HandleGrant, HandleResolved, OutputChoice,
-    OutputCommitted, OutputDestination, PortId,
+    CacheKind, CapabilityHandle, CapabilityKind, HandleAccess, HandleGrant, HandleResolved,
+    OutputChoice, OutputCommitted, OutputDestination, PortId,
 };
 use pm_protocol::patch::{DocumentEncoding, Resync, ResyncSource};
 use pm_protocol::priority::*;
@@ -158,6 +158,10 @@ struct Host {
     answers: BTreeMap<u64, Message>,
     statuses: Vec<JobStatus>,
     host_requests: Vec<&'static str>,
+    /// The editor window's answer to `compatFrame` asks (level 1 SVG
+    /// rasters): a fill colour, or the host's error words.
+    svg_window: Result<[u8; 4], String>,
+    compat_asks: Vec<pm_protocol::snapshot::CompatFrameRequest>,
 }
 
 impl Host {
@@ -176,7 +180,7 @@ impl Host {
             .collect();
         let mut engine =
             EngineHost::with_sink(EngineProcess::Job, Some(sink), |k| env.get(k).cloned()).unwrap();
-        engine.attach(HOST.0, "host").unwrap();
+        engine.attach(HOST.0, "host", None).unwrap();
         let out = engine.receive(HOST.0, &hello(PeerRole::Host));
         let dir = std::env::temp_dir().join(format!("pm-node-jobs-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -200,6 +204,8 @@ impl Host {
             answers: BTreeMap::new(),
             statuses: vec![],
             host_requests: vec![],
+            svg_window: Err("This layer is drawn by an extension in the editor; open the project in a window to export it.".into()),
+            compat_asks: vec![],
         };
         host.handle(out);
         host
@@ -285,6 +291,19 @@ impl Host {
         match body {
             Request::MintHandle(m) => {
                 self.host_requests.push("mintHandle");
+                if let CapabilityKind::Cache {
+                    cache: CacheKind::Scratch,
+                } = &m.kind
+                {
+                    let path = self.dir.join("scratch");
+                    std::fs::create_dir_all(&path).unwrap();
+                    let handle = self.mint(m.kind.clone(), path);
+                    return Ok(Response::Handle(HandleGrant {
+                        handle,
+                        kind: m.kind,
+                        content_hash: None,
+                    }));
+                }
                 let CapabilityKind::MediaRead { asset } = &m.kind else {
                     return err(ErrorCode::Unsupported, "only media");
                 };
@@ -305,6 +324,7 @@ impl Host {
                 };
                 let access = match kind {
                     CapabilityKind::OutputWrite { .. } => HandleAccess::Write,
+                    CapabilityKind::Cache { .. } => HandleAccess::ReadWrite,
                     _ => HandleAccess::Read,
                 };
                 Ok(Response::HandleResolved(HandleResolved {
@@ -379,6 +399,53 @@ impl Host {
                     }
                 }
                 unreachable!()
+            }
+            // A window's fallback runner (main relays it): every texel
+            // blue, after checking the textures arrived as files.
+            Request::ShaderFallback(f) => {
+                self.host_requests.push("shaderFallback");
+                assert!(session.is_some(), "bound to the job's session");
+                let Some((_, area)) = self.handles.get(&f.area).cloned() else {
+                    return err(ErrorCode::CapabilityRejected, "unknown area");
+                };
+                let r = &f.request;
+                let bytes = u64::from(r.width) * u64::from(r.height) * 8;
+                for name in &f.textures {
+                    assert_eq!(
+                        std::fs::metadata(area.join(name)).unwrap().len(),
+                        bytes,
+                        "{name}"
+                    );
+                }
+                let out: Vec<u8> = (0..r.width * r.height)
+                    .flat_map(|_| [0u16, 0, 0x3c00, 0x3c00])
+                    .flat_map(u16::to_le_bytes)
+                    .collect();
+                std::fs::write(area.join(&f.output), out).unwrap();
+                Ok(Response::Ack)
+            }
+            Request::CompatFrame(ask) => {
+                self.host_requests.push("compatFrame");
+                self.compat_asks.push(ask.clone());
+                let svg = ask.svg.clone().expect("an SVG raster");
+                let fill = match &self.svg_window {
+                    Ok(fill) => *fill,
+                    Err(words) => return err(ErrorCode::NotHeadlessRenderable, words),
+                };
+                let k = svg.key;
+                Ok(Response::CompatFrame(Box::new(
+                    pm_protocol::snapshot::CompatFrame {
+                        key: format!("{}:{}x{}", k.content, k.width, k.height),
+                        width: k.width,
+                        height: k.height,
+                        format: pm_protocol::snapshot::CompatFormat::Rgba8Premultiplied,
+                        origin: [0.0, 0.0],
+                        scale: 1.0,
+                        payload: pm_protocol::snapshot::PixelPayload::Inline {
+                            bytes: Bytes(fill.repeat((k.width * k.height) as usize)),
+                        },
+                    },
+                )))
             }
             other => err(ErrorCode::InvalidMessage, &format!("unexpected {other:?}")),
         }
@@ -1117,5 +1184,455 @@ fn media_facts_resolve_their_handle_through_the_host() {
             .unwrap()
             .value;
         assert_eq!(value, alpha);
+    }
+}
+
+/// The project with Invert on its background solid (the top-left corner).
+fn inverted_project() -> Value {
+    let mut doc = project(false);
+    let back = doc["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "back")
+        .unwrap();
+    back["fx"] =
+        json!([{ "id": "fx1", "type": "invert", "on": true, "p": { "amount": ch(json!(100)) } }]);
+    doc
+}
+
+/// `invert` replaced by a fork that paints the layer blue (an override by
+/// id: the same id, the fork's GLSL).
+fn blue_invert_fork() -> pm_protocol::definitions::DefinitionSnapshot {
+    let mut fork = pm_render::builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    fork.origin = pm_protocol::definitions::DefinitionOrigin::Fork;
+    let glsl = fork.glsl.as_mut().unwrap();
+    let body = "\n      vec4 c = texture(u_tex, v_st); o = vec4(0.0, 0.0, c.a, c.a);\n}";
+    let at = glsl.source.rfind("void main(){").unwrap() + "void main(){".len();
+    glsl.source.truncate(at);
+    glsl.source.push_str(body);
+    glsl.body_utf16_len = body.encode_utf16().count() as u32;
+    glsl.body_utf8_len = body.len() as u32;
+    fork
+}
+
+impl Host {
+    /// Pushes a definitions update to `session`; the engine's answer.
+    fn push_definitions(
+        &mut self,
+        session: SessionId,
+        update: pm_protocol::definitions::DefinitionsUpdate,
+    ) -> Message {
+        let id = self.send_request(Request::PushDefinitions(update), Some(session), None);
+        // The compile worker answers once the update is compiled.
+        assert!(self.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
+        self.answers.remove(&id).expect("answered")
+    }
+
+    /// The top-left pixel of each frame of a batch on `session`.
+    fn corner_pixels(
+        &mut self,
+        session: SessionId,
+        revision: u64,
+    ) -> Vec<Result<[u8; 3], ErrorCode>> {
+        let id = self.send_request(
+            Request::AgentFrames(frames_request(2)),
+            Some(session),
+            Some(revision),
+        );
+        assert!(self.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
+        let Message::Response {
+            body: Response::AgentFrames(result),
+            ..
+        } = &self.answers[&id]
+        else {
+            panic!("{:?}", self.answers[&id])
+        };
+        result
+            .outcomes
+            .iter()
+            .map(|o| match o {
+                AgentFrameOutcome::Rendered {
+                    image: ImagePayload::Inline { bytes },
+                    ..
+                } => {
+                    let decoded =
+                        image::load_from_memory_with_format(&bytes.0, image::ImageFormat::Jpeg)
+                            .unwrap();
+                    Ok(decoded.to_rgb8().get_pixel(2, 2).0)
+                }
+                AgentFrameOutcome::Failed { error, .. } => Err(error.code),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+}
+
+fn near(px: [u8; 3], want: [u8; 3]) -> bool {
+    px.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 6)
+}
+
+/// Contract 10 in the job engine: agent frames and exports draw effects
+/// with the definitions their session holds when the work is submitted (the
+/// window's winning registrations), an override by id draws the fork's
+/// GLSL from the next batch, disposing it restores the built-in, a removed
+/// definition is skipped with its data kept (as a missing effect), and a
+/// session without definitions reports the effect unsupported instead of
+/// drawing from a stale or built-in set.
+#[test]
+fn agent_frames_and_exports_draw_the_definitions_their_session_holds() {
+    use pm_protocol::definitions::{DefinitionKind, DefinitionRemoval, DefinitionsUpdate};
+    let mut host = Host::new("definitions", &[]);
+    let doc = inverted_project();
+    let sid = host.snapshot(&doc, SessionRole::Job, 1);
+    // No definitions pushed: the effect cannot be drawn, and nothing is
+    // drawn without it.
+    let none = host.corner_pixels(sid, 1);
+    assert!(
+        none.iter().all(|p| *p == Err(ErrorCode::Unsupported)),
+        "{none:?}"
+    );
+    let builtins = pm_render::builtin_definitions();
+    let update = |generation: u64, full: bool, upserts, removals| DefinitionsUpdate {
+        generation: Seq::new(generation).unwrap(),
+        full,
+        upserts,
+        removals,
+    };
+    // The window's set (built-ins): acknowledged, then drawn.
+    let applied = host.push_definitions(sid, update(1, true, builtins.definitions.clone(), vec![]));
+    assert!(
+        matches!(&applied, Message::Response { body: Response::DefinitionsApplied(a), .. } if a.generation.get() == 1),
+        "{applied:?}"
+    );
+    // #E83A5E inverted.
+    let inverted = [0x17, 0xC5, 0xA1];
+    for px in host.corner_pixels(sid, 1) {
+        assert!(near(px.unwrap(), inverted), "{px:?}");
+    }
+    // A fork registers `invert` (a delta): the next batch draws the fork.
+    host.push_definitions(sid, update(2, false, vec![blue_invert_fork()], vec![]));
+    for px in host.corner_pixels(sid, 1) {
+        assert!(near(px.unwrap(), [0, 0, 255]), "the override wins: {px:?}");
+    }
+    // The fork is disposed: the built-in registration is restored.
+    let original = builtins
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap()
+        .clone();
+    host.push_definitions(sid, update(3, false, vec![original], vec![]));
+    for px in host.corner_pixels(sid, 1) {
+        assert!(near(px.unwrap(), inverted), "restored: {px:?}");
+    }
+    // No registration remains: missing, skipped with its data kept.
+    host.push_definitions(
+        sid,
+        update(
+            4,
+            false,
+            vec![],
+            vec![DefinitionRemoval {
+                kind: DefinitionKind::Effect,
+                id: "invert".into(),
+            }],
+        ),
+    );
+    for px in host.corner_pixels(sid, 1) {
+        assert!(near(px.unwrap(), [0xE8, 0x3A, 0x5E]), "skipped: {px:?}");
+    }
+    // An export from a snapshot session with the window's set draws every
+    // effect (it was routed before definitions reached the job engine).
+    let snapshot = host.snapshot(&doc, SessionRole::JobSnapshot, 1);
+    host.push_definitions(
+        snapshot,
+        update(1, true, builtins.definitions.clone(), vec![]),
+    );
+    host.send_request(
+        Request::SubmitJob(agent_export(
+            "job-fx",
+            "run-d",
+            snapshot,
+            ExportFormat::H264,
+            "mp4",
+        )),
+        None,
+        None,
+    );
+    assert!(host.run_until(Duration::from_secs(120), |h| {
+        terminal(h, "job-fx").is_some()
+    }));
+    let status = terminal(&host, "job-fx").unwrap();
+    assert_eq!(status.state, JobState::Done, "{:?}", status.error);
+    // Without definitions the same export is refused before anything is
+    // written.
+    let bare = host.snapshot(&doc, SessionRole::JobSnapshot, 1);
+    host.send_request(
+        Request::SubmitJob(agent_export(
+            "job-bare",
+            "run-d",
+            bare,
+            ExportFormat::H264,
+            "mp4",
+        )),
+        None,
+        None,
+    );
+    assert!(host.run_until(Duration::from_secs(60), |h| {
+        terminal(h, "job-bare").is_some()
+    }));
+    let status = terminal(&host, "job-bare").unwrap();
+    assert_eq!(status.state, JobState::Failed);
+    assert_eq!(
+        status.error.as_ref().map(|e| e.code),
+        Some(ErrorCode::Unsupported)
+    );
+}
+
+fn raw_effect(id: &str, source: &str) -> pm_protocol::definitions::DefinitionSnapshot {
+    serde_json::from_value(json!({
+        "id": id, "kind": "effect", "version": 0, "origin": "local", "renderer": null,
+        "glsl": { "source": source, "bodyLineOffset": 0, "bodyUtf16Len": source.encode_utf16().count(), "bodyUtf8Len": source.len() },
+        "params": [],
+        "flags": { "passes": 1, "keepOrig": false, "backdrop": false, "rawShader": true, "viewportSafe": false, "viewportPadding": [], "clamp": false }
+    }))
+    .unwrap()
+}
+
+/// The job engine compiles what it is pushed before acknowledging it
+/// (`validate_effect`): a program WebGL refuses too fails with its
+/// diagnostics in the author's lines, one only the WebGL fallback runner
+/// draws is reported as not headless-renderable (valid in the app, never a
+/// compile error), and valid programs and the built-ins pass.
+#[test]
+fn pushed_definitions_are_compiled_before_they_are_acknowledged() {
+    use pm_protocol::definitions::DefinitionsUpdate;
+    let mut host = Host::new("compile", &[]);
+    let sid = host.snapshot(&project(false), SessionRole::Job, 1);
+    let good = raw_effect(
+        "acme.gain",
+        "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_st) * 2.0; }\n",
+    );
+    let broken = raw_effect(
+        "acme.broken",
+        "#version 300 es\nprecision highp float;\nout vec4 o;\nvoid main(){\n  o = nope;\n}\n",
+    );
+    let runner = raw_effect(
+        "acme.sky",
+        "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nuniform samplerCube u_sky;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_st) + texture(u_sky, vec3(0.0, 0.0, 1.0)); }\n",
+    );
+    let mut upserts = pm_render::builtin_definitions().definitions;
+    upserts.extend([good, broken, runner]);
+    let answer = host.push_definitions(
+        sid,
+        DefinitionsUpdate {
+            generation: Seq::new(1).unwrap(),
+            full: true,
+            upserts,
+            removals: vec![],
+        },
+    );
+    let Message::Response {
+        body: Response::DefinitionsApplied(applied),
+        ..
+    } = answer
+    else {
+        panic!("{answer:?}")
+    };
+    assert_eq!(applied.generation.get(), 1);
+    let mut failures: Vec<_> = applied
+        .failures
+        .iter()
+        .map(|e| match &e.scope {
+            ErrorScope::Definition { definition } => (definition.as_str().to_owned(), e.code),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    failures.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        failures,
+        vec![
+            ("acme.broken".to_owned(), ErrorCode::ShaderCompile),
+            ("acme.sky".to_owned(), ErrorCode::NotHeadlessRenderable),
+        ]
+    );
+    let broken = applied
+        .failures
+        .iter()
+        .find(|e| e.code == ErrorCode::ShaderCompile)
+        .unwrap();
+    let Some(pm_protocol::error::ErrorDetail::ShaderCompile { diagnostics }) = &broken.detail
+    else {
+        panic!("{broken:?}")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.line == 5 && d.message.contains("nope")),
+        "{diagnostics:?}"
+    );
+}
+
+/// Contract 14 and amendment 21 in the job engine: an effect only the WebGL
+/// runner draws is not routed and not skipped. The job asks the host to run
+/// it in a window's runner, with its textures as files in the session's
+/// scratch area, and draws the pixels the host writes back: agent frames
+/// and an export alike.
+#[test]
+fn effects_only_the_webgl_runner_draws_run_in_a_window_through_the_host() {
+    use pm_protocol::definitions::DefinitionsUpdate;
+    let mut host = Host::new("fallback", &[]);
+    let mut doc = project(false);
+    let back = doc["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "back")
+        .unwrap();
+    back["fx"] = json!([{ "id": "fx1", "type": "acme.cube", "on": true, "p": {} }]);
+    let mut set = pm_render::builtin_definitions();
+    let mut cube = set
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap()
+        .clone();
+    cube.id = "acme.cube".into();
+    cube.origin = pm_protocol::definitions::DefinitionOrigin::Store;
+    let glsl = cube.glsl.as_mut().unwrap();
+    glsl.source = glsl.source.replacen(
+        "void main(){",
+        "uniform samplerCube u_env;\nvoid main(){",
+        1,
+    );
+    let end = glsl.source.rfind('}').unwrap();
+    glsl.source
+        .insert_str(end, "  o += texture(u_env, vec3(0.0, 0.0, 1.0)) * 0.0;\n");
+    set.definitions.push(cube);
+    let update = DefinitionsUpdate {
+        generation: Seq::new(1).unwrap(),
+        full: true,
+        upserts: set.definitions,
+        removals: vec![],
+    };
+    let sid = host.snapshot(&doc, SessionRole::Job, 1);
+    host.push_definitions(sid, update.clone());
+    for px in host.corner_pixels(sid, 1) {
+        assert!(
+            near(px.unwrap(), [0, 0, 255]),
+            "the runner's pixels: {px:?}"
+        );
+    }
+    assert!(host.host_requests.contains(&"shaderFallback"));
+    // The scratch files are gone once read.
+    let left = std::fs::read_dir(host.dir.join("scratch")).unwrap().count();
+    assert_eq!(left, 0);
+    // An export draws it too.
+    let snapshot = host.snapshot(&doc, SessionRole::JobSnapshot, 1);
+    host.push_definitions(snapshot, update);
+    host.send_request(
+        Request::SubmitJob(agent_export(
+            "job-cube",
+            "run-c",
+            snapshot,
+            ExportFormat::H264,
+            "mp4",
+        )),
+        None,
+        None,
+    );
+    assert!(host.run_until(Duration::from_secs(120), |h| {
+        terminal(h, "job-cube").is_some()
+    }));
+    let status = terminal(&host, "job-cube").unwrap();
+    assert_eq!(status.state, JobState::Done, "{:?}", status.error);
+}
+
+/// Level 1 SVG images (decision S1): the job engine asks host services for
+/// each raster (the window that owns the document draws it with today's
+/// code), once per bucket, and with no window the frame fails with the
+/// host's words instead of drawing anything else.
+#[test]
+fn level1_svg_frames_get_their_rasters_from_the_documents_window() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/></svg>"##;
+    let mut host = Host::new("svg", &[]);
+    let path = host.dir.join("art.svg");
+    std::fs::write(&path, svg).unwrap();
+    host.media.insert("art".into(), path);
+    let mut doc = project(false);
+    // First in the list: the top layer, clear of the others.
+    doc["layers"].as_array_mut().unwrap().insert(
+        0,
+        layer(
+            "svg",
+            "image",
+            json!({ "asset": "art", "fit": "contain", "w": 80, "h": 45 }),
+            270.0,
+            140.0,
+            1.0,
+        ),
+    );
+    doc["assets"]["art"] = json!({ "id": "art", "name": "art.svg", "kind": "image", "format": "svg", "w": 64, "h": 36, "dur": 0, "persisted": true });
+    host.svg_window = Ok([0x4C, 0x8D, 0xFF, 0xFF]);
+    let sid = host.snapshot(&doc, SessionRole::Job, 2);
+    let id = host.send_request(Request::AgentFrames(frames_request(2)), Some(sid), Some(2));
+    assert!(host.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
+    let images = frame_images(&host.answers[&id]);
+    let decoded =
+        image::load_from_memory_with_format(&images[0].2, image::ImageFormat::Jpeg).unwrap();
+    let px = decoded.to_rgb8().get_pixel(270, 140).0;
+    assert!(
+        px.iter()
+            .zip([0x4C, 0x8D, 0xFF])
+            .all(|(a, b)| a.abs_diff(b) <= 3),
+        "the window's raster at the layer's center: {px:?}"
+    );
+    // One ask for the bucket (`svgRasterDimensions(64, 36, 80, 45, …)`:
+    // 80 × 45), naming the document, the layer, and the SVG's bytes.
+    assert_eq!(host.compat_asks.len(), 1, "{:?}", host.compat_asks);
+    let ask = &host.compat_asks[0];
+    assert_eq!(ask.document.as_str(), "Ptest");
+    assert_eq!(
+        (ask.composition.as_str(), ask.layer.as_str()),
+        ("Ptest-root", "svg")
+    );
+    assert_eq!(ask.source, pm_protocol::snapshot::CompatSource::SvgImage);
+    let raster = ask.svg.as_ref().unwrap();
+    assert_eq!(
+        (raster.key.width, raster.key.height, raster.asset.as_str()),
+        (80, 45, "art")
+    );
+    let content = pm_render::vector::svg::content_hash(&host.media["art"]).unwrap();
+    assert_eq!(raster.key.content, content);
+    assert_eq!(content.len(), 64);
+
+    // No window has the project open: the frames fail with the host's words.
+    let mut lonely = Host::new("svg-lonely", &[]);
+    let path = lonely.dir.join("art.svg");
+    std::fs::write(&path, svg).unwrap();
+    lonely.media.insert("art".into(), path);
+    let sid = lonely.snapshot(&doc, SessionRole::Job, 2);
+    let id = lonely.send_request(Request::AgentFrames(frames_request(1)), Some(sid), Some(2));
+    assert!(lonely.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
+    let Message::Response {
+        body: Response::AgentFrames(result),
+        ..
+    } = &lonely.answers[&id]
+    else {
+        panic!()
+    };
+    match &result.outcomes[0] {
+        AgentFrameOutcome::Failed { error, .. } => {
+            assert!(
+                error.message.contains("open the project in a window"),
+                "{error:?}"
+            )
+        }
+        other => panic!("{other:?}"),
     }
 }

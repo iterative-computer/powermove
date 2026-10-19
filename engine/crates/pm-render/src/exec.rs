@@ -116,6 +116,8 @@ pub(crate) struct Exec<'a> {
     /// Where screen, overlay, and soft light run with linear blending on.
     pub blend_domain: BlendDomain,
     pub export: bool,
+    /// What a level 1 SVG raster miss draws (`crate::vector::svg_rasters`).
+    pub svg_policy: crate::vector::svg_rasters::SvgMissPolicy,
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
     pub depth_id: bool,
@@ -360,17 +362,44 @@ impl Exec<'_> {
                         }
                     }
                     Source::Vector(v) => {
-                        match self
-                            .vector
-                            .resolve(self.device, self.queue, v, self.precision)
-                        {
-                            Ok(view) => {
-                                // Level 2 content on a plane is resampled
-                                // (`crate::space25d::local`).
-                                self.prepare_level2(encoder, r, view.texture(), false);
-                                r.view = Some(view);
+                        if let crate::vector::VectorSource::SvgImage { key, asset, path } = &**v {
+                            use crate::vector::cache::SvgResolved;
+                            // Chromium's raster of today's bucket (decision
+                            // S1); a miss draws the content's latest bucket
+                            // in preview, nothing otherwise.
+                            match self.vector.resolve_svg(
+                                self.device,
+                                self.queue,
+                                key,
+                                asset,
+                                path,
+                                self.svg_policy,
+                                (&plan.composition, &draw.layer),
+                            ) {
+                                Ok(SvgResolved::Drawn(view) | SvgResolved::Substitute(view)) => {
+                                    self.prepare_level2(encoder, r, view.texture(), false);
+                                    r.view = Some(view);
+                                }
+                                Ok(SvgResolved::Missing) => {}
+                                Err(message) => {
+                                    self.fail(plan, draw, MediaFailure::Failed(message))
+                                }
                             }
-                            Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
+                        } else {
+                            match self
+                                .vector
+                                .resolve(self.device, self.queue, v, self.precision)
+                            {
+                                Ok(view) => {
+                                    // Level 2 content on a plane is resampled
+                                    // (`crate::space25d::local`).
+                                    self.prepare_level2(encoder, r, view.texture(), false);
+                                    r.view = Some(view);
+                                }
+                                Err(message) => {
+                                    self.fail(plan, draw, MediaFailure::Failed(message))
+                                }
+                            }
                         }
                     }
                     Source::Text(text) => {
@@ -418,6 +447,11 @@ impl Exec<'_> {
                                 self.taken.push(target);
                             }
                         }
+                        // Turned off by the watchdog: nothing drawn; its
+                        // report names the layer.
+                        Err(crate::shader_layers::exec::Missed::Disabled) => {}
+                        // Held by the hang guard: the frame is not presented.
+                        Err(crate::shader_layers::exec::Missed::Held) => {}
                         Err(crate::shader_layers::exec::Missed::NeedsFallback(what)) => self.fail(
                             plan,
                             draw,
@@ -426,6 +460,7 @@ impl Exec<'_> {
                             )),
                         ),
                         Err(crate::shader_layers::exec::Missed::Pending(request)) => {
+                            self.effects.fallback.blocked = true;
                             if !self.fallback_pending.iter().any(|p| p.key == request.key) {
                                 self.fallback_pending.push(request);
                             }

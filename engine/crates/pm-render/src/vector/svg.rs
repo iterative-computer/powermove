@@ -1,14 +1,16 @@
 //! SVG image layers (plan section 10, `image` (SVG); docs/engine/vector.md,
 //! "SVG images").
 //!
-//! `compat` level 2 SVG images are drawn at output resolution: as vectors
-//! (Vello coverage, the float paint pass) when the SVG is solid fills and
-//! strokes inside its box, otherwise by resvg into the device rectangle
-//! with the box and viewport as an antialiased clip. Level 1 SVG images
-//! (today's `<img>` per size bucket) stay routed: resvg's bucket rasters
-//! are outside the 2D parity class against Chromium's
-//! (`pm-vector/tests/svg.rs`). SVGs with text stay routed at every level
-//! (usvg's text feature is off; SVG text goes through `pm-text`).
+//! `compat` level 1 SVG images are today's `<img>` raster at today's size
+//! bucket, drawn by Chromium itself (decision S1): the plan names the
+//! bucket and the SVG's content hash ([`content_hash`]), and the raster
+//! comes from the renderer that owns the document (`super::cache`,
+//! "Level 1 SVG rasters"). `compat` level 2 SVG images are drawn at output
+//! resolution: as vectors (Vello coverage, the float paint pass) when the
+//! SVG is solid fills and strokes inside its box, otherwise by resvg into
+//! the device rectangle with the box and viewport as an antialiased clip.
+//! Level 2 SVGs with text stay unsupported (usvg's text feature is off;
+//! SVG text goes through `pm-text`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -69,6 +71,53 @@ pub fn document(path: &Path) -> Result<(Arc<SvgDocument>, Stamp), String> {
         doc: doc.clone(),
     });
     Ok((doc, stamp))
+}
+
+struct Hashed {
+    path: PathBuf,
+    stamp: Stamp,
+    content: String,
+}
+
+/// Content hashes of SVG files, most recently used last.
+static HASHES: Mutex<Vec<Hashed>> = Mutex::new(Vec::new());
+const MAX_HASHES: usize = 256;
+
+/// The SHA-256 (lowercase hex) of the file at `path` as it is on disk:
+/// the identity of a level 1 SVG raster (decision S1; the renderer hashes
+/// the bytes its `<img>` decoded and must find the same). Cached by path
+/// and stamp, so a replaced or relinked file hashes again.
+pub fn content_hash(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let stamp = stamp(path)?;
+    {
+        let mut hashes = HASHES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = hashes
+            .iter()
+            .position(|h| h.path == path && h.stamp == stamp)
+        {
+            let h = hashes.remove(i);
+            let content = h.content.clone();
+            hashes.push(h);
+            return Ok(content);
+        }
+    }
+    let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let content: String = Sha256::digest(&data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let mut hashes = HASHES.lock().unwrap_or_else(|e| e.into_inner());
+    hashes.retain(|h| h.path != path);
+    if hashes.len() >= MAX_HASHES {
+        hashes.remove(0);
+    }
+    hashes.push(Hashed {
+        path: path.to_path_buf(),
+        stamp,
+        content: content.clone(),
+    });
+    Ok(content)
 }
 
 /// How a level 2 SVG image layer is drawn.

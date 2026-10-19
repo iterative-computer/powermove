@@ -4,6 +4,7 @@ import type { EngineSnapshotRequest } from '../../shared/engine-ipc';
 import type { Request, Response } from '../../shared/engine-protocol';
 import { RemoteError } from './protocol';
 import { MAX_BLENDER_WAIT_MS, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, validSnapshotRequest, type SnapshotEngine } from './snapshots';
+import { FallbackInputs } from './fallback-inputs';
 
 const request = (over: Partial<EngineSnapshotRequest['snapshot']> = {}, top: Partial<EngineSnapshotRequest> = {}): EngineSnapshotRequest => ({
   generation: 2,
@@ -55,6 +56,8 @@ function engine(answer: (body: Request, revision: number | null) => Promise<Resp
 describe('snapshot requests', () => {
   it('accept the shapes the renderer sends and refuse the rest', () => {
     expect(validSnapshotRequest(request())).toBe(true);
+    expect(validSnapshotRequest(request({ captionsHidden: true }))).toBe(true);
+    expect(validSnapshotRequest(request({ captionsHidden: 'false' as never }))).toBe(false);
     expect(validSnapshotRequest(request({ target: { kind: 'layer', layer: 'L1', scale: 2, crop: { x: 0, y: 0, width: 8, height: 8 } } }))).toBe(true);
     expect(validSnapshotRequest(request({ outputSize: { width: 0, height: 2 } }))).toBe(false);
     expect(validSnapshotRequest(request({ outputSize: { width: 16_385, height: 2 } }))).toBe(false);
@@ -122,13 +125,31 @@ describe('SnapshotService', () => {
       return answer;
     });
     const service = new SnapshotService({ engine: e, takePixels: null, log: () => {} });
-    expect(await service.snapshot(9, request())).toEqual({ status: 'needsRenderer', revision: 41, fallback: [], compat: [] });
+    expect(await service.snapshot(9, request())).toEqual({ status: 'needsRenderer', revision: 41, fallback: [], compat: [], svg: [] });
     answer = { type: 'snapshot', outcome: 'empty', revision: 41 } as unknown as Response;
     expect(await service.snapshot(9, request())).toEqual({ status: 'empty', revision: 41 });
     answer = new RemoteError({ code: 'unsupported', scope: { kind: 'request', id: 1 }, message: 'The new engine cannot draw this frame: x.', retry: { kind: 'never' }, detail: null } as never);
     expect(await service.snapshot(9, request())).toMatchObject({ status: 'failed', code: 'unsupported', message: 'The new engine cannot draw this frame: x.' });
     answer = new Error('the interactive engine is not connected');
     expect(await service.snapshot(9, request())).toMatchObject({ status: 'failed', code: 'unavailable' });
+  });
+
+  it('hands an effect request its textures, which the engine sent ahead of the answer', async () => {
+    const inputs = new FallbackInputs();
+    const effect = { key: 'f'.repeat(64), layer: 'L1', vertex: 'v', fragment: 'f', width: 2, height: 1, calls: [], stage: 'bind', message: '', textures: 1, units: [], morePasses: [] };
+    const layer = { ...effect, key: '0'.repeat(64), textures: 0 };
+    const e = {
+      ...engine(async () => {
+        // Bands arrive on main's port before the answer they belong to.
+        inputs.receive({ type: 'shaderFallback', fallback: 'input', key: effect.key, texture: 0, width: 2, height: 1, row: 0, rows: 1, rgba16f: new Uint8Array(16).fill(9) });
+        return { type: 'snapshot', outcome: 'needsRenderer', revision: 41, fallback: [effect, layer], compat: [] } as unknown as Response;
+      }),
+      fallbackTextures: (key: string, count: number, width: number, height: number) => inputs.take(key, count, width, height)
+    };
+    const service = new SnapshotService({ engine: e, takePixels: null, log: () => {} });
+    const reply = await service.snapshot(9, request());
+    expect(reply).toMatchObject({ status: 'needsRenderer', fallback: [effect, layer], fallbackTextures: [{ key: effect.key, textures: [new Uint8Array(16).fill(9)] }] });
+    expect(inputs.held).toBe(0);
   });
 
   it('bounds the wait and frees a late segment', async () => {
@@ -217,6 +238,12 @@ describe('sync snapshots served by main’s session for the window', () => {
     expect(validSnapshotRequest(request({}, { fallbackPixels: [] }))).toBe(false);
     expect(validSnapshotRequest(request({}, { session: null, document: doc, fallbackPixels: [{ key: 'k', width: 1, height: 1, rgba16f: new Uint8Array(8) }] }))).toBe(true);
     expect(validSnapshotRequest(request({}, { session: null, document: doc, fallbackPixels: [{ key: 'k', width: 1, height: 1, rgba16f: new Uint8Array(4) }] }))).toBe(false);
+    const svgKey = { content: 'c'.repeat(64), width: 2, height: 1 };
+    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: svgKey, data: new Uint8Array(8) }] }))).toBe(true);
+    expect(validSnapshotRequest(request({}, { svgPixels: [{ key: svgKey, data: new Uint8Array(8) }] }))).toBe(false);
+    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: svgKey, data: new Uint8Array(4) }] }))).toBe(false);
+    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, content: 'C'.repeat(64) }, data: new Uint8Array(8) }] }))).toBe(false);
+    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, width: 9000 }, data: new Uint8Array(9000 * 4) }] }))).toBe(false);
   });
 
   it('snapshot main’s session, the host naming itself, with no renderer session or launch match needed', async () => {
@@ -225,7 +252,7 @@ describe('sync snapshots served by main’s session for the window', () => {
     const service = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare }, log: () => {} });
     const reply = await service.snapshot(12, request({}, { session: null, generation: 0, document: doc }));
     expect(reply.status).toBe('rendered');
-    expect(prepare).toHaveBeenCalledWith(12, doc, []);
+    expect(prepare).toHaveBeenCalledWith(12, doc, [], []);
     expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
     expect(service.status().windowSessions).toBe(1);
   });

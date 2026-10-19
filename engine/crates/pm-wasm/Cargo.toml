@@ -7,13 +7,13 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[lib]
-# cdylib: the module the renderer and the headless document host load;
-# rlib: native tests and the native side of the bit-identity check.
-crate-type = ["cdylib", "rlib"]
+# A plain rlib: native tests, pm-cli and the native side of the bit-identity
+# check link it. The module the renderer and the headless document host load
+# is the cdylib-only pm-wasm-module crate over it, so the release profile's
+# LTO applies to it (docs/engine/release-build.md).
 
 [dependencies]
-pm-model = { path = "../pm-model" }
+pm-model = { path = "../pm-model", features = ["read-tracking"] }
 pm-time = { path = "../pm-time" }
 pm-eval = { path = "../pm-eval" }
 pm-edit = { path = "../pm-edit" }

@@ -14,16 +14,24 @@ use std::sync::Arc;
 
 use pm_gpu::{Target, TargetPool};
 use pm_protocol::color::{Precision, WorkingEncoding};
-use pm_protocol::common::{DefinitionId, EffectInstanceId, LayerId};
 use pm_protocol::definitions::DefinitionKind;
 
 use super::plan::{Binding, EffectStep, Param, TransitionStep};
 use super::program::{Call, GpuProgram, active};
-use super::watchdog::{FrameTimer, Span};
+use super::watchdog::{FrameTimer, Span, Subject};
 use super::{Effects, SimpleOp};
 use crate::capability::{Feature, Unsupported};
 use crate::composite::effects::{Covered, EffectContext, EffectPasses, TransitionPasses};
 use crate::exec::Region;
+use crate::shader_layers::{FallbackPixels, FallbackUnit};
+use pm_protocol::error::{EngineError, ErrorCode, ErrorScope};
+
+pub(crate) fn parity_failure() -> pm_glsl::Failure {
+    pm_glsl::Failure::new(
+        pm_glsl::FailureStage::AngleParity,
+        "first-use native/ANGLE parity probe or persisted ANGLE pin",
+    )
+}
 
 /// `fullQuad(w, h)` as the column-major mat3 uniform.
 fn full_quad(w: u32, h: u32) -> [f32; 9] {
@@ -73,6 +81,101 @@ fn param_calls(program: &GpuProgram, params: &[Param], calls: &mut Vec<(String, 
     }
 }
 
+/// `setParam` for the fallback runner, which applies GL's rule itself:
+/// each parameter by name when that uniform is active in the linked
+/// program, else through its positional alias (`name|alias`, split by
+/// `shader_layers::fallback::call`).
+fn runner_param_calls(params: &[Param], calls: &mut Vec<(String, Call)>) {
+    for (index, p) in params.iter().enumerate() {
+        let name = format!("u_{}|{}{index}", p.key, if p.color { "u_c" } else { "u_p" });
+        let call = match p.value {
+            Binding::Float(v) => f(&[v]),
+            Binding::Color(rgb) => f(&rgb),
+        };
+        calls.push((name, call));
+    }
+}
+
+/// A target's pixels as binary16 RGBA in its row order (GL order for
+/// every pm-render target).
+pub(crate) fn read_half(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    target: &Target,
+) -> Result<FallbackPixels, String> {
+    let raw =
+        pm_gpu::readback::read_raw(device, queue, &target.texture).map_err(|e| e.to_string())?;
+    let rgba16f: Vec<u16> = match target.format() {
+        wgpu::TextureFormat::Rgba16Float => crate::shader_layers::fallback::halves(&raw),
+        wgpu::TextureFormat::Rgba32Float => raw
+            .chunks_exact(4)
+            .map(|c| pm_gpu::readback::f32_to_half(f32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+            .collect(),
+        other => return Err(format!("format {other:?}")),
+    };
+    Ok(FallbackPixels {
+        width: target.width(),
+        height: target.height(),
+        rgba16f,
+    })
+}
+
+/// Writes the runner's binary16 pixels into a working target (before the
+/// rest of the frame's commands run: they are submitted after it).
+fn write_half(queue: &wgpu::Queue, target: &Target, pixels: &FallbackPixels) {
+    let (bytes, texel): (Vec<u8>, u32) = match target.format() {
+        wgpu::TextureFormat::Rgba32Float => (
+            pixels
+                .rgba16f
+                .iter()
+                .flat_map(|h| pm_gpu::readback::half_to_f32(*h).to_le_bytes())
+                .collect(),
+            16,
+        ),
+        _ => (
+            crate::shader_layers::fallback::half_bytes(&pixels.rgba16f),
+            8,
+        ),
+    };
+    queue.write_texture(
+        target.texture.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(pixels.width * texel),
+            rows_per_image: Some(pixels.height),
+        },
+        wgpu::Extent3d {
+            width: pixels.width,
+            height: pixels.height,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+fn span_name(span: &Span) -> String {
+    match &span.subject {
+        Subject::Definition { id, .. } => id.as_str().to_owned(),
+        Subject::Code(_) => format!("The shader of layer {}", span.layer.as_str()),
+    }
+}
+
+fn span_scope(span: &Span) -> ErrorScope {
+    match (&span.subject, &span.instance) {
+        (Subject::Definition { id, .. }, Some(effect)) => ErrorScope::Effect {
+            layer: span.layer.clone(),
+            effect: effect.clone(),
+            definition: id.clone(),
+        },
+        (Subject::Definition { id, .. }, None) => ErrorScope::Definition {
+            definition: id.clone(),
+        },
+        _ => ErrorScope::Layer {
+            layer: span.layer.clone(),
+        },
+    }
+}
+
 /// The renderer's own effect state, lent to the chains it prepared.
 pub(crate) struct Native<'a> {
     pub effects: &'a mut Effects,
@@ -112,6 +215,24 @@ impl<'c> Gpu<'c> {
             linear: native.linear,
             unsupported: &mut *native.unsupported,
         })
+    }
+
+    /// Whether a definition is a built-in's (the hang guard keeps those).
+    fn builtin(&self, kind: DefinitionKind, id: &str) -> bool {
+        self.effects
+            .get(kind, id)
+            .is_some_and(|d| d.origin == pm_protocol::definitions::DefinitionOrigin::BuiltIn)
+    }
+
+    /// A program the hang guard holds (a frame that drew it may be running
+    /// away): left out, and the frame is not presented.
+    fn held(&mut self, kind: DefinitionKind, id: &str) -> bool {
+        self.effects
+            .watchdog
+            .hold(&super::watchdog::Subject::Definition {
+                kind,
+                id: id.into(),
+            })
     }
 
     fn take(&mut self, w: u32, h: u32) -> Target {
@@ -205,23 +326,77 @@ impl<'c> Gpu<'c> {
         let format = input.format();
         let (w, h) = (input.width(), input.height());
         let device = self.device;
-        if self
+        let source = self
             .effects
-            .program(device, DefinitionKind::Effect, &step.definition, format)
-            .is_err()
+            .parity_source(DefinitionKind::Effect, &step.definition);
+        let probe = source
+            .as_ref()
+            .map(|source| self.effects.parity.verdict(source));
+        let present = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.has_present(source));
+        let pending = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.pending(source));
+        if probe == Some(super::parity::Verdict::Runner)
+            || (probe == Some(super::parity::Verdict::Unknown) && pending)
         {
-            // The plan only prepares ready programs; a build failure here is
-            // engine-only (WebGL draws it): route the frame.
-            self.fallback(layer, &step.definition);
+            let mut result = self.runner_effect(
+                layer,
+                step,
+                input,
+                backdrop,
+                time,
+                parity_failure(),
+                (uv, origin, resolution),
+                None,
+            )?;
+            if step.clamp {
+                let clamped = self.take(w, h);
+                self.simple_pass(SimpleOp::Clamp, &result, &clamped);
+                self.taken.push(std::mem::replace(&mut result, clamped));
+            }
+            return Some(result);
+        }
+        if let Err(failure) =
+            self.effects
+                .program(device, DefinitionKind::Effect, &step.definition, format)
+        {
+            // WebGL draws it and the engine cannot: the fallback runner
+            // draws it when one is attached, else the frame routes.
+            if !self.effects.fallback.runner {
+                self.fallback(layer, &step.definition);
+                return None;
+            }
+            let mut result = self.runner_effect(
+                layer,
+                step,
+                input,
+                backdrop,
+                time,
+                failure,
+                (uv, origin, resolution),
+                None,
+            )?;
+            if step.clamp {
+                let clamped = self.take(w, h);
+                self.simple_pass(SimpleOp::Clamp, &result, &clamped);
+                self.taken.push(std::mem::replace(&mut result, clamped));
+            }
+            return Some(result);
+        }
+        let builtin = self.builtin(DefinitionKind::Effect, &step.definition);
+        if !builtin && self.held(DefinitionKind::Effect, &step.definition) {
             return None;
         }
         let span = self.timer.as_deref_mut().and_then(|t| {
-            t.begin(Span {
-                kind: DefinitionKind::Effect,
-                definition: DefinitionId::from(step.definition.as_str()),
-                layer: LayerId::from(layer),
-                instance: Some(EffectInstanceId::from(step.instance.as_str())),
-            })
+            t.begin(Span::definition(
+                DefinitionKind::Effect,
+                &step.definition,
+                layer,
+                Some(&step.instance),
+                builtin,
+            ))
         });
         if let (Some(timer), Some((b, _))) = (self.timer.as_deref(), span) {
             timer.mark(device, self.encoder, &input.view, b);
@@ -274,6 +449,23 @@ impl<'c> Gpu<'c> {
         }
         let mut result = outputs.pop().expect("at least one pass");
         self.taken.extend(outputs);
+        if probe == Some(super::parity::Verdict::Unknown) || present {
+            let answer = self.runner_effect(
+                layer,
+                step,
+                input,
+                backdrop,
+                time,
+                parity_failure(),
+                (uv, origin, resolution),
+                Some(&result),
+            );
+            self.taken.push(result);
+            // `None` is the runner's own outcome for the step (its request
+            // waits, or its failure is handled as for a pinned program):
+            // the unverified native frame is never presented.
+            result = answer?;
+        }
         if step.clamp {
             let clamped = self.take(w, h);
             self.simple_pass(SimpleOp::Clamp, &result, &clamped);
@@ -295,21 +487,53 @@ impl<'c> Gpu<'c> {
         let format = before.format();
         let (w, h) = (before.width(), before.height());
         let device = self.device;
-        if self
+        let source = self
             .effects
-            .program(device, DefinitionKind::Transition, &step.definition, format)
-            .is_err()
+            .parity_source(DefinitionKind::Transition, &step.definition);
+        let probe = source
+            .as_ref()
+            .map(|source| self.effects.parity.verdict(source));
+        let present = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.has_present(source));
+        let pending = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.pending(source));
+        if probe == Some(super::parity::Verdict::Runner)
+            || (probe == Some(super::parity::Verdict::Unknown) && pending)
         {
-            self.fallback(layer, &step.definition);
+            return self.runner_transition(
+                layer,
+                step,
+                before,
+                with_layer,
+                time,
+                parity_failure(),
+                None,
+            );
+        }
+        if let Err(failure) =
+            self.effects
+                .program(device, DefinitionKind::Transition, &step.definition, format)
+        {
+            if !self.effects.fallback.runner {
+                self.fallback(layer, &step.definition);
+                return None;
+            }
+            return self.runner_transition(layer, step, before, with_layer, time, failure, None);
+        }
+        let builtin = self.builtin(DefinitionKind::Transition, &step.definition);
+        if !builtin && self.held(DefinitionKind::Transition, &step.definition) {
             return None;
         }
         let span = self.timer.as_deref_mut().and_then(|t| {
-            t.begin(Span {
-                kind: DefinitionKind::Transition,
-                definition: DefinitionId::from(step.definition.as_str()),
-                layer: LayerId::from(layer),
-                instance: None,
-            })
+            t.begin(Span::definition(
+                DefinitionKind::Transition,
+                &step.definition,
+                layer,
+                None,
+                builtin,
+            ))
         });
         let (from, to) = if step.edge_in {
             (before, with_layer)
@@ -348,7 +572,364 @@ impl<'c> Gpu<'c> {
         if let (Some(timer), Some((_, e))) = (self.timer.as_deref(), span) {
             timer.mark(device, self.encoder, &out.view, e);
         }
+        if probe == Some(super::parity::Verdict::Unknown) || present {
+            let answer = self.runner_transition(
+                layer,
+                step,
+                before,
+                with_layer,
+                time,
+                parity_failure(),
+                Some(&out),
+            );
+            self.taken.push(out);
+            // As for an effect: the runner's outcome, never the unverified
+            // native frame.
+            return answer;
+        }
         Some(out)
+    }
+
+    /// An effect only the fallback runner draws (`super::fallback`): its
+    /// passes with the compositor's calls, `u_tex` chained through them,
+    /// `u_orig` the input, `u_backdrop` the stack beneath.
+    #[allow(clippy::too_many_arguments)]
+    fn runner_effect(
+        &mut self,
+        layer: &str,
+        step: &EffectStep,
+        input: &Target,
+        backdrop: Option<&Target>,
+        time: f64,
+        failure: pm_glsl::Failure,
+        (uv, origin, resolution): ([f64; 4], [f64; 2], [f64; 2]),
+        native: Option<&Target>,
+    ) -> Option<Target> {
+        let (w, h) = (input.width(), input.height());
+        let passes: Vec<Vec<(String, Call)>> = (0..step.passes.max(1))
+            .map(|pass| {
+                let mut calls: Vec<(String, Call)> = vec![("u_tex".into(), Call::I(0))];
+                if step.keep_orig {
+                    calls.push(("u_orig".into(), Call::I(1)));
+                }
+                if step.backdrop {
+                    calls.push(("u_backdrop".into(), Call::I(2)));
+                }
+                calls.push(("u_m".into(), Call::M3(full_quad(w, h))));
+                calls.push(("u_res".into(), f(&[f64::from(w), f64::from(h)])));
+                calls.push(("u_uv".into(), f(&uv)));
+                calls.push(("u_coordRes".into(), f(&resolution)));
+                calls.push(("u_pxOrigin".into(), f(&origin)));
+                calls.push((
+                    "u_texel".into(),
+                    f(&[1.0 / f64::from(w), 1.0 / f64::from(h)]),
+                ));
+                calls.push(("u_time".into(), f(&[time])));
+                calls.push(("u_pass".into(), Call::I(i32::from(pass))));
+                runner_param_calls(&step.params, &mut calls);
+                calls
+            })
+            .collect();
+        let backdrop = backdrop.filter(|_| step.backdrop);
+        let mut units = vec![FallbackUnit {
+            unit: 0,
+            texture: 0,
+            chain: true,
+        }];
+        if step.keep_orig {
+            units.push(FallbackUnit {
+                unit: 1,
+                texture: 0,
+                chain: false,
+            });
+        }
+        let mut textures = vec![input];
+        if let Some(b) = backdrop {
+            units.push(FallbackUnit {
+                unit: 2,
+                texture: 1,
+                chain: false,
+            });
+            textures.push(b);
+        }
+        let span = Span::definition(
+            DefinitionKind::Effect,
+            &step.definition,
+            layer,
+            Some(&step.instance),
+            self.builtin(DefinitionKind::Effect, &step.definition),
+        );
+        self.runner_step(span, passes, units, &textures, failure, native)
+    }
+
+    /// A transition only the fallback runner draws: `u_from` and `u_to`
+    /// the stack without and with the layer.
+    #[allow(clippy::too_many_arguments)]
+    fn runner_transition(
+        &mut self,
+        layer: &str,
+        step: &TransitionStep,
+        before: &Target,
+        with_layer: &Target,
+        time: f64,
+        failure: pm_glsl::Failure,
+        native: Option<&Target>,
+    ) -> Option<Target> {
+        let (w, h) = (before.width(), before.height());
+        let (from, to) = if step.edge_in {
+            (before, with_layer)
+        } else {
+            (with_layer, before)
+        };
+        let mut calls: Vec<(String, Call)> = vec![
+            ("u_from".into(), Call::I(0)),
+            ("u_to".into(), Call::I(1)),
+            ("u_m".into(), Call::M3(full_quad(w, h))),
+            ("u_res".into(), f(&[f64::from(w), f64::from(h)])),
+            ("u_uv".into(), f(&[0.0, 0.0, 1.0, 1.0])),
+            (
+                "u_texel".into(),
+                f(&[1.0 / f64::from(w), 1.0 / f64::from(h)]),
+            ),
+            ("u_time".into(), f(&[time])),
+            ("u_prog".into(), f(&[step.progress])),
+        ];
+        runner_param_calls(&step.params, &mut calls);
+        let units = vec![
+            FallbackUnit {
+                unit: 0,
+                texture: 0,
+                chain: false,
+            },
+            FallbackUnit {
+                unit: 1,
+                texture: 1,
+                chain: false,
+            },
+        ];
+        let span = Span::definition(
+            DefinitionKind::Transition,
+            &step.definition,
+            layer,
+            None,
+            self.builtin(DefinitionKind::Transition, &step.definition),
+        );
+        self.runner_step(span, vec![calls], units, &[from, to], failure, native)
+    }
+
+    /// The runner's pixels for a step, written into a working target, or
+    /// `None` when the step is left out: its request waits for the runner
+    /// (the frame is not presented), the hang guard holds it, or the runner
+    /// could not draw its program (skipped and reported, as WebGL skips a
+    /// program it refuses).
+    fn runner_step(
+        &mut self,
+        span: Span,
+        passes: Vec<Vec<(String, Call)>>,
+        units: Vec<FallbackUnit>,
+        textures: &[&Target],
+        failure: pm_glsl::Failure,
+        native: Option<&Target>,
+    ) -> Option<Target> {
+        let Subject::Definition { kind, id } = &span.subject else {
+            return None;
+        };
+        let (kind, id) = (*kind, id.as_str().to_owned());
+        if self.effects.watchdog.is_disabled(kind, &id)
+            || (!span.builtin && self.effects.watchdog.hold(&span.subject))
+        {
+            return None;
+        }
+        let source = self
+            .effects
+            .get(kind, &id)
+            .and_then(|d| d.glsl.as_ref())
+            .map(|g| g.source.clone())
+            .unwrap_or_default();
+        let program = super::fallback::program_id_of(pm_glsl::VERTEX, &source);
+        let (w, h) = (textures[0].width(), textures[0].height());
+        if let Some(why) = self.effects.fallback.failure(&program, w, h).cloned() {
+            // A probe whose reference can never be drawn (the failure was
+            // learned from another request of the program): pinned, so
+            // later frames take the runner's path without a native draw.
+            if native.is_some()
+                && self.effects.parity.verdict(&source) == super::parity::Verdict::Unknown
+            {
+                self.effects.parity.pin(&source);
+            }
+            self.runner_failed(&span, &program, &why);
+            return None;
+        }
+        // Its last request failed for a transient reason (the runner's
+        // context was lost): asked for again once the backoff passed, drawn
+        // without it until then and reported once.
+        // A job's host already tried it again in place: the job stops.
+        if self.effects.watchdog.policy() == super::watchdog::Policy::Job
+            && let Some(retry) = self.effects.fallback.retries.last(&program)
+        {
+            let why = retry.failure.clone();
+            self.runner_failed(&span, &program, &why);
+            return None;
+        }
+        let now = self.effects.watchdog.now();
+        if let Some(super::fallback::RetryState::Wait { failure, report }) =
+            self.effects.fallback.retries.state(&program, now)
+        {
+            if report {
+                let name = span_name(&span);
+                self.effects.watchdog.report(EngineError::new(
+                    ErrorCode::NotHeadlessRenderable,
+                    span_scope(&span),
+                    crate::effects::truncate(format!(
+                        "{name} could not be drawn by the WebGL fallback runner for now ({}: {}); it is skipped until the runner draws it again.",
+                        failure.reason, failure.message
+                    )),
+                ));
+            }
+            return None;
+        }
+        // A request already waits in this frame: what this step reads may
+        // depend on it, so it is asked for once that one is answered.
+        if self.effects.fallback.blocked {
+            return None;
+        }
+        // The frame so far runs now, so the textures hold this frame's
+        // pixels when they are read.
+        let device = self.device;
+        let queue = self.queue;
+        let done = std::mem::replace(
+            self.encoder,
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm frame (after a fallback readback)"),
+            }),
+        );
+        queue.submit([done.finish()]);
+        let mut pixels = Vec::with_capacity(textures.len());
+        for t in textures {
+            match read_half(device, queue, t) {
+                Ok(p) => pixels.push(Arc::new(p)),
+                Err(e) => {
+                    self.effects.watchdog.report(EngineError::new(
+                        ErrorCode::Internal,
+                        span_scope(&span),
+                        format!("{id}: the fallback runner's input could not be read ({e})"),
+                    ));
+                    return None;
+                }
+            }
+        }
+        let request = crate::shader_layers::fallback::request_with_textures(
+            span.layer.as_str().to_owned(),
+            source,
+            w,
+            h,
+            &passes,
+            units,
+            &pixels.iter().map(|p| p.as_ref()).collect::<Vec<_>>(),
+            &failure,
+        );
+        if let Some(native) = native {
+            if let Some(probed_frame) = self.effects.parity.take_present(&request.fragment) {
+                if probed_frame != request.key {
+                    // The caller returns the native target to the pool;
+                    // keep a distinct lease for the chain's output.
+                    return Some(self.copy_of(native));
+                }
+            } else if self.effects.parity.verdict(&request.fragment)
+                == super::parity::Verdict::Unknown
+                && !self.effects.parity.pending(&request.fragment)
+            {
+                match read_half(device, queue, native) {
+                    Ok(pixels) => {
+                        self.effects
+                            .parity
+                            .start(&request.key, &request.fragment, pixels)
+                    }
+                    Err(error) => self.effects.watchdog.report(EngineError::new(
+                        ErrorCode::Internal,
+                        span_scope(&span),
+                        format!("{id}: shader parity readback failed ({error})"),
+                    )),
+                }
+            }
+        }
+        if let Some(result) = self.effects.fallback.result(&request.key)
+            && result.width == w
+            && result.height == h
+        {
+            self.effects.parity.answer(&request.key, &result);
+            self.effects.parity.take_present(&request.fragment);
+            let out = self.take(w, h);
+            write_half(queue, &out, &result);
+            return Some(out);
+        }
+        self.effects.fallback.wait(Arc::new(request), pixels);
+        None
+    }
+
+    /// The runner could not draw a step's program: reported once; a draw
+    /// past the runner's deadline is a runaway (the watchdog turns it off,
+    /// or stops a job); a job cannot deliver without a program WebGL draws
+    /// today, so any other failure but WebGL refusing it stops the job.
+    fn runner_failed(
+        &mut self,
+        span: &Span,
+        program: &str,
+        why: &crate::shader_layers::FallbackFailure,
+    ) {
+        let name = span_name(span);
+        let job = self.effects.watchdog.policy() == super::watchdog::Policy::Job;
+        if why.reason == "watchdog" {
+            self.effects.watchdog.runner_runaway(
+                span,
+                &name,
+                format!(
+                    "{name} did not finish drawing in the WebGL fallback runner ({}), so it is turned off until it is registered or reloaded again.",
+                    why.message
+                ),
+            );
+            return;
+        }
+        if job && why.reason != "compile" {
+            self.effects.fallback.fatal.get_or_insert_with(|| {
+                format!(
+                    "{name} needs the WebGL fallback runner, which could not draw it ({}: {}).",
+                    why.reason, why.message
+                )
+            });
+            return;
+        }
+        if !self.effects.fallback.report_once(program) {
+            return;
+        }
+        let (code, message) = match why.reason.as_str() {
+            "unavailable" => (
+                ErrorCode::NotHeadlessRenderable,
+                format!(
+                    "{name} needs the WebGL fallback runner, which is not available here ({}).",
+                    why.message
+                ),
+            ),
+            "tooLarge" => (
+                ErrorCode::BudgetExceeded,
+                format!(
+                    "{name} needs the WebGL fallback runner, and its {} is past this GPU's WebGL limit; it is skipped at this size.",
+                    why.message
+                ),
+            ),
+            reason => (
+                ErrorCode::ShaderCompile,
+                format!(
+                    "{name} could not be drawn by the WebGL fallback runner ({reason}: {}); it is skipped.",
+                    why.message
+                ),
+            ),
+        };
+        self.effects.watchdog.report(EngineError::new(
+            code,
+            span_scope(span),
+            crate::effects::truncate(message),
+        ));
     }
 
     /// One draw of a legacy program into `out` (cleared to transparent,

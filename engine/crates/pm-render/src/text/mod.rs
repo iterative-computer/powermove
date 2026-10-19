@@ -14,6 +14,7 @@
 //! anchors are `pm-eval`'s.
 
 pub mod gpu;
+pub mod served;
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -57,6 +58,21 @@ pub trait TextFonts: Send {
     /// cached rasters of an older generation are dropped.
     fn generation(&self) -> u64 {
         0
+    }
+    /// Called before each text or captions layer is laid out: fonts whose
+    /// registry changed start over here (never in the middle of a layer,
+    /// whose runs name the current faces).
+    fn sync(&mut self) {}
+    /// Registry questions left unanswered since the last call (a served
+    /// registry that did not answer): the layer that met them is refused,
+    /// never drawn with another font.
+    fn take_failures(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    /// What the next layers are laid out for (the window whose font cache
+    /// seeds they measure with); applied at the next [`TextFonts::sync`].
+    fn set_seed_scope(&mut self, scope: served::SeedScope) {
+        let _ = scope;
     }
     /// Level 2 layout for `compat` ≥ 2 text layers, when the host provides
     /// it (`None`: such layers are refused).
@@ -120,14 +136,33 @@ impl<R: FontResolver + Send> TextFonts for pm_eval::text_measure::CompatMeasure<
     }
 }
 
+/// Level 1 glyph masks as Canvas2D gets them on this platform: CoreGraphics
+/// on macOS (`pm_text::render::cgmask`); elsewhere none (outlines with the
+/// Canvas2D profile).
+fn platform_masks() -> Option<Box<dyn pm_text::render::scene::MaskSource + Send>> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(Box::new(pm_text::render::cgmask::CgMasks::new()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Everything text rendering keeps across frames.
 pub struct TextContext {
     pub(crate) fonts: Option<Box<dyn TextFonts>>,
     outlines: Outlines,
     bitmaps: Bitmaps,
+    /// Level 1 glyph masks from the platform rasterizer (CoreGraphics on
+    /// macOS), as Canvas2D draws them.
+    masks: Option<Box<dyn pm_text::render::scene::MaskSource + Send>>,
     /// The level 1 profile (Canvas2D).
     profile: Profile,
     generation: u64,
+    /// The fonts' own generation when last synced.
+    fonts_generation: u64,
     captions_hidden: bool,
     unsupported: Vec<String>,
 }
@@ -138,8 +173,10 @@ impl Default for TextContext {
             fonts: None,
             outlines: Outlines::new(),
             bitmaps: Bitmaps::new(),
+            masks: platform_masks(),
             profile: Profile::CANVAS2D,
             generation: 0,
+            fonts_generation: 0,
             captions_hidden: false,
             unsupported: Vec::new(),
         }
@@ -149,13 +186,47 @@ impl Default for TextContext {
 impl TextContext {
     pub fn set_fonts(&mut self, fonts: Option<Box<dyn TextFonts>>) {
         self.fonts = fonts;
+        self.forget_glyphs();
+        self.generation += 1;
+        self.fonts_generation = self.fonts.as_ref().map_or(0, |f| f.generation());
+    }
+
+    /// Before a layer: the fonts catch up with their registry, and a new
+    /// font generation makes every later raster key new (cached rasters of
+    /// the old fonts are never reused).
+    fn sync_fonts(&mut self) {
+        if let Some(fonts) = self.fonts.as_deref_mut() {
+            fonts.sync();
+            let g = fonts.generation();
+            if g != self.fonts_generation {
+                self.fonts_generation = g;
+                self.generation += 1;
+                self.forget_glyphs();
+            }
+        }
+    }
+
+    /// Drops every glyph drawn from the previous fonts: outlines, color
+    /// bitmaps, platform masks and their CTFonts. Glyph caches key on
+    /// `FontBytes::id`, which is never reused, so a replaced font can never
+    /// hit an old entry; this releases the old entries.
+    fn forget_glyphs(&mut self) {
         self.outlines.clear();
         self.bitmaps.clear();
-        self.generation += 1;
+        if let Some(masks) = self.masks.as_deref_mut() {
+            masks.reset();
+        }
     }
 
     pub fn has_fonts(&self) -> bool {
         self.fonts.is_some()
+    }
+
+    /// Where level 1 glyph masks come from (`None`: outlines with the
+    /// profile's stem darkening).
+    pub fn set_masks(&mut self, masks: Option<Box<dyn pm_text::render::scene::MaskSource + Send>>) {
+        self.masks = masks;
+        self.generation += 1;
     }
 
     /// The level 1 profile (tests and the fitting tool).
@@ -179,6 +250,9 @@ impl TextContext {
 
     /// What the last layer built could not draw.
     pub(crate) fn take_unsupported(&mut self) -> Vec<String> {
+        if let Some(fonts) = self.fonts.as_deref_mut() {
+            self.unsupported.extend(fonts.take_failures());
+        }
         std::mem::take(&mut self.unsupported)
     }
 }
@@ -408,12 +482,26 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
 }
 
 impl TextContext {
-    fn painter(&mut self) -> (Painter<'_>, &mut dyn TextFonts, &mut Vec<String>) {
+    fn painter(
+        &mut self,
+        viewport: (u32, u32),
+    ) -> (Painter<'_>, &mut dyn TextFonts, &mut Vec<String>) {
         let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
         (
             Painter {
                 outlines: &mut self.outlines,
                 bitmaps: &mut self.bitmaps,
+                // Platform masks are Canvas2D's look: level 1 only (level 2
+                // captions swap in the CoreText profile and draw outlines).
+                masks: if self.profile == Profile::CANVAS2D {
+                    self.masks
+                        .as_deref_mut()
+                        .map(|m| m as &mut dyn pm_text::render::scene::MaskSource)
+                } else {
+                    None
+                },
+                viewport: Some(viewport),
+                path_rasterizer: Some(&pm_vector::canvas2d::text::RASTERIZER),
                 profile: self.profile.clone(),
                 unsupported: Vec::new(),
             },
@@ -460,6 +548,7 @@ impl TextContext {
         time: f64,
         scale: f64,
     ) -> JsResult<Option<TextQuad>> {
+        self.sync_fonts();
         let d = scope.resolved_text_content(layer, time)?;
         let stored = pm_eval::node::member(Some(layer), "d");
         let has = |key: &str| {
@@ -487,7 +576,7 @@ impl TextContext {
                     height: ch,
                     items: Vec::new(),
                 };
-                let (mut painter, fonts, unsupported) = self.painter();
+                let (mut painter, fonts, unsupported) = self.painter((cw, ch));
                 for (g, baseline) in a.glyphs.iter().zip(&a.baselines) {
                     if g.opacity.is_nan() || g.opacity <= 0.0 {
                         continue;
@@ -544,7 +633,7 @@ impl TextContext {
             height: ch,
             items: Vec::new(),
         };
-        let (mut painter, fonts, unsupported) = self.painter();
+        let (mut painter, fonts, unsupported) = self.painter((cw, ch));
         let lines = fonts.line_runs(&tc);
         let m = Affine::scale(density);
         for line in &lines {
@@ -570,6 +659,7 @@ impl TextContext {
         m: Affine,
         target: (u32, u32),
     ) -> JsResult<Option<TextPlan>> {
+        self.sync_fonts();
         let stored = pm_eval::node::member(Some(layer), "d");
         let has = |key: &str| {
             pm_eval::node::member(stored, key)
@@ -624,6 +714,9 @@ impl TextContext {
         let mut painter = Painter {
             outlines: &mut self.outlines,
             bitmaps: &mut self.bitmaps,
+            masks: None,
+            viewport: None,
+            path_rasterizer: None,
             profile: Profile::CORETEXT,
             unsupported: Vec::new(),
         };
@@ -636,7 +729,7 @@ impl TextContext {
             let face = pm_text::render::outline::FaceRef {
                 data: data.as_slice(),
                 index: 0,
-                id: data.ptr_id(),
+                id: data.id(),
             };
             let refs = [pm_text::render::scene::Run {
                 face,
@@ -665,6 +758,7 @@ impl TextContext {
         m: Affine,
         target: (u32, u32),
     ) -> JsResult<Option<TextPlan>> {
+        self.sync_fonts();
         let frame = {
             let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
             scope.caption_frame(layer, time, fonts.measure())?
@@ -692,6 +786,7 @@ impl TextContext {
         time: f64,
         scale: f64,
     ) -> JsResult<Option<TextQuad>> {
+        self.sync_fonts();
         let frame = {
             let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
             scope.caption_frame(layer, time, fonts.measure())?
@@ -751,7 +846,25 @@ impl TextContext {
                 block.y1 - block.y0,
                 style.box_radius,
             );
-            if let Some(item) = fill_path(path, m0, fill, 1.0) {
+            // With platform masks (Canvas2D's look), the box is filled as
+            // the GPU canvas fills paths: 4× multisampled.
+            let item = if self.masks.is_some() && self.profile == Profile::CANVAS2D {
+                pm_text::render::scene::fill_rounded_rect_msaa(
+                    (
+                        0.0,
+                        0.0,
+                        block.x1 - block.x0,
+                        block.y1 - block.y0,
+                        style.box_radius,
+                    ),
+                    m0,
+                    fill,
+                    1.0,
+                )
+            } else {
+                fill_path(path, m0, fill, 1.0)
+            };
+            if let Some(item) = item {
                 scene.items.push(item);
             }
         }
@@ -767,7 +880,7 @@ impl TextContext {
         // keeps the canvas default, black.
         let stroke_color =
             hex_to_rgba(&style.stroke_color.to_string_lossy(), 1.0).unwrap_or(color::BLACK);
-        let (mut painter, fonts, unsupported) = self.painter();
+        let (mut painter, fonts, unsupported) = self.painter((scene.width, scene.height));
         for line in &layout.lines {
             for word in &line.words {
                 let state =
@@ -914,5 +1027,74 @@ mod tests {
             hex_to_rgba("#1g0000", 1.0),
             Some([1.0 / 255.0, 0.0, 0.0, 1.0])
         );
+    }
+
+    /// A font change (a new generation from the registry, or new fonts)
+    /// drops every glyph cache, platform masks and their CTFonts included,
+    /// and makes later raster keys new.
+    #[test]
+    fn font_changes_drop_glyph_caches() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        struct Fonts(Arc<AtomicU64>);
+        impl TextFonts for Fonts {
+            fn measure(&mut self) -> &mut dyn TextMeasure {
+                unreachable!("not laid out")
+            }
+            fn line_runs(&mut self, _: &TextContent) -> Vec<LineRuns> {
+                unreachable!("not laid out")
+            }
+            fn text_runs(&mut self, _: &TextContent, _: &str, _: f64) -> Vec<GlyphRun> {
+                unreachable!("not laid out")
+            }
+            fn face(&mut self, _: FaceId) -> &FaceInfo {
+                unreachable!("not laid out")
+            }
+            fn generation(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+        struct Masks(Arc<AtomicUsize>);
+        impl pm_text::render::scene::MaskSource for Masks {
+            fn mask(
+                &mut self,
+                _: pm_text::render::outline::FaceRef<'_>,
+                _: &[(u32, f32)],
+                _: u16,
+                _: f32,
+                _: pm_text::render::scene::MaskStyle,
+                _: kurbo::Rect,
+            ) -> Option<Arc<pm_text::render::scene::GlyphMask>> {
+                None
+            }
+            fn preblend(&self, _: [f64; 3]) -> [u8; 256] {
+                [0; 256]
+            }
+            fn reset(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let generation = Arc::new(AtomicU64::new(1));
+        let resets = Arc::new(AtomicUsize::new(0));
+        let mut cx = TextContext::default();
+        cx.set_masks(Some(Box::new(Masks(resets.clone()))));
+        cx.set_fonts(Some(Box::new(Fonts(generation.clone()))));
+        assert_eq!(
+            resets.load(Ordering::SeqCst),
+            1,
+            "new fonts reset the masks"
+        );
+        let key = cx.generation;
+        cx.sync_fonts();
+        assert_eq!((resets.load(Ordering::SeqCst), cx.generation), (1, key));
+        generation.store(2, Ordering::SeqCst);
+        cx.sync_fonts();
+        assert_eq!(
+            resets.load(Ordering::SeqCst),
+            2,
+            "a new generation resets the masks"
+        );
+        assert_ne!(cx.generation, key, "and re-keys rasters");
+        cx.sync_fonts();
+        assert_eq!(resets.load(Ordering::SeqCst), 2);
     }
 }

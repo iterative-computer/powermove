@@ -33,7 +33,11 @@
 #![allow(clippy::result_large_err)]
 
 pub(crate) mod blender;
+mod compile;
+mod definitions;
+mod fallback;
 pub mod gate;
+mod svg;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -46,8 +50,8 @@ use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
 use pm_engine::priority::Scheduler;
 use pm_export::render::{
     ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
-    encode_jpeg, encode_png, offline_media, plan_export_with, render_still,
-    run_export_with_blender, sink_for, to_rgba8,
+    encode_jpeg, encode_png, offline_media, plan_export_for, render_still, run_export_with_blender,
+    sink_for, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
 use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
@@ -101,6 +105,22 @@ enum Work {
     },
 }
 
+impl Work {
+    /// Whose font cache seeds the work's text measures with.
+    fn seed_scope(&self) -> pm_render::text::served::SeedScope {
+        match self {
+            Work::Frames { port, document, .. } => pm_render::text::served::SeedScope {
+                port: Some(port.0),
+                session: Some(document.session.get()),
+            },
+            Work::Export { document, .. } => pm_render::text::served::SeedScope {
+                port: None,
+                session: Some(document.session.get()),
+            },
+        }
+    }
+}
+
 struct JobRecord {
     class: PriorityClass,
     run: Option<AgentRunId>,
@@ -136,6 +156,8 @@ struct State {
     stats: ServiceStats,
     /// Blender surfaces received for the lanes' Blender requests.
     blender: blender::Delivered,
+    /// Definition pushes waiting for the compile worker's answer.
+    compiles: compile::Queue,
 }
 
 /// Ended job records kept.
@@ -178,6 +200,8 @@ struct Shared {
     gate: Arc<Gate>,
     wake: Wake,
     gpu: Mutex<Option<(wgpu::Device, wgpu::Queue)>>,
+    /// The engine's font service: lanes' renderers lay text out through it.
+    fonts: Option<Arc<crate::fonts::hub::FontHub>>,
 }
 
 impl Shared {
@@ -325,13 +349,30 @@ impl Shared {
     }
 
     fn renderer(&self) -> Result<Renderer, String> {
+        let (device, queue) = self.gpu()?;
+        let mut renderer = Renderer::new(device, queue);
+        if let Some(hub) = &self.fonts {
+            renderer.set_text_fonts(Some(Box::new(pm_render::text::served::ServedFonts::new(
+                hub.clone(),
+                hub.clone(),
+            ))));
+        }
+        Ok(renderer)
+    }
+
+    /// The service's device (one per process, shared by the lanes).
+    fn gpu(&self) -> Result<(wgpu::Device, wgpu::Queue), String> {
         let mut gpu = self.gpu.lock().unwrap_or_else(|e| e.into_inner());
         if gpu.is_none() {
             let g = pm_gpu::Gpu::new("pm-job").map_err(|e| e.to_string())?;
             *gpu = Some((g.device, g.queue));
         }
         let (device, queue) = gpu.as_ref().expect("set above");
-        Ok(Renderer::new(device.clone(), queue.clone()))
+        Ok((device.clone(), queue.clone()))
+    }
+
+    fn device(&self) -> Result<wgpu::Device, String> {
+        self.gpu().map(|(device, _)| device)
     }
 }
 
@@ -413,6 +454,15 @@ impl JobEngineService {
     /// Starts the three lanes. `wake` must make the engine's host call
     /// [`pm_engine::Engine::pump`] soon.
     pub fn start(wake: Wake) -> Result<JobEngineService, String> {
+        Self::start_with_fonts(wake, None)
+    }
+
+    /// [`JobEngineService::start`] with the engine's font hub: lanes draw
+    /// text and captions (`crate::fonts::hub`).
+    pub fn start_with_fonts(
+        wake: Wake,
+        fonts: Option<Arc<crate::fonts::hub::FontHub>>,
+    ) -> Result<JobEngineService, String> {
         let state = State {
             user: Some(Scheduler::new(EngineProcess::Job)),
             ..State::default()
@@ -424,6 +474,7 @@ impl JobEngineService {
             gate: Arc::new(Gate::new()),
             wake,
             gpu: Mutex::new(None),
+            fonts,
         });
         let mut threads = Vec::new();
         for (lane, name) in [
@@ -444,6 +495,13 @@ impl JobEngineService {
                 run_probes(&probes)
             })
             .map_err(|e| format!("could not start the pm-job-probes lane: {e}"))?;
+        threads.push(handle);
+        let compiles = shared.clone();
+        let handle =
+            pm_engine::qos::spawn_engine_thread(EngineProcess::Job, "pm-job-compile", move || {
+                compile::run(&compiles)
+            })
+            .map_err(|e| format!("could not start the pm-job-compile worker: {e}"))?;
         threads.push(handle);
         Ok(JobEngineService { shared, threads })
     }
@@ -743,6 +801,23 @@ impl JobService for JobEngineService {
         (self.shared.wake)();
     }
 
+    fn definitions_pushed(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        session: SessionId,
+        update: &pm_protocol::definitions::DefinitionsUpdate,
+    ) -> bool {
+        self.shared.lock().compiles.0.push_back(compile::Pending {
+            port,
+            id,
+            session,
+            update: update.clone(),
+        });
+        self.shared.work.notify_all();
+        true
+    }
+
     fn port_closed(&mut self, port: PortId) {
         let mut st = self.shared.lock();
         let keep: VecDeque<Work> = st
@@ -800,6 +875,7 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
     };
     let mut renderer: Option<Renderer> = None;
     let mut blender = LaneBlender::default();
+    let mut definitions = definitions::LaneDefinitions::default();
     while let Some(work) = next_work(shared, lane) {
         if renderer.is_none() {
             match shared.renderer() {
@@ -811,6 +887,46 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
             }
         }
         let r = renderer.as_mut().expect("set above");
+        // The work's own definitions (contract 10), before it is planned.
+        let loaded = match &work {
+            Work::Frames { document, .. } | Work::Export { document, .. } => {
+                definitions.use_for(r, document)
+            }
+        };
+        if let Err(message) = loaded {
+            fail_work(shared, work, ErrorCode::InvalidMessage, &message);
+            continue;
+        }
+        // Programs only the WebGL runner draws run in a window's runner
+        // through the host (contract 14): the job waits for them.
+        let (session, cancel) = match &work {
+            Work::Frames {
+                document, cancel, ..
+            }
+            | Work::Export {
+                document, cancel, ..
+            } => (document.session, cancel.clone()),
+        };
+        r.set_fallback_host(Some(Arc::new(fallback::HostFallback::new(
+            shared.clone(),
+            session,
+            cancel,
+        ))));
+        // Text measures with the font cache seeds of the window the work is
+        // for: the requesting port's window, or the window main opened the
+        // session for (an export).
+        r.set_text_seed_scope(work.seed_scope());
+        // Level 1 SVG rasters come from the document's window through host
+        // services (decision S1); job frames (exports, agent frames) never
+        // draw a stand-in for one.
+        r.set_svg_wait(true);
+        let document = match &work {
+            Work::Frames { document, .. } | Work::Export { document, .. } => document,
+        };
+        r.set_svg_source(Some(Arc::new(svg::HostSvgRasters::new(
+            shared.clone(),
+            document,
+        ))));
         match work {
             Work::Frames {
                 port,
@@ -846,6 +962,7 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
                 &mut blender,
             ),
         }
+        r.set_svg_source(None);
         // Keep the pool small between work items (lease pressure).
         r.trim(64 << 20);
     }
@@ -1302,7 +1419,7 @@ fn run_job(
         Err(e) => return finish(JobState::Failed, None, Some(e)),
     };
     // Routing first: nothing is created for work the engine cannot do.
-    let mut plan = match plan_export_with(&export, stage.is_some()) {
+    let mut plan = match plan_export_for(&export, stage.is_some(), renderer) {
         Ok(plan) => plan,
         Err(e) => {
             let state = if matches!(e, JobError::Cancelled) {

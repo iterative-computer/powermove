@@ -197,12 +197,7 @@ pub struct Build<'r> {
     pub(crate) reuse: Option<&'r mut crate::reuse::DrawReuse>,
 }
 
-/// Facts of a composition's layer list a compositing pass reads.
-struct PassFacts {
-    owners: pm_eval::groups::LayerOwners,
-    matte_sources: MatteSources,
-    solo: bool,
-}
+use crate::pass_facts::PassFacts;
 
 impl Build<'_> {
     fn pass_facts(&mut self, layers: &[Node], all: &[&Node]) -> std::sync::Arc<PassFacts> {
@@ -210,11 +205,10 @@ impl Build<'_> {
         if let Some((_, facts)) = self.passes.iter().find(|(k, _)| *k == key) {
             return facts.clone();
         }
-        let facts = std::sync::Arc::new(PassFacts {
-            owners: pm_eval::groups::LayerOwners::of(all),
-            matte_sources: MatteSources::of(all),
-            solo: all.iter().any(|l| js::flag(l, "solo")),
-        });
+        let facts = match self.reuse.as_deref_mut() {
+            Some(reuse) => reuse.pass_facts(layers, all),
+            None => std::sync::Arc::new(PassFacts::of(all)),
+        };
         self.passes.push((key, facts.clone()));
         facts
     }
@@ -510,51 +504,6 @@ pub(crate) fn comp_pass<'d>(
     }
     b.pass3d.pop();
     plan
-}
-
-/// Every layer's `matteSource` (`includes`, SameValueZero), as a set: the
-/// pass asks for each of its layers, and a list scan per layer was 3% of a
-/// viewer frame at 500 layers (docs/engine/perf.md).
-struct MatteSources {
-    undefined: bool,
-    strings: std::collections::BTreeSet<JsString>,
-    /// Numbers, booleans, `null`, and objects: rare, compared one by one.
-    others: Vec<JsValue>,
-}
-
-impl MatteSources {
-    fn of(layers: &[&Node]) -> MatteSources {
-        let mut set = MatteSources {
-            undefined: false,
-            strings: std::collections::BTreeSet::new(),
-            others: Vec::new(),
-        };
-        for l in layers {
-            match node::get(l, b"matteSource").to_js() {
-                JsValue::Undefined => set.undefined = true,
-                JsValue::String(s) => {
-                    set.strings.insert(s);
-                }
-                other => set.others.push(other),
-            }
-        }
-        set
-    }
-
-    fn contains(&self, id: &JsValue) -> bool {
-        match id {
-            JsValue::Undefined => self.undefined,
-            JsValue::String(s) => self.strings.contains(s),
-            _ => self.others.iter().any(|m| same_value_zero(m, id)),
-        }
-    }
-}
-
-fn same_value_zero(a: &JsValue, b: &JsValue) -> bool {
-    match (a, b) {
-        (JsValue::Number(x), JsValue::Number(y)) => x == y || (x.is_nan() && y.is_nan()),
-        _ => pm_eval::js_sem::strict_eq(a, b),
-    }
 }
 
 /// `groupContainsSolo(group, layers, ancestors)`.
@@ -1228,24 +1177,63 @@ fn native_content_quad<'d>(
             let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
             let format = js::string(&rec("format")).to_ascii_lowercase();
             if ty == "image" && format == "svg" {
-                // Valid level 1 paint records remain gated. A broken
-                // XML/image document paints nothing, as Chromium's <img>
-                // does. usvg paint support does not determine corruption.
                 if !crate::vector::level2(layer) {
+                    // Level 1 (decision S1): today's `<img>` raster at
+                    // today's bucket, drawn by Chromium in the document's
+                    // renderer, sampled as today's image texture. A
+                    // document Chromium is measured to show as a broken
+                    // `<img>` paints nothing, as there.
                     match pm_media::image::svg::broken_image_file(&path) {
-                        Err(e) => b.failures.push(LayerFailure {
-                            composition: comp_id,
-                            layer: js::layer_id(layer),
-                            message: format!("{}: {e}", path.display()),
-                        }),
-                        Ok(true) => {}
-                        Ok(false) => b.unsupported.push(Unsupported::layer(
-                            &comp_id,
-                            layer,
-                            Feature::SvgImage,
-                        )),
+                        Err(e) => {
+                            b.failures.push(LayerFailure {
+                                composition: comp_id,
+                                layer: js::layer_id(layer),
+                                message: format!("{}: {e}", path.display()),
+                            });
+                            return Ok(None);
+                        }
+                        Ok(true) => return Ok(None),
+                        Ok(false) => {}
                     }
-                    return Ok(None);
+                    let content = match crate::vector::svg::content_hash(&path) {
+                        Ok(c) => c,
+                        Err(message) => {
+                            b.failures.push(LayerFailure {
+                                composition: comp_id,
+                                layer: js::layer_id(layer),
+                                message,
+                            });
+                            return Ok(None);
+                        }
+                    };
+                    // `const bw = d.w || W, bh = d.h || H` with the live
+                    // asset's `w`/`h` (its natural size, persisted).
+                    let sw = js::or_number(&rec("w"), 1.0);
+                    let sh = js::or_number(&rec("h"), 1.0);
+                    let bw = js::or_number(js::get(&d, "w"), wf);
+                    let bh = js::or_number(js::get(&d, "h"), hf);
+                    let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
+                    // `svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H))`.
+                    let world = scaled_world(scope, layer, time, scale)?;
+                    let (width, height, _) = pm_vector::render::svg::svg_raster_dimensions(
+                        sw, sh, bw, bh, &world, 8192.0,
+                    );
+                    return Ok(Some(Quad::Texture {
+                        source: Source::Vector(Box::new(crate::vector::VectorSource::SvgImage {
+                            key: pm_protocol::svg_raster::SvgRasterKey {
+                                content,
+                                width,
+                                height,
+                            },
+                            asset: asset_id,
+                            path,
+                        })),
+                        w: bw,
+                        h: bh,
+                        ax: bw / 2.0,
+                        ay: bh / 2.0,
+                        uv,
+                    }));
                 }
                 if let Err(message) = crate::vector::svg::document(&path) {
                     b.failures.push(LayerFailure {

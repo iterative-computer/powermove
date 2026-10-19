@@ -450,3 +450,153 @@ The following edits outside them are intentional and local:
 
 Idle/close policy belongs to the agents lane: workers remain alive until explicit
 close or shutdown; no competing eviction policy was added here.
+
+## P3/B2 follow-up: root scopes, detached scopes, activation readiness
+
+The round 5 root-scope and boot-window entries above are superseded here.
+`Comps.get(rootId)` returns a fresh `rootComp` object sharing the open project's
+layers. A repeated numeric answer at exactly the same time, revision, layer,
+property, key and scope is retained from pm-wasm; writes, scope changes and module
+death invalidate it. This is an additional small hot-path edit in native.ts beyond
+scope addressing, needed for the paired query-time gate.
+
+**The wrapper is not the project (round 4).** Rounds 1 to 3 addressed any scope
+with `cur.layers === proj.layers && cur.id === proj.compId` as the open
+composition. That is exact for keyed channels but not for expressions: legacy
+`PM.ev`/`PM.evP` hand the wrapper itself to expressions as `comp`, and `param()`
+reads `PM.curComp().params`. `rootComp` (`legacy/core/compositions.ts`) builds
+`{ id: compId, name: compName }` plus the composition fields only: no `params`,
+`comps`, `compId`, `compName`, project `id` or `name`. Under the alias,
+`param("amp") + (comp.params ? 1000 : 0)` answered 1007 where today answers 0, and
+`comp.name` gave the project's name. Now:
+
+- pm-eval resolves `@root:<openId>` (`pm_eval::comp::ROOT_VIEW`) to the open
+  composition seen through the wrapper: in the canonical mirror `comps[compId]`
+  already is exactly `rootComp` (`pm_model::canonical`), read as a plain object; in
+  the stored form (no `compId`) the root is read with `id` from `compId`, `name`
+  from `compName`, the composition fields, and nothing else. The address is its
+  own, so interned ids, layer indexes, expression errors and retiming caches keyed
+  by composition id never mix the wrapper with the open composition.
+- NativeApi addresses a scope over the open composition's own layers (`id:
+  compId`) as `@root:` when it is exactly `rootComp(PM.proj)` now
+  (`isRootWrapper`: named reads of `id`, `name` and the 13 composition fields
+  against the project's values, plus one for-in walk that admits no other member
+  and counts them; about 30 ns). Any other object over those layers (an added
+  `params`, a stale `fps`, a partial `{ id, fps, layers }`) is a detached scope,
+  answered from its own contents.
+- A channel without an expression cannot read the scope (`evalKfs(prop.kf, T -
+  L.from)` or `prop.v`), so its slow path addresses any scope over the open layers
+  as `@root:`, and its interned id is checked against the mirror revision only,
+  without calling `PM.curComp()`. A channel with an expression checks the scope
+  stamp and, under `@root:`, `isRootWrapper` on every call: the wrapper is an
+  object outside the document and can change without the barrier seeing it.
+- Members `for...in` does not list (non-enumerable or symbol keys) are not
+  compared. `rootComp` never makes them, and an expression cannot tell them apart
+  from the comparison's view; this is the one shape the check does not prove.
+
+`strict.test.ts` compares `param()`, `comp.name`, `comp.id`,
+`comp.compId`/`comps`/`compName`, `comp.fps`/`layers.length` and an `ev` channel
+with today's answers under no scope, a fresh wrapper, alternating at one revision,
+a held wrapper changed without the barrier (`params` added, `name` changed, an
+extra member, a field removed), a stale wrapper after the project's `fps` changed,
+and the stored form. The previous native.ts fails it with exactly the reported
+1007-for-0 answer.
+
+**A scope object made anew per query (round 4).** A detached scope is keyed by
+object identity, so `PM.curComp = () => ({ ...comp })` got a new scope, a full
+serialization and a new pm-wasm entry per query: 92 ms per `evP` on 100 layers by
+40 channels, and a synchronous loop of them ran out of memory (each new scope's
+mirror stayed alive with its `WeakRef` target until the job ended). Now a fresh
+copy of the last object addressed (`copyOf`: same prototype, same member names in
+order, same `layers` array) shares that scope; its answers are validated against
+the new object's reads as for any mutation. The scope object's own read is its
+shape (like any container whose identity holds; every member read is its own
+input). NativeApi skips the whole-document walk for a copy of the object last found
+outside the document at the same revision (addressing it as detached is exact even
+if it were inside, only slower), and reuses a detached property's address for a
+copy. A throw pm-wasm returns before tracing (a refused scope update, no reads) is
+no longer kept as the scope's answer.
+
+Genuinely detached scopes still carry their exact contents. The renderer carries
+JSON as `compJsonText`, avoiding a second JavaScript object parse; pm-wasm hashes
+the text and keeps up to four resident compositions with independent evaluators,
+evicting the least recently used. Object-form `compJson` still works and uses its
+canonical content hash. A hit does not parse/build the composition again or reset
+the document's evaluator. Project revision changes reset the detached evaluator
+(expression dependencies can reach the project); resync discards every resident
+scope. Missing-address results are cached only for the same project and mirror
+revision. Content changes outside the write barrier therefore remain observable.
+The remaining serialization cost is measured in perf.md; this does **not** claim
+that arbitrary detached scopes now meet the legacy query-time gate.
+
+The loader waits for `EngineDoc.whenReady` **before importing or activating any
+extension**, including built-ins, direct loader activations, reloads and contained
+runtimes. The synchronous API signatures stay the same: activation starts with a
+ready evaluator. The wait is outside the extension's activation timeout. The
+bootstrap/UI install chain remains synchronous and does not await the module.
+A failed module load remains a named `pm-wasm-unavailable` failure and extension
+code is not run. `EngineDoc.stats().startup` records source/streaming compile,
+instantiation and mirror-ready durations; streaming compilation includes body
+delivery. No readiness check switches an answer to the legacy evaluator.
+
+**Activation when the module does not load (round 4).** Rounds 1 to 3 failed
+every extension's activation, built-ins included, each with a sticky toast, and a
+later successful `EngineDoc.retry()` left them inactive. Now each extension
+records the named activation error (`pm-wasm-unavailable`) without a toast of its
+own (the engine names the failure once, with Retry), stays out of the load plan,
+and activates in its planned order when `EngineDoc.onReady` fires after a
+successful retry (`kernel/loader.ts`, `loader.test.ts`; `strict.test.ts` checks
+`onReady`). Answers never route to the legacy evaluator.
+
+**The remaining boot window.** Only extension activation waits for `whenReady`.
+A kernel or evaluator call from anything else that runs between the UI install and
+module readiness (renderer code, an agent or IPC kernel call) is still a named
+`unavailable` failure under strict. Module compilation overlaps preload, so the
+window is short: every measured launch (rounds 1 to 3, and this round's e2e) had
+zero such failures. It is not proven empty.
+
+Regression coverage: fresh root wrappers never send compJson and keep one interned
+channel; numeric answers invalidate on a write or dead module; detached scopes
+hit the resident cache, notice mutations, evict and resync; failed/held readiness
+prevents imports and activation. `e2e/engine-doc-boot.spec.ts` installs an apiVersion
+1 extension whose activate() synchronously evaluates a keyed property. Its opt-in
+measurement runs five alternating setting-off/on boot pairs in isolated profiles.
+
+### Detached scopes: exact input validation (fixups round 2)
+
+Detached scopes now get a resident handle instead of an `@json:` serialization
+on every call. `pm-model`'s `read-tracking` feature is enabled by pm-wasm only:
+immutable node access, serialization and cloning record reads. A stable boxed
+scope and a parent/address index turn those reads into paths without scanning
+all nodes on subsequent queries. Prepared evaluator memos reset before tracing,
+so a cached plan cannot hide a dependency. Native rendering builds do not enable
+this feature.
+
+The TypeScript cache keeps the last answer, each read's primitive value or object
+identity, container keys/array lengths, and the last serialized scope. It checks
+layer identity, id, parent and group in document order on every call. Adding,
+removing, replacing or reordering a layer, changing a parent/group, or replacing
+the layers array invalidates the whole scope. Otherwise only changed read paths
+cross the boundary as patches; an unchanged repeated request sends nothing.
+Another time or operation reuses the same resident scope and discovers its own
+reads. Changing a condition can reveal a stale, previously unread field: compare
+new reads against the retained serialization, hydrate those fields, and evaluate
+again before accepting the answer. Object identity alone cannot prove that a
+nested primitive stayed unchanged.
+
+Module replacement, document revision changes, definition labels and font inputs
+invalidate the answer. The Rust cache remains bounded to four scopes, and a
+renderer handle evicted there is re-created from live data. Non-JSON host objects
+with `toJSON` retain full native serialization semantics when a plain read-set
+snapshot cannot represent them; they do not route to the legacy evaluator.
+
+The real-wasm regression uses 1,200 deterministic mutations and compares 3,600
+answers with a fresh full serialization. Each operation keeps its own last answer
+across mutations, exercising revalidation before memoized returns. It changes retained keyframe references,
+key arrays, expressions, composition settings, property identities, layer order,
+insertions/removals and parents. Separate checks cover newly discovered branch
+reads, no transmission on unchanged inputs, partial updates, changing query times,
+module reset, JSON host-object serialization and the facade's cached address after
+a reorder. The mandatory structural/read validation is still linear in the
+actual input set; nanosecond parity is a measured gate, not an implication of
+removing serialization (see `perf.md`).

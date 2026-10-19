@@ -11,12 +11,15 @@
 //!
 //! `render` and `parity render` exit 0 done, 1 failed, 2 usage, 3 the engine
 //! cannot render this yet (the reasons are printed; the desktop app routes
-//! such projects to the current engine). `parity eval` (evaluation parity,
+//! such projects to the current engine); `render` exits 4 when a program
+//! only the app's WebGL fallback runner draws makes the project not
+//! headless-renderable (named per layer and definition). `parity eval` (evaluation parity,
 //! section 25; docs/engine/phase1-gate.md) keeps its own statuses, listed in
 //! `pm-cli parity eval --help`.
 
 mod compare;
 mod corpus;
+mod fonts;
 mod parity;
 mod render;
 mod render_parity;
@@ -72,8 +75,14 @@ const USAGE: &str = "usage:
       --no-audio  --no-captions  --color quicktime|broadcast|srgb|rec709
       --dither on|off  --precision 16|32
       --composition ID  --media ASSET=FILE  --force (replace an existing file)
+      --definitions FILE  a definition set snapshot (contract 10, JSON) to draw
+               effects, transitions, and extension layers with (default: the
+               built-in definitions)
+      --ui-scale S  the editor's display scale factor, which fixes how its
+                    renderer measures system-ui text (default 2)
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
                        [--real FILE.pmv] [--no-definitions] [--determinism]
+                       [--svg-rasters DIR]
       compares engine renders with the legacy captures of the parity corpus
       (default: the newest v1-* and render-* captures). The renderer holds
       the built-in definitions as the kernel pushes them (--no-definitions:
@@ -81,7 +90,10 @@ const USAGE: &str = "usage:
       real/<slug> project with its media unpacked from FILE.pmv (the file the
       capture opened, checked by SHA-256). --determinism renders every
       sample again with the renderer's caches dropped and requires
-      bit-identical buffers
+      bit-identical buffers. Level 1 SVG images are drawn from Chromium's
+      rasters in --svg-rasters DIR (missing ones are listed in its
+      needs.json for engine/crates/pm-render/tools/svg-rasters), else by
+      resvg with an \"approximate SVG\" notice
   pm-cli parity eval [options]
       evaluation parity against the corpus (see pm-cli parity eval --help)
   pm-cli scope <project.pmv|.json> -o <dir> [options]
@@ -89,7 +101,8 @@ const USAGE: &str = "usage:
       waveform, RGB parade, and vectorscope of a 32-bit working render (or a
       captured frame): waveform.png, parade.png, vectorscope.png, scope.json
       --time S  --composition ID  --size WxH | --scale S  --media ASSET=FILE
-      --motion-blur off|export|N (default export)  --transparent  --columns N";
+      --motion-blur off|export|N (default export)  --transparent  --columns N
+      --ui-scale S (default 2)";
 
 fn list(v: &str) -> Vec<String> {
     v.split(',')
@@ -219,6 +232,8 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
             "--timecode" => o.timecode = Some(value(args, &mut i, a)?.into()),
             "--reel" => o.reel = Some(value(args, &mut i, a)?.into()),
             "--no-captions" => o.no_captions = true,
+            "--definitions" => o.definitions = Some(PathBuf::from(value(args, &mut i, a)?)),
+            "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
             other => {
                 if input.replace(PathBuf::from(other)).is_some() {
@@ -269,6 +284,7 @@ fn parse_scope(args: &[String]) -> Result<scope::Options, String> {
             }
             "--motion-blur" => o.motion_blur = Some(value(args, &mut i, a)?.into()),
             "--transparent" => o.transparent = true,
+            "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             "--columns" => {
                 let v = value(args, &mut i, a)?;
                 o.columns = Some(v.parse().map_err(|_| format!("columns {v:?}"))?);
@@ -300,6 +316,7 @@ fn parse_parity(args: &[String]) -> Result<render_parity::Options, String> {
         real: None,
         definitions: true,
         determinism: false,
+        svg_rasters: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -312,6 +329,7 @@ fn parse_parity(args: &[String]) -> Result<render_parity::Options, String> {
             "--real" => o.real = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--no-definitions" => o.definitions = false,
             "--determinism" => o.determinism = true,
+            "--svg-rasters" => o.svg_rasters = Some(PathBuf::from(value(args, &mut i, a)?)),
             other => return Err(format!("unknown option {other}")),
         }
         i += 1;
@@ -345,6 +363,17 @@ fn main() -> ExitCode {
                         eprintln!("  {r}");
                     }
                     ExitCode::from(3)
+                }
+                Err(render::Failure::NotHeadless(reasons)) => {
+                    eprintln!(
+                        "pm-cli: not headless-renderable: these programs compile in WebGL but \
+                         not in the native pipeline, and only the app's WebGL fallback runner \
+                         draws them (pm-cli has none):"
+                    );
+                    for r in reasons {
+                        eprintln!("  {r}");
+                    }
+                    ExitCode::from(4)
                 }
                 Err(render::Failure::Failed(m)) => {
                     eprintln!("pm-cli: {m}");
@@ -421,7 +450,9 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(render::Failure::Usage(m)) => fail_usage(&m),
-                Err(render::Failure::Unsupported(reasons)) => {
+                Err(
+                    render::Failure::Unsupported(reasons) | render::Failure::NotHeadless(reasons),
+                ) => {
                     eprintln!("pm-cli: the new engine cannot render this project yet:");
                     for r in reasons {
                         eprintln!("  {r}");
