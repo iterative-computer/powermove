@@ -79,6 +79,12 @@ function safeTimes(values: any, fallback: any) {
     .map((value: any) => PM.clamp(value, 0, dur)).map((value: any) => PM.round(value, 3)))].slice(0, 5);
 }
 
+/** safeTimes for each contact-sheet cell, keeping one time per cell. */
+function cellTimes(values: any[]) {
+  const dur = Math.max(.1, Number(PM.proj?.dur) || 10);
+  return values.slice(0, 48).map(Number).map((value: number) => Number.isFinite(value) ? PM.round(PM.clamp(value, 0, dur), 3) : 0);
+}
+
 function defaultTimes() {
   const p = PM.proj;
   const start = Array.isArray(p.work) ? p.work[0] : 0;
@@ -747,7 +753,10 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     const rawTimes = Array.isArray(request.arguments.times) ? request.arguments.times : undefined;
     const times = safeTimes(rawTimes?.slice(0, 5).map(Number).filter(Number.isFinite), defaultTimes());
     const width = PM.clamp(Math.round(Number(request.arguments.width) || 720), 160, 1280);
-    return { ok: true, content: [toolText({ times, width, project: JSON.stringify(PM.proj), revision: currentRevision() })], revision: currentRevision() };
+    // A contact sheet's cells (main/agent-tools/bridge.ts): one batch at the
+    // times today's 5-frame render_frames calls would draw, cell for cell.
+    const cells = Array.isArray(request.arguments.cells) ? cellTimes(request.arguments.cells) : undefined;
+    return { ok: true, content: [toolText({ times, width, ...(cells ? { cells } : {}), project: JSON.stringify(PM.proj), revision: currentRevision() })], revision: currentRevision() };
   }
   if (request.tool === 'get_render_status') {
     throw new Error('No render job with that id: exports in this host finish before export_video returns.');

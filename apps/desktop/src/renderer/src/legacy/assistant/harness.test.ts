@@ -57,6 +57,21 @@ describe('legacy assistant harness install', () => {
     expect(PM.AgentHarness.sanitizeProposal({ commands }).commands).toEqual(commands);
   });
 
+  it('plans contact-sheet cells at the times today\'s render_frames batches draw, one per cell', async () => {
+    const PM = harnessRegistry();
+    const answer = await PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'sheet', callId: 'c1', tool: '__engine_frames_plan',
+      arguments: { times: [0.12345], width: 320, cells: [0.12345, 2.0004, 7, -1, 2.0004] },
+    });
+    const value = JSON.parse(answer.content[0].text);
+    // Clamped to the 6 s composition and rounded to the millisecond (safeTimes), never deduplicated or cut to 5.
+    expect(value.cells).toEqual([0.123, 2, 6, 0, 2]);
+    expect(value.times).toEqual([0.123]);
+    expect(value.width).toBe(320);
+    const plain = await PM.AgentHarness.test.handleLiveAgentTool({ runId: 'sheet', callId: 'c2', tool: '__engine_frames_plan', arguments: { times: [1] } });
+    expect(JSON.parse(plain.content[0].text).cells).toBeUndefined();
+  });
+
   it('keeps group commands available to live and returned agent edits', () => {
     const PM = harnessRegistry();
     for (const command of [

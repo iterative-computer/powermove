@@ -408,6 +408,97 @@ describe('native Powermove agent tool bridge', () => {
     expect(response.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' });
   });
 
+  /** A renderer stand-in for an engine contact sheet: composition info and
+   *  the frames plan (cells clamped to the 8 s composition, rounded to 3 decimals). */
+  async function engineSheetFixture(renderFrames: (plan: { times: number[] }, options: { signal?: AbortSignal }) => Promise<unknown>, budgetMs: number) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
+    temporaryDirectories.push(root);
+    const still = path.join(root, 'frame.jpg');
+    const ffmpegPath = resolveFfmpeg({ packaged: false, resourcesPath: '', appPath: path.resolve(__dirname, '../../..') }).ffmpeg;
+    await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180', '-frames:v', '1', still])
+      .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
+    const jpeg = new Uint8Array(await fs.readFile(still));
+    const project = { id: 'P', name: 'P', compId: 'P-root', w: 1280, h: 720, fps: 30, dur: 8, layers: [] };
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    (owner as unknown as { id: number }).id = 5;
+    owner.send = (_channel: string, request: AgentToolRequestEvent) => {
+      owner.requests.push(request);
+      const cells = Array.isArray(request.arguments.cells) ? (request.arguments.cells as number[]).map((t) => Math.round(Math.min(8, Math.max(0, t)) * 1000) / 1000) : undefined;
+      const value = request.tool === '__composition_info' ? { width: 1280, height: 720, fps: 30, duration: 8 }
+        : request.tool === '__engine_frames_plan' ? { times: [0], width: 320, ...(cells ? { cells } : {}), project: JSON.stringify(project), revision: 7 }
+        : null;
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, { runId: request.runId, callId: request.callId, ok: value !== null, content: value ? [{ type: 'text' as const, text: JSON.stringify(value) }] : [], ...(value ? {} : { error: 'unexpected' }) }));
+    };
+    const image = (time: number) => ({ time, data: jpeg, mimeType: 'image/jpeg' as const, width: 320, height: 180 });
+    const engineJobs = {
+      available: true,
+      exportVideo: vi.fn(),
+      renderFrames: vi.fn(async (_owner: number, _run: string, plan: { times: number[] }, options: { signal?: AbortSignal } = {}) => renderFrames(plan, options)),
+      status: vi.fn(),
+      cancelRun: vi.fn(async () => 0)
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '/resources/agent-tools/mcp-server.mjs', ffmpegPath, mediaFontFile: null, mediaCallBudgetMs: budgetMs, engineJobs: engineJobs as never });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'engine-sheet', owner: owner as never, baseRevision: 0 });
+    return { bridge, session, owner, engineJobs, image };
+  }
+
+  it('renders an engine contact sheet as one batch at the cells today\'s render_frames batches draw', async () => {
+    let fixture!: Awaited<ReturnType<typeof engineSheetFixture>>;
+    fixture = await engineSheetFixture(async (plan) => ({ status: 'rendered', revision: 1, queuedMs: 0, images: plan.times.map((t) => fixture.image(t)) }), 120_000);
+    const response = await fixture.bridge.callTool(fixture.session, 'media_contact_sheet', { target: 'composition', times: [0.12345, 3, 7.9999] });
+    expect(response.ok).toBe(true);
+    expect(fixture.owner.requests.map((request) => request.tool)).toEqual(['__composition_info', '__engine_frames_plan']);
+    expect(fixture.engineJobs.renderFrames).toHaveBeenCalledTimes(1);
+    const [, run, plan, options] = fixture.engineJobs.renderFrames.mock.calls[0]!;
+    expect(run).toBe('engine-sheet');
+    expect((plan as { times: number[]; revision: number }).revision).toBe(7);
+    // resolveSampleTimes keeps times inside the composition; the plan rounds them as safeTimes does.
+    expect((plan as { times: number[] }).times.every((t) => t >= 0 && t <= 8 && Math.round(t * 1000) / 1000 === t)).toBe(true);
+    expect((options as { signal?: AbortSignal }).signal?.aborted).toBe(false);
+    const result = JSON.parse((response.content[0] as { text: string }).text);
+    expect(result.cells).toHaveLength((plan as { times: number[] }).times.length);
+    expect(result.omitted).toBeUndefined();
+    expect(result.incomplete).toBeUndefined();
+  });
+
+  it('cancels only the engine contact-sheet batch at the call deadline and answers with the cells that finished', async () => {
+    let fixture!: Awaited<ReturnType<typeof engineSheetFixture>>;
+    let abortedAt = 0;
+    // A heavy composition: 3 of 8 cells finish; the engine answers the cancel
+    // with them (the rest come back cancelled and are dropped by AgentJobs).
+    fixture = await engineSheetFixture((plan, options) => new Promise((resolve) => {
+      options.signal?.addEventListener('abort', () => {
+        abortedAt = Date.now();
+        setTimeout(() => resolve({ status: 'rendered', revision: 1, queuedMs: 0, images: plan.times.slice(0, 3).map((t) => fixture.image(t)) }), 20);
+      }, { once: true });
+    }), 16_500);
+    const started = Date.now();
+    const response = await fixture.bridge.callTool(fixture.session, 'media_contact_sheet', { target: 'composition', count: 8 });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(abortedAt - started).toBeGreaterThanOrEqual(1_000);
+    expect(response.ok).toBe(true);
+    expect(fixture.engineJobs.renderFrames).toHaveBeenCalledTimes(1);
+    const result = JSON.parse((response.content[0] as { text: string }).text);
+    expect(result.cells).toHaveLength(3);
+    expect(result.omitted).toHaveLength(5);
+    expect(result.incomplete).toContain('3 of 8 cells');
+    expect(response.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' });
+    // The agent run itself is not cancelled: its exports keep running.
+    expect(fixture.engineJobs.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it('answers in time when a cancelled engine contact-sheet batch never answers, and names an empty sheet', async () => {
+    const fixture = await engineSheetFixture(() => new Promise(() => undefined), 16_500);
+    const started = Date.now();
+    await expect(fixture.bridge.callTool(fixture.session, 'media_contact_sheet', { target: 'composition', count: 8 })).rejects.toThrow('did not render in time for one tool call');
+    // 1.5 s to the deadline plus the 2 s cancel grace.
+    expect(Date.now() - started).toBeLessThan(6_000);
+    const [, , , options] = fixture.engineJobs.renderFrames.mock.calls[0]!;
+    expect((options as { signal?: AbortSignal }).signal?.aborted).toBe(true);
+  });
+
   it('reports media tools as unavailable without a bundled ffmpeg', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);

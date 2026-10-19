@@ -34,13 +34,16 @@ import { userInput, type UserInput } from '../user-input';
 import { AgentMediaTools, CALL_BUDGET_MS, type CompositionInfo, type MediaToolContext } from './media-tools';
 import { AGENT_MEDIA_TOOL_NAMES, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentMediaSource } from '../../shared/media-tools';
 import type { TranscriptionService } from '../transcription/service';
-import { AGENT_PRESETS, agentPreset, type AgentFramesResult, type ExportVideoInput, type ExportVideoResult, type FramesPlan, type RenderStatus } from '../engine/agent-jobs';
+import { AGENT_PRESETS, agentPreset, type AgentFramesResult, type ExportVideoInput, type ExportVideoResult, type FramesOptions, type FramesPlan, type RenderStatus } from '../engine/agent-jobs';
 import { isRenderFormat, migrateFormat, supportsAlpha } from '../../shared/delivery';
 
 const STORE_TOOL_NAMES = new Set<string>(POWERMOVE_STORE_TOOL_NAMES);
 const MEDIA_TOOL_NAMES = new Set<string>(AGENT_MEDIA_TOOL_NAMES);
 
 const TOOL_TIMEOUT_MS = 120_000;
+/** How long a cancelled contact-sheet batch may take to answer with the
+ *  cells that finished before the sheet is assembled without them. */
+const SHEET_CANCEL_GRACE_MS = 2_000;
 const MAX_SOCKET_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_TEXT_CHARS = 2_000_000;
 // Private host plans carry complete documents and Undo, not paged agent state.
@@ -55,7 +58,7 @@ export interface AgentEngineJobs {
   /** `onStarted` runs once when the job starts rendering (tool timeouts
    *  count from then: plan section 17). */
   exportVideo(owner: number, run: string, project: unknown, input: ExportVideoInput, onStarted?: () => void): Promise<ExportVideoResult>;
-  renderFrames(owner: number, run: string, plan: FramesPlan): Promise<AgentFramesResult>;
+  renderFrames(owner: number, run: string, plan: FramesPlan, options?: FramesOptions): Promise<AgentFramesResult>;
   saveProject?(project: unknown, document?: unknown): Promise<string>;
   status(owner: number, jobId: string): RenderStatus;
   cancelRun(run: string): Promise<number>;
@@ -691,21 +694,7 @@ export class PowermoveAgentToolBridge {
         // the deadline is abandoned, so the tool answers within the client's
         // tool timeout with the frames that did finish.
         const engine = this.options.engineJobs;
-        if (engine) {
-          if (until !== undefined && Date.now() >= until) throw new Error('The composition frame deadline expired before rendering started.');
-          // Contact sheets are one engine batch, so the document and winning
-          // definitions freeze together even if the user edits while it renders.
-          const plan = await this.rendererValue(session, '__engine_frames_plan', { times: times.slice(0, 5), width });
-          const pending = engine.renderFrames(session.owner.id, session.runId, {
-            project: JSON.parse(String(plan.project)), times, width: plan.width, revision: plan.revision
-          });
-          let timer: NodeJS.Timeout | undefined;
-          const result = await (until === undefined ? pending : Promise.race([
-            pending,
-            new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('The composition did not render before the contact sheet deadline.')), Math.max(1, until - Date.now())); timer.unref(); })
-          ])).finally(() => clearTimeout(timer));
-          return result.images.map(image => ({ data: image.data, mimeType: image.mimeType }));
-        }
+        if (engine) return this.engineSheetFrames(session, engine, times, width, until, controller.signal);
         const frames: Array<{ data: Uint8Array; mimeType: 'image/png' | 'image/jpeg' }> = [];
         let slowest = 0;
         for (let offset = 0; offset < times.length; offset += 5) {
@@ -749,6 +738,47 @@ export class PowermoveAgentToolBridge {
       return { runId: session.runId, callId: `main-${randomUUID()}`, ok: true, content };
     } finally {
       calls.delete(controller);
+    }
+  }
+
+  /**
+   * A composition contact sheet's cells through the job engine: one batch,
+   * so the document and the winning definitions freeze together even if the
+   * user edits while it renders. At `until` (or when the call is cancelled)
+   * the batch alone is cancelled in the engine, never the run's exports, and
+   * the cells that finished, always the first ones in order, are the answer;
+   * the media tool reports the rest as omitted, as it does today.
+   */
+  private async engineSheetFrames(session: PowermoveAgentToolSession, engine: AgentEngineJobs, times: number[], width: number, until: number | undefined, callSignal: AbortSignal): Promise<Array<{ data: Uint8Array; mimeType: 'image/png' | 'image/jpeg' }>> {
+    if (until !== undefined && Date.now() >= until) throw new Error('The composition did not render in time for one tool call. Ask for fewer cells or a shorter span.');
+    // The cells at the times today's render_frames batches would draw:
+    // clamped to the composition and rounded to the millisecond (harness safeTimes).
+    const plan = await this.rendererValue(session, '__engine_frames_plan', { times: times.slice(0, 5), width, cells: times });
+    const cells = Array.isArray(plan.cells) && plan.cells.length === times.length ? plan.cells as number[] : times;
+    const batch = new AbortController();
+    const abort = () => batch.abort();
+    callSignal.addEventListener('abort', abort, { once: true });
+    if (callSignal.aborted) abort();
+    let timer: NodeJS.Timeout | undefined;
+    let grace: NodeJS.Timeout | undefined;
+    if (until !== undefined) { timer = setTimeout(abort, Math.max(1, until - Date.now())); timer.unref?.(); }
+    const pending = engine.renderFrames(session.owner.id, session.runId, { project: JSON.parse(String(plan.project)), times: cells, width: plan.width, revision: plan.revision }, { signal: batch.signal });
+    pending.catch(() => undefined);
+    // After a cancel the engine stops at the frame it is drawing and answers;
+    // the wait for that answer is bounded so the call still answers in time.
+    const late = new Promise<null>((resolve) => {
+      const start = () => { grace = setTimeout(() => resolve(null), SHEET_CANCEL_GRACE_MS); grace.unref?.(); };
+      if (batch.signal.aborted) start(); else batch.signal.addEventListener('abort', start, { once: true });
+    });
+    try {
+      const result = await Promise.race([pending, late]);
+      const frames = (result?.images ?? []).map((image) => ({ data: image.data, mimeType: image.mimeType }));
+      if (!frames.length) throw new Error('The composition did not render in time for one tool call. Ask for fewer cells or a shorter span.');
+      return frames;
+    } finally {
+      clearTimeout(timer);
+      clearTimeout(grace);
+      callSignal.removeEventListener('abort', abort);
     }
   }
 

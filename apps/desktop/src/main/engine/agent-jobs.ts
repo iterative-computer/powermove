@@ -134,6 +134,12 @@ export type AgentFrameImage = { time: number; data: Uint8Array; mimeType: 'image
 export type AgentFramesResult =
   | { status: 'rendered'; images: AgentFrameImage[]; revision: number; queuedMs: number };
 
+/** How one agent frame batch may end early. With `signal`, aborting it
+ *  cancels this batch only (never the run's exports) and the batch answers
+ *  with the frames that finished before the cancel: always the first ones,
+ *  in order (a contact sheet at its call deadline, section 20). */
+export type FramesOptions = { signal?: AbortSignal };
+
 /** The project as the agent sees it, and where the frames are. */
 export type FramesPlan = { project: unknown; times: number[]; width: number; revision: number; imageFormat?: 'png' };
 
@@ -500,10 +506,16 @@ export class AgentJobs {
   /** Cancels every job of an agent run (the run was cancelled or rolled back). */
   async cancelRun(run: string): Promise<number> {
     const live = [...this.jobs.values()].some((r) => r.run === run && !terminal(r.status.state));
-    const frames = this.frameRuns.has(run);
-    if (!live && !frames) return 0;
+    // Frame batches carry their own wire run (one per batch), so a batch can
+    // be cancelled alone; the agent run's cancel reaches every one of them.
+    const wires = [...(live ? [run] : []), ...(this.frameRuns.get(run) ?? [])];
+    const counts = await Promise.all(wires.map((wire) => this.cancelWireRun(wire, run)));
+    return counts.reduce((sum, count) => sum + count, 0);
+  }
+
+  private async cancelWireRun(wire: string, run: string): Promise<number> {
     try {
-      const response = await this.options.engine.request('job', { type: 'cancelJobs', kind: 'run', run });
+      const response = await this.options.engine.request('job', { type: 'cancelJobs', kind: 'run', run: wire });
       return response.type === 'jobsCancelled' ? response.jobs.length : 0;
     } catch (error) {
       this.options.log?.('warn', `cancelling the jobs of agent run ${run} failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -654,23 +666,37 @@ export class AgentJobs {
 
   /* ── render_frames ─────────────────────────────────────────────────── */
 
-  private readonly frameRuns = new Map<string, number>();
+  /** Agent run -> the wire runs of its frame batches in flight. */
+  private readonly frameRuns = new Map<string, Set<string>>();
+  private frameBatch = 0;
 
   /** Renders agent frames at the agent's revision in the agent snapshot
    *  class. Every failure is named; playback is never paused. */
-  async renderFrames(owner: number, run: string, plan: FramesPlan): Promise<AgentFramesResult> {
+  async renderFrames(owner: number, run: string, plan: FramesPlan, options: FramesOptions = {}): Promise<AgentFramesResult> {
     const project = asProject(plan.project);
     if (!plan.times.length) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
     const w = Number(project['w']), h = Number(project['h']);
     // `width` is today's output width; the engine takes the longest edge.
     const maxDimension = Math.max(1, Math.min(8192, Math.round(h > w && w > 0 ? plan.width * h / w : plan.width)));
+    const { signal } = options;
+    if (signal?.aborted) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
     const frameSession = await this.frameSession(owner, project);
-    this.frameRuns.set(run, (this.frameRuns.get(run) ?? 0) + 1);
+    const wire = `${run}#frames-${++this.frameBatch}`;
+    const wires = this.frameRuns.get(run) ?? new Set<string>();
+    wires.add(wire);
+    this.frameRuns.set(run, wires);
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      void this.cancelWireRun(wire, run);
+    };
     let response: Response;
     try {
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener('abort', onAbort, { once: true });
       response = await this.options.engine.request('job', {
         type: 'agentFrames',
-        run,
+        run: wire,
         frames: plan.times.map((time) => ({ composition: project['compId'], time: toTicks(time) })),
         maxDimension,
         format: plan.imageFormat === 'png' ? { kind: 'png' } : { kind: 'jpeg', quality: 0.74 },
@@ -682,27 +708,36 @@ export class AgentJobs {
       if (e?.code === 'unknownSession' || e?.code === 'staleRevision') this.frameSessions.delete(owner);
       throw new AgentJobError(e?.message ?? (error instanceof Error ? error.message : String(error)), e?.code ?? 'internal');
     } finally {
-      const left = (this.frameRuns.get(run) ?? 1) - 1;
-      if (left) this.frameRuns.set(run, left); else this.frameRuns.delete(run);
+      signal?.removeEventListener('abort', onAbort);
+      const left = this.frameRuns.get(run);
+      left?.delete(wire);
+      if (left && !left.size) this.frameRuns.delete(run);
     }
     if (response.type !== 'agentFrames') throw new AgentJobError('The job engine answered agent frames with something else.');
-    return this.frameImages(plan.times, response.outcomes, response.queuedMs, frameSession.revision);
+    return this.frameImages(plan.times, response.outcomes, response.queuedMs, frameSession.revision, aborted);
   }
 
-  private frameImages(times: number[], outcomes: AgentFrameOutcome[], queuedMs: number, revision: number): AgentFramesResult {
+  /** The batch's images in request order. A batch cancelled through its
+   *  signal answers with the frames before the first cancelled one; any other
+   *  failure (and a cancel the caller did not ask for) is named. */
+  private frameImages(times: number[], outcomes: AgentFrameOutcome[], queuedMs: number, revision: number, aborted = false): AgentFramesResult {
     const images: AgentFrameImage[] = new Array(times.length);
+    const cancelled = new Set<number>();
     if (outcomes.length !== times.length) throw new AgentJobError('The job engine did not render every requested frame.');
     for (const outcome of outcomes) {
-      if (!Number.isInteger(outcome.index) || outcome.index < 0 || outcome.index >= times.length || images[outcome.index]) {
+      if (!Number.isInteger(outcome.index) || outcome.index < 0 || outcome.index >= times.length || images[outcome.index] || cancelled.has(outcome.index)) {
         throw new AgentJobError('The job engine returned an invalid or duplicate frame index.');
       }
       if (outcome.status === 'failed') {
+        if (aborted && outcome.error.code === 'cancelled') { cancelled.add(outcome.index); continue; }
         throw new AgentJobError(outcome.error.message, outcome.error.code);
       }
       if (outcome.image.kind !== 'inline') throw new AgentJobError('The job engine answered with an image file; agent frames expect inline images.');
       images[outcome.index] = { time: times[outcome.index]!, data: outcome.image.bytes, mimeType: 'image/jpeg', width: outcome.width, height: outcome.height };
     }
-    return { status: 'rendered', images, revision, queuedMs };
+    if (!cancelled.size) return { status: 'rendered', images, revision, queuedMs };
+    const first = Math.min(...cancelled);
+    return { status: 'rendered', images: images.slice(0, first), revision, queuedMs };
   }
 
   /** The window's frame session, resynced when the project changed. */
