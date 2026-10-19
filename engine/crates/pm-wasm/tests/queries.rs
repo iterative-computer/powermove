@@ -105,6 +105,36 @@ fn text_queries_ask_for_fonts_and_scenes_answer() {
 }
 
 #[test]
+fn cold_level2_queries_request_fonts_before_reporting_geometry_errors() {
+    let mut e = Engine::new();
+    e.resync(
+        PROJECT
+            .replace(
+                "\"id\": \"T\", \"type\": \"text\"",
+                "\"id\": \"T\", \"type\": \"text\", \"compat\": 2",
+            )
+            .as_bytes(),
+        1,
+    )
+    .unwrap();
+    for op in [
+        "glyphLayout",
+        "textLayout",
+        "textRasterGeometry",
+        "textAnimation",
+        "bounds",
+        "textRaster",
+        "pick",
+    ] {
+        let r = q(
+            &mut e,
+            &format!(r#"{{"op":"{op}","comp":"C1","layer":3,"t":0,"x":0,"y":0}}"#),
+        );
+        assert_eq!(r.get("fonts"), Some(&Value::Bool(true)), "{op}: {r:?}");
+    }
+}
+
+#[test]
 fn nested_paths_and_replacement_scopes_are_native() {
     let mut e = Engine::new();
     e.resync(br#"{"id":"P","compId":"main","comps":{"main":{"fps":30,"layers":[]},"outer":{"comps":{"same":{"fps":24,"layers":[{"id":"L","from":0,"p":{"x":{"v":7}}}]}}},"same":{"fps":30,"layers":[{"id":"L","from":0,"p":{"x":{"v":99}}}]}}}"#, 1).unwrap();

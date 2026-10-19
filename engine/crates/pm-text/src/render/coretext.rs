@@ -295,6 +295,21 @@ impl CoreTextReference {
         height: u32,
         smoothing: bool,
     ) -> Vec<f32> {
+        self.render_posed(runs, &[], width, height, smoothing)
+    }
+
+    /// [`Self::render`] with each run drawn through its own affine transform
+    /// (`[a, b, c, d, e, f]` in top-down pixel space, applied after the
+    /// glyph placement; runs past the end of `matrices` draw untransformed).
+    /// The reference for posed (rotated, scaled, skewed) glyphs.
+    pub fn render_posed(
+        &mut self,
+        runs: &[RefRun<'_>],
+        matrices: &[[f64; 6]],
+        width: u32,
+        height: u32,
+        smoothing: bool,
+    ) -> Vec<f32> {
         let (w, h) = (width as usize, height as usize);
         let mut data = vec![0.0f32; w * h * 4];
         let Some(space) = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })) else {
@@ -337,7 +352,7 @@ impl CoreTextReference {
                 ty: 0.0,
             },
         );
-        for run in runs {
+        for (i, run) in runs.iter().enumerate() {
             let Some(font) = self.font(run) else { continue };
             CGContext::set_rgb_fill_color(
                 c,
@@ -358,6 +373,22 @@ impl CoreTextReference {
             if glyphs.is_empty() {
                 continue;
             }
+            // Top-down M in bottom-up space is F·M·F (F flips y about h).
+            let posed = matrices
+                .get(i)
+                .filter(|m| **m != [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+                .map(|m| CGAffineTransform {
+                    a: m[0],
+                    b: -m[1],
+                    c: -m[2],
+                    d: m[3],
+                    tx: m[4] + m[2] * h as f64,
+                    ty: h as f64 - m[5] - m[3] * h as f64,
+                });
+            if let Some(t) = posed {
+                CGContext::save_g_state(c);
+                CGContext::concat_ctm(c, t);
+            }
             unsafe {
                 font.draw_glyphs(
                     NonNull::new(glyphs.as_ptr() as *mut u16).expect("not empty"),
@@ -366,6 +397,9 @@ impl CoreTextReference {
                     &ctx,
                 )
             };
+            if posed.is_some() {
+                CGContext::restore_g_state(c);
+            }
         }
         CGContext::flush(c);
         drop(ctx);

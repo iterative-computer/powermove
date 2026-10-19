@@ -28,6 +28,13 @@
 //! `capture.ts --text-only`). A project compared neither way fails the test:
 //! no text escapes the comparison.
 //!
+//! Level 2 text (`compat` ≥ 2, plan Appendix A) has no legacy reference:
+//! today's engine ignores `compat` and draws it at level 1, and the capture
+//! leaves it out (`engine/corpus/src/legacy-capture.ts`). A capture that still
+//! holds such a project has it routed to the native semantic gate
+//! (`tests/text_level2_semantics.rs`) after the routing check: counted,
+//! listed, and a failure when the semantic gate does not judge it.
+//!
 //! `PM_ENGINE_CORPUS` picks captures (default: the newest `v1-*`, `render-*`
 //! and `text-proj-*`, plus the newest `text-iso-*`); `PM_TEXT_ONLY` limits
 //! project names by prefix; `PM_TEXT_DIFFS=<dir>` writes engine and legacy
@@ -71,6 +78,7 @@ fn main() {
     let mut ratcheted = 0;
     let mut ratchet = Ratchet::load();
     let mut expected = Vec::new();
+    let mut level2 = text::Level2Routes::new();
     if captures.is_empty() && (narrowed || corpus_root().is_none()) {
         eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
         return;
@@ -138,12 +146,18 @@ fn main() {
             if !text::has_text(&p.document) {
                 continue;
             }
-            expected.extend(
-                p.samples
-                    .iter()
-                    .map(|sample| Key::corpus(&p.name, in_isolation, sample.time)),
-            );
-            if !p.missing_media.is_empty() {
+            // Level 2 text has no legacy reference (today's engine draws it
+            // at level 1): it is judged by the semantic gate, after the
+            // routing check below, and never against this capture.
+            let level2 = level2.route(&format!("{}{tag}", p.name), &p.name, &p.document);
+            if !level2 {
+                expected.extend(
+                    p.samples
+                        .iter()
+                        .map(|sample| Key::corpus(&p.name, in_isolation, sample.time)),
+                );
+            }
+            if !level2 && !p.missing_media.is_empty() {
                 skipped.push((
                     format!("{}{tag}", p.name),
                     p.name.clone(),
@@ -183,6 +197,9 @@ fn main() {
                     p.name,
                     forbidden.join(", ")
                 ));
+                continue;
+            }
+            if level2 {
                 continue;
             }
             if !issues.is_empty() {
@@ -345,6 +362,8 @@ fn main() {
             ));
         }
     }
+    level2.report();
+    failed.extend(level2.failures());
     failed.extend(ratchet.missing(expected));
     // A full run measures every FONTS-R corpus entry: a missing or
     // unselected capture cannot leave one unchecked.

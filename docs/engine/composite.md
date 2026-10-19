@@ -44,9 +44,9 @@ any project routed for masks, motion blur, 2.5D, `compat` level 2, the
 path masks no longer have a routing reason (`Feature::PathMasks` is removed),
 and neither do level 1 shapes on 2.5D planes (`Feature::PlaneShapeRaster`, a
 route of the previous round, is removed: the Canvas2D emulation's residual it
-stood for is closed; motion.md, "2.5D"). Level 2 text the text renderer does
-not lay out yet (`capability::level2_text_gap`, reported as text) is forbidden
-too.
+stood for is closed; motion.md, "2.5D"). Level 2 text now draws animators,
+range typography and typography anchoring natively. The old text routing
+reason remains forbidden as a regression defence.
 
 ## Graph
 
@@ -284,11 +284,10 @@ Recapture the corpus cases with
   cache). Filling only the path's device bounds (a windowed MSAA target in
   canvas coordinates, so the samples stay exact) is the next step for real-time
   animated masks at UHD; not measured in the viewer.
-- **Level 2 text the text lane does not lay out yet** (animators, range styles,
-  typography anchoring) is reported as `Feature::Text` (`capability.rs`,
-  `level2_text_gap`) and the text lane owns its layout; `support::routing_forbidden`
-  now forbids it like every other level 2 route, so a corpus project that needs
-  it fails (none does today).
+- **Level 2 text** draws animators, range styles and typography anchoring
+  through its shared evaluated frame (`text.md`). Its projects are included
+  in `allProjects`; the corpus routing checks forbid any return of the old
+  level 2 text reason, and `text_level2_semantics` checks drawing and geometry.
 - **The run-in-E option** has no UI (the plan names only the two rows).
 - Today's masks have no expansion, opacity, or inversion; there is nothing to port.
 
