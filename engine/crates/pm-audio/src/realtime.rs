@@ -409,6 +409,12 @@ mod first_overrun_tests {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RealtimeMetrics {
     pub max_unit_ns: u64,
+    /// Largest thread-CPU span following an admitted DSP-step checkpoint.
+    pub max_dsp_unit_ns: u64,
+    /// Largest DSP span as parts per million of its actual computation budget.
+    pub max_dsp_unit_fraction_ppm: u64,
+    /// Number of sampled spans following admitted DSP-step checkpoints.
+    pub dsp_unit_observations: u64,
     pub max_period_cpu_ns: u64,
     pub computation_overruns: u64,
     pub first_computation_overrun: Option<ComputationOverrun>,
@@ -454,6 +460,9 @@ pub struct RealtimeMetrics {
 #[derive(Default)]
 struct MetricCounters {
     max_unit_ns: AtomicU64,
+    max_dsp_unit_ns: AtomicU64,
+    max_dsp_unit_fraction_ppm: AtomicU64,
+    dsp_unit_observations: AtomicU64,
     max_period_cpu_ns: AtomicU64,
     computation_overruns: AtomicU64,
     first_computation_overrun: FirstComputationOverrun,
@@ -486,6 +495,9 @@ impl MetricCounters {
     fn snapshot(&self) -> RealtimeMetrics {
         RealtimeMetrics {
             max_unit_ns: self.max_unit_ns.load(Ordering::Relaxed),
+            max_dsp_unit_ns: self.max_dsp_unit_ns.load(Ordering::Relaxed),
+            max_dsp_unit_fraction_ppm: self.max_dsp_unit_fraction_ppm.load(Ordering::Relaxed),
+            dsp_unit_observations: self.dsp_unit_observations.load(Ordering::Relaxed),
             max_period_cpu_ns: self.max_period_cpu_ns.load(Ordering::Relaxed),
             computation_overruns: self.computation_overruns.load(Ordering::Relaxed),
             first_computation_overrun: self.first_computation_overrun.snapshot(),
@@ -2071,6 +2083,7 @@ mod mac {
         constraint_ns: u64,
         computation_reported: bool,
         constraint_reported: bool,
+        dsp_span_active: bool,
         phase: super::RealtimePhase,
         metrics: Arc<MetricCounters>,
     }
@@ -2096,7 +2109,7 @@ mod mac {
                 .then_some(budget.id)
         });
         if let Some(id) = id {
-            checkpoint_with_reserve(id, None, None);
+            checkpoint_with_reserve(id, None, None, true);
         }
     }
 
@@ -2225,6 +2238,7 @@ mod mac {
                     constraint_ns,
                     computation_reported: false,
                     constraint_reported: false,
+                    dsp_span_active: false,
                     phase: super::RealtimePhase::Unknown,
                     metrics,
                 });
@@ -2260,6 +2274,7 @@ mod mac {
         b.constraint_ns = constraint_ns;
         b.metrics = metrics;
         b.phase = super::RealtimePhase::Unknown;
+        b.dsp_span_active = false;
         // The reservation window owns these flags, not its diagnostic
         // context. Re-entering the same policy must not count an earlier
         // job's overrun again when an idle guard inherits its CPU debt.
@@ -2276,6 +2291,7 @@ mod mac {
                 budget.depth = budget.depth.saturating_sub(1);
                 if budget.depth == 0 {
                     budget.exit_cpu_ns = cpu;
+                    budget.dsp_span_active = false;
                 }
             }
         });
@@ -2283,6 +2299,16 @@ mod mac {
 
     fn sample(b: &mut Budget, now: Instant, cpu: u64) {
         let unit = cpu.saturating_sub(b.last_checkpoint_cpu_ns);
+        if b.dsp_span_active {
+            b.metrics
+                .dsp_unit_observations
+                .fetch_add(1, Ordering::Relaxed);
+            b.metrics.max_dsp_unit_ns.fetch_max(unit, Ordering::Relaxed);
+            b.metrics.max_dsp_unit_fraction_ppm.fetch_max(
+                dsp_unit_fraction_ppm(unit, b.computation_ns),
+                Ordering::Relaxed,
+            );
+        }
         if crate::profile::enabled() {
             crate::profile::record_unit(unit);
         }
@@ -2334,6 +2360,17 @@ mod mac {
         b.last_checkpoint_wall = now;
     }
 
+    fn dsp_unit_fraction_ppm(unit_ns: u64, computation_ns: u64) -> u64 {
+        if computation_ns == 0 {
+            return if unit_ns == 0 { 0 } else { u64::MAX };
+        }
+        // Multiplication and ceiling division stay in u128 even for the
+        // largest possible u64 unit and budget values.
+        (u128::from(unit_ns) * 1_000_000)
+            .div_ceil(u128::from(computation_ns))
+            .min(u128::from(u64::MAX)) as u64
+    }
+
     fn reset_period(b: &mut Budget) {
         let now = Instant::now();
         let cpu = thread_cpu_ns();
@@ -2360,7 +2397,7 @@ mod mac {
     }
 
     pub(super) fn checkpoint(id: u64) {
-        checkpoint_with_reserve(id, None, Some(super::RealtimePhase::Unknown));
+        checkpoint_with_reserve(id, None, Some(super::RealtimePhase::Unknown), false);
         // The sampled work belongs to the preceding profile phase. Clear it
         // only after sampling, so following unlabelled work cannot inherit it.
         if crate::profile::enabled() {
@@ -2372,6 +2409,7 @@ mod mac {
         id: u64,
         requested_reserve_ns: Option<u64>,
         next_phase: Option<super::RealtimePhase>,
+        next_dsp_span: bool,
     ) {
         // Never hold the thread-local budget borrow while yielding to a
         // pending producer control. DSP wall-gated hooks reach this only
@@ -2407,6 +2445,9 @@ mod mac {
             if let Some(phase) = next_phase {
                 b.phase = phase;
             }
+            // `sample` above attributed the preceding span. A wall-gated
+            // DSP hook that did not reach this function retains its marker.
+            b.dsp_span_active = next_dsp_span;
         });
     }
     pub(super) fn checkpoint_current() {
@@ -2422,7 +2463,7 @@ mod mac {
         BUDGET.with(|slot| {
             let id = slot.borrow().as_ref().map(|b| b.id);
             if let Some(id) = id {
-                checkpoint_with_reserve(id, None, Some(phase));
+                checkpoint_with_reserve(id, None, Some(phase), false);
             }
         });
     }
@@ -2431,7 +2472,7 @@ mod mac {
         BUDGET.with(|slot| {
             let id = slot.borrow().as_ref().map(|b| b.id);
             if let Some(id) = id {
-                checkpoint_with_reserve(id, Some(unit_ns), Some(phase));
+                checkpoint_with_reserve(id, Some(unit_ns), Some(phase), false);
             }
         });
     }
@@ -2458,6 +2499,7 @@ mod mac {
                 constraint_ns: 1_133_333,
                 computation_reported: false,
                 constraint_reported: false,
+                dsp_span_active: false,
                 phase: super::super::RealtimePhase::StretchFresh,
                 metrics: metrics.clone(),
             };
@@ -2494,6 +2536,7 @@ mod mac {
                         constraint_ns: 50_000_000,
                         computation_reported: false,
                         constraint_reported: false,
+                        dsp_span_active: false,
                         phase: crate::realtime::RealtimePhase::StretchMap,
                         metrics: first.clone(),
                     });
@@ -2562,6 +2605,93 @@ mod mac {
             })
             .join()
             .unwrap();
+        }
+
+        #[test]
+        fn dsp_spans_are_counted_only_after_admitted_hooks() {
+            std::thread::spawn(|| {
+                const ID: u64 = u64::MAX - 91;
+                let metrics = Arc::new(MetricCounters::default());
+                let now = Instant::now();
+                let cpu = thread_cpu_ns();
+                BUDGET.with(|slot| {
+                    *slot.borrow_mut() = Some(Budget {
+                        id: ID,
+                        depth: 1,
+                        // The first checkpoint starts a fresh synthetic
+                        // period without sleeping or touching Mach policy.
+                        wall_start: now - Duration::from_millis(60),
+                        cpu_start_ns: cpu,
+                        last_checkpoint_cpu_ns: cpu,
+                        last_checkpoint_wall: now - Duration::from_millis(1),
+                        exit_cpu_ns: cpu,
+                        period_ns: 50_000_000,
+                        computation_ns: 40_000_000,
+                        constraint_ns: 50_000_000,
+                        computation_reported: false,
+                        constraint_reported: false,
+                        dsp_span_active: false,
+                        phase: crate::realtime::RealtimePhase::Unknown,
+                        metrics: metrics.clone(),
+                    });
+                });
+
+                crate::realtime::checkpoint_dsp_step();
+                assert_eq!(metrics.snapshot().dsp_unit_observations, 0);
+                assert!(BUDGET.with(|slot| slot.borrow().as_ref().unwrap().dsp_span_active));
+
+                // Both labeled and reserve-bearing checkpoints sample the
+                // preceding DSP span, then begin ordinary work.
+                crate::realtime::checkpoint_phase("stretch-read");
+                assert_eq!(metrics.snapshot().dsp_unit_observations, 1);
+                assert!(!BUDGET.with(|slot| slot.borrow().as_ref().unwrap().dsp_span_active));
+                crate::realtime::checkpoint_phase_reserve("stretch-fresh", 1_000_000);
+                assert_eq!(metrics.snapshot().dsp_unit_observations, 1);
+
+                BUDGET.with(|slot| {
+                    slot.borrow_mut().as_mut().unwrap().last_checkpoint_wall =
+                        Instant::now() - Duration::from_millis(1);
+                });
+                crate::realtime::checkpoint_dsp_step();
+                assert_eq!(metrics.snapshot().dsp_unit_observations, 1);
+                BUDGET.with(|slot| {
+                    slot.borrow_mut().as_mut().unwrap().last_checkpoint_wall =
+                        Instant::now() + Duration::from_secs(1);
+                });
+                // A gated-out hook leaves the admitted span in force. The
+                // synthetic future timestamp makes the skip deterministic.
+                crate::realtime::checkpoint_dsp_step();
+                assert!(BUDGET.with(|slot| slot.borrow().as_ref().unwrap().dsp_span_active));
+                assert_eq!(metrics.snapshot().dsp_unit_observations, 1);
+                crate::realtime::checkpoint();
+                assert_eq!(metrics.snapshot().dsp_unit_observations, 2);
+                crate::realtime::checkpoint();
+                assert_eq!(metrics.snapshot().dsp_unit_observations, 2);
+
+                BUDGET.with(|slot| {
+                    slot.borrow_mut().as_mut().unwrap().last_checkpoint_wall =
+                        Instant::now() - Duration::from_millis(1);
+                });
+                crate::realtime::checkpoint_dsp_step();
+                clear_budget(ID);
+                let snapshot = metrics.snapshot();
+                assert_eq!(snapshot.dsp_unit_observations, 3);
+                assert!(snapshot.max_dsp_unit_ns > 0);
+                assert!(snapshot.max_dsp_unit_fraction_ppm > 0);
+                assert!(!BUDGET.with(|slot| slot.borrow().as_ref().unwrap().dsp_span_active));
+                BUDGET.with(|slot| *slot.borrow_mut() = None);
+            })
+            .join()
+            .unwrap();
+        }
+
+        #[test]
+        fn dsp_fraction_rounds_up_without_u64_overflow() {
+            assert_eq!(dsp_unit_fraction_ppm(1, 3), 333_334);
+            assert_eq!(dsp_unit_fraction_ppm(1, 1_000_000), 1);
+            assert_eq!(dsp_unit_fraction_ppm(0, 3), 0);
+            assert_eq!(dsp_unit_fraction_ppm(u64::MAX, u64::MAX), 1_000_000);
+            assert_eq!(dsp_unit_fraction_ppm(u64::MAX, 1), u64::MAX);
         }
 
         #[test]
@@ -2997,6 +3127,7 @@ mod mac {
                     constraint_ns: 50_000_000,
                     computation_reported: false,
                     constraint_reported: false,
+                    dsp_span_active: false,
                     phase: crate::realtime::RealtimePhase::Unknown,
                     metrics: metrics.clone(),
                 })
@@ -3026,6 +3157,7 @@ mod mac {
                     constraint_ns: 50_000_000,
                     computation_reported: false,
                     constraint_reported: false,
+                    dsp_span_active: false,
                     phase: crate::realtime::RealtimePhase::Unknown,
                     metrics: metrics.clone(),
                 })
@@ -3061,6 +3193,7 @@ mod mac {
                 constraint_ns: 5_000_000,
                 computation_reported: true,
                 constraint_reported: true,
+                dsp_span_active: true,
                 phase: crate::realtime::RealtimePhase::Unknown,
                 metrics: old_metrics.clone(),
             };
@@ -3074,11 +3207,13 @@ mod mac {
                 (100_000_000, Instant::now()),
             );
             assert_eq!(100_000_000 - b.cpu_start_ns, 6_000_000);
+            assert!(!b.dsp_span_active);
             assert!(b.computation_reported);
             assert!(b.constraint_reported);
             sample(&mut b, Instant::now(), 100_000_000);
             let observed = new_metrics.snapshot();
             assert_eq!(observed.max_period_cpu_ns, 6_000_000);
+            assert_eq!(observed.dsp_unit_observations, 0);
             assert_eq!(observed.computation_overruns, 0);
             assert_eq!(observed.constraint_overruns, 0);
             assert_eq!(observed.throttle_sleeps, 0);
@@ -3128,6 +3263,7 @@ mod mac {
                     constraint_ns: 12_000_000,
                     computation_reported: false,
                     constraint_reported: false,
+                    dsp_span_active: false,
                     phase: crate::realtime::RealtimePhase::Unknown,
                     metrics: old_metrics,
                 });
@@ -3169,6 +3305,7 @@ mod mac {
                     constraint_ns: 5_000_000,
                     computation_reported: false,
                     constraint_reported: false,
+                    dsp_span_active: false,
                     phase: crate::realtime::RealtimePhase::Unknown,
                     metrics: Arc::new(MetricCounters::default()),
                 });
@@ -3226,6 +3363,7 @@ mod mac {
                 constraint_ns: 20_000_000,
                 computation_reported: false,
                 constraint_reported: false,
+                dsp_span_active: false,
                 phase: crate::realtime::RealtimePhase::Unknown,
                 metrics: metrics.clone(),
             };

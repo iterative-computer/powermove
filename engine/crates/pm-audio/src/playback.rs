@@ -322,6 +322,9 @@ pub struct StartTiming {
     pub worker_mach_error: i32,
     pub worker_hint_error: i32,
     pub scheduling_max_unit_ns: u64,
+    pub scheduling_max_dsp_unit_ns: u64,
+    pub scheduling_max_dsp_unit_fraction_ppm: u64,
+    pub scheduling_dsp_unit_observations: u64,
     pub scheduling_max_period_cpu_ns: u64,
     pub scheduling_computation_overruns: u64,
     pub scheduling_first_computation_overrun: Option<crate::realtime::ComputationOverrun>,
@@ -560,6 +563,9 @@ impl StartTrace {
             worker_mach_error: 0,
             worker_hint_error: 0,
             scheduling_max_unit_ns: 0,
+            scheduling_max_dsp_unit_ns: 0,
+            scheduling_max_dsp_unit_fraction_ppm: 0,
+            scheduling_dsp_unit_observations: 0,
             scheduling_max_period_cpu_ns: 0,
             scheduling_computation_overruns: 0,
             scheduling_first_computation_overrun: None,
@@ -1152,6 +1158,9 @@ impl Playback {
             timing.profile_worker_log_drops = profile_stats.dropped;
             timing.profile_worker_flush_failures = profile_stats.flush_failures;
             timing.scheduling_max_unit_ns = metrics.max_unit_ns;
+            timing.scheduling_max_dsp_unit_ns = metrics.max_dsp_unit_ns;
+            timing.scheduling_max_dsp_unit_fraction_ppm = metrics.max_dsp_unit_fraction_ppm;
+            timing.scheduling_dsp_unit_observations = metrics.dsp_unit_observations;
             timing.scheduling_max_period_cpu_ns = metrics.max_period_cpu_ns;
             timing.scheduling_computation_overruns = metrics.computation_overruns;
             timing.scheduling_first_computation_overrun = metrics.first_computation_overrun;
