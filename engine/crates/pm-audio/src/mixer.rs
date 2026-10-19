@@ -314,6 +314,10 @@ pub(crate) struct PrepareVoice {
     head: Option<SharedHead>,
     pub(crate) gate: Option<Arc<AtomicBool>>,
     started: Arc<AtomicBool>,
+    /// Set by whoever ran this job once its history is released. A head's
+    /// consumer waits on it alone: never on the job's result reaching the
+    /// producer, which a dropped or superseded start entry would discard.
+    finished: Arc<AtomicBool>,
 }
 impl PrepareVoice {
     pub(crate) fn history(&self) -> Arc<std::sync::Mutex<StretchRun>> {
@@ -481,18 +485,24 @@ impl PrepareVoice {
         {
             head.available.store(true, Ordering::Release);
         }
+        // The history's lock is released: an installed head may continue on it.
+        self.finished.store(true, Ordering::Release);
         result
     }
 }
 
+/// Detached histories for one start. A history handed to the audible mix
+/// leaves its entry at once ([`Prepared::release`]): the entry then holds
+/// only histories no voice plays, so no later job, claim or reuse (a loop
+/// wrap) ever touches a live run.
 struct Prepared {
     runs: Vec<Option<Arc<std::sync::Mutex<StretchRun>>>>,
     ready: Vec<bool>,
     heads: Vec<Option<SharedHead>>,
+    /// Each voice's latest submitted job's completion (see [`PrepareVoice`]).
     finished: Vec<Arc<AtomicBool>>,
     /// The claim of each voice's latest submitted job.
     started: Vec<Arc<AtomicBool>>,
-    installed: bool,
 }
 impl Prepared {
     fn new(voices: usize) -> Self {
@@ -506,8 +516,17 @@ impl Prepared {
             started: (0..voices)
                 .map(|_| Arc::new(AtomicBool::new(false)))
                 .collect(),
-            installed: false,
         }
+    }
+    /// Voice `i`'s history now belongs to the audible mix. Its slot starts
+    /// over: a later use of this start (the next loop wrap) gets a fresh
+    /// history, never the advanced live one.
+    fn release(&mut self, i: usize) {
+        self.runs[i] = None;
+        self.ready[i] = false;
+        self.heads[i] = None;
+        self.finished[i] = Arc::new(AtomicBool::new(false));
+        self.started[i] = Arc::new(AtomicBool::new(false));
     }
     fn output_ready(&self, i: usize) -> bool {
         self.ready[i]
@@ -711,6 +730,7 @@ impl Mixer {
                     head: None,
                     gate: None,
                     started: prepared.started[vi].clone(),
+                    finished: prepared.finished[vi].clone(),
                 };
                 // A queued detached job shares this history. Run it here only
                 // if no worker has started it; that job then exits unrun.
@@ -798,7 +818,9 @@ impl Mixer {
                     })
                 })
                 .map(|head| head.available.clone());
-            prepared.finished[vi].store(false, Ordering::Release);
+            // A fresh claim and completion per job: a superseded job that
+            // is still exiting can never mark this one finished.
+            prepared.finished[vi] = Arc::new(AtomicBool::new(false));
             prepared.started[vi] = Arc::new(AtomicBool::new(false));
             work.push(PrepareVoice {
                 start,
@@ -814,6 +836,7 @@ impl Mixer {
                 head: prepared.heads[vi].clone(),
                 gate,
                 started: prepared.started[vi].clone(),
+                finished: prepared.finished[vi].clone(),
             });
         }
         work.sort_by_key(|w| {
@@ -828,15 +851,10 @@ impl Mixer {
     }
 
     pub(crate) fn prepared_voice(&mut self, start: i64, vi: usize, ready: bool) {
+        // Only a history still in its entry is recorded: an installed one
+        // was released and its job's result belongs to no start.
         if let Some(p) = self.prepared.get_mut(&start) {
-            // Once installed, the immutable head remains complete even if
-            // this independent job met an evicted input block. Release its
-            // history to the ordinary per-voice retry path at the head's end.
-            p.ready[vi] = ready || p.installed;
-            p.finished[vi].store(true, Ordering::Release);
-            if p.installed && p.ready.iter().all(|r| *r) {
-                self.prepared.remove(&start);
-            }
+            p.ready[vi] = ready;
         }
     }
 
@@ -845,7 +863,6 @@ impl Mixer {
         // leave a failed job hidden behind a permanent preparation mask.
         if let Some(p) = self.prepared.get_mut(&start) {
             p.ready[vi] = true;
-            p.finished[vi].store(true, Ordering::Release);
             p.runs[vi] = None;
         }
         self.voices[vi].preparing = None;
@@ -913,19 +930,23 @@ impl Mixer {
                 if let Some(run) = p.runs[i].take() {
                     voice.stretch = Some(run);
                 }
-            } else if let Some(p) = self.prepared.get(&start)
+            } else if let Some(p) = self.prepared.get_mut(&start)
                 && let Some(head) = p.heads[i]
                     .as_ref()
                     .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                && let Some(run) = p.runs[i].take()
             {
                 // Even at A3's decoder bound, a complete PCM head is a
                 // ready voice. Never silence it for an unfinished CPU job.
-                voice.stretch = p.runs[i].clone();
+                // The history leaves the entry with the voice: it is marked
+                // served, so no job is scheduled on it and the join skips it.
+                voice.stretch = Some(run);
                 voice.prefill = Some(Prefill {
                     head,
                     finished: p.finished[i].clone(),
                     started: p.started[i].clone(),
                 });
+                p.ready[i] = true;
             } else if missing[i] {
                 voice.preparing = Some(start);
             }
@@ -981,7 +1002,6 @@ impl Mixer {
     }
 
     pub(crate) fn abandon_prefills(&mut self) {
-        self.prepared.retain(|_, p| !p.installed);
         for (voice, plan) in self.voices.iter_mut().zip(&self.graph.voices) {
             if let Some(prefill) = voice.prefill.take()
                 && !prefill.finished.load(Ordering::Acquire)
@@ -1013,26 +1033,28 @@ impl Mixer {
     }
 
     pub(crate) fn retain_prepared(&mut self, starts: &[i64]) {
-        self.prepared.retain(|start, p| {
-            starts.contains(start) || (p.installed && p.ready.iter().any(|r| !r))
-        });
+        self.prepared.retain(|start, _| starts.contains(start));
     }
 
     /// Install every ready voice at this start. Partial preparation still
     /// saves work on an immediate Play; unprepared voices use ordinary pre-roll.
     /// Other starts survive Play and are replenished after a loop consumes one.
+    ///
+    /// Every installed history (ready, or behind a complete head with its job
+    /// still queued or running) is released from the entry: the audible mix
+    /// owns it now. Histories not installed stay, still preparing this start
+    /// for its next use, and released slots are prepared afresh.
     pub(crate) fn use_prepared(&mut self, start: i64) {
-        let mut complete = true;
         if let Some(p) = self.prepared.get_mut(&start) {
-            p.installed = true;
             for (i, voice) in self.voices.iter_mut().enumerate() {
                 if p.ready[i] && p.runs[i].is_some() {
                     voice.stretch = p.runs[i].take();
                     voice.prefill = None;
-                } else if let Some(run) = p.runs[i].clone()
-                    && let Some(head) = p.heads[i]
-                        .as_ref()
-                        .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                    p.release(i);
+                } else if let Some(head) = p.heads[i]
+                    .as_ref()
+                    .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                    && let Some(run) = p.runs[i].take()
                 {
                     voice.stretch = Some(run);
                     voice.prefill = Some(Prefill {
@@ -1040,12 +1062,9 @@ impl Mixer {
                         finished: p.finished[i].clone(),
                         started: p.started[i].clone(),
                     });
+                    p.release(i);
                 }
-                complete &= p.ready[i];
             }
-        }
-        if complete {
-            self.prepared.remove(&start);
         }
     }
 
@@ -1096,11 +1115,11 @@ impl Mixer {
     }
 
     fn install(&mut self, doc: Arc<Document>, graph: Arc<MixGraph>) {
-        // Project updates cancel the detached jobs. Installed histories now
-        // belong to the audible mixes: do not submit new jobs on them. Keep
-        // their immutable prefix and resume from its original phase if the
+        // Project updates cancel the detached jobs. Installed histories
+        // belong to the audible mixes and were released from their entries
+        // (`use_prepared`), so no new job is submitted on them. Keep their
+        // immutable prefix and resume from its original phase if the
         // cancelled history was not yet complete.
-        self.prepared.retain(|_, p| !p.installed);
         for voice in self
             .voices
             .iter()
@@ -1147,7 +1166,6 @@ impl Mixer {
             prepared.heads = heads;
             prepared.finished = finished;
             prepared.started = started;
-            prepared.installed = false;
         }
         let p = self.format.sample_rate;
         // Stretches in progress carry over to voices whose map did not
@@ -2477,6 +2495,10 @@ mod prepared_tests {
         for job in jobs {
             let vi = job.vi;
             let ready = if vi == 1 {
+                // v1's job met an evicted input block: it reports not ready
+                // and releases its history unadvanced, as `run` does.
+                assert!(job.claim());
+                job.finished.store(true, Ordering::Release);
                 false
             } else {
                 job.run(&mut Evaluator::new(), true, || false).unwrap()
@@ -2751,6 +2773,21 @@ mod prepared_tests {
         // v1 shares v0's head; v2's job and v3's job never ran.
         assert!(mix.begin_prepared(start));
         assert_eq!(mix.preparing_ids(), ["v3".to_string()].into());
+        // The late start's joins are scheduled from the producer (target
+        // past the start). v1's history left the entry with its head: no
+        // job is scheduled on what the audible mix plays.
+        let live: Vec<_> = mix
+            .voices
+            .iter()
+            .map(|v| v.stretch.clone().unwrap())
+            .collect();
+        let late = mix.preparation_work_except(start, start + 256, |_| false);
+        let mut voices: Vec<usize> = late.iter().map(|j| j.vi).collect();
+        voices.sort();
+        assert_eq!(voices, [2, 3]);
+        for job in &late {
+            assert!(live.iter().all(|l| !Arc::ptr_eq(l, &job.history())));
+        }
         let options = RenderOptions {
             drop_voices: mix.preparing_ids(),
             ..Default::default()
@@ -2835,6 +2872,179 @@ mod prepared_tests {
         mix.prepared_voice(start, vi, ready);
         assert!(!mix.awaiting_history(end, 256));
         compare(&mut mix, HEAD_FRAMES, HEAD_FRAMES + 8192);
+    }
+
+    /// The bit-exact comparison the claim tests share: `mix` against a fresh
+    /// mixer rendering the same frames from `start` on.
+    struct Reference {
+        mix: Mixer,
+        actual: Vec<Vec<f32>>,
+        expected: Vec<Vec<f32>>,
+    }
+    impl Reference {
+        fn new(f: &Fixture) -> Self {
+            Self {
+                mix: f.mixer(0.7, 1.5, 10.0),
+                actual: vec![vec![]; 2],
+                expected: vec![vec![]; 2],
+            }
+        }
+        fn compare(&mut self, mix: &mut Mixer, start: i64, from: usize, to: usize) {
+            let options = RenderOptions {
+                wait: true,
+                ..Default::default()
+            };
+            for offset in (from..to).step_by(256) {
+                let at = start + offset as i64;
+                assert!(
+                    !mix.awaiting_history(at, 256),
+                    "the producer waits on no job at {offset}"
+                );
+                mix.render(at, 256, &mut self.actual, &options).unwrap();
+                self.mix
+                    .render(at, 256, &mut self.expected, &options)
+                    .unwrap();
+                assert_eq!(self.actual, self.expected, "complete mix at {offset}");
+            }
+        }
+    }
+
+    /// A start installed while three of its four jobs are still queued: the
+    /// four voices play the shared head; v1..v3 wait on their histories.
+    fn partly_installed(f: &Fixture, start: i64) -> (Mixer, Vec<PrepareVoice>) {
+        let mut mix = f.mixer(0.7, 1.5, 10.0);
+        mix.standard_content(true);
+        let mut jobs = mix.preparation_work(start, start).into_iter();
+        let first = jobs.next().unwrap();
+        assert!(first.claim());
+        assert!(first.run(&mut Evaluator::new(), true, || false).unwrap());
+        mix.prepared_voice(start, 0, true);
+        let rest: Vec<_> = jobs.collect();
+        assert_eq!(rest.len(), 3);
+        mix.use_prepared(start);
+        assert!(mix.voices[1..].iter().all(|v| v.prefill.is_some()));
+        (mix, rest)
+    }
+
+    /// Claim, the claimed workers' reports, then boundary preparation at the
+    /// same start (a work-area start that Play used). No job is ever
+    /// scheduled on a history the audible mix plays, the producer never
+    /// waits again, and the next loop wrap gets fresh, exact histories
+    /// without a producer pre-roll.
+    #[test]
+    fn claimed_installed_histories_are_never_rescheduled() {
+        let f = Fixture::new();
+        let start = 192_000;
+        let (mut mix, rest) = partly_installed(&f, start);
+        let live: Vec<_> = mix
+            .voices
+            .iter()
+            .map(|v| v.stretch.clone().unwrap())
+            .collect();
+        let mut reference = Reference::new(&f);
+        reference.compare(&mut mix, start, 0, HEAD_FRAMES);
+        let end = start + HEAD_FRAMES as i64;
+        assert!(mix.awaiting_history(end, 256));
+        assert_eq!(mix.claim_histories(end, 256), 3);
+        let mut prep = crate::preparation::Preparation::new();
+        for job in rest {
+            assert!(!job.claim(), "the producer owns this history");
+            prep.deliver_claimed(start, job.vi, job.history());
+        }
+        // prepare_boundaries: retain the boundary, then schedule it.
+        mix.retain_prepared(&[start]);
+        prep.schedule(&mut mix, &[start], false);
+        let scheduled: Vec<usize> = (0..4)
+            .filter(|vi| prep.pending().contains(&(start, *vi)))
+            .collect();
+        assert_eq!(
+            scheduled,
+            [0, 1, 2, 3],
+            "released slots are prepared afresh"
+        );
+        for vi in scheduled {
+            let run = mix.prepared[&start].runs[vi].clone().unwrap();
+            assert!(
+                live.iter().all(|l| !Arc::ptr_eq(l, &run)),
+                "v{vi}'s job runs on a history no voice plays"
+            );
+        }
+        for (v, l) in mix.voices.iter().zip(&live) {
+            assert!(Arc::ptr_eq(v.stretch.as_ref().unwrap(), l));
+        }
+        // The fresh jobs run on the pool while the live mix plays on.
+        for from in (HEAD_FRAMES..HEAD_FRAMES + 16_384).step_by(1024) {
+            reference.compare(&mut mix, start, from, from + 1024);
+            prep.poll(&mut mix);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !prep.pending().is_empty() && std::time::Instant::now() < deadline {
+            prep.wait(&mut mix, std::time::Duration::from_millis(10));
+        }
+        assert!(prep.pending().is_empty(), "the fresh jobs completed");
+        assert!(mix.prepared_ready(&[start]));
+        // The next loop wrap.
+        mix.use_prepared(start);
+        for (v, l) in mix.voices.iter().zip(&live) {
+            assert!(!Arc::ptr_eq(v.stretch.as_ref().unwrap(), l));
+            assert!(v.prefill.is_none());
+        }
+        let mut wrapped = Reference::new(&f);
+        wrapped.compare(&mut mix, start, 0, 8192);
+        for v in &mix.voices {
+            let run = v.stretch.as_ref().unwrap().lock().unwrap();
+            assert_eq!(run.fresh_starts, 1, "no producer pre-roll at the wrap");
+        }
+    }
+
+    /// The entry of an installed start can be dropped (paused preparation
+    /// evicts starts, a project invalidates them) while a worker still runs
+    /// one of its histories. The job's own completion releases the head's
+    /// consumer: it never waits on a result that reaches no entry.
+    #[test]
+    fn a_dropped_start_entry_never_strands_an_installed_history() {
+        let f = Fixture::new();
+        let start = 192_000;
+        let (mut mix, rest) = partly_installed(&f, start);
+        let running = rest.iter().position(|j| j.vi == 1).unwrap();
+        assert!(rest[running].claim());
+        let mut reference = Reference::new(&f);
+        reference.compare(&mut mix, start, 0, HEAD_FRAMES);
+        mix.invalidate_prepared();
+        let end = start + HEAD_FRAMES as i64;
+        assert_eq!(mix.claim_histories(end, 256), 2);
+        assert!(mix.awaiting_history(end, 256), "v1 is still running");
+        let job = rest.into_iter().nth(running).unwrap();
+        assert!(job.run(&mut Evaluator::new(), true, || false).unwrap());
+        reference.compare(&mut mix, start, HEAD_FRAMES, HEAD_FRAMES + 8192);
+    }
+
+    /// Paused or boundary preparation of a start that Play installed never
+    /// takes a queued job's live history: it prepares fresh ones, and the
+    /// producer can still claim every unstarted history at the head's end.
+    #[test]
+    fn paused_preparation_never_runs_a_queued_job_on_a_live_history() {
+        let f = Fixture::new();
+        let start = 192_000;
+        let (mut mix, rest) = partly_installed(&f, start);
+        let live: Vec<_> = mix
+            .voices
+            .iter()
+            .map(|v| v.stretch.clone().unwrap())
+            .collect();
+        let mut reference = Reference::new(&f);
+        reference.compare(&mut mix, start, 0, HEAD_FRAMES);
+        prepare(&mut mix, start);
+        for (vi, run) in mix.prepared[&start].runs.iter().enumerate() {
+            let run = run.as_ref().unwrap();
+            assert!(live.iter().all(|l| !Arc::ptr_eq(l, run)), "v{vi}");
+        }
+        let end = start + HEAD_FRAMES as i64;
+        assert_eq!(mix.claim_histories(end, 256), 3, "no queued job was taken");
+        for job in &rest {
+            assert!(!job.claim());
+        }
+        reference.compare(&mut mix, start, HEAD_FRAMES, HEAD_FRAMES + 8192);
     }
 
     /// A start's own job leaves its opening output in the history: the

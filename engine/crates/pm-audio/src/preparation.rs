@@ -283,6 +283,33 @@ impl Preparation {
         self.poll(mixer);
     }
 }
+#[cfg(test)]
+impl Preparation {
+    /// What a worker reports after dequeuing `(start, voice)` and finding
+    /// its history claimed by another thread (the producer at an exhausted
+    /// head, or paused preparation).
+    pub(crate) fn deliver_claimed(
+        &mut self,
+        start: i64,
+        voice: usize,
+        history: Arc<Mutex<crate::stretch::StretchRun>>,
+    ) {
+        self.pending.insert((start, voice));
+        let _ = self.tx.send(Done {
+            generation: self.generation.load(Ordering::Relaxed),
+            start,
+            voice,
+            history,
+            ready: Ok(false),
+            claimed: true,
+            profile: Default::default(),
+        });
+    }
+    /// Jobs submitted and not yet accepted.
+    pub(crate) fn pending(&self) -> &HashSet<(i64, usize)> {
+        &self.pending
+    }
+}
 impl Drop for Preparation {
     fn drop(&mut self) {
         self.invalidate();

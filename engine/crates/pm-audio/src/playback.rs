@@ -1711,7 +1711,11 @@ impl RenderThread {
     fn preroll(&mut self) {
         self.pending_segment = None;
         self.last_segment_end = None;
-        self.late_start = None;
+        // A superseded late start's entry marks its installed voices served
+        // without their histories: never reuse it for a later Play.
+        if let Some(start) = self.late_start.take() {
+            self.mixer.discard_prepared(start);
+        }
         self.mixer.clear_preparing();
         self.stalls.clear();
         self.render_failure = None;
