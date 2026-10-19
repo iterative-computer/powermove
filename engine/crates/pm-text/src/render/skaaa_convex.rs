@@ -288,47 +288,11 @@ pub(super) fn walk(
 // SkScan::try_blit_fat_anti_rect / SkBlitter::blitFatAntiRect. The mask
 // additive fast path bypasses edge quantization for recognized rectangles.
 pub(super) fn fat_rect(path: &pm_skia_path::Path, dev: &mut Device) -> bool {
-    use pm_skia_path::PathSegment;
-    let mut pts = Vec::new();
-    for seg in path.segments() {
-        match seg {
-            PathSegment::MoveTo(p) if pts.is_empty() => pts.push(p),
-            PathSegment::LineTo(p) => pts.push(p),
-            PathSegment::Close => {}
-            _ => return false,
-        }
-    }
-    if pts.first() == pts.last() {
-        pts.pop();
-    }
-    loop {
-        if pts.len() < 4 {
-            return false;
-        }
-        let redundant = (0..pts.len()).find(|&i| {
-            let (a, b, c) = (
-                pts[(i + pts.len() - 1) % pts.len()],
-                pts[i],
-                pts[(i + 1) % pts.len()],
-            );
-            ((a.x == b.x && b.x == c.x) && (b.y - a.y) * (c.y - b.y) >= 0.)
-                || ((a.y == b.y && b.y == c.y) && (b.x - a.x) * (c.x - b.x) >= 0.)
-        });
-        if let Some(i) = redundant {
-            pts.remove(i);
-        } else {
-            break;
-        }
-    }
-    if pts.len() != 4
-        || (0..4).any(|i| {
-            let (a, b) = (pts[i], pts[(i + 1) % 4]);
-            a.x != b.x && a.y != b.y
-        })
-    {
+    // SkPathRaw::isRect: SkPathPriv::IsRectContour without partial contours.
+    let Some(rc) = path.is_rect() else {
         return false;
-    }
-    let b = path.bounds();
+    };
+    let b = rc.rect;
     let (l, t, r, bottom) = (
         b.left().floor() as i32,
         b.top().floor() as i32,

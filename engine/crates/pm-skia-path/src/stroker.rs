@@ -18,55 +18,11 @@ use crate::scalar::{Scalar, SCALAR_NEARLY_ZERO, SCALAR_ROOT_2_OVER_2};
 #[cfg(all(not(feature = "std"), feature = "no-std-float"))]
 use crate::NoStdFloat;
 
-/// SkStroke::strokeRect, for closed axis-aligned rectangles.
+/// `SkStroke::strokeRect`, for paths `SkPath::isRect` recognizes as closed
+/// rectangles (SkStroke.cpp:1446-1458).
 fn stroke_rect(path: &Path, width: f32, miter: f32, join: LineJoin, fill: bool) -> Option<Path> {
-    let mut pts = Vec::new();
-    let mut closed = false;
-    for seg in path.segments() {
-        match seg {
-            PathSegment::MoveTo(p) if pts.is_empty() => pts.push(p),
-            PathSegment::LineTo(p) if !closed => pts.push(p),
-            PathSegment::Close => closed = true,
-            _ => return None,
-        }
-    }
-    if !closed {
-        return None;
-    }
-    if pts.first() == pts.last() {
-        pts.pop();
-    }
-    // SkPath's rectangle recognizer permits collinear edge subdivisions.
-    loop {
-        if pts.len() < 4 {
-            return None;
-        }
-        let redundant = (0..pts.len()).find(|&i| {
-            let (a, b, c) = (
-                pts[(i + pts.len() - 1) % pts.len()],
-                pts[i],
-                pts[(i + 1) % pts.len()],
-            );
-            ((a.x == b.x && b.x == c.x) && (b.y - a.y) * (c.y - b.y) >= 0.0)
-                || ((a.y == b.y && b.y == c.y) && (b.x - a.x) * (c.x - b.x) >= 0.0)
-        });
-        if let Some(i) = redundant {
-            pts.remove(i);
-        } else {
-            break;
-        }
-    }
-    if pts.len() != 4
-        || (0..4).any(|i| {
-            let (a, b) = (pts[i], pts[(i + 1) % 4]);
-            a.x != b.x && a.y != b.y
-        })
-    {
-        return None;
-    }
-    let (a, b) = (pts[1] - pts[0], pts[2] - pts[1]);
-    let cw = a.x * b.y - a.y * b.x > 0.0;
-    let rect = path.bounds();
+    let rc = path.is_rect().filter(|rc| rc.closed)?;
+    let (rect, cw) = (rc.rect, rc.clockwise);
     let radius = width / 2.0;
     let (l, t, r, b) = (
         rect.left() - radius,
