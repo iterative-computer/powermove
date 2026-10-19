@@ -550,11 +550,12 @@ export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: Media
   // The engine resolves an asset again when its record changes (a replace,
   // its undo and redo, a relink), through these bindings: bound late, an
   // older binding answers the older file and the engine keeps drawing it.
-  // So every batch the document mirror applies binds first what it changed.
+  // So every batch the document mirror applies to the assets binds first
+  // what it changed (other batches, a keystroke or a drag, cost nothing).
   // This subscribes before any engine session does (bootstrap installs the
   // media store before the engine connection), so the bind is sent to main
   // before the batch is posted to the engine.
-  PM.EngineDoc?.subscribe?.(() => bindNow(false));
+  PM.EngineDoc?.subscribe?.((batch: { assets?: boolean }) => { if (batch?.assets !== false) bindNow(false); });
   const bind = () => {
     timer = null;
     const project = PM.proj;

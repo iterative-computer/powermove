@@ -458,6 +458,13 @@ describe('the engine stamp', () => {
       PM.proj.assets.a = { id: 'a', storageKey: 'media:v2:old' };
       batch();
       expect(order.slice(5)).toEqual(['bind {"a":{"key":"media:v2:old"}}', 'post batch']);
+      // A batch that leaves the assets alone (a keystroke, a drag) does not
+      // even look at the bindings.
+      const bindings = vi.spyOn(Object, 'values');
+      for (const fn of subscribers) fn({ assets: false });
+      expect(bindings).not.toHaveBeenCalled();
+      bindings.mockRestore();
+      expect(order.slice(7)).toEqual(['post batch']);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
