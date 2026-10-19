@@ -163,6 +163,13 @@ export interface SandboxRuntimeOptions {
   observer?: SandboxObserver;
   /** The whole activation, the liveness probe after a timeout included. Defaults to 10 s, the loader's. */
   timeoutMs?: number;
+  /**
+   * A runtime outside any document: the document host's contained process
+   * (engine/document-host/sandbox.ts). `loaded` settles once it can take
+   * `init`; `start` hands it `init` and the kernel's port. It has a process
+   * of its own, so it is watched and stopped (`terminate`) like an isolated frame.
+   */
+  process?: { loaded: Promise<void>; start(port: MessagePort, init: SandboxInit): void; terminate(): Promise<void> };
 }
 
 /** Starts a store extension behind an opaque-origin script-only iframe. */
@@ -179,14 +186,16 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
   // Inside Electron the document comes from the extension's own app:// host,
   // so it gets its own process (in development main proxies it from Vite);
   // only the browser host (powermove serve) serves it from its own origin.
-  const base = sandboxOrigin(record.id, location.protocol === 'app:' || navigator.userAgent.includes('Electron') ? 'app://powermove' : location.origin);
+  const external = test?.process ?? null;
+  // A contained process has no document origin; its ids stay those of the extension's own app:// host.
+  const base = sandboxOrigin(record.id, external || location.protocol === 'app:' || navigator.userAgent.includes('Electron') ? 'app://powermove' : location.origin);
   /* Silence is this extension's fault, and stoppable, only when it has a
      process of its own. Under the browser host every sandbox shares one
      origin, so one spinning extension would make its siblings miss pings too,
      and nothing could end it. There no fatal liveness rule runs at all. */
-  const isolated = base.startsWith('app:') && typeof bridge()?.sandboxTerminate === 'function';
+  const isolated = !!external || (base.startsWith('app:') && typeof bridge()?.sandboxTerminate === 'function');
   const perms = (manifest.permissions ?? []).join(',');
-  if (!test?.frame) frame.src = sandboxDocumentUrl(base, record.id, perms);
+  if (!test?.frame && !external) frame.src = sandboxDocumentUrl(base, record.id, perms);
   const registrations = new Map<string, Disposable>();
   const remoteHandles = new Set<number>();
   const claimHandles = (handles: number[]): void => {
@@ -618,7 +627,7 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
   let watchdog: { dispose(): void } | null = null;
   /* Removing a spinning sandbox's iframe does not stop its process: main
      kills it, while the frames still exist to find it by. */
-  const terminate = async (): Promise<void> => { try { await bridge()?.sandboxTerminate?.(record.id); } catch { /* disposing still frees the kernel side */ } };
+  const terminate = async (): Promise<void> => { try { await (external ? external.terminate() : bridge()?.sandboxTerminate?.(record.id)); } catch { /* disposing still frees the kernel side */ } };
   const dispose = (): void => {
     if (disposed) return; disposed = true;
     watchdog?.dispose();
@@ -629,6 +638,8 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
     try { rpc.notify('dispose'); } catch { /* already closed */ }
     rpc.close();
     host.disposeAll(); frame.remove();
+    // A contained process does not end with a frame: stop it.
+    if (external) void terminate();
   };
   stopForBudget = () => { deps.reportRuntimeError(record.id, new Error('exceeded the sandbox message budget')); dispose(); };
   for (const event of STATE_EVENTS) host.api.events.on(event, schedule);
@@ -660,13 +671,18 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
   let timedOut = false, booted = false;
   try {
     host.setActivating(true);
-    const loaded = new Promise<void>((resolve, reject) => { frame.addEventListener('load', () => resolve(), { once: true }); frame.addEventListener('error', () => reject(new Error('Sandbox document failed to load')), { once: true }); });
+    const loaded = new Promise<void>((resolve, reject) => {
+      if (external) external.loaded.then(resolve, reject);
+      else frame.addEventListener('load', () => resolve(), { once: true });
+      frame.addEventListener('error', () => reject(new Error('Sandbox document failed to load')), { once: true });
+    });
     const timeout = setTimeout(() => { timedOut = true; const error = new Error('Sandbox document or activation timed out'); rejected(error); frame.dispatchEvent(new Event('error')); }, budgetMs - probeMs);
-    document.body.append(frame);
+    if (!external) document.body.append(frame);
     try {
       await loaded;
       const init = initFor(openDoc(runtimeLink, rpc), runtimeLink);
-      if (test?.onPostInit) test.onPostInit(channel.port2, init);
+      if (external) external.start(channel.port2, init);
+      else if (test?.onPostInit) test.onPostInit(channel.port2, init);
       else frame.contentWindow?.postMessage({ t: 'init', ...init }, '*', [channel.port2]);
       /* The shim answers pings before it imports the bundle, so an answer
          proves the runtime booted: only then can a later silence be the

@@ -251,6 +251,42 @@ impl<'d> Scope<'_, 'd> {
         Ok((evaluated, matrices, PathLayer::new(&nodes)))
     }
 
+    /// `groupMatrix(PM, layer, path, time)` for a path outside `d.paths` (a
+    /// detached copy): its own values, its parents looked up among the
+    /// layer's paths by id, as the legacy recursion does. The detached path
+    /// goes last in the list, so a stored path with the same id is still the
+    /// one a parent lookup finds, and a lookup that reaches the detached path
+    /// closes a cycle at its id (the identity), exactly as `seen` does today.
+    pub fn detached_group_matrix(
+        &mut self,
+        layer: &'d Node,
+        path: &'d Node,
+        time: f64,
+    ) -> JsResult<[f64; 6]> {
+        let evaluated = self.layer_paths(layer, time)?;
+        let d = node::member(Some(layer), "d");
+        let stored = node::array(node::member(d, "paths")).unwrap_or(&[]);
+        let parent_of =
+            |s: &Node| node::string(node::member(Some(s), "parent")).map(|s| s.to_string_lossy());
+        let mut nodes: Vec<PathNode> = evaluated
+            .iter()
+            .zip(stored)
+            .map(|(e, s)| PathNode {
+                id: e.id.to_js_string().to_string_lossy(),
+                parent: parent_of(s),
+                values: e.path_values(),
+            })
+            .collect();
+        let id = node::to_js_string(node::member(Some(path), "id")).to_string_lossy();
+        let own = self.path_values(layer, path, time, &format!("g.{id}"))?;
+        nodes.push(PathNode {
+            id: own.id.to_js_string().to_string_lossy(),
+            parent: parent_of(path),
+            values: own.path_values(),
+        });
+        Ok(pm_vector::path::group_matrix(&nodes, nodes.len() - 1).as_coeffs())
+    }
+
     /// Whether `sceneRuntime(PM, L, T)` exists for an extension layer and its
     /// scene has no background (`!runtime.scene.background`): a legacy scene
     /// layer whose environment has no background color, or a mesh

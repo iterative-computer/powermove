@@ -128,6 +128,17 @@ function frameDocument() {
 }
 
 function runIsolated(code: any, project: any, input: any = {}) {
+  /* Outside a browser (the document host) the same worker source runs in a
+     contained process of the host's (engine/document-host/sandbox.ts): same
+     message in, same result out, same time limit. */
+  const external = (PM as any).Script?.isolate;
+  if (typeof external === 'function') {
+    // The same ids the frame path mints, in the same order (a token, then the run).
+    PM.uid('script-token');
+    const runId = PM.uid('run').replace(/[^a-z0-9_-]/gi, '');
+    return Promise.resolve(external({ source: WORKER_SOURCE, code, project, input: clone(input), runId, runtime: LIMITS.runtime }))
+      .then((message: any) => message?.ok ? message.result : Promise.reject(new Error(message?.error || 'Script failed')));
+  }
   return new Promise((resolve: any, reject: any) => {
     if (!window.document?.body) { reject(new Error('The isolated runtime needs a browser document')); return; }
     const token = PM.uid('script-token'), runId = PM.uid('run').replace(/[^a-z0-9_-]/gi, '');

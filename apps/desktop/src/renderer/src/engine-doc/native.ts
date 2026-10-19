@@ -22,6 +22,7 @@ import { lookup, type DocumentBarrier } from './barrier';
 import type { PmWasm } from './wasm';
 import type { DualAnswers } from './dual';
 import { geometryRequest, refreshModels, resolveModels } from '../core/scene3d/engine-geometry';
+import { canonicalPath } from '../legacy/core/compositions';
 import type { FontLoader } from './fonts';
 
 type Legacy = Record<string, any>;
@@ -144,6 +145,41 @@ export function at(root: any, path: readonly PathPart[]): any {
   return node;
 }
 
+/** A detached input as the JSON the mirror would hold (evaluated ad hoc). */
+const asJson = (value: any): any => JSON.parse(JSON.stringify(value));
+
+/** Whether canonicalProject moves this root into `comps[compId]` (shared/canonical-json.ts). */
+const canonicalRoot = (proj: any): boolean => typeof proj?.compId === 'string' && !!proj.compId
+  && !(Object.prototype.hasOwnProperty.call(proj, 'comps') && !(proj.comps && typeof proj.comps === 'object' && !Array.isArray(proj.comps)));
+/**
+ * A caller's own layer list as the structural questions read it
+ * (`groupAncestors`: `id`, `group`, `type`; `validMatteSource`: `id`, `type`,
+ * `matteSource`; pm-eval's `group_ancestors` and `valid_matte_source` read
+ * nothing else): each layer's JSON reduced to those members, so a list of
+ * heavy layers is not serialized whole on every call. Other items keep their JSON.
+ */
+const STRUCTURE = ['id', 'group', 'type', 'matteSource'] as const;
+const structural = (item: any): any => {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+  const out: Record<string, unknown> = {};
+  for (const key of STRUCTURE) if (Object.prototype.propertyIsEnumerable.call(item, key)) out[key] = item[key];
+  return out;
+};
+const structuralList = (list: any[]): any => asJson(Array.from(list, structural));
+/** A composition's own scalar members with `layers` (no `comps`, no layer contents). */
+const structuralComp = (cur: any, layers: any[]): any => {
+  const out: Record<string, unknown> = {};
+  if (cur && typeof cur === 'object') for (const [key, value] of Object.entries(cur)) if (value === null || typeof value !== 'object') out[key] = value;
+  out.layers = structuralList(layers);
+  return out;
+};
+
+/** V8's TypeError for `value[key]` on a nullish `value`. */
+const readThrows = (value: unknown, key: string): TypeError => new TypeError(`Cannot read properties of ${value === null ? 'null' : 'undefined'} (reading '${key}')`);
+/** V8's TypeError for `Object.entries(undefined)`. */
+const entriesThrows = (): TypeError => new TypeError('Cannot convert undefined or null to object');
+const isObject = (value: unknown): boolean => !!value && typeof value === 'object';
+
 interface Context {
   comp: string;
   open: string;
@@ -214,6 +250,18 @@ export class NativeApi {
   fonts: FontLoader | null = null;
   /** Called when a dual answer differed because the mirror missed a write. */
   onStale: ((op: string, paths: string[]) => void) | null = null;
+  /**
+   * Operations with no legacy answer to compare with: the headless document
+   * host has no compositor, so `gl.bounds` and `gl.pick` come from pm-wasm
+   * alone there (the editor's dual answers check them against the GPU path).
+   */
+  readonly noReference = new Set<string>();
+  /** Strict hosts report and throw instead of executing any legacy fallback. */
+  onFallback: ((op: string, reason: string) => never) | null = null;
+  /** Re-instantiates a trapped module synchronously (install.ts); false when it cannot. */
+  revive: (() => boolean) | null = null;
+  /** A named failure ("Use New Engine" on; install.ts decides whether to report it). */
+  onFailure: ((code: 'pm-wasm-trap' | 'pm-wasm-error' | 'font-service-unavailable', message: string) => void) | null = null;
 
   constructor(
     private PM: Legacy,
@@ -258,13 +306,92 @@ export class NativeApi {
   /** `PM.curComp()`'s id and the open composition's. */
   private comps(): { comp: string; open: string; cur: any; liveCur: any } | null {
     const proj = this.unwrap(this.PM.proj);
-    if (!proj || typeof proj.compId !== 'string') return null;
+    if (!proj || typeof proj !== 'object') return null;
+    const open = typeof proj.compId === 'string' ? proj.compId : typeof proj.id === 'string' ? proj.id : '';
     const liveCur = this.PM.curComp?.() ?? this.PM.proj;
     const cur = this.unwrap(liveCur);
-    if (cur === proj) return { comp: proj.compId, open: proj.compId, cur, liveCur };
-    const id = typeof cur?.id === 'string' ? cur.id : null;
-    if (!id || this.unwrap(proj.comps?.[id]) !== cur) return null;
-    return { comp: id, open: proj.compId, cur, liveCur };
+    if (cur === proj) return { comp: open, open, cur, liveCur };
+    const comp = this.address(proj, cur);
+    if (comp === null) return cur && typeof cur === 'object' ? { comp: '@json:' + JSON.stringify(cur), open, cur, liveCur } : null;
+    return { comp, open, cur, liveCur };
+  }
+
+  /** Where each composition object last was: checked by walking its path, so a stale entry is never used. */
+  private addresses = new WeakMap<object, PathPart[] | null>();
+
+  /**
+   * The engine address of composition object `cur` inside `proj`: its id when
+   * it is a top-level composition (O(1)), else `@path:` with its canonical path.
+   * Nested compositions are found once by identity and then answered from the
+   * cache, verified in O(depth) per call; null when it is not in the document.
+   */
+  private address(proj: any, cur: any): string | null {
+    if (!cur || typeof cur !== 'object') return null;
+    if (typeof cur.id === 'string' && proj.comps && typeof proj.comps === 'object' && proj.comps[cur.id] === cur) return cur.id;
+    const cached = this.addresses.get(cur);
+    let path = cached && at(proj, cached) === cur ? cached : undefined;
+    if (!path) {
+      path = findPath(proj, cur, 64) ?? undefined;
+      if (path) this.addresses.set(cur, path);
+    }
+    if (!path) return null;
+    return path.length === 2 && path[0] === 'comps' ? String(path[1]) : '@path:' + JSON.stringify(canonicalPath(path, proj.compId));
+  }
+
+  /** Where the mirror holds composition `cur` (at engine address `comp`). */
+  private mirrorBase(comp: string, cur: any): PathPart[] {
+    if (comp.startsWith('@path:')) return JSON.parse(comp.slice(6));
+    // A root canonicalProject leaves as it is (no compId): the mirror holds its layers at the top.
+    if (cur === this.unwrap(this.PM.proj) && !canonicalRoot(cur)) return [];
+    return ['comps', comp];
+  }
+
+  /**
+   * The composition whose `layers` array `list` is, anywhere in the
+   * document (the open one, `comps`, or nested `comps`): its engine address
+   * and the composition, or null for a list of the caller's own.
+   */
+  private ownerOf(list: any): { comp: string; cur: any } | null {
+    const proj = this.unwrap(this.PM.proj);
+    if (!proj || typeof proj !== 'object' || !Array.isArray(list)) return null;
+    if (proj.layers === list) return { comp: typeof proj.compId === 'string' ? proj.compId : typeof proj.id === 'string' ? proj.id : '', cur: proj };
+    const seen = new Set<any>();
+    const visit = (comps: any, depth: number): { comp: string; cur: any } | null => {
+      if (!comps || typeof comps !== 'object' || depth > 16 || seen.has(comps)) return null;
+      seen.add(comps);
+      for (const comp of Object.values(comps)) {
+        if (!comp || typeof comp !== 'object') continue;
+        if ((comp as any).layers === list) {
+          const address = this.address(proj, comp);
+          return address === null ? null : { comp: address, cur: comp };
+        }
+        const nested = visit((comp as any).comps, depth + 1);
+        if (nested) return nested;
+      }
+      return null;
+    };
+    return visit(proj.comps, 0);
+  }
+
+  /**
+   * A layer of an explicit list that is some composition's own `layers`:
+   * its index there (checked against the mirror, repaired if a write
+   * bypassed the barrier), or its JSON when it is not in the list.
+   */
+  private listLayer(owner: { comp: string; cur: any }, L: any): number | any {
+    const layers: any[] = owner.cur.layers;
+    const raw = this.unwrap(L);
+    const i = this.index(layers).index.get(raw);
+    // Not in the list: its JSON (the questions read its structure only); not an object: no members.
+    if (i === undefined || layers[i] !== raw) return raw && typeof raw === 'object' ? asJson(structural(raw)) : {};
+    const barrier = this.barrier();
+    const mirrored = barrier ? lookup(barrier.shadow, [...this.mirrorBase(owner.comp, owner.cur), 'layers', i, 'id']) : null;
+    if (barrier && (!mirrored?.exists || mirrored.value !== raw.id)) {
+      this.stats.repairs += 1;
+      const missed = barrier.repair('structuralDiff');
+      if (missed.length) this.onStale?.('context', missed);
+    }
+    return i;
   }
 
   private context(L: any): Context | null {
@@ -282,33 +409,50 @@ export class NativeApi {
     // what it holds). If not, a structural write bypassed the barrier: repair
     // before answering rather than answer for another layer.
     const barrier = this.barrier();
-    const mirrored = barrier ? lookup(barrier.shadow, ['comps', c.comp, 'layers', i, 'id']) : null;
-    if (barrier && (!mirrored?.exists || mirrored.value !== raw.id)) {
+    const mirrored = barrier ? lookup(barrier.shadow, [...this.mirrorBase(c.comp, c.cur), 'layers', i, 'id']) : null;
+    if (barrier && !c.comp.startsWith('@json:') && (!mirrored?.exists || mirrored.value !== raw.id)) {
       this.stats.repairs += 1;
       const missed = barrier.repair('structuralDiff');
       if (missed.length) this.onStale?.('context', missed);
     }
-    const first = typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
+    const first = !c.comp.startsWith('@json:') && typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
     return { comp: c.comp, open: c.open, layer: i, raw, first, live };
   }
 
   private query<T>(op: string, request: Record<string, unknown>, map?: (v: any) => T): Native<T> {
-    const wasm = this.ready();
+    let wasm = this.ready();
     if (!wasm) return { fallback: 'unavailable' };
-    let reply: any;
-    try {
-      refreshModels(this.PM, wasm);
-      reply = wasm.query({ op, ...request });
+    const ask = (instance: PmWasm): any => {
+      const payload: Record<string, unknown> = { op, ...request };
+      if (typeof request.comp === 'string' && request.comp.startsWith('@json:')) {
+        payload.compJson = JSON.parse(request.comp.slice(6));
+        payload.comp = '@detached';
+      }
+      refreshModels(this.PM, instance);
+      let reply = instance.query(payload);
       // 3D geometry met model assets the mirror lacks: add them and ask again.
-      if (reply?.models) reply = resolveModels(this.PM, wasm, () => wasm.query({ op, ...request }), reply);
-    } catch (error) { console.warn('[engine-doc] pm-wasm query failed', error); return { fallback: 'trap' }; }
-    if (reply?.fonts && this.fonts) {
-      // Text layout met fonts the mirror lacks: load them (at once from a
-      // synchronous registry, in the background otherwise) and ask again.
-      try {
-        reply = this.fonts.resolve(wasm, () => wasm.query({ op, ...request }), (r: any) => !!r?.fonts) ?? reply;
-      } catch (error) { console.warn('[engine-doc] pm-wasm query failed', error); return { fallback: 'trap' }; }
+      if (reply?.models) reply = resolveModels(this.PM, instance, () => instance.query(payload), reply);
+      if (reply?.fonts && this.fonts) {
+        // Text layout met fonts the mirror lacks: load them (at once from a
+        // synchronous registry, in the background otherwise) and ask again.
+        reply = this.fonts.resolve(instance, () => instance.query(payload), (r: any) => !!r?.fonts) ?? reply;
+      }
+      return reply;
+    };
+    let reply: any;
+    try { reply = ask(wasm); } catch (error) {
+      // A trap: a fresh instance, resynced, answers the same question (the
+      // answer stays native). A second trap on it is a pm-wasm defect.
+      console.warn('[engine-doc] pm-wasm query failed', error);
+      if (!this.revive?.() || !(wasm = this.ready())) return { fallback: 'trap' };
+      try { reply = ask(wasm); } catch (again) {
+        console.warn('[engine-doc] pm-wasm query failed again on a fresh instance', again);
+        this.onFailure?.('pm-wasm-trap', `pm-wasm trapped twice answering ${op}: ${String((again as Error)?.message ?? again)}`);
+        this.revive?.();
+        return { fallback: 'trap' };
+      }
     }
+    if (reply?.fonts && this.fonts?.disabled) this.onFailure?.('font-service-unavailable', 'The native font service stopped answering, so text layout cannot run in the new engine.');
     if ('ok' in reply) return { value: map ? map(reply.ok) : reply.ok };
     if (reply.throw) {
       const error = new (reply.throw.kind === 'TypeError' ? TypeError : reply.throw.kind === 'RangeError' ? RangeError : Error)(reply.throw.message);
@@ -323,6 +467,7 @@ export class NativeApi {
     if (reply.host) return { fallback: 'host' };
     if (reply.fonts) return { fallback: 'fonts' };
     if (reply.ink) return { fallback: 'ink' };
+    this.onFailure?.('pm-wasm-error', `pm-wasm could not answer ${op}: ${reply.error ?? 'unknown'}`);
     return { fallback: `error:${reply.error ?? 'unknown'}` };
   }
 
@@ -364,9 +509,10 @@ export class NativeApi {
     let got = run();
     if ('fallback' in got) {
       this.fell(op, got.fallback);
+      if (this.onFallback) return this.onFallback(op, got.fallback);
       return legacy();
     }
-    if (this.dual) {
+    if (this.dual && !this.noReference.has(op)) {
       const dual = this.dual;
       let expected: { value?: T; threw?: unknown };
       try { expected = { value: legacy() }; } catch (error) { expected = { threw: error }; }
@@ -380,7 +526,7 @@ export class NativeApi {
           dual.stats.stale[op] = (dual.stats.stale[op] ?? 0) + 1;
           this.onStale?.(op, missed);
           const again = run();
-          if ('fallback' in again) { this.fell(op, again.fallback); return legacy(); }
+          if ('fallback' in again) { this.fell(op, again.fallback); if (this.onFallback) return this.onFallback(op, again.fallback); return legacy(); }
           got = again;
           verdict = dual.classify(op, answer(got), expected, this.unwrap);
         }
@@ -577,7 +723,7 @@ export class NativeApi {
   }
 
   evP(L: any, prop: any, T: any, key: any): any {
-    if (!prop || typeof prop !== 'object') return this.legacy.evP(L, prop, T, key);
+    if (!prop || typeof prop !== 'object') return null;
     if (!this.dual && typeof T === 'number') {
       const rawProp = this.unwrap(prop);
       const entry = this.props.get(rawProp);
@@ -654,11 +800,15 @@ export class NativeApi {
 
   hasKeyAt(L: any, prop: any, T: any): any {
     return this.answer('hasKeyAt', () => {
+      // Not a channel at all: `p.kf.find(...)` throws before it reads the layer.
+      if (!isObject(prop)) return { threw: prop == null ? readThrows(prop, 'kf') : readThrows(undefined, 'find') };
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const path = findPath(ctx.raw, this.unwrap(prop));
-      if (!path) return { fallback: 'detached-prop' };
-      return this.query('hasKeyAt', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, t: T }, (i) => i == null ? null : prop.kf[i] ?? null);
+      // A channel outside the layer: pm-wasm reads its JSON (its keys are
+      // found by index, so the answer is still the live key).
+      const detached = path ? {} : { prop: prop && typeof prop === 'object' ? asJson(this.unwrap(prop)) : prop };
+      return this.query('hasKeyAt', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path: path ?? [], ...detached, t: T }, (i) => i == null ? null : prop.kf[i] ?? null);
     }, () => this.legacy.hasKeyAt(L, prop, T), () => ({ layer: L?.id, t: T }));
   }
 
@@ -690,7 +840,8 @@ export class NativeApi {
         if (parent == null) extra.parent = null;
         else {
           const ctx = this.context(parent);
-          if (!ctx || typeof ctx.layer !== 'number') return { fallback: 'detached-parent' };
+          if (!ctx) return { fallback: 'context' };
+          // A parent outside the composition is evaluated from its JSON.
           extra.parent = ctx.layer;
         }
       }
@@ -712,9 +863,26 @@ export class NativeApi {
   }
 
   groupAncestors(L: any, layers?: any[]): any[] {
+    // `if (!layer?.group) return []` comes before anything reads the list
+    // (an explicit list, or a layer that is not one; the shaped path below
+    // caches the rest per revision).
+    const raw = this.unwrap(L);
+    if (!raw?.group && (layers !== undefined || !raw || typeof raw !== 'object')) {
+      return this.answer('groups.ancestors', () => ({ value: [] }), () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id }));
+    }
     if (layers !== undefined) {
       const c = this.comps();
-      if (!c || this.unwrap(layers) !== c.cur.layers) return this.legacy.groupAncestors(L, layers);
+      if (!c || this.unwrap(layers) !== c.cur.layers) {
+        // Another composition's own layers (audio, the mixer, a render of
+        // another composition): asked by its address, not as JSON.
+        const owner = c ? this.ownerOf(this.unwrap(layers)) : null;
+        if (owner) return this.answer('groups.ancestors',
+          () => this.query('groupAncestors', { comp: owner.comp, open: c!.open, layer: this.listLayer(owner, L) }, (indexes: number[]) => indexes.map(i => layers[i])),
+          () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id }));
+        return this.answer('groups.ancestors',
+          () => this.query('groupAncestors', { comp: c?.comp ?? '', open: c?.open ?? '', compJson: structuralComp(c?.cur, layers), layer: asJson(structural(this.unwrap(L))) }, (indexes: number[]) => indexes.map(i => layers[i])),
+          () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id }));
+      }
     }
     return this.shaped('groups.ancestors', L, 'groupAncestors',
       () => this.answer('groups.ancestors', () => this.layerQuery('groupAncestors', L, {}, (indexes: number[], ctx) => indexes.map(i => ctx.live[i])),
@@ -775,7 +943,8 @@ export class NativeApi {
         if (parent == null) extra.parent = null;
         else {
           const ctx = this.context(parent);
-          if (!ctx || typeof ctx.layer !== 'number') return { fallback: 'detached-parent' };
+          if (!ctx) return { fallback: 'context' };
+          // A parent outside the composition is evaluated from its JSON.
           extra.parent = ctx.layer;
         }
       }
@@ -913,6 +1082,56 @@ export class NativeApi {
     }, legacy, () => ({ t: T }));
   }
 
+  /**
+   * Loads the faces the open composition's text layers need before anything
+   * asks, so with an asynchronous provider (the editor, through main) the
+   * first question about them is answered natively too. Asks pm-wasm
+   * directly: nothing here is counted or answered.
+   */
+  async warmFonts(): Promise<void> {
+    const loader = this.fonts;
+    if (!loader || loader.disabled) return;
+    const proj = this.unwrap(this.PM.proj);
+    if (!proj) return;
+    const open = proj.compId ?? proj.id ?? '';
+    const visit = async (comp: any, address: string): Promise<void> => {
+      const layers = Array.isArray(comp.layers) ? comp.layers : [];
+      for (let index = 0; index < layers.length; index++) {
+        const L = layers[index];
+        if (L?.type !== 'text') continue;
+        // Visit every keyed time, including content/range font changes. The
+        // on-demand synchronous provider covers interpolated and expression faces.
+        const times = new Set<number>([Number(L.from) || 0]);
+        const scan = (value: any) => {
+          if (!value || typeof value !== 'object') return;
+          if (Array.isArray(value.kf)) for (const key of value.kf) if (Number.isFinite(key.t)) times.add((Number(L.from) || 0) + key.t);
+          for (const child of Object.values(value)) scan(child);
+        };
+        scan(L);
+        for (const t of times) for (let round = 0; round < 6; round++) {
+          const wasm = this.ready();
+          if (!wasm) return;
+          const ask = () => wasm.query({ op: 'textLayout', comp: address, open, layer: index, t });
+          const reply: any = ask();
+          if (!reply?.fonts) break;
+          loader.resolve(wasm, ask, (r: any) => !!r?.fonts);
+          await loader.whenIdle();
+          if (loader.disabled) return;
+        }
+      }
+      for (const child of Object.values(comp.comps ?? {})) {
+        const address = this.address(proj, child);
+        if (address !== null) await visit(child, address);
+      }
+    };
+    await visit(proj, open);
+  }
+
+  /** `PM.textLayout` (the glyph layout: characters, words, lines) for a host without a raster. */
+  glyphLayout(L: any, T: number): any {
+    return this.answer('glyphLayout', () => this.layerQuery('glyphLayout', L, { t: T }), () => this.legacy.glyphLayout(L, T), () => ({ layer: L?.id, t: T }));
+  }
+
   textLayout(L: any, T: number): any {
     return this.answer('textLayout', () => this.layerQuery('textLayout', L, { t: T }), () => this.legacy.textLayout(L, T), () => ({ layer: L?.id, t: T }));
   }
@@ -934,12 +1153,15 @@ export class NativeApi {
 
   pathValues(L: any, path: any, time: number, prefix?: string): any {
     return this.answer('pathValues', () => {
+      // Not a path: `path.id` (the default prefix) or `Object.entries(path.p)` throws before the layer is read.
+      if (!isObject(path)) return { threw: path == null ? readThrows(path, prefix === undefined ? 'id' : 'p') : entriesThrows() };
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const index = (Array.isArray(ctx.raw.d?.paths) ? ctx.raw.d.paths : []).indexOf(this.unwrap(path));
-      if (index < 0) return { fallback: 'detached-path' };
       const live = this.unwrap(path);
-      return this.query('pathValues', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, t: time, ...(prefix === undefined ? {} : { prefix }) },
+      // A path outside `d.paths` is evaluated from its JSON, with the layer as context.
+      const detached = index < 0 ? { pathJson: asJson(live) } : {};
+      return this.query('pathValues', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, ...detached, t: time, ...(prefix === undefined ? {} : { prefix }) },
         (v: any) => {
           const out = keyOrder(v, live?.p);
           // `vertices` last, each in its own `p` order, as pathValues builds them.
@@ -953,11 +1175,14 @@ export class NativeApi {
 
   groupMatrix(L: any, path: any, time: number): number[] {
     return this.answer('groupMatrix', () => {
+      // Not a path: `seen.has(path.id)` or pathValues' `Object.entries(path.p)` throws before the layer is read.
+      if (!isObject(path)) return { threw: path == null ? readThrows(path, 'id') : entriesThrows() };
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const index = (Array.isArray(ctx.raw.d?.paths) ? ctx.raw.d.paths : []).indexOf(this.unwrap(path));
-      if (index < 0) return { fallback: 'detached-path' };
-      return this.query('groupMatrix', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, t: time });
+      const live = this.unwrap(path);
+      const detached = index < 0 ? { pathJson: asJson(live) } : {};
+      return this.query('groupMatrix', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, ...detached, t: time });
     }, () => this.legacy.groupMatrix(L, path, time), () => ({ layer: L?.id, t: time }));
   }
 
@@ -968,8 +1193,16 @@ export class NativeApi {
   }
 
   validMatteSource(layers: any[], layer: any, id: any): boolean {
+    // `new Set([layer.id])` throws first for a missing layer.
+    if (layer == null) return this.answer('validMatteSource', () => ({ threw: readThrows(layer, 'id') }), () => this.legacy.validMatteSource(layers, layer, id), () => ({ id }));
     const c = this.comps();
-    if (!c || this.unwrap(layers) !== c.cur.layers) return this.legacy.validMatteSource(layers, layer, id);
+    const owner = c && this.unwrap(layers) !== c.cur.layers ? this.ownerOf(this.unwrap(layers)) : null;
+    if (owner) return this.answer('validMatteSource',
+      () => this.query('validMatteSource', { comp: owner.comp, open: c!.open, layer: this.listLayer(owner, layer), id: id === undefined ? { $u: 1 } : id }),
+      () => this.legacy.validMatteSource(layers, layer, id), () => ({ layer: layer?.id, id }));
+    if (!c || this.unwrap(layers) !== c.cur.layers) return this.answer('validMatteSource',
+      () => this.query('validMatteSource', { comp: c?.comp ?? '', open: c?.open ?? '', compJson: structuralComp(c?.cur, layers), layer: asJson(structural(this.unwrap(layer))), id: id === undefined ? { $u: 1 } : id }),
+      () => this.legacy.validMatteSource(layers, layer, id), () => ({ id }));
     return this.answer('validMatteSource', () => this.layerQuery('validMatteSource', layer, { id: id === undefined ? { $u: 1 } : id }),
       () => this.legacy.validMatteSource(layers, layer, id), () => ({ layer: layer?.id, id }));
   }

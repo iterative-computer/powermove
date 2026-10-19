@@ -290,11 +290,6 @@ pub(crate) fn dispatch(
         return Err(Unanswered::Host);
     }
     if let Err(e) = &result
-        && e.kind == pm_edit::LEGACY_ONLY
-    {
-        return Err(Unanswered::Legacy);
-    }
-    if let Err(e) = &result
         && e.kind == pm_eval::query3d::MODEL_UNLOADABLE
     {
         return Err(Unanswered::Unsupported(e.message.clone()));

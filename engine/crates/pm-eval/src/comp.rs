@@ -77,7 +77,16 @@ impl<'d> Comp<'d> {
             .or_else(|| node::string(node::member(Some(root), "id")));
         let stored_open = open.is_some_and(|s| s.as_bytes() == comp_id.as_bytes())
             && node::member(Some(root), "layers").is_some();
-        let node = if stored_open {
+        // A nested composition is addressed by its canonical member path, so
+        // duplicate ids in different composition maps remain distinct.
+        let path_node = comp_id.strip_prefix("@path:").and_then(|json| {
+            let path: Vec<String> = serde_json::from_str(json).ok()?;
+            path.iter()
+                .try_fold(root, |at, key| node::member(Some(at), key))
+        });
+        let node = if let Some(node) = path_node {
+            node
+        } else if stored_open {
             root
         } else {
             node::member(node::member(Some(root), "comps"), comp_id)
@@ -95,6 +104,19 @@ impl<'d> Comp<'d> {
             rate: std::cell::OnceCell::new(),
             open_canonical,
         })
+    }
+
+    /// An ad-hoc composition during project replacement. It keeps the open
+    /// project's members/rate while evaluating the caller's exact scope.
+    pub fn at_node(root: &'d Node, node: &'d Node, id: &str, revision: u64) -> Self {
+        Self {
+            root,
+            node,
+            id: JsString::from(id),
+            revision,
+            rate: std::cell::OnceCell::new(),
+            open_canonical: false,
+        }
     }
 
     pub fn id(&self) -> &JsString {

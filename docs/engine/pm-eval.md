@@ -223,3 +223,13 @@ Section 25's evaluation tolerance (`1e-9 + 1e-9·|b|`) applies to transcendental
   defaults; editor-helper shims; the `pm-wasm` boundary and identity registry.
 - `pm-edit`: the editing commands of `temporal-ease.ts` and `anim.ts` (`setKey`,
   `easyEase`, `setInterpolation`, `applyUnitCurve`, `offset_property`, ...).
+
+## Document-host composition scopes (round 4)
+
+`Comp::in_root` accepts canonical nested member paths for compositions below
+another composition's `comps`; the address keeps duplicate ids in separate maps
+independent. pm-wasm can also evaluate a replacement-time `compJson` through
+`Comp::at_node`, retaining the current project's members and open composition.
+Ad-hoc scope queries clear per-document evaluator caches (interned ids remain
+valid), because their temporary nodes must never share cached answers with a
+later replacement scope at the same document revision.

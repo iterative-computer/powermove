@@ -44,6 +44,36 @@ pub struct SubsetInfo {
 
 /// Builds the metrics-and-shaping subset of face `index` of `data` as a
 /// single-face sfnt (its index is 0).
+/// Face `index` of `data` whole, outlines included, as a single-face font
+/// (read at index 0): a single-face file's own bytes, or every table of the
+/// collection's face assembled into one sfnt. What a host that measures
+/// glyph ink (text bounds, raster placement) loads instead of the
+/// metrics-and-shaping subset.
+pub fn whole_face(data: &[u8], index: u32) -> Result<Vec<u8>, ReadError> {
+    match FileRef::new(data)? {
+        FileRef::Font(_) if index == 0 => Ok(data.to_vec()),
+        FileRef::Font(_) => Err(ReadError::OutOfBounds),
+        FileRef::Collection(collection) => {
+            let font = collection.get(index)?;
+            let mut tables: Vec<(u32, Vec<u8>)> = font
+                .table_directory()
+                .table_records()
+                .iter()
+                .filter_map(|record| {
+                    let tag = record.tag();
+                    font.table_data(tag).map(|bytes| {
+                        (
+                            u32::from_be_bytes(tag.to_be_bytes()),
+                            bytes.as_bytes().to_vec(),
+                        )
+                    })
+                })
+                .collect();
+            Ok(build_sfnt(&mut tables))
+        }
+    }
+}
+
 pub fn metrics_subset(data: &[u8], index: u32) -> Result<(Vec<u8>, SubsetInfo), ReadError> {
     let file = FileRef::new(data)?;
     let font = file
@@ -278,5 +308,58 @@ mod tests {
             worst < 1.0 / 1024.0,
             "worst advance difference {worst} units"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod whole_face_tests {
+    use super::whole_face;
+    use read_fonts::{FileRef, FontRef, TableProvider};
+
+    /// A collection face comes out as one face with every table of the
+    /// original, outlines included; a single-face file comes out unchanged.
+    #[test]
+    fn collection_faces_come_out_whole() {
+        let data = std::fs::read("/System/Library/Fonts/Helvetica.ttc").expect("Helvetica.ttc");
+        let FileRef::Collection(collection) = FileRef::new(&data).unwrap() else {
+            panic!("Helvetica.ttc is a collection");
+        };
+        for index in 0..collection.len() {
+            let original = collection.get(index).unwrap();
+            let whole = whole_face(&data, index).unwrap();
+            let face = FontRef::new(&whole).unwrap();
+            let tags = |f: &FontRef| {
+                f.table_directory()
+                    .table_records()
+                    .iter()
+                    .map(|r| r.tag())
+                    .collect::<Vec<_>>()
+            };
+            let mut expected = tags(&original);
+            expected.sort();
+            assert_eq!(tags(&face), expected, "face {index}");
+            for tag in expected {
+                assert_eq!(
+                    face.table_data(tag).unwrap().as_bytes(),
+                    original.table_data(tag).unwrap().as_bytes(),
+                    "face {index} table {tag}"
+                );
+            }
+            assert_eq!(
+                face.maxp().unwrap().num_glyphs(),
+                original.maxp().unwrap().num_glyphs()
+            );
+        }
+        assert!(whole_face(&data, collection.len()).is_err());
+    }
+
+    #[test]
+    fn single_faces_are_their_own_bytes() {
+        let path = "/System/Library/Fonts/SFNS.ttf";
+        let Ok(data) = std::fs::read(path) else {
+            return;
+        };
+        assert_eq!(whole_face(&data, 0).unwrap(), data);
+        assert!(whole_face(&data, 1).is_err());
     }
 }
