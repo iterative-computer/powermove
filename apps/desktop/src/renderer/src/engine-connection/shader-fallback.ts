@@ -254,31 +254,31 @@ export class ShaderFallbackRunner {
     }
   }
 
-  /** `finished` on the calling thread: the fence is polled without
-   *  yielding, within the same draw deadline. */
+  /**
+   * `finished` on the calling thread. WebGL lets a fence signal only once
+   * the user agent's event loop runs again (WebGL 2.0, "Fences" in the
+   * differences from OpenGL ES 3.0), so a fence polled inside this task
+   * never signals and the poll would always end at the deadline. The pass
+   * is waited for with `finish` instead, which blocks until the GPU has run
+   * it (Chromium's command buffer round trip). The calling thread cannot cut
+   * a draw short, so the deadline is judged when it returns: a pass that
+   * took longer fails with `watchdog`, loses the context and its program is
+   * never run again, as in `finished`. A draw that hangs the GPU is cut by
+   * the GPU process and surfaces as `contextLost`.
+   */
   private finishedSync(gl: GL, id: string, request: ShaderFallbackRequest): void {
-    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-    if (!sync) return;
-    gl.flush();
     const ms = this.options.drawDeadlineMs ?? DRAW_DEADLINE_MS;
-    const deadline = this.now() + ms;
-    try {
-      for (;;) {
-        const status = gl.clientWaitSync(sync, 0, 0);
-        if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return;
-        if (status === gl.WAIT_FAILED || this.lost || gl.isContextLost()) {
-          this.lost = true;
-          throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
-        }
-        if (this.now() > deadline) {
-          const error = this.fail(id, request, 'watchdog', `its draw did not finish within ${Math.round(ms / 1000)} s`);
-          gl.getExtension('WEBGL_lose_context')?.loseContext();
-          this.lost = true;
-          throw error;
-        }
-      }
-    } finally {
-      if (!gl.isContextLost()) gl.deleteSync(sync);
+    const started = this.now();
+    gl.finish();
+    if (this.lost || gl.isContextLost()) {
+      this.lost = true;
+      throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
+    }
+    if (this.now() - started > ms) {
+      const error = this.fail(id, request, 'watchdog', `its draw did not finish within ${Math.round(ms / 1000)} s`);
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      this.lost = true;
+      throw error;
     }
   }
 
@@ -475,7 +475,7 @@ export class ShaderFallbackRunner {
 
   /**
    * Draws a request's passes, yielding after each pass's draw is issued so
-   * the caller waits for its fence (`finished` or `finishedSync`), and
+   * the caller waits for it (`finished`'s fence, or `finishedSync`), and
    * returns the read-back pixels. Every pass binds all it uses, and the
    * target is bound again before the read: a synchronous request may run
    * on the context between an asynchronous request's passes.
