@@ -1785,3 +1785,132 @@ This removes worker construction and first-pipeline compilation from a warmed
 mid-play mount. It does not remove the viewer extension's own DOM work. See
 `perf.md` P5 for the deterministic reverse scheduling result and remaining paired
 mount/A/V gates; neither physical-display gate is claimed from unit tests.
+
+## Today's viewer canvas (decision V1, 2026-10-19)
+
+With "Use New Engine" on, the viewer looks like today's at every zoom and
+preview resolution, including the resolution today draws at and the
+browser's upscale of it.
+
+**Today.** The legacy viewer draws a view into a WebGL canvas it sizes
+itself (`V.layout` in `extensions/viewer/viewer.ts`):
+
+- below 100% (and for crop-unsafe projects at any zoom), `previewRenderSize`:
+  the composition at `min(1, zoom × min(2, DPR)) × quality`, so a 2x display
+  at 61% draws 1 canvas pixel per composition pixel, not 1.22;
+- with an explicit preview resolution (Full, Half, Quarter), the composition
+  at `quality` whatever the zoom;
+- above 100% in a crop-safe project, the cropped `previewRenderViewport`
+  (`round(cssWidth × min(2, DPR) × quality)` over the crop).
+
+The canvas fills its CSS box (`V.inner`, or the crop's box), and Chromium
+composites it there: the box snapped to whole device pixels (each edge
+rounded, as Blink snaps a replaced element's content box) and the 8-bit
+canvas sampled bilinearly, without mipmaps, clamped at its edges. The
+compositor picks every raster (text, shapes, SVG buckets) at that canvas's
+`outputScale`.
+
+**The engine.** The viewer computes the same geometry before it sends the
+view and sends the canvas as `ViewerState.canvas` (`todaysCanvas` in
+`engine-present/view-params.ts`: backing size, the composition part it
+holds, and its CSS box; RFC 02 version note). The kernel's canvas binding
+sends the one a `render.gl.resize` caller sized. pm-node's
+`compose::canvas_placement`:
+
+- renders the frame at the canvas's size and today's `outputScale` (the
+  canvas over its crop), so every layer, effect and level 1 SVG bucket is
+  drawn at today's resolution; only the canvas texels the visible frame
+  pixels read are rendered;
+- stores the region as today's 8-bit opaque canvas (`Rgba8Unorm`,
+  composited over black), then scales it into the box snapped as Blink snaps
+  it, with hardware bilinear sampling clamped at the canvas edges, into the
+  working texture the display transform presents;
+- without a canvas (the integration harnesses, older callers), draws the
+  composition at zoom × DPR × the preview resolution as before.
+
+The preview quality is honoured exactly as today because the canvas is
+today's: Auto follows `api.transport.quality` (the adaptive ladder),
+explicit Full and Half draw the composition at their quality whatever the
+zoom (Full at 25% is a 2× downscale by the browser, as today). During a
+paused zoom or pan gesture today keeps its committed canvas and shows its
+last frame scaled by CSS until the gesture settles (`canRetainNavigation`,
+100 ms after the last event); the engine view keeps the committed canvas
+the same way (its box follows the gesture) and takes the new one when the
+gesture settles. Below 100% the canvas holds the whole composition, so a
+frame rendered at the old canvas is today's stale frame, rescaled.
+
+GPU work below 100% falls with the canvas: a 1920 × 1080 composition at
+61% on a 2x display renders 2.07 MP instead of 3.09 MP, at 100% 2.07 MP
+instead of 8.29 MP.
+
+**Measured** (`e2e/engine-viewer-canvas.spec.ts`, Electron lock, one
+worker; a 640 × 360 project with two text layers, a rotated rounded
+rectangle, a 1 px line, a blurred star, a rotated level 1 SVG image and a
+video; stage 748 × 452 CSS at DPR 2, captured with `capturePage`,
+1496 × 904 pixels; corpus bound: every channel within 1 CV for 99.9% of
+pixels, none beyond 4):
+
+| Case | Today's canvas | Whole stage: within 1 CV, max | Outside the video layer | Display profile (P3 canvas), whole stage |
+|---|---|---|---|---|
+| 25% Auto | 320 × 180 | 99.997%, 49 | 100.0000%, 1 | 99.919%, 49 |
+| 50% Auto | 640 × 360 | 100.000%, 1 | 100.0000%, 1 | 99.778%, 2 |
+| 61% Auto | 640 × 360 | 100.000%, 2 | 99.9995%, 2 | 99.892%, 4 |
+| 100% Auto | 640 × 360 | 99.999%, 2 | 99.9997%, 2 | 99.714%, 4 |
+| 25% Full | 640 × 360 | 100.000%, 1 | 100.0000%, 1 | 99.979%, 3 |
+| 50% Full | 640 × 360 | 100.000%, 1 | 100.0000%, 1 | 99.781%, 2 |
+| 61% Full | 640 × 360 | 100.000%, 2 | 99.9995%, 2 | 99.895%, 4 |
+| 100% Full | 640 × 360 | 100.000%, 2 | 99.9997%, 2 | 99.723%, 4 |
+| 25% Half | 320 × 180 | 99.997%, 49 | 100.0000%, 1 | 99.919%, 49 |
+| 50% Half | 320 × 180 | 99.972%, 37 | 99.9997%, 2 | 99.905%, 37 |
+| 61% Half | 320 × 180 | 99.957%, 44 | 99.9983%, 2 | 99.873%, 44 |
+| 100% Half | 320 × 180 | 99.888%, 43 | 99.9963%, 2 | 99.620%, 43 |
+
+All cases hold the bound outside the video layer, and the whole stage holds
+it at every Full case and at Auto from 50% up. Where the stage misses it
+(Auto at 25% and every Half case, all with a half-scale canvas: 45 to 1,468
+pixels, up to 49 CV) the differences sit on the video layer's edges and
+nowhere else. Today's viewer draws a video's editing copy when the preview
+resolution is Auto or its quality is below 1 (`previewVideoElement`, the
+intra-1280 derivative) and the engine draws the original (its media
+preference has no proxies yet, section 14); the edges of the two decodes
+differ when sampled at half scale. That is the likely cause, not proven
+pixel by pixel. The same frame's content without the scaling (the engine's snapshot
+against today's `renderToPixels`, both from the original, at the canvas
+size) is within 1 CV in 11 of 12 cases; the exception is the session's
+first legacy `renderToPixels` (25% Auto: 6.25% of pixels, up to 228 CV, in
+both runs), and the same 320 × 180 canvas at 25% Half is within 1 CV. Both windows ran with
+`--force-color-profile=srgb`; with the display's own profile (last column,
+the first run) the engine's display-p3 canvas moves single channels of
+smooth gradients by 2 CV through the 8-bit P3 round trip, at every zoom,
+including 50% where both canvases map 1:1, so that column measures the
+presentation's color space, not the scaling. Before V1 the engine drew 61%
+at 1.22 and 100% at 2 device pixels per composition pixel, sharper than
+today everywhere. Evidence (today, engine, differences in red), outside the
+repository: `/tmp/ne-w5/viewer-canvas-evidence2/` and
+`/tmp/ne-w5/viewer-canvas-display/`.
+
+Also run after V1 (Electron lock, one worker): `engine-svg.spec.ts` 6 of 7
+(the seventh is the exported still, E1 in vector.md, unchanged);
+`engine-render-transport.spec.ts` 7 of 7; the `viewer-*.spec.ts` specs 22 of
+24, the two failures in `viewer-resize.spec.ts` (a handle drag leaves
+`scale.x` at 100) failing the same way with the branch's base `viewer.ts`.
+The svg and text gates: `svg_corpus` 34 projects, 105 frames, 0 failed;
+`text_corpus` 576 frames, 0 failed; `text_raster` 0 failed. pm-node
+`tests/compose.rs` checks the snapped box, the rendered texels and the
+bilinear values against the 8-bit canvas.
+
+Remaining:
+
+- Above 100% in a crop-safe project the engine renders the crop at today's
+  scale and size, but the crop's pixel grid starts at the nearest output
+  pixel rather than at the crop's fractional origin (`previewRenderViewport`
+  pans in fractions of a pixel; pm-render has no preview-viewport origin).
+  Not measured here.
+- The engine presents a display-p3 canvas on a wide-gamut display where
+  today's canvas is sRGB; the 8-bit P3 round trip moves single channels of
+  smooth gradients by 2 CV (above), at every zoom.
+- The gesture hold (above) is covered by code review only: no e2e drives
+  a pinch with the engine on and compares frames.
+- The stage origin is assumed to sit on whole device pixels (Blink snaps
+  the canvas box in window coordinates; the engine snaps it in the stage's).
+

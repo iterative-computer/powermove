@@ -246,15 +246,28 @@ presentation frame requests fail without a viewer; offscreen captures use the
 snapshot path. See RFC 16 for the renderer lifecycle. The generated build is
 `protocol-2f8d7cab61015d02`; addons and TypeScript must be rebuilt together.
 
-### Version note: optional SVG output scale (2026-10-19)
+### Version note: optional viewer canvas (decision V1, 2026-10-19)
 
-`ViewerState.svgScale?: [number, number] | null` (Rust `svg_scale:
-Option<[f64; 2]>`, `#[serde(default)]`) is today's output scale for the view:
-the legacy compositor's `outputScale` over the canvas today's viewer sizes
-for it (`previewRenderSize`, the explicit preview resolution, or the cropped
-`previewRenderViewport`), canvas pixels per composition pixel per axis. The
-engine picks level 1 SVG image buckets at it (`RenderRequest::svg_scale`;
-docs/engine/vector.md, "Viewer buckets at today's scale"). Absent or null:
-the engine's own output scale, as before. Positive, finite and at most 64
-(`ViewerState::validate`). A change of it is a new view (`viewSeq`). The
-build id moved; addons and TypeScript are rebuilt together.
+`ViewerState.canvas?: ViewerCanvas | null` (Rust `canvas:
+Option<ViewerCanvas>`, `#[serde(default)]`) is the WebGL canvas today's
+viewer draws the view into:
+
+```rust
+pub struct ViewerCanvas {
+    pub width: u32,  // backing size: previewRenderSize, the explicit
+    pub height: u32, // preview resolution, or the crop's renderWidth × renderHeight
+    pub crop: Rect,  // the composition part it holds (the whole composition, or the crop)
+    pub css: Rect,   // its CSS box in stage CSS pixels
+}
+```
+
+With it the engine renders the viewer frame at that canvas's size and
+today's `outputScale` (`width / crop.width`), and scales it into the box
+snapped to whole device pixels with bilinear sampling, as Chromium shows
+today's canvas (docs/engine/bridge.md, "Today's viewer canvas"). Absent or
+null: the composition at zoom × DPR × the preview resolution, as before.
+`width` and `height` 1..16384, `crop` and `css` finite with positive size
+(`ViewerState::validate`). A change of it is a new view (`viewSeq`). It
+replaces the `svgScale` field this branch first added, so the branch moves
+the build id once (`protocol-8433dea27e348b5a`); addons and TypeScript are
+rebuilt together.

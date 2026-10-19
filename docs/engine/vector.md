@@ -514,10 +514,9 @@ M4 Max), the machine shared with other lanes.
   `previewRenderViewport` rules (the cap at one pixel per composition pixel,
   the crop's safety plan, the quality and explicit resolution settings),
   and the browser's upscale of the smaller frame. Until then the viewer
-  differs from today there for every layer kind except the resolution of
-  level 1 SVG rasters, which follow today's scale since 2026-10-19 ("Viewer
-  buckets at today's scale" below); the engine still draws the frame (and
-  samples those rasters) at zoom × DPR.
+  differs from today there for every layer kind. Done 2026-10-19 (decision
+  V1, bridge.md "Today's viewer canvas"): the engine renders at today's
+  canvas and scales it as Chromium does.
 - Preview stand-ins during playback (above: 17 of 62 frames of a scale
   animation): prefetching the buckets of the frames ahead would remove
   them; a decision for the orchestrator.
@@ -641,24 +640,22 @@ an explicit preview resolution it is `round(comp × quality)`, and above
 engine's viewer draws at zoom × DPR (`placement`), so its buckets followed
 that scale.
 
-The fix keeps the engine's frame and changes only the bucket choice:
+The first fix (an SVG-only `ViewerState.svgScale`) was replaced the same
+day by decision V1 (docs/engine/bridge.md, "Today's viewer canvas"): the
+viewer sends today's canvas (`ViewerState.canvas`: backing size, crop, CSS
+box), the engine renders every layer of the viewer frame at that canvas and
+today's `outputScale`, and scales it into the box as Chromium scales today's
+WebGL canvas. Level 1 SVG buckets follow without an override:
 
-- The viewer computes today's render geometry before it sends the view and
-  sends the compositor's `outputScale` over it as `ViewerState.svgScale`
-  (`todaysOutputScale` in `engine-present/view-params.ts`; RFC 02 version
-  note). The kernel's canvas binding does the same from the size and crop a
-  `render.gl.resize` caller passes. A change of it is a new view.
-- Composer passes it as `RenderRequest::svg_scale`; the plan picks level 1
-  SVG buckets at it (`svgRasterDimensions(…, scaledWorld)` with today's
-  scale), and a level 1 precomp derives its child's scale from today's
-  target (`round(w × sx)` over the child's size), as today's nested
-  `renderProject` does. Draw reuse keys on it.
-- Snapshots and exports send none: their scale is `W / comp.w`, which is
+- `svgRasterDimensions(…, scaledWorld)` runs at today's scale because the
+  whole frame does, and a level 1 precomp's child target is today's
+  `round(w × sx)` for the same reason.
+- Snapshots and exports are unchanged: their scale is `W / comp.w`, which is
   today's (`renderToPixels`, `renderInto` after `GL.resize(W, H)` with no
   viewport). Level 2 is unchanged (native vectors at output resolution).
 - Perf3's exact-raster policy is untouched: the bucket is computed in the
   plan of the frame that draws it, so the frame still waits for exactly
-  that raster (e2e: zero stand-ins).
+  that raster.
 
 Measured:
 
@@ -667,9 +664,10 @@ Measured:
   Auto and Half × crop safe and unsafe, plus an SVG in a precomp: 918
   views, 216 of them cropped. `svg_level1.rs`
   (`viewer_frames_pick_todays_buckets_at_todays_viewer_scale`) plans the
-  engine's viewer frame of each with the sent scale: 918 of 918 buckets are
-  today's; at the engine's own scale 491 differ.
-- e2e (`engine-svg.spec.ts`, Electron lock, one worker): the viewer asks
+  engine's viewer frame of each at the sent canvas's output scale: 918 of
+  918 buckets are today's; at zoom × DPR 491 differ.
+- e2e (`engine-svg.spec.ts`, Electron lock, one worker; run again after V1
+  with the same results): the viewer asks
   for today's buckets at fit, at 237% cropped and panned, and at 61%
   (160 × 90, 280 × 158, 520 × 293), with zero stand-ins; ten bucket edits
   and the 63-frame scale animation (17 asks) present no stand-in; 6 of 7
@@ -678,10 +676,7 @@ Measured:
   32-bit still pipeline, not the rasters.
 - `svg_corpus`: 34 projects, 105 frames, 9,640,652 SVG pixels, 0 failed.
 
-Remaining: the engine still draws the viewer frame itself at zoom × DPR
-and samples the today-sized raster into it, where today's browser upscales
-the whole smaller canvas ("Level 1: what remains"). A level 1 SVG inside a
-level 2 precomp keeps the engine's scale (today has no level 2). During a
-zoom gesture today keeps its old canvas until the gesture settles
-(`canRetainNavigation`); the engine follows the new scale at once, so only
-transient gesture frames can differ.
+Remaining: a level 1 SVG inside a level 2 precomp keeps the engine's
+continuous density (today has no level 2). Above 100% in a crop-safe
+project the crop's pixel grid starts at the nearest output pixel, not at
+the crop's fractional origin (bridge.md, "Today's viewer canvas").
