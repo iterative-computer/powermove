@@ -301,21 +301,11 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 
 ## Gaps
 
-- **Imported glTF models** are not built into snapshots; their
-  compositions route (the static check lists them). Since Phase 3c round 3
-  the comparison harness counts every snapshot it cannot build as a
-  failure (it listed them as allowed before, a skipped corpus case), and it
-  compares the newest `threed-2*` capture by default as well: on `v1` plus
-  `threed-20261019-roles-maps` it reports 182 compared, 153 equal, 29
-  failures (23 glTF snapshots not built, 6 with differing converted
-  textures), so `cargo test -p pm-render --test blender_snapshots` fails
-  on a machine with the corpus until both are closed. Building them needs
-  posed meshes (`getVertexPosition` with skinning and morphs, skinned
-  normals through `applyBoneTransform`), `sourceMaterialSnapshot` from the
-  loader's material fields, and the texture snapshot ids in today's
-  asynchronous order (meshes are pushed as their materials resolve).
-  Recipe parts are built since Phase 3c (`generated`,
-  docs/engine/scene3d.md).
+- **Imported glTF snapshots are built and match in round 4.** All 23
+  formerly unbuilt v1 snapshots compare equal, including embedded texture
+  pixels. The complete run is 176/182 equal because six snapshots still
+  contain the AVIF Canvas2D conversion differences below. Recipe parts
+  remain built as before.
 - **The viewport's busy and error state** (`previewState()`: the
   spinner and the error line in the 3D viewport UI) still comes from
   today's renderer-side preview; the engine's preview jobs and failures
@@ -331,20 +321,14 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
   once the plan visits them, and the frame-list port covers them.
 - **Leases**: the job lane's decoded surfaces use a fixed 512 MiB budget,
   not the `blenderSurfaces` lease category; the disk area's bound is 8 GiB.
-- **Converted textures** (images the worker does not load as they are:
-  TIFF, AVIF, HEIC, and others) are made from the level 1 bitmap read back
-  unpremultiplied, as today's canvas `toBlob` reads it (Phase 3c round 2).
-  On capture `threed-20261019-roles-maps` the 8-bit TIFF renditions equal
-  today's pixels, but three classes still differ: 16-bit TIFF renditions
-  (today passes the stored FFmpeg PNG rendition itself, 16-bit), the
-  CMYK-alpha TIFF (up to 180 CV), and HDR AVIF (today's canvas `drawImage`
-  tone maps the bitmap differently from the WebGL upload: up to 210 CV for
-  PQ and HLG, 1 CV on 29 to 66 pixels for BT.2020 and P3 SDR). The
-  snapshot test compares converted PNGs by decoded pixels and names each
-  differing asset. Matching them needs the importer's rendition bytes for
-  TIFF and a measurement of Chromium's canvas draw of HDR bitmaps.
-- **Native-pass limits on Blender compositions**: the static check still
-  routes Blender compositions with SVG texture maps.
+- **Converted textures:** round 4 preserves TIFF rendition samples at full
+  depth; all six captured TIFF maps now match. AVIF Canvas2D conversion
+  remains different: PQ HDR up to 174 CV, HLG HDR 117 CV, HDR alpha 210 CV,
+  and P3/BT.2020 SDR 1 CV on 66/29 pixels. The full comparison still fails
+  all six snapshots that use these maps. See round 4 below.
+- **SVG maps in Blender:** the native 3D pass consumes Chromium's new SVG
+  material-map upload, but the Blender asset converter still does not
+  obtain its PNG from Chromium's canvas raster. That path remains open.
 - **Fixed in Phase 3c round 2: media-store assets.** Media-store files are
   content-addressed and may have no extension; main's Blender stage refused
   them ("Unsupported Blender asset format"), so a texture imported into the

@@ -212,3 +212,14 @@ repository.
 - `pm-render/tests/motion.rs`: the wave 4 motion merge moved the
   request before cloning it; the unblurred render now clones it, so the
   test target compiles again.
+
+## Phase 3c round 4: Blender snapshot integration
+
+The Blender snapshot builder now consumes imported glTF geometry through
+pm-geom3d's pose kernel (morphs and skins), source material factors/maps,
+and the material-completion order used by today's async snapshot. All 23
+retained imported-model snapshots now build and compare equal; the full
+Blender run still fails six external AVIF map snapshots. See blender.md
+for the full-depth TIFF conversion and the remaining gaps. The public
+`assets.get().object3d` adapter and `prepareImport` backend are unchanged
+and remain required work.

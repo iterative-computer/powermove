@@ -405,26 +405,23 @@ Apple M4 Max, macOS 27, 2026-10-18, load average about 9 to 12.
 | `pm-render` `scene3d_document`, `headless`, `scene3d_layering`, `scene3d_resources` | Capability expectations updated (recipe parts and 3D objects in 3D groups draw) | Pass |
 | `pm-geom3d`, `pm-eval`, `pm-edit`, `pm-wasm` test suites; clippy `-D warnings` | | Pass |
 
-### Known differences from today (history-dependent there)
+### Known differences from today (THREED-1, binding round 4 decisions)
 
-- Hits at exactly equal distances keep scene order, not the runtime's
-  object insertion history.
-- A skinned mesh's bounding box is the one the importer computed at the
-  loaded pose (`loadGltf`'s `Box3.setFromObject` fills
-  `SkinnedMesh.boundingBox`, and every runtime clone copies it), as today,
-  for the pick pre-test and `setFromObject` (`Picker::loaded_box`). Its
-  bounding sphere is the current pose's: three.js computes it once, at the
-  first frustum test or raycast of the runtime's clone, so today a ray can
-  miss a skinned model that moved outside the sphere of the first pose the
-  runtime drew.
-- The local bounding-box pre-test always runs (three.js runs it only once
-  some bounds question computed the box). It only prunes.
-- Stored legacy scenes that fail `parseScene` (today every question about
-  them throws a `ZodError`) answer instead of throwing; scenes are
-  validated when written, so this needs a corrupted document.
+- Exactly equal-distance picks must match today's object insertion history.
+  The current scene-order tie break still needs that correction.
+- The skinned bounding sphere uses the current pose: **KEEP**, a recorded
+  bug fix. Today's first-pose sphere can miss a mesh after it moves outside
+  that sphere. The loaded-pose bounding box still matches today.
+- Corrupted legacy scenes must throw the same `ZodError` as today's
+  `parseScene`. The current answer-instead-of-throw behavior still needs
+  that correction.
+- Headless and agent picks return native 3D answers where today returns
+  null: **KEEP**, a recorded fix.
 
-These three need Jude's sign-off (amendment 22); they are listed for the
-orchestrator with the evidence above.
+The local bounding-box pre-test always runs (three.js runs it only after a
+bounds question computed the box); it only prunes. These decisions are
+settled, with no further approval requested. The two required corrections
+above are open implementation gaps, not accepted differences.
 
 ### Phase 3c round 2 (review fixes, 2026-10-19)
 
@@ -577,9 +574,8 @@ orchestrator with the evidence above.
   scene with three.js for grid occlusion and selection outlines, so the
   composition's three.js runtime is still synced while the 3D viewport is
   open (for the chrome only; no answer comes from it with the setting on).
-  Drawing it over the bridge's depth and id surface as specified would
-  change what the chrome shows, which amendment 22 forbids without Jude's
-  decision:
+  Binding decision D requires replacing that redraw while retaining today's
+  pixels. The current depth/ID contract is insufficient on its own:
   - the surface's depth is view-space depth in `rgbaf16` (about 11 bits
     of mantissa: 0.008 world units at 10 units away), where today's grid
     is depth-tested against a 24-bit depth buffer of the same scene, so the
@@ -593,9 +589,9 @@ orchestrator with the evidence above.
     the overlay draws over.
   Matching today needs a selection-mask surface (selected objects' coverage
   without depth against others) and a full-precision depth surface from the
-  engine (a contract 2 change, the bridge's), or keeping the three.js
-  chrome; escalated. The light and camera glyphs box select reads
-  (`glyphsIn`) are drawn by the same chrome.
+  engine (a contract 2 change). Keeping the three.js scene redraw is not an
+  accepted alternative. This implementation is still missing. The light and
+  camera glyphs box select reads (`glyphsIn`) are drawn by the same chrome.
 - The `scene3d` API is still assembled by `makeScene3DAPI` over today's
   modeling, rendering, and controller code. Its geometry questions are
   pm-wasm's (above), and `describe` evaluates through the engine document,
@@ -605,14 +601,16 @@ orchestrator with the evidence above.
   the presenter's `blenderPreview` status, which no renderer channel
   carries yet). `assets.get().object3d` is still the importer's three.js
   object, not one built from the engine's geometry.
-- Blender: snapshots of imported glTF models are not built (23 v1
-  snapshots); converted 16-bit TIFF, CMYK-alpha TIFF, and HDR AVIF
-  textures differ from today's (docs/engine/blender.md). Recipe parts are
-  built into snapshots (Phase 3c, above).
-- SVG maps stay listed (`SVG texture maps`): level 1 SVG is rasterized by
-  Chromium through the compatibility upload channel (decision S1), which
-  the 2D `SVG images` reason waits on as well. The no-media static check
-  still lists `imported models` and map containers conservatively.
+- Blender: all 23 previously unbuilt imported-glTF snapshots now match,
+  as do all six captured TIFF maps at full sample depth. Five AVIF maps
+  still differ when converted through Canvas2D (the six map snapshots
+  remain failures); see blender.md's round 4 results.
+- SVG maps use Chromium's compatibility upload channel with a distinct
+  material-map key, straight alpha and flipY. Blender's SVG-to-PNG asset
+  conversion still needs to consume the Chromium canvas raster; it does
+  not yet do so. The no-media static check still lists `imported models`
+  and map containers conservatively. `Feature::Scene3d` has not been
+  retired.
 - The 3D orbit row misses p95 ≤ 33 ms on both paths in r1 (2026-10-19,
   load average 25 to 68: engine idle p50/p95/p99 28.2/44.9/53.3 ms against
   today's 25.7/38.5/42.6 ms; under the gate load the engine is
@@ -620,3 +618,55 @@ orchestrator with the evidence above.
   `docs/engine/phase3c-measurements/p3c-orbit-*-r1.json`). The r2 rerun was
   queued behind other lanes' jobs on the Electron lock for over an hour in
   round 3 and cancelled unrun; it needs a quiet machine before the gate.
+
+### Phase 3c round 4
+
+Merged the integration branch, the bridge branch, and the accepted SVG
+compatibility branch (it was not yet in the integration ref when this lane
+started). The three SVG merge conflicts keep both draw reuse/performance
+state and SVG raster delivery. Protocol TypeScript and both addons were
+regenerated/rebuilt, as was pm-wasm.
+
+Imported-model Blender snapshots now use pm-geom3d's CPU pose for vertices
+and skin-adjusted normals, the renderer's source materials, and the
+asynchronous material-completion order for embedded texture ids and mesh
+order. The retained comparison builds all 182 snapshots; 176 are equal,
+including all 23 imported-glTF snapshots. All 90 frame lists match, with
+geometry max 3.47e-16 over 14,118,112 values. All six TIFF map conversions
+match at full decoded PNG depth. The six snapshots with AVIF maps remain
+failures; nothing is excluded or given a larger tolerance.
+
+The real-wasm geometry suite passes 10/10, including strict flag-on
+`objectMesh3d` and `cursorHit3d` failures with visible toasts and zero legacy
+closures called. The 3D gesture snapshots now assert occupied native pixels
+before comparing images, so two empty captures cannot establish parity.
+
+SVG material maps use S1's Chromium channel. A separate key distinguishes
+three.js's straight, flipped image-element upload from the 2D premultiplied
+bucket. Native color and data maps get their mip chains as before. Exports
+and synchronous captures wait for the exact requested raster. Missing
+preview maps are requested through the existing SVG miss channel; the
+presenter keeps the previous frame until those exact texels arrive,
+without presenting an absent 3D object. Oversized SVG maps follow
+three.js's 16,384 px resize rule. Corrupt SVGs recognized as broken images
+remain missing textures. pm-cli's resvg map raster is explicitly counted
+as an approximation, as S1 requires.
+
+Round 4 verification (same source and rebuilt addons, flag on):
+
+| Check | Observed result |
+|---|---|
+| `scene3d`, `viewport3d`, `engine-blender`, `blender-motion`, `comp-thumbnails` e2e | Required 18/18 pass, one worker; native gesture captures assert occupied pixels and multiple colors before Undo image comparisons |
+| SVG material-map e2e | Pass; 1,600 occupied pixels, 1,156 interior pixels compared, max 0 CV, no SVG failures, engine route |
+| `svg_level1` and `threed_maps` | 11/11 pass; all 112 retained still classes have exact texels, 14 failed uploads retain zero storage, two rejected imports remain missing textures; every retained sRGB/linear mip matches |
+| SVG transport and main snapshot unit tests | 45/45 pass |
+| SVG protocol key/band unit tests | 3/3 pass |
+| Real-wasm 3D geometry suite | 10/10 pass |
+| `cargo test -p pm-geom3d -p pm-eval -p pm-wasm -p pm-protocol` | Pass, four test threads |
+| `pm-geom3d` / `pm-render` library clippy | Pass with warnings denied |
+
+The complete Blender snapshot comparison remains a failing gate (176/182).
+Decisions D/E are unimplemented, so G was not re-measured: the earlier idle
+orbit regression remains a blocker. THREED-1's insertion-history tie break
+and corrupted-scene `ZodError` corrections also remain open. No visible
+difference is accepted by these test results.
