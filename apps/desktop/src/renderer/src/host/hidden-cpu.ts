@@ -48,17 +48,22 @@ export function installHiddenCpu(PM: PMRegistry): void {
   (PM as any).EngineRender = render;
   (PM as any).EngineSvgRasters = svg;
   installAppCaptures(PM, render);
-  let bound: HTMLCanvasElement | null = null, output: HTMLCanvasElement | null = null;
+  let bound: HTMLCanvasElement | null = null, output: HTMLCanvasElement | null = null, originalVisibility = '';
+  const syncStyle = () => {
+    if (!bound || !output) return;
+    output.className = bound.className; output.style.cssText = bound.style.cssText;
+    output.style.visibility = originalVisibility; output.style.pointerEvents = 'none';
+  };
   let pending: { time: number; options: any } | null = null, drawing = false;
   const bind = (canvas: HTMLCanvasElement) => {
     if (canvas === bound) return;
-    if (bound) bound.style.visibility = '';
+    if (bound) bound.style.visibility = originalVisibility;
     output?.remove(); bound = canvas;
     output = document.createElement('canvas'); output.dataset.nativeCpu = 'true';
-    output.style.cssText = `${canvas.style.cssText};pointer-events:none;`;
+    originalVisibility = canvas.style.visibility; syncStyle();
     canvas.after(output); canvas.style.visibility = 'hidden';
   };
-  (PM as any).EngineCanvas = { bind, resize() {}, get bound() { return bound; } };
+  (PM as any).EngineCanvas = { bind, resize: syncStyle, get bound() { return bound; } };
   const draw = async () => {
     if (drawing) return; drawing = true;
     try {
@@ -66,16 +71,20 @@ export function installHiddenCpu(PM: PMRegistry): void {
         const frame = pending; pending = null;
         const project = PM.proj, canvas = bound, target = output;
         if (!canvas || !target || !canvas.isConnected || !render.ready || !project.id || PM.isHomeProject?.()) continue;
-        const view = PM.GL.previewViewport ?? { x: 0, y: 0, w: canvas.width, h: canvas.height };
-        const width = Math.max(1, Math.round(view.w)), height = Math.max(1, Math.round(view.h));
+        const viewport = PM.GL.previewViewport;
+        const view = viewport ?? { x: 0, y: 0, width: project.w, height: project.h };
+        const canvasWidth = canvas.width, canvasHeight = canvas.height, version = PM.animVersion?.(), quality = PM.quality;
+        const scaleX = canvasWidth / view.width, scaleY = canvasHeight / view.height;
+        const width = Math.max(1, Math.round(project.w * scaleX)), height = Math.max(1, Math.round(project.h * scaleY));
         const image = await render.snapshot({ time: frame.time, width, height, pixels: 'opaque', background: frame.options.bg !== false });
-        if (PM.proj !== project || output !== target) continue;
+        if (PM.proj !== project || output !== target || PM.GL.previewViewport !== viewport || canvas.width !== canvasWidth || canvas.height !== canvasHeight) continue;
         const offscreen = document.createElement('canvas'); offscreen.width = image.width; offscreen.height = image.height;
         offscreen.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(image.data), image.width, image.height), 0, 0);
-        target.width = canvas.width; target.height = canvas.height;
+        syncStyle(); target.width = canvas.width; target.height = canvas.height;
         const ctx = target.getContext('2d')!; ctx.clearRect(0, 0, target.width, target.height);
-        ctx.drawImage(offscreen, view.x, view.y, width, height);
-        PM.bus.emit('preview:presented', { viewport: view, time: frame.time, version: PM.animVersion?.(), project, quality: PM.quality });
+        const sx = width / project.w, sy = height / project.h;
+        ctx.drawImage(offscreen, view.x * sx, view.y * sy, view.width * sx, view.height * sy, 0, 0, target.width, target.height);
+        PM.bus.emit('preview:presented', { viewport, time: frame.time, version, project, quality });
       }
     } catch (error) { log('error', String(error)); }
     finally { drawing = false; if (pending) void draw(); }
