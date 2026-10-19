@@ -26,7 +26,18 @@
         "p": {
           "x": {
             "v": 72,
-            "kf": [],
+            "kf": [
+              {
+                "t": 0,
+                "v": 72,
+                "i": "krp1"
+              },
+              {
+                "t": 2.5,
+                "v": -30,
+                "i": "krp2"
+              }
+            ],
             "expr": null
           },
           "y": {
@@ -233,7 +244,18 @@
         "p": {
           "size": {
             "v": 64,
-            "kf": [],
+            "kf": [
+              {
+                "t": 0,
+                "v": 64,
+                "i": "ksw1"
+              },
+              {
+                "t": 2.5,
+                "v": 30,
+                "i": "ksw2"
+              }
+            ],
             "expr": null
           },
           "weight": {
@@ -243,7 +265,18 @@
           },
           "color": {
             "v": "#FF6B1A",
-            "kf": [],
+            "kf": [
+              {
+                "t": 0,
+                "v": "#FF6B1A",
+                "i": "ksw3"
+              },
+              {
+                "t": 2.5,
+                "v": "#3FCF8E",
+                "i": "ksw4"
+              }
+            ],
             "expr": null
           }
         }
@@ -283,7 +316,18 @@
         "p": {
           "x": {
             "v": 50,
-            "kf": [],
+            "kf": [
+              {
+                "t": 0,
+                "v": 50,
+                "i": "kan1"
+              },
+              {
+                "t": 2.5,
+                "v": 0,
+                "i": "kan2"
+              }
+            ],
             "expr": null
           },
           "y": {
@@ -309,7 +353,7 @@
     "id": "text-level2/unicode",
     "title": "unicode",
     "d": {
-      "text": "A é 👨‍👩‍👧‍👦 עברית العربية 漢字",
+      "text": "A e\u0301 \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 \u05e2\u05d1\u05e8\u05d9\u05ea \u0627\u0644\u0639\u0631\u0628\u064a\u0629 \u6f22\u5b57",
       "font": "Georgia",
       "weight": 400,
       "size": 40,
@@ -416,6 +460,316 @@
           },
           "spread": {
             "v": 15,
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/range-leading",
+    "title": "range leading",
+    "d": {
+      "text": "Hello world again",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "styles": [
+      {
+        "id": "tall",
+        "start": 6,
+        "end": 11,
+        "p": {
+          "leading": {
+            "v": 2.0,
+            "kf": [],
+            "expr": null
+          },
+          "color": {
+            "v": "#FF6B1A",
+            "kf": [],
+            "expr": null
+          }
+        }
+      },
+      {
+        "id": "wide",
+        "start": 12,
+        "end": 17,
+        "p": {
+          "tracking": {
+            "v": 6,
+            "kf": [],
+            "expr": null
+          },
+          "color": {
+            "v": "#4C8DFF",
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ],
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "range",
+        "unit": "characters",
+        "shape": "square",
+        "p": {
+          "y": {
+            "v": -24,
+            "kf": [],
+            "expr": null
+          },
+          "start": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "end": {
+            "v": 50,
+            "kf": [
+              {
+                "t": 0,
+                "v": 50,
+                "i": "krl1"
+              },
+              {
+                "t": 2.5,
+                "v": 100,
+                "i": "krl2"
+              }
+            ],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/ligature",
+    "title": "ligature",
+    "d": {
+      "text": "Salam \u0644\u0627 sea",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "stagger",
+        "unit": "characters",
+        "shape": "square",
+        "p": {
+          "y": {
+            "v": 30,
+            "kf": [],
+            "expr": null
+          },
+          "rotation": {
+            "v": 10,
+            "kf": [],
+            "expr": null
+          },
+          "duration": {
+            "v": 0.5,
+            "kf": [],
+            "expr": null
+          },
+          "stagger": {
+            "v": 0.1,
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/styled-anchor",
+    "title": "styled anchor",
+    "d": {
+      "text": "Motion type",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "fontAnchorBounds": {
+      "x0": 0,
+      "y0": 0,
+      "x1": 200,
+      "y1": 50
+    },
+    "styles": [
+      {
+        "id": "style",
+        "start": 0,
+        "end": 6,
+        "p": {
+          "size": {
+            "v": 56,
+            "kf": [
+              {
+                "t": 0,
+                "v": 56,
+                "i": "ksa1"
+              },
+              {
+                "t": 2.5,
+                "v": 36,
+                "i": "ksa2"
+              }
+            ],
+            "expr": null
+          },
+          "weight": {
+            "v": 700,
+            "kf": [],
+            "expr": null
+          },
+          "color": {
+            "v": "#FF6B1A",
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/center-tracking",
+    "title": "center tracking",
+    "d": {
+      "text": "Center",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "center"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "range",
+        "unit": "characters",
+        "shape": "square",
+        "p": {
+          "tracking": {
+            "v": 12,
+            "kf": [
+              {
+                "t": 0,
+                "v": 12,
+                "i": "kct1"
+              },
+              {
+                "t": 2.5,
+                "v": 2,
+                "i": "kct2"
+              }
+            ],
+            "expr": null
+          },
+          "start": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "end": {
+            "v": 100,
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/right-tracking",
+    "title": "right tracking",
+    "d": {
+      "text": "Right",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "right"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "range",
+        "unit": "characters",
+        "shape": "square",
+        "p": {
+          "tracking": {
+            "v": 8,
+            "kf": [
+              {
+                "t": 0,
+                "v": 8,
+                "i": "krt1"
+              },
+              {
+                "t": 2.5,
+                "v": -4,
+                "i": "krt2"
+              }
+            ],
+            "expr": null
+          },
+          "start": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "end": {
+            "v": 100,
             "kf": [],
             "expr": null
           }
