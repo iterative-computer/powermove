@@ -72,10 +72,11 @@ export const renderSettings = (comp: any): Render3DSettings =>
   render3DSchema.parse(comp?.render3d || {});
 export const renderState = (PM: any): RenderPreviewState => {
   const s = state(PM);
+  const native = PM.EngineConnection?.preview?.state?.();
   return {
     mode: s.mode,
-    busy: s.busy,
-    error: s.error,
+    busy: native ? native.busy || s.busy : s.busy,
+    error: native ? native.error ?? s.error : s.error,
     engine: previewEngine(PM) ?? renderSettings(PM.curComp?.() || PM.proj).engine,
     shading: s.shading,
   };
@@ -112,7 +113,8 @@ export function onRenderState(
   listener: (value: RenderPreviewState) => void,
 ) {
   state(PM).listeners.add(listener);
-  return () => state(PM).listeners.delete(listener);
+  const offNative = PM.EngineConnection?.preview?.subscribe?.(() => listener(renderState(PM)));
+  return () => { state(PM).listeners.delete(listener); offNative?.(); };
 }
 export function setRenderSettings(
   PM: any,
@@ -153,7 +155,10 @@ export function setShading(PM: any, shading: ViewportShading) {
     s.timer = null;
   }
   emit(PM);
-  if (mode === "rendered") schedulePreview(PM);
+  // The native viewer-state update starts or cancels automatic Blender
+  // previews. A toolbar shading change must reach it before any explicit
+  // renderFrame request, including Material Preview's EEVEE choice.
+  if (!nativePreviewEnabled(PM) && mode === "rendered") schedulePreview(PM);
 }
 const frameKey = (
   PM: any,
@@ -211,13 +216,8 @@ export function blenderSurface(
 /** The new engine draws the viewer (Use New Engine): it renders the paused
  *  Blender preview itself (docs/engine/blender.md), so this one would only
  *  run Blender a second time. */
-const engineDrawsViewer = (PM: any): boolean => {
-  try {
-    return PM.EngineConnection?.status?.().route === "engine";
-  } catch {
-    return false;
-  }
-};
+const nativePreviewEnabled = (PM: any): boolean => !!PM.EngineDoc?.enabled || !!PM.EngineConnection;
+const engineDrawsViewer = nativePreviewEnabled;
 export function schedulePreview(PM: any) {
   const s = state(PM);
   if (
@@ -677,6 +677,11 @@ async function cropSurface(blob: Blob): Promise<Surface> {
 
 /** A paused rendered preview includes nested compositions through their own cameras. */
 export async function renderBlenderPreview(PM: any) {
+  if (nativePreviewEnabled(PM)) {
+    if (!PM.EngineConnection?.preview) throw Object.assign(new Error("The native preview controller is unavailable"), { name: "EnginePreviewUnavailable" });
+    state(PM).error = null;
+    return PM.EngineConnection.preview.render();
+  }
   const visited = new Set<string>(),
     project = PM.proj;
   const visit = async (comp: any, time: number, depth: number) => {
@@ -842,8 +847,13 @@ export async function cancelBlender(PM: any) {
   s.error = null;
   if (s.timer) clearTimeout(s.timer);
   s.timer = null;
-  await bridge()?.blender?.cancel();
   emit(PM);
+  if (nativePreviewEnabled(PM)) {
+    if (!PM.EngineConnection?.preview) throw Object.assign(new Error("The native preview controller is unavailable"), { name: "EnginePreviewUnavailable" });
+    await PM.EngineConnection.preview.cancel();
+  } else {
+    await bridge()?.blender?.cancel();
+  }
 }
 export function disposeBlenderFrames(PM: any) {
   const s = states.get(PM);

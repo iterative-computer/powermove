@@ -19,6 +19,7 @@
 import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
+import type { PreviewStatus } from './preview';
 
 /** What the session needs of the shader fallback runner (`ShaderFallbackRunner`). */
 export interface FallbackRunner {
@@ -102,6 +103,8 @@ export type SessionOptions = {
   onAudio?: (message: AudioMessage) => void;
   /** The engine's presentation stats (`RenderStats`, at most 2 Hz). */
   onStats?: (stats: RenderStats) => void;
+  /** One explicit paused Blender preview's progress or completion. */
+  onPreviewStatus?: (status: PreviewStatus) => void;
   /**
    * The window replaced its document (a `load` batch: another project, or
    * `PM.proj` assigned outright) and the engine has it now. The viewer's
@@ -414,6 +417,11 @@ export class DocumentSession {
       case 'renderStats': {
         const { type: _t, ...stats } = event;
         this.options.onStats?.(stats as unknown as RenderStats);
+        return;
+      }
+      case 'previewStatus': {
+        const { type: _t, ...status } = event;
+        this.options.onPreviewStatus?.(status as PreviewStatus);
         return;
       }
       case 'patchesApplied':

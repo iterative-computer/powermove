@@ -80,9 +80,9 @@ export type NativeEngineOptions = {
    *  it Blender requests answer `unsupported` and the current engine runs
    *  Blender. */
   blender?: { locate: BlenderLocator; tempRoot: string };
-  /** The job engine's `compatFrame` requests: a layer's compatibility
-   *  pixels drawn by the document's window (compat-frames.ts). Without it
-   *  they answer `notHeadlessRenderable`. */
+  /** Compatibility pixels drawn by the document's window
+   *  (compat-frames.ts): job renders and interactive Blender PNG maps.
+   *  Without it they answer `notHeadlessRenderable`. */
   compatFrame?: (request: import('../../shared/engine-protocol').CompatFrameRequest) => Promise<Response>;
 };
 
@@ -575,7 +575,14 @@ export class NativeEngine {
           }
         }
         if (body.type === 'compatFrame') {
-          if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks for compatibility frames.'));
+          // Paused Blender previews use the interactive engine. Admit only
+          // its exact-PNG map source; every other compatibility draw remains
+          // an export/job capability. The shared window ask still checks the
+          // document owner and original content hash; the request's revision
+          // is forwarded unchanged with the frozen source identity.
+          if (process !== 'job' && (body.source !== 'blenderPng' || !body.blender)) {
+            return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks for this compatibility frame.'));
+          }
           if (!this.options.compatFrame) return Promise.reject(new ProtocolError('notHeadlessRenderable', 'This host draws no compatibility frames.'));
           const { type: _type, ...request } = body;
           return this.options.compatFrame(request);

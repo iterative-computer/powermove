@@ -333,6 +333,12 @@ export class EngineBlender {
   private queued: Queued[] = [];
   private current: Queued | null = null;
   private paused = false;
+  private readonly completed: { requested: string; actual: string }[] = [];
+
+  /** Bounded host-worker evidence for diagnostics; no snapshot or file paths. */
+  completedRenders(): readonly { requested: string; actual: string }[] {
+    return this.completed.slice();
+  }
 
   /** This process's scratch parent: `<tmp>/powermove-engine-blender/<pid>`.
    *  Scratch of processes that no longer run is removed at start (an app
@@ -505,6 +511,8 @@ export class EngineBlender {
             send({ type: 'blenderProgress', job: req.job, completed, total: req.surfaces.length });
           }
         }
+        this.completed.push({ requested: checked.snapshot.settings.engine, actual: manifest.renderEngine });
+        if (this.completed.length > 32) this.completed.shift();
       } finally {
         await rm(dir, { recursive: true, force: true }).catch(() => {});
       }
