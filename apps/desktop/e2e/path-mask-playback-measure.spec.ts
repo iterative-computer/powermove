@@ -1,5 +1,5 @@
 /* Opt-in, paired actual viewer playback. No loop: every mask raster is new. */
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, statfs } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, launchApp, test } from './helpers/app';
@@ -10,10 +10,16 @@ test('measure animated path masks at 1080p and UHD against today', async () => {
   test.setTimeout(240_000);
   const evidence = process.env.PM_FIXUPS2_EVIDENCE ?? '/tmp/ne-fixups2-evidence';
   await mkdir(evidence, { recursive: true });
+  const runTag = process.env.PM_FIXUPS2_RUN ?? 'r3';
+  if (!/^[a-z0-9-]+$/i.test(runTag)) throw new Error('Invalid measurement run tag');
   const runs = process.env.PM_FIXUPS2_HD_ONLY
     ? [{width:1920,enabled:true,hidden:true}]
-    : [1920,3840].flatMap(width => [false,true].map(enabled=>({width,enabled,hidden:false}))).concat([{width:1920,enabled:true,hidden:true}]);
+    : [1920,3840].flatMap(width => [false,true].map(enabled=>({width,enabled,hidden:false}))).concat(process.env.PM_FIXUPS2_HIDDEN_DIAGNOSTIC ? [{width:1920,enabled:true,hidden:true}] : []);
   for (const {width,enabled,hidden} of runs) {
+    const disk = await statfs('/System/Volumes/Data');
+    const freeGiB = disk.bavail * disk.bsize / 1024**3;
+    if (freeGiB < 40) throw new Error(`Disk below mandatory 40 GiB floor before app launch: ${freeGiB.toFixed(2)} GiB`);
+    console.log(`Disk before ${width}/${enabled?'engine':'today'}: ${freeGiB.toFixed(2)}GiB`);
     const app = await launchApp({ env: { POWERMOVE_NEW_ENGINE: enabled ? '1' : '0' } });
     try {
       const displayBeforeShow = await app.page.evaluate(() => ({at:performance.now(),wallMs:Date.now(),visibility:document.visibilityState,dpr:devicePixelRatio,edr:matchMedia('(dynamic-range: high)').matches,wide:matchMedia('(color-gamut: p3)').matches}));
@@ -73,7 +79,7 @@ test('measure animated path masks at 1080p and UHD against today', async () => {
         const read = () => { const display = harness.displayState(); const key=JSON.stringify(display); if(key!==state.last){state.last=key;state.changes.push({wallMs:Date.now(),...display});} };
         read(); state.timer=setInterval(read,100); (globalThis as any).__maskDisplayState=state;
       }, process.env.POWERMOVE_PM_BRIDGE_HARNESS ?? path.join(os.homedir(),'Library/Caches/powermove-engine/pm_bridge_harness.node'));
-      const tracePath = `${evidence}/mask-r2-${width}-${enabled ? 'engine' : 'today'}${hidden?'-hidden':''}.trace.json`;
+      const tracePath = `${evidence}/mask-${runTag}-${width}-${enabled ? 'engine' : 'today'}${hidden?'-hidden':''}.trace.json`;
       await app.app.evaluate(async ({ contentTracing }) => {
         await contentTracing.startRecording({ included_categories: ['disabled-by-default-devtools.timeline.frame','blink.user_timing','graphics.pipeline','viz'], excluded_categories: ['*'] });
       });
@@ -118,6 +124,8 @@ test('measure animated path masks at 1080p and UHD against today', async () => {
         frames.length = 0;
         const started = performance.now();
         const before = enabled ? presentation.stats() : null;
+        const legacyContext = PM.GL?.gl;
+        const legacyBefore = !enabled ? {colorSpace:legacyContext?.drawingBufferColorSpace,attributes:legacyContext?.getContextAttributes(),width:legacyContext?.drawingBufferWidth,height:legacyContext?.drawingBufferHeight} : null;
         const beforeState = presentation?.state;
         const resizeAtStart = presentation ? {pending:presentation.pendingSize,applied:presentation.appliedSize,timer:presentation.settleTimer} : null;
         measuring = true;
@@ -134,14 +142,15 @@ test('measure animated path masks at 1080p and UHD against today', async () => {
         const q = (p:number) => intervals[Math.min(intervals.length-1,Math.floor(intervals.length*p))] ?? null;
         let skips=0,repeats=0;
         for(let i=1;i<frames.length;i++){const delta=Math.round((frames[i].t-frames[i-1].t)*30);if(delta>1)skips+=delta-1;else if(delta===0)repeats++;}
-        return { rafs:frames.map(f=>f.raf),displayChanges,resizeAtStart,generations:[...generations],submits,transitions,beforeState,enabled,width,height:width*9/16,elapsed,shown:frames.length,skips,repeats,intervalMs:{p50:q(.5),p95:q(.95),p99:q(.99),max:q(1)},before,after,view:presentation?.state??null,descriptor:presentation?.latest?{size:presentation.latest.size}:null,glSize:{width:PM.GL.gl.canvas.width,height:PM.GL.gl.canvas.height},rasterSize:enabled&&presentation.state?{width:PM.proj.w*presentation.state.zoom*presentation.state.devicePixelRatio,height:PM.proj.h*presentation.state.zoom*presentation.state.devicePixelRatio}:null,failures:PM.EngineDoc?.failures()??[] };
+        return { legacyBefore,legacyAfter:!enabled?{sameContext:legacyContext===PM.GL?.gl,colorSpace:PM.GL?.gl?.drawingBufferColorSpace,attributes:PM.GL?.gl?.getContextAttributes(),width:PM.GL?.gl?.drawingBufferWidth,height:PM.GL?.gl?.drawingBufferHeight}:null,rafs:frames.map(f=>f.raf),displayChanges,resizeAtStart,generations:[...generations],submits,transitions,beforeState,enabled,width,height:width*9/16,elapsed,shown:frames.length,skips,repeats,intervalMs:{p50:q(.5),p95:q(.95),p99:q(.99),max:q(1)},before,after,view:presentation?.state??null,descriptor:presentation?.latest?{size:presentation.latest.size}:null,glSize:{width:PM.GL.gl.canvas.width,height:PM.GL.gl.canvas.height},rasterSize:enabled&&presentation.state?{width:PM.proj.w*presentation.state.zoom*presentation.state.devicePixelRatio,height:PM.proj.h*presentation.state.zoom*presentation.state.devicePixelRatio}:null,failures:PM.EngineDoc?.failures()??[] };
       }, { enabled, width });
       await app.app.evaluate(async ({ contentTracing }, tracePath) => { await contentTracing.stopRecording(tracePath); }, tracePath);
       const nativeDisplay = await app.app.evaluate(() => {const state=(globalThis as any).__maskDisplayState;clearInterval(state.timer);return state.changes;});
       const common: any = hidden ? null : await compositorTiming(tracePath, result.submits).catch(error=>({error:String(error)}));
+      const capabilityLogs = app.diagnostics.console.filter(record => record.text.includes('display capabilities changed'));
       const report = enabled ? await app.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive')) : null;
-      await appendFile(evidence+'/path-mask-playback-r2.jsonl', JSON.stringify({...result,nativeDisplay,hidden,firstShow,displayBeforeShow,displayAfterShow,common,report})+'\n');
-      console.log(JSON.stringify({...result,nativeDisplay,hidden,firstShow,displayBeforeShow,displayAfterShow,common,report}));
+      await appendFile(`${evidence}/path-mask-playback-${runTag}.jsonl`, JSON.stringify({...result,capabilityLogs,freeGiB,nativeDisplay,hidden,firstShow,displayBeforeShow,displayAfterShow,common,report})+'\n');
+      console.log(JSON.stringify({...result,capabilityLogs,freeGiB,nativeDisplay,hidden,firstShow,displayBeforeShow,displayAfterShow,common,report}));
       expect(result.shown).toBeGreaterThan(0);
       if (common) {
         expect.soft(common.error).toBeUndefined();
