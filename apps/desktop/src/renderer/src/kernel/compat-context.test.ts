@@ -88,6 +88,31 @@ describe('render.gl.context, the compatibility context', () => {
     expect(host.context()).toBe(gl);
   });
 
+  it('selects the preserved engine surface by the presented frame tag, not the newest arrival', () => {
+    const r = rig(); r.env.bound.mockReturnValue(r.bound); r.host.context();
+    const first = { seq: 1, revision: 7, viewSeq: 3 };
+    const second = { seq: 2, revision: 7, viewSeq: 3 };
+    r.host.captureFrame(first, { displayWidth: 400, displayHeight: 200 } as VideoFrame);
+    const saved = r.made.at(-1);
+    r.host.captureFrame(second, { displayWidth: 400, displayHeight: 200 } as VideoFrame);
+    r.drawn.length = 0;
+    r.host.selectFrame(first); r.host.presented();
+    expect(r.drawn).toContainEqual(['drawImage', saved, 0, 0, 400, 200, 0, 0, 200, 100]);
+  });
+
+  it('preserves presented pixels for reads after the WebGPU swapchain has been cleared', () => {
+    const r = rig();
+    r.env.bound.mockReturnValue(r.bound);
+    const gl: any = r.host.context();
+    r.host.presented();
+    const captured = r.made.find((canvas) => canvas !== r.made[0]);
+    expect(captured).toBeDefined();
+    r.drawn.length = 0;
+    gl.readPixels(0, 0, 1, 1, 0x1908, 0x1401, new Uint8Array(4));
+    expect(r.drawn.some((d) => d[0] === 'drawImage' && d[1] === r.presentation)).toBe(false);
+    expect(r.drawn).toContainEqual(['drawImage', captured, 0, 0]);
+  });
+
   it('is null until a viewer binds a canvas, then one context on an offscreen canvas with today\'s attributes', () => {
     const r = rig();
     expect(r.host.context()).toBeNull();

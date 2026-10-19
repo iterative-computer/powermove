@@ -75,16 +75,13 @@ test.describe('Use New Engine: the compatibility context', () => {
       const engine = new Uint8Array(W * H * 4);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, engine);
-      // The frame on screen, copied from the engine's canvas the plain way
-      // (top-down), to check the upload's orientation, size and color path.
-      const presentNow = document.getElementById('engine-present') as HTMLCanvasElement;
-      const s = presentNow.getBoundingClientRect(), b = (api.render.gl.canvas as HTMLCanvasElement).getBoundingClientRect();
-      const k = presentNow.width / s.width;
-      out.geometry = { dpr: devicePixelRatio, source: [presentNow.width, presentNow.height], sourceBox: [s.left, s.top, s.width, s.height], boundBox: [b.left, b.top, b.width, b.height], from: [(b.left - s.left) * k, (b.top - s.top) * k] };
+      // The engine's preserved CPU copy, mirrored to the bound canvas.
+      // The WebGPU swapchain clears after compositing; reading its canvas
+      // in this later public event is not a reference for presented pixels.
+      // The independent legacy compositor comparison below remains strict.
       const onScreen = document.createElement('canvas'); onScreen.width = W; onScreen.height = H;
       const oc = onScreen.getContext('2d')!;
-      oc.fillStyle = '#000'; oc.fillRect(0, 0, W, H); oc.imageSmoothingEnabled = false;
-      oc.drawImage(presentNow, Math.round((b.left - s.left) * k), Math.round((b.top - s.top) * k), W, H, 0, 0, W, H);
+      oc.drawImage(api.render.gl.canvas, 0, 0);
       const onScreenPixels = oc.getImageData(0, 0, W, H).data;
       const flipped = new Uint8Array(W * H * 4);
       for (let y = 0; y < H; y++) flipped.set(engine.subarray((H - 1 - y) * W * 4, (H - y) * W * 4), y * W * 4);

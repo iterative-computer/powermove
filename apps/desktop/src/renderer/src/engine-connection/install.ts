@@ -24,7 +24,7 @@ import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { EngineBridge } from '../../../shared/engine-ipc';
 import { ENGINE_WINDOW_MESSAGE } from '../../../shared/engine-ipc';
 import type { EngineViewerChannel, EngineViewerHandlers, EngineViewerService } from '../../../extensions/viewer/engine-present/presentation';
-import type { ClockSample } from '../../../shared/engine-protocol';
+import type { ClockSample, FrameDescriptor } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
@@ -120,6 +120,21 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     else if (level === 'warn') console.warn(line);
     else console.info(line);
   };
+  // Capture a compatibility context's engine surfaces before presentation
+  // returns their pool slots. An import can arrive after its descriptor.
+  const pendingCompatFrames = new Map<string, FrameDescriptor>();
+  const captureCompatFrame = (desc: FrameDescriptor): boolean => {
+    if (!PM.CompatContext?.active) return true;
+    const frame = source.videoFrame(desc.poolGeneration, desc.poolIndex);
+    if (!frame) return false;
+    try { PM.CompatContext.captureFrame(desc, frame); } finally { frame.close(); }
+    return true;
+  };
+  const offCompatSurface = source.onSurface((generation, poolIndex) => {
+    for (const [key, desc] of pendingCompatFrames) {
+      if (desc.poolGeneration === generation && desc.poolIndex === poolIndex && captureCompatFrame(desc)) pendingCompatFrames.delete(key);
+    }
+  });
   const hostClock = new HostClock(() => native.hostTime());
   hostClock.start();
   let connection: EngineConnection | null = null;
@@ -153,7 +168,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     if (barrier) versions.note(barrier.revision, PM.animVersion?.());
   };
   const presentedEvents = new PresentedEvents(
-    (frame, quality) => emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj }),
+    (frame, quality) => {
+      PM.CompatContext?.selectFrame?.(frame);
+      emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj });
+    },
     (fn) => target.requestAnimationFrame(fn)
   );
   /** Engine stats for the status bar and the performance panel. */
@@ -243,6 +261,11 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           if (message.type === 'frame' && !firstFrame) {
             firstFrame = true;
             performance.mark?.('powermove:engine-first-frame');
+          }
+          if (message.type === 'frame' && !captureCompatFrame(message.frame)) {
+            const desc = message.frame;
+            pendingCompatFrames.set(`${desc.poolGeneration}:${desc.seq}`, desc);
+            while (pendingCompatFrames.size > 8) pendingCompatFrames.delete(pendingCompatFrames.keys().next().value!);
           }
           if (viewerHandlers) viewerHandlers.message(message as never, arrivedMs);
           else if (message.type === 'frame') session.release(message.frame);
@@ -385,6 +408,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   });
 
   async function connect(nextGeneration: number, port: PortLike): Promise<void> {
+    pendingCompatFrames.clear();
     connection?.close('a new interactive engine launch');
     const next = new EngineConnection(nextGeneration, port, log);
     connection = next;
@@ -535,6 +559,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       clock: current?.clock ?? null
     }),
     dispose: () => {
+      offCompatSurface();
+      pendingCompatFrames.clear();
       offShaderFallback();
       offPending();
       offEager();

@@ -117,6 +117,10 @@ type CompatState = {
   shown: number;
   /** The bound canvas's 2D context mirroring today's canvas pixels (`context.canvas` reads). */
   mirror: CanvasRenderingContext2D | null | undefined;
+  /** Preserve a presented WebGPU canvas before Chromium clears its swapchain. */
+  frame: OffscreenCanvas | HTMLCanvasElement | null;
+  copies: Map<string, OffscreenCanvas | HTMLCanvasElement>;
+  pendingFrame: OffscreenCanvas | HTMLCanvasElement | null;
 };
 
 /** Counters for tests and diagnostics. */
@@ -128,6 +132,8 @@ function defaultCanvas(width: number, height: number): OffscreenCanvas | HTMLCan
   canvas.width = width; canvas.height = height;
   return canvas;
 }
+
+const frameKey = (tag: { seq: number; revision: number; viewSeq: number }) => `${tag.revision}:${tag.viewSeq}:${tag.seq}`;
 
 /** The engine's canvas over `bound`: the presentation in the bound canvas's stage, when it shows a frame. */
 export function presentationCanvas(bound: HTMLCanvasElement): HTMLCanvasElement | null {
@@ -173,6 +179,34 @@ export class CompatContextHost {
     return layer && layer.style.visibility === 'visible' ? layer : null;
   }
 
+  /** Copy a completed engine surface before the presenter releases its pool
+   * slot. WebGPU canvases clear after compositing, so reading one in the
+   * coalesced frame event (the next rAF) can otherwise read black. Only a
+   * requested compatibility context pays for this preservation. */
+  captureFrame(tag: { seq: number; revision: number; viewSeq: number; colorSpace?: string }, source: VideoFrame): void {
+    const state = this.state;
+    if (!state || state.lost) return;
+    const canvas = (this.env.makeCanvas ?? defaultCanvas)(source.displayWidth, source.displayHeight);
+    const c2 = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    if (!c2) return;
+    c2.drawImage(source, 0, 0);
+    // Electron's shared texture import tags these RGB surfaces as sRGB even
+    // when the descriptor says the engine encoded Display P3. The presenter
+    // writes those values to its P3 canvas. Our legacy GL context is sRGB:
+    // reinterpret the imported values before converting to that space.
+    if (tag.colorSpace === 'displayP3' && source.colorSpace?.primaries !== 'smpte432') {
+      const pixels = c2.getImageData(0, 0, canvas.width, canvas.height);
+      c2.putImageData(new ImageData(pixels.data, canvas.width, canvas.height, { colorSpace: 'display-p3' }), 0, 0);
+    }
+    state.copies.set(frameKey(tag), canvas);
+    while (state.copies.size > 8) state.copies.delete(state.copies.keys().next().value!);
+  }
+
+  /** Select the surface for the exact frame whose public event follows. */
+  selectFrame(tag: { seq: number; revision: number; viewSeq: number }): void {
+    if (this.state) this.state.pendingFrame = this.state.copies.get(frameKey(tag)) ?? null;
+  }
+
   /**
    * An engine frame was presented (today's `preview:presented`, emitted
    * before `frame:rendered`): the default framebuffer is to hold it again,
@@ -192,7 +226,24 @@ export class CompatContextHost {
     const source = (this.env.presentation ?? presentationCanvas)(state.bound);
     if (source) {
       const from = sourceRect(source, state.bound);
-      if (from) this.mirror(state, source, from);
+      const pixels = state.pendingFrame ?? source;
+      if (from) {
+        let frame = state.frame;
+        const width = state.bound.width, height = state.bound.height;
+        if (!frame) frame = state.frame = (this.env.makeCanvas ?? defaultCanvas)(width, height);
+        if (frame.width !== width) frame.width = width;
+        if (frame.height !== height) frame.height = height;
+        const c2 = frame.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+        if (c2) {
+          c2.globalCompositeOperation = 'copy'; c2.fillStyle = '#000'; c2.fillRect(0, 0, width, height);
+          c2.globalCompositeOperation = 'source-over';
+          const same = Math.abs(from.sw - width) <= 1 && Math.abs(from.sh - height) <= 1;
+          c2.imageSmoothingEnabled = !same;
+          c2.drawImage(pixels as CanvasImageSource, same ? Math.round(from.sx) : from.sx, same ? Math.round(from.sy) : from.sy,
+            same ? width : from.sw, same ? height : from.sh, 0, 0, width, height);
+          this.mirror(state, frame as CanvasImageSource);
+        }
+      }
     }
   }
 
@@ -391,7 +442,7 @@ export class CompatContextHost {
     if (!gl) return null;
     const state: CompatState = {
       bound, canvas, gl, raw: {}, drawFb: null, readFb: null,
-      stale: true, dirty: false, flushQueued: false, layer: null, upload: null, lost: false, exporting: null, mirror: undefined, drawn: 0, shown: 0
+      stale: true, dirty: false, flushQueued: false, layer: null, upload: null, lost: false, exporting: null, mirror: undefined, frame: null, copies: new Map(), pendingFrame: null, drawn: 0, shown: 0
     };
     this.instrument(state);
     (canvas as any).addEventListener?.('webglcontextlost', (event: Event) => {
@@ -493,7 +544,9 @@ export class CompatContextHost {
     // An export frame (opaque, at the export's size: today's `renderInto`
     // resized the compositor's canvas to it).
     if (state.exporting) c2.putImageData(state.exporting, 0, 0);
-    if (source) {
+    if (!state.exporting && state.frame && state.frame.width === width && state.frame.height === height) {
+      c2.drawImage(state.frame as CanvasImageSource, 0, 0);
+    } else if (source) {
       const from = sourceRect(source, state.bound);
       if (from) {
         // At the same density (the usual case) the region is copied pixel
