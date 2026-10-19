@@ -1098,8 +1098,9 @@ impl PathStroker {
         on_p.y = tp.y - axis_flip * dxy.x;
 
         if let Some(ref mut tangent) = tangent {
-            tangent.x = on_p.x + dxy.x;
-            tangent.y = on_p.y + dxy.y;
+            // Current Skia keeps a tangent vector; adding and subtracting
+            // the point loses precision on large glyph coordinates.
+            **tangent = *dxy;
         }
     }
 
@@ -1190,8 +1191,8 @@ impl PathStroker {
     ) -> ResultType {
         let start = quad_points.quad[0];
         let end = quad_points.quad[2];
-        let a_len = quad_points.tangent_start - start;
-        let b_len = quad_points.tangent_end - end;
+        let a_len = quad_points.tangent_start;
+        let b_len = quad_points.tangent_end;
 
         // Slopes match when denom goes to zero:
         //                   axLen / ayLen ==                   bxLen / byLen
@@ -1213,8 +1214,8 @@ impl PathStroker {
 
             // if the perpendicular distances from the quad points to the opposite tangent line
             // are small, a straight line is good enough
-            let dist1 = pt_to_line(start, end, quad_points.tangent_end);
-            let dist2 = pt_to_line(end, start, quad_points.tangent_start);
+            let dist1 = pt_to_tangent_line(start, end, quad_points.tangent_end);
+            let dist2 = pt_to_tangent_line(end, start, quad_points.tangent_start);
             if dist1.max(dist2) <= self.inv_res_scale_squared {
                 return ResultType::Degenerate;
             }
@@ -1230,10 +1231,8 @@ impl PathStroker {
             if intersect_ray_type == IntersectRayType::CtrlPt {
                 // the intersection of the tangents need not be on the tangent segment
                 // so 0 <= numer_a <= 1 is not necessarily true
-                quad_points.quad[1].x =
-                    start.x * (1.0 - numer_a) + quad_points.tangent_start.x * numer_a;
-                quad_points.quad[1].y =
-                    start.y * (1.0 - numer_a) + quad_points.tangent_start.y * numer_a;
+                quad_points.quad[1].x = start.x + quad_points.tangent_start.x * numer_a;
+                quad_points.quad[1].y = start.y + quad_points.tangent_start.y * numer_a;
             }
 
             return ResultType::Quad;
@@ -1732,8 +1731,8 @@ fn fn_ptr_eq(f1: CapProc, f2: CapProc) -> bool {
 struct QuadConstruct {
     // The state of the quad stroke under construction.
     quad: [Point; 3],       // the stroked quad parallel to the original curve
-    tangent_start: Point,   // a point tangent to quad[0]
-    tangent_end: Point,     // a point tangent to quad[2]
+    tangent_start: Point,   // tangent vector at quad[0]
+    tangent_end: Point,     // tangent vector at quad[2]
     start_t: NormalizedF32, // a segment of the original curve
     mid_t: NormalizedF32,
     end_t: NormalizedF32,
@@ -1855,6 +1854,18 @@ fn quad_in_line(quad: &[Point; 3]) -> bool {
 }
 
 // returns the distance squared from the point to the line
+// Current Skia's pt_to_tangent_line: the line is stored as a start
+// and vector, without a lossy point-to-vector round trip.
+fn pt_to_tangent_line(pt: Point, start: Point, tangent: Point) -> f32 {
+    let delta = pt - start;
+    let t = tangent.dot(delta) / tangent.dot(tangent);
+    if (0.0..=1.0).contains(&t) {
+        (start + tangent.scaled(t)).distance_to_sqd(pt)
+    } else {
+        pt.distance_to_sqd(start)
+    }
+}
+
 fn pt_to_line(pt: Point, line_start: Point, line_end: Point) -> f32 {
     let dxy = line_end - line_start;
     let ab0 = pt - line_start;

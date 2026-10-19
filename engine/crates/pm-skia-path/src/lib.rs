@@ -249,8 +249,10 @@ fn set_point_length(
     let yy = y as f64;
     let dmag = (xx * xx + yy * yy).sqrt();
     let dscale = length as f64 / dmag;
-    x *= dscale as f32;
-    y *= dscale as f32;
+    // C++ compound assignment promotes x/y to double before multiplying.
+    // Rounding dscale first changes stroked curve control points.
+    x = (f64::from(x) * dscale) as f32;
+    y = (f64::from(y) * dscale) as f32;
 
     // check if we're not finite, or we're zero-length
     if !x.is_finite() || !y.is_finite() || (x == 0.0 && y == 0.0) {
@@ -325,5 +327,19 @@ impl core::ops::MulAssign for Point {
     fn mul_assign(&mut self, other: Point) {
         self.x *= other.x;
         self.y *= other.y;
+    }
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::Point;
+
+    #[test]
+    fn normalization_multiplies_in_double_before_rounding_to_float() {
+        // SkPoint::setLength (C++): x *= dscale, with a double dscale.
+        // Rounding dscale first gives 0x3ea670dc instead.
+        let mut p = Point::from_xy(1.1, 3.2);
+        assert!(p.normalize());
+        assert_eq!(p.x.to_bits(), 0x3ea670db);
     }
 }
