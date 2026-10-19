@@ -281,11 +281,15 @@ respectively, with zero and five runner rounds. The stable program's
 202 ms is not its steady state: the review (2026-10-19) measured the same
 program at about 193 ms per snapshot right after its probe and 5 ms per
 snapshot after waiting 3 s, and a second program probed later showed the
-same window. The cause is not established (a candidate is the viewer
-session's own asynchronous probe of the program, which cannot be answered
-while the window's thread is blocked in synchronous snapshots); it affects
-an extension that calls `render.renderFrameTo` in a loop right after first
-use, and is recorded for PERF3. After app restart, the
+same window. After the reference-failure fix (same date), one rerun of
+`e2e/engine-shader-parity.spec.ts` measured the stable program at 864 ms
+first use and 5.7 to 6.5 ms for the five snapshots right after it (zero
+runner rounds), and the pinned program at 631 ms then 436 to 462 ms (five
+rounds). The window did not appear in that run; with one run its cause is
+not established (a candidate is the viewer session's own asynchronous
+probe failing transiently while the window's thread is blocked in
+synchronous snapshots, which before the fix left the program re-probing),
+so it stays recorded for PERF3. After app restart, the
 stable program needed no probe (five steady snapshots averaged 5.2 ms);
 the persisted pin averaged 409 ms and continued to use ANGLE. These are
 end-to-end snapshot times under shared machine load, not GPU timings or a
