@@ -558,6 +558,7 @@ mod tests {
                 view_seq: None,
                 wait_ms: 1_000,
                 blender_wait_ms: 0,
+                captions_hidden: false,
                 uploaded: Vec::new(),
             },
             revision.map(|r| Revision::new(r).unwrap()),

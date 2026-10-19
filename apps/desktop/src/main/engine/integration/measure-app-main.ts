@@ -35,7 +35,7 @@ type AppConfig = {
   /** `tracer`: the app's own engine connection draws the document (Use New Engine). */
   mode: 'today' | 'engine' | 'tracer';
   /** A synthetic project of slice features instead of the corpus project. */
-  synthetic?: { layers: number; fps?: number; fpsRational?: [number, number] | null; images?: number; seed?: number };
+  synthetic?: { layers: number; fps?: number; fpsRational?: [number, number] | null; images?: number; seed?: number; scene3d?: boolean };
   /** Playback only: an inspector edit every `everyMs` while recording (tracer). */
   edits?: { everyMs: number };
   load: boolean;
@@ -45,7 +45,7 @@ type AppConfig = {
   project: string;
   /** Content time playback starts from, seconds. */
   startS?: number;
-  inputModes?: ('drag' | 'pan')[];
+  inputModes?: ('drag' | 'pan' | 'orbit')[];
   /** `false`: engine-path gestures keep `pointermove` (before step 2). */
   rawGestures?: boolean;
   /** `false`: the viewer draws engine frames on the page's main thread, not in its presentation worker. */
@@ -150,6 +150,8 @@ async function run(config: AppConfig): Promise<void> {
     machineLoad: { before: os.loadavg() },
     startedAt: new Date().toISOString()
   };
+  const loadDuring: number[] = [];
+  const loadTimer = setInterval(() => loadDuring.push(os.loadavg()[0]!), 1000);
   let verdict = 'MEASURE DONE';
   try {
     const win = await waitFor('the editor window', () => BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && w.webContents.getURL().startsWith('app:')) ?? null);
@@ -410,6 +412,8 @@ async function run(config: AppConfig): Promise<void> {
     verdict = `MEASURE FAIL ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`;
     result['error'] = verdict;
   } finally {
+    clearInterval(loadTimer);
+    result['machineLoad'] = { ...(result['machineLoad'] as object), during: loadDuring };
     result['log'] = logs.slice(-200);
     writeFileSync(config.out, JSON.stringify(result));
     process.stdout.write(`${verdict}\n`);

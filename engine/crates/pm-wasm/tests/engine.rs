@@ -416,3 +416,20 @@ fn malformed_input_never_panics() {
         100.0
     );
 }
+
+#[test]
+fn font_cache_seeds_are_kept_across_registry_changes() {
+    let mut e = engine();
+    let seeds = r#"{"seeds":[{"family":"system-ui","weight":400,"italic":false,"size":24,"specified":12}]}"#;
+    assert_eq!(e.set_font_seeds(seeds.as_bytes()), Ok(true));
+    // The same seeds again (or as a bare array) change nothing.
+    assert_eq!(e.set_font_seeds(seeds.as_bytes()), Ok(false));
+    let bare = r#"[{"family":"system-ui","weight":400,"italic":false,"size":24,"specified":12}]"#;
+    assert_eq!(e.set_font_seeds(bare.as_bytes()), Ok(false));
+    // A registry generation change drops answers and faces, not the seeds.
+    e.clear_fonts();
+    assert_eq!(e.set_font_seeds(seeds.as_bytes()), Ok(false));
+    assert_eq!(e.set_font_seeds(b"[]"), Ok(true));
+    assert!(e.set_font_seeds(b"{\"seeds\":7}").is_err());
+    assert!(e.set_font_seeds(b"not json").is_err());
+}

@@ -72,15 +72,11 @@ pub struct Identity {
     pub faces: usize,
 }
 
-/// The UI's type scale (`packages/tokens/tokens.css`: `--fs-sm`, `--fs-md`)
-/// in CSS px: the app lays `system-ui` DOM text out at these sizes before a
-/// canvas measures anything.
-const UI_SYSTEM_UI_SIZES: [f32; 2] = [12.0, 13.0];
-
 /// The capture renderer's font cache (`docs/engine/text.md`, "The
-/// renderer's font cache"; `pm-eval/tests/corpus.rs`): at the capture's
-/// device pixel ratio the UI's `system-ui` text created the renderer's 24
-/// and 26 px entries.
+/// renderer's font cache"; `pm-eval/tests/corpus.rs`): the app's UI text
+/// (`system-ui` at 12 and 13 px) laid out at the capture's device pixel
+/// ratio created the renderer's entries, as main tells pm-wasm and the
+/// engines in the app (`app_ui_font_cache_seeds`).
 fn capture_font_cache_seeds(manifest: Option<&Value>) -> Vec<FontCacheSeed> {
     let dpr = manifest
         .and_then(|m| member(m, "gpu"))
@@ -90,16 +86,7 @@ fn capture_font_cache_seeds(manifest: Option<&Value>) -> Vec<FontCacheSeed> {
     if dpr == 1.0 {
         return Vec::new();
     }
-    UI_SYSTEM_UI_SIZES
-        .iter()
-        .map(|&css| FontCacheSeed {
-            family: "system-ui".into(),
-            weight: 400.0,
-            italic: false,
-            size: pm_text::compat::canvas::effective_font_size(css * dpr),
-            specified: css,
-        })
-        .collect()
+    pm_text::compat::app_ui_font_cache_seeds(&[dpr])
 }
 
 fn selected(name: &str, opts: &Options) -> bool {
@@ -168,11 +155,16 @@ pub fn judge_dump(stats: &mut Stats, project: &str, items: &[Item], answers: &[A
             );
         }
         let (outcome, err, why) = judge(a, &it.want, it.legacy_threw.is_some(), it.rule);
-        if let (Outcome::Question(_), Answer::Value(v)) = (outcome, a) {
+        if let (Outcome::Question(_) | Outcome::Class(_), Answer::Value(v)) = (outcome, a) {
             let d = compare::max_abs_difference(&compare::plain(v), &it.want).unwrap_or(f64::NAN);
             let c = stats.categories.entry(it.category).or_default();
-            if d.is_nan() || d > c.question_max_abs {
-                c.question_max_abs = d;
+            let max = if matches!(outcome, Outcome::Class(_)) {
+                &mut c.class_max_abs
+            } else {
+                &mut c.question_max_abs
+            };
+            if d.is_nan() || d > *max {
+                *max = d;
             }
         }
         stats.record(it.category, outcome, err, || {
@@ -213,6 +205,8 @@ pub fn run(opts: &Options) -> Result<Report, String> {
             .join(", ")
     };
 
+    // pm-wasm gets the same seeds, as main's `engine-fonts:seeds` gives them.
+    let seeds_json = serde_json::json!({ "seeds": seeds }).to_string();
     let mut measure = CompatMeasure::new(CoreTextRegistry::new());
     measure.compat().set_font_cache_seeds(seeds);
     let mut native_stats = opts
@@ -260,7 +254,7 @@ pub fn run(opts: &Options) -> Result<Report, String> {
             .then(|| pm_model::canonical::canonical_project(loaded.clone()));
         let doc = Document::new(Some(loaded), 1);
         let mut discovery = match (&canonical, font_service.as_mut()) {
-            (Some(c), Some(fs)) => Some(wasm::Discovery::new(fs, c)?),
+            (Some(c), Some(fs)) => Some(wasm::Discovery::new(fs, c, &seeds_json)?),
             _ => None,
         };
         let mut project_items: Vec<Vec<Item>> = Vec::new();
@@ -361,6 +355,7 @@ fn stats_json(s: &Stats) -> serde_json::Value {
                 (*k).to_owned(),
                 serde_json::json!({
                     "compared": c.compared, "matched": c.matched, "allowed": c.allowed,
+                    "toleranceClasses": c.classes, "toleranceClassMaxAbsDifference": c.class_max_abs,
                     "questions": c.questions, "questionMaxAbsDifference": c.question_max_abs, "mismatched": c.mismatched,
                     "maxRelativeError": c.max_error, "samples": c.samples,
                 }),
@@ -414,6 +409,12 @@ fn print_stats(title: &str, s: &Stats) {
         );
         for (class, n) in c.allowed.iter() {
             println!("      allowed ({class}): {n}");
+        }
+        for (class, n) in c.classes.iter() {
+            println!(
+                "      matched in the tolerance class {class}: {n}, max absolute difference {:.3e}",
+                c.class_max_abs
+            );
         }
         for (class, n) in c.questions.iter() {
             println!(

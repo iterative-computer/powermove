@@ -37,6 +37,7 @@ import { installAppCaptures, usesBlender } from './app-captures';
 // kernel's `render.gl.init` binding uses it for viewers that do not present
 // by themselves (old forks of the viewer).
 import { ViewerPresentation } from '../../../extensions/viewer/engine-present/presentation';
+import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
 import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
 import { SvgRasters } from './svg-rasters';
 import { EngineTransport } from './transport';
@@ -107,6 +108,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     else if (level === 'warn') console.warn(line);
     else console.info(line);
   };
+  const drawingWarmup = new PresentationWarmup(target.document, () => new Worker(new URL('../../../extensions/viewer/engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' }));
+  drawingWarmup.warm();
   const hostClock = new HostClock(() => native.hostTime());
   hostClock.start();
   let connection: EngineConnection | null = null;
@@ -319,6 +322,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       };
     },
     usesBlender: () => usesBlender(PM.proj),
+    captionsHidden: () => PM.captionsHidden === true,
     svgRasters: () => svgRasters,
     log
   });
@@ -383,6 +387,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     trace,
     source,
     exclusive: true,
+    drawingWarmup,
     // Frame events on presentation (presentation-events.ts), at most once
     // per animation frame for the newest frame on screen, as today's frame
     // loop emits them once per frame it draws.
@@ -419,6 +424,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           viewerHandlers = null;
           opened.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
           transport.refresh();
+          drawingWarmup.warm();
         }
       };
     }
@@ -472,6 +478,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       clock: current?.clock ?? null
     }),
     dispose: () => {
+      drawingWarmup.dispose();
       offShaderFallback();
       offPending();
       offEager();

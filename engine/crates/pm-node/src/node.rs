@@ -96,8 +96,13 @@ impl JsEngineHost {
 
     /// A port from main. `peer` is `"host"`, `"renderer"`, or `"peer"`.
     #[napi]
-    pub fn attach(&mut self, port: u32, peer: String) -> Result<Vec<EngineAction>> {
-        Ok(convert(self.inner.attach(port, &peer).map_err(err)?))
+    pub fn attach(
+        &mut self,
+        port: u32,
+        peer: String,
+        owner: Option<u32>,
+    ) -> Result<Vec<EngineAction>> {
+        Ok(convert(self.inner.attach(port, &peer, owner).map_err(err)?))
     }
 
     /// The port closed.

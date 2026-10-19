@@ -52,6 +52,8 @@ const arg = (name, fallback) => {
 const seconds = Number(arg('seconds', '60'));
 const only = arg('only', '').split(',').filter(Boolean);
 const tag = arg('tag', '');
+const maxLoad = Number(arg('max-load', 'Infinity'));
+const evidenceDir = arg('evidence-dir', '') ? path.resolve(arg('evidence-dir', '')) : null;
 // Re-analyze raw results a `--keep` run left in this directory instead of
 // measuring again (the analysis changed, not the measurement).
 const from = arg('from', '') ? path.resolve(arg('from', '')) : null;
@@ -154,7 +156,16 @@ const RUNS = [
   // Phase 3a (docs/engine/phase3a-gate.md): layer drag on the 884-layer
   // project (the corpus perf copy), today and with Use New Engine on, idle.
   { name: 'p3a-drag-today-884-idle', ...latency, app: true, mode: 'today', load: false, inputModes: ['drag'], dir: 'docs/engine/phase3a-gate-measurements' },
-  { name: 'p3a-drag-engine-884-idle', ...latency, app: true, mode: 'tracer', load: false, inputModes: ['drag'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3a-gate-measurements' }
+  { name: 'p3a-drag-engine-884-idle', ...latency, app: true, mode: 'tracer', load: false, inputModes: ['drag'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3a-gate-measurements' },
+  // Phase 3c (plan section 25, "3D orbit, 3D corpus scene with shadows",
+  // p95 ≤ 33 ms pointer-to-pixel): a middle-button orbit in the 3D
+  // viewport's editor view of the corpus primitives scene with a sun
+  // casting shadows, 1920 × 1080, today's WebGL viewer and the engine
+  // drawing the document, idle and under the gate load.
+  { name: 'p3c-orbit-today-idle', ...latency, app: true, mode: 'today', load: false, synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], dir: 'docs/engine/phase3c-measurements' },
+  { name: 'p3c-orbit-engine-idle', ...latency, app: true, mode: 'tracer', load: false, synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3c-measurements' },
+  { name: 'p3c-orbit-today-load', ...latency, app: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], dir: 'docs/engine/phase3c-measurements' },
+  { name: 'p3c-orbit-engine-load', ...latency, app: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3c-measurements' }
 ];
 
 /** The tracer's runs: layer drag on 500 layers (engine and today, idle and
@@ -190,7 +201,11 @@ function tracerRuns() {
     { name: 'tracer-playback-today-23976-load', ...playback, app: true, tracer: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001 }
   ];
 }
-const selected = RUNS.filter((run) => !only.length || only.includes(run.name));
+const selected = only.length ? only.map(name => {
+  const run = RUNS.find(run => run.name === name);
+  if (!run) throw new Error(`Unknown measurement run: ${name}`);
+  return run;
+}) : RUNS;
 
 /* ── build ─────────────────────────────────────────────────────────── */
 
@@ -814,7 +829,10 @@ function analyzeLatency(raw) {
     // Engine frames echo the view sequence (pans) or, on the tracer, the
     // document revision (layer drags).
     const engineLike = page.mode === 'engine' || page.mode === 'tracer';
-    const draws = (engineLike ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: page.mode === 'tracer' ? d[2] : d[6], submitMs: d[5], arrivedMs: d[4], seq: d[1] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null, arrivedMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
+    // An orbit changes the view, not the document: its engine frames echo
+    // the view sequence on the tracer too.
+    const byView = page.mode === 'engine' || mode === 'orbit';
+    const draws = (engineLike ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: byView ? d[6] : d[2], submitMs: d[5], arrivedMs: d[4], seq: d[1] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null, arrivedMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
     // When the page handled each input (ms, page clock): the first dispatch
     // that carried it.
     const handledOf = new Map();
@@ -921,6 +939,13 @@ const electron = createRequire(path.join(desktop, 'package.json'))('electron');
 const results = {};
 try {
   for (const run of selected) {
+    if (!from) {
+      const until = Date.now() + 15 * 60_000;
+      while (os.loadavg()[0] > maxLoad && Date.now() < until) await sleepMs(30_000);
+      if (os.loadavg()[0] > maxLoad) throw new Error(`Machine load remained above ${maxLoad}; remaining rows are unmeasured`);
+      const disk = fs.statfsSync('/System/Volumes/Data');
+      if (disk.bavail * disk.bsize < 40 * 1024 ** 3) throw new Error('Disk below the required 40 GiB floor before app launch');
+    }
     const name = tag ? `${run.name}-${tag}` : run.name;
     const out = path.join(from ?? work, `${name}.json`);
     const trace = path.join(from ?? work, `${name}.trace.json`);
@@ -1020,7 +1045,8 @@ try {
       process.stdout.write(`   analysis failed: ${error.message}\n${(raw.log ?? []).slice(-15).join('\n')}\n`);
       continue;
     }
-    const dir = run.dir ? path.join(repo, run.dir) : run.tracer ? path.join(repo, 'docs/engine/tracer-measurements') : summaries;
+    if (!from && Math.max(os.loadavg()[0], raw.machineLoad?.before?.[0] ?? 0, raw.machineLoad?.after?.[0] ?? 0, ...(raw.machineLoad?.during ?? [])) > maxLoad) summary.invalid = `Machine load exceeded ${maxLoad}; retry this pair`;
+    const dir = evidenceDir ?? (run.dir ? path.join(repo, run.dir) : run.tracer ? path.join(repo, 'docs/engine/tracer-measurements') : summaries);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${name}.json`), `${JSON.stringify(summary, null, 2)}\n`);
     results[name] = summary;

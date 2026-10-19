@@ -197,7 +197,7 @@ test.describe('Use New Engine: level 1 SVG images', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('a bucket change in the viewer shows a stand-in until the window answers', async ({ session }) => {
+  test('a bucket change waits for its exact raster before presenting', async ({ session }) => {
     const { page } = session;
     await openEngine(session);
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
@@ -207,11 +207,11 @@ test.describe('Use New Engine: level 1 SVG images', () => {
       const contain = PM.proj.layers.find((l: any) => l.name === 'Contain');
       const out: { standIns: number; ms: number }[] = [];
       for (const scale of [131, 173, 219, 97, 151, 263, 117, 199, 241, 89]) {
-        const posted = PM.EngineSvgRasters.stats.posted;
+        const revision = PM.EngineDoc.barrier.revision;
         let standIns = 0, done = 0;
         const start = performance.now();
         const off = presentation.onPresented((frame: any) => {
-          if (PM.EngineSvgRasters.stats.posted === posted && !frame.standIn) return;
+          if (frame.revision <= revision) return;
           if (frame.standIn) standIns++;
           else if (!done) done = performance.now();
         });
@@ -226,20 +226,20 @@ test.describe('Use New Engine: level 1 SVG images', () => {
       return out;
     });
     console.log(`bucket changes: ${JSON.stringify(runs)}`);
-    // Every change ended on an exact frame after at most one stand-in
-    // (the previous bucket, scaled), as the plan allows (vector.md).
+    // Every frame of an existing project uses its own raster bucket.
+    // Holding the prior frame until it is ready must not publish an old
+    // bucket under the edited frame's revision (amendment 22).
     expect(runs.every((r) => r.ms >= 0)).toBe(true);
-    expect(Math.max(...runs.map((r) => r.standIns))).toBeLessThanOrEqual(1);
+    expect(runs.map((r) => r.standIns)).toEqual(Array(10).fill(0));
     expect((await compareFrame(page, 0.5)).differ).toBe(0);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('playback of a scale animation: stand-in frames are counted, and the paused frame is exact', async ({ session }) => {
+  test('playback of a scale animation presents only exact SVG buckets', async ({ session }) => {
     // The Stretch layer scales 60% → 310% over the 2 s: every frame of it
     // may need a new bucket. Today redraws the bucket synchronously in the
-    // frame; the engine draws the content's previous bucket until the
-    // window's raster arrives (vector.md, "A miss"). Measured, not judged:
-    // the count is the evidence for the stand-in decision.
+    // frame. The engine requests it during render-ahead and holds that
+    // frame until Chromium answers; no previous bucket may stand in.
     const { page } = session;
     await openEngine(session);
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
@@ -257,6 +257,7 @@ test.describe('Use New Engine: level 1 SVG images', () => {
     });
     console.log(`playback of a scale animation: ${JSON.stringify(run)}`);
     expect(run.frames).toBeGreaterThan(10);
+    expect(run.standIns).toBe(0);
     await page.evaluate(() => (window as any).PM.setTime(1.5, { raw: true, force: true }));
     await expect.poll(async () => (await compareFrame(page, 1.5)).differ, { timeout: 20_000 }).toBe(0);
     expect(session.diagnostics.pageErrors).toEqual([]);

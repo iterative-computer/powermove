@@ -21,7 +21,7 @@ type Addon = {
    *  (the viewer presenter's frame descriptors, clock samples, and frame
    *  responses, sent straight to the viewer's port: amendment 4). */
   EngineHost: new (process: string, onActions?: (actions: EngineAction[]) => void) => {
-    attach(port: number, peer: string): EngineAction[];
+    attach(port: number, peer: string, owner?: number | null): EngineAction[];
     detach(port: number): EngineAction[];
     receive(port: number, bytes: Uint8Array): EngineAction[];
     tick(): EngineAction[];
@@ -118,7 +118,7 @@ function main(): void {
         run(engine.detach(message.port));
       });
       try {
-        run(engine.attach(message.port, message.peer));
+        run(engine.attach(message.port, message.peer, Number.isSafeInteger(message.owner) ? message.owner : null));
       } catch (error) {
         notify({ type: 'log', level: 'error', message: `could not attach port ${message.port}: ${error instanceof Error ? error.message : String(error)}` });
         ports.delete(message.port);

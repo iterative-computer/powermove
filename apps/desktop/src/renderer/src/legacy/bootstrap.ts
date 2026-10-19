@@ -28,6 +28,7 @@ import { install as installHistory } from './core/history';
 import { installEngineDoc } from '../engine-doc/install';
 import { rendererMode, withNewEngine } from '../engine-doc/flags';
 import { installEngineConnection } from '../engine-connection/install';
+import { installUiFontCensus } from '../engine-doc/ui-font-census';
 import { install as installLibrary } from './core/library';
 import { install as installProjects } from './core/projects';
 import { install as installEditing } from './core/editing';
@@ -84,6 +85,10 @@ function safeRendererMode(): ReturnType<typeof rendererMode> {
 
 // Engine dependency order — do not reorder.
 const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
+  /* Observe creators before any engine or extension can measure canvas
+     text. Waiting until after raster/engine installation loses startup
+     entries that the later UI census must not overwrite. */
+  ['engine/ui-font-census', () => void installUiFontCensus(hostBridge() as never)],
   ['core/diag', installDiag],
   ['core/util', installUtil],
   /* The kernel registries must exist before anything registers into them:

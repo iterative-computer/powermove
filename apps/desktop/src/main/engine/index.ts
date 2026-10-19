@@ -24,7 +24,8 @@ import { routeToCurrentExporter } from '../render-encoder';
 import type { EngineProcess } from '../../shared/engine-protocol';
 import type { Log } from './connection';
 import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, type SharedTextureLike } from './bridge';
-import { EngineFontClient, installEngineFontService } from '../engine-fonts';
+import { EngineFontClient, FONT_CLIENT_ID, installEngineFontService, JOB_FONT_CLIENT_ID } from '../engine-fonts';
+import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
@@ -37,9 +38,7 @@ import { CompatFrames } from './compat-frames';
 import { ShaderFallbackRelay } from './shader-fallback-relay';
 import type { ChildLike, PortLike } from './ports';
 
-/** Main's own client id for its font port to the interactive engine (never
- *  a window id: those are positive). */
-export const FONT_CLIENT_ID = -1;
+export { FONT_CLIENT_ID, JOB_FONT_CLIENT_ID } from '../engine-fonts';
 
 export { NEW_ENGINE_ENV, NEW_ENGINE_STORE_KEY, newEngineEnabled } from './flag';
 
@@ -396,7 +395,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const windowSessions = new WindowSnapshotSessions(
     { isReady: (p) => engine.isReady(p), hostPort: (p) => engine.hostPort(p), request: (p, body, session, revision) => engine.request(p, body, session, revision), stageDocument: (p, session, bytes) => engine.stageDocument(p, session, bytes), event: (p, body, session) => engine.event(p, body, session) },
     engine.definitions,
-    log
+    log,
+    undefined,
+    (session, owner) => fontClient.setSessionOwner(session, owner)
   );
   snapshots = new SnapshotService({
     engine,
@@ -409,8 +410,12 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // section 12, Phase 2): main relays pm-wasm's font requests over its own
   // font port and keeps only the project fonts a restarted engine needs.
   const fontClient = new EngineFontClient({ log });
-  const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender }, fontClient);
+  const jobFontClient = new EngineFontClient({ log });
+  fontClient.mirror(jobFontClient);
+  const fontSeeds = startEngineFontSeeds(fontClient, log, options.windows);
+  const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender, seedsFor: fontSeeds.seedsFor, reportUiFonts: fontSeeds.reportUiFonts }, fontClient);
   engine.addClient(FONT_CLIENT_ID, (_info, port) => fontClient.connect(port), { peer: 'fonts', processes: ['interactive'] });
+  engine.addClient(JOB_FONT_CLIENT_ID, (_info, port) => jobFontClient.connect(port), { peer: 'fonts', processes: ['job'] });
 
   // The shared host clock for the renderer's engine connection: it maps
   // performance.now() onto the engines' host µs (clock samples, the
@@ -486,6 +491,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     log,
     // Each job renders its window's winning registrations (contract 10).
     definitions: (owner) => engine!.definitions.current(owner),
+    // A window's exports measure text with its font cache seeds.
+    sessionOwner: (session, owner) => jobFontClient.setSessionOwner(session, owner),
     onDelivered: (owner, file) => rememberExport(owner, file),
     onUserStatus: (owner, status) => {
       const file = userDestinations.get(status.jobId);
@@ -505,6 +512,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   });
   jobOwners = agentJobs;
   renderQueue = new RenderQueue({
+    windowOpen: (owner) => { const contents = webContents.fromId(owner); return !!contents && !contents.isDestroyed(); },
     directory: path.join(options.userData, 'Render Queue'),
     engine: agentJobs,
     platform: {
@@ -594,6 +602,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       ? chosen.filePath
       : `${chosen.filePath}.${panel.extension}`;
     const id = await renderQueue!.add({
+      owner: event.sender.id,
       name: path.basename(file),
       project: options.snapshotMedia ? await options.snapshotMedia(JSON.parse(queueRequest.project)) : JSON.parse(queueRequest.project),
       options: queueRequest.options,
@@ -685,7 +694,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       await renderQueue?.dispose();
       for (const job of [...awake.keys()]) letSleep(job);
       uninstallFonts();
+      fontSeeds.stop();
       fontClient.disconnect();
+      jobFontClient.disconnect('the job engine stopped');
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
       options.ipc.removeAllListeners(ENGINE_IPC.playback);
       options.ipc.removeAllListeners(ENGINE_IPC.shaderFallbackResult);

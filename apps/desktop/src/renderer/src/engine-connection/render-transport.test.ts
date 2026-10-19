@@ -30,7 +30,7 @@ function canvasFake() {
   return { canvas: canvas as unknown as HTMLCanvasElement, drawn };
 }
 
-function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void>; usesBlender?: () => boolean; svgRasters?: TransportSvgRasters } = {}) {
+function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void>; usesBlender?: () => boolean; svgRasters?: TransportSvgRasters; captionsHidden?: () => boolean } = {}) {
   const asked: EngineSnapshotRequest[] = [];
   const s = session();
   const runner = { renderSync: vi.fn((r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })), render: vi.fn(async (r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })) };
@@ -49,6 +49,7 @@ function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; 
     windowDocument: options.windowDocument,
     wake: options.wake,
     usesBlender: options.usesBlender,
+    captionsHidden: options.captionsHidden,
     composition: () => 'comp-1',
     document: () => 'doc-1',
     viewSeq: () => 4,
@@ -155,6 +156,26 @@ describe('EngineRenderTransport', () => {
     expect(asked[1]!.snapshot.target).toMatchObject({ kind: 'frame', motionBlurSamples: 16 });
     expect(transport.snapshotDataUrlSync(1, 480, { w: 1920, h: 1080 })).toBe('');
     expect(transport.stats.lastFailure).toBe('unsupported: x');
+  });
+
+  it('carries caption visibility on each sync and async frame without leaking it', async () => {
+    const { transport, asked } = setup([rendered(2, 2), rendered(2, 2), rendered(2, 2)]);
+    transport.snapshotDataUrlSync(0, 2, { w: 2, h: 2 }, { captionsHidden: true });
+    await transport.snapshotDataUrl(0, 2, { w: 2, h: 2 }, { captionsHidden: true });
+    transport.snapshotSync({ time: 0, width: 2, height: 2 });
+    expect(asked.map(r => r.snapshot.captionsHidden)).toEqual([true, true, false]);
+  });
+
+  it('inherits the current app caption flag for general frame captures, with per-request overrides', () => {
+    let hidden = true;
+    const { transport, asked } = setup(Array.from({ length: 4 }, () => rendered(2, 2)), { captionsHidden: () => hidden });
+    transport.renderFrameToSync(0, 2, 2);
+    hidden = false;
+    transport.snapshotDataUrlSync(0, 2, { w: 2, h: 2 });
+    transport.snapshotSync({ time: 0, width: 2, height: 2, captionsHidden: true });
+    hidden = true;
+    transport.snapshotSync({ time: 0, width: 2, height: 2, captionsHidden: false });
+    expect(asked.map(r => r.snapshot.captionsHidden)).toEqual([true, false, true, false]);
   });
 
   it('fails clearly without a session, and opens one on demand (never at boot)', async () => {

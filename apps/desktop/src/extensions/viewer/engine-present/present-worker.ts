@@ -79,6 +79,7 @@ export interface WorkerScope {
 }
 
 export type ServeOptions = {
+  timers?: { set(fn: () => void, ms: number): number; clear(id: number): void };
   createPainter?: (canvas: PaintTarget) => Promise<FramePainter>;
   /** Wraps the painter (the integration test reads drawn frames back). */
   wrapPainter?: (painter: FramePainter) => Promise<FramePainter> | FramePainter;
@@ -87,18 +88,17 @@ export type ServeOptions = {
 };
 
 /**
- * A worker canvas's animation frame to the panel (docs/engine/bridge.md,
- * "A/V sync"): viz draws the canvas's compositor frame at the BeginFrame
- * of its animation frame when it arrives before the page's frame for that
- * BeginFrame, else at the next one (a race between two frame sinks the
- * worker cannot see: 0 to 40% of frames the first way, by run and load),
- * and the panel shows it a refresh after that draw (8% two refreshes),
- * 3.2 ms into that refresh (measured on the 120 Hz panel, viz's
- * presentation feedback). The prediction sits between the two draws, so
- * with the nearest refresh either lands within a refresh of the frame's
- * time on the audio clock.
+ * Timed canvas commits use a fixed phase after BeginFrame, targeting the
+ * following compositor refresh rather than racing the page's frame for
+ * the current one. The prediction is two refreshes to the panel, including
+ * the following draw's presentation, plus its measured 3.2 ms offset
+ * (docs/engine/bridge.md, "A/V sync"). Paused/gesture frames still submit
+ * on arrival. The common-clock performance gate must validate the phase
+ * and A/V prediction on an awake display (docs/engine/perf.md).
  */
-export const WORKER_LATENCY_REFRESHES = 1.5;
+export const WORKER_LATENCY_REFRESHES = 2;
+/** Submit after this BeginFrame's compositor deadline, before the next one. */
+export const WORKER_COMMIT_PHASE_REFRESHES = 0.75;
 /**
  * Added while the window is being resized (docs/engine/perf.md, "A/V sync
  * under load"): a live resize holds the panel's presentation of a worker
@@ -178,6 +178,8 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         // now can reach the display frame being composed, instead of
         // waiting for the worker's next animation frame.
         drawOnArrival: true,
+        commitPhaseRefreshes: WORKER_COMMIT_PHASE_REFRESHES,
+        timers: options.timers,
         // Timed frames are picked for the instant a worker canvas's frame
         // reaches the panel (WORKER_LATENCY_REFRESHES), rounded to the
         // nearest refresh, so they stay on the audio clock's line.

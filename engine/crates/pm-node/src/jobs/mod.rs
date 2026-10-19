@@ -105,6 +105,22 @@ enum Work {
     },
 }
 
+impl Work {
+    /// Whose font cache seeds the work's text measures with.
+    fn seed_scope(&self) -> pm_render::text::served::SeedScope {
+        match self {
+            Work::Frames { port, document, .. } => pm_render::text::served::SeedScope {
+                port: Some(port.0),
+                session: Some(document.session.get()),
+            },
+            Work::Export { document, .. } => pm_render::text::served::SeedScope {
+                port: None,
+                session: Some(document.session.get()),
+            },
+        }
+    }
+}
+
 struct JobRecord {
     class: PriorityClass,
     run: Option<AgentRunId>,
@@ -184,6 +200,8 @@ struct Shared {
     gate: Arc<Gate>,
     wake: Wake,
     gpu: Mutex<Option<(wgpu::Device, wgpu::Queue)>>,
+    /// The engine's font service: lanes' renderers lay text out through it.
+    fonts: Option<Arc<crate::fonts::hub::FontHub>>,
 }
 
 impl Shared {
@@ -332,7 +350,14 @@ impl Shared {
 
     fn renderer(&self) -> Result<Renderer, String> {
         let (device, queue) = self.gpu()?;
-        Ok(Renderer::new(device, queue))
+        let mut renderer = Renderer::new(device, queue);
+        if let Some(hub) = &self.fonts {
+            renderer.set_text_fonts(Some(Box::new(pm_render::text::served::ServedFonts::new(
+                hub.clone(),
+                hub.clone(),
+            ))));
+        }
+        Ok(renderer)
     }
 
     /// The service's device (one per process, shared by the lanes).
@@ -429,6 +454,15 @@ impl JobEngineService {
     /// Starts the three lanes. `wake` must make the engine's host call
     /// [`pm_engine::Engine::pump`] soon.
     pub fn start(wake: Wake) -> Result<JobEngineService, String> {
+        Self::start_with_fonts(wake, None)
+    }
+
+    /// [`JobEngineService::start`] with the engine's font hub: lanes draw
+    /// text and captions (`crate::fonts::hub`).
+    pub fn start_with_fonts(
+        wake: Wake,
+        fonts: Option<Arc<crate::fonts::hub::FontHub>>,
+    ) -> Result<JobEngineService, String> {
         let state = State {
             user: Some(Scheduler::new(EngineProcess::Job)),
             ..State::default()
@@ -440,6 +474,7 @@ impl JobEngineService {
             gate: Arc::new(Gate::new()),
             wake,
             gpu: Mutex::new(None),
+            fonts,
         });
         let mut threads = Vec::new();
         for (lane, name) in [
@@ -877,6 +912,10 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
             session,
             cancel,
         ))));
+        // Text measures with the font cache seeds of the window the work is
+        // for: the requesting port's window, or the window main opened the
+        // session for (an export).
+        r.set_text_seed_scope(work.seed_scope());
         // Level 1 SVG rasters come from the document's window through host
         // services (decision S1); job frames (exports, agent frames) never
         // draw a stand-in for one.

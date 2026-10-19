@@ -45,7 +45,7 @@ pub struct BitmapGlyph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Key {
-    font: usize,
+    font: u64,
     index: u32,
     glyph: u32,
     size: u32,
@@ -57,8 +57,7 @@ pub fn has_bitmaps(face: FaceRef<'_>) -> bool {
     face.font().is_some_and(|f| !f.bitmap_strikes().is_empty())
 }
 
-/// Whether a face has color vector glyphs (`COLR` with `CPAL`), which this
-/// renderer does not draw.
+/// Whether a face has color vector glyphs (`COLR` with `CPAL`).
 pub fn has_colr(face: FaceRef<'_>) -> bool {
     face.font()
         .is_some_and(|f| f.colr().is_ok() && f.cpal().is_ok())
@@ -74,6 +73,8 @@ pub fn is_colr_glyph(face: FaceRef<'_>, glyph: u32) -> bool {
 #[derive(Default)]
 pub struct Bitmaps {
     map: HashMap<Key, Option<Arc<BitmapGlyph>>>,
+    #[cfg(feature = "cg-masks")]
+    pub(crate) colr: super::colr::Cache,
 }
 
 impl Bitmaps {
@@ -83,6 +84,8 @@ impl Bitmaps {
 
     pub fn clear(&mut self) {
         self.map.clear();
+        #[cfg(feature = "cg-masks")]
+        self.colr.clear();
     }
 
     /// The color bitmap of `glyph` for a run at `requested` device px,
@@ -316,6 +319,29 @@ pub fn resample(img: &Rgba8, scale: f64) -> Rgba8 {
 /// rounded, halves down; below, Canvas2D shifts the (enlarged) glyph
 /// further, by the amounts measured at every size from 6 to 19 px
 /// (`fit-emoji`, two emoji, every pixel equal after the shift).
+/// Whether a face has color bitmap strikes (`sbix`, `CBDT`): glyphs Skia
+/// draws as color images. Monochrome `EBDT` strikes (Courier New) draw as
+/// masks.
+pub fn has_color_bitmaps(face: FaceRef<'_>) -> bool {
+    face.font().is_some_and(|f| {
+        matches!(
+            f.bitmap_strikes().format(),
+            Some(BitmapFormat::Sbix | BitmapFormat::Cbdt)
+        )
+    })
+}
+
+/// Whether a face is Apple Color Emoji (the `sbix` font Canvas2D shifts
+/// down, `apple_emoji_shift`).
+pub fn is_apple_color_emoji(face: FaceRef<'_>) -> bool {
+    face.font().is_some_and(|font| {
+        font.bitmap_strikes().format() == Some(BitmapFormat::Sbix)
+            && font
+                .localized_strings(skrifa::string::StringId::POSTSCRIPT_NAME)
+                .any(|name| name.chars().eq("AppleColorEmoji".chars()))
+    })
+}
+
 pub fn apple_emoji_shift(requested: f32, size: f32) -> f64 {
     const SMALL: [f64; 14] = [
         1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0, 4.0,

@@ -16,14 +16,25 @@
 
 pub mod atlas;
 pub mod bitmap;
+#[cfg(all(target_os = "macos", feature = "cg-masks"))]
+pub mod cgmask;
 pub mod color;
-#[cfg(all(target_os = "macos", feature = "coretext-reference"))]
+pub mod color4;
+#[cfg(feature = "cg-masks")]
+pub mod colr;
+#[cfg(all(target_os = "macos", feature = "cg-masks"))]
 pub mod coretext;
 pub mod cpu;
+pub mod mask_tables;
 pub mod outline;
 pub mod paint;
 pub mod profile;
 pub mod scene;
+pub mod sdf;
+#[cfg(feature = "cg-masks")]
+pub mod skaaa;
+#[cfg(feature = "cg-masks")]
+pub mod skpath;
 
 use kurbo::Affine;
 

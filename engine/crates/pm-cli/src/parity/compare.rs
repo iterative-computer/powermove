@@ -10,8 +10,14 @@
 //!   a rotation that differs by exactly 360° at `atan2`'s branch cut
 //!   (amendment 20), a variable-speed source time in a nested composition
 //!   (amendment 16).
+//! * A named tolerance class passes a difference outside the plan's
+//!   tolerance but within the class's own, and counts it apart: variable-font
+//!   ink (CoreText's variation arithmetic against skrifa's, at most 1.19e-4
+//!   px on the corpus; Phase 1 T2, decided by the orchestrator under
+//!   amendment 22: invisible). Bounds and raster boxes of variable-font text
+//!   take it.
 //! * A "tolerance question" is a difference outside the plan's tolerance but
-//!   within a named looser one (variable-font ink): reported, never passed.
+//!   within a named looser one: reported, never passed.
 
 use std::collections::BTreeMap;
 
@@ -269,6 +275,8 @@ pub enum Answer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Match,
+    /// Within a named tolerance class (passes; counted apart).
+    Class(&'static str),
     Allowed(&'static str),
     Question(&'static str),
     Mismatch,
@@ -281,6 +289,10 @@ pub struct Category {
     pub compared: usize,
     pub matched: usize,
     pub allowed: BTreeMap<&'static str, usize>,
+    /// Values that passed in a named tolerance class, by class.
+    pub classes: BTreeMap<&'static str, usize>,
+    /// Largest absolute difference among them.
+    pub class_max_abs: f64,
     pub questions: BTreeMap<&'static str, usize>,
     pub mismatched: usize,
     pub max_error: f64,
@@ -341,6 +353,10 @@ impl Stats {
         }
         match outcome {
             Outcome::Match => c.matched += 1,
+            Outcome::Class(class) => {
+                c.matched += 1;
+                *c.classes.entry(class).or_default() += 1;
+            }
             Outcome::Allowed(class) => *c.allowed.entry(class).or_default() += 1,
             Outcome::Question(class) => {
                 *c.questions.entry(class).or_default() += 1;
@@ -385,6 +401,8 @@ pub struct Rule {
     /// A looser tolerance whose differences are reported as a tolerance
     /// question instead of a mismatch.
     pub question: Option<(Tol, &'static str)>,
+    /// A named tolerance class: differences within it pass, counted apart.
+    pub class: Option<(Tol, &'static str)>,
     /// A difference here is an allowed difference of this class.
     pub allowed: Option<&'static str>,
 }
@@ -395,6 +413,7 @@ impl Rule {
             tol: NUM,
             branch_cut: true,
             question: None,
+            class: None,
             allowed: None,
         }
     }
@@ -403,6 +422,7 @@ impl Rule {
             tol: BOUNDS,
             branch_cut: false,
             question: None,
+            class: None,
             allowed: None,
         }
     }
@@ -465,6 +485,12 @@ pub fn judge(
             }
             if let Some(class) = rule.allowed {
                 return (Outcome::Allowed(class), err, describe());
+            }
+            if let Some((tol, class)) = rule.class {
+                let (mut e2, mut c2) = (0.0, false);
+                if same(&v, want, tol, &mut e2, &mut c2) && !c2 {
+                    return (Outcome::Class(class), err, describe());
+                }
             }
             if let Some((loose, class)) = rule.question {
                 let (mut e2, mut c2) = (0.0, false);
@@ -699,6 +725,41 @@ mod tests {
         assert_eq!(
             judge(&Answer::Value(v("1.0000001")), &v("1"), false, rule).0,
             Outcome::Match
+        );
+    }
+
+    #[test]
+    fn a_tolerance_class_passes_within_its_bound_and_is_counted_apart() {
+        let rule = Rule {
+            class: Some(((2e-4, 0.0), "variable-font ink")),
+            ..Rule::bounds()
+        };
+        assert_eq!(
+            judge(&Answer::Value(v("1.000119")), &v("1"), false, rule).0,
+            Outcome::Class("variable-font ink")
+        );
+        assert_eq!(
+            judge(&Answer::Value(v("1.001")), &v("1"), false, rule).0,
+            Outcome::Mismatch
+        );
+        assert_eq!(
+            judge(&Answer::Value(v("1.0000001")), &v("1"), false, rule).0,
+            Outcome::Match
+        );
+        let mut stats = Stats::new(false, 4);
+        stats.record(
+            "bounds (variable font)",
+            Outcome::Class("variable-font ink"),
+            1e-4,
+            String::new,
+        );
+        assert_eq!(
+            (stats.mismatches(), stats.questions(), stats.compared()),
+            (0, 0, 1)
+        );
+        assert_eq!(
+            stats.categories["bounds (variable font)"].classes["variable-font ink"],
+            1
         );
     }
 

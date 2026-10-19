@@ -40,6 +40,7 @@ export interface PmWasmExports {
   pm_fonts_add(len: number): number;
   pm_fonts_report(): number;
   pm_fonts_clear(): void;
+  pm_fonts_seeds(len: number): number;
   pm_fonts_outlines(outlines: number): void;
   pm_heap_live(): number;
   pm_heap_peak(): number;
@@ -254,6 +255,16 @@ export class PmWasm {
       view.setUint32(4 + key.length, index, true);
       bytes.set(data, 8 + key.length);
       if (this.x.pm_fonts_add(this.writeBytes(bytes)) !== 0) throw new Error('pm-wasm: malformed font');
+    });
+  }
+
+  /** The window's font cache seeds (`{ seeds }` JSON from main): text
+   *  measures as this renderer's Canvas2D does. Returns whether they changed. */
+  setFontSeeds(json: string): boolean {
+    return this.call(() => {
+      const r = this.x.pm_fonts_seeds(this.writeString(json));
+      if (r === 2) throw new Error(`pm-wasm font seeds: ${this.readOut()}`);
+      return r === 1;
     });
   }
 

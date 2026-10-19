@@ -37,7 +37,8 @@ pub fn generic_family(name: &str) -> &'static str {
 /// canvas asks for a font.
 ///
 /// `FontPlatformDataCache` keys platform data by family, effective size, and
-/// selection request (weight, width, slope), but not by specified size, and
+/// selection request (weight, width, slope), plus the complete platform
+/// identity carried by `cache_key`, but not by specified size, and
 /// `FontPlatformDataFromCTFont` sets `opsz` from the specified size of the
 /// description that created the entry. Whoever creates an entry first fixes
 /// its optical size for every later user of the key in that renderer. DOM
@@ -45,8 +46,8 @@ pub fn generic_family(name: &str) -> &'static str {
 /// scale factor applies as zoom), so UI text at 12 px on a 2x display
 /// creates the 24 px entry with `opsz` 12 (clamped to the axis minimum, 17,
 /// for the system font), and a canvas measuring 24 px text in the same
-/// family, weight, and style afterwards gets SF's text-size advances (about
-/// 3.7% wider than at `opsz` 24).
+/// family and identical platform key afterwards gets SF's text-size advances
+/// (about 3.7% wider than at `opsz` 24).
 ///
 /// A seed declares one such entry, so level 1 can reproduce a renderer whose
 /// cache is in that state. Without seeds, every entry is the canvas's own
@@ -63,11 +64,79 @@ pub struct FontCacheSeed {
     pub size: f32,
     /// The specified size of the description that created the entry.
     pub specified: f32,
+    /// Complete Blink platform-data identity; legacy static captures use
+    /// the default Canvas2D key when absent.
+    #[serde(default, rename = "cacheKey", skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
 }
+
+/// The CSS sizes of the app's own UI text that create `system-ui` entries in
+/// a default-density editor renderer's font cache at startup (`--fs-sm` and
+/// `--fs-md`, weight 400, upright; `docs/engine/text.md`, "The renderer's
+/// font cache"): the model for tools with no window to ask (corpus tests,
+/// parity, `pm-cli`). In the app, main sends each window's seeds as its
+/// renderer reports the UI text it laid out (the UI font census).
+pub const APP_UI_TEXT_SIZES: [f32; 2] = [12.0, 13.0];
+
+/// The seeds of an editor renderer whose window has been on displays with
+/// these device scale factors (each scale factor's entries stay in the
+/// renderer's cache for the life of the window), in that order. Equal to
+/// `appUiFontCacheSeeds` in `apps/desktop/src/shared/engine-fonts-seeds.ts`.
+pub fn app_ui_font_cache_seeds(scale_factors: &[f32]) -> Vec<FontCacheSeed> {
+    let mut out: Vec<FontCacheSeed> = Vec::new();
+    for &scale in scale_factors {
+        if !(scale.is_finite() && scale > 0.0) {
+            continue;
+        }
+        for css in APP_UI_TEXT_SIZES {
+            let seed = FontCacheSeed {
+                family: "system-ui".into(),
+                weight: 400.0,
+                italic: false,
+                size: crate::compat::canvas::effective_font_size(css * scale),
+                specified: css,
+                cache_key: None,
+            };
+            // The first creator of a key fixes it.
+            if !out
+                .iter()
+                .any(|s| s.size == seed.size && s.weight == seed.weight && s.italic == seed.italic)
+            {
+                out.push(seed);
+            }
+        }
+    }
+    out
+}
+
+/// The names Blink resolves to the system font on macOS. They share one
+/// font cache key: the app's UI text in `-apple-system` (`--f-ui`) creates
+/// the entries a canvas measuring `system-ui` finds (the real project's
+/// capture, `docs/engine/text.md`), so a seed named by one matches them all.
+const SYSTEM_FONT_ALIASES: [&str; 3] = ["system-ui", "-apple-system", "blinkmacsystemfont"];
+
+fn same_cache_family(a: &str, b: &str) -> bool {
+    let system = |n: &str| {
+        SYSTEM_FONT_ALIASES
+            .iter()
+            .any(|s| n.eq_ignore_ascii_case(s))
+    };
+    a.eq_ignore_ascii_case(b) || (system(a) && system(b))
+}
+
+/// Same default key as shared/engine-fonts-seeds.ts. Only identical
+/// platform-data keys can share the first creator's optical size.
+const CANVAS_FONT_CACHE_KEY: &str = r#"["auto","auto",true,true,"normal","100%","horizontal","normal","none",[],"normal","normal",true,false,false,false]"#;
 
 impl FontCacheSeed {
     fn matches(&self, family: &str, desc: &FontDesc) -> bool {
-        self.family.eq_ignore_ascii_case(family)
+        let canvas_key = if desc.italic {
+            CANVAS_FONT_CACHE_KEY.replace("\"normal\",\"100%\"", "\"italic\",\"100%\"")
+        } else {
+            CANVAS_FONT_CACHE_KEY.to_string()
+        };
+        self.cache_key.as_deref().unwrap_or(&canvas_key) == canvas_key
+            && same_cache_family(&self.family, family)
             && self.weight == desc.weight
             && self.italic == desc.italic
             && self.size == desc.size
@@ -391,4 +460,43 @@ pub fn measure(
         out.items.push(result);
     }
     out
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    #[test]
+    fn app_ui_seeds_follow_the_windows_scale_factors() {
+        let two = app_ui_font_cache_seeds(&[2.0]);
+        assert_eq!(
+            two.iter()
+                .map(|s| (s.size, s.specified))
+                .collect::<Vec<_>>(),
+            [(24.0, 12.0), (26.0, 13.0)]
+        );
+        assert!(
+            two.iter()
+                .all(|s| s.family == "system-ui" && s.weight == 400.0 && !s.italic)
+        );
+        // At 1x the UI's entries are the canvas's own sizes.
+        let one = app_ui_font_cache_seeds(&[1.0]);
+        assert!(one.iter().all(|s| s.size == s.specified));
+        // A window that went from 2x to 1x keeps both; the first creator of
+        // a key wins, and invalid factors are ignored.
+        let both = app_ui_font_cache_seeds(&[2.0, f32::NAN, 1.0, 2.0]);
+        assert_eq!(both.len(), 4);
+        assert_eq!(both[0].size, 24.0);
+        // Fractional scale factors floor as Blink's effective size does.
+        assert_eq!(app_ui_font_cache_seeds(&[1.1])[0].size, 13.2);
+        assert_eq!(app_ui_font_cache_seeds(&[]).len(), 0);
+    }
+
+    #[test]
+    fn system_font_aliases_share_a_cache_key() {
+        assert!(same_cache_family("system-ui", "-apple-system"));
+        assert!(same_cache_family("BlinkMacSystemFont", "system-ui"));
+        assert!(same_cache_family("Helvetica", "helvetica"));
+        assert!(!same_cache_family("system-ui", "Helvetica"));
+    }
 }
