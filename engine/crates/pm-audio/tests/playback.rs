@@ -806,6 +806,9 @@ fn a_cold_mapped_start_queues_its_preroll_blocks_together() {
 }
 
 fn time_mapped_playback(loaded: bool) {
+    // Real-time comparisons (40 ms device, zero underruns) never overlap the
+    // sixteen-voice start tests' bursts of user-interactive pool jobs.
+    let _isolated = POOL_BURSTS.read().unwrap_or_else(|e| e.into_inner());
     let _load = loaded.then(CpuContention::start);
     let dir = temp_dir(if loaded {
         "time-mapped-loaded"
@@ -3126,15 +3129,16 @@ fn cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous() {
     assert_sixteen_voice_edit_starts(true, true);
 }
 
-/// The sixteen-voice start tests share the process-wide preparation pool.
-/// Run concurrently, each would time the other's sixteen jobs; they still
-/// run beside every other test.
-static SIXTEEN_VOICE_STARTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The sixteen-voice start tests fill the process-wide preparation pool with
+/// user-interactive jobs. Run concurrently, each would time the other's
+/// sixteen jobs, and a burst would compete with another test's real-time
+/// producer in the same process (an app never prepares paused starts during
+/// its own playback). They take this lock exclusively; the real-time
+/// time-mapped comparisons share it; every other test runs beside both.
+static POOL_BURSTS: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
-    let _serial = SIXTEEN_VOICE_STARTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _serial = POOL_BURSTS.write().unwrap_or_else(|e| e.into_inner());
     let _load = stress_enabled().then(CpuContention::start);
     let dir = temp_dir(match (cold, distinct) {
         (true, false) => "a8-cold-start",
