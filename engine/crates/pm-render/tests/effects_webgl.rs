@@ -103,6 +103,9 @@ struct Metrics {
     hdr_over_one: usize,
     hdr_max_cv: f64,
     pixels: usize,
+    /// Pixels whose four values equal the reference's binary16 values bit
+    /// for bit (`PM_SHADER_STATS`).
+    exact: usize,
 }
 
 impl Metrics {
@@ -135,6 +138,9 @@ fn compare(engine: &[f32], reference: &[u16]) -> Metrics {
         let _ = p;
         let mut worst = 0u32;
         let mut worst_hdr = 0.0f64;
+        if (0..4).all(|c| pm_gpu::readback::f32_to_half(a[c]) == b[c]) {
+            m.exact += 1;
+        }
         for c in 0..4 {
             let r = pm_gpu::readback::half_to_f32(b[c]);
             let e = a[c];
@@ -237,6 +243,8 @@ fn effects_transitions_and_probes_match_webgl() {
         })
         .unwrap();
     let filter = std::env::var("PM_SHADER_FILTER").ok();
+    // Per-variant measurements, bit-exact pixels included.
+    let stats = std::env::var_os("PM_SHADER_STATS").is_some();
     let mut groups: BTreeMap<String, Tally> = BTreeMap::new();
     for (case, def) in cases.iter().zip(&definitions) {
         let id = case["id"].as_str().unwrap();
@@ -368,6 +376,17 @@ fn effects_transitions_and_probes_match_webgl() {
                 pm_gpu::readback::read_f32(renderer.device(), renderer.queue(), &out.texture)
                     .unwrap();
             let m = compare(&pixels, &reference);
+            if stats {
+                eprintln!(
+                    "{id} {name}: exact {:.3}% ({} of {} px), {} px over 1 CV, max {} CV, above-1.0 max {:.3} CV",
+                    100.0 * m.exact as f64 / m.pixels.max(1) as f64,
+                    m.exact,
+                    m.pixels,
+                    m.over_one,
+                    m.max_cv,
+                    m.hdr_max_cv
+                );
+            }
             if m.pass() {
                 tally.matched += 1;
             } else if let Some(why) = known_open(id) {
