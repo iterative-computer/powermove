@@ -8,6 +8,7 @@ import { WebIpcMain } from '../clients';
 import { ProjectSessions } from '../sessions';
 import { createStore } from '../../main/storage';
 import { WEB } from '../../shared/wire';
+import { IPC, type AgentToolRequestEvent, type AgentToolResponseEvent } from '../../shared/ipc';
 import { CONTRACT_PROJECT_ID, contractProject, answerOf, workspaceDocumentFields, type ContractTranscript } from '../../engine/document-host/contract-run';
 import { CONTRACT_SEQUENCE } from '../../engine/document-host/contract';
 import { BRIDGE, extensionHost } from '../../engine/document-host/test-host';
@@ -24,15 +25,26 @@ export async function runContractOnNativeHost(distDir: string, script: string, e
     const reference = path.join(directory, 'rasters.json'); await writeFile(reference, JSON.stringify(rasters));
     const unavailable = async (): Promise<never> => { throw new Error('This document contract does not ask for browser pixels.'); };
     const { NativeHiddenHost: Host } = createRequire(__filename)(path.join(distDir, 'native-host.cjs')) as { NativeHiddenHost: typeof NativeHiddenHost };
+    const ipc = new WebIpcMain();
     host = new Host({ userData: directory, exportsDir: path.join(directory, 'exports'), distDir,
-      rendererDir: path.join(distDir, 'renderer'), ipc: new WebIpcMain(), store, sessions, extensions: extensionHost(extensions).service,
+      rendererDir: path.join(distDir, 'renderer'), ipc, store, sessions, extensions: extensionHost(extensions).service,
       documentScript: script, documentEnv: { POWERMOVE_PM_BRIDGE: BRIDGE, POWERMOVE_DOCUMENT_HOST_TEST_SEED: '1', POWERMOVE_NATIVE_EVALUATOR: 'audit', POWERMOVE_DOCUMENT_HOST_TEXT_REFERENCE: reference },
       browser: { call: unavailable, shader: unavailable, compat: unavailable, close: async () => {} }, log: () => {} });
     await host.start();
+    const call = (request: AgentToolRequestEvent): Promise<AgentToolResponseEvent> => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { ipc.off(IPC.agentToolResponse, receive); reject(new Error(`Native host timed out: ${request.tool}`)); }, 60000);
+      const receive = (_event: unknown, value: unknown) => {
+        const response = value as AgentToolResponseEvent;
+        if (response.callId !== request.callId) return;
+        clearTimeout(timer); ipc.off(IPC.agentToolResponse, receive); resolve(response);
+      };
+      ipc.on(IPC.agentToolResponse, receive);
+      host!.owner(CONTRACT_PROJECT_ID).send(IPC.agentToolRequest, request);
+    });
     let revision = 0;
     const answers: ContractTranscript['answers'] = [], documents: string[] = [];
     for (const [index, call] of CONTRACT_SEQUENCE.entries()) {
-      const response = await host.pool.call(CONTRACT_PROJECT_ID, { runId: call.runId, callId: `native-contract-${index}`, tool: call.tool, arguments: call.arguments, baseRevision: revision });
+      const response = await call({ runId: call.runId, callId: `native-contract-${index}`, tool: call.tool, arguments: call.arguments, baseRevision: revision });
       revision = response.revision ?? revision; answers.push(answerOf(response));
       const stats = await host.pool.stats(CONTRACT_PROJECT_ID);
       if (!stats.testDocument) throw new Error('The contract worker did not expose its live document bytes'); documents.push(stats.testDocument);
