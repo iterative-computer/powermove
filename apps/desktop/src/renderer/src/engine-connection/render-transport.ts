@@ -439,14 +439,15 @@ export class EngineRenderTransport {
     this.pumpingAhead = true;
     try {
       const deadline = performance.now() + LOOKAHEAD_BUDGET_MS;
-      const clock = this.options.playing?.() ? this.options.playhead?.() : null;
+      const playhead = this.options.playhead?.();
+      const clock = this.options.playing?.() ? playhead : null;
       const revision = this.options.revision();
       const entries = [...this.ahead.values()].filter(entry => {
         if (entry.session.closed || !this.answerers.has(entry.need.source)) {
           this.ahead.delete(this.aheadTag(entry.need));
           return false;
         }
-        const step = (this.options.frameTicks?.() ?? Math.abs(entry.step)) * (clock && clock.rate < 0 ? -1 : 1);
+        const step = (this.options.frameTicks?.() ?? Math.abs(entry.step)) * (playhead && playhead.rate < 0 ? -1 : 1);
         const clockCursor = clock ? Math.max(0, Math.floor(clock.time / Math.abs(step)) * Math.abs(step)) : null;
         const cursor = clockCursor === null ? entry.cursor : entry.need.composition === this.options.composition()
           ? clockCursor : entry.cursor + (entry.clockCursor === null ? 0 : clockCursor - entry.clockCursor);
