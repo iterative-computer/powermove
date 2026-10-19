@@ -270,7 +270,7 @@ R.destroy = (id: any) => {
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
   try { PM.store.del(R.STATE + id); } catch (e) { }
-  for (const prefix of ['projectMeta.', 'projectHistory.', 'projectWorkspace.']) {
+  for (const prefix of ['projectMeta.', 'projectHistory.', 'projectWorkspace.', 'documentHost.']) {
     try { PM.store.del(prefix + id); } catch (e) { }
   }
   try { PM.store.del(R.JOURNAL + id); } catch (e) { }

@@ -62,11 +62,31 @@ export function withNewEngine(mode: EngineDocMode, newEngine: boolean): EngineDo
   return newEngine && !mode.evaluator ? parseMode('on') : mode;
 }
 
+/**
+ * The development modes (dual answers, the auditor, the tracking Proxy) run
+ * the legacy evaluator next to pm-wasm on purpose. They are for developers
+ * and test builds only: a build chooses them at build time
+ * (`VITE_POWERMOVE_NATIVE_EVALUATOR`), and a profile's stored override can
+ * only turn the plain mirror on or off outside a development build.
+ */
+export function profileOverride(stored: string | null, development: boolean): EngineDocMode | null {
+  if (stored == null) return null;
+  const mode = parseMode(stored);
+  if (development || !(mode.audit || mode.dual || mode.proxy)) return mode;
+  return parseMode('on');
+}
+
 /** The renderer's mode: the stored override, else the build default. */
 export function rendererMode(): EngineDocMode {
   let stored: string | null = null;
   try { stored = globalThis.localStorage?.getItem(STORAGE_KEY) ?? null; } catch { /* storage unavailable */ }
   const env = (import.meta as any).env ?? {};
-  const value = stored ?? env.VITE_POWERMOVE_NATIVE_EVALUATOR ?? 'off';
-  return parseMode(value);
+  return profileOverride(stored, env.DEV === true || env.MODE === 'test') ?? parseMode(env.VITE_POWERMOVE_NATIVE_EVALUATOR ?? 'off');
+}
+
+
+/** Worker runtime environment is a developer override only. Production is
+ * selected solely by Use New Engine, including the flag-off legacy path. */
+export function workerMode(value: string | undefined, newEngine: boolean, development: boolean): EngineDocMode {
+  return development ? withNewEngine(parseMode(value ?? 'on'), newEngine) : parseMode(newEngine ? 'on' : 'off');
 }

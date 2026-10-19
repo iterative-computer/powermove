@@ -317,8 +317,9 @@ function reparentCases(doc: string, T: number, out: Case[]): void {
   }
 }
 function reparentCase(doc: string, T: number, li: number, pi: number | null, out: Case[]): void {
-  // pm-edit leaves these to the legacy edit (`pm_edit::LEGACY_ONLY`): the
-  // replay checks it declines exactly these.
+  // The legacy aim here reads the camera's keyed channels through the
+  // evaluation cache the pose write left stale; pm-edit reproduces that read
+  // (`pose::reparent`). The replay counts these cases apart.
   const L = open(doc, T);
   const selfSpace = Parenting.aimProperties3D(L[li]).length > 0 && spaceReadsLayer(L[li], pi === null ? null : L[pi]);
   const live = open(doc, T);
@@ -830,8 +831,8 @@ if (CORPUS) {
     const doc = fontDoc(index);
     add(doc, (text, T, out) => { fontAnchorCases(text, T, out); measuredSplitCases(text, T, out); }, [0, range(0, 3)]);
   }
-  // Cameras and lights reparented into a space that moves with them (left to
-  // the legacy edit), and the same shapes without the loop (compared).
+  // Cameras and lights reparented into a space that moves with them (the
+  // stale-cache aim, `selfSpace`), and the same shapes without the loop.
   for (let index = 0; index < 4 * SCALE; index++) {
     for (const loop of [true, false]) {
       const doc = selfSpaceDoc(2000 + index * 2 + (loop ? 0 : 1), index % 2 ? 'light' : 'camera', loop);

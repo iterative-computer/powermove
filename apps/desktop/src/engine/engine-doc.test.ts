@@ -35,7 +35,7 @@ describe.skipIf(!existsSync(MODULE))('the headless document host on pm-wasm', ()
     for (const m of mods as any[]) (m.installKernel ? (P: any) => void m.installKernel(P) : m.install)(PM);
     const engine = await installHeadlessEngineDoc(PM, line => lines.push(line));
     for (const m of rest as any[]) m.install(PM);
-    expect(engine).toEqual({ ready: true, mode: 'on' });
+    expect(engine).toEqual({ ready: true, mode: 'on', fonts: 'none' });
     expect(lines.some(line => line.includes('document mirror: pm-wasm'))).toBe(true);
 
     PM.proj = (PM as any).mkProject({ name: 'Engine', w: 640, h: 360 });

@@ -162,9 +162,56 @@ the others as app-writer violations and groups violations by writer.
 - **Not routed**: edits (`setKey`, `setKeyOn`, `removeKey`, `applyEaseTo`,
   `temporalKeys`, `enableTimeRemap`, factories) wait for `pm-edit`; `anim.version`
   and `touch` stay the renderer's.
-- **Fallbacks** (counted per operation and reason): the module not ready or dead,
-  three.js questions (3D objects, model groups, backgroundless extension scenes), and
-  text layout before fonts are served.
+- **Fallbacks** (counted per operation and reason): the module not ready, three.js
+  questions (3D objects, model groups, backgroundless extension scenes), text layout
+  before fonts are served, and ink without outlines. Detached channels, parents, and
+  paths are no longer fallbacks: they go to pm-wasm as JSON (below).
+
+## Named failures and exact answers ("Use New Engine" on)
+
+`installEngineDoc({ strict: true })` (the headless document host with the new engine
+on; docs/engine/document-host.md):
+
+- **Traps.** The compiled module is kept; a trapped instance is replaced
+  synchronously (`new WebAssembly.Instance`, far below Chromium's synchronous limit),
+  resynced from the document, and the question that trapped is asked again on it, so
+  the answer stays native (queries in `native.ts`, kernels in `edits.ts`). A second
+  trap on the same question is a `pm-wasm-trap` failure. The 1 s revive timer uses
+  the same synchronous path for traps outside a query.
+- **Detached inputs** are evaluated ad hoc: `hasKeyAt` takes the channel's JSON
+  (`prop`), `transformParentMatrix` and `parent3D` a parent layer's (`parent`),
+  `pathValues` and `groupMatrix` a path's (`pathJson`; `groupMatrix` appends it after
+  the layer's paths, so parent lookups and cycle closing match the legacy recursion).
+  A non-object where a channel or path belongs throws the legacy TypeError natively
+  (`hasKeyAt`: reading `kf` or `find`; `pathValues`: `path.id` for the default prefix
+  or `path.p`; `groupMatrix`: `path.id`; a primitive: `Object.entries`), before the
+  layer is read, as today.
+- **Named failures** (`strict` only): a module that does not load
+  (`pm-wasm-unavailable`, `retry()` loads it again), a pm-wasm error reply
+  (`pm-wasm-error`), a trap twice (`pm-wasm-trap`), and a font provider given up
+  after three failures (`font-service-unavailable`). Each is reported once per code
+  and message: `engine:failure` on the bus, a `failure` report line, and
+  `PM.EngineDoc.failures()`.
+- **Font state per instance.** The loader keeps loaded faces per module instance, so
+  a replacement instance loads them again. `FontProvider.whole` makes ink questions
+  native: the headless document host has it (pm-bridge `FontRegistry.whole`); the
+  editor's provider through main does not yet.
+- **The editor's boot** (`legacy/bootstrap.ts`, new engine on): the project opens
+  once the mirror is ready (bounded wait), and the boot project's faces load first
+  (`EngineDoc.warmFonts`, which asks pm-wasm directly, uncounted); every project
+  opened later warms its faces. What still answers with the legacy code in the
+  editor: a face first used after a project opened (`fonts`, until the fonts lane's
+  synchronous channel), ink (`ink`, same), and `context` (mid-replacement, or a
+  nested composition held in a composition's own `comps`).
+- **Anchor bounds key order.** pm-edit's JSON objects come out with sorted keys;
+  `legacyKeyOrder` writes `fontAnchorBounds`/`sizeAnchorBounds` as the legacy edits
+  do (x0, y0, x1, y1), so the document's bytes do not depend on which side measured.
+- **No headless reference.** In a host without a raster (`headless`), the dual modes
+  skip what has no legacy answer there: `gl.bounds`, `gl.pick`, `glyphLayout` (the
+  native `PM.textLayout`), and the kernels `captureFontAnchor` and `anchorReference`.
+- **Development modes.** `audit`, `audit-proxy`, and `strict` come from the build
+  flag (or a development build's stored override); a production build's stored
+  override can only choose `on` or `off` (`profileOverride`).
 
 ## Text
 
@@ -242,10 +289,11 @@ tracer forwards the same batches to the interactive engine.
 
 ## The headless document host
 
-`apps/desktop/src/engine/main.ts` installs the mirror after history with the flag on
-by default. With no compositor, `PM.GL.bounds` and `PM.GL.pick` come from pm-wasm
-alone (2D; `null` where three.js would be needed), so geometry that used to be
-unavailable headlessly now answers.
+One worker process per open project (docs/engine/document-host.md): each installs
+the mirror after history (on by default; required with the new engine on). With no
+compositor, `PM.GL.bounds` and `PM.GL.pick` come from pm-wasm alone (2D; `null`
+where three.js would be needed), and dual answers skip them there (no legacy
+reference exists headlessly).
 
 ## The frame-rate validator (`apps/desktop/src/shared/frame-rate.ts`)
 
@@ -271,7 +319,8 @@ with its composition when another one opens.
 | Barrier, mirror, native API vs legacy | `vitest run src/renderer/src/engine-doc` | random projects: every routed query, zero dual mismatches; mirror hash equals the live document through 60 edits, undos, redos, and structural changes |
 | JSON diff vs `diffOps` | `json-diff.test.ts` | 2,000 random pairs identical; the allocation-free comparison of retained elements agrees with the full one on every exception (`toJSON`, wrappers, accessors, absent members) |
 | Frame rates vs pm-time | `frame-rate.test.ts` | 3,000+ inputs identical |
-| Headless host | `vitest run src/engine` | mirror and 2D geometry without a renderer |
+| Headless host | `vitest run src/engine` | mirror and 2D geometry without a renderer; per-project workers (docs/engine/document-host.md) |
+| Exact answers, named failures | `vitest run src/renderer/src/engine-doc/strict.test.ts` | detached inputs native with 0 dual mismatches; traps answered by a fresh instance; failures named |
 
 ## S5 targets in the app
 
@@ -360,3 +409,34 @@ where dual answers and the auditor load the main thread, and 0 of 12 with the fl
 `on` or `off`; the spec should poll for the clip path. `export-code.spec.ts:9`
 (the web player's `stopped` flag) failed once under the same load and passed the
 other 4 runs.
+
+
+## Round 4: strict answers and synchronous fonts
+
+With Use New Engine on, every refusal in NativeApi and NativeEdits reports and
+throws `EngineFailure`; `fonts`, `ink`, `host`, `3d`, `legacy`, `flush`, `exception`
+and missing context never execute the legacy fallback. The main-frame-only
+synchronous font channel supplies whole faces on demand. Retry re-enables the
+font loader and forgets failed face-cache entries. Font warmup visits nested
+compositions and every keyed time, off the UI installation chain.
+
+Composition addresses may identify a nested canonical member path. Replacement
+scopes detached from the current project are evaluated as native `compJson`
+inputs, with the open project's rate and members retained. See document-host.md
+for tests, remaining 3D/cyclic-pose failures and cross-lane edits.
+
+## Round 5: review fixes
+
+- pm-edit answers the cyclic camera/light reparent natively (the legacy aim's
+  stale-cache read, docs/engine/pm-edit.md), so the `legacy` reason and pm-wasm's
+  `{legacy}` reply are gone.
+- `editKernels.align` runs the caller's own code (the strip's `alignCommands`, or a
+  fork's) for layers outside the open composition, an empty selection, and the
+  kernel's `host`/`fonts`/`ink` refusals: that code is extension code over
+  `api.anim`/`api.render`, which answer natively or fail by name. It is counted in
+  `NativeEditStats.callers`, not `fallbacks`. Engine faults stay named failures.
+- Composition scopes are addressed in O(1) for `proj.comps` members and from a
+  verified path cache for nested ones; a root without `compId` is looked up at the
+  mirror's top level (no repair per query); explicit layer lists go by their
+  composition's address, or as their structural members only. Measurements are in
+  document-host.md, round 5.

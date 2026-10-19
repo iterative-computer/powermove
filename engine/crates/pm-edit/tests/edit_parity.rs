@@ -20,11 +20,14 @@
 //! engine-internal `TypeError`s only need to throw. The font anchor's cases
 //! (`captureFontAnchor`, `anchorReference`/`anchorMoved` with `anchor:
 //! "font"`) and measured split text measure on the generator's synthetic
-//! canvas (`Synth`). Cases a kernel leaves to the host (three.js bounds of 3D
-//! objects and model groups), to the legacy edit (a camera or light
-//! reparented into a space that moves with it, which the generator marks
-//! `selfSpace`: the kernel must decline exactly those), or that measure text
-//! without that canvas (the vectors carry no fonts) are counted apart.
+//! canvas (`Synth`). A camera or light reparented into a space that moves
+//! with it (the generator marks it `selfSpace`) is compared like every other
+//! case: the legacy aim there reads the camera's keyed channels through the
+//! evaluation cache the pose write left stale, and the kernel reproduces
+//! that read (`pose::reparent`); those cases are also counted on their own.
+//! Cases a kernel leaves to the host (three.js bounds of 3D objects and model
+//! groups) or that measure text without that canvas (the vectors carry no
+//! fonts) are counted apart.
 //!
 //! `PM_EDIT_VECTORS=<file>` replays another set (a `PM_EDIT_SCALE` run, or
 //! the corpus set from `PM_EDIT_CORPUS`).
@@ -271,8 +274,7 @@ enum Outcome {
         answer: Option<V>,
     },
     Threw(JsThrow),
-    /// Left to the host (three.js), to text measurement, or to the legacy
-    /// edit (`pm_edit::LEGACY_ONLY`).
+    /// Left to the host (three.js) or to text measurement.
     Skipped(&'static str),
 }
 
@@ -469,7 +471,6 @@ fn run_case(doc: &Document, comp: &str, case: &Value) -> Outcome {
     };
     match result {
         Err(e) if e.kind == HOST_ONLY => Outcome::Skipped("host"),
-        Err(e) if e.kind == pm_edit::LEGACY_ONLY => Outcome::Skipped("legacy"),
         _ if text.asked => Outcome::Skipped("text"),
         Err(e) => Outcome::Threw(e),
         Ok(answer) => {
@@ -880,22 +881,11 @@ fn edits_match_typescript() {
                     names: HashMap::new(),
                 },
             );
-            // The generator marks the reparents whose legacy aim reads the
-            // camera's own transform through a stale cache (`selfSpace`,
-            // computed by its own walk of `parent3D`): the kernel leaves
-            // exactly those to the legacy edit.
-            let declined = matches!(outcome, Outcome::Skipped("legacy"));
-            let self_space = matches!(get(case, "selfSpace"), Some(Value::Bool(true)));
-            if declined != self_space && stats.failures.len() < 30 {
-                stats.failures.push(format!(
-                    "{}: {}",
-                    what(),
-                    if declined {
-                        "left to the legacy edit, but the generator found no self-space"
-                    } else {
-                        "a self-space reparent the kernel answered"
-                    }
-                ));
+            // The reparents whose legacy aim reads the camera's own transform
+            // through a stale cache (`selfSpace`, from the generator's own walk
+            // of `parent3D`) are compared like the rest, and counted apart.
+            if matches!(get(case, "selfSpace"), Some(Value::Bool(true))) {
+                *cases.entry(format!("{kind}(selfSpace)")).or_default() += 1;
             }
             let mut path = String::new();
             let ok = match (outcome, &want) {

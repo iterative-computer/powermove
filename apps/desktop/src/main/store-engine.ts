@@ -66,7 +66,9 @@ export function storeByteLimit(key: string): number {
   // Project snapshots and sessions (including undo/redo history) must support
   // the same size as project files, including during autosave and save completion.
   const large = parsed?.kind === 'dynamic'
-    && (parsed.prefix === 'project' || parsed.prefix === 'projectState' || parsed.prefix === 'projectHistory');
+    && (parsed.prefix === 'project' || parsed.prefix === 'projectState' || parsed.prefix === 'projectHistory'
+      /* A document host worker's undo history (docs/engine/document-host.md). */
+      || parsed.prefix === 'documentHost');
   return large ? LIMITS.fileSaveBytes : LIMITS.storeValueBytes;
 }
 
