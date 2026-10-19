@@ -10,16 +10,21 @@ import { install as editing } from '../src/renderer/src/legacy/core/editing';
 import { setSceneParameterValue } from '../src/renderer/src/legacy/core/workspace';
 import { installEngineDoc } from '../src/renderer/src/engine-doc/install';
 import { parseMode } from '../src/renderer/src/engine-doc/flags';
+import { ELECTRON_ONLY_SUITES, EXPRESSION_SUITES, frameChannels } from '../e2e/helpers/expression-suites';
 
 const PROFILE = !!process.env.PM_BENCH_PROFILE;
-const sources = ['value + time * 40', 'param("amp") + comp.layers.length + time', 'layer.p.opacity.v + t * 13', 'Math.sin(time) * 10 + idx + value'];
+// The original warm/edit/cold fixture. The frame suite below adds the other
+// expression styles and a sequential-layers read pattern.
+const sources = EXPRESSION_SUITES.numeric!;
 const quantile = (xs: number[], q: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor(xs.length * q))]!;
 const stats = (xs: number[]) => ({ median: quantile(xs, .5), p95: quantile(xs, .95), min: Math.min(...xs), max: Math.max(...xs) });
 
 // Only non-evaluation host services are inert. Model construction, composition
 // lookup, expression compilation/evaluation, write barrier and native facade are
 // the production modules; no expression helper or numerical operation is stubbed.
-async function fixture(module: WebAssembly.Module, native: boolean, scalar = false) {
+async function fixture(module: WebAssembly.Module, native: boolean, scalar = false,
+  options: { sources?: string[]; keyed?: boolean; pattern?: 'all' | 'window' } = {}) {
+  const fixtureSources = options.sources ?? sources;
   let id = 0;
   const listeners = new Map<string, Set<(...args: any[]) => void>>();
   const PM: any = { uid: (prefix: string) => `${prefix}-${++id}`, clamp: (v: number, a: number, b: number) => Math.max(a, Math.min(b, v)),
@@ -32,13 +37,24 @@ async function fixture(module: WebAssembly.Module, native: boolean, scalar = fal
   PM.proj.params = { amp: { name: 'amp', value: 7 } };
   PM.proj.layers = Array.from({ length: scalar ? 1 : 100 }, (_, i) => {
     const layer = PM.mkLayer('solid');
-    for (let k = 0; k < (scalar ? 1 : 4); k++) layer.p[`expr${k}`] = { v: i + k, kf: [], expr: sources[k] };
+    for (let k = 0; k < (scalar ? 1 : 4); k++) {
+      const kf = options.keyed ? [{ t: 0, v: i + k }, { t: 3, v: i + k + 30 }] : [];
+      layer.p[`expr${k}`] = { v: i + k, kf, expr: fixtureSources[k] };
+    }
     return layer;
   });
   const doc = native ? installEngineDoc(PM, { mode: parseMode('on'), strict: true, loadModule: async () => module, sink: () => {} }) : null;
   if (doc && !await doc.whenReady) throw new Error('Production pm-wasm failed to load');
   PM.touch();
-  const profile = { flushUs: 0, batchUs: 0, frameUs: 0 };
+  const profile = { flushUs: 0, batchUs: 0, frameUs: 0, evaluated: 0 };
+  if (doc) {
+    // Counts ids evaluated by frame runs (an integer add per run, not per id).
+    const prepare = doc.wasm!.prepareBatch.bind(doc.wasm!);
+    doc.wasm!.prepareBatch = ids => {
+      const evaluate = prepare(ids);
+      return (time, start = 0, count = ids.length - start) => { profile.evaluated += count; return evaluate(time, start, count); };
+    };
+  }
   if (doc && PROFILE) {
     const flush = doc.barrier!.flush.bind(doc.barrier!);
     doc.barrier!.flush = () => {
@@ -48,12 +64,18 @@ async function fixture(module: WebAssembly.Module, native: boolean, scalar = fal
     const prepare = doc.wasm!.prepareBatch.bind(doc.wasm!);
     doc.wasm!.prepareBatch = ids => {
       const evaluate = prepare(ids);
-      return time => { const start = performance.now(); try { return evaluate(time); } finally { profile.batchUs += (performance.now() - start) * 1000; } };
+      return (time, start, count) => { const begin = performance.now(); try { return evaluate(time, start, count); } finally { profile.batchUs += (performance.now() - begin) * 1000; } };
     };
   }
-  const channels = PM.proj.layers.flatMap((layer: any) => sources.slice(0, scalar ? 1 : 4).map((_, k) => ({ layer, prop: layer.p[`expr${k}`], key: `expr${k}` })));
+  const channels = PM.proj.layers.flatMap((layer: any) => fixtureSources.slice(0, scalar ? 1 : 4).map((_, k) => ({ layer, prop: layer.p[`expr${k}`], key: `expr${k}` })));
   const ev = native ? (c: any, t: number) => doc!.api!.evP(c.layer, c.prop, t, c.key) : (c: any, t: number) => PM.evP(c.layer, c.prop, t, c.key);
-  const evaluateFrame = (t: number) => { let sum = 0; for (const c of channels) sum += ev(c, t); return sum; };
+  const pattern = options.pattern ?? 'all';
+  const evaluateFrame = (t: number) => {
+    const [first, end] = frameChannels(pattern, t, channels.length);
+    let sum = 0;
+    for (let i = first; i < end; i++) sum += ev(channels[i], t);
+    return sum;
+  };
   const frame = PROFILE ? (t: number) => { const start = performance.now(); try { return evaluateFrame(t); } finally { profile.frameUs += (performance.now() - start) * 1000; } } : evaluateFrame;
   return { PM, doc, channels, ev, frame, profile };
 }
@@ -90,7 +112,13 @@ export async function run(wasmPath: string) {
   };
   const frameCount = Number(process.env.PM_BENCH_FRAMES ?? 4000);
   if (!Number.isSafeInteger(frameCount) || frameCount < 1) throw new Error('PM_BENCH_FRAMES must be a positive integer');
-  const frames = pairs(engine, today, frameCount);
+  // PM_BENCH_SECTIONS=suite,edits,… runs a subset while iterating; the
+  // recorded results run every section (a partial run never passes).
+  const sections = new Set((process.env.PM_BENCH_SECTIONS ?? 'frames,scalar,cold,edits,suite').split(','));
+  const partial = sections.size < 5;
+  const want = (name: string) => sections.has(name);
+  const skipped = { rows: [], engineUs: stats([0]), todayUs: stats([0]) };
+  const frames = want('frames') ? pairs(engine, today, frameCount) : skipped;
   const sampleFrames = (f: typeof engine) => {
     const samples = [];
     let sum = 0;
@@ -102,17 +130,17 @@ export async function run(wasmPath: string) {
     return { samples, sum };
   };
   const frameSamples = { engine: [] as number[], today: [] as number[] };
-  for (let pair = 0; pair < 8; pair++) {
+  for (let pair = 0; pair < (want('frames') ? 8 : 0); pair++) {
     let a, b;
     if (pair % 2) { b = sampleFrames(today); a = sampleFrames(engine); }
     else { a = sampleFrames(engine); b = sampleFrames(today); }
     if (!Object.is(a.sum, b.sum)) throw new Error('Frame latency sums differ');
     frameSamples.engine.push(...a.samples); frameSamples.today.push(...b.samples);
   }
-  const latency = { engineUs: stats(frameSamples.engine), todayUs: stats(frameSamples.today), framesPerSide: frameSamples.engine.length };
-  const scalar = pairs(await fixture(module, true, true), await fixture(module, false, true), 100_000);
+  const latency = want('frames') ? { engineUs: stats(frameSamples.engine), todayUs: stats(frameSamples.today), framesPerSide: frameSamples.engine.length } : null;
+  const scalar = want('scalar') ? pairs(await fixture(module, true, true), await fixture(module, false, true), 100_000) : skipped;
   const cold = [];
-  for (let pair = 0; pair < 9; pair++) {
+  for (let pair = 0; pair < (want('cold') ? 9 : 0); pair++) {
     const a = await fixture(module, true), b = await fixture(module, false);
     const once = (f: typeof engine) => { const start = performance.now(); const sum = f.frame(.5); return { usPerFrame: (performance.now() - start) * 1000, sum }; };
     const runPair = (fn: typeof once) => {
@@ -131,7 +159,7 @@ export async function run(wasmPath: string) {
     effects: { structuralDiffs: number; batches: number; ops: number; interned: number }; stepsPerPair: number }> = {};
   const stepsPerPair = Number(process.env.PM_BENCH_EDIT_STEPS ?? 40);
   if (!Number.isSafeInteger(stepsPerPair) || stepsPerPair < 2) throw new Error('PM_BENCH_EDIT_STEPS must be an integer >= 2');
-  for (const kind of ['parameterDrag', 'sourceEdit', 'layerAdd', 'layerRemove'] as const) {
+  for (const kind of want('edits') ? ['parameterDrag', 'sourceEdit', 'layerAdd', 'layerRemove'] as const : []) {
     const rows = [];
     for (let pair = 0; pair < 9; pair++) {
       const a = await fixture(module, true), b = await fixture(module, false);
@@ -168,7 +196,15 @@ export async function run(wasmPath: string) {
         const samples = [];
         const answers = [];
         const effects = { structuralDiffs: 0, batches: 0, ops: 0, interned: 0 };
-        const profile = { flushUs: 0, batchUs: 0, frameUs: 0 };
+        const profile = { flushUs: 0, batchUs: 0, frameUs: 0, evaluated: 0 };
+  if (doc) {
+    // Counts ids evaluated by frame runs (an integer add per run, not per id).
+    const prepare = doc.wasm!.prepareBatch.bind(doc.wasm!);
+    doc.wasm!.prepareBatch = ids => {
+      const evaluate = prepare(ids);
+      return (time, start = 0, count = ids.length - start) => { profile.evaluated += count; return evaluate(time, start, count); };
+    };
+  }
         const plansBefore = f.doc?.wasm?.stats();
         let sum = 0;
         for (let index = 0; index < stepsPerPair; index++) {
@@ -216,15 +252,40 @@ export async function run(wasmPath: string) {
         return total;
       }, { structuralDiffs: 0, batches: 0, ops: 0, interned: 0 }), stepsPerPair };
   }
+  // Every expression style, static and keyframed bases, all channels and a
+  // sequential-layers window, each paired against today exactly.
+  const suiteFrames = Number(process.env.PM_BENCH_SUITE_FRAMES ?? 2000);
+  const suite: Array<{ suite: string; base: string; pattern: string; engineUs: ReturnType<typeof stats>; todayUs: ReturnType<typeof stats>; evaluated?: number; pass: boolean }> = [];
+  for (const [name, set] of want('suite') ? Object.entries(EXPRESSION_SUITES) : []) {
+    if (ELECTRON_ONLY_SUITES.has(name)) continue;
+    for (const keyed of [false, true]) for (const pattern of ['all', 'window'] as const) {
+      const a = await fixture(module, true, false, { sources: set, keyed, pattern });
+      const b = await fixture(module, false, false, { sources: set, keyed, pattern });
+      for (const time of [0, -0, .001, .5, 1, 17 / 30, 2.5, 9.999]) for (let i = 0; i < a.channels.length; i++) {
+        const x = a.ev(a.channels[i], time), y = b.ev(b.channels[i], time);
+        if (!Object.is(x, y)) throw new Error(`Parity in ${name} (${keyed ? 'keyed' : 'static'}) at channel ${i}, time ${time}: ${x} vs ${y}`);
+      }
+      // Ids evaluated by frame runs per frame, against the channels read.
+      for (let frame = 0; frame < 200; frame++) a.frame(frame / 30);
+      const before = a.profile.evaluated;
+      for (let frame = 200; frame < 400; frame++) a.frame(frame / 30);
+      const perFrame = (a.profile.evaluated - before) / 200;
+      const row = pairs(a, b, suiteFrames);
+      suite.push({ suite: name, base: keyed ? 'keyed' : 'static', pattern, engineUs: row.engineUs, todayUs: row.todayUs,
+        evaluated: perFrame, pass: row.engineUs.median <= row.todayUs.median && row.engineUs.p95 <= row.todayUs.p95 });
+      console.error(`suite ${name} ${keyed ? 'keyed' : 'static'} ${pattern}: native ${row.engineUs.median.toFixed(2)}/${row.engineUs.p95.toFixed(2)} us, today ${row.todayUs.median.toFixed(2)}/${row.todayUs.p95.toFixed(2)} us, ${perFrame} wasm evaluations per frame`);
+    }
+  }
   const loadAfter = os.loadavg();
   const cold400 = summarize(cold);
-  const cold400Pass = cold400.engineUs.max <= 8000;
+  const cold400Pass = cold.length > 0 && cold400.engineUs.max <= 8000;
   const editAndFramePass = Object.values(edits).every(row => row.engineUs.median <= row.todayUs.median && row.engineUs.p95 <= row.todayUs.p95);
   const result = { runtime: process.versions, nice: os.getPriority(), loadBefore, loadAfter, wasmSha256: createHash('sha256').update(bytes).digest('hex'), channels: 400, framesPerPair: frameCount, warmupFramesPerSide: Math.min(frameCount, 1000),
-    fixture: sources, frames, latency, scalar, cold400: { ...cold400, pass: cold400Pass }, editWarmupStepsPerSide: 40, edits, native: engine.doc!.stats(),
-    targets: { cold400MaxUs: 8000, editAndFrame: 'native median and p95 <= legacy per edit kind' },
-    profiled: PROFILE,
-    pass: !PROFILE && frames.engineUs.median <= frames.todayUs.median && cold400Pass && editAndFramePass && loadAfter[0]! <= 8 };
+    fixture: sources, frames, latency, scalar, cold400: { ...cold400, pass: cold400Pass }, editWarmupStepsPerSide: 40, edits, suite, native: engine.doc!.stats(),
+    targets: { cold400MaxUs: 8000, editAndFrame: 'native median and p95 <= legacy per edit kind', suite: 'native median and p95 <= legacy per suite, base and read pattern' },
+    authority: 'Node 24 V8 is not the shipping Electron 44 V8 (Math.sin differs in the last bit for some inputs); Electron measurements are authoritative',
+    profiled: PROFILE, sections: [...sections],
+    pass: !PROFILE && !partial && frames.engineUs.median <= frames.todayUs.median && cold400Pass && editAndFramePass && suite.every(row => row.pass) && loadAfter[0]! <= 8 };
   if (process.env.PM_BENCH_OUT) writeFileSync(process.env.PM_BENCH_OUT, JSON.stringify(result, null, 2) + '\n');
   console.log(JSON.stringify(result, null, 2));
   if (!result.pass) process.exitCode = 1;
