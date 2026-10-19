@@ -98,8 +98,7 @@ fn gate(dir: &std::path::Path) -> usize {
     }
     let mut renderer = Renderer::headless().expect("a Metal device");
     renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
-        measure,
-        None,
+        measure, None,
     ))));
     if let Ok(p) = std::env::var("PM_TEXT_PROFILE") {
         let profile: pm_text::render::profile::Profile =

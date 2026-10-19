@@ -98,7 +98,7 @@ test('census and canvas-first font seeds match this renderer’s Canvas2D advanc
       await mkdir(root, { recursive: true });
       const cases = [], shots = [];
       for (const [index, row] of rows.entries()) {
-        if (Math.abs(row.legacy - row.native) <= 0.25) continue;
+        if (Math.abs(row.legacy - row.native) <= 0.001) continue;
         const d = { text: 'First creator AVATAR 123', font: 'system-ui', size: row.size, weight: row.weight, italic: row.italic, tracking: 0, leading: 1.15, align: 'left', color: '#FFFFFF' };
         const shot = await session.page.evaluate(d => {
           const cv = document.createElement('canvas');
@@ -123,6 +123,6 @@ test('census and canvas-first font seeds match this renderer’s Canvas2D advanc
       await writeFile(path.join(root, 'cases.json'), JSON.stringify({ cases, seeds: seeds.seeds, projectFonts: [], variableSources: {} }));
       await writeFile(path.join(root, 'manifest.json'), JSON.stringify({ cases: shots }));
     }
-    for (const row of rows) expect(Math.abs(row.legacy - row.native), JSON.stringify(row)).toBeLessThanOrEqual(0.25);
+    for (const row of rows) expect(Math.abs(row.legacy - row.native), JSON.stringify(row)).toBeLessThanOrEqual(0.001);
   } finally { await session.close(); }
 });

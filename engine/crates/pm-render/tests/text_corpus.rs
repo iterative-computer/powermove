@@ -259,7 +259,12 @@ fn main() {
                     && let Some(dir) = &diffs
                 {
                     std::fs::create_dir_all(dir).unwrap();
-                    let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
+                    let stem = format!(
+                        "{}{}-{}",
+                        p.name.replace('/', "_"),
+                        if in_isolation { "-text-only" } else { "" },
+                        s.time
+                    );
                     write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
                     write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
                     // Pixels the "rest" check compares that differ by
