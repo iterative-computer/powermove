@@ -1493,8 +1493,24 @@ headless e2e prints them (every run this round: `stalls` 0, `slowTurns` at
 most one turn of 50 to 100 ms, the longest 85 ms). The headless spec's
 premise check threw `a viewer is attached` when no engine session existed
 yet before Play (Play opens one, viewerless); it now fails only on a viewer
-service or a session with presentation, and says which. That false failure
-happened once this round, in the first full suite run.
+service or a session with presentation, and says which. A first-test run of
+a full suite later failed it the other way: no viewer service, but a
+session with presentation (`headless false`). That did not reproduce in 6
+isolated runs; the error now names who presents (the session's last state,
+the `render.gl.init` binding, the engine stages and their canvases). One
+way to get there was a real defect, now fixed: the `render.gl.init`
+binding unbound a detached canvas only at the caller's next
+`render.gl.resize`, so a viewer torn down before its own presentation took
+the stage over (disabled or unmounted early) left the binding's
+presentation holding a presenting session for a stage nobody sees. The
+binding now watches its canvas with a ResizeObserver and unbinds when it
+leaves the document (unit test in `canvas-binding.test.ts`). Whether that
+was the cause of this run is not proven.
+
+**Merged feat/native-engine again (perf2, wave 5)** after this round's
+first measurements, with pm-wasm and the addon rebuilt (protocol
+unchanged, `protocol-2f8d7cab61015d02`); the viewer's version lock entry is
+updated for the merged tree.
 
 **Final run (one lock, after every change).** pm-node: 88 library tests,
 document 4 of 4, snapshot 7 of 7. Vitest (main/engine, preload,
@@ -1505,10 +1521,21 @@ skipped. E2E `native-engine-transport`, `native-engine-tracer`,
 sample over 10 ms, worst 10.1 ms). Then `engine-headless-playback` three
 times: 6 of 6.
 
+After the perf2 merge and the binding fix, the same set again under one
+lock: 28 of 28 (J/K/L 2x reverse worst 7.2 ms, no sample over 10 ms), then
+`engine-headless-playback` three times, 6 of 6. A post-merge run before the
+binding fix had failed two: the headless premise (above) and the J/K/L 2x
+reverse sawtooth (20 samples over 10 ms, 8.6 to 12.6 ms, the documented
+pattern; audio and performance owners).
+
 **The join, for the orchestrator's decision.** Playhead (`PM.time`) error
 while the viewer mounts mid-play, engine against today (flag off), same
 invocation: 39.3 against 26.9 ms (the suite), then 36.9 against 25.2, 32.2
-against 24.1, and 32.1 against 34.7 ms (the repeats). The engine's line
+against 24.1, and 32.1 against 34.7 ms (the repeats). After the merge: 36.7
+against 27.0, 32.0 against 23.5, 29.6 against 32.1 (repeats); final lock:
+43.1 against 37.3 ms (the suite), then 28.9 against 24.0, 34.9 against
+29.2, and 36.6 against 33.5 ms. Over the 11 pairs the engine is 5.9 ms
+slower on average (from 2.6 ms faster to 12.4 ms slower). The engine's line
 stays within 0.1 ms and the playhead is back on it within two animation
 frames. The stall is the page's main thread mounting the engine viewer
 (its presentation worker and painter); it is still recorded, not bounded.
