@@ -239,7 +239,11 @@ a named layer failure. `Feature::SvgImage` is never listed for level 1.
 **The store** (`pm-render/src/vector/svg_rasters.rs`, inside `VectorCache`):
 `Renderer::put_svg_raster(key, rgba)` keeps the premultiplied RGBA8 rows (192
 MiB, least recently used out, counted in `vector_cache_bytes` and trimmed with
-the cache), uploaded on first use as the `Rgba8Unorm` texture today's canvas
+the cache; the working set, every raster stored or read since the latest frame
+began, is never evicted, as today's raster cache always keeps the raster it
+just drew: one bucket over the budget on its own, an 8192 × 6200 raster, or
+several large rasters one export frame needs together stay until a later frame
+no longer reads them), uploaded on first use as the `Rgba8Unorm` texture today's canvas
 upload makes, the same format level 1 shape rasters use (exact on the corpus).
 A replaced or relinked file hashes to another content, so an old raster is
 never drawn for it; it ages out. An engine restart or a GPU loss starts empty,
@@ -253,7 +257,16 @@ so the engine resolved the new record to the old file and kept drawing it
 document batch changed before the batch reaches the engine: it subscribes to
 the mirror's batches ahead of every engine session (bootstrap installs the
 media store before the engine connection), and the bind message is sent
-before the batch is posted.
+before the batch is posted. Only batches that change the assets, the project
+id, or the whole document (`PatchBatch.assets`, set by the barrier) look at
+the bindings; a keystroke or a drag costs nothing. The order relies on main
+reading the window's bind IPC before the engine's later resolve request
+reaches it through host services (it does in every e2e run; it is not
+enforced by construction).
+
+The engine never drops a replaced file's rasters itself (keys are content
+hashes, so they cannot be drawn for the new bytes); they leave the store by
+least recent use.
 
 **A miss** is recorded per frame (`SvgRasterNeed`: the request, the file, the
 first layer and composition that drew it):
@@ -269,8 +282,13 @@ first layer and composition that drew it):
   nothing until it resolves. During a scale animation that is the frame after
   a bucket change; paused, the next frame is exact.
 - *Exports, agent frames, and snapshots* (`SvgMissPolicy::Wait`: an export
-  request, `Renderer::set_svg_wait`): nothing is ever drawn in place of a
-  raster. The frame fails with `RenderError::SvgRastersPending` and the
+  request, `Renderer::set_svg_wait` on a renderer the caller owns, or
+  `Renderer::svg_waiting` for a snapshot on the viewer's renderer, a guard
+  that gives the viewer its policy back on every return and unwind; a
+  snapshot that failed on its fonts used to leave the viewer waiting, so its
+  misses failed instead of asking the window, tested in pm-node
+  `a_snapshot_that_fails_on_fonts_leaves_the_viewer_asking_for_svg_rasters`):
+  nothing is ever drawn in place of a raster. The frame fails with `RenderError::SvgRastersPending` and the
   targets are untouched; with a source attached (`Renderer::set_svg_source`)
   the renderer fetches every missing raster, blocking, and draws the frame
   again; a source that cannot fails the frame with its words
@@ -292,8 +310,12 @@ change so a synchronous snapshot can check one), and answers:
   them on the calling thread, posts them on the window's session, and asks
   again naming `svg:<content>:<w>x<h>` in `uploaded`; the render thread waits
   for those bands. The rasters are shared by every session on the render
-  thread, so main's own session for the window (boot, a staged resync) draws
-  with the ones the window posts on its session. A snapshot in the same task as an import or a replace meets an asset whose
+  thread. A synchronous snapshot main serves from its own session for the
+  window (at boot, before the window's session opens, or while a staged
+  resync is in flight) carries the rasters with its next ask instead
+  (`svgPixels`, as shader fallback pixels travel), and main posts them in
+  bands on its session before asking again: the window may have no session
+  to post on. A snapshot in the same task as an import or a replace meets an asset whose
   hash `prime` has not finished: the window then reads the `<img>`'s bytes
   with a synchronous `XMLHttpRequest` of its object URL (the only synchronous
   read a window has) and hashes them on the calling thread
@@ -303,9 +325,10 @@ change so a synchronous snapshot can check one), and answers:
   frame asks host services for `compatFrame { source: svgImage, svg: { key,
   asset } }` naming the document (today's `documentId(PM.proj.id)`); main asks
   every editor window (`compat-frames.ts`), the one with the document open
-  answers through `provideCompat('svgImage', …)`. With no window it fails with
-  "SVG images are drawn by the editor window that has this project open; open
-  the project in a window to export it." Nothing else is drawn.
+  answers through `provideCompat('svgImage', …)`. With no window, or only
+  windows with other documents open, it fails with "SVG images are drawn by
+  the editor window that has this project open; open the project in a window
+  to export it." Nothing else is drawn.
 
 **Hosts without Chromium.** `pm-cli` sets `SvgRasterizer::Resvg`: resvg draws
 each bucket (`SvgDocument::raster`, the user space stretched over the bucket as
@@ -341,7 +364,16 @@ M4 Max), the machine shared with other lanes.
   against their Chromium references `svg-gate-20261018-163629-8db61ae3`: 383
   of 383 byte-identical. These are the documents the emulation could not
   match; Chromium drawing them as today needs no emulation.
-- **The corpus** (`tests/svg_corpus.rs`, capture `v1-20261012-230504-ae47a3b3`,
+- **The corpus, headless, after merging the integration branch of
+  2026-10-19** (`tests/svg_corpus.rs`, same capture and rasters): all 34
+  projects planned and 33 rendered (105 frames, 9,640,927 SVG pixels; 5
+  frames show none), every SVG pixel exact in all 33, including the three
+  projects that differed by 1 CV below and `masks/path`, `space/layers-25d`,
+  and `layers/extension-missing`, which the composite, masks, 2.5D, and
+  extension lanes now draw. The one failure is `effects/extension-typewriter`
+  headless only: the corpus's fixture extension defines `typewriter` in the
+  app, and the headless run has no definition for it.
+- **The corpus, first run** (`tests/svg_corpus.rs`, capture `v1-20261012-230504-ae47a3b3`,
   the 6 buckets the corpus draws captured with the module into
   `svg-rasters-20261018`): all 34 projects with a level 1 SVG image were
   planned with the engine's fonts and the built-in definitions; 31 rendered
@@ -362,7 +394,19 @@ M4 Max), the machine shared with other lanes.
   (2.5D layers), `effects/extension-typewriter` (no definition for the
   `typewriter` effect).
 
-- **The corpus in the app** (`tools/svg-rasters/app-corpus.ts`, 2026-10-18,
+- **The corpus in the app, 2026-10-19** (`tools/svg-rasters/app-corpus.ts`,
+  after merging the integration branch, same capture): 34 projects, 108
+  frames, 9,936,458 SVG pixels (5 frames show none); today's compositor live
+  is 100% exact in every frame, and the engine's SVG pixels are exact in
+  **33 of 34 projects**, including the six of the first run below (the 1 CV
+  composite and mask residuals, `masks/path`, and `space/layers-25d`, no
+  longer routed). The one failure is `layers/extension-missing`: the
+  snapshot fails, "no definition for layer com.example.absent-layer"
+  (L008), where today draws the project without it (the extension
+  compatibility lane; headless, the same project renders exact). The whole
+  frame still differs where text is (the text lane's residuals, not SVG
+  pixels).
+- **The corpus in the app, first run** (`tools/svg-rasters/app-corpus.ts`, 2026-10-18,
   after the bridge lane's merge): the 34 projects opened in the built app as
   the capture opened them, "Use New Engine" on, every sample drawn by
   `PM.EngineRender.snapshotSync` (the engine with this window's rasters) and
@@ -384,7 +428,7 @@ M4 Max), the machine shared with other lanes.
     ("2.5D layers").
   Side by side (capture, engine, differing pixels in red), outside the
   repository: `svg-rasters-20261018/evidence/app-corpus-20261018/`.
-- **e2e** (`e2e/engine-svg.spec.ts`, flag on): the viewer and synchronous
+- **e2e** (`e2e/engine-svg.spec.ts`, flag on, rerun 2026-10-19): synchronous
   snapshots equal today's compositor byte for byte at 0, 0.75, and 1.5 s
   (three layers: contain, cover rotated at 230%, stretch with animated scale
   and opacity); a replace draws the new bytes at once (equal to today's, and
@@ -394,10 +438,44 @@ M4 Max), the machine shared with other lanes.
   through the job engine equal to today's (max 0). `import-svg.spec.ts`
   passes with the flag on and off (with the flag on its high-zoom check reads
   the engine's view instead of the legacy compositor's cropped viewport).
+- **The viewer** (`the viewer asks for the buckets today's viewer
+  rasterizes…`). A presented frame is an IOSurface in main's layer and
+  cannot be read back, so the viewer is compared by the buckets it draws:
+  today's viewer frames (the `rasterSvgAsset` calls inside `PM.GL.render`;
+  thumbnails and captures draw their own sizes and are kept apart) against
+  the asks of a restarted engine (holding no raster) in the same viewer
+  state (stage 748 × 452 CSS px, DPR 2, quality 1, checked equal in both
+  launches). At fit (114.4%: 1160 × 653, 600 × 338, 400 × 225) and at 237%
+  with a cropped preview viewport and a pan (2360 × 1328, 1200 × 675, 760
+  × 428) the buckets are today's. **At 61% they are not**: today 520 × 293,
+  280 × 158, 160 × 90; the engine 600 × 338, 320 × 180, 200 × 113. Not the
+  rasters: today's viewer draws at most one output pixel per composition
+  pixel when it does not crop (`previewRenderSize` in
+  `extensions/viewer/viewer.ts`: `min(1, zoom × DPR) × quality`, the canvas
+  scaled up by the browser; also above 100% for projects whose layers make
+  the cropped viewport unsafe: masks, mattes, transitions, 3D, adjustment,
+  shader, extension and precomp layers, effects not marked viewport safe),
+  while the engine's viewer always renders at zoom × DPR
+  (`pm-node/src/present/compose.rs`, `placement`). Between 50% and 100% at
+  DPR 2 (and when zoomed into those projects) every layer, not only SVG
+  images, is drawn sharper than today. The SVG buckets follow the output
+  scale, so they are right for the scale the engine draws at; the scale is
+  the presenter's. Side by side (today's frame at its render size scaled
+  as the browser shows it, the engine's snapshot at its viewer's output
+  size, differing pixels in red; a simulation of both presented frames,
+  which cannot be read back): 68,829 of 342,859 pixels differ at 781 × 439,
+  `svg-rasters-20261018/evidence/viewer-zoom-20261019/`.
+- **Playback of a scale animation** (`playback of a scale animation…`, the
+  Stretch layer at 60% → 310% over 2 s, idle machine): 62 presented frames,
+  17 stand-ins (each a frame whose bucket the window had not yet drawn: the
+  previous bucket scaled), 17 asks, the slowest answered in 12 ms; the
+  paused frame afterwards is exact. Today draws every one of those frames
+  at its own bucket.
 - **Exported stills are not yet today's** (not the rasters): the job
   engine's still of the e2e project differs from today's exporter's in
   56,037 channel values by 1 CV, and a PNG control with no SVG in it differs
-  the same way (59,924 by 1 CV). The SVG still equals the interactive
+  the same way (59,924 by 1 CV; 56,037 and 59,892 in the rerun of
+  2026-10-19). The SVG still equals the interactive
   engine's snapshot of the same frame and today's `renderFrameTo`; the job
   engine's still alone renders at 32-bit and dithers 8-bit PNG
   (`export.md`), which today's still does not. Side by side:
@@ -414,8 +492,26 @@ M4 Max), the machine shared with other lanes.
   svgImage` as an editor window does.
 - Exported stills (export lane): 32-bit rendering and 8-bit PNG dither
   differ from today's still by 1 CV (above).
-- The non-SVG residuals of the corpus run (composite, masks, missing
-  extension layers, 2.5D routing; above), each with its lane.
+- `layers/extension-missing` in the app (extension compatibility lane):
+  the snapshot fails where today draws the project without the missing
+  layer.
+- The viewer's render scale below fit and for crop-unsafe projects (above):
+  the presenter lane's `placement` needs today's `previewRenderSize` and
+  `previewRenderViewport` rules (the cap at one pixel per composition pixel,
+  the crop's safety plan, the quality and explicit resolution settings),
+  and the browser's upscale of the smaller frame. Until then the viewer
+  differs from today there for every layer kind.
+- Preview stand-ins during playback (above: 17 of 62 frames of a scale
+  animation): prefetching the buckets of the frames ahead would remove
+  them; a decision for the orchestrator.
+- Bucket input: the engine sizes the bucket from the asset record's `w` and
+  `h`, today from the live decode's `naturalWidth` and `naturalHeight`. They
+  are the same decode at import; they would differ only if Chromium's
+  natural size for a file changed after the project was saved (an SVG
+  without a size, across Chromium versions). Not tested.
+- Level 1 broken documents are still decided by an emulation
+  (`broken_image_file`); the window's own decode (its `decode` failure)
+  could decide instead.
 - Preview: a viewer miss shows the content's previous bucket, or nothing for
   a new or replaced file, until the window's bands arrive. Measured in the
   e2e (`a bucket change in the viewer shows a stand-in…`, 10 scale edits of
