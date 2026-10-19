@@ -262,8 +262,31 @@ impl Renderer {
     /// Frames that are not exports also wait for missing level 1 SVG
     /// rasters ([`RenderError::SvgRastersPending`]) instead of drawing the
     /// content's latest bucket (snapshots). Exports always wait.
+    ///
+    /// For a renderer this caller owns (a job, a test). A renderer shared
+    /// with a viewer waits through [`Renderer::svg_waiting`], which puts
+    /// the viewer's policy back on every exit.
     pub fn set_svg_wait(&mut self, wait: bool) {
         self.svg_wait = wait;
+    }
+
+    /// Whether frames that are not exports wait for level 1 SVG rasters
+    /// ([`Renderer::set_svg_wait`], [`Renderer::svg_waiting`]).
+    pub fn svg_wait(&self) -> bool {
+        self.svg_wait
+    }
+
+    /// This renderer, waiting for level 1 SVG rasters until the guard is
+    /// dropped (a snapshot on the viewer's renderer). Dropping the guard,
+    /// on any return or unwind, restores the policy it found, so a
+    /// snapshot that bails out never leaves the viewer waiting (a viewer
+    /// that waits fails its frames instead of asking for the rasters).
+    pub fn svg_waiting(&mut self) -> SvgWaiting<'_> {
+        let restore = std::mem::replace(&mut self.svg_wait, true);
+        SvgWaiting {
+            renderer: self,
+            restore,
+        }
     }
 
     /// Stores a level 1 SVG raster the document's renderer drew:
@@ -1411,5 +1434,31 @@ pub fn effective_precision(request: Precision, project: Precision) -> Precision 
         Precision::Float32
     } else {
         Precision::Float16
+    }
+}
+
+/// A [`Renderer`] waiting for level 1 SVG rasters
+/// ([`Renderer::svg_waiting`]); dropping it restores the renderer's policy.
+pub struct SvgWaiting<'a> {
+    renderer: &'a mut Renderer,
+    restore: bool,
+}
+
+impl std::ops::Deref for SvgWaiting<'_> {
+    type Target = Renderer;
+    fn deref(&self) -> &Renderer {
+        self.renderer
+    }
+}
+
+impl std::ops::DerefMut for SvgWaiting<'_> {
+    fn deref_mut(&mut self) -> &mut Renderer {
+        self.renderer
+    }
+}
+
+impl Drop for SvgWaiting<'_> {
+    fn drop(&mut self) {
+        self.renderer.svg_wait = self.restore;
     }
 }

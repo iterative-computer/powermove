@@ -146,6 +146,11 @@ fn level1_svg_snapshots_draw_the_windows_rasters() {
     run_child("child_svg");
 }
 
+#[test]
+fn a_snapshot_that_fails_on_fonts_leaves_the_viewer_asking_for_svg_rasters() {
+    run_child("child_svg_font_failure");
+}
+
 /// Every message the engine sent, by port.
 #[derive(Default)]
 struct Inbox {
@@ -1895,4 +1900,84 @@ fn child_svg() {
     )));
     assert_eq!(at(&px, 320, 160, 90), green);
     println!("CHILD-OK");
+}
+
+#[test]
+#[ignore = "run by a_snapshot_that_fails_on_fonts_leaves_the_viewer_asking_for_svg_rasters"]
+fn child_svg_font_failure() {
+    use pm_protocol::snapshot::CompatMessage;
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("pm-snapshot-svg-fonts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("art.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/></svg>"##,
+    )
+    .unwrap();
+    let mut c = Child::start();
+    let session = c.session;
+    // A text layer over the SVG: this engine has no font service, so the
+    // snapshot's render meets a font failure and returns early.
+    let mut doc = svg_project();
+    doc["layers"].as_array_mut().unwrap().push(json!({
+        "id": "title", "type": "text", "name": "title", "from": 0, "dur": 2, "on": true,
+        "lock": false, "shy": false, "collapsed": true, "threeD": false, "solo": false,
+        "color": "#4C8DFF", "blend": "normal", "mblur": false, "parent": null, "group": null,
+        "matteSource": null,
+        "p": {
+            "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(160)),
+            "position.y": ch(json!(40)), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
+            "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
+        },
+        "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
+        "d": {
+            "text": "Fonts", "boxWidth": ch(json!(0)), "boxHeight": ch(json!(0)),
+            "font": "Helvetica", "weight": 700, "size": 24, "tracking": 0, "leading": 1.2,
+            "color": "#F2E8D0", "align": "center", "italic": false
+        },
+        "locked_intent": {}
+    }));
+    c.resync(2, 1, &doc);
+    let small = Size::new(320, 180);
+    c.snapshot(
+        50,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 20_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    let outcome = serve_media(&mut c, &path, Duration::from_secs(40), answer(50));
+    assert_eq!(
+        outcome.err(),
+        Some(ErrorCode::Timeout),
+        "the snapshot fails on its fonts"
+    );
+    // The viewer shares the snapshot's renderer: its misses still ask the
+    // window for rasters (a renderer left waiting fails them silently).
+    c.resync(3, 2, &svg_project());
+    c.event(Event::Viewer(viewer_state()));
+    let asked = serve_media(&mut c, &path, Duration::from_secs(20), |port, m| {
+        if port != WINDOW {
+            return None;
+        }
+        match &m.message {
+            Message::Event {
+                body: Event::Compat(CompatMessage::SvgRequests { requests }),
+            } => Some(requests.clone()),
+            _ => None,
+        }
+    });
+    assert!(
+        asked.iter().any(|r| r.asset == "svg1"),
+        "the viewer asked for the SVG's raster: {asked:?}"
+    );
+    let presenter: Value = serde_json::from_str(&c.host.status_json()).unwrap();
+    println!(
+        "CHILD-OK svg font failure ({} raster requests; presenter {})",
+        asked.len(),
+        presenter["presenter"]
+    );
 }

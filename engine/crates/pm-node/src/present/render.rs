@@ -3378,24 +3378,29 @@ impl Thread {
         }
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         // A snapshot never draws an SVG bucket's stand-in: it waits for the
-        // renderer's raster (decision S1).
-        renderer.set_svg_wait(true);
-        let rendered = renderer
-            .render(
-                doc.document(),
-                job.request.composition.as_str(),
-                job.request.time,
-                &request,
-                doc.media(),
-            )
-            .and_then(|frame| {
-                let raw = pm_gpu::readback::read_raw(
-                    renderer.device(),
-                    renderer.queue(),
-                    &frame.color.texture,
-                )?;
-                Ok((frame.color.width(), frame.color.height(), raw))
-            });
+        // renderer's raster (decision S1). The renderer is the viewer's
+        // too: the guard gives the viewer its policy back however this
+        // returns (a viewer left waiting fails its misses instead of asking
+        // the window for them).
+        let rendered = {
+            let mut renderer = renderer.svg_waiting();
+            renderer
+                .render(
+                    doc.document(),
+                    job.request.composition.as_str(),
+                    job.request.time,
+                    &request,
+                    doc.media(),
+                )
+                .and_then(|frame| {
+                    let raw = pm_gpu::readback::read_raw(
+                        renderer.device(),
+                        renderer.queue(),
+                        &frame.color.texture,
+                    )?;
+                    Ok((frame.color.width(), frame.color.height(), raw))
+                })
+        };
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
@@ -3405,7 +3410,6 @@ impl Thread {
             );
             return;
         }
-        renderer.set_svg_wait(false);
         let (width, height, raw) = match rendered {
             Ok(done) => done,
             Err(pm_render::RenderError::SvgRastersPending(needs)) => {

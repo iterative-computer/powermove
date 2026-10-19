@@ -156,6 +156,56 @@ fn a_frame_names_todays_bucket_and_the_svg_bytes() {
 }
 
 #[test]
+fn a_snapshot_on_the_viewers_renderer_gives_the_viewer_its_policy_back() {
+    // A snapshot borrows the viewer's renderer: whichever way it leaves
+    // (an early return, an unwind), the viewer's frames substitute again.
+    let mut renderer = Renderer::headless().unwrap();
+    let (doc, resolver) = svg_doc(
+        "a.svg",
+        ART.as_bytes(),
+        "contain",
+        60.0,
+        40.0,
+        100.0,
+        vec![],
+    );
+    let doc = load(&doc);
+    let snapshot = |renderer: &mut Renderer, bail: bool| -> Result<(), String> {
+        let mut waiting = renderer.svg_waiting();
+        assert!(waiting.svg_wait());
+        let pending = matches!(
+            waiting.render(&doc, "Ptest-root", ticks(0.0), &request(false), &resolver),
+            Err(RenderError::SvgRastersPending(_))
+        );
+        assert!(pending, "a snapshot waits for the raster");
+        if bail {
+            return Err("fonts did not answer".into());
+        }
+        Ok(())
+    };
+    assert!(snapshot(&mut renderer, true).is_err());
+    assert!(!renderer.svg_wait(), "an early return restores the policy");
+    assert!(snapshot(&mut renderer, false).is_ok());
+    assert!(!renderer.svg_wait());
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _waiting = renderer.svg_waiting();
+        panic!("a snapshot that unwinds");
+    }));
+    assert!(unwound.is_err());
+    assert!(!renderer.svg_wait(), "an unwind restores the policy");
+    // The viewer's next frame records the miss (and asks for the raster)
+    // instead of failing.
+    let frame = renderer
+        .render(&doc, "Ptest-root", ticks(0.0), &request(false), &resolver)
+        .expect("the viewer's frame draws");
+    assert_eq!(frame.svg_misses.len(), 1);
+    // A caller that set the policy itself keeps it.
+    renderer.set_svg_wait(true);
+    drop(renderer.svg_waiting());
+    assert!(renderer.svg_wait());
+}
+
+#[test]
 fn the_raster_is_placed_as_todays_image_quad() {
     // An opaque raster drawn as an SVG covers exactly what the same pixels
     // as a PNG image layer cover: the box, the fit UVs, and the quad are
@@ -515,4 +565,3 @@ fn exports_fetch_missing_rasters_from_the_source_before_drawing() {
         Ok(_) => panic!("drawn without the raster"),
     }
 }
-
