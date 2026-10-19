@@ -28,10 +28,13 @@
  * Compiles are asynchronous (`KHR_parallel_shader_compile`): a request
  * waits up to a deadline, and a compile past it goes on and is waited for
  * again by the program's next request (the engine asks again), so a large
- * program draws once WebGL has compiled it, as today. Every pass's draw is fenced and bounded by the draw deadline
+ * program draws once WebGL has compiled it, as today. Every pass's draw is bounded by the draw deadline
  * (the runner's watchdog): a draw that has not finished by then loses the
  * context on purpose, fails with `watchdog`, and its program is never run
- * again, so a runaway program never blocks the renderer in `readPixels`.
+ * again. Asynchronous requests poll each pass's fence, so a runaway program
+ * never blocks the renderer in `readPixels`; a synchronous request waits
+ * with `finish` (WebGL cannot signal a fence within the task) and judges
+ * the deadline when the pass returns (`finishedSync`).
  *
  * A target edge past the context's `MAX_TEXTURE_SIZE` fails with
  * `tooLarge`: the GPU cannot hold it, today's compositor could not either,
