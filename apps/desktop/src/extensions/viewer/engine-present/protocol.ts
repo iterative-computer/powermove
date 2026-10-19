@@ -127,11 +127,14 @@ export type EngineFrameMessage =
 
 /**
  * What the engine connection tells the presentation besides frames: the
- * engine routed the composition to the current (legacy) engine (capability
- * routing, plan section 21), so its frames leave the screen until the
- * engine draws again.
+ * engine cannot draw the composition (capability routing, plan section 21;
+ * `reason` names what), so its frames leave the screen until the engine
+ * draws again. An exclusive presentation ("Use New Engine" on, amendment
+ * 21) shows the reason on the stage; nothing hands the stage to the
+ * current engine. `seq` is the newest frame seq the engine had given the
+ * view when it decided: frames at or below it are stale.
  */
-export type EngineRouteMessage = { type: 'routed'; route: 'legacy'; reason: string; revision?: number };
+export type EngineRouteMessage = { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number };
 
 /** Whether a clock sample's line is moving. */
 export function running(sample: ClockSample | null): boolean {

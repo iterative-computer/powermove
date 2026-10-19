@@ -258,6 +258,79 @@ describe('ViewerPresentation', () => {
     expect(stage.contains(presentation.canvas)).toBe(false);
   });
 
+  it.each([true, false])('keeps configured surface colors through capability flips (initial high gamut/EDR: %s) and later geometry changes', async (initialHigh) => {
+    const service = new Service();
+    const painter = new Painter();
+    const win = window as unknown as Window;
+    const { stage, overlay, rafs } = stageIn(win);
+    const lists = new Map<string, { matches: boolean; listeners: Set<() => void> }>();
+    Object.assign(win, {
+      matchMedia: (query: string) => {
+        let list = lists.get(query);
+        if (!list) {
+          list = { matches: query === '(dynamic-range: high)' || query === '(color-gamut: p3)' ? initialHigh : true, listeners: new Set() };
+          lists.set(query, list);
+        }
+        return {
+          get matches() { return list.matches; },
+          addEventListener: (_type: string, listener: () => void) => list.listeners.add(listener),
+          removeEventListener: (_type: string, listener: () => void) => list.listeners.delete(listener)
+        };
+      }
+    });
+    const flip = (query: string, matches: boolean): void => {
+      const list = lists.get(query)!;
+      list.matches = matches;
+      for (const listener of list.listeners) listener();
+    };
+    const logs: [string, string][] = [];
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, sizeSettleMs: 0, createPainter: async () => painter, log: (level, message) => logs.push([level, message]) });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    const colors = { colorSpace: initialHigh ? 'displayP3' : 'srgb', edr: initialHigh };
+    expect(channel.states[0]).toMatchObject({ ...colors, viewSeq: 1 });
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 7, surfaces: [] } }, performance.now());
+    const frame = (seq: number, viewSeq: number): void => {
+      channel.handlers.message({ type: 'frame', frame: { ...desc(seq, viewSeq), poolGeneration: 7 } }, performance.now());
+      runFrames(rafs, performance.now());
+    };
+    frame(1, 1);
+
+    // Each capability changes independently, as on first show or a display
+    // transition. Neither asks the engine to reconfigure a playing pool.
+    flip('(color-gamut: p3)', !initialHigh);
+    frame(2, 1);
+    flip('(dynamic-range: high)', !initialHigh);
+    frame(3, 1);
+    expect(channel.states).toHaveLength(1);
+    expect(presentation.stats()).toMatchObject({ generation: 7, drawn: 3, dropped: {}, staleGeneration: 0 });
+    expect(presentation.latest).toMatchObject({ seq: 3, viewSeq: 1 });
+    expect(logs).toHaveLength(2);
+    expect(logs.every(([level, message]) => level === 'info' && message.includes(`keeping configured ${colors.colorSpace}, edr=${colors.edr}`))).toBe(true);
+    expect(logs[0]![1]).toContain(`changed to ${initialHigh ? 'srgb' : 'displayP3'}, edr=${initialHigh}`);
+    expect(logs[1]![1]).toContain(`edr=${!initialHigh}; keeping`);
+
+    // A later real DPR/size/zoom update must not pick up the observed
+    // capability tuple that was deliberately excluded above.
+    Object.assign(win, { devicePixelRatio: 1 });
+    flip('(resolution: 2dppx)', false);
+    expect(channel.states.at(-1)).toMatchObject({ ...colors, devicePixelRatio: 1, size: { width: 640, height: 360 }, viewSeq: 2 });
+    const rect = stage.getBoundingClientRect();
+    stage.getBoundingClientRect = () => ({ ...rect, width: 800, height: 450, right: 800, bottom: 450 });
+    presentation.update({ ...PARAMS, zoom: 0.75, pan: [4, 8] }, { width: 800, height: 450 });
+    expect(channel.states.at(-1)).toMatchObject({ ...colors, size: { width: 800, height: 450 }, zoom: 0.75, pan: [4, 8], viewSeq: 3 });
+    expect(logs).toHaveLength(2);
+
+    flip('(color-gamut: p3)', initialHigh);
+    flip('(dynamic-range: high)', initialHigh);
+    expect(channel.states).toHaveLength(3);
+    expect(presentation.stats()?.generation).toBe(7);
+    expect(logs).toHaveLength(4);
+    presentation.dispose();
+    expect([...lists.values()].every((list) => list.listeners.size === 0)).toBe(true);
+  });
+
   it('a canvas that was hidden counts its first frame as on screen only after the display shows it', async () => {
     const service = new Service();
     service.revealFrames = 2;
@@ -440,9 +513,64 @@ describe('ViewerPresentation', () => {
     second.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
     runFrames(rafs, performance.now() + 40);
     expect(presentation.status).toBeNull();
-    // Capability routing (scaffolding until it is removed) still hands back.
-    second.handlers.message({ type: 'routed', route: 'legacy', reason: 'x', revision: 9 } as never, performance.now());
-    expect(hidden).toEqual([1]);
+    // A composition the engine cannot draw (amendment 21): the stage says
+    // why and is never handed back; a frame the engine produced before the
+    // report, still in the presenter, stays off it; the next frame the
+    // engine draws clears it.
+    const why = 'The new engine cannot draw this composition yet: path masks (layer box in C).';
+    second.handlers.message({ type: 'frame', frame: { ...desc(2, 1), revision: 9 } }, performance.now());
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: why, revision: 9 } as never, performance.now());
+    expect(hidden).toEqual([]);
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.latest).toBeNull();
+    expect(presentation.status).toBe(why);
+    expect(stage.querySelector('[data-engine-status]')?.getAttribute('role')).toBe('status');
+    runFrames(rafs, performance.now() + 60);
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.status).toBe(why);
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: '', revision: 9 } as never, performance.now());
+    expect(presentation.status).toBe(PRESENTATION_STATUS.unsupported);
+    second.handlers.message({ type: 'frame', frame: { ...desc(3, 1), revision: 10 } }, performance.now());
+    runFrames(rafs, performance.now() + 80);
+    runFrames(rafs, performance.now() + 100);
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.status).toBeNull();
+    expect(hidden).toEqual([]);
+    // A composition switch, A (cannot draw) to B and back, twice: the
+    // document batch reaches the engine before the viewer state, so it
+    // reports A at the revision it then draws B at. B's frame at that very
+    // revision shows and clears the line; A's report hides it again.
+    let seq = 3;
+    for (const revision of [11, 12]) {
+      second.handlers.message({ type: 'routed', route: 'legacy', reason: why, revision } as never, performance.now());
+      expect(presentation.status).toBe(why);
+      expect(presentation.presenting).toBe(false);
+      second.handlers.message({ type: 'frame', frame: { ...desc(++seq, 1), revision } }, performance.now());
+      runFrames(rafs, performance.now() + 120 + seq * 20);
+      runFrames(rafs, performance.now() + 130 + seq * 20);
+      expect(presentation.presenting).toBe(true);
+      expect(presentation.latest?.revision).toBe(revision);
+      expect(presentation.status).toBeNull();
+    }
+    // The report names the newest seq the engine had given the view (7):
+    // frames 6 and 7, of revision 12, were still on the GPU. Frame 6 arrives
+    // after the report with a higher seq than any delivered: it is stale and
+    // the line stays. Frame 8 is a later decision.
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: why, revision: 13, seq: 7 } as never, performance.now());
+    expect(presentation.status).toBe(why);
+    second.handlers.message({ type: 'frame', frame: { ...desc(6, 1), revision: 12 } }, performance.now());
+    runFrames(rafs, performance.now() + 300);
+    runFrames(rafs, performance.now() + 320);
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.latest).toBeNull();
+    expect(presentation.status).toBe(why);
+    second.handlers.message({ type: 'frame', frame: { ...desc(8, 1), revision: 13 } }, performance.now());
+    runFrames(rafs, performance.now() + 340);
+    runFrames(rafs, performance.now() + 360);
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.latest?.seq).toBe(8);
+    expect(presentation.status).toBeNull();
+    expect(hidden).toEqual([]);
     presentation.dispose();
     expect(stage.querySelector('[data-engine-status]')).toBeNull();
   });
@@ -518,6 +646,54 @@ describe('ViewerPresentation', () => {
     timers.find((t) => t.live)!.fn();
     expect(channel.states.at(-1)!.size).toEqual({ width: 1480, height: 720 });
     presentation.dispose();
+  });
+
+  it('settles a stable pending size while repeated playback updates continue', async () => {
+    const service = new Service();
+    const { stage } = stageIn(window as unknown as Window);
+    const timers: { fn: () => void; live: boolean }[] = [];
+    const presentation = new ViewerPresentation({ service, stage, createPainter: async () => new Painter(), timers: {
+      set: (fn) => timers.push({ fn, live: true }), clear: (id) => { timers[id-1]!.live = false; }
+    } });
+    await settle();
+    presentation.update(PARAMS, { width: 640, height: 360 });
+    stage.getBoundingClientRect = () => ({ width: 960, height: 540 }) as DOMRect;
+    presentation.update(PARAMS);
+    // The same 150ms pending size must not be postponed every animation frame.
+    for (let frame = 0; frame < 120; frame++) presentation.update(PARAMS);
+    expect(timers).toHaveLength(1);
+    timers[0]!.fn();
+    const channel = service.channels[0]!;
+    expect(channel.states.at(-1)!.size).toEqual({ width: 1920, height: 1080 });
+    const stable = channel.states.at(-1)!.viewSeq;
+    for (let frame = 0; frame < 120; frame++) presentation.update(PARAMS);
+    expect(channel.states.at(-1)!.viewSeq).toBe(stable);
+    expect(channel.states).toHaveLength(2);
+    presentation.dispose();
+  });
+
+  it('starts a pending resize deadline again when its stage moves to another window', async () => {
+    const service = new Service();
+    const { stage } = stageIn(window as unknown as Window);
+    const timers: { fn: () => void; live: boolean }[] = [];
+    const presentation = new ViewerPresentation({ service, stage, createPainter: async () => new Painter(), timers: {
+      set: (fn) => timers.push({ fn, live: true }), clear: (id) => { timers[id-1]!.live = false; }
+    } });
+    await settle();
+    presentation.update(PARAMS, { width: 640, height: 360 });
+    stage.getBoundingClientRect = () => ({width:960,height:540}) as DOMRect;
+    presentation.update(PARAMS);
+    const popout = new HappyWindow() as unknown as Window;
+    stageIn(popout);
+    popout.document.body.appendChild(stage);
+    presentation.update(PARAMS);
+    expect(timers).toHaveLength(2);
+    expect(timers[0]!.live).toBe(false);
+    expect(timers[1]!.live).toBe(true);
+    timers[1]!.fn();
+    expect(service.channels[0]!.states.at(-1)!.size).toEqual({width:1920,height:1080});
+    presentation.dispose();
+    await (popout as unknown as HappyWindow).happyDOM.close();
   });
 
   it('presents from a worker when the viewer can start one: frames, tags, releases, and teardown', async () => {

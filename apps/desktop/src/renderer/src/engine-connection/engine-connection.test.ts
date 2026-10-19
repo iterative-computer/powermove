@@ -11,9 +11,10 @@ import { decodeEnvelope, encodeEnvelope, envelope, localRanges } from '../../../
 import { ENGINE_VIEWER_CHANGED as VIEWER_CHANGED, ENGINE_VIEWER_SERVICE as VIEWER_SERVICE } from '../../../extensions/viewer/engine-present/presentation';
 import { EngineConnection, type PortLike } from './connection';
 import { bestOffset, HostClock } from './host-clock';
-import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE } from './install';
+import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, missedRoute } from './install';
 import { DEFINITIONS_RETRIES, DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
 import { EngineTransport, mediaTicksAt, ticks, TICKS_PER_SECOND } from './transport';
+import { followOpenComposition } from './composition-follow';
 import { createEngineDefinitions } from '../kernel/engine-definitions';
 import { createKernel } from '../kernel/registries';
 
@@ -150,20 +151,42 @@ describe('the engine connection', () => {
     expect(session.batches).toBe(2);
 
     // A frame says the engine draws the composition; an `unsupported`
-    // failure routes it to the legacy viewer.
-    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, revision: 5 } } as never, 5));
-    port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 6, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'Drawn by the current engine: effects.', retry: { kind: 'never' }, detail: null } } } as never, 5));
+    // failure routes it to the legacy viewer. The report names the newest
+    // frame seq the engine had given the view: 2, a paused frame of
+    // revision 5 the GPU had not finished yet (the completion thread sends
+    // it), so it was never received.
+    const failure = (revision: number, lastFrame: number | null) => envelope({ kind: 'event', body: { type: 'failure', revision, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'Drawn by the current engine: effects.', retry: { kind: 'never' }, detail: lastFrame === null ? null : { kind: 'unsupported', lastFrame } } } } as never, 5);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 1, revision: 5 } } as never, 5));
+    port.deliver(failure(6, 2));
     expect(routes).toEqual(['engine', 'legacy']);
     expect(messages).toEqual(['frame', 'routed']);
     expect(session.routeReason).toMatch(/effects/);
-    // A frame of the routed revision or older, still in flight, is stale: it
-    // neither shows nor brings the engine back; a newer one does.
-    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, revision: 6 } } as never, 5));
+    // That frame, still in flight at the report, arrives after it with a
+    // higher seq than any frame received: it is of the older revision and
+    // stale. It neither shows nor brings the engine back.
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, seq: 2, revision: 5 } } as never, 5));
     expect(routes).toEqual(['engine', 'legacy']);
     expect(messages).toEqual(['frame', 'routed']);
-    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, revision: 7 } } as never, 5));
+    expect(session.routeReason).toMatch(/effects/);
+    expect(session.lastFrame?.seq).toBe(1);
+    // A composition switch: the document batch reached the engine before the
+    // viewer state, so it reported the old composition at revision 6 and
+    // then drew the new one at the same revision. That frame is a later
+    // decision and brings the engine back.
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 3, revision: 6 } } as never, 5));
     expect(routes).toEqual(['engine', 'legacy', 'engine']);
     expect(messages).toEqual(['frame', 'routed', 'frame']);
+    expect(session.routeReason).toBeNull();
+    // Back to the composition the engine cannot draw and over again (A, B,
+    // A, B), every report and frame at revision 7. This report carries no
+    // seq (the gate falls back to the newest frame received).
+    port.deliver(failure(7, null));
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 3, revision: 6 } } as never, 5));
+    expect(routes).toEqual(['engine', 'legacy', 'engine', 'legacy']);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, seq: 4, revision: 7 } } as never, 5));
+    expect(routes).toEqual(['engine', 'legacy', 'engine', 'legacy', 'engine']);
+    expect(messages).toEqual(['frame', 'routed', 'frame', 'routed', 'frame']);
+    expect(session.lastFrame?.seq).toBe(4);
   });
 
   it('streams the kernel\'s definitions to the session before its document, and their failures back', async () => {
@@ -356,6 +379,17 @@ describe('the engine connection', () => {
     expect(source).toEqual({ kind: 'cacheFile', handle: 'f'.repeat(32), length: 18 });
   });
 
+  it('tells a viewer replacing another why the engine draws nothing', () => {
+    // Presenting a composition the engine cannot draw: the new viewer is told.
+    expect(missedRoute({ headless: false, route: 'legacy', routeReason: 'The new engine cannot draw this composition yet: path masks.' }))
+      .toEqual({ type: 'routed', route: 'legacy', reason: 'The new engine cannot draw this composition yet: path masks.' });
+    // Viewerless (the engine says it again when a viewer attaches), drawn,
+    // or undecided: nothing missed.
+    expect(missedRoute({ headless: true, route: 'legacy', routeReason: 'x' })).toBeNull();
+    expect(missedRoute({ headless: false, route: 'engine', routeReason: null })).toBeNull();
+    expect(missedRoute({ headless: false, route: 'pending', routeReason: null })).toBeNull();
+  });
+
   it('keeps document ids within the contract', () => {
     expect(documentId('')).toBe('untitled');
     expect(documentId('x'.repeat(300))).toHaveLength(64);
@@ -405,10 +439,17 @@ describe('the transport driver', () => {
     port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 3, state: 'stopped', hostTime: 9_000_000, mediaTime: ticks(2), rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
     expect(driver.now(9000)).toEqual({ time: 2, playing: false, ended: true });
 
-    // Routed to the legacy viewer: the driver hands back.
+    // A composition the engine cannot draw (amendment 21): nothing hands
+    // the transport back; Play still runs on the engine's clock.
     port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 4, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'masks', retry: { kind: 'never' }, detail: null } } } as never, 5));
     driver.refresh();
-    expect(changes).toEqual([true, false]);
+    expect(session.route).toBe('legacy');
+    expect(changes).toEqual([true]);
+    expect(driver.active()).toBe(true);
+    const before = port.events('transport').length;
+    driver.play(0.5);
+    const after = port.events('transport').slice(before).map((e) => (e.message as { body: { command: string } }).body.command);
+    expect(after).toEqual(['seek', 'play']);
   });
 
   it('sends J/K/L rates, play around, and the audio scrub switch, and follows a line at any rate', async () => {
@@ -476,6 +517,90 @@ describe('the transport driver', () => {
     port.deliver(envelope({ kind: 'event', body: { type: 'frame', revision: 3 } } as never, 5));
     driver.refresh();
     expect(port.events('transport').filter(e => (e.message as any).body.command === 'play')).toHaveLength(1);
+    session.close(); connection.close('test complete');
+  });
+
+  it('a viewerless session follows the open composition before each command', async () => {
+    const { connection, port } = await connected();
+    const doc = stream(); doc.set(0);
+    const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    session.sendHeadless('C1');
+    let open = 'C1';
+    // install.ts's follower, on a bus like the kernel's.
+    const listeners = new Map<string, Set<() => void>>();
+    const bus = {
+      on: (event: string, listener: () => void) => {
+        if (!listeners.has(event)) listeners.set(event, new Set());
+        listeners.get(event)!.add(listener);
+        return () => listeners.get(event)!.delete(listener);
+      },
+      emit: (event: string) => { for (const listener of listeners.get(event) ?? []) listener(); }
+    };
+    const follower = followOpenComposition({ session: () => session, open: () => open, bus });
+    expect([...listeners.keys()].sort()).toEqual(['comps', 'project']);
+    const driver = new EngineTransport(() => session, new HostClock(async () => 0), { exclusive: true, wake: () => {}, prepare: follower.follow });
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5, 0));
+    driver.refresh();
+    expect(session.route).toBe('engine');
+    // Another timeline tab: the same project, another composition (a
+    // document batch, not a load). Play plays the composition just opened.
+    open = 'C2';
+    const start = port.sent.length;
+    driver.play(0.25);
+    const after = port.sent.slice(start).filter((e) => e.message.kind === 'event').map((e) => {
+      const body = (e.message as { body: { type: string; command?: string; composition?: string } }).body;
+      return body.type === 'viewer' ? `viewer:${body.composition}` : `${body.type}:${body.command}`;
+    });
+    expect(after[0]).toBe('viewer:C2');
+    expect(after.slice(-2)).toEqual(['transport:seek', 'transport:play']);
+    expect(session.composition).toBe('C2');
+    // Nothing new to send for the same composition.
+    const again = port.events('viewer').length;
+    driver.pause();
+    expect(port.events('viewer')).toHaveLength(again);
+    // compositions.open (and its undo) announce `comps`; a project change `project`.
+    open = 'C3';
+    bus.emit('comps');
+    expect(session.composition).toBe('C3');
+    open = 'C1';
+    bus.emit('project');
+    expect(session.composition).toBe('C1');
+    // A session with a viewer sends its own state: the follower leaves it.
+    session.sendViewerState({ composition: 'C1', viewSeq: 9, headless: false } as never);
+    open = 'C2';
+    bus.emit('comps');
+    expect(session.composition).toBe('C1');
+    follower.dispose();
+    expect([...listeners.values()].every((set) => set.size === 0)).toBe(true);
+    session.close(); connection.close('test complete');
+  });
+
+  it('a viewerless session keeps the transport for a composition the engine cannot draw', async () => {
+    const { connection, port } = await connected();
+    const doc = stream(); doc.set(0);
+    const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    session.sendHeadless('C');
+    const driver = new EngineTransport(() => session, new HostClock(async () => 0), { exclusive: true, wake: () => {} });
+    port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 0, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'The new engine cannot draw this composition yet: path masks.', retry: { kind: 'never' }, detail: null } } } as never, 5, 0));
+    // Its clock (the engine runs the transport) comes untagged and keeps the reason.
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    driver.refresh();
+    expect(session.route).toBe('legacy');
+    expect(session.routeReason).toMatch(/path masks/);
+    expect(driver.active()).toBe(true);
+    driver.play(0.5);
+    expect(port.events('transport').map(e => (e.message as any).body.command)).toEqual(['audioScrub', 'seek', 'play']);
+    // An edit or a composition switch makes it drawable: the engine's clock
+    // comes tagged with the revision again, and the session is the engine's.
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 2, state: 'playing', hostTime: 0, mediaTime: 0, rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5, 1));
+    expect(session.route).toBe('engine');
+    expect(session.routeReason).toBeNull();
+    // And back: the next report routes it again.
+    port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 2, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'The new engine cannot draw this composition yet: path masks.', retry: { kind: 'never' }, detail: null } } } as never, 5, 2));
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 3, epoch: 2, state: 'playing', hostTime: 0, mediaTime: 0, rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    expect(session.route).toBe('legacy');
     session.close(); connection.close('test complete');
   });
 

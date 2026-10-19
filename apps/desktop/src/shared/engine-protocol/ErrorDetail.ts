@@ -2,9 +2,10 @@
 import type { AssetId } from "./AssetId";
 import type { ContractId } from "./ContractId";
 import type { Revision } from "./Revision";
+import type { Seq } from "./Seq";
 import type { ShaderDiagnostic } from "./ShaderDiagnostic";
 
 /**
  * Structured details for codes that need them.
  */
-export type ErrorDetail = { "kind": "shaderCompile", diagnostics: Array<ShaderDiagnostic>, } | { "kind": "staleRevision", applied: Revision, wanted: Revision, } | { "kind": "unsupportedVersion", contract: ContractId | null, local: Array<number>, remote: Array<number>, } | { "kind": "missingSurfaces", count: number, } | { "kind": "offline", assets: Array<AssetId>, };
+export type ErrorDetail = { "kind": "shaderCompile", diagnostics: Array<ShaderDiagnostic>, } | { "kind": "staleRevision", applied: Revision, wanted: Revision, } | { "kind": "unsupportedVersion", contract: ContractId | null, local: Array<number>, remote: Array<number>, } | { "kind": "missingSurfaces", count: number, } | { "kind": "offline", assets: Array<AssetId>, } | { "kind": "unsupported", lastFrame: Seq, };

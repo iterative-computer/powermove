@@ -13,7 +13,7 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pm-model = { path = "../pm-model" }
+pm-model = { path = "../pm-model", features = ["read-tracking"] }
 pm-time = { path = "../pm-time" }
 pm-eval = { path = "../pm-eval" }
 pm-edit = { path = "../pm-edit" }
