@@ -215,7 +215,7 @@ function fakeGl(active: string[], fence: () => number, maxTextureSize = 16384) {
     uniformMatrix3fv: (l: { name: string }) => state.uniforms.push(l.name),
     getError: () => 0,
     drawArrays: () => { state.draws.push(Object.fromEntries([0, 1, 2].map((u) => [u, (bound.get(u) as { id: number } | null)?.id ?? null]))); },
-    fenceSync: () => ({}), flush: () => {}, clientWaitSync: () => fence(), deleteSync: () => {},
+    finish: () => {}, fenceSync: () => ({}), flush: () => {}, clientWaitSync: () => fence(), deleteSync: () => {},
     readPixels: () => {}, isContextLost: () => lost, deleteFramebuffer: () => {}, deleteTexture: () => {},
     getParameter: (p: number) => (p === C.MAX_TEXTURE_SIZE ? maxTextureSize : null)
   };
@@ -484,6 +484,16 @@ describe('the runner on the calling thread (the synchronous snapshot path)', () 
     await expect(runner.render(effect(), [input, backdrop])).resolves.toMatchObject({ width: 2 });
   });
 
+  it('does not poll a same-task WebGL fence, which the browser cannot signal', () => {
+    const { canvas } = fakeGl([], () => { throw new Error('same-task fences cannot signal'); });
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    let finished = 0;
+    gl['finish'] = () => { finished++; };
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    expect(runner.renderSync(request(2, 1, '8d'.repeat(32)))).toMatchObject({ width: 2 });
+    expect(finished).toBe(1);
+  });
+
   it('refuses a request without its textures rather than drawing it unsampled', () => {
     const { canvas, state } = fakeGl([], () => 25);
     const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
@@ -493,8 +503,9 @@ describe('the runner on the calling thread (the synchronous snapshot path)', () 
 
   it('keeps the watchdog: a draw past its deadline loses the context and the program is never run again', () => {
     let clock = 0;
-    // The fence never signals; the clock moves each poll.
-    const { canvas, state } = fakeGl([], () => { clock += 100; return 27; });
+    const { canvas, state } = fakeGl([], () => 27);
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    gl['finish'] = () => { clock += 3000; };
     const runner = new ShaderFallbackRunner({ createCanvas: () => canvas, drawDeadlineMs: 2000, now: () => clock });
     const r = effect();
     const textures = [new Uint16Array(8), new Uint16Array(8)];

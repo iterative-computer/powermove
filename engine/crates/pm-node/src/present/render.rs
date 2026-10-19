@@ -1214,6 +1214,12 @@ impl Thread {
                 };
                 self.fallback.asked.remove(&request);
                 if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+                    // Effects' requests/results belong to their session's
+                    // definition set. Another viewer/snapshot may have
+                    // parked it while ANGLE drew this request.
+                    if let Some(doc) = self.docs.get(&key) {
+                        let _ = composer.use_definitions(key, doc.definitions(), &[]);
+                    }
                     composer.renderer().put_fallback_pixels(request, pixels);
                 }
                 if let Some(view) = self.views.get_mut(&key) {
@@ -1242,6 +1248,9 @@ impl Thread {
                     .as_mut()
                     .and_then(|g| g.composer.as_mut())
                     .and_then(|composer| {
+                        if let Some(doc) = self.docs.get(&key) {
+                            let _ = composer.use_definitions(key, doc.definitions(), &[]);
+                        }
                         composer.renderer().put_fallback_failure(
                             &request,
                             pm_render::shader_layers::FallbackFailure { reason, message },
