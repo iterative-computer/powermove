@@ -289,6 +289,13 @@ M4 Max), the machine shared with other lanes.
   SVG cases of the canvas-ref sweep (solid, stroke, opacity, gradient, clip,
   even-odd, blur, text, transform at 64², 200², 333 × 150) byte-identical to
   the legacy capture `canvas-20261018-220349-9a95e00c` (27 of 27).
+- **Blink's SVG semantics.** The same tool over `feat/ne-svg`'s 383 gate
+  documents (colors, numbers, invalid values, `display`, duplicate ids, the
+  root clip, `points` errors, `xml-stylesheet`, sizes and viewBoxes, at three
+  buckets each; `--cases-file` with that branch's `svg-gate-cases.json`)
+  against their Chromium references `svg-gate-20261018-163629-8db61ae3`: 383
+  of 383 byte-identical. These are the documents the emulation could not
+  match; Chromium drawing them as today needs no emulation.
 - **The corpus** (`tests/svg_corpus.rs`, capture `v1-20261012-230504-ae47a3b3`,
   the 6 buckets the corpus draws captured with the module into
   `svg-rasters-20261018`): all 34 projects with a level 1 SVG image were
