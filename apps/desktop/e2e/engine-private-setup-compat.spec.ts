@@ -218,6 +218,7 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
         }
         results[mode].status = await app.page.evaluate(() => (window as any).PM.EngineConnection?.status?.() ?? null);
 
+        results[mode].uiAfter = await exercise(app.page, ids);
         results[mode].after = await facts(app.page, ids);
         results[mode].openDone = await app.page.evaluate(() => (window as any).__c1OpenDone);
 
@@ -249,12 +250,15 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
       expect(results[mode].openWaitError, `${mode}: project-open deadline`).toBeUndefined();
       expect(results[mode].openDone, `${mode}: original project open completed`).toBe(true);
       for (const records of [results[mode].extensions, results[mode].after]) expect(records.filter((r: any) => r.id !== 'private-extension-32' && (!r.active || !r.enabled || r.health !== 'ok'))).toEqual([]);
-      expect(results[mode].ui.panels.filter((p: any) => !p.mounted || p.error)).toEqual([]);
-      expect(results[mode].ui.commands.filter((c: any) => !c.ok)).toEqual([]);
-      expect(results[mode].ui.theme.tools).toBeGreaterThanOrEqual(8);
-      expect(results[mode].ui.theme.stage && results[mode].ui.theme.timeline).toBe(true);
+      for (const ui of [results[mode].ui, results[mode].uiAfter]) {
+        expect(ui.panels.filter((p: any) => !p.mounted || p.error)).toEqual([]);
+        expect(ui.commands.filter((c: any) => !c.ok)).toEqual([]);
+        expect(ui.theme.tools).toBeGreaterThanOrEqual(8);
+        expect(ui.theme.stage && ui.theme.timeline).toBe(true);
+      }
     }
     expect(results.engine.ui).toEqual(results.today.ui);
+    expect(results.engine.uiAfter).toEqual(results.today.uiAfter);
     expect(results.engine.ui.gradient).toBe('private-extension-15');
     expect(results.engine.ui.rasterWrapped && results.engine.ui.legacyPm).toBe(true);
     expect(results.engine.frames.length).toBe(captures.length);
