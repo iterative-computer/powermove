@@ -150,6 +150,8 @@ async function run(config: AppConfig): Promise<void> {
     machineLoad: { before: os.loadavg() },
     startedAt: new Date().toISOString()
   };
+  const loadDuring: number[] = [];
+  const loadTimer = setInterval(() => loadDuring.push(os.loadavg()[0]!), 1000);
   let verdict = 'MEASURE DONE';
   try {
     const win = await waitFor('the editor window', () => BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && w.webContents.getURL().startsWith('app:')) ?? null);
@@ -410,6 +412,8 @@ async function run(config: AppConfig): Promise<void> {
     verdict = `MEASURE FAIL ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`;
     result['error'] = verdict;
   } finally {
+    clearInterval(loadTimer);
+    result['machineLoad'] = { ...(result['machineLoad'] as object), during: loadDuring };
     result['log'] = logs.slice(-200);
     writeFileSync(config.out, JSON.stringify(result));
     process.stdout.write(`${verdict}\n`);

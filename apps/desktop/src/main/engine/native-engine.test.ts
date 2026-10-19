@@ -303,6 +303,9 @@ describe('NativeEngine with fake engines', () => {
     await settle();
     expect(delivered.map((d) => [d.process, d.generation])).toEqual([['interactive', 1], ['job', 1]]);
     expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(1);
+    // Each connect names the window, so an engine measures its text with
+    // that window's font cache seeds.
+    expect(live('interactive').controls.filter((c) => c.type === 'connect' && c.peer === 'renderer')).toEqual([expect.objectContaining({ owner: 1 })]);
     host.reconnectClient(1);
     await settle();
     expect(delivered).toHaveLength(4);
@@ -319,6 +322,7 @@ describe('NativeEngine with fake engines', () => {
     expect(delivered.map((d) => [d.process, d.generation])).toEqual([['interactive', 1]]);
     expect([...live('interactive').ports.values()].filter((p) => p.peer === 'fonts')).toHaveLength(1);
     expect([...live('job').ports.values()].filter((p) => p.peer === 'fonts')).toHaveLength(0);
+    expect(live('interactive').controls.find((c) => c.type === 'connect' && c.peer === 'fonts')).not.toHaveProperty('owner');
     // A restarted interactive engine gets a new font port; a restarted job engine none.
     live('interactive').exit(139);
     await settle();

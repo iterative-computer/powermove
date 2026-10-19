@@ -2079,7 +2079,6 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "napi",
- "napi-build",
  "napi-derive",
  "objc2",
  "objc2-app-kit",
@@ -2090,6 +2089,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pm-bridge-addon"
+version = "0.1.0"
+dependencies = [
+ "napi-build",
+ "pm-bridge",
 ]
 
 [[package]]
@@ -2309,7 +2316,6 @@ dependencies = [
  "image",
  "libc",
  "napi",
- "napi-build",
  "napi-derive",
  "pm-audio",
  "pm-blender",
@@ -2320,6 +2326,7 @@ dependencies = [
  "pm-gpu",
  "pm-media",
  "pm-model",
+ "pm-node",
  "pm-protocol",
  "pm-render",
  "pm-text",
@@ -2327,6 +2334,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "wgpu",
+]
+
+[[package]]
+name = "pm-node-addon"
+version = "0.1.0"
+dependencies = [
+ "napi-build",
+ "pm-media",
+ "pm-node",
 ]
 
 [[package]]
@@ -2383,6 +2399,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-skia-path"
+version = "0.12.0"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "libm",
+ "strict-num",
+]
+
+[[package]]
 name = "pm-stretch"
 version = "0.1.0"
 dependencies = [
@@ -2407,6 +2433,7 @@ dependencies = [
  "objc2-foundation",
  "parlance",
  "parley",
+ "pm-skia-path",
  "png",
  "read-fonts 0.45.0",
  "serde",
@@ -2459,6 +2486,13 @@ dependencies = [
  "pm-time",
  "ryu-js",
  "serde_json",
+]
+
+[[package]]
+name = "pm-wasm-module"
+version = "0.1.0"
+dependencies = [
+ "pm-wasm",
 ]
 
 [[package]]

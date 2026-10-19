@@ -627,3 +627,94 @@ fn svg_material_maps_use_chromiums_map_upload_without_a_scene3d_refusal() {
     let pixels = renderer.read_rgba(&frame).unwrap();
     assert!(pixels.chunks_exact(4).any(|p| p[3] > 0.9));
 }
+
+#[test]
+fn a_viewer_frame_draws_without_a_bucket_the_window_could_not_draw() {
+    // The viewer waits for the exact bucket (no stand-in), but a bucket
+    // the window could not draw (or did not answer for) must not hold the
+    // frame: it is drawn without that image, as today's compositor draws
+    // the frame without a layer whose `rasterSvgAsset` throws, and named so
+    // the host asks for it again later. Snapshots and exports still wait.
+    let mut renderer = Renderer::headless().unwrap();
+    let (small, resolver) = svg_doc(
+        "fail.svg",
+        ART.as_bytes(),
+        "stretch",
+        40.0,
+        20.0,
+        100.0,
+        vec![],
+    );
+    let small = load(&small);
+    let (zoomed, _) = svg_doc(
+        "fail.svg",
+        ART.as_bytes(),
+        "stretch",
+        40.0,
+        20.0,
+        300.0,
+        vec![],
+    );
+    let zoomed = load(&zoomed);
+    let viewer = |renderer: &mut Renderer, doc: &pm_model::Document| {
+        let mut waiting = renderer.svg_waiting_viewer();
+        let frame = waiting.render(doc, "Ptest-root", ticks(0.0), &request(false), &resolver)?;
+        let pixels = waiting.read_rgba(&frame).unwrap();
+        Ok::<_, RenderError>((pixels, frame.svg_misses))
+    };
+    // The 100% bucket is drawn, so a stand-in would exist for 300%.
+    let a = match viewer(&mut renderer, &small) {
+        Err(RenderError::SvgRastersPending(needs)) => needs[0].request.key.clone(),
+        other => panic!("the viewer waits for the bucket: {:?}", other.map(|f| f.1)),
+    };
+    renderer.put_svg_raster(a, ramp(40, 20, 200)).unwrap();
+    let (drawn, misses) = viewer(&mut renderer, &small).unwrap();
+    assert!(misses.is_empty() && drawn.iter().any(|&v| v > 0.0));
+    let b = match viewer(&mut renderer, &zoomed) {
+        Err(RenderError::SvgRastersPending(needs)) => needs[0].request.key.clone(),
+        other => panic!("no stand-in for the 300% bucket: {:?}", other.map(|f| f.1)),
+    };
+    assert!(!renderer.svg_raster_failed(&b));
+    renderer.fail_svg_raster(b.clone());
+    assert!(renderer.svg_raster_failed(&b));
+    let (without, misses) = viewer(&mut renderer, &zoomed).expect("the frame draws");
+    assert_eq!(misses.len(), 1, "named, so the host asks again");
+    assert_eq!(misses[0].request.key, b);
+    assert!(
+        without.iter().all(|&v| v == 0.0),
+        "drawn without the image, never the 100% bucket"
+    );
+    // The policy is the viewer's only: a snapshot and an export wait.
+    {
+        let mut waiting = renderer.svg_waiting();
+        assert!(matches!(
+            waiting.render(
+                &zoomed,
+                "Ptest-root",
+                ticks(0.0),
+                &request(false),
+                &resolver
+            ),
+            Err(RenderError::SvgRastersPending(_))
+        ));
+    }
+    {
+        let mut waiting = renderer.svg_waiting_viewer();
+        assert!(matches!(
+            waiting.render(&zoomed, "Ptest-root", ticks(0.0), &request(true), &resolver),
+            Err(RenderError::SvgRastersPending(_))
+        ));
+    }
+    assert!(!renderer.svg_wait(), "the guards restore the policy");
+    // Its raster arrives: the failure is over and the bucket is drawn.
+    renderer
+        .put_svg_raster(b.clone(), ramp(120, 60, 200))
+        .unwrap();
+    assert!(!renderer.svg_raster_failed(&b));
+    let (exact, misses) = viewer(&mut renderer, &zoomed).unwrap();
+    assert!(misses.is_empty() && exact.iter().any(|&v| v > 0.0));
+    // A forgotten content forgets its failures.
+    renderer.fail_svg_raster(b.clone());
+    renderer.forget_svg_rasters(Some(&b.content));
+    assert!(!renderer.svg_raster_failed(&b));
+}

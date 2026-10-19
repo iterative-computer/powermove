@@ -351,7 +351,18 @@ pub(crate) fn order_pass<'d>(
         _ => pass,
     };
     if !pass.iter().any(|l| Role3d::of(l).is_some()) {
-        // No 3D layers: `depthOrderedLayers` (the 2.5D order).
+        // No scene objects, and no 2.5D switch anywhere in this
+        // composition (including enclosing groups): timeline order is
+        // already the answer. Keep the old path for malformed nullish
+        // lists, whose group lookups can throw.
+        if !scope
+            .layers()
+            .iter()
+            .any(|l| js::flag(l, "threeD") || node::is_nullish(Some(l)))
+        {
+            return Ok((pass, ctx));
+        }
+        // No 3D objects: `depthOrderedLayers` (the 2.5D order).
         let ordered = scope.depth_ordered_layers(&pass, time)?;
         return Ok((ordered, ctx));
     }

@@ -20,9 +20,12 @@ corpus-tools = ["system", "level2", "dep:flate2"]
 # engine-owned stem-darkening profiles, color bitmap glyphs, the text scene
 # the renderer paints, and the `vello_cpu` coverage fallback. Off for
 # `pm-wasm` and `pm-eval`, which only lay text out.
-render = ["dep:kurbo", "dep:skrifa", "dep:png", "dep:vello_cpu"]
+render = ["dep:pm-skia-path", "dep:kurbo", "dep:skrifa", "dep:png", "dep:vello_cpu"]
+# Level 1 glyph masks from CoreGraphics, as Canvas2D gets them on macOS
+# (`render::cgmask`), and the CoreText fonts they need.
+cg-masks = ["render", "dep:pm-skia-path", "objc2-core-graphics/CGAffineTransform", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGImage", "objc2-core-graphics/CGDataProvider", "objc2-core-graphics/CGPath"]
 # The CoreText reference rasterizer (macOS; level 2 gate and review sheets).
-coretext-reference = ["render", "system", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGImage", "objc2-core-graphics/CGDataProvider"]
+coretext-reference = ["cg-masks", "system"]
 
 [dependencies]
 harfrust = "0.14"
@@ -41,6 +44,7 @@ kurbo = { version = "0.13.1", optional = true }
 skrifa = { version = "0.44", optional = true }
 png = { version = "0.18", optional = true }
 vello_cpu = { version = "0.3", default-features = false, features = ["std", "u8_pipeline"], optional = true }
+pm-skia-path = { path = "../pm-skia-path", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 memmap2 = "0.9"

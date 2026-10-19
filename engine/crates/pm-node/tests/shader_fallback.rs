@@ -48,16 +48,36 @@ const WINDOW: PortId = PortId(7);
 
 #[test]
 fn programs_only_the_runner_draws_take_its_pixels_through_the_engine() {
+    run_child("child_engine", &[]);
+}
+
+/// The viewer's wait for runner pixels (pm-node `present::wait`) ends at
+/// once on a runner failure, a transient failure's backoff draws the frame
+/// without the program and asks again, and a runner that never answers
+/// times out instead of freezing the picture.
+#[test]
+fn a_runner_failure_or_silence_never_freezes_the_viewer() {
+    run_child(
+        "child_engine_waits",
+        &[(pm_node::present::EXTERNAL_WAIT_ENV, WAIT_CAP_MS)],
+    );
+}
+
+/// The wait cap the waits child runs with (ms).
+const WAIT_CAP_MS: &str = "3000";
+
+fn run_child(child_test: &str, envs: &[(&str, &str)]) {
     let name = random_service_name(SERVICE_PREFIX).unwrap();
     let server = Rendezvous::register(&name).unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "child_engine",
+            child_test,
             "--ignored",
             "--nocapture",
             "--test-threads=1",
         ])
+        .envs(envs.iter().copied())
         .env(CHILD_ENV, "1")
         .env(BRIDGE_ENV, &name)
         .env(SOURCE_ENV, "document")
@@ -242,9 +262,9 @@ fn child_engine() {
         let actions = host.receive(WINDOW.0, &codec::encode(&envelope).unwrap());
         inbox.push(actions);
     };
-    host.attach(1, "host").unwrap();
+    host.attach(1, "host", None).unwrap();
     host.receive(1, &hello(PeerRole::Host));
-    host.attach(WINDOW.0, "renderer").unwrap();
+    host.attach(WINDOW.0, "renderer", None).unwrap();
     inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
     send(
         &mut host,
@@ -398,6 +418,7 @@ fn child_engine() {
         _ => None,
     });
     assert_ne!(next, r.key);
+    let failed_at = Instant::now();
     send(
         &mut host,
         event(Event::ShaderFallback(ShaderFallbackMessage::Failed {
@@ -425,6 +446,12 @@ fn child_engine() {
         } if d.revision.get() == 2 => Some(d.clone()),
         _ => None,
     });
+    // At once, not after the viewer's wait for the pixels (10 s).
+    assert!(
+        failed_at.elapsed() < Duration::from_secs(2),
+        "the failed program's frame took {:?}",
+        failed_at.elapsed()
+    );
     assert!(
         reported.iter().any(|e| e.code == ErrorCode::ShaderCompile
             && e.scope
@@ -542,4 +569,162 @@ fn child_engine() {
     });
     release(&mut host, &shown);
     println!("CHILD-OK");
+}
+
+/// Opens the window's interactive session on `host`.
+fn open_session(host: &mut EngineHost, inbox: &Inbox) -> pm_protocol::common::SessionId {
+    host.attach(1, "host", None).unwrap();
+    host.receive(1, &hello(PeerRole::Host));
+    host.attach(WINDOW.0, "renderer", None).unwrap();
+    inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
+    let open = Envelope::new(Message::Request {
+        id: RequestId::new(1).unwrap(),
+        body: Request::OpenSession(OpenSession {
+            document: "Ptracer".into(),
+            role: SessionRole::Interactive,
+            process: EngineProcess::Interactive,
+            color: ProjectColor::DEFAULT,
+        }),
+    });
+    inbox.push(host.receive(WINDOW.0, &codec::encode(&open).unwrap()));
+    inbox.wait(Duration::from_secs(5), |m| match &m.message {
+        Message::Response {
+            body: Response::SessionOpened { session },
+            ..
+        } => Some(*session),
+        _ => None,
+    })
+}
+
+#[test]
+#[ignore = "run by a_runner_failure_or_silence_never_freezes_the_viewer"]
+fn child_engine_waits() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let cap = Duration::from_millis(WAIT_CAP_MS.parse().unwrap());
+    let inbox = Arc::new(Inbox::default());
+    let sink_inbox = inbox.clone();
+    let env = |key: &str| match key {
+        "POWERMOVE_BRIDGE_LEAD" => Some("2".to_owned()),
+        other => std::env::var(other).ok(),
+    };
+    let mut host = EngineHost::with_sink(
+        EngineProcess::Interactive,
+        Some(Arc::new(move |actions| sink_inbox.push(actions))),
+        env,
+    )
+    .unwrap();
+    let session = open_session(&mut host, &inbox);
+    let send = |host: &mut EngineHost, body: Event| {
+        let envelope = Envelope::new(Message::Event { body }).with_session(session);
+        let actions = host.receive(WINDOW.0, &codec::encode(&envelope).unwrap());
+        inbox.push(actions);
+    };
+    let requested = |inbox: &Inbox, within: Duration| {
+        inbox.wait(within, |m| match &m.message {
+            Message::Event {
+                body: Event::ShaderFallback(ShaderFallbackMessage::Requests { requests }),
+            } => Some(requests[0].key.clone()),
+            Message::Event {
+                body: Event::Frame(d),
+            } => panic!("a frame before the runner answered: {d:?}"),
+            _ => None,
+        })
+    };
+    let failed = |key: &str, reason: &str| {
+        Event::ShaderFallback(ShaderFallbackMessage::Failed {
+            key: key.to_owned(),
+            reason: reason.into(),
+            message: format!("the runner's test {reason}"),
+        })
+    };
+
+    let code = "uniform samplerCube uEnv;\nvoid main(){ fragColor = vec4(texture(uEnv, vec3(uv, 1.0)).rgb + vec3(uv, 0.0), 1.0); }";
+    let doc = project(shader(code));
+    let text = model(&doc);
+    let resync = Envelope::new(Message::Request {
+        id: RequestId::new(2).unwrap(),
+        body: Request::Resync(Resync {
+            document: "Ptracer".into(),
+            revision: Revision::new(1).unwrap(),
+            encoding: DocumentEncoding::CanonicalJsonV1,
+            source: ResyncSource::Inline {
+                body: Bytes(doc.to_string().into_bytes()),
+            },
+            hash: ContentHash(pm_model::hash::canonical_digest(&text)),
+        }),
+    })
+    .with_session(session);
+    inbox.push(host.receive(WINDOW.0, &codec::encode(&resync).unwrap()));
+    send(&mut host, Event::Viewer(state(1)));
+    let key = requested(&inbox, Duration::from_secs(20));
+
+    // A lost context (transient, first in a row): asked for again at once,
+    // not after the viewer's wait.
+    let t = Instant::now();
+    send(&mut host, failed(&key, "contextLost"));
+    assert_eq!(requested(&inbox, Duration::from_secs(20)), key);
+    let again = t.elapsed();
+    assert!(
+        again < Duration::from_secs(1),
+        "asked again after {again:?}"
+    );
+
+    // Lost again: the backoff (250 ms) draws the frame without the program
+    // at once, then asks again.
+    let t = Instant::now();
+    send(&mut host, failed(&key, "contextLost"));
+    let drawn = inbox.wait(Duration::from_secs(20), |m| match &m.message {
+        Message::Event {
+            body: Event::Frame(d),
+        } => Some(d.clone()),
+        Message::Event {
+            body: Event::ShaderFallback(ShaderFallbackMessage::Requests { .. }),
+        } => panic!("asked again before the frame was drawn"),
+        _ => None,
+    });
+    let shown = t.elapsed();
+    assert!(shown < Duration::from_secs(1), "the frame took {shown:?}");
+    assert_eq!(drawn.revision.get(), 1);
+    send(
+        &mut host,
+        Event::ReleaseFrame(FrameRelease {
+            pool_index: drawn.pool_index,
+            seq: drawn.seq,
+        }),
+    );
+    assert_eq!(requested(&inbox, Duration::from_secs(20)), key);
+    let retried = t.elapsed();
+    assert!(
+        retried >= Duration::from_millis(200) && retried < Duration::from_secs(2),
+        "asked again after {retried:?} (backoff 250 ms)"
+    );
+
+    // The runner never answers: the wait times out at the cap (counted
+    // from the ask) and the frame is drawn without the program; nothing
+    // waits for the 10 s default.
+    let t = Instant::now();
+    let drawn = inbox.wait(Duration::from_secs(20), |m| match &m.message {
+        Message::Event {
+            body: Event::Frame(d),
+        } => Some(d.clone()),
+        _ => None,
+    });
+    let waited = t.elapsed();
+    assert!(
+        waited + Duration::from_millis(100) >= cap && waited < cap + Duration::from_secs(2),
+        "drawn after {waited:?} (cap {cap:?})"
+    );
+    assert_eq!(drawn.revision.get(), 1);
+    let logs = inbox.logs.lock().unwrap().clone();
+    assert!(
+        logs.iter()
+            .any(|l| l.contains("unanswered") && l.contains("did not answer within 3 s")),
+        "{logs:?}"
+    );
+    let status: Value = serde_json::from_str(&host.status_json()).unwrap();
+    let timeouts = &status["presenter"]["externalWaitTimeouts"];
+    assert_eq!(timeouts, &json!(1), "{}", status["presenter"]);
+    println!("CHILD-OK waits (retried after {retried:?}, timed out after {waited:?})");
 }

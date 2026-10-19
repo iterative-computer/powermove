@@ -141,6 +141,7 @@ pub struct DrawReuse {
     /// composition node address.
     fields_unchanged: Vec<(usize, bool)>,
     stats: ReuseStats,
+    facts: crate::pass_facts::FactsCache,
 }
 
 impl DrawReuse {
@@ -155,6 +156,7 @@ impl DrawReuse {
     /// Drops every entry (the next build at the same time stores again).
     pub fn clear(&mut self) {
         self.passes.clear();
+        self.facts.clear();
         self.doc = None;
         self.build = None;
         self.time = None;
@@ -176,6 +178,9 @@ impl DrawReuse {
             first,
             project: node::string(node::member(Some(root), "id")).cloned(),
         };
+        if self.doc.as_ref() != Some(&doc) || revision < self.stamp {
+            self.facts.clear();
+        }
         let time = time.to_bits();
         let same = self.doc.as_ref() == Some(&doc)
             && self.build.as_ref() == Some(&build)
@@ -210,6 +215,14 @@ impl DrawReuse {
         }
         self.stamp = self.revision;
         self.active = false;
+    }
+
+    pub(crate) fn pass_facts(
+        &mut self,
+        layers: &[Node],
+        all: &[&Node],
+    ) -> std::sync::Arc<crate::pass_facts::PassFacts> {
+        self.facts.get(layers, all, self.revision)
     }
 
     /// Whether `comp`'s own fields (and the root's, and the open

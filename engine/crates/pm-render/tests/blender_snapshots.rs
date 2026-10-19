@@ -62,7 +62,11 @@ struct ChromiumPngResolver<'a> {
 fn chromium_png_dir() -> std::path::PathBuf {
     std::env::var_os("PM_BLENDER_CHROMIUM_PNGS")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| corpus_root().join("blender-chromium-pngs"))
+        .unwrap_or_else(|| {
+            corpus_root()
+                .unwrap_or_default()
+                .join("blender-chromium-pngs")
+        })
 }
 
 /// The failure note for a snapshot the engine did not build because a

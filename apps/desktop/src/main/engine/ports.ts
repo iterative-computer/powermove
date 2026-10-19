@@ -46,7 +46,9 @@ export type EngineBootstrap = { type: 'control' };
  *  port. The engine exits when the control port closes, as on
  *  `shutdown`. */
 export type EngineControl =
-  | { type: 'connect'; port: number; peer: 'host' | 'renderer' | 'peer' | 'fonts' }
+  /** `owner` names the window a renderer client's port belongs to (the
+   *  engine measures its text with that window's font cache seeds). */
+  | { type: 'connect'; port: number; peer: 'host' | 'renderer' | 'peer' | 'fonts'; owner?: number }
   | { type: 'disconnect'; port: number }
   /** Destroy the viewer presenter's GPU device as a real loss would (the
    *  recovery test; interactive engine). */

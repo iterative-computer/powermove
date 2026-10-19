@@ -36,7 +36,7 @@ for all of that.
 ### Snapshot request
 
 `SnapshotRequest { composition, time (ticks), outputSize, target, pixels,
-class, viewSeq, waitMs, blenderWaitMs?, uploaded }`:
+class, viewSeq, waitMs, blenderWaitMs?, captionsHidden?, uploaded }`:
 
 - `target`: `frame { motionBlurSamples, background, draft3d }` or
   `layer { layer, scale, crop, content? }`. `content` is the layer object
@@ -65,6 +65,9 @@ class, viewSeq, waitMs, blenderWaitMs?, uploaded }`:
   draws a frame an earlier capture prepared, or fails `blenderFailed`
   with today's words. Main waits at most `2 × waitMs + blenderWaitMs`
   plus its render allowance.
+- `captionsHidden` (optional, default false): omit caption layers for this
+  frame capture, matching `PM.captionsHidden`. It does not alter the viewer
+  or subsequent captures.
 - `uploaded`: shader fallback keys the caller drew and posted on the
   session's port after a `needsRenderer` answer (see below).
 
@@ -124,7 +127,10 @@ the buffer to the renderer in shared memory again (Mojo big buffers).
    font service (the registry on the utility process's main thread,
    answered through a broker; `pm-node/src/fonts/render.rs`). A frame whose
    fonts did not answer in time fails with `timeout`; it never draws text
-   with missing fonts.
+   with missing fonts. Main-owned snapshot sessions bind to the originating
+   window's font seeds before resync; the render scope includes both port
+   and session. This waits only on the engine font-service port using main's
+   cached seeds, never on the blocked renderer.
 6. **Failures are named, never another engine's pixels.** `unsupported`
    (with the engine's reasons), `timeout`, `unknownSession`,
    `budgetExceeded`, `deviceLost`, `invalidMessage`, `internal`,
@@ -184,14 +190,15 @@ the messages above:
 |---|---|---|
 | `CompatMessage::SvgRequests { requests }` | interactive engine → renderer (session-bound) | Buckets a viewer frame drew without: `SvgRasterRequest { key: { content, width, height }, asset }`, at most 64 per message. `content` is the lowercase SHA-256 of the SVG file's bytes |
 | `CompatMessage::SvgPixels { key, row, rows, data }` | renderer → interactive engine | One band (at most 8 MiB) of premultiplied RGBA8, top-down: the bytes today's `texImage2D` of the bucket canvas stores. Accepted from any session of the render thread, and kept for all of them |
-| `CompatMessage::SvgFailed { key, reason, message }` | renderer → interactive engine | `missing`, `stale` (the window's bytes hash differently), `decode`, `size`, `unavailable`. Asked again after 5 s |
+| `CompatMessage::SvgFailed { key, reason, message }` | renderer → interactive engine | `missing`, `stale` (the window's bytes hash differently), `decode`, `size`, `unavailable`. A viewer frame waiting for the bucket is drawn at once without that image (as is one whose ask had no answer within 5 s); asked again after 5 s while a view draws without it |
 | `SnapshotOutcome::NeedsRenderer.svg` | engine → main → renderer | Buckets a snapshot needs; the renderer posts them (`SvgPixels`) and asks again naming `svg:<content>:<w>x<h>` in `uploaded`; the engine waits for those bands. Absent in older answers (empty) |
 | `CompatSource::SvgImage`, `CompatFrameRequest.svg` | job engine → host | An export or agent frame's bucket (`svg` is set exactly when the source is `svgImage`). The answer is a `CompatFrame` keyed `<content>:<w>x<h>`, `rgba8Premultiplied`, the bucket's size, origin 0, scale 1. With no window that has the document open: `notHeadlessRenderable`, "SVG images are drawn by the editor window that has this project open; open the project in a window to export it." |
 
 The renderer draws a request only from its own asset whose decoded bytes
-hash to `content`. A viewer frame never waits: it draws the content's latest
-bucket or nothing and is drawn again when the bands arrive; snapshots and job
-frames never draw a stand-in. TypeScript: `EngineSnapshotReply.needsRenderer`
+hash to `content`. The app viewer, snapshots and job frames all wait for
+that exact bucket. The viewer retains the frame in its render-ahead schedule
+while its renderer answers; it never publishes the old bucket under a new
+frame's revision. Other sessions and the audio clock continue running. TypeScript: `EngineSnapshotReply.needsRenderer`
 gains `svg?: SvgRasterRequest[]`; `RenderTransportOptions.svgRasters`
 (`TransportSvgRasters`: `drawSync`, `draw`, `post`); `SessionOptions.svgRasters`;
 `PM.EngineSvgRasters` (`SvgRasters`, with `stats`).
@@ -275,8 +282,8 @@ snapshot(options: EngineSnapshotOptions, cls?: 'async' | 'idle'): Promise<Engine
 renderFrameToSync(time, width, height, options?): HTMLCanvasElement | null; // today's renderOpaqueFrame
 renderFrameToCanvasSync(time, width, height, options?): HTMLCanvasElement; // throws EngineSnapshotError
 renderFrameTo(time, width, height, options?): Promise<HTMLCanvasElement>;
-snapshotDataUrlSync(time, maxWidth, size: { w; h }): string;          // JPEG 0.74, '' only on failure (throws for blenderFailed)
-snapshotDataUrl(time, maxWidth, size, options?: { prepareBlender?: boolean }): Promise<string>; // prepareBlender: today's snapshotAsync
+snapshotDataUrlSync(time, maxWidth, size: { w; h }, options?: { captionsHidden?: boolean }): string;          // JPEG 0.74, '' only on failure (throws for blenderFailed)
+snapshotDataUrl(time, maxWidth, size, options?: { prepareBlender?: boolean; captionsHidden?: boolean }): Promise<string>; // prepareBlender: today's snapshotAsync
 currentRevision(): number | null;                                      // flushes pending edits
 rasterSync(layer: string, scale, time, crop?, options?: RasterOptions): EngineSnapshot | null;  // null: draws nothing then
 raster(layer: string, scale, time, crop?, options?: RasterOptions): Promise<EngineSnapshot | null>;
@@ -287,7 +294,7 @@ forgetCompat(layer, composition?): boolean;
 provideCompat(source: CompatSource, producer: CompatProducer): () => void;
 readonly stats: TransportStats;
 
-type EngineSnapshotOptions = { time; width; height; composition?; pixels?; motionBlurSamples?; background?; draft3d?; waitMs?;
+type EngineSnapshotOptions = { time; width; height; composition?; pixels?; motionBlurSamples?; captionsHidden?; background?; draft3d?; waitMs?;
   prepareBlender?;  // async and idle frames: Blender renders the frame first (only in documents with a Blender composition)
   layer?: { id: string; scale: number; crop?: { x; y; width; height } | null; content?: Uint8Array | null } };
 type RasterOptions = { composition?: string; content?: Uint8Array | null; maxEdge?: number };
@@ -332,7 +339,13 @@ extcompat lane.
 
 `render.gl.init(canvas)` and `render.gl.resize(…)` bind engine presentation
 to the caller's canvas (`PM.EngineCanvas`,
-`engine-connection/canvas-binding.ts`).
+`engine-connection/canvas-binding.ts`). The binding never presents over a
+viewer that presents by itself: one whose stage is marked
+`data-engine-stage="viewer"` (its presentation) or
+`data-engine-self-presents` (`ENGINE_SELF_PRESENTS_ATTRIBUTE`, set by the
+built-in viewer from attach until it is disposed, round 6). It ends when
+its canvas leaves the document, at once (a ResizeObserver), not only at
+the caller's next resize.
 
 ### Frame events and stats (`engine-connection/presentation-events.ts`)
 
@@ -424,18 +437,33 @@ sentence as the stage's status line, keeps the current engine's canvas
 hidden, never hands the stage back, and clears the line at the next frame
 the engine draws. `EngineTransport` takes commands for every decided route.
 
-**Which frames a report makes stale (round 6).** A session's events arrive
-in the engine's order on one port, and a session's frame `seq` only
-increases (a view lives as long as its session). A frame after an
-`unsupported` report is therefore a later decision, at any revision; the
-revision cannot tell them apart, because a composition switch reaches the
-engine as a document batch (revision N) before the viewer state, so the
-engine reports the old composition at N and then draws the new one at N.
-The session drops only frames with `seq` at or below the newest it had when
-the report came; the presentation drops only presented frames with `seq` at
-or below the newest its channel had delivered then (frames still in the
-presenter's queue). A viewerless session takes `engine` from any route on a
-clock tagged with a revision at or past the one it applied.
+**Which frames a report makes stale (round 6, corrected in round 7).** The
+revision cannot decide it: a composition switch reaches the engine as a
+document batch (revision N) before the viewer state, so the engine reports
+the old composition at N and then draws the new one at N. The frame `seq`
+does, because it only increases within a session (a view lives as long as
+its session) and the engine assigns it when it draws. Arrival order does
+not: a session's events do not arrive in the engine's order. Paused frames
+leave from the completion thread once the GPU finishes them
+(`present/complete.rs`), while the render thread goes on to the next batch,
+so round 6's rule (any frame after the report is a later decision) let a
+paused frame of revision R, still on the GPU, arrive after a report caused
+by the batch at R+1, with a higher seq than any frame received so far. That
+frame brought the route back to `engine` and hid the reason. Two rules now
+hold. The render thread drains the completion thread before it sends any
+`unsupported` report (`report_legacy`, which every route to `legacy`
+reaches: a static reason, a draw that fails with
+`RenderError::Unsupported`, and a shader fallback runner failure), so every
+frame drawn before the decision is sent before it. And the report carries
+`ErrorDetail::Unsupported { lastFrame }`, the newest seq the engine had
+given the view when it decided. The session drops frames with `seq` at or
+below `lastFrame` (falling back to the newest frame it received when the
+detail is absent), and passes it on in its `routed` message. The
+presentation drops presented frames with `seq` at or below the larger of
+`lastFrame` and the newest its channel had delivered (frames still in the
+presenter's queue). A frame above it is a later decision at any revision. A
+viewerless session takes `engine` from any route on a clock tagged with a
+revision at or past the one it applied.
 
 Headless playback carries playback pressure for idle snapshots but has no draw
 schedule against which foreground async captures should wait. A Blender

@@ -548,6 +548,104 @@ impl Context {
     pub fn finish(&self) -> Vec<u8> {
         render_ops(self.width, self.height, &self.ops)
     }
+
+    /// Resolve a device-space crop of primitive path draws, retaining the
+    /// original canvas viewport. This bounds a glyph allocation without
+    /// changing the NDC round trip or any sample decisions.
+    pub fn finish_region(&self, rect: [i32; 4]) -> Option<Vec<u8>> {
+        if rect[2] <= rect[0] || rect[3] <= rect[1] { return None; }
+        if self.ops.iter().any(|o| !matches!(o,
+            Op::Polygons { .. } | Op::Triangles { .. } | Op::Analytic { .. })) {
+            return None;
+        }
+        let pattern = if self.ops.iter().any(needs_msaa) { &SAMPLES_4X[..] } else { &SAMPLES_1X[..] };
+        let mut target = MsaaTarget::new((rect[2] - rect[0]) as u32,
+                                        (rect[3] - rect[1]) as u32, pattern);
+        let viewport = tess::Viewport::of(self.width, self.height);
+        for op in &self.ops {
+            render_op_region(&mut target, op, None, viewport, [rect[0], rect[1]]);
+        }
+        Some(target.resolve())
+    }
+
+    /// A single white fill's alpha, with CPU work bounded to its device mesh.
+    /// The full canvas viewport and global sample coordinates stay unchanged;
+    /// translating the geometry or using the window as a viewport changes AA.
+    /// Transparent pixels outside the window remain in the returned canvas so
+    /// blur keeps exactly the original save-layer bounds and downsample phase.
+    pub(super) fn finish_fill_alpha(&self) -> Result<Vec<u8>, Unsupported> {
+        let mut alpha = vec![0; (self.width * self.height) as usize];
+        let Some(op) = self.ops.first() else {
+            return Ok(alpha);
+        };
+        if self.ops.len() != 1 {
+            return Err(Unsupported("multiple windowed mask fills"));
+        }
+        let viewport = tess::Viewport::of(self.width, self.height);
+        let points: Vec<P> = match op {
+            Op::Polygons { polys, .. } => {
+                polys.iter().flatten().map(|p| viewport.map(*p)).collect()
+            }
+            Op::Triangles { tris, .. } => tris.iter().flatten().map(|p| viewport.map(*p)).collect(),
+            Op::Analytic { inst, .. } => analytic::device_bounds(inst),
+            _ => return Err(Unsupported("windowed mask operation")),
+        };
+        // Include snapping and AA at the mesh edges. Feather is applied later
+        // to the full-sized alpha canvas, so no blurred sample is cropped here.
+        let mut lo = [self.width as f32, self.height as f32];
+        let mut hi = [0.0f32; 2];
+        for p in points {
+            for a in 0..2 {
+                lo[a] = lo[a].min(p[a]);
+                hi[a] = hi[a].max(p[a]);
+            }
+        }
+        let x0 = (lo[0].floor() - 1.0).clamp(0.0, self.width as f32) as u32;
+        let y0 = (lo[1].floor() - 1.0).clamp(0.0, self.height as f32) as u32;
+        let x1 = (hi[0].ceil() + 1.0).clamp(0.0, self.width as f32) as u32;
+        let y1 = (hi[1].ceil() + 1.0).clamp(0.0, self.height as f32) as u32;
+        if x1 <= x0 || y1 <= y0 {
+            return Ok(alpha);
+        }
+        let pattern = if needs_msaa(op) {
+            &SAMPLES_4X[..]
+        } else {
+            &SAMPLES_1X[..]
+        };
+        let (w, h) = (x1 - x0, y1 - y0);
+        let mut mask = super::msaa::SampleMask::new(w, h, pattern);
+        mask.origin = [x0, y0];
+        let coverage = match op {
+            Op::Polygons { polys, rule, .. } => {
+                fill_polygons(&mut mask, &viewport.map_polygons(polys), *rule);
+                None
+            }
+            Op::Triangles { tris, .. } => {
+                super::msaa::fill_triangles(&mut mask, &viewport.map_triangles(tris));
+                None
+            }
+            Op::Analytic { inst, .. } => {
+                Some(analytic::rasterize_window(inst, w, h, pattern, [x0, y0]))
+            }
+            _ => unreachable!(), // restricted to one fill above
+        };
+        let n = pattern.len();
+        for y in 0..h {
+            for x in 0..w {
+                let p = (y * w + x) as usize;
+                let sum: u32 = match &coverage {
+                    Some(c) => c.coverage[p * n..(p + 1) * n]
+                        .iter()
+                        .map(|c| u32::from(super::msaa::unorm8(c.unwrap_or(0.0))))
+                        .sum(),
+                    None => mask.bits[p].count_ones() * 255,
+                };
+                alpha[((y + y0) * self.width + x + x0) as usize] =
+                    ((sum + n as u32 / 2) / n as u32) as u8;
+            }
+        }
+        Ok(alpha)
+    }
 }
 
 fn needs_msaa(o: &Op) -> bool {
@@ -571,21 +669,33 @@ fn render_ops(width: u32, height: u32, ops: &[Op]) -> Vec<u8> {
     target.resolve()
 }
 fn render_op(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>) {
+    let viewport = tess::Viewport::of(target.width, target.height);
+    render_op_region(target, op, clip, viewport, [0, 0]);
+}
+fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
+                    viewport: tess::Viewport, origin: [i32; 2]) {
     use super::msaa::{fill_triangles, unorm8};
     let mut mask = target.mask();
     let mut coverage = None;
-    let viewport = tess::Viewport::of(target.width, target.height);
     let paint = match op {
         Op::Polygons { polys, color, rule, .. } => {
-            fill_polygons(&mut mask, &viewport.map_polygons(polys), *rule);
+            let mut mapped = viewport.map_polygons(polys);
+            for p in mapped.iter_mut().flatten() {
+                p[0] -= f64::from(origin[0]); p[1] -= f64::from(origin[1]);
+            }
+            fill_polygons(&mut mask, &mapped, *rule);
             color
         }
         Op::Triangles { tris, color } => {
-            fill_triangles(&mut mask, &viewport.map_triangles(tris));
+            let mut mapped = viewport.map_triangles(tris);
+            for p in mapped.iter_mut().flatten() {
+                p[0] -= origin[0] as f32; p[1] -= origin[1] as f32;
+            }
+            fill_triangles(&mut mask, &mapped);
             color
         }
         Op::Analytic { inst, color } => {
-            coverage = Some(analytic::rasterize(inst, target.width, target.height, target.pattern));
+            coverage = Some(analytic::rasterize_region(inst, target.width, target.height, target.pattern, origin));
             color
         }
         Op::Clip { op, clips } => {
@@ -672,7 +782,8 @@ fn render_op(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>) {
             continue;
         }
         let color = paint
-            .at((p % target.width as usize) as f32 + 0.5, (p / target.width as usize) as f32 + 0.5)
+            .at((p % target.width as usize) as f32 + origin[0] as f32 + 0.5,
+                (p / target.width as usize) as f32 + origin[1] as f32 + 0.5)
             .map(|v| v * cov);
         let inv = 1.0 - color[3];
         for c in 0..4 {
@@ -733,6 +844,81 @@ fn linear_rgb(pixels: &mut [u8], encode: bool) {
                 libm::pow((v + 0.055) / 1.055, 2.4)
             };
             *c = (v * a * 255.0 + 0.5) as u8;
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn windowed_white_fills_equal_full_canvas_at_every_pixel() {
+        // Fractional placements near viewport rounding boundaries, signed and
+        // reflected transforms, clipped/offscreen fills, analytic and both
+        // tessellation paths. Also a genuine UHD viewport (never recentered).
+        for (w, h) in [(317, 233), (1920, 1080), (3840, 2160)] {
+            for kind in 0..4 {
+                for (x, y) in [(13.375, 17.625), (-45.125, 6.875), (w as f64-5.25, h as f64-7.125)] {
+                    let mut c = Context::new(w, h);
+                    c.set_fill_style("white");
+                    c.translate(x, y);
+                    c.rotate(0.173);
+                    c.scale(-0.83, 1.19);
+                    c.begin_path();
+                    match kind {
+                        0 => c.path.rect(-20.0, -30.0, 73.25, 45.5),
+                        1 => { c.path.ellipse(0.0, 0.0, 53.0, 31.0, 0.0, core::f64::consts::TAU, false).unwrap(); }
+                        2 => { c.path.move_to(-15.0, -20.0); c.path.line_to(60.0, 20.0); c.path.line_to(-10.0, 45.0); c.path.close_path(); }
+                        _ => {
+                            c.path.move_to(0.0, 0.0);
+                            c.path.bezier_curve_to(90.0, -70.0, -80.0, 100.0, 70.0, 65.0);
+                            c.path.line_to(-30.0, 50.0);
+                            c.path.close_path();
+                        }
+                    }
+                    c.fill().unwrap();
+                    let full: Vec<u8> = c.finish().chunks_exact(4).map(|p| p[3]).collect();
+                    assert_eq!(c.finish_fill_alpha().unwrap(), full, "{w}x{h}, kind={kind}, ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn windowed_pixel_aligned_rects_equal_full_canvas_at_every_pixel() {
+        // The non-AA bounds renderer (`Op::Polygons { msaa: false }`, the 1X
+        // pattern): device-aligned rectangles, also within the pixel
+        // tolerance, mirrored, quarter-turned, and partly or wholly offscreen.
+        for (w, h) in [(317, 233), (1920, 1080), (3840, 2160)] {
+            let cases: [(f64, f64, f64, f64, f64, f64, u8); 7] = [
+                (0.0, 0.0, 10.0, 12.0, 40.0, 30.0, 0),
+                (0.002, -0.003, 10.0, 12.0, 40.0, 30.0, 0),
+                (0.0, 0.0, -25.0, -9.0, 60.0, 50.0, 0),
+                (w as f64, 0.0, 7.0, 3.0, 90.0, 41.0, 1),
+                (w as f64 - 20.0, h as f64 - 10.0, 0.0, 0.0, 64.0, 32.0, 0),
+                (100.0, 50.0, 0.0, 0.0, 33.0, 17.0, 2),
+                (w as f64 + 5.0, 0.0, 0.0, 0.0, 10.0, 10.0, 0),
+            ];
+            for (i, &(tx, ty, x, y, rw, rh, kind)) in cases.iter().enumerate() {
+                let mut c = Context::new(w, h);
+                c.set_fill_style("white");
+                c.translate(tx, ty);
+                match kind {
+                    1 => c.scale(-1.0, 1.0),
+                    2 => c.rotate(core::f64::consts::FRAC_PI_2),
+                    _ => {}
+                }
+                c.begin_path();
+                c.path.rect(x, y, rw, rh);
+                c.fill().unwrap();
+                assert!(
+                    matches!(c.ops.last(), Some(Op::Polygons { msaa: false, .. })),
+                    "{w}x{h}, case {i}: the non-AA bounds renderer"
+                );
+                let full: Vec<u8> = c.finish().chunks_exact(4).map(|p| p[3]).collect();
+                assert_eq!(c.finish_fill_alpha().unwrap(), full, "{w}x{h}, case {i}");
+            }
         }
     }
 }

@@ -40,6 +40,7 @@ export interface PmWasmExports {
   pm_fonts_add(len: number): number;
   pm_fonts_report(): number;
   pm_fonts_clear(): void;
+  pm_fonts_seeds(len: number): number;
   pm_fonts_outlines(outlines: number): void;
   pm_model_set?(len: number): number;
   pm_model_import?(len: number): number;
@@ -87,6 +88,8 @@ export function revive(value: any): any {
 export const imports = { pm_expr: { pow: Math.pow } };
 
 export class PmWasm {
+  /** External evaluator inputs (definition labels and font registry state). */
+  contextRevision = 0;
   readonly x: PmWasmExports;
   dead = false;
   private buffer: ArrayBuffer | null = null;
@@ -268,16 +271,19 @@ export class PmWasm {
   }
 
   define(definition: { id: string; label?: string; params?: Record<string, string> }): void {
+    this.contextRevision += 1;
     this.call(() => this.x.pm_define(this.writeString(JSON.stringify(definition))));
   }
 
   addFontAnswers(json: string): void {
+    this.contextRevision += 1;
     this.call(() => {
       if (this.x.pm_fonts_answers(this.writeString(json)) !== 0) throw new Error(`pm-wasm fonts: ${this.readOut()}`);
     });
   }
 
   addFont(blob: string, index: number, data: Uint8Array): void {
+    this.contextRevision += 1;
     this.call(() => {
       const key = encoder.encode(blob);
       const bytes = new Uint8Array(8 + key.length + data.length);
@@ -322,6 +328,27 @@ export class PmWasm {
     this.call(() => this.x.pm_models_clear?.());
   }
 
+  /** The window's font cache seeds (`{ seeds }` JSON from main): text
+   *  measures as this renderer's Canvas2D does. Returns whether they changed. */
+  setFontSeeds(json: string): boolean {
+    return this.call(() => {
+      const r = this.x.pm_fonts_seeds(this.writeString(json));
+      if (r === 2) throw new Error(`pm-wasm font seeds: ${this.readOut()}`);
+      if (r === 1) this.contextRevision += 1;
+      return r === 1;
+    });
+  }
+
+  clearFonts(): void {
+    this.contextRevision += 1;
+    this.call(() => this.x.pm_fonts_clear());
+  }
+
+  fontOutlines(enabled: boolean): void {
+    this.contextRevision += 1;
+    this.call(() => this.x.pm_fonts_outlines(enabled ? 1 : 0));
+  }
+
   fontReport(): { misses: unknown[]; pending: Array<[string, number]> } {
     return this.call(() => JSON.parse(this.readOut(this.x.pm_fonts_report())));
   }
@@ -335,21 +362,48 @@ export class PmWasm {
 
 /** Compiles the module once per page; instances are cheap. */
 let compiled: Promise<WebAssembly.Module> | null = null;
+/** Last successful load; streaming compilation includes delivery of the body. */
+let compileTiming: { sourceMs: number; compileMs: number } | null = null;
+export function moduleCompileTiming(): typeof compileTiming { return compileTiming; }
 
 /** Where the editor serves the module (`public/engine/`, see engine/crates/pm-wasm/scripts/build.mjs). */
 export const MODULE_PATH = 'engine/pm_wasm.wasm';
 
+type EditorBoot = { enabled: boolean; module?: Promise<WebAssembly.Module>; timing?: { sourceMs: number; compileMs: number } };
+const editorBoot: EditorBoot | undefined = (globalThis as any).__powermoveDocumentBoot;
+if (editorBoot) delete (globalThis as any).__powermoveDocumentBoot;
+
+/** The preload read the launch setting once before the renderer module graph. */
+export function preloadedEngineEnabled(): boolean | undefined { return editorBoot?.enabled; }
+
+/** Reuse compilation that overlapped module loading, or load in a standalone renderer. */
+export function compileEditorModule(): Promise<WebAssembly.Module> {
+  if (!compiled && editorBoot?.module) {
+    compiled = editorBoot.module.then(module => { compileTiming = editorBoot.timing ?? null; return module; });
+    delete editorBoot.module;
+    compiled.catch(() => { compiled = null; });
+  }
+  return compiled ?? compileFrom(() => fetch(new URL(MODULE_PATH, globalThis.document?.baseURI ?? globalThis.location?.href).href));
+}
+
 export function compileFrom(source: () => Promise<Response | ArrayBuffer | Uint8Array>): Promise<WebAssembly.Module> {
   compiled ??= (async () => {
+    const started = performance.now();
     const got = await source();
-    if (got instanceof Response) {
-      if (!got.ok) throw new Error(`pm-wasm: ${got.status} fetching the module`);
-      if (typeof WebAssembly.compileStreaming === 'function' && got.headers.get('content-type')?.includes('wasm')) {
-        return WebAssembly.compileStreaming(got);
+    const fetched = performance.now();
+    const compile = async (): Promise<WebAssembly.Module> => {
+      if (got instanceof Response) {
+        if (!got.ok) throw new Error(`pm-wasm: ${got.status} fetching the module`);
+        if (typeof WebAssembly.compileStreaming === 'function' && got.headers.get('content-type')?.includes('wasm')) {
+          return WebAssembly.compileStreaming(got);
+        }
+        return WebAssembly.compile(await got.arrayBuffer());
       }
-      return WebAssembly.compile(await got.arrayBuffer());
-    }
-    return WebAssembly.compile(got as BufferSource);
+      return WebAssembly.compile(got as BufferSource);
+    };
+    const module = await compile();
+    compileTiming = { sourceMs: fetched - started, compileMs: performance.now() - fetched };
+    return module;
   })();
   compiled.catch(() => { compiled = null; });
   return compiled;
@@ -362,4 +416,4 @@ export async function instantiate(module: WebAssembly.Module): Promise<PmWasm> {
 }
 
 /** For tests: forget the compiled module. */
-export function resetCompiled(): void { compiled = null; }
+export function resetCompiled(): void { compiled = null; compileTiming = null; }

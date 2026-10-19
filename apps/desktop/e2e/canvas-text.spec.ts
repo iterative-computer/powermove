@@ -1,4 +1,8 @@
 import { expect, test } from './helpers/app';
+import { expectEngineDrewText } from './helpers/engine-drew';
+
+// With the new engine on, the engine (not the legacy renderer) drew the text.
+test.afterEach(async ({ session }) => { await expectEngineDrewText(session); });
 
 /* On-canvas text editing contract. The compositor paints the text while it
    is edited; a hidden textarea owns input. Escape, Command+Enter and clicking

@@ -7,11 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The addon is a cdylib loaded by the engine utility processes. The napi
-# glue is behind the `node` feature so the workspace builds and tests
-# without Node's symbols (they resolve when Node loads the addon).
-[lib]
-crate-type = ["cdylib", "rlib"]
+# The napi glue is behind the `node` feature so the workspace builds and
+# tests without Node's symbols (they resolve when Node loads the addon). The
+# addon itself is the cdylib-only pm-node-addon crate over this rlib, so the
+# release profile's LTO applies to it (docs/engine/release-build.md).
 
 [dependencies]
 pm-engine = { path = "../pm-engine" }
@@ -51,11 +50,16 @@ node = ["dep:napi", "dep:napi-derive"]
 # The C′ prototype (pm-gpu `remote-layer`): measurement builds only. Without
 # it, POWERMOVE_BRIDGE_REMOTE_LAYER=1 reports that this build has no C′.
 remote-layer = ["pm-gpu/remote-layer"]
+# Test hooks on production types (a held paused frame,
+# POWERMOVE_BRIDGE_TEST_SEND_DELAY_MS); off in the app. The crate's own
+# tests turn it on through the dev-dependency below.
+test-hooks = []
 
 [dev-dependencies]
 pm-model = { path = "../pm-model" }
 # The audio status test holds and fails decoders (pm-audio's test hooks).
 pm-audio = { path = "../pm-audio", features = ["test-hooks"] }
+pm-node = { path = ".", features = ["test-hooks"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [[test]]
@@ -67,6 +71,3 @@ harness = false
 # The engine's render fonts: the child's host runs on its main thread.
 name = "render_fonts"
 harness = false
-
-[build-dependencies]
-napi-build = "2.6"

@@ -52,6 +52,8 @@ const arg = (name, fallback) => {
 const seconds = Number(arg('seconds', '60'));
 const only = arg('only', '').split(',').filter(Boolean);
 const tag = arg('tag', '');
+const maxLoad = Number(arg('max-load', 'Infinity'));
+const evidenceDir = arg('evidence-dir', '') ? path.resolve(arg('evidence-dir', '')) : null;
 // Re-analyze raw results a `--keep` run left in this directory instead of
 // measuring again (the analysis changed, not the measurement).
 const from = arg('from', '') ? path.resolve(arg('from', '')) : null;
@@ -199,24 +201,28 @@ function tracerRuns() {
     { name: 'tracer-playback-today-23976-load', ...playback, app: true, tracer: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: { ...s500, fpsRational: [24000, 1001], dur: 90 }, startS: 0, fps: 24000 / 1001 }
   ];
 }
-const selected = RUNS.filter((run) => !only.length || only.includes(run.name));
+const selected = only.length ? only.map(name => {
+  const run = RUNS.find(run => run.name === name);
+  if (!run) throw new Error(`Unknown measurement run: ${name}`);
+  return run;
+}) : RUNS;
 
 /* ── build ─────────────────────────────────────────────────────────── */
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-bridge-measure-'));
 const harnessAddon = path.join(work, 'pm_bridge_harness.node');
 if (!process.argv.includes('--skip-build') && !from) {
-  execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-bridge --lib --features harness'], { cwd: engineDir, stdio: 'inherit' });
+  execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-bridge-addon --features harness'], { cwd: engineDir, stdio: 'inherit' });
 }
-fs.copyFileSync(path.join(engineDir, 'target/release/libpm_bridge.dylib'), harnessAddon);
+fs.copyFileSync(path.join(engineDir, 'target/release/libpm_bridge_addon.dylib'), harnessAddon);
 // The C′ prototype is compiled into pm-node only with its `remote-layer`
 // feature (never in release builds): its runs load an addon built with it.
 const remoteAddon = path.join(work, 'pm_node_remote_layer.node');
 if (selected.some((run) => run.remoteLayer) && !from) {
   if (!process.argv.includes('--skip-build')) {
-    execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-node --features node,remote-layer'], { cwd: engineDir, stdio: 'inherit' });
+    execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-node-addon --features node,remote-layer'], { cwd: engineDir, stdio: 'inherit' });
   }
-  fs.copyFileSync(path.join(engineDir, 'target/release/libpm_node.dylib'), remoteAddon);
+  fs.copyFileSync(path.join(engineDir, 'target/release/libpm_node_addon.dylib'), remoteAddon);
 }
 const harness = createRequire(import.meta.url)(harnessAddon);
 const allowAsleep = process.argv.includes('--allow-display-asleep');
@@ -933,6 +939,13 @@ const electron = createRequire(path.join(desktop, 'package.json'))('electron');
 const results = {};
 try {
   for (const run of selected) {
+    if (!from) {
+      const until = Date.now() + 15 * 60_000;
+      while (os.loadavg()[0] > maxLoad && Date.now() < until) await sleepMs(30_000);
+      if (os.loadavg()[0] > maxLoad) throw new Error(`Machine load remained above ${maxLoad}; remaining rows are unmeasured`);
+      const disk = fs.statfsSync('/System/Volumes/Data');
+      if (disk.bavail * disk.bsize < 40 * 1024 ** 3) throw new Error('Disk below the required 40 GiB floor before app launch');
+    }
     const name = tag ? `${run.name}-${tag}` : run.name;
     const out = path.join(from ?? work, `${name}.json`);
     const trace = path.join(from ?? work, `${name}.trace.json`);
@@ -1032,7 +1045,8 @@ try {
       process.stdout.write(`   analysis failed: ${error.message}\n${(raw.log ?? []).slice(-15).join('\n')}\n`);
       continue;
     }
-    const dir = run.dir ? path.join(repo, run.dir) : run.tracer ? path.join(repo, 'docs/engine/tracer-measurements') : summaries;
+    if (!from && Math.max(os.loadavg()[0], raw.machineLoad?.before?.[0] ?? 0, raw.machineLoad?.after?.[0] ?? 0, ...(raw.machineLoad?.during ?? [])) > maxLoad) summary.invalid = `Machine load exceeded ${maxLoad}; retry this pair`;
+    const dir = evidenceDir ?? (run.dir ? path.join(repo, run.dir) : run.tracer ? path.join(repo, 'docs/engine/tracer-measurements') : summaries);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${name}.json`), `${JSON.stringify(summary, null, 2)}\n`);
     results[name] = summary;

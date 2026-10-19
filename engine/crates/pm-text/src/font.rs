@@ -16,29 +16,44 @@ use std::sync::Arc;
 pub type FaceId = u32;
 
 /// Shared font file bytes (owned, or a read-only mapping of a system font file).
+///
+/// Each value made by [`FontBytes::new`] or [`FontBytes::from_shared`] has
+/// its own identity ([`FontBytes::id`]), shared by its clones and never
+/// given to another value in the process. Glyph caches key on it, so a font
+/// replaced by new bytes (even at the address the old bytes had) never
+/// reaches a cache entry of the old font.
 #[derive(Clone)]
-pub struct FontBytes(Arc<dyn AsRef<[u8]> + Send + Sync>);
+pub struct FontBytes {
+    data: Arc<dyn AsRef<[u8]> + Send + Sync>,
+    id: u64,
+}
+
+static NEXT_FONT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl FontBytes {
     pub fn new(bytes: Vec<u8>) -> Self {
-        FontBytes(Arc::new(bytes))
+        Self::from_shared(Arc::new(bytes))
     }
 
     pub fn from_shared(shared: Arc<dyn AsRef<[u8]> + Send + Sync>) -> Self {
-        FontBytes(shared)
+        FontBytes {
+            data: shared,
+            id: NEXT_FONT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        (*self.0).as_ref()
+        (*self.data).as_ref()
     }
 
     pub fn shared(&self) -> Arc<dyn AsRef<[u8]> + Send + Sync> {
-        self.0.clone()
+        self.data.clone()
     }
 
-    /// Identity of the underlying buffer (two clones share it).
-    pub fn ptr_id(&self) -> usize {
-        self.as_slice().as_ptr() as usize
+    /// Identity of this font for caches: shared by clones, unique in the
+    /// process (never reused, unlike the buffer's address).
+    pub fn id(&self) -> u64 {
+        self.id
     }
 }
 

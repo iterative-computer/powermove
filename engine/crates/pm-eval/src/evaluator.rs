@@ -319,8 +319,8 @@ struct Slot {
 
 /// A composition's layer index and what it was built from. It is reused only
 /// for the same `layers` node: the same document root (by address), the same
-/// resolution path ([`Comp::at_root`]), the same `layers` node address, and a
-/// `layers` revision no newer than the revision it was validated at.
+/// resolution path ([`Comp::at_root`]), the same `layers` node address, and
+/// unchanged indexed inputs (ids and nullish positions).
 struct IndexEntry {
     validated: u64,
     len: usize,
@@ -331,6 +331,17 @@ struct IndexEntry {
     /// The address of the `layers` node (0 when there was none).
     layers: usize,
     index: Arc<LayerIndex>,
+    // The index reads only each position's nullish state and id. A drag
+    // changes the layers' subtree revision, but neither input. Addresses
+    // detect reordered nodes even when reconciliation preserves revisions.
+    ids: Vec<(bool, usize)>,
+}
+
+fn index_input(layer: &Node) -> (bool, usize) {
+    (
+        node::is_nullish(Some(layer)),
+        address_of(node::member(Some(layer), "id")),
+    )
 }
 
 fn address_of(node: Option<&Node>) -> usize {
@@ -683,14 +694,20 @@ impl Evaluator {
         let len = cx.layers().len();
         let root = address_of(Some(cx.root()));
         let layers = address_of(layers_node);
-        if let Some(entry) = self.indexes.get(cx.id())
+        if let Some(entry) = self.indexes.get_mut(cx.id())
             && entry.root == root
             && entry.at_root == cx.at_root()
             && entry.layers == layers
-            && layers_rev <= entry.validated
             && entry.validated <= cx.revision()
             && entry.len == len
+            && (layers_rev <= entry.validated
+                || cx.layers().iter().zip(&entry.ids).all(|(layer, input)| {
+                    index_input(layer) == *input
+                        && node::member(Some(layer), "id")
+                            .is_none_or(|id| id.rev() <= entry.validated)
+                }))
         {
+            entry.validated = cx.revision();
             return entry.index.clone();
         }
         self.build_layer_index(cx)
@@ -708,6 +725,7 @@ impl Evaluator {
                 at_root: cx.at_root(),
                 layers: address_of(cx.layers_node()),
                 index: index.clone(),
+                ids: cx.layers().iter().map(index_input).collect(),
             },
         );
         index

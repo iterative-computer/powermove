@@ -15,15 +15,20 @@
  * top), and the passed canvas rests hidden.
  *
  * No competing presenters: a viewer that presents by itself (the built-in
- * viewer's own presentation marks its stage `data-engine-stage="viewer"`)
- * owns the canvas, and the binding yields to it, at bind time and at every
- * resize. A new `init` with another canvas replaces the binding (one per
- * window), and a canvas that left the document unbinds.
+ * viewer marks its stage `data-engine-self-presents` while mounted, and its
+ * presentation marks it `data-engine-stage="viewer"`) owns the canvas, and
+ * the binding yields to it, at bind time and at every resize. A new `init` with another canvas replaces the binding (one per
+ * window), and a canvas that left the document unbinds: at the next
+ * `resize`, or as soon as its size observer sees it go (a caller that
+ * tears its canvas down calls nothing more; its presentation would keep a
+ * presenting engine session for a stage nobody sees).
  */
 import type { EngineViewerService, ViewParams } from '../../../extensions/viewer/engine-present/presentation';
 
 /** Mirrors engine-present/presentation.ts `ENGINE_STAGE_EVENT`. */
 export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
+/** Mirrors engine-present/presentation.ts `ENGINE_SELF_PRESENTS_ATTRIBUTE`. */
+export const ENGINE_SELF_PRESENTS_ATTRIBUTE = 'data-engine-self-presents';
 
 /** What the binding needs of a presentation (`ViewerPresentation`). */
 export interface BoundPresentation {
@@ -41,7 +46,35 @@ export type CanvasBindingOptions = {
   quality: () => number;
   /** Makes the presentation (`new ViewerPresentation(…)`). */
   present: (options: { service: EngineViewerService; stage: HTMLElement; before: Element | null; role: 'binding' }) => BoundPresentation;
+  /** Calls `changed` when `canvas` may have left the document; returns the
+   *  stop. Default: `watchRemoval` (a ResizeObserver and a MutationObserver). */
+  watch?: (canvas: HTMLCanvasElement, changed: () => void) => () => void;
 };
+
+/** The default `watch`: a ResizeObserver (a removed element's box goes to
+ *  0) and, for a canvas whose box is already 0x0 (its box cannot change, so
+ *  the ResizeObserver stays quiet), a MutationObserver on the document's
+ *  child lists that reports once the canvas is no longer connected. */
+export function watchRemoval(canvas: HTMLCanvasElement, changed: () => void): () => void {
+  const view = canvas.ownerDocument?.defaultView;
+  const stops: Array<() => void> = [];
+  if (view?.ResizeObserver) {
+    const sizes = new view.ResizeObserver(changed);
+    sizes.observe(canvas);
+    stops.push(() => sizes.disconnect());
+  }
+  const root = canvas.ownerDocument?.documentElement;
+  if (view?.MutationObserver && root) {
+    const removals = new view.MutationObserver(() => {
+      if (!canvas.isConnected) changed();
+    });
+    removals.observe(root, { childList: true, subtree: true });
+    stops.push(() => removals.disconnect());
+  }
+  return () => {
+    for (const stop of stops) stop();
+  };
+}
 
 /** The resolution menu's enum for today's quality factor. */
 function resolution(quality: number): ViewParams['resolution'] {
@@ -70,9 +103,10 @@ export class EngineCanvasBinding {
     return this.presentation !== null;
   }
 
-  /** Whether a viewer of its own presents over `canvas` (the built-in one). */
+  /** Whether a viewer of its own presents over `canvas` (the built-in one),
+   *  or is mounted to (it presents once the engine connection is up). */
   private owned(canvas: HTMLCanvasElement): boolean {
-    return !!canvas.closest('[data-engine-stage="viewer"]');
+    return !!canvas.closest(`[data-engine-stage="viewer"], [${ENGINE_SELF_PRESENTS_ATTRIBUTE}]`);
   }
 
   /**
@@ -101,6 +135,8 @@ export class EngineCanvasBinding {
 
   private watching: Document | null = null;
   private unwatch: (() => void) | null = null;
+  /** Stops watching the bound canvas leave the document. */
+  private unwatchCanvas: (() => void) | null = null;
 
   private stopWatching(): void {
     this.unwatch?.();
@@ -132,6 +168,9 @@ export class EngineCanvasBinding {
       this.stage = stage;
       this.presentation = this.options.present({ service, stage, before: canvas.nextSibling as Element | null, role: 'binding' });
       this.made++;
+      this.unwatchCanvas = (this.options.watch ?? watchRemoval)(canvas, () => {
+        if (this.canvas === canvas && !canvas.isConnected) this.unbind();
+      });
       if (this.presentation.exclusive) {
         canvas.style.visibility = 'hidden';
         this.hid = true;
@@ -153,6 +192,8 @@ export class EngineCanvasBinding {
   /** Ends the binding's presentation (the canvas stays bound). `restore`:
    *  show the canvas it hid (not when a viewer took the canvas over). */
   private drop(restore = true): void {
+    this.unwatchCanvas?.();
+    this.unwatchCanvas = null;
     this.presentation?.dispose();
     this.presentation = null;
     this.stage = null;

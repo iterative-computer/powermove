@@ -136,9 +136,10 @@ export type EngineFrameMessage =
  * `reason` names what), so its frames leave the screen until the engine
  * draws again. An exclusive presentation ("Use New Engine" on, amendment
  * 21) shows the reason on the stage; nothing hands the stage to the
- * current engine.
+ * current engine. `seq` is the newest frame seq the engine had given the
+ * view when it decided: frames at or below it are stale.
  */
-export type EngineRouteMessage = { type: 'routed'; route: 'legacy'; reason: string; revision?: number };
+export type EngineRouteMessage = { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number };
 
 /** Whether a clock sample's line is moving. */
 export function running(sample: ClockSample | null): boolean {

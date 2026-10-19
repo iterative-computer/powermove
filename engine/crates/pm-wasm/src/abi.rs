@@ -544,6 +544,24 @@ pub extern "C" fn pm_fonts_outlines(outlines: u32) {
     with(|s| s.engine.set_font_outlines(outlines != 0))
 }
 
+/// The editor renderer's font cache seeds (JSON, main's
+/// `engine-fonts:seeds`). Returns 0 unchanged, 1 changed (text lays out
+/// again), 2 malformed (the reason is in the output buffer).
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_fonts_seeds(len: usize) -> u32 {
+    with(|s| {
+        let bytes = input(s, len).to_vec();
+        match s.engine.set_font_seeds(&bytes) {
+            Ok(false) => 0,
+            Ok(true) => 1,
+            Err(e) => {
+                reply(s, &e, false);
+                2
+            }
+        }
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_fonts_clear() {
     with(|s| s.engine.clear_fonts())
@@ -570,12 +588,14 @@ pub extern "C" fn pm_stats() -> usize {
     with(|s| {
         let st = s.engine.stats;
         let text = format!(
-            "{{\"batches\":{},\"ops\":{},\"resyncs\":{},\"queries\":{},\"unanswered\":{},\"revision\":{}}}",
+            "{{\"batches\":{},\"ops\":{},\"resyncs\":{},\"queries\":{},\"unanswered\":{},\"detachedHits\":{},\"detachedMisses\":{},\"revision\":{}}}",
             st.batches,
             st.ops,
             st.resyncs,
             st.queries,
             st.unanswered,
+            st.detached_hits,
+            st.detached_misses,
             s.engine.revision()
         );
         reply(s, &text, false)

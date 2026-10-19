@@ -122,6 +122,8 @@ pub struct Fonts {
     pub(crate) outlines: bool,
     answers: Answers,
     fonts: Vec<(String, u32, FontBytes)>,
+    /// The editor renderer's font cache seeds (amendment 19), from main.
+    seeds: Vec<pm_text::compat::FontCacheSeed>,
     pub(crate) measure: CompatMeasure<ReplayResolver>,
 }
 
@@ -133,6 +135,7 @@ impl Fonts {
             measure: CompatMeasure::new(ReplayResolver::new(&answers)),
             answers,
             fonts: Vec::new(),
+            seeds: Vec::new(),
         }
     }
 
@@ -144,6 +147,9 @@ impl Fonts {
             resolver.add_font(blob, *index, data.clone(), 0);
         }
         self.measure = CompatMeasure::new(resolver);
+        self.measure
+            .compat()
+            .set_font_cache_seeds(self.seeds.clone());
     }
 
     /// Whether the last layout met a query the answers lack, or a face whose
@@ -214,11 +220,17 @@ pub struct Stats {
     pub resyncs: u64,
     pub queries: u64,
     pub unanswered: u64,
+    pub detached_hits: u64,
+    pub detached_misses: u64,
 }
 
 pub struct Engine {
     doc: Document,
     ev: Evaluator,
+    // A bounded resident scope cache. Each entry has its own evaluator so an
+    // ad-hoc scope never resets the open document's interned property plans.
+    detached: HashMap<String, DetachedComp>,
+    detached_tick: u64,
     labels: Arc<Labels>,
     fonts: Fonts,
     /// Model assets and 3D caches (picks and bounds).
@@ -227,6 +239,20 @@ pub struct Engine {
     last: JsValue,
     last_kind: ValueKind,
     pub stats: Stats,
+}
+
+struct DetachedComp {
+    node: Box<Node>,
+    reads: Option<pm_model::doc::reads::Index>,
+    ev: Evaluator,
+    revision: u64,
+    used: u64,
+}
+
+fn evaluator(labels: &Arc<Labels>) -> Evaluator {
+    Evaluator::new()
+        .with_expressions(Arc::new(PmExpressions))
+        .with_hooks(Arc::new(LabelsRef(labels.clone())))
 }
 
 impl Default for Engine {
@@ -361,9 +387,9 @@ impl Engine {
         let labels = Arc::new(Labels::default());
         Engine {
             doc: Document::new(None, 0),
-            ev: Evaluator::new()
-                .with_expressions(Arc::new(PmExpressions))
-                .with_hooks(Arc::new(LabelsRef(labels.clone()))),
+            ev: evaluator(&labels),
+            detached: HashMap::new(),
+            detached_tick: 0,
             labels,
             fonts: Fonts::new(),
             models: crate::geometry::Models::default(),
@@ -425,6 +451,7 @@ impl Engine {
             self.doc = Document::new(root, revision);
             self.ev.reset();
         }
+        self.detached.clear();
         self.stats.resyncs += 1;
         Ok(())
     }
@@ -581,10 +608,34 @@ impl Engine {
     }
 
     /// Drops every answer and face (after a registry generation change).
+    /// The seeds stay: they describe the renderer, not the registry.
     pub fn clear_fonts(&mut self) {
         let outlines = self.fonts.outlines;
+        let seeds = std::mem::take(&mut self.fonts.seeds);
         self.fonts = Fonts::new();
         self.fonts.outlines = outlines;
+        self.fonts.seeds = seeds;
+        self.fonts.rebuild();
+    }
+
+    /// The editor renderer's font cache seeds (`{ seeds: FontCacheSeed[] }`
+    /// or a bare array, main's `engine-fonts:seeds`): level 1 measures as
+    /// that renderer does (amendment 19, docs/engine/text.md). Returns
+    /// whether they changed; a change lays text out again.
+    pub fn set_font_seeds(&mut self, json: &[u8]) -> Result<bool, String> {
+        let value: serde_json::Value = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+        let list = match value {
+            serde_json::Value::Object(mut o) => o.remove("seeds").unwrap_or_default(),
+            other => other,
+        };
+        let seeds: Vec<pm_text::compat::FontCacheSeed> =
+            serde_json::from_value(list).map_err(|e| e.to_string())?;
+        if seeds == self.fonts.seeds {
+            return Ok(false);
+        }
+        self.fonts.seeds = seeds;
+        self.fonts.rebuild();
+        Ok(true)
     }
 
     /// Declares that the faces added are whole fonts with outlines, so
@@ -633,6 +684,7 @@ impl Engine {
                 return out;
             }
         };
+        let tracked = get(&request, "scopeId").and_then(Value::as_str);
         let mut body = Reply::new();
         let result = self.dispatch(&request, &mut body);
         match result {
@@ -678,6 +730,29 @@ impl Engine {
                 out.str(&why);
                 out.raw("}");
             }
+        }
+        if let Some(id) = tracked {
+            let reads =
+                pm_model::doc::reads::finish(self.detached.get(id).and_then(|c| c.reads.as_ref()));
+            out.text.pop();
+            out.raw(",\"reads\":[");
+            for (i, path) in reads.iter().enumerate() {
+                if i > 0 {
+                    out.raw(",");
+                }
+                out.raw("[");
+                for (j, part) in path.iter().enumerate() {
+                    if j > 0 {
+                        out.raw(",");
+                    }
+                    match part {
+                        pm_model::PathPart::Key(k) => out.js_str(k),
+                        pm_model::PathPart::Index(n) => out.num(*n),
+                    }
+                }
+                out.raw("]");
+            }
+            out.raw("]}");
         }
         out
     }
@@ -765,16 +840,101 @@ impl Engine {
             .and_then(Value::as_str)
             .unwrap_or(comp_id);
         let revision = self.doc.revision();
-        let detached_comp = get(request, "compJson")
-            .filter(|v| matches!(v, Value::Object(_)))
-            .map(|v| Node::from_value(v.clone(), revision));
-        if detached_comp.is_some() {
-            self.ev.reset();
-        }
-        let resolved = detached_comp.as_ref().map_or_else(
-            || Comp::in_root(root, comp_id, revision),
-            |node| Ok(Comp::at_node(root, node, comp_id, revision)),
-        );
+        let detached = get(request, "compJson").filter(|v| matches!(v, Value::Object(_)));
+        // The renderer carries detached JSON as a string so repeated queries
+        // need no object parse or canonical number serialization before hashing.
+        let text = get(request, "compJsonText").and_then(Value::as_str);
+        let scope_id = get(request, "scopeId").and_then(Value::as_str);
+        let hash = scope_id.map(str::to_owned).or_else(|| {
+            text.map(|s| pm_model::hash::sha256_hex(s.as_bytes()))
+                .or_else(|| detached.map(pm_model::hash::canonical_hash))
+        });
+        let resident = if let Some(hash) = hash {
+            self.detached_tick += 1;
+            if scope_id.is_some() && (text.is_some() || detached.is_some()) {
+                self.detached.remove(&hash);
+            }
+            if self.detached.contains_key(&hash) {
+                self.stats.detached_hits += 1;
+            } else {
+                let value = match (text, detached) {
+                    (Some(json), _) => match parse_bytes(json.as_bytes()) {
+                        Ok(v) if matches!(v, Value::Object(_)) => v,
+                        _ => {
+                            return Ok(Err(JsThrow::type_error(
+                                "Invalid detached composition JSON",
+                            )));
+                        }
+                    },
+                    (_, Some(v)) => v.clone(),
+                    _ => return Ok(Err(JsThrow::type_error("detached-scope-missing"))),
+                };
+                self.stats.detached_misses += 1;
+                if self.detached.len() >= 4
+                    && let Some(oldest) = self
+                        .detached
+                        .iter()
+                        .min_by_key(|(_, c)| c.used)
+                        .map(|(h, _)| h.clone())
+                {
+                    self.detached.remove(&oldest);
+                }
+                let node = Box::new(Node::from_value(value, revision));
+                let reads = scope_id.map(|_| pm_model::doc::reads::Index::new(&node));
+                self.detached.insert(
+                    hash.clone(),
+                    DetachedComp {
+                        node,
+                        reads,
+                        ev: evaluator(&self.labels),
+                        revision,
+                        used: self.detached_tick,
+                    },
+                );
+            }
+            let c = self.detached.get_mut(&hash).unwrap();
+            // Expressions can read project members as well as their own scope.
+            if c.revision != revision {
+                c.ev.reset();
+                c.revision = revision;
+            }
+            c.used = self.detached_tick;
+            if let Some(patches) = get(request, "scopePatches") {
+                let patches = match pm_model::patch::patches_from_value(patches) {
+                    Ok(patches) => patches,
+                    Err(e) => {
+                        return Ok(Err(JsThrow::type_error(format!(
+                            "Invalid scope patches: {e}"
+                        ))));
+                    }
+                };
+                if let Err(e) = c.node.apply_patches(&patches, revision) {
+                    return Ok(Err(JsThrow::type_error(format!(
+                        "Invalid scope update: {e}"
+                    ))));
+                }
+            }
+            if scope_id.is_some() && get(request, "scopePatches").is_some() {
+                c.reads = Some(pm_model::doc::reads::Index::new(&c.node));
+            }
+            // Dependencies must include reads otherwise hidden by prepared
+            // plans or expression memos from an earlier request.
+            if scope_id.is_some() {
+                c.ev.reset();
+                // Trace the answer, not reconciliation's bookkeeping reads.
+                pm_model::doc::reads::begin();
+            }
+            Some(c)
+        } else {
+            None
+        };
+        let (resolved, ev) = match resident {
+            Some(c) => (
+                Ok(Comp::at_node(root, &c.node, comp_id, revision)),
+                &mut c.ev,
+            ),
+            None => (Comp::in_root(root, comp_id, revision), &mut self.ev),
+        };
         let Ok(comp) = resolved else {
             return Ok(Err(JsThrow::type_error(format!(
                 "No composition {comp_id}"
@@ -829,7 +989,7 @@ impl Engine {
         };
         let fonts = &mut self.fonts;
         let models = &mut self.models;
-        let mut scope = Scope::new(&mut self.ev, &comp, &open);
+        let mut scope = Scope::new(ev, &comp, &open);
         macro_rules! layer {
             () => {
                 match layer {

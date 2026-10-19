@@ -16,7 +16,7 @@
  * viewer (capability routing, section 21); a frame means the engine draws
  * it.
  */
-import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
 import type { PreviewStatus } from './preview';
@@ -62,7 +62,7 @@ export type ViewerMessage =
   | { type: 'frame'; frame: FrameDescriptor }
   | { type: 'surfacePool'; pool: SurfacePool }
   | { type: 'clock'; sample: ClockSample }
-  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number };
+  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number };
 
 /** The kernel's definition stream (`PM.EngineDefinitions`, kernel/engine-definitions.ts; contract 10). */
 export interface DefinitionsSource {
@@ -193,13 +193,22 @@ export class DocumentSession {
   /** Definitions pushes the engine refused in a row, and the pending retry. */
   private definitionRefusals = 0;
   private definitionRetry: ReturnType<typeof setTimeout> | null = null;
-  /** The newest frame `seq` this session received when the engine last said
-   *  it cannot draw the view's composition. The session's events arrive in
-   *  the engine's order and a session's frame seqs only increase, so a
-   *  frame after that report is a later decision: a composition switch
-   *  draws the new composition at the very revision the old one was
-   *  reported at (the document batch reaches the engine before the viewer
-   *  state), so the revision alone cannot tell them apart. */
+  /** The newest frame `seq` the engine had given the view when it last said
+   *  it cannot draw the view's composition (the report's
+   *  `ErrorDetail::Unsupported.lastFrame`). A frame at or below it was
+   *  drawn before the decision and is stale; one above it is a later
+   *  decision at any revision: a composition switch draws the new
+   *  composition at the very revision the old one was reported at (the
+   *  document batch reaches the engine before the viewer state), so the
+   *  revision alone cannot tell them apart.
+   *
+   *  The engine's number, not the newest frame received: arrival order is
+   *  not the engine's decision order. Paused frames leave from the engine's
+   *  completion thread once the GPU finishes them, so a frame drawn before
+   *  the report could arrive after it with a higher seq than any frame
+   *  received so far. The engine also sends those frames before the report
+   *  (it drains the completion thread first); the seq makes the gate hold
+   *  whatever the order. */
   private routedSeq: number | null = null;
 
   constructor(private readonly options: SessionOptions) {}
@@ -484,9 +493,12 @@ export class DocumentSession {
         const error = (event as unknown as { error: { code: string; message: string; retry: { kind: string } } }).error;
         if (error.code === 'unsupported') {
           const revision = Number(event['revision']) || 0;
-          this.routedSeq = Number(this.lastFrame?.seq) || 0;
+          const detail = (error as { detail?: ErrorDetail | null }).detail;
+          const received = Number(this.lastFrame?.seq) || 0;
+          const seq = detail?.kind === 'unsupported' ? Number(detail.lastFrame) || 0 : received;
+          this.routedSeq = seq;
           this.setRoute('legacy', error.message);
-          this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision }, arrivedMs);
+          this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision, seq }, arrivedMs);
           return;
         }
         this.failures.push(`${error.code}: ${error.message}`);

@@ -29,8 +29,9 @@ import { findPath, NativeApi } from './native';
 import { NativeEdits } from './edits';
 import { createTracker, patchCloning, querySite, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
-import { compileFrom, imports, instantiate, MODULE_PATH, PmWasm } from './wasm';
+import { compileEditorModule, imports, instantiate, moduleCompileTiming, PmWasm } from './wasm';
 import { FontLoader, type FontProvider } from './fonts';
+import { fontCensusStats } from './ui-font-census';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { setEvaluationWriter } from '../legacy/core/temporal-bridge';
 import { inversePlane, is3DLayer, local3D, parent3D, perspectiveAmount, planeContains, planeMatrix, projectPoint, world3D } from '../legacy/core/space-3d';
@@ -130,6 +131,11 @@ export interface EngineDoc {
   failures(): EngineFailure[];
   /** Loads the module again after a `pm-wasm-unavailable` failure; resolves with readiness. */
   retry(): Promise<boolean>;
+  /**
+   * `fn` runs once the module becomes ready after `whenReady` resolved false
+   * (a successful `retry()`): the extension loader activates what waited.
+   */
+  onReady(fn: () => void): () => void;
   /** Loads the faces the open composition's text needs before anything asks (asynchronous font providers). */
   warmFonts(): Promise<void>;
 }
@@ -150,7 +156,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false),
       check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
-      failures: () => [], retry: () => Promise.resolve(false), warmFonts: () => Promise.resolve(),
+      failures: () => [], retry: () => Promise.resolve(false), onReady: () => () => {}, warmFonts: () => Promise.resolve(),
     };
     PM.EngineDoc = off;
     return off;
@@ -373,7 +379,15 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   api.revive = () => reviveNow();
   api.onFailure = (code, message) => fail(code, message, code === 'font-service-unavailable');
   const fontProvider = options.fonts !== undefined ? options.fonts : editorFonts();
-  if (fontProvider) api.fonts = new FontLoader(fontProvider);
+  if (fontProvider) {
+    api.fonts = new FontLoader(fontProvider, () => {
+      // Font cache changes affect text bounds, carets, picks and overlays
+      // even when the document revision has not moved.
+      PM.invalidate?.();
+      PM.bus?.emit?.('fonts');
+    });
+    api.fonts.watchSeeds(() => (state.ready ? wasm : null));
+  }
   api.onStale = (op, paths) => {
     reporter.emit({ type: 'audit', kind: 'stale-answer', revision: barrier?.revision ?? -1, paths: paths.slice(0, 20), detail: op, site: querySite(undefined, 8), tx: PM.hist?.busy?.() ? (PM.hist?.scoped?.() ? 'scoped' : 'plain') : 'none' });
     if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
@@ -420,9 +434,11 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const subscribers = new Set<(batch: PatchBatch) => void>();
   const pendingListeners = new Set<() => void>();
   const eager = new Set<() => boolean>();
+  const readyListeners = new Set<() => void>();
   let readyResolve: (ok: boolean) => void = () => {};
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
+  const startup = { startedAt: performance.now(), moduleMs: 0, instantiateMs: 0, mirrorMs: 0, readyMs: 0 };
   const state: EngineDoc = {
     mode, enabled: true, ready: false, api, edits, barrier: null, wasm: null, auditor, dual, tracker, whenReady,
     check(reason) {
@@ -438,8 +454,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     stats() {
       return {
         mode: mode.name, ready: state.ready,
+        startup: { ...startup, ...moduleCompileTiming() },
         barrier: barrier ? { revision: barrier.revision, ...barrier.stats } : null,
         native: api.stats,
+        fontCensus: typeof document === 'undefined' ? null : fontCensusStats(document),
         edits: edits.stats,
         dual: dual ? { ...dual.total(), compared: dual.stats.compared, mismatched: dual.stats.mismatched, stale: dual.stats.stale, allowed: dual.stats.allowed, fragile: dual.stats.fragile, fragileBudget: dual.fragileBudget() } : null,
         audit: auditor ? { audits: auditor.stats.audits, failures: auditor.stats.failures, missedWrites: auditor.stats.missedWrites, mirrorMismatches: auditor.stats.mirrorMismatches, ms: Math.round(auditor.stats.ms) } : null,
@@ -454,14 +472,21 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       api.fonts?.retry();
       failed.clear();
       if (state.ready) return Promise.resolve(true);
-      return start().then((ok) => { if (ok) afterReady(); return ok; });
+      return start().then((ok) => {
+        if (ok) {
+          afterReady();
+          for (const fn of [...readyListeners]) { try { fn(); } catch (error) { console.error(error); } }
+        }
+        return ok;
+      });
     },
+    onReady(fn) { readyListeners.add(fn); return () => { readyListeners.delete(fn); }; },
     warmFonts: () => (state.ready ? api.warmFonts() : Promise.resolve()),
   };
   PM.EngineDoc = state;
 
   // ── loading ───────────────────────────────────────────────────────────
-  const loadModule = options.loadModule ?? (() => compileFrom(() => fetch(new URL(MODULE_PATH, (globalThis as any).document?.baseURI ?? (globalThis as any).location?.href).href)));
+  const loadModule = options.loadModule ?? compileEditorModule;
   let compiledModule: WebAssembly.Module | null = null;
   /** Puts a fresh instance in place and resyncs it (the barrier keeps its revisions). */
   const attach = (instance: PmWasm): void => {
@@ -482,13 +507,23 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     replacing = true;
     try { barrier.resync(); } finally { replacing = false; }
     pendingReplace = null;
+    api.fonts?.applySeeds(wasm);
     state.ready = true;
     reporter.emit({ type: 'ready', mode: mode.name, bytes: wasm.x.memory.buffer.byteLength });
   };
   const start = async (): Promise<boolean> => {
     try {
+      const started = performance.now();
       compiledModule = await loadModule();
-      attach(await instantiate(compiledModule));
+      const loaded = performance.now();
+      startup.moduleMs = loaded - started;
+      const instance = await instantiate(compiledModule);
+      startup.instantiateMs = performance.now() - loaded;
+      const attached = performance.now();
+      attach(instance);
+      startup.mirrorMs = performance.now() - attached;
+      performance.mark?.('powermove:document-ready');
+      startup.readyMs = performance.now() - started;
       return true;
     } catch (error) {
       state.ready = false;
@@ -577,16 +612,23 @@ function editorFonts(): FontProvider | null {
     if (r.ok === false) throw new Error(r.error);
     return r.value;
   };
+  // Seeds describe this renderer regardless of how face bytes are served.
+  const seedSource = {
+    ...(typeof bridge.seeds === 'function' ? { seeds: async () => String(unwrapResult(await bridge.seeds())) } : {}),
+    ...(typeof bridge.onSeedsChanged === 'function' ? { onSeedsChanged: (listener: (json: string) => void) => { bridge.onSeedsChanged(listener); } } : {}),
+  };
   if (typeof bridge.answerSync === 'function' && typeof bridge.wholeSync === 'function') return {
     sync: true,
     answer: (queries) => unwrapResult(bridge.answerSync(queries)),
     subset: (blob, index) => new Uint8Array(unwrapResult(bridge.wholeSync(blob, index))),
     whole: (blob, index) => new Uint8Array(unwrapResult(bridge.wholeSync(blob, index))),
+    ...seedSource,
   };
   return {
     sync: false,
     answer: async (queries: string) => unwrapResult(await bridge.answer(queries)),
     subset: async (blob: string, index: number) => new Uint8Array(unwrapResult(await bridge.subset(blob, index))),
+    ...seedSource,
   };
 }
 

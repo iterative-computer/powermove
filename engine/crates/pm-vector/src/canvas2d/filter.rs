@@ -466,15 +466,32 @@ impl Image {
         }
         f32::from(self.px[(ly as usize) * self.rect.w as usize + lx as usize]) / 255.0
     }
-    /// Bilinear at `(x, y)` in the image's space (exact weights).
+    /// Bilinear at `(x, y)` in the image's space, including Metal's
+    /// 8-bit interpolation weights and four fractional channel bits.
     pub fn bilinear(&self, x: f32, y: f32) -> f32 {
-        let (u, v) = (x - 0.5, y - 0.5);
+        self.bilinear_ring(x, y, 1)
+    }
+    fn bilinear_ring(&self, x: f32, y: f32, ring: u32) -> f32 {
+        // Match sample_at's normalized coordinates before the sampler's
+        // fixed-point interpolation. The initial RGBA layer has no ring;
+        // filter intermediates and path-mask inputs have a 1-pixel ring.
+        let (w,h) = ((self.rect.w+2*ring) as f32, (self.rect.h+2*ring) as f32);
+        let u = ((x-(self.rect.x0-ring as i32) as f32)*(1.0/w))*w - ring as f32 - 0.5;
+        let v = ((y-(self.rect.y0-ring as i32) as f32)*(1.0/h))*h - ring as f32 - 0.5;
         let (i, j) = (libm::floorf(u), libm::floorf(v));
-        let (fx, fy) = (u - i, v - j);
-        let (i, j) = (i as i32, j as i32);
-        let a = self.texel(i, j) * (1.0 - fx) + self.texel(i + 1, j) * fx;
-        let b = self.texel(i, j + 1) * (1.0 - fx) + self.texel(i + 1, j + 1) * fx;
-        a * (1.0 - fy) + b * fy
+        let (fx, fy) = ((256.0 * (u - i)).round()/256.0, (256.0 * (v - j)).round()/256.0);
+        let (i, j) = (i as i32 + self.rect.x0, j as i32 + self.rect.y0);
+        // Interpolate integer channel values before normalization. The
+        // hardware's 8-bit weights and 4 fractional output bits make this
+        // exact fixed-point arithmetic, including halfway decisions.
+        let at = |x: i32, y: i32| {
+            let (x,y) = (x-self.rect.x0, y-self.rect.y0);
+            if x < 0 || y < 0 || x >= self.rect.w as i32 || y >= self.rect.h as i32 { 0.0 }
+            else { f32::from(self.px[y as usize*self.rect.w as usize+x as usize]) }
+        };
+        let a = at(i, j) * (1.0 - fx) + at(i + 1, j) * fx;
+        let b = at(i, j + 1) * (1.0 - fx) + at(i + 1, j + 1) * fx;
+        ((a * (1.0 - fy) + b * fy) * 16.0 + 0.5).floor() / 4080.0
     }
     fn nearest(&self, x: f32, y: f32) -> f32 {
         self.texel(libm::floorf(x) as i32, libm::floorf(y) as i32)
@@ -486,10 +503,33 @@ fn unorm8(v: f32) -> u8 {
 }
 
 impl BlurPlan {
-    /// The plan on the CPU (exact bilinear weights, `f32` sums): a model of
+    /// Premultiplied RGBA, with the same plan and per-pass N32 storage as
+    /// scalar coverage. Each channel follows precisely the same arithmetic.
+    pub fn run_cpu_rgba(&self, rgba: &[u8], width: u32, height: u32) -> Vec<f32> {
+        self.run_cpu_rgba_region(rgba, Rect::ltrb(0, 0, width as i32, height as i32), width, height)
+    }
+
+    /// The input need not cover the canvas: save layers may include
+    /// off-canvas ink. Quantize the final filtered draw to N32 too.
+    pub fn run_cpu_rgba_region(&self, rgba: &[u8], rect: Rect, width: u32, height: u32) -> Vec<f32> {
+        assert_eq!(rgba.len(), (rect.w * rect.h * 4) as usize);
+        let mut out = vec![0.0; (width*height*4) as usize];
+        for c in 0..4 {
+            let img = Image { rect, px: rgba.chunks_exact(4).map(|p| p[c]).collect() };
+            for (p, v) in out.chunks_exact_mut(4).zip(self.run_cpu_ring(&img, width, height, 0)) {
+                p[c] = f32::from(unorm8(v)) / 255.0;
+            }
+        }
+        out
+    }
+
+    /// The plan on the CPU (the measured UNORM sampler, `f32` sums): a model of
     /// the GPU passes for tests and diagnostics. Returns each canvas
     /// pixel's value as the final draw samples it (before the composite).
     pub fn run_cpu(&self, item: &Image, width: u32, height: u32) -> Vec<f32> {
+        self.run_cpu_ring(item, width, height, 1)
+    }
+    fn run_cpu_ring(&self, item: &Image, width: u32, height: u32, mut ring: u32) -> Vec<f32> {
         let mut img = item.clone();
         for pass in &self.passes {
             let dst = pass.dst();
@@ -498,21 +538,21 @@ impl BlurPlan {
                 for x in 0..dst.w as i32 {
                     let (cx, cy) = ((dst.x0 + x) as f32 + 0.5, (dst.y0 + y) as f32 + 0.5);
                     let v = match pass {
-                        Pass::Rescale { sample, .. } => img.bilinear(
-                            cx * sample.scale[0] + sample.translate[0],
-                            cy * sample.scale[1] + sample.translate[1],
+                        Pass::Rescale { sample, .. } => img.bilinear_ring(
+                            cx.mul_add(sample.scale[0], sample.translate[0]),
+                            cy.mul_add(sample.scale[1], sample.translate[1]), ring,
                         ),
                         Pass::Blur2d { weights, offsets, .. } => {
                             let mut sum = 0.0f32;
                             for (w, o) in weights.iter().zip(offsets) {
-                                sum += *w * img.nearest(cx + o[0], cy + o[1]);
+                                sum = w.mul_add(img.nearest(cx + o[0], cy + o[1]), sum);
                             }
                             sum
                         }
                         Pass::Blur1d { dir, taps, .. } => {
                             let mut sum = 0.0f32;
                             for (o, w) in taps {
-                                sum += *w * img.bilinear(cx + *o * dir[0], cy + *o * dir[1]);
+                                sum = w.mul_add(img.bilinear_ring(o.mul_add(dir[0], cx), o.mul_add(dir[1], cy), ring), sum);
                             }
                             sum
                         }
@@ -521,16 +561,17 @@ impl BlurPlan {
                 }
             }
             img = Image { rect: dst, px };
+            ring = 1;
         }
         let mut out = vec![0.0f32; (width * height) as usize];
         for y in 0..height {
             for x in 0..width {
                 let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
                 let (sx, sy) = (
-                    cx * self.draw.scale[0] + self.draw.translate[0],
-                    cy * self.draw.scale[1] + self.draw.translate[1],
+                    cx.mul_add(self.draw.scale[0], self.draw.translate[0]),
+                    cy.mul_add(self.draw.scale[1], self.draw.translate[1]),
                 );
-                out[(y * width + x) as usize] = if self.linear { img.bilinear(sx, sy) } else { img.nearest(sx, sy) };
+                out[(y * width + x) as usize] = if self.linear { img.bilinear_ring(sx, sy, ring) } else { img.nearest(sx, sy) };
             }
         }
         out
@@ -540,6 +581,15 @@ impl BlurPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bilinear_uses_integer_channels_before_normalizing() {
+        let img = Image { rect: Rect::ltrb(0, 0, 2, 1), px: vec![0,255] };
+        // 9/256 of 255 is 8.96484375; the sampler rounds it to
+        // 8.9375 code values before converting to normalized float.
+        assert_eq!(img.bilinear(0.5+9.0/256.0, 0.5), 143.0/4080.0);
+        assert_eq!(img.bilinear(0.5+8.0/256.0, 0.5), 8.0/255.0);
+    }
 
     #[test]
     fn step_counts_follow_skia() {

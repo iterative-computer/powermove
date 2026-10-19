@@ -33,6 +33,7 @@ pub mod snapshot;
 pub mod stats;
 pub mod svg;
 pub mod view;
+pub mod wait;
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Sender, channel};
@@ -64,6 +65,26 @@ pub const LEAD_ENV: &str = "POWERMOVE_BRIDGE_LEAD";
 pub const FPS_ENV: &str = "POWERMOVE_BRIDGE_TEST_FPS";
 pub const LOAD_ENV: &str = "POWERMOVE_BRIDGE_TEST_LOAD";
 pub const TRACE_ENV: &str = "POWERMOVE_BRIDGE_TRACE";
+/// Tests only: milliseconds the completion thread waits after the GPU
+/// finished a paused frame before it sends the frame (a frame kept in
+/// flight on purpose; at most 5000). Read only in builds with the
+/// `test-hooks` feature (the crate's own tests); the app ignores it.
+pub const SEND_DELAY_ENV: &str = "POWERMOVE_BRIDGE_TEST_SEND_DELAY_MS";
+
+/// [`SEND_DELAY_ENV`]'s value as a delay, in `test-hooks` builds only.
+#[cfg(feature = "test-hooks")]
+fn send_delay(value: Option<String>) -> Option<std::time::Duration> {
+    value
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(|ms| std::time::Duration::from_millis(ms.min(5_000)))
+}
+
+/// Shipped builds: a stray [`SEND_DELAY_ENV`] never slows a paused frame.
+#[cfg(not(feature = "test-hooks"))]
+fn send_delay(_value: Option<String>) -> Option<std::time::Duration> {
+    None
+}
 /// `1`: keep the stand-in log in the presenter's status (scrub
 /// measurements, docs/engine/scrub.md).
 pub const STAND_IN_LOG_ENV: &str = "POWERMOVE_ENGINE_STAND_IN_LOG";
@@ -97,6 +118,11 @@ pub enum FrameSource {
     /// The session's document, drawn by pm-render.
     Document,
 }
+
+/// Caps how long a viewer frame waits for its window's SVG bucket or
+/// fallback runner pixels, in ms (tests of the wait's timeout; the
+/// defaults are `wait::Bounds::new(None)`).
+pub const EXTERNAL_WAIT_ENV: &str = "POWERMOVE_ENGINE_EXTERNAL_WAIT_MS";
 
 /// `1`: play on the host clock rather than the audio device (machines
 /// without an output, and runs that must not open one).
@@ -155,6 +181,10 @@ impl PresenterConfig {
                     .filter(|p| !p.is_empty())
                     .map(std::path::PathBuf::from),
                 fonts: None,
+                external_wait_cap_us: env(EXTERNAL_WAIT_ENV)
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .map(|ms| i64::from(ms) * 1_000),
+                send_delay: send_delay(env(SEND_DELAY_ENV)),
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),
@@ -782,6 +812,26 @@ mod tests {
 
     const MIB: u64 = 1 << 20;
     const DEFAULT: u64 = pm_render::media::DEFAULT_FRAME_CACHE as u64;
+
+    /// The held-frame knob is parsed and capped in test builds (the
+    /// `test-hooks` feature the crate's dev-dependency turns on); shipped
+    /// builds compile the other `send_delay`, which always answers `None`.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn the_send_delay_knob_is_read_only_with_test_hooks() {
+        use std::time::Duration;
+        assert_eq!(
+            send_delay(Some("600".into())),
+            Some(Duration::from_millis(600))
+        );
+        assert_eq!(
+            send_delay(Some("90000".into())),
+            Some(Duration::from_millis(5_000))
+        );
+        assert_eq!(send_delay(Some("0".into())), None);
+        assert_eq!(send_delay(Some("soon".into())), None);
+        assert_eq!(send_delay(None), None);
+    }
 
     fn presenter() -> (BridgePresenter, Receiver<Command>) {
         let config = PresenterConfig::from_env(EngineProcess::Interactive, |key| match key {

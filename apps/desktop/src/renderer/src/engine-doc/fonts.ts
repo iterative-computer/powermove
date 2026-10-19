@@ -31,6 +31,11 @@ export interface FontProvider {
   whole?(blob: string, index: number): Uint8Array | Promise<Uint8Array>;
   /** Whether both calls return values directly (no promises). */
   readonly sync: boolean;
+  /** This window's font cache seeds (`{ seeds }` JSON; docs/engine/text.md,
+   *  "The renderer's font cache"). */
+  seeds?(): string | Promise<string>;
+  /** Calls `listener` with the window's seeds whenever they change. */
+  onSeedsChanged?(listener: (json: string) => void): void;
 }
 
 const MAX_ROUNDS = 6;
@@ -61,7 +66,7 @@ function loadOnce(wasm: PmWasm, provider: FontProvider, loaded: Set<string>, gen
     if (typeof parsed?.generation === 'number') {
       if (generation.value !== null && generation.value !== parsed.generation) {
         // The registry changed (project fonts): start again from empty answers.
-        wasm.call(() => wasm.x.pm_fonts_clear());
+        wasm.clearFonts();
         loaded.clear();
       }
       generation.value = parsed.generation;
@@ -94,7 +99,46 @@ export class FontLoader {
   /** Set after MAX_FAILURES failures in a row: the provider is unavailable. */
   disabled = false;
 
-  constructor(readonly provider: FontProvider) {}
+  /** The window's latest font cache seeds, applied to every pm-wasm
+   *  instance (a revived one too). */
+  private seedsJson: string | null = null;
+  private seedsTarget: (() => PmWasm | null) | null = null;
+
+  constructor(readonly provider: FontProvider, private readonly seedsChanged: () => void = () => {}) {}
+
+  /**
+   * Follows the window's font cache seeds: asks once, hears changes, and
+   * applies them to `target()` whenever it is ready (and on `applySeeds`
+   * when an instance starts).
+   */
+  watchSeeds(target: () => PmWasm | null): void {
+    this.seedsTarget = target;
+    const take = (json: unknown) => {
+      if (typeof json !== 'string') return;
+      this.seedsJson = json;
+      const wasm = this.seedsTarget?.();
+      if (wasm) this.applySeeds(wasm);
+    };
+    let changes = 0;
+    this.provider.onSeedsChanged?.((json) => { changes++; take(json); });
+    try {
+      const value = this.provider.seeds?.();
+      if (value instanceof Promise) value.then((json) => { if (changes === 0) take(json); }, (error) => console.warn('[engine-doc] font cache seeds unavailable', error));
+      else take(value);
+    } catch (error) {
+      console.warn('[engine-doc] font cache seeds unavailable', error);
+    }
+  }
+
+  /** Gives `wasm` the latest seeds, if any arrived. */
+  applySeeds(wasm: PmWasm): void {
+    if (this.seedsJson === null) return;
+    try {
+      if (wasm.setFontSeeds(this.seedsJson)) this.seedsChanged();
+    } catch (error) {
+      console.warn('[engine-doc] font cache seeds refused', error);
+    }
+  }
 
   /** Resolves when no background load is running (an asynchronous provider). */
   whenIdle(): Promise<void> { return this.busy ?? Promise.resolve(); }
@@ -104,7 +148,7 @@ export class FontLoader {
   private declareOutlines(wasm: PmWasm): void {
     if (!this.provider.whole || this.declared.has(wasm)) return;
     this.declared.add(wasm);
-    wasm.call(() => wasm.x.pm_fonts_outlines(1));
+    wasm.fontOutlines(true);
   }
 
   /**
