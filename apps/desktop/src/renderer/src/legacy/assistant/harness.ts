@@ -74,7 +74,7 @@ const text = (value: any, fallback: any, max: any) => typeof value === 'string' 
 function safeTimes(values: any, fallback: any) {
   const dur = Math.max(.1, Number(PM.proj?.dur) || 10);
   const source = Array.isArray(values) && values.length ? values : fallback;
-  return [...new Set((source || []).map(Number).filter(Number.isFinite)
+  return [...new Set<number>((source || []).map(Number).filter(Number.isFinite)
     .map((value: any) => PM.clamp(value, 0, dur)).map((value: any) => PM.round(value, 3)))].slice(0, 5);
 }
 
@@ -942,6 +942,8 @@ nativeAgentTools?.onRequest((request) => {
 });
 
 PM.AgentHarness = {
+  /** The hidden host invokes the same dispatcher in its project-pinned DOM tab. */
+  dispatch: answerLiveAgentTool,
   MAX_REPAIRS, projectState, defaultTimes, observe, observeVisual, capture, sanitizeProposal,
   describeCommand, sceneSchema, promptContext, execute, rollback, cleanCommand,
   test: { cleanCommand, safeTimes, reviewSchema, handleLiveAgentTool, answerLiveAgentTool },

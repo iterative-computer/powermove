@@ -44,10 +44,23 @@ await build({
   define: { 'process.env.NODE_ENV': '"production"' },
   sourcemap: true,
   logLevel: 'info',
+  loader: { '.py': 'text' },
   banner: { js: '// Powermove serve host. Built from apps/desktop/src/server by scripts/build-serve.mjs.' }
 });
 
+// Node child uses the desktop's engine runtime and supervision protocol.
+await build({ entryPoints: [path.join(desktop, 'src/server/native/engine-child.ts')], bundle: true,
+  platform: 'node', target: 'node22', format: 'cjs', outfile: path.join(outDir, 'native-engine-child.cjs'), sourcemap: true });
+await build({ entryPoints: [path.join(desktop, 'src/main/media-store/hash-worker.ts')], bundle: true,
+  platform: 'node', target: 'node22', format: 'cjs', outfile: path.join(outDir, 'native-media-hash.cjs') });
+
+await build({ entryPoints: [path.join(desktop, 'src/server/native/angle-child.ts')], bundle: true,
+  platform: 'node', target: 'node22', format: 'cjs', external: ['playwright'], outfile: path.join(outDir, 'native-angle-child.cjs') });
+
 await cp(path.join(desktop, 'out/renderer'), path.join(outDir, 'renderer'), { recursive: true });
+await build({ entryPoints: [path.join(desktop, 'src/renderer/src/host/native-hidden.ts')], bundle: true,
+  platform: 'browser', target: 'chrome130', format: 'esm', outfile: path.join(outDir, 'renderer/engine/native-host.js') });
+await writeFile(path.join(outDir, 'renderer/engine/native-runner.html'), '<!doctype html><meta charset="utf-8"><title>Powermove ANGLE runner</title>');
 
 // The document engine: the renderer's core built for Node by Vite (SSR).
 {

@@ -1,3 +1,4 @@
+import { installHiddenCpu } from '../host/hidden-cpu';
 /*
  * The kernel's engine connection (plan sections 6, 15, 18, 19, 21; the
  * Phase 2 tracer bullet), behind "Use New Engine".
@@ -48,6 +49,7 @@ export const ENGINE_VIEWER_SERVICE = 'engine.viewer';
 export const ENGINE_VIEWER_CHANGED = 'powermove:engine-viewer-changed';
 
 export type EngineConnectionHost = {
+  nativeHidden?: boolean;
   nativeEngine?: EngineBridge;
   frameBridge?: FrameBridgeApi;
 };
@@ -105,6 +107,7 @@ export function missedRoute(session: { readonly headless: boolean; readonly rout
 }
 
 export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHost | null | undefined, target: Window = window): EngineConnectionHandle | null {
+  if (host?.nativeHidden) { installHiddenCpu(PM); return null; }
   const native = host?.nativeEngine;
   let enabled = false;
   try {

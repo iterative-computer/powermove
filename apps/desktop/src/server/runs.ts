@@ -45,6 +45,8 @@ export interface RunRecord {
 }
 
 export interface RunHubDeps {
+  /** Native hidden hosts own a project-specific dispatcher without a tab. */
+  native?(projectId: string): RemoteClient | null;
   /** The document engine's client, when connected. */
   engine(): RemoteClient | null;
   /** A live tab to show things on, most recent first. */
@@ -185,6 +187,8 @@ export class RunHub {
   expectResponse(callId: string, owner: RunOwner): void { this.pendingCalls.set(callId, owner); }
 
   targetFor(tool: string, owner: RunOwner): RemoteClient | null {
+    const native = this.deps.native?.(owner.record.projectId);
+    if (native) return native;
     if (tool === '__agent_thread_control') return owner.attachedTabs[0] ?? this.deps.tabs()[0] ?? null;
     if (DISPLAY_TOOLS.has(tool)) return this.projectTab(owner);
     if (TAB_FIRST_TOOLS.has(tool)) {

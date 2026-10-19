@@ -33,7 +33,7 @@
  *   the job engine's export frames are drawn by (main asks the window).
  */
 import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, SnapshotPixels, SnapshotRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
-import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAsk, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
+import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAnswer, type EngineCompatAsk, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
 
 /** Rounds of `needsRenderer` a snapshot goes through before it fails. */
@@ -165,6 +165,8 @@ export type CompatProducer = (request: CompatFrameRequest) =>
   | Promise<{ key: string; width: number; height: number; format: CompatFormat; origin: [number, number]; scale: number; data: Uint8Array } | null>;
 
 export type RenderTransportOptions = {
+  /** CPU hidden tabs use host-owned document sessions for every snapshot. */
+  documentOnly?: boolean;
   native: Pick<EngineBridge, 'snapshotSync' | 'snapshot' | 'onCompatAsk' | 'answerCompat'>;
   /** The session snapshots are taken of (the newest viewer session). */
   session: () => TransportSession | null;
@@ -241,6 +243,7 @@ export class EngineRenderTransport {
 
   /** Whether a session is open to take snapshots of. */
   get ready(): boolean {
+    if (this.options.documentOnly) return !!this.options.windowDocument?.();
     const s = this.options.session();
     return !!s && s.id !== null && !s.closed;
   }
@@ -470,6 +473,7 @@ export class EngineRenderTransport {
   async snapshot(options: EngineSnapshotOptions, cls: Exclude<SnapshotClass, 'sync'> = 'async'): Promise<EngineSnapshot> {
     const native = this.options.native;
     if (!native.snapshot) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no engine snapshots.'), 'snapshot');
+    if (this.options.documentOnly) return this.documentSnapshot(options, cls);
     const uploaded: string[] = [];
     try {
       if (!this.ready) {
@@ -499,6 +503,45 @@ export class EngineRenderTransport {
           if (uploaded.includes(request.key)) throw new EngineSnapshotError('internal', `The engine asked again for program ${request.key.slice(0, 12)}.`);
           session.uploadFallback(await runner.render(request, fallbackTextures(reply, request)));
           uploaded.push(request.key);
+        }
+      }
+      throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
+    } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
+      throw this.fail(error, 'snapshot');
+    }
+  }
+
+  private async documentSnapshot(options: EngineSnapshotOptions, cls: Exclude<SnapshotClass, 'sync'>): Promise<EngineSnapshot> {
+    try {
+      const revision = this.options.revision();
+      const doc = this.options.windowDocument?.();
+      if (!doc) throw new EngineSnapshotError('noSession', 'The native document is not ready.');
+      const body = doc.full();
+      const uploaded: string[] = [];
+      let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
+      let svgPixels: { key: SvgRasterKey; data: Uint8Array }[] = [];
+      for (let round = 0; round < MAX_ROUNDS; round++) {
+        const reply = await this.options.native.snapshot!({ ...this.request(options, cls, uploaded, true, revision), session: null,
+          document: { id: doc.id, revision: body.revision, hash: body.hash, json: body.json }, fallbackPixels, svgPixels });
+        fallbackPixels = []; svgPixels = [];
+        if (reply.status === 'rendered') { this.stats[cls]++; return this.result(reply); }
+        if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
+        if (reply.status === 'failed') throw failure(reply);
+        this.stats.rounds++;
+        const unmet = this.compatUnmet(reply.compat); if (unmet) throw unmet;
+        const rasters = this.options.svgRasters?.();
+        for (const request of reply.svg ?? []) {
+          const key = svgUploadKey(request.key);
+          if (!rasters || uploaded.includes(key)) throw new EngineSnapshotError('unavailable', 'The requested SVG raster is unavailable.');
+          svgPixels.push({ key: request.key, data: await rasters.draw(request) }); uploaded.push(key);
+        }
+        const runner = this.options.fallbackRunner();
+        for (const request of reply.fallback) {
+          if (!runner || uploaded.includes(request.key)) throw new EngineSnapshotError('unavailable', 'The requested ANGLE program is unavailable.');
+          const pixels = await runner.render(request, fallbackTextures(reply, request));
+          fallbackPixels.push({ key: pixels.key, width: pixels.width, height: pixels.height,
+            rgba16f: new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength) }); uploaded.push(request.key);
         }
       }
       throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
@@ -649,21 +692,22 @@ export class EngineRenderTransport {
     };
   }
 
+  /** A local hidden host asks this same producer without an Electron port. */
+  async compatibility(request: CompatFrameRequest): Promise<EngineCompatAnswer> {
+    const no = (message: string): EngineCompatAnswer => ({ ask: 0, status: 'unavailable', message });
+    if (request.document !== this.options.document()) return no(OTHER_DOCUMENT_OPEN);
+    const producer = this.producers.get(request.source);
+    if (!producer) return no(`No ${request.source === 'rasterOverride' ? 'raster override' : request.source === 'svgImage' ? 'SVG rasterizer' : 'compatibility context'} draws layer ${request.layer} in this window.`);
+    try {
+      const pixels = await producer(request);
+      return pixels ? { ask: 0, status: 'pixels', ...pixels } : no(`Layer ${request.layer} has no compatibility pixels at that frame.`);
+    } catch (error) { return no(error instanceof Error ? error.message : String(error)); }
+  }
   private async answerAsk(ask: EngineCompatAsk): Promise<void> {
     const answer = this.options.native.answerCompat;
-    if (!answer) return;
-    const no = (message: string) => answer({ ask: ask.ask, status: 'unavailable', message });
-    if (ask.request.document !== this.options.document()) return no(OTHER_DOCUMENT_OPEN);
-    const producer = this.producers.get(ask.request.source);
-    if (!producer) return no(`No ${ask.request.source === 'rasterOverride' ? 'raster override' : ask.request.source === 'svgImage' ? 'SVG rasterizer' : 'compatibility context'} draws layer ${ask.request.layer} in this window.`);
-    try {
-      const pixels = await producer(ask.request);
-      if (!pixels) return no(`Layer ${ask.request.layer} has no compatibility pixels at that frame.`);
-      answer({ ask: ask.ask, status: 'pixels', ...pixels });
-    } catch (error) {
-      no(error instanceof Error ? error.message : String(error));
-    }
+    if (answer) answer({ ...await this.compatibility(ask.request), ask: ask.ask });
   }
+
 }
 
 /** Straight alpha from premultiplied RGBA8 (canvas `ImageData` takes straight). */

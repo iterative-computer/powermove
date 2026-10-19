@@ -23,6 +23,7 @@ const SYNC_DEBOUNCE_MS = 250;
 interface RemotePatch { projectId: string; seq: number; patches: Patch[]; from: number }
 
 type Registry = {
+  RemoteSync?: { flush(): Promise<void> };
   proj?: { id?: string; assets?: Record<string, { id: string }> } & Record<string, unknown>;
   assets?: { get(id: string): unknown };
   restoreProjectAssets?(project: unknown, warn?: boolean): Promise<unknown>;
@@ -42,6 +43,7 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
   let synced = '';
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let sending: Promise<void> = Promise.resolve();
+  let failure: unknown = null;
 
   const current = (): string | null => (PM.isHomeProject?.() ? null : PM.proj?.id ?? null);
   const snapshot = (): string => { try { return JSON.stringify(PM.proj ?? null); } catch { return ''; } };
@@ -72,7 +74,7 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
     if (!patches.length) return;
     sending = sending
       .then(() => link.invoke<number>(WEB.syncPatch, { projectId, patches }))
-      .then((next) => { seq = next; }, (error) => console.warn('[remote-sync] patch rejected', error));
+      .then((next) => { seq = next; }, (error) => { failure = error; console.warn('[remote-sync] patch rejected', error); });
   };
   const schedule = (): void => {
     if (flushTimer || !joined) return;
@@ -132,8 +134,16 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
     track();
   });
 
+  const sync = { flush: async () => {
+    await joining;
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    flush(); await sending;
+    if (failure) throw new Error(`project-sync-failed: ${String(failure)}`);
+  } };
+  PM.RemoteSync = sync;
   track();
   return () => {
+    if (PM.RemoteSync === sync) delete PM.RemoteSync;
     for (const off of offs) off();
     offRemote();
     offReconnect();

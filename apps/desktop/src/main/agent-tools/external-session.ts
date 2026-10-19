@@ -21,7 +21,7 @@ export interface ExternalSessionOptions {
   apiPackFiles(): Promise<AgentApiPackFile[]>;
   attach(request: CodexRunRequest, session: PowermoveAgentToolSession): Promise<() => Promise<void>>;
   refreshExtensions?(ids: string[]): Promise<void>;
-  importMedia?(owner: WebContents, args: Record<string, unknown>): Promise<unknown>;
+  importMedia?(owner: WebContents, args: Record<string, unknown>, call: (tool: string, args: Record<string, unknown>) => Promise<AgentToolResponseEvent>): Promise<unknown>;
 }
 
 /** One external connection owns one private workspace and transaction. */
@@ -84,7 +84,7 @@ export class ExternalAgentSession {
         ? { ...z.object({ path: z.string().min(1).max(4096).refine(value => /^(\/|[A-Za-z]:[\\/])/.test(value) && !value.includes('\0')), folderId: z.string().nullable().optional(), expectedFingerprint: z.string().max(200).optional(), storage: z.enum(['copy', 'link']).optional() }).strict().parse(args), assetOnly: true }
         : z.object({ path: z.string().min(1), at: z.number().finite().min(0).optional() }).strict().parse(args);
       if (!this.options.importMedia) throw new Error('Direct timeline import requires a hidden host. Use import_media and edit_video in the desktop connection.');
-      return this.options.importMedia(session.owner, { ...input, projectId: this.request?.projectId });
+      return this.options.importMedia(session.owner, { ...input, projectId: this.request?.projectId }, (tool, arguments_) => this.options.bridge.callTool(session, tool, arguments_, this.workspace?.root));
     }
     const response = await this.options.bridge.callTool(session, name, args, this.workspace?.root);
     return response;

@@ -1,4 +1,4 @@
-import { requireHiddenHostRuntime } from './hidden-engine-policy';
+import { nativeHiddenHostEnabled } from './hidden-engine-policy';
 import { mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
@@ -7,7 +7,7 @@ import { connectMcpHost } from '../main/agent-tools/mcp-client.mjs';
 import { startMcpStdio } from '../main/agent-tools/mcp-stdio.mjs';
 import { EXTERNAL_MCP_INSTRUCTIONS } from '../main/agent-tools/external-spec';
 
-async function profileLock(userData: string) {
+export async function profileLock(userData: string) {
   await mkdir(userData, { recursive: true, mode: 0o700 });
   const file = path.join(userData, 'mcp-host.lock');
   const acquire = async () => { const handle = await open(file, 'wx', 0o600); await handle.writeFile(String(process.pid)); await handle.close(); };
@@ -27,7 +27,10 @@ async function profileLock(userData: string) {
 /** Runtime rendering is intentionally done in Chromium using the production
  * editor, never a parallel implementation of Powermove's document model. */
 export async function runHeadlessMcp(options: ServeOptions): Promise<void> {
-  await requireHiddenHostRuntime(options.userData);
+  if (await nativeHiddenHostEnabled(options.userData)) {
+    const { runNativeHiddenMcp } = await import('./native/mcp');
+    return runNativeHiddenMcp(options);
+  }
   const unlock = await profileLock(options.userData);
   let browser: Browser | undefined, host: RunningServer | undefined, page: Page | undefined;
   let external: { close(): Promise<void> } | undefined;
