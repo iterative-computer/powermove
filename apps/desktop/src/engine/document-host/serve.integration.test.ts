@@ -106,3 +106,9 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host beh
     }
   }, 120_000);
 });
+
+it('sends the session cookie only to the serve host it was given', async () => {
+  for (const route of ['//elsewhere.example/ext/x/bundle.js', 'https://elsewhere.example/ext/x/bundle.js', 'http://127.0.0.1:1/ext/x/bundle.js']) {
+    await expect(hostFetch('wss://127.0.0.1:4567/link', 'token', route)).rejects.toThrow(/not on the serve host/);
+  }
+});

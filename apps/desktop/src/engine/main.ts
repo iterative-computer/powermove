@@ -51,7 +51,11 @@ export interface EngineToolRequest extends AgentToolRequestEvent { projectId: st
  */
 export function hostFetch(url: string, token: string, path: string): Promise<string> {
   const base = new URL(url);
-  const target = new URL(path, `${base.protocol === 'wss:' ? 'https:' : 'http:'}//${base.host}`);
+  const origin = `${base.protocol === 'wss:' ? 'https:' : 'http:'}//${base.host}`;
+  const target = new URL(path, origin);
+  // The session cookie goes only to the host this supervisor was given
+  // (a path like `//elsewhere/x` would otherwise resolve to another host).
+  if (target.origin !== new URL(origin).origin) return Promise.reject(new Error(`${path}: not on the serve host ${origin}`));
   const request = target.protocol === 'https:' ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
     const req = request(target, { method: 'GET', headers: { cookie: `pm_session=${token}` }, rejectUnauthorized: false }, (response) => {
