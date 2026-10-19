@@ -295,6 +295,15 @@ export function buildClosureCases(): RenderCase[] {
     'rgb(from #3478f6 r g b / 50%)', 'hsl(from red calc(h + 120) s l)', 'oklch(from #ff3b30 calc(l - 0.1) c h)',
     'rgb(calc(255 / 2) 0 calc(100 + 20))', 'rgb(127.5 64.25 0)', 'hsl(210.5 50.5% 40.25%)',
     'currentcolor', 'CanvasText', 'Canvas', 'AccentColor', 'LinkText', 'GrayText',
+    'light-dark(red, blue)', 'light-dark(oklch(60% 0.2 30), #fff)',
+    'ActiveBorder', 'ActiveCaption', 'ActiveText', 'AppWorkspace', 'Background',
+    'ButtonBorder', 'ButtonFace', 'ButtonHighlight', 'ButtonShadow', 'ButtonText',
+    'CaptionText', 'Field', 'FieldText', 'Highlight', 'HighlightText', 'InactiveBorder',
+    'InactiveCaption', 'InactiveCaptionText', 'InfoBackground', 'InfoText', 'Mark', 'MarkText',
+    'Menu', 'MenuText', 'Scrollbar', 'SelectedItem', 'SelectedItemText', 'ThreeDDarkShadow',
+    'ThreeDFace', 'ThreeDHighlight', 'ThreeDLightShadow', 'ThreeDShadow', 'VisitedText',
+    'Window', 'WindowFrame', 'WindowText',
+
   ];
   for (const color of COLORS) addText('css-color', text({ text: 'Colors', size: 48, color }));
   return cases;

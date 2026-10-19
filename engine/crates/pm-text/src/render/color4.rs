@@ -1628,6 +1628,7 @@ fn color_value(t: &Tok) -> Option<Color> {
         Tok::Hash(h) => super::color::hex_rgba(h).map(legacy_from_rgba),
         Tok::Ident(name) => match name.as_str() {
             "currentcolor" => Some(Color::legacy(0, 0, 0, 1.0)),
+            "highlight" => Some(Color::legacy(128, 188, 254, 0.6)),
             other => system_color(other)
                 .map(|[r, g, b]| Color::legacy(r, g, b, 1.0))
                 .or_else(|| super::color::named_rgba(other).map(legacy_from_rgba)),
@@ -1646,10 +1647,19 @@ fn legacy_from_rgba(c: Rgba) -> Color {
 /// ones measured on the closure capture.
 fn system_color(name: &str) -> Option<[u8; 3]> {
     Some(match name {
-        "canvastext" => [0, 0, 0],
-        "canvas" => [255, 255, 255],
+        "canvastext" | "activeborder" | "buttonborder" | "buttontext" | "captiontext"
+        | "fieldtext" | "highlighttext" | "inactiveborder" | "infotext" | "marktext"
+        | "menutext" | "selecteditemtext" | "threeddarkshadow" | "threedhighlight"
+        | "threedlightshadow" | "threedshadow" | "windowframe" | "windowtext" => [0, 0, 0],
+        "canvas" | "activecaption" | "appworkspace" | "background" | "field"
+        | "inactivecaption" | "infobackground" | "menu" | "scrollbar" | "window" => [255, 255, 255],
+        "buttonface" | "buttonhighlight" | "buttonshadow" | "threedface" => [239, 239, 239],
         "linktext" => [0, 0, 238],
-        "graytext" => [128, 128, 128],
+        "graytext" | "inactivecaptiontext" => [128, 128, 128],
+        "activetext" => [255, 0, 0],
+        "mark" => [255, 255, 0],
+        "selecteditem" => [179, 215, 255],
+        "visitedtext" => [85, 26, 139],
         _ => return None,
     })
 }

@@ -332,6 +332,12 @@ pub fn classify(value: &str) -> Result<Rgba, Rejected> {
         return hex(h).ok_or(Rejected::Invalid);
     }
     let lower = s.to_ascii_lowercase();
+    // Blink rejects light-dark() on the detached normal-scheme canvases
+    // used by the rasterizer; the setter keeps the restored paint.
+    if lower.starts_with("light-dark(") {
+        return Err(Rejected::Invalid);
+    }
+
     if let Some((name, rest)) = lower.split_once('(') {
         let name = name.trim_end();
         let parsed = rest.trim_end().strip_suffix(')').and_then(|inner| {
@@ -371,6 +377,9 @@ pub fn classify(value: &str) -> Result<Rgba, Rejected> {
     }
     if let Some(c) = super::color4::parse(&lower) {
         return Ok(c);
+    }
+    if lower == "highlight" {
+        return Ok([128.0 / 255.0, 188.0 / 255.0, 254.0 / 255.0, 0.6]);
     }
     if DOCUMENT_COLORS.contains(&lower.as_str()) {
         return Err(Rejected::Unsupported);
@@ -690,9 +699,9 @@ mod tests {
         ] {
             assert!(classify(s).is_ok(), "{s}");
         }
-        // Valid colors not reproduced: refused.
-        for s in ["light-dark(red, blue)", "ButtonFace", "Highlight"] {
-            assert_eq!(classify(s), Err(Rejected::Unsupported), "{s}");
+        assert_eq!(classify("light-dark(red, blue)"), Err(Rejected::Invalid));
+        for s in ["ButtonFace", "Highlight"] {
+            assert!(classify(s).is_ok(), "{s}");
         }
         // Not colors to Chromium's canvas.
         assert_eq!(classify("AccentColor"), Err(Rejected::Invalid));

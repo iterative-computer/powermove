@@ -19,7 +19,7 @@ mod support;
 #[cfg(target_os = "macos")]
 fn main() {
     use pm_protocol::color::Precision;
-    use pm_render::{Feature, RenderError, Renderer};
+    use pm_render::Renderer;
     use serde_json::{Value, json};
     use support::doc::{ch, layer, no_fill, project};
 
@@ -69,6 +69,19 @@ fn main() {
 
     // Equal scenes: the color a string draws is the color of `expected`.
     let same = [
+        (
+            "detached light-dark() retains black",
+            "text",
+            text("light-dark(red, blue)"),
+            text("#000000"),
+        ),
+        ("ButtonFace", "text", text("ButtonFace"), text("#efefef")),
+        (
+            "Highlight",
+            "text",
+            text("Highlight"),
+            text("rgba(128,188,254,0.6)"),
+        ),
         (
             "hsl() as hex",
             "text",
@@ -187,76 +200,27 @@ fn main() {
         ("lab() text", "text", text("lab(50% 40 59.5)")),
         ("color() text", "text", text("color(display-p3 1 0 0)")),
         ("currentcolor text", "text", text("currentcolor")),
-        ("oklch() range style", "text", ranged("#00FF00", "oklch(70% 0.1 200)")),
+        (
+            "oklch() range style",
+            "text",
+            ranged("#00FF00", "oklch(70% 0.1 200)"),
+        ),
         (
             "color-mix() caption fill",
             "captions",
-            caption("color-mix(in srgb, red, blue)", "#FFD43B", "#202020", "#000000", true),
+            caption(
+                "color-mix(in srgb, red, blue)",
+                "#FFD43B",
+                "#202020",
+                "#000000",
+                true,
+            ),
         ),
     ] {
         match raster(&mut r, ty, &d) {
             Ok(Some(_)) => println!("{name:<72} drawn"),
             Ok(None) => failures.push(format!("{name}: text_raster drew nothing")),
             Err(e) => failures.push(format!("{name}: text_raster refused: {e}")),
-        }
-    }
-    // Valid CSS colors the engine does not reproduce refuse the layer.
-    let refused = [
-        ("light-dark() text", "text", text("light-dark(red, blue)")),
-        ("system color text", "text", text("ButtonFace")),
-        (
-            "light-dark() range style",
-            "text",
-            ranged("#00FF00", "light-dark(#000, #fff)"),
-        ),
-        (
-            "system color caption fill",
-            "captions",
-            caption("Highlight", "#FFD43B", "#202020", "#000000", true),
-        ),
-    ];
-    let plain = text("#F2F2F2");
-    let request = pm_render::RenderRequest::sized(
-        pm_protocol::common::Size::new(640, 360),
-        Precision::Float16,
-    );
-    let resolver = pm_render::MapResolver::default();
-    for (name, ty, d) in &refused {
-        let is_color_refusal = |e: &RenderError| match e {
-            RenderError::Unsupported(u) => u.iter().any(|u| {
-                matches!(&u.feature, Feature::Text(w) if w.starts_with("text color"))
-                    && u.layer.as_deref() == Some("l")
-            }),
-            _ => false,
-        };
-        match raster(&mut r, ty, d) {
-            Err(e) if is_color_refusal(&e) => println!("{name:<72} refused ({e})"),
-            Err(e) => failures.push(format!("{name}: text_raster: unexpected error {e}")),
-            Ok(_) => failures.push(format!("{name}: text_raster drew it")),
-        }
-        // Nothing is left for the next layer.
-        if let Err(e) = raster(&mut r, "text", &plain) {
-            failures.push(format!("{name}: the next text_raster failed: {e}"));
-        }
-        match r.render(
-            &doc_of(ty, d),
-            "Ptest-root",
-            support::ticks(1.05),
-            &request,
-            &resolver,
-        ) {
-            Err(e) if is_color_refusal(&e) => {}
-            Err(e) => failures.push(format!("{name}: render: unexpected error {e}")),
-            Ok(_) => failures.push(format!("{name}: render drew it")),
-        }
-        if let Err(e) = r.render(
-            &doc_of("text", &plain),
-            "Ptest-root",
-            support::ticks(1.05),
-            &request,
-            &resolver,
-        ) {
-            failures.push(format!("{name}: the next render failed: {e}"));
         }
     }
     for f in &failures {
