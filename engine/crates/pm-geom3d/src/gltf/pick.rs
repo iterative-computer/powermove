@@ -432,6 +432,10 @@ pub struct Picker {
     tris: Vec<Option<(Vec<[u32; 3]>, Bvh)>>,
     /// `geometry.boundingSphere` per geometry.
     spheres: Vec<(Vec3, f64)>,
+    /// Per object: a skinned mesh's `boundingBox` as the importer leaves it
+    /// (`loadGltf`'s `Box3.setFromObject(scene)` computes it at the loaded
+    /// pose; every runtime clone copies it and never recomputes it).
+    loaded_boxes: Vec<Option<(Vec3, Vec3)>>,
 }
 
 /// A model posed under a layer at a time (re-posed vertices for skinned
@@ -473,11 +477,32 @@ impl Picker {
             .iter()
             .map(|g| g.bounding_sphere())
             .collect();
+        // The loaded pose: `scene.updateMatrixWorld()` from the glTF scene.
+        let rest = Pose::rest(&model);
+        let rest_world = pose::world(&model, &rest, None);
+        let loaded_boxes = model
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| match &o.kind {
+                ObjectKind::Drawable(d) if d.skin.is_some() => {
+                    pose::local_box(&model, i, d, &rest, &rest_world)
+                }
+                _ => None,
+            })
+            .collect();
         Picker {
             model,
             tris,
             spheres,
+            loaded_boxes,
         }
+    }
+
+    /// A skinned drawable's `boundingBox` as every runtime clone of the
+    /// imported model holds it (the loaded pose), in its local space.
+    pub fn loaded_box(&self, object: usize) -> Option<(Vec3, Vec3)> {
+        self.loaded_boxes.get(object).copied().flatten()
     }
 
     /// Poses the model under the layer matrix `layer` at mixer time `time`.
@@ -543,7 +568,8 @@ impl Picker {
 
     /// The closest hit along the world ray within `[near, far]`; `side`
     /// gives each drawable's material side, `skip` drawables to ignore
-    /// (materials all at opacity 0, hidden).
+    /// (materials all at opacity 0, hidden). Skinned bounding volumes are
+    /// those of the current pose.
     pub fn pick(
         &self,
         posed: &Posed,
@@ -552,6 +578,35 @@ impl Picker {
         far: f64,
         side: &dyn Fn(usize) -> Side,
         skip: &dyn Fn(usize) -> bool,
+    ) -> Option<Hit> {
+        self.pick_with(posed, ray, near, far, side, skip, false)
+    }
+
+    /// [`Picker::pick`] as today's runtime raycasts a clone of the imported
+    /// model: a skinned mesh's box pre-test uses the box the importer
+    /// computed at the loaded pose ([`Picker::loaded_box`]).
+    pub fn pick_as_runtime(
+        &self,
+        posed: &Posed,
+        ray: &Ray,
+        near: f64,
+        far: f64,
+        side: &dyn Fn(usize) -> Side,
+        skip: &dyn Fn(usize) -> bool,
+    ) -> Option<Hit> {
+        self.pick_with(posed, ray, near, far, side, skip, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pick_with(
+        &self,
+        posed: &Posed,
+        ray: &Ray,
+        near: f64,
+        far: f64,
+        side: &dyn Fn(usize) -> Side,
+        skip: &dyn Fn(usize) -> bool,
+        loaded_boxes: bool,
     ) -> Option<Hit> {
         let model = &self.model;
         let mut best: Option<Hit> = None;
@@ -579,7 +634,7 @@ impl Picker {
                     let Some((tris, rest_bvh)) = &self.tris[d.geometry] else {
                         continue;
                     };
-                    let (positions, bvh, (center, radius, bbox)): (Option<&[Vec3]>, &Bvh, _) =
+                    let (positions, bvh, (center, radius, mut bbox)): (Option<&[Vec3]>, &Bvh, _) =
                         match &posed.deformed[i] {
                             Some(x) => (Some(&x.positions), &x.bvh, x.bounds),
                             None => {
@@ -587,6 +642,9 @@ impl Picker {
                                 (None, rest_bvh, (c, r, g.bounding_box))
                             }
                         };
+                    if loaded_boxes && d.skin.is_some() {
+                        bbox = self.loaded_box(i);
+                    }
                     let vertex = |k: u32| -> Vec3 {
                         match positions {
                             Some(p) => p[k as usize],

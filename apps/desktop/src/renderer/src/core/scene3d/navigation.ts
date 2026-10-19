@@ -41,11 +41,22 @@ export function frameView(start:ViewPose,box:THREE.Box3,fov:number,aspect:number
 const comp=(PM:any)=>PM.curComp?.()||PM.proj;
 /** World bounds of the selection (or everything, like Blender's View All); lights and cameras count as points. */
 export function viewportBounds(PM:any,selected=true,exclude:string|null=null):THREE.Box3 {
-  const world=compositionRuntime(PM),ids=new Set<string>(selected?selected3D(PM):[]),box=new THREE.Box3();
-  for(const layer of comp(PM).layers){
-    const role=layer3DRole(layer);if(!role||!PM.active(layer,PM.time)||layer.id===exclude)continue;
-    if(selected&&!ids.has(layer.id)&&!(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id)))continue;
-    if(role==='object'){const object=world.objects.get(layer.id);if(object)box.expandByObject(object);}
+  const ids=new Set<string>(selected?selected3D(PM):[]),box=new THREE.Box3();
+  const members=comp(PM).layers.filter((layer:any)=>{
+    const role=layer3DRole(layer);if(!role||!PM.active(layer,PM.time)||layer.id===exclude)return false;
+    return !selected||ids.has(layer.id)||(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id));
+  });
+  // With the native evaluator the objects' boxes come from the engine's
+  // geometry (pm-wasm); otherwise from the composition's three.js runtime.
+  const engine=PM.EngineDoc?.enabled?PM.EngineDoc.api:null;
+  const objects=members.filter((layer:any)=>layer3DRole(layer)==='object').map((layer:any)=>layer.id);
+  const native=engine&&objects.length?engine.objectBoxes3d(objects,PM.time):null;
+  const world=native||!objects.length?null:compositionRuntime(PM);
+  for(const layer of members){
+    if(layer3DRole(layer)==='object'){
+      if(native){const b=native[layer.id];if(b)box.union(new THREE.Box3(new THREE.Vector3(b[0],b[1],b[2]),new THREE.Vector3(b[3],b[4],b[5])));}
+      else{const object=world?.objects.get(layer.id);if(object)box.expandByObject(object);}
+    }
     else box.expandByPoint(new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,layer,PM.time))));
   }
   return box;

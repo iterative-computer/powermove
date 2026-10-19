@@ -783,6 +783,25 @@ impl<'d> Scope<'_, 'd> {
         Ok(ids)
     }
 
+    /// `new Box3().expandByObject(runtime.objects.get(id))` for each id of
+    /// the composition's runtime at `time` (`viewportBounds`): `None` for an
+    /// id the runtime does not hold or whose box is empty.
+    pub fn object_boxes3d(
+        &mut self,
+        ids: &[String],
+        time: f64,
+        host: &mut dyn LayerHost,
+    ) -> JsResult<Vec<Option<Box3>>> {
+        let Some(g) = host.geometry() else {
+            return Err(host_only("3D object boxes"));
+        };
+        let scene = self.composition_scene3d(time, g)?;
+        Ok(ids
+            .iter()
+            .map(|id| scene.scene.object_box(id).filter(|b| !b.is_empty()))
+            .collect())
+    }
+
     /// The camera a pick or bound uses: the editor's, or the render camera.
     fn view3d(&self, scene: &CompositionScene3d, g: &dyn Geometry3d) -> Camera {
         g.view_camera().unwrap_or(scene.camera)

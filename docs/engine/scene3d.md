@@ -385,10 +385,11 @@ Apple M4 Max, macOS 27, 2026-10-18, load average about 9 to 12.
 
 | Test | What | Result |
 |---|---|---|
-| `engine-doc/scene3d-geometry.test.ts` (real pm-wasm, dual-answer mode against today's `GL.pick`, `GL.bounds`, `PM.groupBounds` with three.js r180) | 5 seeded compositions (every primitive, lathe, extrude with and without bevel, a mesh source with groups and one or two slots, a hand-built animated GLB, an OBJ model, the missing box, untextured Khronos models: `BoxAnimated`, `RiggedSimple`, `RiggedFigure`, `BrainStem`, `RecursiveSkeletons`, `AnimatedMorphCube`, `SimpleInstancing`; keyframed transforms, opacity 0, double-sided, inactive, solo, layer opacity, 2D barriers, plain and model groups, a camera layer; a legacy scene layer with a hierarchy and models, a mesh definition layer, one with an invalid empty background) at 4 times, in the camera view, the editor view (orbited, then orthographic), and Local View | 7,328 compared answers (picks, bounds, group bounds), 0 mismatches, 0 fragile differences, 0 fallbacks; picks hit 472 object layers and 420 extension scenes, 1,009 throws agreed (the invalid background) |
+| `engine-doc/scene3d-geometry.test.ts` (real pm-wasm, dual-answer mode against today's `GL.pick`, `GL.bounds`, `PM.groupBounds` with three.js r180) | 5 seeded compositions (every primitive, lathe, extrude with and without bevel, a mesh source with groups and one or two slots, a hand-built animated GLB, an OBJ model, the missing box, untextured Khronos models: `BoxAnimated`, `RiggedSimple`, `RiggedFigure`, `BrainStem`, `RecursiveSkeletons`, `AnimatedMorphCube`, `SimpleInstancing`; keyframed transforms, opacity 0, double-sided, inactive, solo, layer opacity, 2D barriers, plain and model groups, a camera layer; a legacy scene layer with a hierarchy and models, a mesh definition layer, one with an invalid empty background) at 4 times, in the camera view, the editor view (orbited, then orthographic), and Local View | 6,128 compared answers (picks, bounds, group bounds), 0 mismatches beyond the dual-answer classes (identity for picks; 1e-6 for bounds, amendment 20), 0 fragile differences, 0 fallbacks; picks hit 373 object layers and 341 extension scenes, 807 throws agreed (the invalid background) |
 | same | Animated rocket and staircase recipes: `compositionScene` from pm-wasm against today's at 5 times; picks and bounds in the camera and editor views | Scenes equal (every number exact, key order aside), 0 mismatches, 0 fallbacks |
 | same | Model assets fetched once; a relinked record fetched again; a removed one draws the missing box | Pass |
-| same | Pick latency in wasm (V8, Node), the 7 Khronos models above plus a random composition, a new time per pick (skinned models re-posed), 400 picks, editor view | p50 2.37 ms, p95 2.61 ms, max 3.73 ms |
+| same | Pick latency in wasm (V8, Node), the 7 Khronos models above plus a random composition, a new time per pick (skinned models re-posed), 400 picks, editor view | p50 2.15 ms, p95 2.27 ms, max 3.73 ms |
+| same | `viewportBounds`' boxes (`Box3.expandByObject`) from pm-wasm (`objectBoxes3d`) against three.js on 3 compositions with the Khronos models, 3 times | 138 boxes, every number exact (difference 0) |
 | `pm-geom3d` `query` unit tests | Nearest object, depth-set ids, invisible and transparent objects, slots and groups (throw, nothing, hit), back faces by side, projected bounds, `setFromObject`, orthographic rays | Pass |
 | `pm-eval` `tests/layers_unit.rs` `object_picks_raycast_the_scene` | A box seen by the studio camera, a 2D layer below, no geometry host (`HostOnly`), Local View | Pass |
 | `pm-render` `tests/corpus.rs`, capture `threed-modelgroup-20261018-165040` (new corpus project `3d/model-group`, captured through the app) | Animated rocket and staircase recipes in turning 3D groups at 0, 1.5, 3 s | 3 frames: 100% exact outside 3D, 3D bar ≤ 2 CV 100%, max 1 CV, SSIM 0.99998 |
@@ -396,6 +397,8 @@ Apple M4 Max, macOS 27, 2026-10-18, load average about 9 to 12.
 | `pm-render` `tests/blender_snapshots.rs`, corpus v1 | Regression | 158 compared, 135 equal, 23 not built (`3d/gltf`, `3d/gltf-materials`, imported models), as before |
 | `pm-wasm` `tests/geometry.rs` | Models asked for once, the missing box, an OBJ that does not parse (kept missing, named), the editor camera from behind, Local View | Pass |
 | `core/scene3d/engine-camera.test.ts`, `viewer/engine-present/view-params.test.ts` | The editor camera as contract 2's camera (perspective and orthographic), Local View in the snapshot and the view override | Pass |
+| `e2e/viewport3d.spec.ts` with `POWERMOVE_NEW_ENGINE=1` (under the Electron lock) | Blender keys (transform, duplicate, hide, select, key), Properties tabs, box select, X-ray, Walk, Local View, Zoom Border, area lights, Edit Mode | 4 of 4 pass |
+| `e2e/scene3d.spec.ts` with `POWERMOVE_NEW_ENGINE=1` | | 4 of 8 pass (navigation and framing, portable glTF export, OBJ bundles, normal maps and shadows); 4 fail where the spec reads today's WebGL canvas (`#gl`, `PM.GL.canvas` pixel sums of 0 while the engine draws the viewer) or calls `PM.Export.snapshot` before the window's engine session exists (`noSession`); none fails at a pick, bound, or gesture |
 | `pm-render` `tests/corpus.rs`, `PM_RENDER_ONLY=3d/` (v1 and render captures) | Regression after the capability changes | 30 frames, 0 failed (`3d/motion-blur`, `3d/transparency` still routed by motion blur and masks) |
 | `pm-render` `scene3d_document`, `headless`, `scene3d_layering`, `scene3d_resources` | Capability expectations updated (recipe parts and 3D objects in 3D groups draw) | Pass |
 | `pm-geom3d`, `pm-eval`, `pm-edit`, `pm-wasm` test suites; clippy `-D warnings` | | Pass |
@@ -404,9 +407,14 @@ Apple M4 Max, macOS 27, 2026-10-18, load average about 9 to 12.
 
 - Hits at exactly equal distances keep scene order, not the runtime's
   object insertion history.
-- A skinned model's bounding sphere and box are those of the current pose;
-  three.js caches the first pose it saw (S7 defect 5), so today a ray can
-  miss a skinned model that moved outside its first-pose sphere.
+- A skinned mesh's bounding box is the one the importer computed at the
+  loaded pose (`loadGltf`'s `Box3.setFromObject` fills
+  `SkinnedMesh.boundingBox`, and every runtime clone copies it), as today,
+  for the pick pre-test and `setFromObject` (`Picker::loaded_box`). Its
+  bounding sphere is the current pose's: three.js computes it once, at the
+  first frustum test or raycast of the runtime's clone, so today a ray can
+  miss a skinned model that moved outside the sphere of the first pose the
+  runtime drew.
 - The local bounding-box pre-test always runs (three.js runs it only once
   some bounds question computed the box). It only prunes.
 - Stored legacy scenes that fail `parseScene` (today every question about
@@ -420,6 +428,9 @@ Apple M4 Max, macOS 27, 2026-10-18, load average about 9 to 12.
 
 ### What remains (3D lane, Phase 3c)
 
+- Viewport framing (`viewportBounds`: View Selected, View All) reads the
+  engine's boxes with the native evaluator on; Edit Mode and the other
+  controller code below still read three.js.
 - The 3D viewport chrome (`core/scene3d/overlay.ts`) still renders the
   scene with three.js for occlusion and selection masks; it does not yet
   read the engine's depth and id surface.

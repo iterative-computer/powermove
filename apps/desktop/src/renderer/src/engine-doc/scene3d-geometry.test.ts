@@ -23,6 +23,8 @@ import { createScene, parseScene, SCENE3D_DEFINITION } from '../core/scene3d/sch
 import { editScene } from '../core/scene3d/operations';
 import { setViewportMode, orbitViewStep, enterLocalView, exitLocalView, toggleViewProjection } from '../core/scene3d/viewport';
 import { loadGltf } from '../core/scene3d/import-model';
+import { compositionRuntime } from '../core/scene3d/service';
+import * as THREE from 'three';
 import { parseObj } from '../kernel/obj';
 
 const MODULE = fileURLToPath(new URL('../../public/engine/pm_wasm.wasm', import.meta.url));
@@ -325,6 +327,41 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     expect(hits.scene).toBeGreaterThan(20);
     expect(hits.threw).toBeGreaterThan(0);
   }, 600_000);
+
+  it('frames the viewport with the engine boxes three.js computes', async () => {
+    let compared = 0, worst = 0, inexact = 0;
+    for (const seed of [11, 12, 13]) {
+      const { PM, doc } = await editor();
+      const random = rng(seed);
+      const models = await addModels(PM);
+      const ids = populate(PM, random, ['cube', 'wedge', ...models]);
+      for (const name of models) editScene(PM, { operation: 'add_object', object: { id: `k${models.indexOf(name)}`, source: { assetId: name }, p: { x: random() * 2 } } });
+      PM.touch();
+      const all = PM.proj.layers.filter((l: any) => l.d?.data?.object).map((l: any) => l.id);
+      for (const t of [0, 0.8, 2.6]) {
+        const native = doc.api!.objectBoxes3d(all, t)!;
+        const runtime = compositionRuntime(PM, t);
+        for (const id of all) {
+          const object = runtime.objects.get(id);
+          const box = object ? new THREE.Box3().expandByObject(object) : null;
+          const legacy = box && !box.isEmpty() ? [...box.min.toArray(), ...box.max.toArray()] : null;
+          // The dual-answer bounds class (1e-6); posed skinned vertices
+          // differ from three.js by an ulp or so of f64.
+          expect(native[id] === null, `seed ${seed} ${id} t ${t}`).toBe(legacy === null);
+          native[id]?.forEach((v, k) => {
+            const d = Math.abs(v - legacy![k]!);
+            worst = Math.max(worst, d);
+            if (d !== 0) inexact++;
+            expect(d, `seed ${seed} ${id} t ${t} [${k}]`).toBeLessThanOrEqual(1e-6);
+          });
+          compared++;
+        }
+      }
+      expect(ids.length).toBeGreaterThan(0);
+    }
+    expect(compared).toBeGreaterThan(60);
+    if (process.env.PM_GEOMETRY_REPORT) writeFileSync(`${process.env.PM_GEOMETRY_REPORT}.boxes`, JSON.stringify({ compared, worst, inexact }));
+  }, 300_000);
 
   it('evaluates animated model-group recipes like compositionScene and picks their parts', async () => {
     const { PM, doc } = await editor();

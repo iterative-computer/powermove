@@ -1116,6 +1116,38 @@ impl Engine {
                 let id = arg(get(request, "id"));
                 out.bool(scope.valid_matte_source(l, &id));
             }
+            "objectBoxes3d" => {
+                // `viewportBounds`' boxes: `Box3.expandByObject` per object layer.
+                let ids: Vec<String> = get(request, "ids")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let boxes = scope.object_boxes3d(&ids, t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                let boxes = try_js!(boxes);
+                out.raw("{");
+                for (i, (id, b)) in ids.iter().zip(&boxes).enumerate() {
+                    if i > 0 {
+                        out.raw(",");
+                    }
+                    out.str(id);
+                    out.raw(":");
+                    match b {
+                        Some(b) => {
+                            out.nums(&[b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]])
+                        }
+                        None => out.raw("null"),
+                    }
+                }
+                out.raw("}");
+            }
             "bounds" | "groupBounds" | "pick" | "textLayout" | "textRaster" => {
                 fonts.clear_reports();
                 let mut host = crate::geometry::GeomHost::new(models, request);

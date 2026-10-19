@@ -717,7 +717,7 @@ impl Scene {
                     Some(f) => f.opacity <= 0.0,
                 };
                 Ok(picker
-                    .pick(posed, ray, 0.0, f64::INFINITY, &side, &skip)
+                    .pick_as_runtime(posed, ray, 0.0, f64::INFINITY, &side, &skip)
                     .map(|h| h.distance))
             }
         }
@@ -834,10 +834,17 @@ impl Scene {
             Shape::Model { picker, posed, .. } => {
                 let model = &picker.model;
                 for i in model.traversal() {
-                    if let ObjectKind::Drawable(d) = &model.objects[i].kind
-                        && let Some(lb) =
-                            crate::gltf::pose::local_box(model, i, d, &posed.pose, &posed.world)
-                    {
+                    let ObjectKind::Drawable(d) = &model.objects[i].kind else {
+                        continue;
+                    };
+                    // A skinned mesh keeps the box the importer computed
+                    // (`object.boundingBox` is copied by every clone).
+                    let lb = if d.skin.is_some() {
+                        picker.loaded_box(i)
+                    } else {
+                        crate::gltf::pose::local_box(model, i, d, &posed.pose, &posed.world)
+                    };
+                    if let Some(lb) = lb {
                         b.union(&Box3::from_pair(lb).transformed(&posed.world[i]));
                     }
                 }

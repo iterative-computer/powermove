@@ -864,6 +864,20 @@ export class NativeApi {
       this.dual ? () => this.onLayerEdge(x, y, T) : undefined);
   }
 
+  /**
+   * `Box3.expandByObject` of each 3D object layer in the composition's
+   * runtime at `T` (`viewportBounds`), from pm-wasm's geometry: `[minX,
+   * minY, minZ, maxX, maxY, maxZ]` per id, null for an id without one, or
+   * null altogether when the mirror cannot answer.
+   */
+  objectBoxes3d(ids: readonly string[], T: number): Record<string, number[] | null> | null {
+    const c = this.comps();
+    if (!c) return null;
+    const got = this.query<Record<string, number[] | null>>('objectBoxes3d', { comp: c.open, open: c.open, ids: [...ids], t: T, ...geometryRequest(this.PM) });
+    if ('threw' in got) throw got.threw;
+    return 'value' in got ? got.value : null;
+  }
+
   textLayout(L: any, T: number): any {
     return this.answer('textLayout', () => this.layerQuery('textLayout', L, { t: T }), () => this.legacy.textLayout(L, T), () => ({ layer: L?.id, t: T }));
   }
