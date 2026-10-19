@@ -79,6 +79,10 @@ name = "text_level2"
 harness = false
 
 [[test]]
+name = "text_level2_semantics"
+harness = false
+
+[[test]]
 # Runs on the main thread (the CoreText font registry).
 name = "text_colors"
 harness = false

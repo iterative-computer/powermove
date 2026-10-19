@@ -24,6 +24,68 @@ use skrifa::{FontRef, GlyphId, MetadataProvider, Tag};
 
 use crate::text_geom::{MeasuredLine, TextMeasure};
 
+mod level2;
+
+/// Level 2 uses font-metric baselines and normalized Parley coordinates.
+/// Keep outline geometry independent of platform rasterization.
+pub(crate) fn level2_ink(
+    data: &pm_text::font::FontBytes,
+    run: &pm_text::level2::Run,
+    glyph: u32,
+) -> Option<[f64; 4]> {
+    let font = FontRef::new(data.as_slice()).ok()?;
+    let coords: Vec<_> = run
+        .coords
+        .iter()
+        .map(|v| skrifa::instance::NormalizedCoord::from_bits(*v))
+        .collect();
+    let mut pen = ControlBox {
+        b: [0.0; 4],
+        any: false,
+    };
+    if let Some(outline) = font.outline_glyphs().get(GlyphId::new(glyph)) {
+        outline
+            .draw(
+                DrawSettings::unhinted(Size::new(run.size), coords.as_slice()),
+                &mut pen,
+            )
+            .ok()?;
+    }
+    if !pen.any {
+        // Color bitmap glyphs have no outline; their advance and the font's
+        // ascent/descent form their typographic box. Spaces have no ink.
+        let metrics = font.glyph_metrics(Size::new(run.size), coords.as_slice());
+        let advance = metrics.advance_width(GlyphId::new(glyph))?;
+        let metrics = font.metrics(Size::new(run.size), coords.as_slice());
+        if font.charmap().map(' ') == Some(GlyphId::new(glyph)) {
+            return None;
+        }
+        return Some([
+            0.0,
+            -f64::from(metrics.ascent),
+            f64::from(advance),
+            -f64::from(metrics.descent),
+        ]);
+    }
+    let mut ink = [
+        f64::from(pen.b[0]),
+        -f64::from(pen.b[3]),
+        f64::from(pen.b[2]),
+        -f64::from(pen.b[1]),
+    ];
+    if run.synthetic_bold {
+        // The CoreText profile's synthetic face is an outline dilation.
+        let x = f64::from(run.size) * 0.00875;
+        let y = x * 0.925;
+        ink = [ink[0] - x, ink[1] - y, ink[2] + x, ink[3] + y];
+    }
+    let skew = -libm::tan(f64::from(run.skew) * core::f64::consts::PI / 180.0);
+    let (a, b) = (skew * ink[1], skew * ink[3]);
+    ink[0] += a.min(b);
+    ink[2] += a.max(b);
+    Some(ink)
+}
+
 /// A glyph's control box in font units, and the face's units per em.
 type GlyphBox = Option<([f32; 4], f32)>;
 
@@ -34,6 +96,7 @@ type BoxKey = (FaceId, u32, Vec<(u32, u32)>);
 pub struct CompatMeasure<R: FontResolver> {
     compat: Compat<R>,
     boxes: HashMap<BoxKey, GlyphBox>,
+    level2_faces: HashMap<(u64, u32), pm_text::font::FontBytes>,
 }
 
 impl<R: FontResolver> CompatMeasure<R> {
@@ -41,6 +104,7 @@ impl<R: FontResolver> CompatMeasure<R> {
         CompatMeasure {
             compat: Compat::new(resolver),
             boxes: HashMap::new(),
+            level2_faces: HashMap::new(),
         }
     }
 
@@ -372,6 +436,13 @@ impl<R: FontResolver> CompatMeasure<R> {
 }
 
 impl<R: FontResolver> TextMeasure for CompatMeasure<R> {
+    fn level2(
+        &mut self,
+        d: &TextContent,
+        spans: &[pm_text::level2::StyleSpan],
+    ) -> Result<crate::text_level2::Shaped, String> {
+        level2::shape(&mut self.compat, &mut self.level2_faces, d, spans)
+    }
     fn measure_lines(&mut self, d: &TextContent) -> Vec<MeasuredLine> {
         let lines = self.compat.source_lines(d);
         let shaped: Vec<(String, pm_text::blink::measure::Measured)> = {

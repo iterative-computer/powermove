@@ -1,0 +1,426 @@
+[
+  {
+    "id": "text-level2/range-position",
+    "title": "range position",
+    "d": {
+      "text": "Motion type",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "range",
+        "unit": "characters",
+        "shape": "square",
+        "p": {
+          "x": {
+            "v": 72,
+            "kf": [],
+            "expr": null
+          },
+          "y": {
+            "v": 24,
+            "kf": [],
+            "expr": null
+          },
+          "start": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "end": {
+            "v": 100,
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/word-transform",
+    "title": "word transform",
+    "d": {
+      "text": "Motion type",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "range",
+        "unit": "words",
+        "shape": "square",
+        "p": {
+          "rotation": {
+            "v": 20,
+            "kf": [],
+            "expr": null
+          },
+          "scale": {
+            "v": 125,
+            "kf": [],
+            "expr": null
+          },
+          "skew": {
+            "v": 12,
+            "kf": [],
+            "expr": null
+          },
+          "tracking": {
+            "v": 5,
+            "kf": [],
+            "expr": null
+          },
+          "start": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "end": {
+            "v": 100,
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/line-wave",
+    "title": "line wave",
+    "d": {
+      "text": "First line\nSecond line",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "wave",
+        "unit": "lines",
+        "shape": "square",
+        "p": {
+          "y": {
+            "v": 25,
+            "kf": [],
+            "expr": null
+          },
+          "rotation": {
+            "v": 8,
+            "kf": [],
+            "expr": null
+          },
+          "speed": {
+            "v": 1,
+            "kf": [],
+            "expr": null
+          },
+          "spread": {
+            "v": 25,
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/stagger",
+    "title": "stagger",
+    "d": {
+      "text": "Motion type",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "stagger",
+        "unit": "characters",
+        "shape": "square",
+        "p": {
+          "opacity": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "y": {
+            "v": 40,
+            "kf": [],
+            "expr": null
+          },
+          "duration": {
+            "v": 0.5,
+            "kf": [],
+            "expr": null
+          },
+          "stagger": {
+            "v": 0.08,
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/styled-wrap",
+    "title": "styled wrap",
+    "d": {
+      "text": "Styled typography wraps across lines",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left",
+      "boxWidth": 260,
+      "boxHeight": 220
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "styles": [
+      {
+        "id": "style",
+        "start": 0,
+        "end": 5,
+        "p": {
+          "size": {
+            "v": 64,
+            "kf": [],
+            "expr": null
+          },
+          "weight": {
+            "v": 700,
+            "kf": [],
+            "expr": null
+          },
+          "color": {
+            "v": "#FF6B1A",
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/anchor",
+    "title": "anchor",
+    "d": {
+      "text": "Motion type",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "fontAnchorBounds": {
+      "x0": 0,
+      "y0": 0,
+      "x1": 200,
+      "y1": 50
+    },
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "range",
+        "unit": "characters",
+        "shape": "square",
+        "p": {
+          "x": {
+            "v": 50,
+            "kf": [],
+            "expr": null
+          },
+          "y": {
+            "v": 20,
+            "kf": [],
+            "expr": null
+          },
+          "start": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "end": {
+            "v": 100,
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/unicode",
+    "title": "unicode",
+    "d": {
+      "text": "A é 👨‍👩‍👧‍👦 עברית العربية 漢字",
+      "font": "Georgia",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left"
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "styles": [
+      {
+        "id": "style",
+        "start": 2,
+        "end": 4,
+        "p": {
+          "color": {
+            "v": "#3FCF8E",
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ],
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "stagger",
+        "unit": "characters",
+        "shape": "square",
+        "p": {
+          "y": {
+            "v": 15,
+            "kf": [],
+            "expr": null
+          },
+          "duration": {
+            "v": 0.5,
+            "kf": [],
+            "expr": null
+          },
+          "stagger": {
+            "v": 0.02,
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "text-level2/variable",
+    "title": "variable",
+    "d": {
+      "text": "Variable text",
+      "font": "system-ui",
+      "weight": 400,
+      "size": 40,
+      "color": "#FFFFFF",
+      "leading": 1.2,
+      "align": "left",
+      "fontAxis.wght": 750
+    },
+    "samples": [
+      0,
+      0.25,
+      0.75,
+      2.5
+    ],
+    "animators": [
+      {
+        "id": "anim",
+        "mode": "wave",
+        "unit": "characters",
+        "shape": "square",
+        "p": {
+          "scale": {
+            "v": 120,
+            "kf": [],
+            "expr": null
+          },
+          "blur": {
+            "v": 1.5,
+            "kf": [],
+            "expr": null
+          },
+          "opacity": {
+            "v": 75,
+            "kf": [],
+            "expr": null
+          },
+          "color": {
+            "v": "#4C8DFF",
+            "kf": [],
+            "expr": null
+          },
+          "speed": {
+            "v": 0.5,
+            "kf": [],
+            "expr": null
+          },
+          "spread": {
+            "v": 15,
+            "kf": [],
+            "expr": null
+          }
+        }
+      }
+    ]
+  }
+]

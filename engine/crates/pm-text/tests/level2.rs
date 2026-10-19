@@ -206,6 +206,50 @@ fn baselines_come_from_font_metrics() {
 }
 
 #[test]
+fn range_typography_participates_in_shaping_wrapping_and_utf16_sources() {
+    use pm_text::level2::StyleSpan;
+    let mut full = engine(false);
+    let mut subsets = engine(true);
+    let content = d(
+        "Office e\u{301} typography wraps here",
+        "Georgia",
+        24.0,
+        200.0,
+    );
+    let mut large = content.clone();
+    large.size = Some(60.0);
+    large.weight = Some(700.0);
+    let spans = [StyleSpan {
+        start: 0,
+        end: 6,
+        content: large,
+    }];
+    let plain = full.layout(&content);
+    let styled = full.layout_styled(&content, &spans);
+    assert!(styled.lines[0].height > plain.lines[0].height);
+    assert!(
+        styled.lines[0].end < plain.lines[0].end,
+        "range font metrics change wrapping"
+    );
+    assert!(styled.runs.iter().any(|r| r.size == 60.0));
+    assert!(styled.runs.iter().any(|r| r.size == 24.0));
+    assert_eq!(
+        styled,
+        subsets.layout_styled(&content, &spans),
+        "full fonts and WASM subsets shape identically"
+    );
+    let starts: std::collections::BTreeSet<_> =
+        graphemes(&content.text.encode_utf16().collect::<Vec<_>>())
+            .into_iter()
+            .map(|r| r.start)
+            .collect();
+    for run in &styled.runs {
+        assert_eq!(run.glyphs.len(), run.sources.len());
+        assert!(run.sources.iter().all(|s| starts.contains(s)));
+    }
+}
+
+#[test]
 fn alignment_places_lines_around_the_origin() {
     let mut l2 = engine(false);
     for (align, want) in [("left", 0.0), ("center", -0.5), ("right", -1.0)] {

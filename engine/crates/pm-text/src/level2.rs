@@ -69,6 +69,19 @@ pub struct Run {
     /// Synthetic oblique angle in degrees (0 when none).
     pub skew: f32,
     pub glyphs: Vec<PlacedGlyph>,
+    /// UTF-16 source of each glyph's shaping atom. Ligature continuations
+    /// share the first grapheme's pose; shaping is never repeated per letter.
+    #[serde(default)]
+    pub sources: Vec<usize>,
+}
+
+/// An evaluated typography span, in UTF-16 source coordinates. Callers
+/// resolve overlapping styles before shaping, in authored order.
+#[derive(Clone, Debug)]
+pub struct StyleSpan {
+    pub start: usize,
+    pub end: usize,
+    pub content: TextContent,
 }
 
 /// A level 2 layout.
@@ -226,8 +239,32 @@ impl Level2 {
         self.families.values().map(String::as_str)
     }
 
+    /// A host that resolves only the faces needed by this text can provide
+    /// their ordered fallback families instead of an eager platform census.
+    pub fn set_fallback_families(&mut self, families: &[String]) {
+        let ids: Vec<_> = families
+            .iter()
+            .filter_map(|f| self.fcx.collection.family_id(f))
+            .collect();
+        self.fcx
+            .collection
+            .set_generic_families(GenericFamily::SansSerif, ids.iter().copied());
+        self.fcx
+            .collection
+            .set_generic_families(GenericFamily::SystemUi, ids.iter().copied());
+        self.fcx
+            .collection
+            .set_fallbacks(Script::from_bytes(*b"Zyyy"), ids.into_iter());
+    }
+
     /// Lays `d` out.
     pub fn layout(&mut self, d: &TextContent) -> Level2Layout {
+        self.layout_styled(d, &[])
+    }
+
+    /// Styles participate in shaping, line breaking and font-metric line
+    /// boxes, including whitespace. Source ranges never cut a UTF-8 scalar.
+    pub fn layout_styled(&mut self, d: &TextContent, spans: &[StyleSpan]) -> Level2Layout {
         let text = d.text.clone();
         let size = d.size() as f32;
         let leading = d
@@ -282,6 +319,64 @@ impl Level2 {
         builder.push_default(StyleProperty::WhiteSpaceCollapse(
             WhiteSpaceCollapse::Preserve,
         ));
+        let index = Utf8Index::new(&text);
+        for span in spans {
+            let range = index.of(span.start)..index.of(span.end);
+            if range.is_empty() {
+                continue;
+            }
+            let s = &span.content;
+            if let Some(family) = &s.font {
+                builder.push(
+                    StyleProperty::FontFamily(FontFamily::List(Cow::Owned(vec![
+                        FontFamilyName::Named(Cow::Owned(family.clone())),
+                        FontFamilyName::Generic(GenericFamily::SansSerif),
+                    ]))),
+                    range.clone(),
+                );
+            }
+            builder.push(StyleProperty::FontSize(s.size() as f32), range.clone());
+            builder.push(
+                StyleProperty::FontWeight(FontWeight::new(
+                    s.weight.unwrap_or(500.0).clamp(1.0, 1000.0) as f32,
+                )),
+                range.clone(),
+            );
+            builder.push(
+                StyleProperty::FontStyle(if s.italic.unwrap_or(false) {
+                    FontStyle::Italic
+                } else {
+                    FontStyle::Normal
+                }),
+                range.clone(),
+            );
+            builder.push(
+                StyleProperty::LetterSpacing(
+                    s.tracking.filter(|t| t.is_finite()).unwrap_or(0.0) as f32
+                ),
+                range.clone(),
+            );
+            builder.push(
+                StyleProperty::LineHeight(LineHeight::FontSizeRelative(
+                    s.leading
+                        .filter(|v| v.is_finite() && *v > 0.0)
+                        .unwrap_or(1.15) as f32,
+                )),
+                range.clone(),
+            );
+            let mut axes: Vec<_> = s
+                .axes
+                .iter()
+                .map(|(t, v)| axis(tag(t), *v as f32))
+                .collect();
+            if !s.axes.iter().any(|(t, _)| tag(t) == OPSZ) {
+                axes.push(axis(OPSZ, s.size() as f32));
+            }
+            builder.push(
+                StyleProperty::FontVariations(FontVariations::List(Cow::Owned(axes))),
+                range,
+            );
+        }
         let mut layout: Layout<u32> = builder.build(&text);
         let box_width = d
             .box_width
@@ -361,6 +456,13 @@ impl Level2 {
                         y: g.y as f64,
                     });
                 }
+                let sources = run
+                    .visual_clusters()
+                    .flat_map(|c| {
+                        let source = utf16_at.of(c.text_range().start);
+                        c.glyphs().map(move |_| source)
+                    })
+                    .collect();
                 // `.notdef` for a visible character (controls, spaces, and
                 // default-ignorables draw nothing by design).
                 for cluster in run.clusters() {
@@ -386,6 +488,7 @@ impl Level2 {
                     synthetic_bold: synthesis.embolden(),
                     skew: synthesis.skew().unwrap_or(0.0),
                     glyphs,
+                    sources,
                 });
             }
 

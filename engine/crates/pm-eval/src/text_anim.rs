@@ -750,6 +750,25 @@ impl<'d> Scope<'_, 'd> {
         layout: &GlyphLayout,
         state: &TextAnimation,
     ) -> Vec<PosedGlyph> {
+        self.posed_glyphs(d, layout, state, false)
+    }
+
+    pub(crate) fn level2_glyphs(
+        &mut self,
+        d: &Content,
+        layout: &GlyphLayout,
+        state: &TextAnimation,
+    ) -> Vec<PosedGlyph> {
+        self.posed_glyphs(d, layout, state, true)
+    }
+
+    fn posed_glyphs(
+        &mut self,
+        d: &Content,
+        layout: &GlyphLayout,
+        state: &TextAnimation,
+        level2: bool,
+    ) -> Vec<PosedGlyph> {
         let size = js_max(1.0, num(get(d, "size"), 16.0));
         let pivot_y = -size * 0.35;
         let mut glyphs: Vec<PosedGlyph> = layout
@@ -813,6 +832,10 @@ impl<'d> Scope<'_, 'd> {
                         px + num(get(p, "x"), 0.0) * w - (local[0] * px + local[2] * pivot_y);
                     local[5] =
                         pivot_y + num(get(p, "y"), 0.0) * w - (local[1] * px + local[3] * pivot_y);
+                    if level2 && local[..4] == [1.0, 0.0, 0.0, 1.0] {
+                        local[4] = num(get(p, "x"), 0.0) * w;
+                        local[5] = num(get(p, "y"), 0.0) * w;
+                    }
                     matrix = multiply(&local, &matrix);
                     opacity *= 1.0 + (num(get(p, "opacity"), 100.0) / 100.0 - 1.0) * w;
                     blur += js_max(0.0, num(get(p, "blur"), 0.0)) * w.abs();

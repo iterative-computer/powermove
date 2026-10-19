@@ -33,6 +33,19 @@ pub struct MeasuredLine {
 
 /// The text measurements geometry depends on.
 pub trait TextMeasure {
+    /// Geometry needs outlines; shaping and caret answers do not. Mirrors
+    /// use this to request whole faces only for ink-dependent queries.
+    fn require_ink(&mut self) {}
+    /// Level 2 shaping over the same resolved font bytes on every host.
+    /// A host without this service fails by name; it never substitutes the
+    /// level 1 layout for native-only text.
+    fn level2(
+        &mut self,
+        _d: &TextContent,
+        _spans: &[pm_text::level2::StyleSpan],
+    ) -> Result<crate::text_level2::Shaped, String> {
+        Err("level 2 text measurement is unavailable".into())
+    }
     /// `textLines(d, meas, lh)` with each line's width and ink, measured with
     /// `font = fontStr(d)` and `letterSpacing = d.tracking px`.
     fn measure_lines(&mut self, d: &TextContent) -> Vec<MeasuredLine>;
@@ -335,6 +348,12 @@ impl<'d> Scope<'_, 'd> {
         animators: bool,
         anchor: bool,
     ) -> JsResult<TextRaster> {
+        if crate::text_level2::is_level2(layer) {
+            measure.require_ink();
+            return self
+                .level2_text(layer, time, measure, animators, anchor)
+                .map(|f| f.raster());
+        }
         let d = self.resolved_text_content(layer, time)?;
         let ld = node::member(Some(layer), "d");
         let count = |key: &str| {
@@ -517,6 +536,23 @@ impl<'d> Scope<'_, 'd> {
         time: f64,
         measure: &mut dyn TextMeasure,
     ) -> JsResult<TextGeometry> {
+        if crate::text_level2::is_level2(layer) {
+            measure.require_ink();
+            let f = self.level2_text(layer, time, measure, false, false)?;
+            let r = f.raster();
+            return Ok(TextGeometry {
+                w: r.w,
+                h: r.h,
+                anchor_x: r.anchor_x,
+                anchor_y: r.anchor_y,
+                selection: r.selection,
+                lines: f.layout.lines.iter().map(|l| l.text.clone()).collect(),
+                line_height: f.layout.lines.first().map_or(0.0, |l| l.height),
+                size: f.size,
+                pad: 0.0,
+                x: r.anchor_x,
+            });
+        }
         let d = self.resolved_text_content(layer, time)?;
         Ok(text_geometry(&d, measure))
     }
@@ -528,6 +564,11 @@ impl<'d> Scope<'_, 'd> {
         time: f64,
         measure: &mut dyn TextMeasure,
     ) -> JsResult<GlyphLayout> {
+        if crate::text_level2::is_level2(layer) {
+            return self
+                .level2_text(layer, time, measure, false, false)
+                .map(|f| f.layout.units);
+        }
         let d = self.resolved_text_content(layer, time)?;
         Ok(measure.glyph_layout(&text_content(&d)))
     }
