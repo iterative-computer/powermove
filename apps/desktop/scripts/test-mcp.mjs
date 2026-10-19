@@ -133,9 +133,25 @@ async function desktopSmoke() {
     assert(listed.assets.every(asset => asset.status === 'available'), 'host-store imports are available to the worker');
     await tool('check_project');
     await tool('replace_media', { assetId: imported.assetId, path: audio });
+    await tool('open_panel', { panelId: 'timeline' });
+    assert(diagnostics.includes('Chromium started on demand'), 'the first panel tool starts Chromium lazily');
     const workspace = text(await tool('get_workspace_state'));
     assert(workspace.layout?.registeredPanels?.length > 0, 'native hidden workspace keeps the full production panel registry');
-    assert(diagnostics.includes('Chromium started on demand'), 'workspace DOM starts Chromium lazily');
+    await tool('open_panel', { panelId: 'viewer' });
+    let shown;
+    for (const until = Date.now() + 30_000; ;) {
+      const capture = await tool('capture_panel', { panelId: 'viewer' });
+      const image = capture.content.find(item => item.type === 'image');
+      assert(image, 'native CPU viewer screenshot');
+      shown = Buffer.from(image.data, 'base64');
+      const center = execFileSync(ffmpeg, ['-v', 'error', '-i', 'pipe:0', '-frames:v', '1', '-vf', 'crop=2:2:(iw-2)/2:(ih-2)/2', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { input: shown });
+      if (center[0] > 150 && center[1] < 120 && center[2] < 150) break;
+      if (Date.now() > until) {
+        if (process.env.POWERMOVE_MCP_EVIDENCE) { await mkdir(process.env.POWERMOVE_MCP_EVIDENCE, { recursive: true }); await writeFile(path.join(process.env.POWERMOVE_MCP_EVIDENCE, 'native-cpu-viewer.jpg'), shown); }
+        throw new Error(`Native CPU viewer did not present the red composition: ${center.subarray(0, 3)}. ${diagnostics}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
   }
   const video = text(await tool('export_video', { name: 'MCP desktop engine', audio: true, motionBlur: false }));
   assert(video.jobId, `export_video did not run in the job engine: ${JSON.stringify(video)} ${appLog.match(/export_video routed[^\n]*/)?.[0] ?? ''}`);
