@@ -269,6 +269,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const barrier = PM.EngineDoc?.barrier;
       if (!barrier) return null;
       barrier.flush();
+      // A snapshot may block this thread until the engine has the revision:
+      // the batches this run holds (patch-coalesce.ts) leave now.
+      connection?.sendPatches();
       noteVersion();
       return barrier.revision;
     },
@@ -284,6 +287,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const barrier = doc?.barrier;
       if (!doc?.enabled || !barrier || typeof doc.snapshot !== 'function') return null;
       barrier.flush();
+      connection?.sendPatches();
       return {
         id: documentId(PM.proj?.id),
         revision: barrier.revision,
