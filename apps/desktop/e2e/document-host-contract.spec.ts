@@ -85,7 +85,8 @@ test('the agent-tool contract leaves byte-identical documents on the desktop and
     return { rasters, answers, documents, document: JSON.stringify(PM.proj), workspace: JSON.parse(JSON.stringify(workspace)) };
   }, CONTRACT_SEQUENCE);
 
-  const prebuilt = process.env['POWERMOVE_CONTRACT_ENGINE_SCRIPT'];
+  const dist = process.env['POWERMOVE_NATIVE_HOST_DIST'];
+  const prebuilt = process.env['POWERMOVE_CONTRACT_ENGINE_SCRIPT'] ?? (dist ? path.join(dist, 'engine/engine.mjs') : undefined);
   const bundle = prebuilt ? { script: prebuilt, dispose() {} } : await buildEngineBundle();
   let worker: ContractTranscript;
   let hidden: ContractTranscript | undefined;

@@ -40,7 +40,7 @@ function mcp(child) {
       finally { clearTimeout(timer); }
     } };
 }
-for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => { void Promise.all([...children].map(stop)).finally(() => process.exit(130)); });
+for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => { void Promise.all([...children].map(stop)).finally(async () => { await rm(root, { recursive: true, force: true }); process.exit(130); }); });
 const pixels = file => execFileSync(ffmpeg, ['-v', 'error', '-i', file, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-']);
 const pngs = async folder => (await readdir(folder)).filter(n => n.endsWith('.png')).sort().map(n => path.join(folder, n));
 let app;

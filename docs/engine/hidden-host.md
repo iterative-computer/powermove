@@ -65,8 +65,9 @@ host keep the previous behavior.
 
 ## Validation commands
 
-Build the matching native wrappers, pm-wasm and CLI host first. Run these under
-`pm-electron-lock`, with Playwright workers set to one:
+Build the matching native wrappers, pm-wasm, desktop and CLI host before taking
+the app lease. Hold `pm-electron-lock` only for app runs, with Playwright workers
+set to one:
 
 - `node apps/desktop/scripts/test-mcp.mjs --desktop`
 - `node apps/desktop/scripts/test-mcp.mjs --native`
@@ -75,7 +76,13 @@ Build the matching native wrappers, pm-wasm and CLI host first. Run these under
 - `node apps/desktop/scripts/test-native-hidden-services.mjs --launchd`
 - `node apps/desktop/scripts/test-native-hidden-services.mjs --ssh`
 - In `apps/desktop`, set `POWERMOVE_NATIVE_HOST_DIST` to the built CLI `dist`
-  and run `bunx playwright test e2e/document-host-contract.spec.ts --workers=1`.
+  and run `bunx playwright test e2e/document-host-contract.spec.ts --config playwright.prebuilt.config.ts --workers=1`.
+  The contract uses the prebuilt CLI engine and compares the complete no-window
+  workspace bytes, including every desktop built-in and a persisted user panel.
+- For shipping observation timing, use the same prebuilt config with
+  `e2e/engine-agent-observation.spec.ts`, only when machine load is at most 8.
+  `POWERMOVE_SHIPPING_ADDON_SHA256` binds the run to the assembled shipping addon;
+  the measurement records its hash and start/peak one-minute load.
 
 The parity harness captures a real desktop runner pin, compares every decoded
 PNG frame with the hidden export, and compares complete workspace JSON bytes
