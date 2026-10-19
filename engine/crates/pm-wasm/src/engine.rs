@@ -524,8 +524,13 @@ impl Engine {
         let ids: Vec<PropId> = ids.iter().map(|&i| PropId::from_index(i)).collect();
         let mut k = vec![ValueKind::Number; ids.len()];
         self.ev.ev_batch(&self.doc, &ids, t, out, &mut k);
-        for (dst, src) in kinds.iter_mut().zip(k) {
-            *dst = src as u8;
+        for ((dst, src), &id) in kinds.iter_mut().zip(k).zip(&ids) {
+            *dst = src as u8
+                | if self.expression_error(id).is_some() {
+                    0x80
+                } else {
+                    0
+                };
         }
     }
 

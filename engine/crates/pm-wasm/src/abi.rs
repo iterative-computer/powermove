@@ -74,6 +74,7 @@ static ALLOCATOR: Counting = Counting;
 #[derive(Default)]
 struct State {
     engine: Engine,
+    status: u32,
     input: Vec<u8>,
     out: Vec<u8>,
     out_special: bool,
@@ -243,8 +244,21 @@ pub extern "C" fn pm_ev(id: u32, t: f64) -> f64 {
     with(|s| {
         let (kind, n) = s.engine.ev_id(PropId::from_index(id), t);
         s.last_kind = kind as u32;
+        s.status = s.last_kind
+            | if s.engine.expression_error(PropId::from_index(id)).is_some() {
+                0x80
+            } else {
+                0
+            };
         n
     })
+}
+
+/// Stable status word for the last scalar call: low bits are ValueKind;
+/// bit 7 flags an expression error. JS reads it without another wasm call.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_status_ptr() -> *const u32 {
+    with(|s| &s.status as *const u32)
 }
 
 #[unsafe(no_mangle)]
@@ -277,7 +291,7 @@ pub extern "C" fn pm_batch_kinds(n: usize) -> *mut u8 {
 }
 
 /// `ids[..n]` at `t` into `out[..n]` and `kinds[..n]` (0 number, 1 other,
-/// 2 threw). 0 on success; 1 when a buffer is smaller than `n`.
+/// 2 threw; bit 7 flags an expression error). 0 on success; 1 when a buffer is smaller than `n`.
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_ev_batch(n: usize, t: f64) -> u32 {
     with(|s| {

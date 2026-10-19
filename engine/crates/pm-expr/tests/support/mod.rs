@@ -108,6 +108,12 @@ pub fn evaluate_case(source: &[u16], spec: &Json, dialect: Dialect) -> Json {
             ctx.idx = 0.0;
         }
         let out = expr.evaluate(&JsonHost::new(), &ctx);
+        let untracked = expr.evaluate_untracked(&JsonHost::new(), &ctx);
+        match (&out.result, &untracked) {
+            (Ok(a), Ok(b)) => assert_eq!(encode(a), encode(b), "untracked result"),
+            (Err(a), Err(b)) => assert_eq!(a, b, "untracked exception"),
+            _ => panic!("tracked and untracked disagree"),
+        }
         fields.push((
             "result",
             match &out.result {

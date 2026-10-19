@@ -44,6 +44,7 @@
 // `js-pow`), a declaration of a pure function.
 #![deny(unsafe_code)]
 
+mod bytecode;
 mod deps;
 mod diagnostic;
 mod eval;
@@ -68,8 +69,8 @@ pub use value::{
     string_to_number,
 };
 
+use bytecode::Program;
 use eval::Evaluator;
-use parser::Node;
 
 /// Which names exist.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -112,7 +113,7 @@ pub struct Context<O> {
 /// cheap to evaluate many times.
 #[derive(Clone, Debug)]
 pub struct Expression {
-    tree: Node,
+    program: Program,
     needs_idx: bool,
     dialect: Dialect,
 }
@@ -200,7 +201,7 @@ impl Expression {
         }
         let tree = parser::parse(units).map_err(CompileError::Syntax)?;
         Ok(Expression {
-            tree,
+            program: Program::compile(&tree),
             needs_idx: needs_idx(units),
             dialect,
         })
@@ -217,15 +218,44 @@ impl Expression {
         self.needs_idx
     }
 
+    /// Whether a caller needs to prepare the channel string at evaluation.
+    pub fn needs_channel(&self) -> bool {
+        self.program
+            .code
+            .iter()
+            .any(|op| matches!(op, bytecode::Op::Identifier(bytecode::Input::Channel)))
+    }
+
+    /// Literal property/parameter names for embedders that intern host keys.
+    /// Dynamic keys still go through the host's ordinary conversion.
+    pub fn literal_strings(&self) -> impl Iterator<Item = &JsStr> {
+        self.program.code.iter().filter_map(|op| match op {
+            bytecode::Op::Literal(parser::Literal::String(s)) => Some(s),
+            _ => None,
+        })
+    }
+
     pub fn dialect(&self) -> Dialect {
         self.dialect
+    }
+
+    /// Runs without allocating a dependency trace. Callers must invalidate on
+    /// every document revision (or track reads in the host itself).
+    pub fn evaluate_untracked<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+    ) -> Result<Value<H::Obj>, EvalError> {
+        Evaluator::untracked(host, ctx, self.dialect)
+            .run(&self.program)
+            .map(|v| v.map_doc(|t| t.into_obj()))
     }
 
     /// Evaluates against raw project values supplied by `host`.
     pub fn evaluate<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Evaluation<H::Obj> {
         let mut evaluator = Evaluator::new(host, ctx, self.dialect);
         let result = evaluator
-            .evaluate(&self.tree)
+            .run(&self.program)
             .map(|v| v.map_doc(|t| t.into_obj()));
         Evaluation {
             result,

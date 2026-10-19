@@ -7,7 +7,7 @@ rule 9, and 7). Everything here was measured on 2026-10-12 against Electron 44
 
 ## What the crate is
 
-A bounded parser and tree-walking interpreter for channel expressions, with no
+A bounded parser and compiled bytecode evaluator for channel expressions, with no
 JavaScript engine. It reproduces what a project can observe of
 `expression.ts`:
 
@@ -207,3 +207,33 @@ bit).
 | Dependency soundness | 37,313 perturbations of unread inputs, 0 changed results |
 | Parsing 2,000-deep inputs | bounded stack (256 KiB thread) |
 | Evaluation (release, JSON host, `examples/expr_bench.rs`) | about 20 to 180 ns for expressions on context values; 0.5 to 0.9 µs with document reads; compile 0.3 to 2.7 µs |
+
+## P6: compiled frame expressions (2026-10-19)
+
+`Expression::parse` compiles the validated syntax tree into bounded bytecode.
+Input names, helper lookup and syntactic Math callees are resolved once. Jumps
+preserve conditional/short-circuit reads; calls evaluate arguments left to right
+without evaluating their callee, exactly as before. Coercion, member access,
+helper formulas and V8 math remain the same routines. The compiler computes the
+maximum stack; up to eight live values and twelve numeric arguments stay inline.
+The larger bounded cases spill through `smallvec`.
+
+The default `evaluate` still records the exact dynamic dependencies. The new
+`evaluate_untracked` avoids path allocations for hosts that invalidate every
+document revision or track their reads themselves. pm-wasm uses it: pm-eval
+invalidates expression memos on document changes, and detached queries retain
+pm-model's read tracking. Literal host keys are converted to pm-model strings
+once per source; dynamic keys keep the ordinary conversion. Legacy-dialect
+expressions do not compute the inaccessible native `frame` input, or construct
+unused `ch` strings.
+
+Interned pm-eval plans retain the compiled source for both static and keyed
+bases, so hundreds of distinct resident expressions do not churn the shared
+256-source cache every frame. Nonempty keyframes still use the original exact
+keyframe evaluator. Memo keys remain revision plus the original f64 time bits;
+there is no quantization or tolerance. The 400-source keyed regression checks
+that four frames compile exactly 400 times.
+
+Renderer batching and paired timing evidence are documented in `perf.md` under
+P6/B3. The parity fixture additionally compares tracked and untracked outcomes,
+including encoded number bits and exception messages, for every compiled case.

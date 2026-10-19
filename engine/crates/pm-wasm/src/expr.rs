@@ -21,12 +21,31 @@ pub struct PmExpressions;
 impl ExpressionEngine for PmExpressions {
     fn compile(&self, source: &JsString) -> Option<Arc<dyn CompiledExpression>> {
         let units: Vec<u16> = source.utf16_units().collect();
-        Expression::compile_utf16(&units, Dialect::Legacy)
-            .map(|e| Arc::new(Compiled(e)) as Arc<dyn CompiledExpression>)
+        Expression::compile_utf16(&units, Dialect::Legacy).map(|e| {
+            let channel = e.needs_channel();
+            let mut keys: Vec<_> = e
+                .literal_strings()
+                .map(|s| (s.clone(), JsString::from_utf16_units(s.units())))
+                .collect();
+            keys.extend(
+                ["params", "value", "toString"].map(|s| (JsStr::from(s), JsString::from(s))),
+            );
+            Arc::new(Compiled {
+                expression: e,
+                channel,
+                keys,
+                empty: JsStr::default(),
+            }) as Arc<dyn CompiledExpression>
+        })
     }
 }
 
-struct Compiled(Expression);
+struct Compiled {
+    expression: Expression,
+    channel: bool,
+    keys: Vec<(JsStr, JsString)>,
+    empty: JsStr,
+}
 
 /// A document object as an expression sees it.
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +78,7 @@ fn js_str(s: &JsString) -> JsStr {
 
 /// Reads the mirror's nodes (and computed values) for `pm-expr`.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct NodeHost<'a>(std::marker::PhantomData<&'a ()>);
+pub struct NodeHost<'a>(&'a [(JsStr, JsString)]);
 
 impl<'a> NodeHost<'a> {
     pub fn node(node: &'a Node) -> Value<Obj<'a>> {
@@ -127,17 +146,23 @@ impl<'a> Host for NodeHost<'a> {
     }
 
     fn property(&self, object: &Obj<'a>, key: &JsStr) -> Option<Value<Obj<'a>>> {
-        let key = JsString::from_utf16_units(key.units());
+        let converted;
+        let key = if let Some((_, interned)) = self.0.iter().find(|(s, _)| s == key) {
+            interned
+        } else {
+            converted = JsString::from_utf16_units(key.units());
+            &converted
+        };
         match object {
             Obj::Comp(comp) => match comp.get(key.as_bytes()) {
                 pm_eval::node::Got::Node(n) => Some(NodeHost::node(n)),
                 _ => None,
             },
             Obj::Node(n) => match n.kind() {
-                NodeKind::Object(map) => map.get(&key).map(NodeHost::node),
+                NodeKind::Object(map) => map.get(key).map(NodeHost::node),
                 _ => None,
             },
-            Obj::Value(pm_model::Value::Object(map)) => map.get_key(&key).map(NodeHost::value),
+            Obj::Value(pm_model::Value::Object(map)) => map.get_key(key).map(NodeHost::value),
             Obj::Value(_) => None,
         }
     }
@@ -145,11 +170,15 @@ impl<'a> Host for NodeHost<'a> {
 
 impl CompiledExpression for Compiled {
     fn needs_idx(&self) -> bool {
-        self.0.needs_idx()
+        self.expression.needs_idx()
+    }
+
+    fn needs_frame(&self) -> bool {
+        false
     }
 
     fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
-        let host = NodeHost(std::marker::PhantomData);
+        let host = NodeHost(&self.keys);
         let ctx = Context {
             t: cx.t,
             time: cx.time,
@@ -158,11 +187,15 @@ impl CompiledExpression for Compiled {
             value: NodeHost::js(cx.value),
             layer: cx.layer.map_or(Value::Undefined, NodeHost::node),
             comp: Value::Object(Object::Doc(Obj::Comp(cx.comp))),
-            channel: js_str(cx.channel),
+            channel: if self.channel {
+                js_str(cx.channel)
+            } else {
+                self.empty.clone()
+            },
             idx: cx.idx,
         };
-        let out = self.0.evaluate(&host, &ctx);
-        match out.result {
+        let out = self.expression.evaluate_untracked(&host, &ctx);
+        match out {
             Ok(Value::Number(n)) => Ok(JsValue::Number(n)),
             Ok(Value::Bool(b)) => Ok(JsValue::Bool(b)),
             Ok(Value::String(s)) => Ok(JsValue::String(JsString::from_utf16_units(s.units()))),

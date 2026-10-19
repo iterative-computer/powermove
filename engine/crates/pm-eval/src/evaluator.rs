@@ -285,6 +285,9 @@ impl CompiledCache {
 
 #[derive(Clone, Debug)]
 enum Plan {
+    /// A compiled source and optional static base value. Node/context reads still happen
+    /// at the requested time; edits revalidate the complete document memo.
+    Expression(ExpressionPlan),
     /// The answer does not depend on time.
     Const(JsResult<JsValue>),
     /// A temporal track read at `T - from`; `first` answers non-finite times.
@@ -295,6 +298,21 @@ enum Plan {
     /// Read the nodes at every evaluation (mixed tracks, expressions, reads
     /// that throw).
     Live { expression: bool },
+}
+
+#[derive(Clone)]
+struct ExpressionPlan {
+    compiled: Option<Arc<dyn CompiledExpression>>,
+    value: Option<JsValue>,
+}
+
+impl std::fmt::Debug for ExpressionPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExpressionPlan")
+            .field("compiled", &self.compiled.is_some())
+            .field("value", &self.value)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -482,6 +500,9 @@ impl Evaluator {
 
     /// `PM.expressionErrors.get(prop)` for a channel.
     pub fn expression_error(&self, comp: &str, layer: &str, key: &str) -> Option<&str> {
+        if self.errors.is_empty() {
+            return None;
+        }
         self.errors
             .get(&ErrorKey {
                 comp: JsString::from(comp),
@@ -644,9 +665,25 @@ impl Evaluator {
             _ => None,
         }
         .and_then(|src| self.compiled.get(self.expressions.as_deref(), &src));
-        let error_key = Self::error_key(cx, layer, key);
+        self.eval_compiled(cx, layer, compiled.as_deref(), value, tl, time, key)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_compiled(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: Option<&Node>,
+        compiled: Option<&dyn CompiledExpression>,
+        value: JsValue,
+        tl: f64,
+        time: f64,
+        key: &JsString,
+    ) -> JsResult<JsValue> {
         let Some(compiled) = compiled else {
-            self.errors.insert(error_key, messages::INVALID.to_owned());
+            self.errors.insert(
+                Self::error_key(cx, layer, key),
+                messages::INVALID.to_owned(),
+            );
             return Ok(value);
         };
         let fps = cx.expression_fps();
@@ -659,7 +696,11 @@ impl Evaluator {
             t: tl,
             time,
             fps: &fps,
-            frame: cx.frame_at(time),
+            frame: if compiled.needs_frame() {
+                cx.frame_at(time)
+            } else {
+                None
+            },
             value: &value,
             layer,
             comp: cx,
@@ -668,17 +709,19 @@ impl Evaluator {
         };
         match compiled.evaluate(&context) {
             Ok(r) if r.is_finite_number() || matches!(r, JsValue::String(_) | JsValue::Bool(_)) => {
-                self.errors.remove(&error_key);
+                self.clear_error(cx, layer, key);
                 Ok(r)
             }
             Ok(_) => {
-                self.errors
-                    .insert(error_key, messages::NOT_FINITE.to_owned());
+                self.errors.insert(
+                    Self::error_key(cx, layer, key),
+                    messages::NOT_FINITE.to_owned(),
+                );
                 Ok(value)
             }
             Err(e) => {
                 self.errors.insert(
-                    error_key,
+                    Self::error_key(cx, layer, key),
                     e.message.unwrap_or_else(|| messages::FAILED.to_owned()),
                 );
                 Ok(value)
@@ -946,7 +989,7 @@ impl Evaluator {
                     state.memo = Some((time_bits, value.clone()));
                     return value;
                 }
-                Plan::Live { .. } => {}
+                Plan::Live { .. } | Plan::Expression(_) => {}
             }
         }
         let value = self.ev_slot_slow(doc, index, time, resolved);
@@ -1088,7 +1131,10 @@ impl Evaluator {
                             }
                             Via::Find => false,
                         });
-                let expression = matches!(state.plan, Plan::Live { expression: true });
+                let expression = matches!(
+                    state.plan,
+                    Plan::Live { expression: true } | Plan::Expression(_)
+                );
                 if unchanged {
                     let from = node::to_number(node::member(Some(layer), "from"));
                     let memo_ok = if expression {
@@ -1143,6 +1189,36 @@ impl Evaluator {
                 } else {
                     first.clone()
                 })
+            }
+            Plan::Expression(plan) => {
+                let plan = plan.clone();
+                let tl = time - state.from;
+                let value = match plan.value {
+                    Some(value) => value,
+                    None => {
+                        let prop = match &address.via {
+                            Via::Channel => {
+                                node::member(node::member(Some(layer), "p"), &key_str(&address.key))
+                            }
+                            Via::Member(path) => member_path(layer, path),
+                            Via::Find => address::find_prop(layer, &address.key)?.node(),
+                        };
+                        self.eval_keyframes(
+                            node::member(prop, "kf"),
+                            tl,
+                            interpolates_color(address.key.as_bytes()),
+                        )?
+                    }
+                };
+                self.eval_compiled(
+                    cx,
+                    Some(layer),
+                    plan.compiled.as_deref(),
+                    value,
+                    tl,
+                    time,
+                    &address.key,
+                )
             }
             Plan::Live { .. } => self.ev_address(cx, layer, &address, time),
         }
@@ -1211,8 +1287,25 @@ impl Evaluator {
         let Some(p) = prop.node() else {
             return (Plan::Const(Ok(JsValue::Undefined)), from);
         };
-        if node::get(p, b"expr").truthy() {
-            return (Plan::Live { expression: true }, from);
+        let expr = node::get(p, b"expr");
+        if expr.truthy() {
+            // Retain the compiled source in the slot, including keyed bases:
+            // a document with >256 unique sources must not churn the shared
+            // source cache on every frame. The original keyframe evaluator
+            // still answers nonempty tracks at the exact requested local time.
+            let keyed =
+                node::array(node::member(Some(p), "kf")).is_some_and(|keys| !keys.is_empty());
+            let compiled = expr
+                .node()
+                .and_then(|n| node::string(Some(n)))
+                .and_then(|source| self.compiled.get(self.expressions.as_deref(), source));
+            return (
+                Plan::Expression(ExpressionPlan {
+                    compiled,
+                    value: (!keyed).then(|| node::get(p, b"v").to_js()),
+                }),
+                from,
+            );
         }
         self.clear_error(cx, Some(layer), &address.key);
         if !kf_length_truthy(&prop) {

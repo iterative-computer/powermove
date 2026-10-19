@@ -56,6 +56,12 @@ pub trait CompiledExpression: Send + Sync {
     /// `needsIdx`: whether `idx` must be computed (`/\bidx\b/` on the source).
     fn needs_idx(&self) -> bool;
 
+    /// Whether the embedding language can read the native `frame` input.
+    /// The default preserves existing engines; the legacy dialect has no frame.
+    fn needs_frame(&self) -> bool {
+        true
+    }
+
     /// See [`ExprDeps`].
     fn dependencies(&self) -> ExprDeps {
         ExprDeps::ALL

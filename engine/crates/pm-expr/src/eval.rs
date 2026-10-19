@@ -1,15 +1,16 @@
-//! The tree-walking interpreter of `expression.ts`, with JavaScript's
+//! The bytecode evaluator of `expression.ts`, with JavaScript's
 //! conversions, and the dependency recorder.
 
 use std::rc::Rc;
 
+use crate::bytecode::{Call, Input, Op, Program};
 use crate::deps::{ContextReads, Dependencies, FieldRead, Root, Step};
 use crate::host::{Host, Shape};
 use crate::jsmath;
-use crate::parser::{BinaryOp, Literal, Node, OBJECT_PROTOTYPE, UnaryOp};
+use crate::parser::{BinaryOp, Literal, OBJECT_PROTOTYPE, UnaryOp};
 use crate::string::JsStr;
 use crate::value::{
-    Callable, Helper, MATH_CONSTANTS, MathFunction, Object, Value, number_to_string,
+    Helper, MATH_CONSTANTS, MathFunction, Object, Value, number_to_string,
     string_to_number,
 };
 use crate::{Context, Dialect};
@@ -111,7 +112,7 @@ fn keys() -> &'static Keys {
 #[derive(Clone, Debug)]
 pub(crate) struct Tracked<O> {
     obj: O,
-    path: Rc<Path>,
+    path: Option<Rc<Path>>,
 }
 
 impl<O> Tracked<O> {
@@ -287,14 +288,15 @@ fn array_index(key: &JsStr) -> Option<u64> {
 
 /// What `MATH_FUNCTIONS[name]` finds: an own function, an inherited
 /// `Object.prototype` member, or nothing.
-enum MathLookup {
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MathLookup {
     Function(MathFunction),
     /// `Object.prototype[name]`; `None` for `__proto__`.
     Inherited(Option<&'static str>),
     Missing,
 }
 
-fn math_lookup(name: &JsStr) -> MathLookup {
+pub(crate) fn math_lookup(name: &JsStr) -> MathLookup {
     if let Some(&f) = MathFunction::ALL.iter().find(|f| name.eq_str(f.name())) {
         return MathLookup::Function(f);
     }
@@ -319,6 +321,7 @@ pub(crate) struct Evaluator<'a, H: Host> {
     dialect: Dialect,
     context: ContextReads,
     reads: Vec<Rc<Path>>,
+    tracking: bool,
 }
 
 impl<'a, H: Host> Evaluator<'a, H> {
@@ -329,7 +332,14 @@ impl<'a, H: Host> Evaluator<'a, H> {
             dialect,
             context: ContextReads::empty(),
             reads: Vec::new(),
+            tracking: true,
         }
+    }
+
+    pub fn untracked(host: &'a H, ctx: &'a Context<H::Obj>, dialect: Dialect) -> Self {
+        let mut out = Self::new(host, ctx, dialect);
+        out.tracking = false;
+        out
     }
 
     /// What the evaluation read, sorted and deduplicated.
@@ -351,19 +361,22 @@ impl<'a, H: Host> Evaluator<'a, H> {
             Root::Comp => &self.ctx.comp,
             Root::Value => &self.ctx.value,
         };
-        let path = Path::root(root);
-        self.reads.push(path.clone());
+        let path = self.tracking.then(|| Path::root(root));
+        if let Some(path) = &path {
+            self.reads.push(path.clone());
+        }
         value.clone().map_doc(|obj| Tracked { obj, path })
     }
 
-    fn record(&mut self, parent: &Tracked<H::Obj>, step: Step) -> Rc<Path> {
+    fn record(&mut self, parent: &Tracked<H::Obj>, step: Step) -> Option<Rc<Path>> {
+        let parent_path = parent.path.as_ref()?;
         let path = Rc::new(Path {
-            root: parent.path.root,
-            parent: Some(parent.path.clone()),
+            root: parent_path.root,
+            parent: Some(parent_path.clone()),
             step: Some(step),
         });
         self.reads.push(path.clone());
-        path
+        Some(path)
     }
 
     fn length(&mut self, array: &Tracked<H::Obj>) -> usize {
@@ -406,7 +419,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
 
     /// `String(value)` for a value from outside an evaluation.
     pub fn string_of(&mut self, value: &Value<H::Obj>) -> R<JsStr> {
-        let path = Path::root(Root::Value);
+        let path = Some(Path::root(Root::Value));
         let value = value.clone().map_doc(|obj| Tracked { obj, path });
         self.js_string(&value)
     }
@@ -536,131 +549,122 @@ impl<'a, H: Host> Evaluator<'a, H> {
 
     // ── evaluation ──────────────────────────────────────────────────────
 
-    pub fn evaluate(&mut self, node: &Node) -> R<V<H::Obj>> {
-        match node {
-            Node::Literal(literal) => Ok(match literal {
-                Literal::Number(n) => Value::Number(*n),
-                Literal::String(s) => Value::String(s.clone()),
-                Literal::Bool(b) => Value::Bool(*b),
-                Literal::Null => Value::Null,
-            }),
-            Node::Identifier(name) => Ok(self.identifier(name)),
-            Node::Unary(op, inner) => {
-                let value = self.evaluate(inner)?;
-                Ok(match op {
-                    UnaryOp::Not => Value::Bool(!value.truthy()),
-                    UnaryOp::Minus => Value::Number(-self.js_number(&value)?),
-                    UnaryOp::Plus => Value::Number(self.js_number(&value)?),
-                })
-            }
-            Node::Binary(op, left, right) => {
-                let left = self.evaluate(left)?;
-                match op {
-                    BinaryOp::And => {
-                        return if left.truthy() {
-                            self.evaluate(right)
-                        } else {
-                            Ok(left)
-                        };
+    pub fn run(&mut self, program: &Program) -> R<V<H::Obj>> {
+        // The compiler computes the maximum active stack, bounded by the parser.
+        let mut stack: smallvec::SmallVec<[V<H::Obj>; 8]> = smallvec::SmallVec::new();
+        stack.resize(program.stack, Value::Undefined);
+        let mut len = 0;
+        let mut pc = 0;
+        while let Some(op) = program.code.get(pc) {
+            pc += 1;
+            let value = match op {
+                Op::Literal(v) => match v {
+                    Literal::Number(n) => Value::Number(*n),
+                    Literal::String(s) => Value::String(s.clone()),
+                    Literal::Bool(b) => Value::Bool(*b),
+                    Literal::Null => Value::Null,
+                },
+                Op::Identifier(name) => self.identifier(*name),
+                Op::Unary(op) => {
+                    len -= 1;
+                    let v = std::mem::replace(&mut stack[len], Value::Undefined);
+                    match op {
+                        UnaryOp::Not => Value::Bool(!v.truthy()),
+                        UnaryOp::Minus => Value::Number(-self.js_number(&v)?),
+                        UnaryOp::Plus => Value::Number(self.js_number(&v)?),
                     }
-                    BinaryOp::Or => {
-                        return if left.truthy() {
-                            Ok(left)
-                        } else {
-                            self.evaluate(right)
-                        };
+                }
+                Op::Binary(op) => {
+                    len -= 2;
+                    let l = std::mem::replace(&mut stack[len], Value::Undefined);
+                    let r = std::mem::replace(&mut stack[len + 1], Value::Undefined);
+                    self.binary(*op, &l, &r)?
+                }
+                Op::Member => {
+                    len -= 2;
+                    let o = std::mem::replace(&mut stack[len], Value::Undefined);
+                    let k = std::mem::replace(&mut stack[len + 1], Value::Undefined);
+                    self.member(&o, &k)?
+                }
+                Op::Call(call, count) => {
+                    len -= count;
+                    let args = &stack[len..len + count];
+                    let result = match call {
+                        Call::Helper(h) => self.helper(*h, args),
+                        Call::Math(m) => self.call_math(*m, args),
+                        Call::Missing => Ok(Value::Undefined),
+                    };
+                    for v in &mut stack[len..len + count] {
+                        *v = Value::Undefined;
                     }
-                    _ => {}
+                    result?
                 }
-                let right = self.evaluate(right)?;
-                self.binary(*op, &left, &right)
-            }
-            Node::Conditional(test, yes, no) => {
-                if self.evaluate(test)?.truthy() {
-                    self.evaluate(yes)
-                } else {
-                    self.evaluate(no)
-                }
-            }
-            Node::Member(object, property) => {
-                let object = self.evaluate(object)?;
-                let property = self.evaluate(property)?;
-                self.member(&object, &property)
-            }
-            Node::Call(callee, args) => {
-                let mut values = Vec::with_capacity(args.len());
-                for arg in args {
-                    values.push(self.evaluate(arg)?);
-                }
-                match &**callee {
-                    Node::Identifier(name) => {
-                        if let Some(helper) = Helper::from_name(name) {
-                            return self.helper(helper, &values);
-                        }
-                        self.call_math(math_lookup(&JsStr::from(name.as_str())), &values)
+                Op::Short(truthy, target) => {
+                    if stack[len - 1].truthy() == *truthy {
+                        pc = *target;
+                    } else {
+                        len -= 1;
+                        stack[len] = Value::Undefined;
                     }
-                    Node::Member(object, property) => match (&**object, &**property) {
-                        (Node::Identifier(name), Node::Literal(literal)) if name == "Math" => {
-                            let key = match literal {
-                                Literal::Number(n) => number_to_string(*n),
-                                Literal::String(s) => s.clone(),
-                                Literal::Bool(b) => JsStr::from(if *b { "true" } else { "false" }),
-                                Literal::Null => JsStr::from("null"),
-                            };
-                            self.call_math(math_lookup(&key), &values)
-                        }
-                        _ => Ok(Value::Undefined),
-                    },
-                    _ => Ok(Value::Undefined),
+                    continue;
                 }
-            }
+                Op::Branch(target) => {
+                    len -= 1;
+                    if !stack[len].truthy() {
+                        pc = *target;
+                    }
+                    stack[len] = Value::Undefined;
+                    continue;
+                }
+                Op::Jump(target) => {
+                    pc = *target;
+                    continue;
+                }
+            };
+            stack[len] = value;
+            len += 1;
         }
+        debug_assert_eq!(len, 1);
+        Ok(std::mem::replace(&mut stack[0], Value::Undefined))
     }
 
-    fn identifier(&mut self, name: &str) -> V<H::Obj> {
+    fn identifier(&mut self, name: Input) -> V<H::Obj> {
         let ctx = self.ctx;
         match name {
-            "time" | "T" => {
+            Input::Time => {
                 self.context.insert(ContextReads::TIME);
                 Value::Number(ctx.time)
             }
-            "PI" => Value::Number(std::f64::consts::PI),
-            "Math" => Value::Object(Object::Math),
-            "t" => {
+            Input::Pi => Value::Number(std::f64::consts::PI),
+            Input::Math => Value::Object(Object::Math),
+            Input::LocalTime => {
                 self.context.insert(ContextReads::LOCAL_TIME);
                 Value::Number(ctx.t)
             }
-            "fps" => {
+            Input::Fps => {
                 self.context.insert(ContextReads::FPS);
                 Value::Number(ctx.fps)
             }
-            "value" => {
+            Input::Value => {
                 self.context.insert(ContextReads::VALUE);
                 self.root(Root::Value)
             }
-            "layer" => self.root(Root::Layer),
-            "comp" => self.root(Root::Comp),
-            "ch" => {
+            Input::Layer => self.root(Root::Layer),
+            Input::Comp => self.root(Root::Comp),
+            Input::Channel => {
                 self.context.insert(ContextReads::CHANNEL);
                 Value::String(ctx.channel.clone())
             }
-            "idx" => {
+            Input::Index => {
                 self.context.insert(ContextReads::INDEX);
                 Value::Number(ctx.idx)
             }
-            "frame" if self.dialect == Dialect::Native => {
+            Input::Frame if self.dialect == Dialect::Native => {
                 self.context.insert(ContextReads::FRAME);
                 Value::Number(ctx.frame)
             }
-            _ => {
-                if let Some(h) = Helper::from_name(name) {
-                    Value::Object(Object::Callable(Callable::Helper(h)))
-                } else if let Some(m) = MathFunction::from_name(name) {
-                    Value::Object(Object::Callable(Callable::Math(m)))
-                } else {
-                    Value::Undefined
-                }
-            }
+            Input::Callable(c) => Value::Object(Object::Callable(c)),
+            _ => Value::Undefined,
         }
     }
 
@@ -764,7 +768,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
         if matches!(lookup, MathLookup::Missing) {
             return Ok(Value::Undefined);
         }
-        let mut numbers = Vec::with_capacity(args.len());
+        let mut numbers: smallvec::SmallVec<[f64; 12]> = smallvec::SmallVec::new();
         for arg in args {
             numbers.push(self.js_number(arg)?);
         }
@@ -790,7 +794,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
     // `6.2831` is the literal `expression.ts` uses, not τ.
     #[allow(clippy::approx_constant)]
     fn helper(&mut self, helper: Helper, args: &[V<H::Obj>]) -> R<V<H::Obj>> {
-        let mut numbers: Vec<f64> = Vec::with_capacity(args.len());
+        let mut numbers: smallvec::SmallVec<[f64; 12]> = smallvec::SmallVec::new();
         for arg in args {
             numbers.push(self.js_number(arg)?);
         }

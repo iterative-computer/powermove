@@ -433,3 +433,25 @@ fn font_cache_seeds_are_kept_across_registry_changes() {
     assert!(e.set_font_seeds(b"{\"seeds\":7}").is_err());
     assert!(e.set_font_seeds(b"not json").is_err());
 }
+
+#[test]
+fn batched_expression_status_distinguishes_errors_without_reading_messages() {
+    let mut e = engine();
+    let ids = ["opacity", "skew"].map(|key| {
+        e.intern(
+            &parse(&format!(
+                r#"{{"comp":"C1","layer":"A","key":"{key}","via":"channel"}}"#
+            ))
+            .unwrap(),
+        )
+        .unwrap()
+        .index()
+    });
+    let mut values = [0.0; 2];
+    let mut kinds = [0u8; 2];
+    for time in [0.0, -0.0, 1.0, 2.0, 1.0] {
+        e.ev_batch(&ids, time, &mut values, &mut kinds);
+        assert_eq!(values, [50.0, 0.0]);
+        assert_eq!(kinds, [0, 0x80]);
+    }
+}

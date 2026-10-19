@@ -204,3 +204,44 @@ fn hooks_extend_ev_active_and_content() {
         Some(&JsValue::Number(10.0))
     );
 }
+
+#[test]
+fn resident_expression_plans_do_not_recompile_more_than_256_unique_sources_each_frame() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting(Arc<AtomicUsize>);
+    struct Identity;
+    impl ExpressionEngine for Counting {
+        fn compile(&self, _: &JsString) -> Option<Arc<dyn CompiledExpression>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Some(Arc::new(Identity))
+        }
+    }
+    impl CompiledExpression for Identity {
+        fn needs_idx(&self) -> bool {
+            false
+        }
+        fn needs_frame(&self) -> bool {
+            false
+        }
+        fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
+            Ok(cx.value.clone())
+        }
+    }
+    let layers = (0..400).map(|i| format!(r#"{{"id":"L{i}","from":0,"p":{{"opacity":{{"v":4,"kf":[{{"t":0,"v":0}},{{"t":2,"v":20}}],"expr":"source-{i}"}}}}}}"#)).collect::<Vec<_>>().join(",");
+    let json = format!(
+        r#"{{"id":"P","compId":"C","comps":{{"C":{{"id":"C","fps":30,"layers":[{layers}]}}}}}}"#
+    );
+    let doc = Document::new(Some(parse(&json).unwrap()), 1);
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut ev = Evaluator::new().with_expressions(Arc::new(Counting(count.clone())));
+    let ids = (0..400)
+        .map(|i| ev.intern(PropAddress::channel("C", &format!("L{i}"), "opacity")))
+        .collect::<Vec<_>>();
+    let mut values = vec![0.0; ids.len()];
+    let mut kinds = vec![pm_eval::ValueKind::Number; ids.len()];
+    for time in [0.0, 1.0, 2.0, 1.0] {
+        ev.ev_batch(&doc, &ids, time, &mut values, &mut kinds);
+        assert!(values.iter().all(|n| *n == time * 10.0));
+        assert_eq!(count.load(Ordering::Relaxed), 400);
+    }
+}
