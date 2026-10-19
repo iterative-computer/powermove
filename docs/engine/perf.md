@@ -855,3 +855,14 @@ unmeasured. SVG exact-pixel and fallback PBO tests establish correctness only.
 The defs runner is now integrated, but export throughput and animated fallback
 playback still need its paired measurements. A 135 ms SVG scale edit was
 observed in an unpaired locked-session correctness run and is not a speed pass.
+
+P5's absolute viewer-join regression retains the **per-sample** `< 0.08 s`
+assertion in `e2e/engine-headless-playback.spec.ts`; an aggregate check does not
+replace it. After integrating defs, the hidden app passed it with 42.3 ms worst
+sample error, preserved its session/epoch across the join, and used zero
+host-clock runs. The J/K/L regression passed too: 42 frames at 2× reverse,
+zero samples above 10 ms, max 0.972 ms outside the frame interval using the
+presenter's predicted display time. These are functional regression results,
+not valid paired performance or physical-display A/V measurements: the display
+was locked/asleep and machine load exceeded 8 during the check window. The
+paired mount probe recorded its invalid display state and skipped.

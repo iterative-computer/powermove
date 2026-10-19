@@ -99,7 +99,7 @@ test('plays, shuttles, seeks and loops without a viewer; opening joins the runni
   for (const sample of join.samples) {
     const error = Math.abs(sample.time - previous.time - (sample.now - previous.now) / 1000);
     maxJoinError = Math.max(maxJoinError, error);
-    expect(error).toBeLessThan(0.08);
+    expect(error, 'P5: every viewer-join sample stays within 0.08 seconds').toBeLessThan(0.08);
     previous = { ...previous, ...sample };
   }
   await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.session().frames)).toBeGreaterThan(0);
