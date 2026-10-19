@@ -1132,6 +1132,11 @@ impl Thread {
         self.refresh_timing(key);
         if let Some(view) = self.views.get_mut(&key) {
             view.dirty = true;
+            // A paused headless session has no frame to announce this
+            // revision. Refresh its readiness clock after every update.
+            if view.state.headless == Some(true) {
+                view.sample_due = true;
+            }
             // Frames already rendered ahead show the older revision.
             if view.clock.is_playing() {
                 view.schedule.invalidate();
