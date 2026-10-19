@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, it, vi } from 'vitest';
 import { makePM } from '../legacy/__tests__/make-pm';
+import { setSceneParameterValue } from '../legacy/core/workspace';
 import { installEngineDoc } from './install';
 import { parseMode } from './flags';
 
@@ -51,11 +52,82 @@ it('batches resident expression channels exactly, across time, edits, errors and
   PM.touch();
   compare(2.6); compare(3.6); // Removing one id updates all live frame-slot indexes.
   expect(batch.mock.calls.at(-1)![0]).toBe(119);
+  PM.proj.layers[0].p.opacity.expr = 'value + time';
+  PM.touch([['layers', 0, 'p', 'opacity', 'expr']]);
+  compare(2.7); compare(3.7); // Reusing its ID restores the expression slot.
+  expect(batch.mock.calls.at(-1)![0]).toBe(120);
   api.reset();
   compare(2.5); compare(3.5);
   doc.wasm!.x.memory.grow(1);
   compare(4.5); // ABI views are reacquired after memory growth.
   expect((doc.stats() as any).native.fallbacks).toEqual({});
+});
+
+it('retains live addresses across leaf revisions and invalidates them on structural changes', async () => {
+  const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history');
+  PM.proj = PM.mkProject({ dur: 10 });
+  PM.proj.params = { amp: { value: 7 } };
+  PM.proj.layers = Array.from({ length: 24 }, () => {
+    const layer = PM.mkLayer('solid');
+    layer.p.opacity.expr = 'param("amp") + time + value';
+    return layer;
+  });
+  const doc = installEngineDoc(PM, { mode: parseMode('on'), strict: true, loadModule, sink: () => {} });
+  expect(await doc.whenReady).toBe(true);
+  const api = doc.api!, wasm = doc.wasm!;
+  const intern = vi.spyOn(wasm, 'intern');
+  const prepare = wasm.prepareBatch.bind(wasm);
+  const batches = vi.spyOn(wasm, 'prepareBatch').mockImplementation(ids => {
+    const evaluate = prepare(ids);
+    return time => { batchCalls.push([ids.length, time]); return evaluate(time); };
+  });
+  const batchCalls: Array<[number, number]> = [];
+  const compare = (time: number) => {
+    for (const layer of PM.proj.layers.slice(0, 24)) {
+      expect(Object.is(api.evP(layer, layer.p.opacity, time, 'opacity'), PM.evP(layer, layer.p.opacity, time, 'opacity'))).toBe(true);
+    }
+  };
+  compare(1);
+  const initialInterns = intern.mock.calls.length;
+  expect(initialInterns).toBe(24);
+  batchCalls.length = 0;
+  const structuralDiffs = doc.barrier!.stats.structuralDiffs;
+  setSceneParameterValue(PM, PM.proj.params.amp, 9, 'amp'); // Existing projects may lack param.name.
+  compare(1);
+  expect(doc.barrier!.stats.structuralDiffs).toBe(structuralDiffs);
+  expect(intern).toHaveBeenCalledTimes(initialInterns);
+  expect(batchCalls).toEqual([[24, 1]]);
+  batchCalls.length = 0;
+  const first = PM.proj.layers[0];
+  PM.doc.write([['layers', 0, 'p', 'opacity', 'expr']], () => { first.p.opacity.expr = 'param("amp") + time * 41 + value'; });
+  compare(2);
+  expect(intern).toHaveBeenCalledTimes(initialInterns);
+  expect(batchCalls).toEqual([[24, 2]]);
+  const stableInterns = intern.mock.calls.length;
+  const extra = PM.mkLayer('solid');
+  PM.doc.write([['layers']], () => { PM.proj.layers.push(extra); });
+  compare(2.5);
+  expect(intern).toHaveBeenCalledTimes(stableInterns);
+  PM.doc.write([['layers']], () => { PM.proj.layers.pop(); });
+  compare(2.75);
+  expect(intern).toHaveBeenCalledTimes(stableInterns);
+  // A held channel that is no longer at its path must never inherit the
+  // address of the replacement channel.
+  const held = first.p.opacity;
+  PM.doc.write([['layers', 0, 'p', 'opacity']], () => {
+    first.p.opacity = { ...held, expr: 'time + 100' };
+  });
+  expect(Object.is(api.evP(first, first.p.opacity, 3, 'opacity'), PM.evP(first, first.p.opacity, 3, 'opacity'))).toBe(true);
+  expect(intern.mock.calls.length).toBeGreaterThan(initialInterns);
+  // Shape changes and duplicate ids require the full address check again.
+  const duplicate = PM.mkLayer('solid');
+  duplicate.id = first.id;
+  duplicate.p.opacity.expr = 'time + 200';
+  PM.doc.write([['layers']], () => { PM.proj.layers.unshift(duplicate); });
+  expect(Object.is(api.evP(first, first.p.opacity, 4, 'opacity'), PM.evP(first, first.p.opacity, 4, 'opacity'))).toBe(true);
+  expect(Object.is(api.evP(duplicate, duplicate.p.opacity, 4, 'opacity'), PM.evP(duplicate, duplicate.p.opacity, 4, 'opacity'))).toBe(true);
+  expect(doc.check('leaf-rebind-test')?.ok).toBe(true);
+  batches.mockRestore();
 });
 
 it('preserves independent frame buffers when callers alternate composition scopes', async () => {

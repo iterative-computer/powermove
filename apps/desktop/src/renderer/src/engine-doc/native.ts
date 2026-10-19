@@ -282,11 +282,11 @@ export class NativeApi {
   private depth = 0;
   private answeredNatively = false;
   /** Live channel object → interned id (validated on every use). */
-  private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown; wasm: PmWasm; time?: number; number?: number; frame?: ExpressionFrameSlot }>();
+  private props = new WeakMap<object, { layer: object; layerId: unknown; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; shape: number; project: unknown; cur: unknown; wasm: PmWasm; time?: number; number?: number; frame?: ExpressionFrameSlot }>();
   /** A detached property's validated address; its inputs are rechecked by DetachedScopes. */
   private detachedProps = new WeakMap<object, { layer: object; cur: unknown; key: unknown; path: PathPart[]; request: Record<string, unknown> }>();
   /** Live layer → interned transform channels, valid at the current revision and scope. */
-  private channels = new WeakMap<object, { comp: string; ids: Map<string, number>; revision: number; cur: unknown }>();
+  private channels = new WeakMap<object, { layer: object; layerId: unknown; comp: string; ids: Map<string, number>; revision: number; shape: number; project: unknown; cur: unknown }>();
   private refs = new Map<number, number>();
   private expressionFrames = new ExpressionFrames();
   private expressionComps = new Map<number, string>();
@@ -806,24 +806,48 @@ export class NativeApi {
    * rootComp: checked on every call, since the scope object can change
    * without the barrier seeing it.
    */
-  private current(entry: { revision: number; cur: unknown }, raw: any): boolean {
-    if (this.wrapperFreeChannel(raw)) {
-      const barrier = this.barrier();
-      if (!barrier) return false;
-      barrier.flush();
-      return entry.revision === barrier.revision;
+  private current(entry: { revision: number; shape: number; project: unknown; cur: unknown; comp: string; layer: object; layerId: unknown; path?: PathPart[]; time?: number; number?: number }, raw: any): boolean {
+    const barrier = this.barrier();
+    if (!barrier) return false;
+    barrier.flush();
+    const revision = barrier.revision;
+    // An unchanged layer shape keeps the interned address in the same owner.
+    // A leaf edit may have changed the expression's reads; pm-wasm validates
+    // and rebinds that id against the new revision on its next evaluation.
+    const revised = entry.revision !== revision;
+    if (revised) {
+      const project = this.unwrap(this.PM.proj);
+      if (entry.project !== project || entry.layerId !== (entry.layer as any)?.id
+        || entry.path && at(entry.layer, entry.path) !== raw) return false;
+      if (entry.shape !== barrier.shapeRevision) {
+        // An added, removed, or reordered layer need not discard every ID.
+        // Check the open composition's membership and first-ID rule once per
+        // layer shape (index() shares its map across all channels in a frame).
+        const open = project?.compId ?? project?.id ?? '';
+        if ((entry.comp !== open && entry.comp !== ROOT_VIEW + open)
+          || !Array.isArray(project?.layers)) return false;
+        const indexed = this.index(project.layers);
+        const atIndex = indexed.index.get(entry.layer);
+        if (atIndex === undefined || indexed.firstById.get(String(entry.layerId)) !== atIndex) return false;
+      }
     }
+    let scopeValid: boolean;
+    if (this.wrapperFreeChannel(raw)) scopeValid = true;
     // The ordinary open-project scope has no wrapper to validate. Avoid
     // constructing a scope stamp for every resident channel of the frame.
-    if (!this.PM.scope?.length) {
-      const barrier = this.barrier();
-      if (!barrier) return false;
-      barrier.flush();
-      return entry.revision === barrier.revision && entry.cur === null;
+    else if (!this.PM.scope?.length) scopeValid = entry.cur === null;
+    else {
+      const stamp = this.stamp();
+      scopeValid = !!stamp && stamp.revision === revision && entry.cur === stamp.cur
+        && (stamp.cur !== ROOT_STAMP || isRootWrapper(stamp.scope, this.unwrap(this.PM.proj), this.projectFields(this.unwrap(this.PM.proj)), this.unwrap));
     }
-    const stamp = this.stamp();
-    return !!stamp && entry.revision === stamp.revision && entry.cur === stamp.cur
-      && (stamp.cur !== ROOT_STAMP || isRootWrapper(stamp.scope, this.unwrap(this.PM.proj), this.projectFields(this.unwrap(this.PM.proj)), this.unwrap));
+    if (!scopeValid) return false;
+    if (revised) {
+      entry.revision = revision;
+      entry.shape = barrier.shapeRevision;
+      entry.time = undefined;
+    }
+    return true;
   }
 
   private wrapperFreeChannel(raw: any): boolean {
@@ -836,6 +860,12 @@ export class NativeApi {
     const wasm = this.wasm();
     if (!wasm || wasm.dead) return MISS;
     const raw = prop && typeof prop === 'object' ? this.unwrap(prop) : null;
+    // The ID still names this channel after a source removal, but it must no
+    // longer occupy a resident expression slot in subsequent frame batches.
+    if (!raw?.expr && this.expressionComps.has(id)) {
+      this.expressionFrames.release(id);
+      this.expressionComps.delete(id);
+    }
     let n: number, status: number;
     try {
       if (raw?.expr) {
@@ -862,8 +892,9 @@ export class NativeApi {
       const raw = this.unwrap(L);
       const entry = this.channels.get(raw);
       const id = entry?.ids.get(key);
-      if (id !== undefined && this.current(entry!, raw.p?.[key])) {
+      if (id !== undefined && Object.prototype.hasOwnProperty.call(raw.p ?? {}, key) && this.current(entry!, raw.p?.[key])) {
         const value = this.fastValue(id, T, raw.p?.[key]);
+        if (value !== MISS && raw.p?.[key]?.expr && !this.expressionComps.has(id)) this.noteError(raw.p[key], this.wasm()!, id, entry!.comp);
         if (value !== MISS) { this.stats.calls.ev = (this.stats.calls.ev ?? 0) + 1; return value; }
       }
     }
@@ -878,8 +909,10 @@ export class NativeApi {
       }
       const stamp = this.stamp()!;
       let entry = this.channels.get(ctx.raw);
-      if (!entry || entry.comp !== ctx.comp) { entry = { comp: ctx.comp, ids: new Map(), revision: stamp.revision, cur: stamp.cur }; this.channels.set(ctx.raw, entry); }
+      if (!entry || entry.comp !== ctx.comp || entry.project !== this.unwrap(this.PM.proj)
+        || entry.layerId !== ctx.raw.id || entry.cur !== stamp.cur) { entry = { layer: ctx.raw, layerId: ctx.raw.id, comp: ctx.comp, ids: new Map(), revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur }; this.channels.set(ctx.raw, entry); }
       entry.revision = stamp.revision;
+      entry.shape = this.barrier()!.shapeRevision;
       entry.cur = stamp.cur;
       let id = entry.ids.get(key);
       if (id === undefined) {
@@ -899,6 +932,12 @@ export class NativeApi {
       const rawProp = this.unwrap(prop);
       const entry = this.props.get(rawProp);
       if (entry && entry.key === key && entry.layer === this.unwrap(L) && this.current(entry, rawProp)) {
+        if (!rawProp.expr && entry.frame) {
+          this.expressionFrames.release(entry.id);
+          this.expressionComps.delete(entry.id);
+          entry.frame = undefined;
+          this.errors.delete(rawProp);
+        }
         // The value was already answered by pm-wasm at this exact time and
         // revision. Like its own last-answer memo, keep numeric answers only.
         if (entry.time !== undefined && Object.is(entry.time, T)) {
@@ -921,6 +960,10 @@ export class NativeApi {
           return value;
         }
         const value = this.fastValue(entry.id, T, rawProp);
+        if (value !== MISS && rawProp.expr && !entry.frame) {
+          if (this.expressionComps.has(entry.id)) entry.frame = this.expressionFrames.register(entry.comp, entry.id, rawProp);
+          else this.noteError(rawProp, entry.wasm, entry.id, entry.comp);
+        }
         if (typeof value === 'number') { entry.time = T; entry.number = value; }
         if (value !== MISS) { this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1; return value; }
       }
@@ -952,7 +995,10 @@ export class NativeApi {
       if (!ctx) return { fallback: 'context' };
       const stamp = this.stamp()!;
       let entry = this.props.get(rawProp);
-      const valid = entry && entry.layer === ctx.raw && entry.comp === ctx.comp && entry.key === key && at(ctx.raw, entry.path) === rawProp;
+      const valid = entry && entry.layer === ctx.raw && entry.comp === ctx.comp && entry.key === key
+        && ctx.first && entry.layerId === ctx.raw.id && entry.project === this.unwrap(this.PM.proj)
+        && (!rawProp.expr || entry.cur === stamp.cur)
+        && at(ctx.raw, entry.path) === rawProp;
       if (!valid) {
         const path = findPath(ctx.raw, rawProp);
         if (!path || !ctx.first || typeof ctx.layer !== 'number' || typeof key !== 'string' || typeof T !== 'number') {
@@ -964,10 +1010,11 @@ export class NativeApi {
         }
         const id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: path }, rawProp);
         if (id < 0) return this.query('evP', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, key, t: T });
-        entry = { layer: ctx.raw, path, comp: ctx.comp, id, key, revision: stamp.revision, cur: stamp.cur, wasm };
+        entry = { layer: ctx.raw, layerId: ctx.raw.id, path, comp: ctx.comp, id, key, revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur, wasm };
         this.props.set(rawProp, entry);
       }
       entry!.revision = stamp.revision;
+      entry!.shape = this.barrier()!.shapeRevision;
       entry!.cur = stamp.cur;
       const got = this.evById(wasm, entry!.id, T);
       entry!.time = 'value' in got && typeof got.value === 'number' ? T : undefined;
