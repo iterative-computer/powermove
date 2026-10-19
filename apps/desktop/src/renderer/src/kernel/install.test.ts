@@ -536,10 +536,88 @@ describe('installKernel', () => {
       if (dispose) { installed.uninstall(); installed = null; }
       PM.EngineDoc.ready = true;
       release(true);
-      await Promise.resolve();
+      await new Promise(resolve => setTimeout(resolve, 0));
       if (dispose) expect(PM.cmd).not.toHaveBeenCalled();
       else { expect(PM.cmd).toHaveBeenCalledWith('boot-key.go'); installed!.uninstall(); installed = null; }
     }
+  });
+
+  /** An EngineDoc whose boot load failed under strict, with a working Retry. */
+  function failedEngineDoc() {
+    let loading: Promise<boolean> | null = null;
+    let finish!: () => void;
+    const doc: any = {
+      enabled: true, strict: true, ready: false, whenReady: Promise.resolve(false),
+      settled: () => loading ?? Promise.resolve(doc.ready),
+      showFailure: vi.fn(),
+      onReady: () => () => {},
+      retry() {
+        loading = new Promise<boolean>(resolve => { finish = () => { doc.ready = true; loading = null; resolve(true); }; });
+        return loading;
+      },
+    };
+    return { doc, finishRetry: () => finish() };
+  }
+  const press = (key: string, init: KeyboardEventInit = { metaKey: true }) => {
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init });
+    document.body.dispatchEvent(event);
+    return event;
+  };
+
+  it('runs Settings from its shortcut after a failed document load, and names the failure for a document command', async () => {
+    const PM = fakePM();
+    const { doc } = failedEngineDoc();
+    PM.EngineDoc = doc;
+    installed = installKernel(PM);
+    const keys = installed.api('keys').keybindings;
+    keys.bind({ key: 'cmd+,', command: 'settings' });
+    keys.bind({ key: 'cmd+d', command: 'duplicate' });
+    press(',');
+    // Settings (where "Use New Engine" is switched off) never reads the document.
+    expect(PM.cmd).toHaveBeenCalledWith('settings');
+    press('d');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(PM.cmd).not.toHaveBeenCalledWith('duplicate');
+    expect(doc.showFailure).toHaveBeenCalledOnce();
+  });
+
+  it('holds a document key pressed during a Retry and runs it once the Retry succeeds', async () => {
+    const PM = fakePM();
+    const { doc, finishRetry } = failedEngineDoc();
+    PM.EngineDoc = doc;
+    installed = installKernel(PM);
+    installed.api('keys').keybindings.bind({ key: 'cmd+d', command: 'duplicate' });
+    void doc.retry();
+    // whenReady resolved false at boot; the key waits for the Retry instead.
+    press('d');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(PM.cmd).not.toHaveBeenCalled();
+    finishRetry();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(PM.cmd).toHaveBeenCalledWith('duplicate');
+    expect(doc.showFailure).not.toHaveBeenCalled();
+  });
+
+  it('gives a sandboxed panel\'s trusted keys the same gate: Settings runs, a document key waits for a Retry', async () => {
+    const PM = fakePM();
+    const { doc, finishRetry } = failedEngineDoc();
+    PM.EngineDoc = doc;
+    let trusted!: (input: any) => boolean;
+    (globalThis as Record<string, any>).powermove = { onInputKey: (fn: typeof trusted) => { trusted = fn; return () => {}; } };
+    installed = installKernel(PM);
+    const keys = installed.api('keys').keybindings;
+    keys.bind({ key: 'cmd+,', command: 'settings' });
+    keys.bind({ key: 'cmd+d', command: 'duplicate' });
+    const input = (key: string) => ({ type: 'keyDown', key, code: '', modifiers: ['meta'], isAutoRepeat: false, field: false, extensionId: 'panel' });
+    expect(trusted(input(','))).toBe(true);
+    expect(PM.cmd).toHaveBeenCalledWith('settings');
+    void doc.retry();
+    expect(trusted(input('d'))).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(PM.cmd).not.toHaveBeenCalledWith('duplicate');
+    finishRetry();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(PM.cmd).toHaveBeenCalledWith('duplicate');
   });
 
   it('falls back to the kernel command table when PM.cmd is absent', () => {
