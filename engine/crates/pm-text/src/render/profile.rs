@@ -141,10 +141,6 @@ pub struct Profile {
     #[serde(default = "one")]
     pub fake_bold_y: f64,
     pub stroke: StrokeProfile,
-    /// Apple Color Emoji sits lower by `bitmap::apple_emoji_shift` whole
-    /// pixels, as Canvas2D draws it; CoreText draws it on the baseline.
-    #[serde(default = "yes")]
-    pub canvas_emoji_shift: bool,
     /// Under a rotated, skewed or non-uniform matrix the smoothing's
     /// upward ink offset (`Point::dy`) stays in device space, as CoreText
     /// grows glyphs toward the top of the bitmap whatever the text's
@@ -159,10 +155,6 @@ pub struct Profile {
 
 fn one() -> f64 {
     1.0
-}
-
-fn yes() -> bool {
-    true
 }
 
 const fn p(size: f64, expand_x: f64, expand_y: f64, dy: f64, gamma: f64) -> Point {
@@ -243,7 +235,6 @@ impl Profile {
             widen: 0.0,
             gamma: 1.0,
         },
-        canvas_emoji_shift: true,
         device_space_offset: false,
         bitmap_snap: None,
     };
@@ -268,7 +259,6 @@ impl Profile {
             widen: 0.0,
             gamma: 1.0,
         },
-        canvas_emoji_shift: false,
         device_space_offset: true,
         bitmap_snap: Some(Snap::Round),
     };
@@ -295,7 +285,6 @@ impl Profile {
             widen: -0.025,
             gamma: 0.612,
         },
-        canvas_emoji_shift: true,
         device_space_offset: false,
         bitmap_snap: None,
     };
