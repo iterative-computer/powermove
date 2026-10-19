@@ -32,6 +32,7 @@ import { DocumentSession, documentId, type DocumentStream } from './session';
 import { EngineRenderTransport } from './render-transport';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
+import { resolveFrameRate, TICKS_PER_SECOND } from '../../../shared/frame-rate';
 import { installAppCaptures, usesBlender } from './app-captures';
 // The presentation is platform code hosted in the viewer's folder; the
 // kernel's `render.gl.init` binding uses it for viewers that do not present
@@ -301,6 +302,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     usesBlender: () => usesBlender(PM.proj),
     // A `raster` override that throws fails the frame, reported as today's
     // frame loop reports a compositor throw (legacy/core/engine.ts).
+    playing: () => !!PM.playing,
+    frameTicks: () => {
+      const rate = resolveFrameRate(PM.proj?.fps, PM.proj?.fpsRational);
+      const ticks = rate ? (TICKS_PER_SECOND * rate.den) / rate.num : 0;
+      return Number.isInteger(ticks) && ticks > 0 ? ticks : null;
+    },
     onProducerError: (error) => {
       const now = performance.now();
       if (now - lastProducerFailure <= 2000) return;
@@ -318,6 +325,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const unrouteCaptures = installAppCaptures(PM, renderTransport);
   // The kernel's raster override producer answers through it (kernel/raster-compat.ts).
   const detachRasterCompat = (PM as any).RasterCompat?.attach?.(renderTransport) ?? (() => {});
+  // Playback: keep compatibility answers ahead of the clock (render-transport.ts).
+  const offPresented = PM.bus?.on?.('preview:presented', () => renderTransport.presentedWhilePlaying());
 
   async function connect(nextGeneration: number, port: PortLike): Promise<void> {
     connection?.close('a new interactive engine launch');
@@ -473,6 +482,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       sessionReady = null;
       unrouteCaptures();
       detachRasterCompat();
+      if (typeof offPresented === 'function') offPresented();
       renderTransport.dispose();
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;

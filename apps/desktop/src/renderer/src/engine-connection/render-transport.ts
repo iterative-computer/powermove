@@ -164,6 +164,9 @@ export type CompatAnswerResult =
   | null;
 
 /** Answers the engine's needs for one source (the raster override's producer). */
+/** Frames of compatibility answers kept ahead of the clock during playback. */
+export const COMPAT_LOOKAHEAD = 6;
+
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
 
 /** `fresh`: never `reuse` (an export frame, or a need asked again after a
@@ -176,6 +179,10 @@ export type RenderTransportOptions = {
   session: () => TransportSession | null;
   /** A producer threw while answering a frame's need (today's failed frame). */
   onProducerError?: (error: unknown, need: CompatNeed) => void;
+  /** Whether the editor plays (compatibility answers then run ahead of the clock). */
+  playing?: () => boolean;
+  /** The open composition's frame duration in ticks (the first lookahead step). */
+  frameTicks?: () => number | null;
   /** Every open session of the window (viewer sessions and the standby):
    *  each learns which compatibility producers the window has. */
   sessions?: () => TransportSession[];
@@ -219,6 +226,16 @@ export class EngineRenderTransport {
   private readonly reused = new Set<string>();
   readonly compatStats = { needs: 0, rasters: 0, natives: 0, reuses: 0, unanswered: 0, exportAsks: 0 };
   private answering = 0;
+  /**
+   * Playback lookahead. During playback a frame whose compatibility answers
+   * are missing is not drawn (the presenter draws the clock's frame when
+   * they arrive, by which time the clock moved on), so the window answers
+   * ahead: each layer the engine asked for is answered for the next
+   * `COMPAT_LOOKAHEAD` frames, and one more per presented frame. Today's
+   * compositor called the wrapper synchronously at each frame it drew.
+   */
+  private readonly ahead = new Map<string, { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number }>();
+  readonly lookaheadStats = { answered: 0 };
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
   /** UI snapshots (thumbnails, library cards, posters, the project thumbnail). */
@@ -273,6 +290,49 @@ export class EngineRenderTransport {
     if (message['compat'] !== 'needs' || !session) return;
     const needs = Array.isArray(message['needs']) ? message['needs'] as CompatNeed[] : [];
     for (const need of needs) this.answerNeed(need, session);
+    if (this.options.playing?.()) for (const need of needs) this.lookahead(need, session);
+    else this.ahead.clear();
+  }
+
+  /** A frame was presented while playing: keep the answers `COMPAT_LOOKAHEAD` frames ahead. */
+  presentedWhilePlaying(): void {
+    if (!this.options.playing?.()) {
+      this.ahead.clear();
+      return;
+    }
+    for (const entry of this.ahead.values()) {
+      entry.cursor += entry.step;
+      this.answerAhead(entry);
+    }
+  }
+
+  private lookahead(need: CompatNeed, session: TransportSession): void {
+    const tag = `${need.composition}\u0000${need.layer}\u0000${need.source}`;
+    const frame = this.options.frameTicks?.() ?? 0;
+    const previous = this.ahead.get(tag);
+    const same = !!previous && previous.session === session;
+    // One frame of the open composition, in the direction the clock moves.
+    // (A nested or retimed layer whose time runs at another rate is answered
+    // ahead at the open composition's frames; frames that miss are asked
+    // for, as without the lookahead.)
+    const moved = same ? need.time - previous!.cursor : 0;
+    const step = moved < 0 ? -frame : frame;
+    if (!step) return;
+    const keep = same && Math.sign(previous!.step) === Math.sign(step) && Math.sign(step) * (previous!.posted - need.time) > 0;
+    const entry = { need, session, step, cursor: need.time, posted: keep ? previous!.posted : need.time };
+    this.ahead.set(tag, entry);
+    this.answerAhead(entry);
+  }
+
+  private answerAhead(entry: { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number }): void {
+    if (entry.session.closed) return;
+    const until = entry.cursor + COMPAT_LOOKAHEAD * entry.step;
+    while (Math.sign(entry.step) * (until - entry.posted) > 0) {
+      entry.posted += entry.step;
+      if (entry.posted < 0) break;
+      if (!this.answerNeed({ ...entry.need, time: entry.posted }, entry.session)) break;
+      this.lookaheadStats.answered++;
+    }
   }
 
   /** Draws one need with its producer and posts the answer; false when there was none. */

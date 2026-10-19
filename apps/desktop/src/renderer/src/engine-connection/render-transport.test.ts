@@ -325,3 +325,42 @@ describe('EngineRenderTransport', () => {
     expect([...unpremultiply(new Uint8ClampedArray([128, 0, 0, 128, 9, 9, 9, 0]))]).toEqual([255, 0, 0, 128, 0, 0, 0, 0]);
   });
 });
+
+describe('compatibility answers during playback', () => {
+  function rig(playing: boolean) {
+    const posted: any[] = [];
+    const session: TransportSession = { id: 3, closed: false, generation: 2, resyncPending: false, applied: 5, uploadFallback: () => {}, post: (e) => { posted.push(e); return true; } };
+    const state = { playing };
+    const t = new EngineRenderTransport({
+      native: {}, session: () => session, revision: () => 5, composition: () => 'P-root', document: () => 'P', viewSeq: () => null, fallbackRunner: () => null, log: () => {},
+      playing: () => state.playing, frameTicks: () => 23_520_000
+    } as any);
+    const asked: number[] = [];
+    t.answerCompat('rasterOverride', (need) => { asked.push(need.time); return { kind: 'native' }; });
+    return { t, session, posted, asked, state };
+  }
+  const need = (time: number) => ({ composition: 'P-root', layer: 'title', time, source: 'rasterOverride' as const, scale: 1 });
+
+  it('answers the next frames ahead of the clock, and one more per presented frame', async () => {
+    const { t, session, asked } = rig(true);
+    const { COMPAT_LOOKAHEAD } = await import('./render-transport');
+    t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+    expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => i * 23_520_000));
+    t.presentedWhilePlaying();
+    expect(asked.at(-1)).toBe((COMPAT_LOOKAHEAD + 1) * 23_520_000);
+    expect(asked).toHaveLength(COMPAT_LOOKAHEAD + 2);
+    // The engine asks for a frame again (its answer was stale): that one is
+    // answered again, the horizon follows the clock, and no frame ahead is
+    // answered twice.
+    const before = asked.length;
+    t.receiveCompat({ compat: 'needs', needs: [need(3 * 23_520_000)] }, session);
+    expect(asked.slice(before)).toEqual([3, 3 + COMPAT_LOOKAHEAD - 1, 3 + COMPAT_LOOKAHEAD].map((n) => n * 23_520_000));
+  });
+
+  it('answers only what was asked while paused', () => {
+    const { t, session, asked } = rig(false);
+    t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+    t.presentedWhilePlaying();
+    expect(asked).toEqual([0]);
+  });
+});
