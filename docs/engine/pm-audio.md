@@ -2585,3 +2585,209 @@ workaround).
 
 Raw captures, profiles, suite logs and the artifact manifest are outside Git
 in `/tmp/ne-w5/audioa7-r4`.
+
+### A8 round 5: installed histories leave their start (2026-10-18)
+
+The round-4 review found that the producer claim path could put jobs back
+on histories that were already playing. The trace: `use_prepared` installed
+a partly ready start (a voice behind a complete shared head, its job still
+queued, got the entry's run and a `Prefill` sharing the entry's completion
+flag) and marked the entry installed. At the head's end the producer
+claimed the queued history; the worker then found its job claimed, and
+`Preparation::accept` returned early, so the voice stayed not ready.
+`prepare_boundaries` kept the installed, incomplete entry and scheduled a
+new job on the same live run with a fresh claim and the shared completion
+flag cleared. The producer then waited on that queued job again (exactly
+the saturated-pool wait the claim exists to avoid), the job rewound the
+live run, and at the next wrap of a loop start `use_prepared` could hand
+the advanced run back as prepared, so the producer re-primed it on the wrap
+(the A7 mechanism). It is reachable in the measured scenario: the harness
+sets the work area to [4 s, 6 s] and the speed and prepared-edit rows play
+from 4 s. PCM stayed bit exact (the reviewer's probe); the defect was the
+real-time stall and the duplicate producer work.
+
+The same ownership gap had two more paths: paused or boundary preparation
+(`prepare_start`) could claim a queued job of an installed start and run it
+on the live run without ever setting its completion flag (the producer
+would then wait at the head's end forever), and evicting or invalidating an
+installed entry dropped the only path that set the flag.
+
+**Fix (961230f6).** Ownership now transfers with the history:
+
+- `use_prepared` releases every history it installs (ready, or behind a
+  complete head with its job queued or running) from the prepared entry
+  (`Prepared::release`). The entry keeps only histories no voice plays, so
+  boundary scheduling, paused preparation and the next loop wrap prepare
+  fresh histories and never touch a live run. The `installed` state and its
+  retention rule are gone.
+- Each job owns its completion flag and sets it when its history is
+  released, whether it ran to ready, stopped on a missing block, or failed.
+  A head's consumer no longer depends on the job's result reaching an entry.
+  Each submission gets a fresh flag, so a superseded job still exiting can
+  never mark a newer job finished.
+- The A3 late path (`begin_prepared`) releases a head-installed history the
+  same way (the slot is marked served, so no join job is scheduled on it),
+  and the next pre-roll discards a superseded late start's entry.
+
+Nothing in the render path, the stretch, the pre-roll or the ring changed.
+No pm-node, protocol or render.rs change in this round (the StartTiming
+fields below are serialized through the existing diagnostics report).
+
+**Regressions (all fail with the fix removed, checked by mutation):**
+`claimed_installed_histories_are_never_rescheduled` drives the reviewer's
+trace through `Preparation`: partial install, claim at the head's end, the
+workers' claimed reports through `accept`, then `retain_prepared` and
+`schedule` at the same start. It asserts that the four rescheduled jobs run
+on histories no voice plays, the producer never waits again, 16,384 frames
+past the head stay bit exact while the jobs run on the pool, and the next
+wrap installs fresh histories with no producer pre-roll (`fresh_starts` 1)
+and 8,192 bit-exact frames. `a_dropped_start_entry_never_strands_an_installed_history`
+invalidates the entry while a worker runs a history and checks the job's
+own completion releases the head's consumer.
+`paused_preparation_never_runs_a_queued_job_on_a_live_history` runs paused
+preparation after a partial install and checks the producer can still claim
+all three queued histories. The A3 test now also checks the late path
+schedules no job on a head-installed voice. The reviewer's probe, run
+against the fix, reports 4 rescheduled jobs, 0 on live runs, producer not
+awaiting, and 0 mismatched chunks. One existing test,
+`immutable_heads_start_complete_then_handoff_to_independent_histories`,
+simulated a job that stops on an evicted block by reporting its result
+without running it; since the job now owns its completion flag, the
+simulation sets that flag as `run` does. Its assertions are unchanged.
+
+**Pool QoS (433bf464).** Investigating a stressed paired failure (below)
+showed a second, pre-existing start hazard. Idle preparation workers waited
+at utility QoS and raised themselves only after dequeuing a playhead job.
+Under default-class load a woken utility thread was starved for longer than
+a start's 85 ms shared head, so the producer reached the head's end with
+most dependent histories unstarted, claimed them all, and primed them
+serially in one render; the ring ran dry. Workers now wait at
+user-interactive QoS; only boundary refill lowers itself to utility QoS for
+the length of its own job. `idle_workers_wait_at_user_interactive_qos`
+reads an idle worker's class from outside the pool and fails with the old
+policy. Linux and Windows are unchanged.
+
+**Start diagnostics (a3ed6997).** `StartTiming` now also reports
+`historyWaitUs`/`historyWaits` (segment holds while an installed head waited
+on a worker's history), `historyClaims` (histories the producer primed
+itself), `maxRenderUs` (the run's longest segment render) and
+`minQueuedFrames` (the ring's low-water mark when the producer returned).
+They are diagnostics only; no gate reads them.
+
+#### Round 5 measurements
+
+**The output device changed during this round.** Jude's default output was
+AirPods Pro (Bluetooth) for most of the session: both engines ran
+256-frame callbacks; native reported 160 ms device latency, today 5.333 ms
+base plus 168 ms output latency. The test signal peaks at -123 dBFS, so
+the captures were inaudible. Later rows ran on the MacBook Pro speakers
+(64-frame native callbacks), as in rounds 3 and 4. Each JSON sample
+records its device.
+
+*Interrupted campaign on 961230f6 (AirPods, paired, 30 starts per row):*
+
+| Case | Today p50/p95/max (ms) | Native p50/p95/max (ms) | Raw misses |
+| --- | ---: | ---: | --- |
+| Prepared level edit, plain, 60 s loop | 173.595/175.312/175.388 | 168.606/171.672/171.972 | None |
+| Speed edit, plain | 173.606/175.607/175.797 | 172.966/176.066/176.099 | p95 +0.459, max +0.302 |
+| Unprepared seek/edit, plain | 173.489/175.794/175.874 | 173.172/175.405/175.438 | None |
+| Prepared level edit, stress 1, 60 s loop | 172.911/175.510/175.895 | 169.899/171.499/171.832 | None |
+| Prepared level edit, stress 2, 60 s loop | 173.212/175.911/175.992 | 168.368/171.601/171.701 | None |
+| Prepared level edit, stress 3, 60 s loop | 173.593/175.566/175.882 | 169.690/171.790/172.090 | None |
+| Speed edit, stressed | 173.201/175.687/175.909 | 174.397/178.460/179.397 | p50 +1.196, p95 +2.773, max +3.488 |
+| Unprepared seek/edit, stressed | failed (below) | failed (below) | — |
+
+All four 60 s loop windows: 0 underruns today, 0 native underruns, starved
+renders and overloads. Every completed native start was complete and
+simultaneous (16 voices, zero spread, omission and safety-net use).
+
+**A8 on Bluetooth: speed edits miss today.** Native compute is unchanged
+from round 4 (Play to all-ready on the plain speed edit: 3.657 ms p50 in
+round 4, 3.645 ms in round 5). The device decides the margin. Per start, native
+= frontend (about 1.7 ms) + canonical pre-roll (3.6–3.7 ms, more under
+stress) + producer queue (0.1 ms) + wait for the next callback (0 to one
+period) + callback-to-presentation lead (one period) + device latency.
+With 64-frame callbacks a period is 1.333 ms and native's device latency is
+13.7 ms below today's (15.625 against 24 + 5.333), which hides the
+pre-roll. On AirPods a period is 5.333 ms and the device-latency advantage
+is only 8 ms (160 against 168 + 5.333), so the pre-roll plus callback phase
+shows at p95 and max. Breakdown p50/p95/max (ms), speed edit, plain: wait
+for callback 2.576/5.141/5.159 on AirPods against 0.598/1.314/1.319 on the
+speakers; lead 5.335 against 2.341. The baseline binary (41b499d7, round 4)
+misses the same way on AirPods: stressed unprepared seek/edit 175.747/
+180.880/182.480 ms native against 172.879/175.487/175.576 ms today. This
+confirms the review's note: **the A8 pass depends on a short native
+callback**, and it does not hold on a 256-frame device for edits that need
+a fresh pre-roll on the Play path. Prepared level edits still pass there.
+This needs an orchestrator decision; it is not fixable inside the bit-exact
+pre-roll.
+
+**Stressed seek: program underruns, pre-existing, located and reduced.**
+The stressed unprepared seek/edit row on 961230f6 failed twice on AirPods
+(one start with 5 and one with 3 program underruns; a first attempt had
+failed on today's side with "WebAudio output timestamp unavailable"). A
+native-only copy of the harness that records instead of throwing then ran
+alternating rows (40 starts each, unprepared seek/edit, AirPods unless
+noted):
+
+| Binary, stress threads | Starts | Starts with program underruns | Starts with claims (histories) |
+| --- | ---: | ---: | --- |
+| 41b499d7 (round 4), 4 | 150 | 1 | n/a |
+| 961230f6, 4 | 120, plus two paired attempts stopped at their first violation | 0, plus those 2 | n/a |
+| a3ed6997 (diagnostics), 4 | 120 | 0 | 0 (0) |
+| a3ed6997, 12 | 120 | 14 | 30 (251) |
+| a3ed6997, 12, speakers | 120 | 7 | 28 (149) |
+| 433bf464 (QoS), 12, speakers, alternating with the row above | 120 | 1 | 0 (0) |
+| 433bf464, 12, speakers | 120 | 0 | 0 (0) |
+
+Every violating start before the QoS change had 8–15 claimed histories;
+where the trace had recorded it before the harness read it, the start's
+longest render was 68–111 ms: the claim burst described above. After it, no
+start claimed a history; the one remaining violation had no claim and a
+46.9 ms render with the whole harness at niceness 15 beside twelve busy
+threads at the same niceness (a descheduled producer). The round-4 binary
+shows the same failure, so it predates this round; the round-5 history fix
+does not cause it.
+
+**Not completed: the final qualification of the final revision.** After
+merging feat/native-engine (d5a59079, 132 commits, none in pm-audio,
+pm-stretch or present/audio.rs), the final campaign passed the targeted
+tests (69 library with one existing ignored measurement, 11
+decode-readiness, 14 mixer, 6 stretch, 5 sources, 2 layouts, 1
+legacy-parity, 3 resampler) and the 59 presenter tests, then stopped at the
+40 GB disk guard (32 GB free, falling to 25 GB as other lanes built). Strict
+clippy, formatting and the library tests also pass on 433bf464. Not run on
+the final revision: the twenty paired rows, the six loop windows, the
+profiles and the sixty playback suites. Rerun with
+`/tmp/ne-w5/audioa7-r6/campaign.sh` once at least 40 GB is free.
+
+**Correction to the round-4 report.** Its deliverables line said no
+assertion was changed. 987ef700 did change one: cold starts are no longer
+held to the one-callback first-buffer bound (10.667 ms) and are only
+reported, as the round-4 section above states.
+
+Evidence outside Git: `/tmp/ne-w5/audioa7-r5` (interrupted campaign,
+A/B and diagnostic rows, breakdown scripts) and `/tmp/ne-w5/audioa7-r6`
+(final-revision verify logs).
+
+#### Remaining and orchestrator decisions, round 5
+
+- **Short native callback (decision; A8 depends on it).** On 64-frame
+  devices A8 passed in rounds 3–4. On a 256-frame Bluetooth device
+  (AirPods Pro), speed edits miss today at p95/max plain and at every
+  percentile stressed, in this round's and round 4's binaries. Options are
+  the orchestrator's: accept per-device behavior, or find a non-bit-exact
+  or speculative way to take the pre-roll off the Play path (both outside
+  the current rules).
+- **Final qualification pending** (disk guard; see above).
+- **Claim burst remains possible.** With the QoS change the pool starts
+  dependents promptly; if it is genuinely saturated, the producer still
+  primes every unstarted history serially at the head's end. Bounding that
+  (priming at most what the ring can cover) is not done.
+- **Producer priority.** The producer is not a real-time thread; today's
+  WebAudio renders on Chromium's real-time audio thread. Under equal-
+  niceness load the producer can be descheduled (one 46.9 ms render at
+  twelve busy threads). Unchanged.
+- Earlier items stand: trim drags on stretched clips (map key), pool load
+  during drags (D6/S1), Linux and Windows priorities, the running-history
+  wait without a timer, and the headless cold-start bound.
