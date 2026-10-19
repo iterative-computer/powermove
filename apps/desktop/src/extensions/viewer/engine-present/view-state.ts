@@ -6,7 +6,7 @@
  * View), Play Every Frame, whether the display shows EDR values, and the
  * view sequence each descriptor echoes.
  */
-import type { EditorCamera, MediaPreference, PreviewResolution, Shading3d, ViewerColorSpace, ViewerState } from './protocol';
+import type { EditorCamera, MediaPreference, PreviewResolution, Shading3d, ViewerCanvas, ViewerColorSpace, ViewerState } from './protocol';
 
 export type ViewInput = {
   composition: string;
@@ -30,8 +30,8 @@ export type ViewInput = {
   localView?: string[];
   /** The 3D chrome wants each frame's depth and object-id surface. */
   depthId?: boolean;
-  /** Today's output scale for level 1 SVG buckets (`todaysOutputScale`). */
-  svgScale?: readonly [number, number] | null;
+  /** Today's viewer canvas for this view (`todaysCanvas`, decision V1). */
+  canvas?: ViewerCanvas | null;
 };
 
 const MAX_EDGE = 16384;
@@ -42,9 +42,11 @@ export function deviceSize(cssWidth: number, cssHeight: number, dpr: number): { 
   return { width: edge(cssWidth), height: edge(cssHeight) };
 }
 
-/** A scale the engine accepts (`ViewerState::validate`: positive, at most 64). */
-function validScale(scale: readonly [number, number] | null | undefined): scale is readonly [number, number] {
-  return !!scale && scale.length === 2 && scale.every((v) => Number.isFinite(v) && v > 0 && v <= 64);
+/** A canvas the engine accepts (`ViewerState::validate`). */
+function validCanvas(canvas: ViewerCanvas | null | undefined): canvas is ViewerCanvas {
+  const rect = (r: ViewerCanvas['crop']) => [r.x, r.y, r.width, r.height].every(Number.isFinite) && r.width > 0 && r.height > 0;
+  const edge = (v: number) => Number.isInteger(v) && v >= 1 && v <= MAX_EDGE;
+  return !!canvas && edge(canvas.width) && edge(canvas.height) && rect(canvas.crop) && rect(canvas.css);
 }
 
 function sameState(a: ViewerState, b: ViewerState): boolean {
@@ -90,7 +92,7 @@ export class ViewSequencer {
       edr: input.edr,
       viewSeq: this.seq,
       ...(input.depthId ? { depthId: true } : {}),
-      ...(validScale(input.svgScale) ? { svgScale: [input.svgScale[0], input.svgScale[1]] as [number, number] } : {})
+      ...(validCanvas(input.canvas) ? { canvas: { width: input.canvas.width, height: input.canvas.height, crop: { ...input.canvas.crop }, css: { ...input.canvas.css } } } : {})
     };
     if (this.last && sameState(this.last, candidate)) return { state: this.last, changed: false };
     this.seq += 1;

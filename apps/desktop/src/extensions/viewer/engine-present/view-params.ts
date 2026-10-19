@@ -11,7 +11,7 @@
  * renders the composition camera.
  */
 import type { ViewParams } from './presentation';
-import type { PreviewResolution, Shading3d } from './protocol';
+import type { PreviewResolution, Shading3d, ViewerCanvas } from './protocol';
 
 export type ViewerLayoutState = {
   /** The zoom on screen (fit or chosen). */
@@ -23,36 +23,48 @@ export type ViewerLayoutState = {
   /** The 3D viewport's state when the composition has a 3D scene. */
   scene3d?: { hasScene: boolean; shading: Shading3d; xray: boolean } | null;
   playEveryFrame?: boolean;
-  /** Today's output scale for this view (`todaysOutputScale`). */
-  svgScale?: readonly [number, number] | null;
+  /** Today's viewer canvas for this view (`todaysCanvas`). */
+  canvas?: ViewerCanvas | null;
 };
 
-/** The viewport fields `todaysOutputScale` reads (`PreviewViewport`). */
-type CroppedViewport = { width: number; height: number };
+/** The crop fields `todaysCanvas` reads (`PreviewViewport`). */
+type CroppedViewport = { x: number; y: number; width: number; height: number };
 
 /**
- * Today's compositor's output scale (`outputScale(W, H)` in
- * legacy/gl/compositor.ts) on the canvas today's viewer sizes for a view:
- * canvas pixels per composition pixel, per axis. `render` is that canvas
- * (`previewRenderSize`, the explicit preview resolution, or the cropped
- * viewport's `renderWidth` × `renderHeight`), `viewport` the crop
- * (`previewRenderViewport`), null when the whole composition is drawn.
- * Level 1 SVG images pick their bucket at this scale
- * (`svgRasterDimensions(…, scaledWorld(L, T, W, H))`), and today's viewer
- * caps it at one pixel per composition pixel below fit (`min(1, zoom ×
- * DPR) × quality`), where the engine draws at zoom × DPR. Null when it
- * cannot be computed (the engine then keeps its own scale).
+ * The canvas today's viewer draws a view into (decision V1): its backing
+ * size `render` (`previewRenderSize`: `min(1, zoom × min(2, DPR)) ×
+ * quality` of the composition below fit; the explicit preview resolution;
+ * or the cropped viewport's `renderWidth` × `renderHeight`), the part of
+ * the composition it holds (`viewport`, the crop of
+ * `previewRenderViewport`; the whole composition when null), and its CSS
+ * box in stage CSS pixels: the composition frame at `position` and `zoom`
+ * (the canvas fills `V.inner`), or the crop inside it (`displayViewport`).
+ * The browser scales the canvas into that box; the engine renders at the
+ * canvas's size and scales it the same way. Null when it cannot be
+ * described (the engine then draws at zoom × DPR).
  */
-export function todaysOutputScale(
+export function todaysCanvas(
   compWidth: number, compHeight: number,
   render: { width: number; height: number },
   viewport: CroppedViewport | null | undefined,
-): [number, number] | null {
-  const W = Number(render.width), H = Number(render.height);
-  const scale: [number, number] = viewport
-    ? [W / Math.max(1e-6, viewport.width), H / Math.max(1e-6, viewport.height)]
-    : [W / Math.max(1, Number(compWidth) || W), H / Math.max(1, Number(compHeight) || H)];
-  return scale.every((v) => Number.isFinite(v) && v > 0) ? scale : null;
+  position: { x: number; y: number }, zoom: number,
+): ViewerCanvas | null {
+  const crop = viewport
+    ? { x: viewport.x, y: viewport.y, width: viewport.width, height: viewport.height }
+    : { x: 0, y: 0, width: Number(compWidth), height: Number(compHeight) };
+  const canvas: ViewerCanvas = {
+    width: Math.round(Number(render.width)), height: Math.round(Number(render.height)), crop,
+    css: { x: position.x + crop.x * zoom, y: position.y + crop.y * zoom, width: crop.width * zoom, height: crop.height * zoom },
+  };
+  const finite = [canvas.width, canvas.height, ...Object.values(crop), ...Object.values(canvas.css)].every(Number.isFinite);
+  return finite && canvas.width >= 1 && canvas.height >= 1 && crop.width > 0 && crop.height > 0 && canvas.css.width > 0 && canvas.css.height > 0 ? canvas : null;
+}
+
+/** Today's compositor's output scale on a canvas (`outputScale(W, H)` in
+ *  legacy/gl/compositor.ts): canvas pixels per composition pixel, per axis.
+ *  Every layer, level 1 SVG buckets included, renders at it. */
+export function canvasOutputScale(canvas: ViewerCanvas): [number, number] {
+  return [canvas.width / canvas.crop.width, canvas.height / canvas.crop.height];
 }
 
 /** The preview resolution menu (Auto, Full, Half, Quarter) as contract 2's enum. */
@@ -72,7 +84,7 @@ export function viewParamsFor(state: ViewerLayoutState): ViewParams {
     resolution: previewResolution(state.previewResolution),
     media: 'automatic',
     playEveryFrame: !!state.playEveryFrame,
-    ...(state.svgScale ? { svgScale: [state.svgScale[0], state.svgScale[1]] as [number, number] } : {}),
+    ...(state.canvas ? { canvas: state.canvas } : {}),
     ...(scene ? { camera: null, shading: scene.shading, xray: scene.xray } : {})
   };
 }

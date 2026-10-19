@@ -22,7 +22,8 @@ export function selectionOutlineColor(project: any): string {
 import { beginTextEdit, type TextEditOptions, type TextEditSession } from './text-editor';
 import { drawEditablePaths, startPathEdit } from './path-editing';
 import { ENGINE_SELF_PRESENTS_ATTRIBUTE, ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, ViewerPresentation, type EngineViewerService } from './engine-present/presentation';
-import { todaysOutputScale, viewParamsFor } from './engine-present/view-params';
+import { todaysCanvas, viewParamsFor } from './engine-present/view-params';
+import type { ViewerCanvas } from './engine-present/protocol';
 import { rawDragMoves, supportsRawUpdates } from './engine-present/raw-gestures';
 import { GeometryAtRevision } from './engine-present/revision-geometry';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
@@ -792,8 +793,14 @@ const eventOffs: Array<() => void> = [];
 let enginePresentation: ViewerPresentation | null = null;
 let engineService: EngineViewerService | null = null;
 let engineFrameTag = '';
-/** Today's output scale for the latest layout (`todaysOutputScale`). */
-let todaysScale: readonly [number, number] | null = null;
+/** Today's canvas for the latest layout (`todaysCanvas`, decision V1). */
+let engineCanvas: ViewerCanvas | null = null;
+/** The canvas size and crop today's viewer has committed for the engine:
+ *  during a paused zoom or pan gesture today keeps its canvas (and shows
+ *  its last frame scaled by CSS) until the gesture settles
+ *  (`canRetainNavigation`), so the engine keeps rendering at it too. */
+let engineCommitted: { render: { width: number; height: number }; viewport: PreviewViewport | null; project: any; version: number; time: number; quality: number } | null = null;
+let engineSettle = 0;
 const syncEnginePresentation = (stage?: { width: number; height: number }) => {
   if (disposed || !V.stage || !V.ov) return;
   const service = api.services.get<EngineViewerService>(ENGINE_VIEWER_SERVICE);
@@ -843,7 +850,7 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
   }
   const scene = api.scene3d?.viewport?.state?.();
   enginePresentation.update(viewParamsFor({
-    shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution, svgScale: todaysScale,
+    shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution, canvas: engineCanvas,
     scene3d: scene ? { hasScene: scene.hasScene, shading: scene.shading, xray: scene.xray } : null,
   }), stage);
 };
@@ -870,6 +877,8 @@ const disposeRuntime = () => {
   V.finishCanvasText?.();
   if (presentationFrame) window.cancelAnimationFrame(presentationFrame);
   presentationFrame = 0;
+  if (engineSettle) window.clearTimeout(engineSettle);
+  engineSettle = 0;
   if (hoverFrame) window.cancelAnimationFrame(hoverFrame);
   hoverFrame = 0; hoverId = null; hoverPointer = null;
   pendingResize = null;
@@ -1013,8 +1022,9 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   z = clamp(z, .02, 8);
   V.shown = z;
   /* Today's render geometry (no styles written): the canvas size and the
-     cropped viewport the compositor draws this view at. The engine's level
-     1 SVG buckets follow its output scale (`todaysOutputScale`). */
+     cropped viewport the compositor draws this view at. The engine renders
+     its frame at that canvas and scales it as the browser scales today's
+     (`todaysCanvas`, decision V1). */
   const position = compositionFramePosition(
     { width: r.width, height: r.height }, { width: p.w, height: p.h }, z,
     { x: V.fit ? 0 : V.pan[0], y: V.fit ? 0 : V.pan[1] },
@@ -1042,7 +1052,28 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   const renderSize: { width: number; height: number } = viewport
     ? { width: viewport.renderWidth, height: viewport.renderHeight }
     : api.transport.previewResolution && api.transport.previewResolution!=='auto' ? {width:Math.max(2,Math.round(p.w*api.transport.quality)),height:Math.max(2,Math.round(p.h*api.transport.quality))} : previewRenderSize(p.w, p.h, z, dpr, api.transport.quality);
-  todaysScale = todaysOutputScale(p.w, p.h, renderSize, viewport);
+  /* A paused zoom or pan gesture keeps today's committed canvas (as
+     `canRetainNavigation` does) while it covers the visible region; the
+     engine follows once the gesture settles. */
+  const committed = engineCommitted;
+  const visible = { x: Math.max(0, -position.x) / z, y: Math.max(0, -position.y) / z,
+    right: Math.min(p.w, (r.width - position.x) / z), bottom: Math.min(p.h, (r.height - position.y) / z) };
+  const retainEngine = gesture && !!committed && now < zoomGestureUntil && !api.transport.playing()
+    && committed.project === p && committed.version === version && committed.time === time && committed.quality === api.transport.quality
+    && (!committed.viewport || (visible.x >= committed.viewport.x && visible.y >= committed.viewport.y
+      && visible.right <= committed.viewport.x + committed.viewport.width && visible.bottom <= committed.viewport.y + committed.viewport.height));
+  if (!retainEngine) engineCommitted = { render: { ...renderSize }, viewport, project: p, version, time, quality: api.transport.quality };
+  else if (!engineSettle && enginePresentation) {
+    const settle = () => {
+      const left = zoomGestureUntil - window.performance.now();
+      if (left > 0) { engineSettle = window.setTimeout(settle, left + 1); return; }
+      engineSettle = 0;
+      if (!disposed) V.layout();
+    };
+    engineSettle = window.setTimeout(settle, Math.max(1, zoomGestureUntil - now + 1));
+  }
+  const kept = engineCommitted!;
+  engineCanvas = todaysCanvas(p.w, p.h, kept.render, kept.viewport, position, z);
   /* The engine's view first: before this layout writes styles (so the
      presentation reads no layout) and before the WebGL bookkeeping below,
      so a gesture's state leaves for the engine as early as it can. */

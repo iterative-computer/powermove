@@ -6,9 +6,10 @@
  * (`previewRenderSize`, the explicit preview resolution, or the cropped
  * `previewRenderViewport`), and the compositor picks each SVG image's bucket
  * at that canvas's output scale (`svgRasterDimensions(…, scaledWorld(L, T,
- * W, H))`, `outputScale(W, H)`). The engine draws the view at zoom × DPR,
- * so the viewer sends today's output scale (`todaysOutputScale`) as
- * `ViewerState.svgScale` and the engine picks the bucket at it.
+ * W, H))`, `outputScale(W, H)`). The engine used to draw the view at zoom
+ * × DPR; it now renders at today's canvas (`todaysCanvas`, sent as
+ * `ViewerState.canvas`; decision V1), so every bucket is picked at today's
+ * output scale (`canvasOutputScale`).
  *
  * This test computes today's buckets with today's functions over a grid of
  * zoom × DPR × layer scale (also preview quality, crop safety, and an SVG
@@ -24,7 +25,7 @@ import { describe, expect, it } from 'vitest';
 
 import { svgRasterDimensions } from '../../renderer/src/legacy/gl/compositor';
 import { compositionFramePosition, previewRenderSize, previewRenderViewport } from './viewer';
-import { todaysOutputScale } from './engine-present/view-params';
+import { canvasOutputScale, todaysCanvas as viewerCanvas } from './engine-present/view-params';
 
 const FIXTURE = path.resolve(__dirname, '../../../../../engine/crates/pm-render/tests/fixtures/svg-viewer-buckets.json');
 
@@ -69,14 +70,19 @@ function todaysCanvas(zoom: number, devicePixelRatio: number, resolution: string
   return { width: size.width, height: size.height, viewport };
 }
 
+/** The output scale of the canvas the viewer sends for a view. */
+function sent(canvas: { width: number; height: number }, viewport: { x: number; y: number; width: number; height: number } | null): [number, number] {
+  return canvasOutputScale(viewerCanvas(COMP.w, COMP.h, canvas, viewport, { x: 0, y: 0 }, 1)!);
+}
+
 type Row = {
   name: string;
   zoom: number; dpr: number; resolution: string; cropSafe: boolean; nested: boolean;
   layerScale: [number, number];
   /** Today's canvas and whether it was cropped. */
   canvas: [number, number]; cropped: boolean;
-  /** What the viewer sends (`todaysOutputScale`). */
-  svgScale: [number, number];
+  /** The output scale of the canvas the viewer sends (`todaysCanvas`). */
+  outputScale: [number, number];
   /** Today's bucket. */
   today: [number, number];
 };
@@ -87,13 +93,13 @@ function rows(): Row[] {
     for (const cropSafe of [true, false]) for (const layerScale of LAYER_SCALES) {
       const canvas = todaysCanvas(zoom, dpr, resolution, quality, cropSafe);
       const [sx, sy] = compositorOutputScale(canvas.width, canvas.height, canvas.viewport, COMP);
-      const svgScale = todaysOutputScale(COMP.w, COMP.h, canvas, canvas.viewport)!;
+      const outputScale = sent(canvas, canvas.viewport);
       const bucket = svgRasterDimensions(SOURCE.w, SOURCE.h, BOX.w, BOX.h, [layerScale[0] * sx, 0, 0, layerScale[1] * sy, 0, 0]);
       out.push({
         name: `zoom ${zoom} dpr ${dpr} ${resolution} ${cropSafe ? 'crop-safe' : 'crop-unsafe'} layer ${layerScale.join('x')}`,
         zoom, dpr, resolution, cropSafe, nested: false, layerScale,
         canvas: [canvas.width, canvas.height], cropped: !!canvas.viewport,
-        svgScale, today: [bucket.width, bucket.height]
+        outputScale, today: [bucket.width, bucket.height]
       });
     }
     // The SVG inside a precomp (a precomp layer is never crop safe): the
@@ -111,7 +117,7 @@ function rows(): Row[] {
       name: `zoom ${zoom} dpr ${dpr} nested layer ${layerScale.join('x')}`,
       zoom, dpr, resolution, cropSafe: false, nested: true, layerScale,
       canvas: [canvas.width, canvas.height], cropped: false,
-      svgScale: todaysOutputScale(COMP.w, COMP.h, canvas, null)!, today: [bucket.width, bucket.height]
+      outputScale: sent(canvas, null), today: [bucket.width, bucket.height]
     });
   }
   return out;
@@ -125,25 +131,25 @@ describe('level 1 SVG buckets in the engine viewer (today’s rule)', () => {
     // composition pixel) draws today at scale 1, not 1.22.
     const canvas = todaysCanvas(0.61, 2, 'auto', 1, true);
     expect(canvas.viewport).toBeNull();
-    expect(todaysOutputScale(COMP.w, COMP.h, canvas, null)).toEqual([1, 1]);
+    expect(sent(canvas, null)).toEqual([1, 1]);
     // Cropped at 237%: the crop's own rounding, not zoom × DPR.
     const cropped = todaysCanvas(2.37, 2, 'auto', 1, true);
     expect(cropped.viewport).not.toBeNull();
-    const [sx] = todaysOutputScale(COMP.w, COMP.h, cropped, cropped.viewport)!;
+    const [sx] = sent(cropped, cropped.viewport);
     expect(sx).toBeCloseTo(4.74, 2);
   });
 
-  it('the scale the viewer sends is today’s compositor output scale', () => {
+  it('the canvas the viewer sends has today’s compositor output scale', () => {
     expect(grid.length).toBeGreaterThan(800);
     for (const row of grid.filter((r) => !r.nested)) {
       const canvas = todaysCanvas(row.zoom, row.dpr, row.resolution, row.resolution === 'auto' ? 1 : 0.5, row.cropSafe);
-      expect(row.svgScale, row.name).toEqual(compositorOutputScale(canvas.width, canvas.height, canvas.viewport, COMP));
+      expect(row.outputScale, row.name).toEqual(compositorOutputScale(canvas.width, canvas.height, canvas.viewport, COMP));
     }
   });
 
   it('no scale for a canvas it cannot describe', () => {
-    expect(todaysOutputScale(600, 338, { width: Number.NaN, height: 2 }, null)).toBeNull();
-    expect(todaysOutputScale(0, 0, { width: 300, height: 169 }, null)).toEqual([1, 1]);
+    expect(viewerCanvas(600, 338, { width: Number.NaN, height: 2 }, null, { x: 0, y: 0 }, 1)).toBeNull();
+    expect(viewerCanvas(0, 0, { width: 300, height: 169 }, null, { x: 0, y: 0 }, 1)).toBeNull();
   });
 
   it('the engine’s fixture is today’s buckets', () => {

@@ -119,17 +119,22 @@ describe('EngineCanvasBinding (render.gl.init/resize with the engine on)', () =>
     expect(binding.bound).toBeNull();
   });
 
-  it('passes today’s output scale of the caller’s backing size and crop (level 1 SVG buckets)', () => {
+  it('passes the caller’s canvas: backing size, crop and CSS box (decision V1)', () => {
     const { binding, made, canvas } = setup();
     binding.bind(canvas);
     binding.resize(960, 540);
-    expect(made[0]!.updates.at(-1)!.params.svgScale).toEqual([0.5, 0.5]);
-    // A cropped preview viewport: its render size over its composition size.
-    binding.resize(1500, 900, { width: 375, height: 225 });
-    expect(made[0]!.updates.at(-1)!.params.svgScale).toEqual([4, 4]);
-    // Without a size (an old caller): the engine keeps its own scale.
+    // 1920 × 1080 in a 960 × 540 box at (20, 30) of the stage.
+    expect(made[0]!.updates.at(-1)!.params.canvas).toEqual({
+      width: 960, height: 540, crop: { x: 0, y: 0, width: 1920, height: 1080 }, css: { x: 20, y: 30, width: 960, height: 540 }
+    });
+    // A cropped preview viewport: the box is the crop's.
+    binding.resize(1920, 1080, { x: 480, y: 270, width: 480, height: 270 });
+    expect(made[0]!.updates.at(-1)!.params.canvas).toEqual({
+      width: 1920, height: 1080, crop: { x: 480, y: 270, width: 480, height: 270 }, css: { x: 20, y: 30, width: 960, height: 540 }
+    });
+    // Without a size (an old caller): the engine draws at zoom × DPR.
     binding.resize();
-    expect(made[0]!.updates.at(-1)!.params).not.toHaveProperty('svgScale');
+    expect(made[0]!.updates.at(-1)!.params).not.toHaveProperty('canvas');
   });
 
   it('a caller that tears its canvas down without another resize leaves no presenter behind', () => {

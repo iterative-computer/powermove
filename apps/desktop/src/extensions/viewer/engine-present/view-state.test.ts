@@ -45,18 +45,20 @@ describe('ViewSequencer', () => {
     expect(sequencer.next({ ...input }).state.view).toBeNull();
   });
 
-  it('carries today’s SVG output scale; a change of it is a new view', () => {
+  it('carries today’s canvas; a change of it is a new view', () => {
+    const canvas = { width: 600, height: 338, crop: { x: 0, y: 0, width: 600, height: 338 }, css: { x: 10, y: 20, width: 366, height: 206.18 } };
     const sequencer = new ViewSequencer();
     const none = sequencer.next(input).state;
-    expect(none).not.toHaveProperty('svgScale');
-    const capped = sequencer.next({ ...input, svgScale: [1, 1] });
-    expect(capped.changed).toBe(true);
-    expect(capped.state.svgScale).toEqual([1, 1]);
-    expect(capped.state.viewSeq).toBe(none.viewSeq + 1);
-    expect(sequencer.next({ ...input, svgScale: [1, 1] }).changed).toBe(false);
-    // A scale the engine would refuse is not sent (the engine keeps its own).
-    for (const bad of [[Number.NaN, 1], [0, 1], [65, 1]] as [number, number][]) {
-      expect(new ViewSequencer().next({ ...input, svgScale: bad }).state).not.toHaveProperty('svgScale');
+    expect(none).not.toHaveProperty('canvas');
+    const withCanvas = sequencer.next({ ...input, canvas });
+    expect(withCanvas.changed).toBe(true);
+    expect(withCanvas.state.canvas).toEqual(canvas);
+    expect(withCanvas.state.viewSeq).toBe(none.viewSeq + 1);
+    expect(sequencer.next({ ...input, canvas: { ...canvas, crop: { ...canvas.crop } } }).changed).toBe(false);
+    expect(sequencer.next({ ...input, canvas: { ...canvas, width: 300 } }).changed).toBe(true);
+    // A canvas the engine would refuse is not sent (it draws at zoom × DPR).
+    for (const bad of [{ ...canvas, width: 0 }, { ...canvas, height: 1.5 }, { ...canvas, crop: { ...canvas.crop, width: 0 } }, { ...canvas, css: { ...canvas.css, x: Number.NaN } }]) {
+      expect(new ViewSequencer().next({ ...input, canvas: bad }).state).not.toHaveProperty('canvas');
     }
   });
 

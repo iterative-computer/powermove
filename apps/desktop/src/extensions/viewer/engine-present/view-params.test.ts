@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { previewResolution, viewParamsFor } from './view-params';
+import { canvasOutputScale, previewResolution, todaysCanvas, viewParamsFor } from './view-params';
 import { ViewSequencer } from './view-state';
 
 describe('view parameters', () => {
@@ -27,10 +27,19 @@ describe('view parameters', () => {
     expect(scene).toMatchObject({ camera: null, shading: 'solid', xray: true });
   });
 
-  it('sends today’s SVG output scale when the viewer has one', () => {
-    expect(viewParamsFor({ shown: 0.61, fit: false, pan: [0, 0], previewResolution: 'auto', svgScale: [1, 0.9990740740740741] }).svgScale)
-      .toEqual([1, 0.9990740740740741]);
-    expect(viewParamsFor({ shown: 0.61, fit: false, pan: [0, 0], previewResolution: 'auto', svgScale: null })).not.toHaveProperty('svgScale');
+  it('describes today’s canvas: the whole composition below fit, the crop above', () => {
+    // 61% at DPR 2: today's canvas is the composition's size (min(1, 1.22)),
+    // in the composition frame's box.
+    const whole = todaysCanvas(600, 338, { width: 600, height: 338 }, null, { x: -9, y: 60.5 }, 0.61)!;
+    expect(whole).toEqual({ width: 600, height: 338, crop: { x: 0, y: 0, width: 600, height: 338 }, css: { x: -9, y: 60.5, width: 366, height: 206.18 } });
+    expect(canvasOutputScale(whole)).toEqual([1, 1]);
+    // A crop: its own box inside the frame, its render size over its size.
+    const crop = todaysCanvas(600, 338, { width: 1500, height: 900 }, { x: 100, y: 50, width: 150, height: 90 }, { x: -200, y: -100 }, 5)!;
+    expect(crop.css).toEqual({ x: 300, y: 150, width: 750, height: 450 });
+    expect(canvasOutputScale(crop)).toEqual([10, 10]);
+    expect(todaysCanvas(600, 338, { width: Number.NaN, height: 2 }, null, { x: 0, y: 0 }, 1)).toBeNull();
+    expect(viewParamsFor({ shown: 0.61, fit: false, pan: [0, 0], previewResolution: 'auto', canvas: whole }).canvas).toEqual(whole);
+    expect(viewParamsFor({ shown: 0.61, fit: false, pan: [0, 0], previewResolution: 'auto', canvas: null })).not.toHaveProperty('canvas');
   });
 
   it('yields a view override with X-ray only in draft shading', () => {
