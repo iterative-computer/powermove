@@ -744,3 +744,169 @@ PM_REUSE_FUZZ=30 PM_REUSE_FRAMES=1500 cargo test --release -p pm-render --test d
 cd ../../engine && cargo build --release -p pm-node --example compose_bench
 PM_BENCH_EDIT=drag target/release/examples/compose_bench doc.json <composition> 240
 ```
+
+## Perf3 implementation (2026-10-19, in progress)
+
+- `pm-eval` retains the ID index across value edits after validating each
+  indexed member by address and node revision. Reorders, duplicate-ID edits,
+  different documents and composition resolution paths still rebuild it.
+  `index_identity`: 3 tests pass, including property edits followed by a
+  reorder and a duplicate-ID edit; no stale-index lookup is needed.
+- The viewer's `DrawReuse` also retains `LayerOwners`, the matte-source set
+  and the solo flag across frames. Validation reads only the exact three
+  fields those facts depend on, in order, and invalidates on a document
+  replacement or backward revision. The bounded cache holds at most 128
+  composition lists, independently of time and layer draw reuse.
+- A pass with no scene objects skips 2.5D ordering only when no layer of
+  its entire composition has `threeD` set (including enclosing groups).
+  Malformed nullish lists retain the original throwing lookup path.
+- `pm-render --test draw_reuse`: all 5 tests pass (seeded edited plans,
+  corpus plans, pixel-exact frames, on-disk image changes, and drag reuse).
+  These are correctness checks; no performance gate is claimed from them.
+
+### Worker commit deadlines (P4)
+
+The supplied fixups2 common-timeline traces locate the judder after submission:
+at HD the worker's canvas reaches viz p50 0.365 ms after its rAF, but viz
+starts drawing it either immediately (p50 0.436 ms after rAF) or one refresh
+later (p95 8.763 ms). UHD likewise splits one/two refreshes. Those are analyses
+of the supplied pre-change traces, not new performance measurements.
+
+Timed commits now target 0.75 refreshes after BeginFrame so they target the
+following compositor refresh consistently; the display prediction is two
+refreshes plus the existing 3.2 ms panel offset. Paused and gesture frames still
+draw on arrival. Every BeginFrame feeds the refresh estimator before scheduling
+the commit, including when a faster, initially unknown display supersedes a
+pending timer. A late timer uses the current refresh's decision. Retargeting and
+disposal cancel the outstanding timer. The presenter/worker regressions cover
+gestures, cancellation, timed frames and an unknown 120 Hz display.
+
+**Not gate-complete:** the initial run found and corrected starvation before the
+refresh period was known. The next paired run lost its awake display during the
+today row, so it is invalid and produced no native timing comparison. There is
+no valid final paired p50/p95/p99/max result at 30, 25 or 23.976 fps, or a final
+A/V-under-load result. Do not treat the changed phase or prediction as a P4 pass.
+
+### perf3 P5: mount preparation and the reverse shuttle sawtooth
+
+The native connection now prepares one detached canvas and presentation worker
+before a viewer opens. The worker initializes its GPU painter and asynchronously
+compiles both SDR and EDR pipelines before processing sessions. A viewer claims
+that canvas and worker without constructing another worker on its mount path.
+The main-thread painter is prepared instead when workers cannot draw. The spare
+has no session, surface imports, or animation loop. It belongs to one document;
+popouts create their own drawing. Closing a viewer prepares the next drawing,
+and disposing the connection disposes any unused drawing. Device-loss and worker
+failure callbacks transfer with a claimed drawing. No transport restart is used.
+
+The inferred refresh period also had a systematic quantization error. Chromium's
+0.1 ms rAF timestamps at 120 Hz have mostly 8.3 ms adjacent intervals, interspersed
+with 8.4 ms. The old median selected 8.3 ms. At 2× reverse this produces about
+0.133 ms of media-time phase drift per frame, then resets at the 500 ms refit:
+the reported sawtooth. The estimator now infers skipped refresh counts from the
+median and fits the fractional period across the window. Phase discontinuities
+are removed from the slope calculation while the phase fit still follows them.
+Known nominal display rates retain their existing path.
+
+A deterministic comparison uses identical 0.1 ms rounded 120 Hz timestamps,
+30 fps, 2× reverse, and 34 starting phases over three seconds each. Old estimator
+outside-frame-interval error (6,154 drawn frames), p50/p95/p99/max:
+1.033/11.767/14.167/16.267 ms. Fixed estimator (6,150 drawn frames):
+0/7.533/8.034/8.035 ms. The old implementation fails the unchanged tighter
+half-refresh bound; the new implementation passes. This is a clock simulation,
+not a paired app or physical display measurement. Warmup ownership, late
+initialization disposal, window isolation, both pipeline formats, and reverse
+scheduling have targeted regression tests.
+
+**P5 gates remain open:** the session was locked during the performance attempts.
+Neither equal-to-today mount stalls nor repeated J/K/L A/V performance is claimed
+from the simulation. Re-run paired mount, cadence, and A/V probes on an awake,
+unlocked display with load at most 8. The between-deadline worker submission
+change above also still needs its common-compositor-clock validation.
+
+### SVG buckets and runner pixels in the viewer: every wait ends promptly
+
+Waiting for the exact SVG bucket or fallback runner pixels (instead of a
+stand-in) introduced a per-view wait (`pm_node::present::wait`). Review found
+two freezes in its first version: a failed SVG raster held the viewer for 5 s
+and, for a permanent failure (`missing`, `decode`), forever, since every retry
+missed and waited again; a runner `Failed` (compile error, watchdog, lost
+context) or the end of a transient backoff only marked the view dirty, which a
+valid wait ignores, so the picture froze for up to 10 s. Every exit is now
+explicit and prompt:
+
+- the pixels arrive: drawn (unchanged);
+- `SvgFailed` or a refused band: the key is marked failed in the renderer
+  (`Renderer::fail_svg_raster`), views waiting for it draw at once without the
+  image (`Renderer::svg_waiting_viewer`; snapshots and exports still wait),
+  and the key is asked for again 5 s later while a view draws without it,
+  without drawing a frame for that;
+- runner `Failed`: the view's runner wait ends and it draws at once (a final
+  failure draws nothing or skips the step; a transient one follows the
+  renderer's backoff), and a backoff's end ends a runner wait too;
+- an edit, view change, or transport discontinuity: the wait is obsolete;
+- nothing arrives: the wait times out 5 s (SVG) or 10 s (runner, its own
+  compile and draw deadlines) after the first ask (re-rendering never extends
+  it); the timeout is a failure (`unanswered` for the runner, transient) and
+  the frame is drawn without it. `Stats::external_wait_timeouts` counts them.
+  `POWERMOVE_ENGINE_EXTERNAL_WAIT_MS` caps both bounds (tests only).
+
+Tests: `wait` unit tests (state, deadlines, bounds); `svg` unit tests
+(retry time, refused band names its key); pm-render
+`a_viewer_frame_draws_without_a_bucket_the_window_could_not_draw`; pm-node
+`an_svg_raster_the_window_cannot_draw_never_freezes_the_viewer` (frame within
+1 s of `SvgFailed`, not a stand-in, asked again at ≈5 s with no redraw, drawn
+when it lands), `an_unanswered_svg_raster_times_out_instead_of_freezing_the_viewer`
+(1.5 s cap), `a_runner_failure_or_silence_never_freezes_the_viewer` (a lost
+context asks again at once, a second draws the frame at once and asks again
+after the 250 ms backoff, silence times out at the 3 s cap), and the existing
+runner test now requires the compile-failure frame within 2 s. Each new
+integration assertion was checked to fail with its fix removed (frame after
+10.0 s, 4.7 s, and a re-ask after 3.0 s).
+
+Not covered by an integration test: a refused SVG band (it takes 256 rasters
+assembling at once or 512 MiB; the mapping is unit-tested and shares the
+`SvgFailed` path).
+
+### Repeating the paired perf3 rows
+
+All app commands below require the machine-wide `pm-electron-lock` wrapper,
+`--workers=1` for Playwright, at least 40 GiB free before builds/launches, load
+at most 8, and an awake, unlocked display. Evidence defaults to `/tmp` for the
+new probes. These are measurement entry points, not completed gate results.
+
+- Cadence: `PM_FIXUPS2_MEASURE=1 PM_PERF3_RATES=30,25,23.976023976023978`
+  with `e2e/path-mask-playback-measure.spec.ts`. It uses fixups2's common
+  `Graphics.Pipeline.DrawAndSwap` timeline for both paths. Set `PM_PERF3_HD=1`
+  for HD only; `PM_PERF3_SOLID=1` isolates pacing with an animated solid and is
+  diagnostic only, not a replacement for the mask case.
+- Typing: `PM_TEXT_TYPING_MEASURE=1 PM_TEXT_TYPING_PAIRED=1` with
+  `e2e/native-engine-text-typing.spec.ts` (fonts lane harness, with p99,
+  keydown/handler, patch/barrier revision, frame and worker traces added).
+- Mount: `PM_MOUNT_MEASURE=1` with
+  `e2e/native-engine-mount-measure.spec.ts`; `PM_MOUNT_PAIRS` controls repeats.
+  It alternates which mode runs first, starts with no viewer, and records the
+  page clock, playhead, and native line through the same mount probe.
+- Drag/pan/orbit: `scripts/frame-bridge-measure.mjs --max-load 8
+  --evidence-dir /tmp/powermove-perf3 --only <paired-run-names>`. Explicit
+  `--only` order is preserved so today's row can immediately precede native.
+  The orbit rows use the threed lane's measurement hooks and synthetic shadow
+  scene; integrating its viewport runtime is a separate lane responsibility.
+
+The perf3 attempt produced no valid final paired rows: the cadence run locked
+mid-pair, drag/pan/orbit were skipped by the display guard, and typing remains
+unmeasured. SVG exact-pixel and fallback PBO tests establish correctness only.
+The defs runner is now integrated, but export throughput and animated fallback
+playback still need its paired measurements. A 135 ms SVG scale edit was
+observed in an unpaired locked-session correctness run and is not a speed pass.
+
+P5's absolute viewer-join regression retains the **per-sample** `< 0.08 s`
+assertion in `e2e/engine-headless-playback.spec.ts`; an aggregate check does not
+replace it. After integrating defs, the hidden app passed it with 42.3 ms worst
+sample error, preserved its session/epoch across the join, and used zero
+host-clock runs. The J/K/L regression passed too: 42 frames at 2× reverse,
+zero samples above 10 ms, max 0.972 ms outside the frame interval using the
+presenter's predicted display time. These are functional regression results,
+not valid paired performance or physical-display A/V measurements: the display
+was locked/asleep and machine load exceeded 8 during the check window. The
+paired mount probe recorded its invalid display state and skipped.

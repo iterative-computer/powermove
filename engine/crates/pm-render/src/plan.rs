@@ -216,12 +216,7 @@ pub struct Build<'r> {
     pub(crate) reuse: Option<&'r mut crate::reuse::DrawReuse>,
 }
 
-/// Facts of a composition's layer list a compositing pass reads.
-struct PassFacts {
-    owners: pm_eval::groups::LayerOwners,
-    matte_sources: MatteSources,
-    solo: bool,
-}
+use crate::pass_facts::PassFacts;
 
 impl Build<'_> {
     fn pass_facts(&mut self, layers: &[Node], all: &[&Node]) -> std::sync::Arc<PassFacts> {
@@ -229,11 +224,10 @@ impl Build<'_> {
         if let Some((_, facts)) = self.passes.iter().find(|(k, _)| *k == key) {
             return facts.clone();
         }
-        let facts = std::sync::Arc::new(PassFacts {
-            owners: pm_eval::groups::LayerOwners::of(all),
-            matte_sources: MatteSources::of(all),
-            solo: all.iter().any(|l| js::flag(l, "solo")),
-        });
+        let facts = match self.reuse.as_deref_mut() {
+            Some(reuse) => reuse.pass_facts(layers, all),
+            None => std::sync::Arc::new(PassFacts::of(all)),
+        };
         self.passes.push((key, facts.clone()));
         facts
     }
@@ -540,51 +534,6 @@ pub(crate) fn comp_pass<'d>(
     }
     b.pass3d.pop();
     plan
-}
-
-/// Every layer's `matteSource` (`includes`, SameValueZero), as a set: the
-/// pass asks for each of its layers, and a list scan per layer was 3% of a
-/// viewer frame at 500 layers (docs/engine/perf.md).
-struct MatteSources {
-    undefined: bool,
-    strings: std::collections::BTreeSet<JsString>,
-    /// Numbers, booleans, `null`, and objects: rare, compared one by one.
-    others: Vec<JsValue>,
-}
-
-impl MatteSources {
-    fn of(layers: &[&Node]) -> MatteSources {
-        let mut set = MatteSources {
-            undefined: false,
-            strings: std::collections::BTreeSet::new(),
-            others: Vec::new(),
-        };
-        for l in layers {
-            match node::get(l, b"matteSource").to_js() {
-                JsValue::Undefined => set.undefined = true,
-                JsValue::String(s) => {
-                    set.strings.insert(s);
-                }
-                other => set.others.push(other),
-            }
-        }
-        set
-    }
-
-    fn contains(&self, id: &JsValue) -> bool {
-        match id {
-            JsValue::Undefined => self.undefined,
-            JsValue::String(s) => self.strings.contains(s),
-            _ => self.others.iter().any(|m| same_value_zero(m, id)),
-        }
-    }
-}
-
-fn same_value_zero(a: &JsValue, b: &JsValue) -> bool {
-    match (a, b) {
-        (JsValue::Number(x), JsValue::Number(y)) => x == y || (x.is_nan() && y.is_nan()),
-        _ => pm_eval::js_sem::strict_eq(a, b),
-    }
 }
 
 /// `groupContainsSolo(group, layers, ancestors)`.

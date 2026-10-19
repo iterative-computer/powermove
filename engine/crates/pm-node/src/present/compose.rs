@@ -568,7 +568,14 @@ impl Composer {
             // in place: frames of a paused time reuse the draws of layers
             // nothing changed (docs/engine/perf.md, "Draw reuse").
             self.renderer.set_draw_reuse(self.draw_reuse);
-            let rendered = self.renderer.render_into(
+            // A preview must use the bucket for this frame, just as today's
+            // synchronous SVG canvas redraw does. Render-ahead requests it
+            // before its display deadline; never publish a substituted bucket.
+            // A bucket the window could not draw is drawn as nothing instead
+            // (`super::wait`), as today draws the frame without a layer whose
+            // raster throws.
+            let mut renderer = self.renderer.svg_waiting_viewer();
+            let rendered = renderer.render_into(
                 doc,
                 composition,
                 time,
@@ -577,7 +584,7 @@ impl Composer {
                 scratch,
                 depth_target,
             );
-            self.renderer.set_draw_reuse(false);
+            renderer.set_draw_reuse(false);
             let rendered = rendered?;
             failures = rendered.failures;
             quads = rendered.quads;

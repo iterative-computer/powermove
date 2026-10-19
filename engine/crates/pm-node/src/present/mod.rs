@@ -32,6 +32,7 @@ pub mod snapshot;
 pub mod stats;
 pub mod svg;
 pub mod view;
+pub mod wait;
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Sender, channel};
@@ -116,6 +117,11 @@ pub enum FrameSource {
     Document,
 }
 
+/// Caps how long a viewer frame waits for its window's SVG bucket or
+/// fallback runner pixels, in ms (tests of the wait's timeout; the
+/// defaults are `wait::Bounds::new(None)`).
+pub const EXTERNAL_WAIT_ENV: &str = "POWERMOVE_ENGINE_EXTERNAL_WAIT_MS";
+
 /// `1`: play on the host clock rather than the audio device (machines
 /// without an output, and runs that must not open one).
 pub const HOST_CLOCK_ENV: &str = "POWERMOVE_ENGINE_HOST_CLOCK";
@@ -174,6 +180,9 @@ impl PresenterConfig {
                     .map(std::path::PathBuf::from),
                 fonts: None,
                 send_delay: send_delay(env(SEND_DELAY_ENV)),
+                external_wait_cap_us: env(EXTERNAL_WAIT_ENV)
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .map(|ms| i64::from(ms) * 1_000),
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),

@@ -2382,6 +2382,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-skia-path"
+version = "0.12.0"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "libm",
+ "strict-num",
+]
+
+[[package]]
 name = "pm-stretch"
 version = "0.1.0"
 dependencies = [
@@ -2406,6 +2416,7 @@ dependencies = [
  "objc2-foundation",
  "parlance",
  "parley",
+ "pm-skia-path",
  "png",
  "read-fonts 0.45.0",
  "serde",

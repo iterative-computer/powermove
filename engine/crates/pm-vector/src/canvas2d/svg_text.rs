@@ -123,6 +123,9 @@ impl<'a, R: FontResolver> TextRenderer<'a, R> {
                     let mut painter = Painter {
                         outlines: &mut self.outlines,
                         bitmaps: &mut self.bitmaps,
+                        masks: None,
+                        viewport: None,
+                        path_rasterizer: None,
                         profile: Profile::CANVAS2D,
                         unsupported: Vec::new(),
                     };

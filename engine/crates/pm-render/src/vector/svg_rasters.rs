@@ -13,18 +13,21 @@
 //! A bucket the store does not have is a miss, recorded for the frame
 //! ([`SvgRasterNeed`]); the host asks for it:
 //!
-//! - **Preview** draws the content's most recent bucket in its place (the
-//!   quad and UVs do not depend on the bucket), or nothing when it has
-//!   none, and draws the frame again when the raster arrives: one frame at
-//!   most, as today's asynchronous `<img>` decode shows nothing until it
-//!   resolves.
+//! - **Viewer preview**, exports and snapshots use [`SvgMissPolicy::Wait`]:
+//!   the caller asks for the exact bucket and renders the frame when it
+//!   arrives. The viewer retains its render-ahead slot in the meantime. A
+//!   bucket the window could not draw ([`SvgRasters::fail`]) is drawn as
+//!   nothing by a viewer frame instead of holding it
+//!   (`Renderer::svg_waiting_viewer`), until its raster arrives.
+//!   [`SvgMissPolicy::Substitute`] is available to diagnostic callers only;
+//!   the app viewer never publishes a previous bucket as a new frame.
 //! - **Exports and snapshots** ([`SvgMissPolicy::Wait`]) never draw a
 //!   substitute: the frame fails with `RenderError::SvgRastersPending` and
 //!   the caller fetches the rasters and renders it again.
 //! - **`pm-cli`** has no Chromium: [`SvgRasterizer::Resvg`] draws the bucket
 //!   with resvg, an approximation it reports with a named notice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use pm_protocol::svg_raster::{SvgRasterKey, SvgRasterRequest};
@@ -192,6 +195,12 @@ pub struct SvgRasters {
     /// therefore kept until a later frame no longer reads it.
     frame_start: u64,
     misses: Vec<SvgRasterNeed>,
+    /// Buckets the document's window could not draw (or did not answer
+    /// for in time): a viewer frame draws without them instead of waiting
+    /// ([`super::super::Renderer::svg_waiting_viewer`]) until their raster
+    /// arrives, as today's compositor draws the frame without a layer
+    /// whose `rasterSvgAsset` throws.
+    failed: HashSet<SvgRasterKey>,
     pub(crate) rasterizer: SvgRasterizer,
     pub(crate) approximated: u64,
 }
@@ -210,6 +219,7 @@ impl Default for SvgRasters {
             tick: 0,
             frame_start: 0,
             misses: Vec::new(),
+            failed: HashSet::new(),
             rasterizer: SvgRasterizer::default(),
             approximated: 0,
         }
@@ -229,6 +239,7 @@ impl SvgRasters {
             ));
         }
         self.tick += 1;
+        self.failed.remove(&key);
         let bytes = data.len() as u64;
         if let Some(old) = self.stored.insert(
             key,
@@ -284,6 +295,24 @@ impl SvgRasters {
         !self.misses.is_empty()
     }
 
+    /// Whether the frame being drawn missed a raster it waits for: any
+    /// miss, or with `skip_failed` (the viewer) any the window did not fail.
+    pub fn missed_waiting(&self, skip_failed: bool) -> bool {
+        self.misses
+            .iter()
+            .any(|m| !(skip_failed && self.failed.contains(&m.request.key)))
+    }
+
+    /// The window could not draw `key`, or did not answer for it in time.
+    pub fn fail(&mut self, key: SvgRasterKey) {
+        self.failed.insert(key);
+    }
+
+    /// Whether `key` failed and has not arrived since.
+    pub fn is_failed(&self, key: &SvgRasterKey) -> bool {
+        self.failed.contains(key)
+    }
+
     /// The frame's misses.
     pub fn take_misses(&mut self) -> Vec<SvgRasterNeed> {
         std::mem::take(&mut self.misses)
@@ -302,6 +331,7 @@ impl SvgRasters {
         });
         self.bytes -= freed;
         self.latest.retain(|_, k| keep(k));
+        self.failed.retain(keep);
     }
 
     /// Bytes stored.
@@ -481,5 +511,35 @@ mod tests {
         assert!(s.missed());
         assert_eq!(s.take_misses().len(), 2);
         assert!(!s.missed());
+    }
+
+    #[test]
+    fn a_failed_bucket_is_waited_for_only_when_failures_are_not_skipped() {
+        let mut s = SvgRasters::default();
+        let need = |k: SvgRasterKey| SvgRasterNeed {
+            request: SvgRasterRequest {
+                key: k,
+                asset: "a1".into(),
+            },
+            path: "/x.svg".into(),
+            composition: "c".into(),
+            layer: "l".into(),
+        };
+        s.fail(key('a', 2, 2));
+        s.miss(need(key('a', 2, 2)));
+        assert!(s.missed_waiting(false), "snapshots and exports wait");
+        assert!(!s.missed_waiting(true), "the viewer draws without it");
+        s.miss(need(key('a', 3, 2)));
+        assert!(s.missed_waiting(true), "another bucket is still waited for");
+        s.take_misses();
+        // Its raster arriving ends the failure; forgetting its content too.
+        s.put(key('a', 2, 2), vec![0; 16]).unwrap();
+        assert!(!s.is_failed(&key('a', 2, 2)));
+        s.fail(key('a', 3, 2));
+        s.fail(key('b', 3, 2));
+        s.forget(Some(&"a".repeat(64)));
+        assert!(!s.is_failed(&key('a', 3, 2)) && s.is_failed(&key('b', 3, 2)));
+        s.forget(None);
+        assert!(!s.is_failed(&key('b', 3, 2)));
     }
 }

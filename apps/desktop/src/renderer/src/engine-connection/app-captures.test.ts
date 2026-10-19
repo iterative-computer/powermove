@@ -40,7 +40,7 @@ describe('the app’s captures with the new engine on', () => {
     installExporter(PM);
     expect(PM.Export.snapshot(1.5, 320)).toBe('data:engine-sync:1.5:320');
     expect(await PM.Export.snapshotAsync(2, 200)).toBe('data:engine-async:2:200');
-    expect(e.snapshotDataUrlSync).toHaveBeenCalledWith(1.5, 320, PM.proj);
+    expect(e.snapshotDataUrlSync).toHaveBeenCalledWith(1.5, 320, PM.proj, { captionsHidden: false });
     expect(renderFrameTo).not.toHaveBeenCalled();
     dispose();
     expect(PM.EngineCaptures).toBeNull();
@@ -64,7 +64,7 @@ describe('the app’s captures with the new engine on', () => {
     installAppCaptures(PM, e);
     installExporter(PM);
     PM.Export.snapshot(0);
-    expect(e.snapshotDataUrlSync).toHaveBeenCalledWith(0, 480, PM.proj);
+    expect(e.snapshotDataUrlSync).toHaveBeenCalledWith(0, 480, PM.proj, { captionsHidden: false });
   });
 
   it('snapshotAsync keeps today’s contract: Blender prepares the frame, playback pauses and resumes, one capture at a time', async () => {
@@ -80,7 +80,7 @@ describe('the app’s captures with the new engine on', () => {
     installExporter(PM);
     const pending = PM.Export.snapshotAsync(1, 320);
     await Promise.resolve();
-    expect(e.snapshotDataUrl).toHaveBeenCalledWith(1, 320, PM.proj, { prepareBlender: true });
+    expect(e.snapshotDataUrl).toHaveBeenCalledWith(1, 320, PM.proj, { prepareBlender: true, captionsHidden: false });
     expect(PM.agentFrameCapture).toBe(true);
     // A second capture while one runs is refused with today's words.
     await expect(PM.Export.snapshotAsync(2, 320)).rejects.toThrow(CAPTURE_BUSY);
@@ -120,6 +120,19 @@ describe('the app’s captures with the new engine on', () => {
     expect(renderState(PM)).toMatchObject({ busy: false, error: 'Blender failed' });
     expect(states).toContainEqual({ busy: true, error: null });
     off();
+  });
+
+  it('reads caption visibility separately for synchronous and asynchronous captures', async () => {
+    const { PM } = legacyPM();
+    const e = engine();
+    installAppCaptures(PM, e);
+    for (const hidden of [true, false]) {
+      PM.captionsHidden = hidden;
+      PM.EngineCaptures.snapshot(0, 320);
+      await PM.EngineCaptures.snapshotAsync(0, 320);
+      expect(e.snapshotDataUrlSync).toHaveBeenLastCalledWith(0, 320, PM.proj, { captionsHidden: hidden });
+      expect(e.snapshotDataUrl).toHaveBeenLastCalledWith(0, 320, PM.proj, { prepareBlender: true, captionsHidden: hidden });
+    }
   });
 
   it('knows a Blender document by any composition with render3d on', () => {

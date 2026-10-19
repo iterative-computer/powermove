@@ -41,7 +41,7 @@ import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/clou
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
 import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineCompatAsk, type EngineExportStart, type EngineExportStatus, type EngineProbeResult, type EngineSnapshotReply, type EngineSnapshotRequest, type EngineStatusMessage, type RenderQueueState, type StageDocumentResult } from '../shared/engine-ipc';
-import { ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
+import { ENGINE_FONTS_EVENTS, ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
 import { MEDIA_STORE_IPC, type MediaStoreConfig } from '../shared/media-store';
 import { installFrameBridgeReceiver, RELEASE_NOTICE_CHANNEL, type ReceiverModule } from './frame-bridge';
 
@@ -120,7 +120,14 @@ function engineFontsBridge(): EngineFontsBridge {
     ),
     setFontSource: (family, data) => invoke(ENGINE_FONTS_IPC.setFontSource, String(family), data),
     clearProjectFonts: () => invoke(ENGINE_FONTS_IPC.clearProjectFonts),
-    generation: () => invoke(ENGINE_FONTS_IPC.generation)
+    generation: () => invoke(ENGINE_FONTS_IPC.generation),
+    seeds: () => invoke(ENGINE_FONTS_IPC.seeds),
+    reportUiFonts: (json) => invoke(ENGINE_FONTS_IPC.uiFonts, String(json)),
+    onSeedsChanged: (listener) => {
+      const handler = (_event: unknown, json: unknown) => listener(String(json));
+      ipcRenderer.on(ENGINE_FONTS_EVENTS.seedsChanged, handler);
+      return () => { ipcRenderer.removeListener(ENGINE_FONTS_EVENTS.seedsChanged, handler); };
+    }
   };
 }
 

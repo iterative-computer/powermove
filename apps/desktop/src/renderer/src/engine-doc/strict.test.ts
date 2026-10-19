@@ -13,6 +13,8 @@ import { groupMatrix, makeVectorPath, makeVertex, pathValues } from '../legacy/c
 import { installEngineDoc, type EngineDoc } from './install';
 import { parseMode, profileOverride, workerMode } from './flags';
 import type { FontProvider } from './fonts';
+import { PmWasm } from './wasm';
+import { installBridgeForTests, resetBridgeForTests } from '../kernel/bridge';
 import { createRequire } from 'node:module';
 
 const MODULE = process.env['POWERMOVE_PM_WASM'] ?? fileURLToPath(new URL('../../public/engine/pm_wasm.wasm', import.meta.url));
@@ -56,6 +58,33 @@ const clone = (v: any) => JSON.parse(JSON.stringify(v));
 const fallbacks = (doc: EngineDoc) => (doc.stats() as any).native.fallbacks as Record<string, number>;
 
 describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () => {
+  it('keeps window font seeds with the synchronous whole-face provider', async () => {
+    const seed = (size: number, specified: number) => JSON.stringify({ seeds: [
+      { family: 'system-ui', weight: 400, italic: false, size, specified },
+    ] });
+    const initial = seed(26, 13), changed = seed(30, 15);
+    let onChange!: (json: string) => void;
+    const applied = vi.spyOn(PmWasm.prototype, 'setFontSeeds');
+    installBridgeForTests({ engineFonts: {
+      answer: async () => ({ ok: true, value: '{}' }),
+      subset: async () => ({ ok: true, value: [] }),
+      answerSync: () => ({ ok: true, value: '{}' }),
+      wholeSync: () => ({ ok: true, value: [] }),
+      seeds: async () => ({ ok: true, value: initial }),
+      onSeedsChanged: (listener: (json: string) => void) => { onChange = listener; },
+    } } as any);
+    try {
+      const { doc } = await editor('on');
+      expect(doc.api!.fonts!.provider.sync).toBe(true);
+      await vi.waitFor(() => expect(applied).toHaveBeenCalledWith(initial));
+      onChange(changed);
+      expect(applied).toHaveBeenLastCalledWith(changed);
+    } finally {
+      resetBridgeForTests();
+      applied.mockRestore();
+    }
+  });
+
   it('answers detached channels, parents and paths natively, equal to the legacy answers', async () => {
     const { PM, doc } = await editor('audit');
     const { parent, child, shape, group, path } = content(PM);

@@ -65,20 +65,12 @@ fn main() {
             .unwrap_or(1.0) as f32;
         let mut measure =
             pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new());
-        if dpr != 1.0 {
-            measure.compat().set_font_cache_seeds(
-                [12.0f32, 13.0]
-                    .iter()
-                    .map(|&css| pm_text::compat::FontCacheSeed {
-                        family: "system-ui".into(),
-                        weight: 400.0,
-                        italic: false,
-                        size: pm_text::compat::canvas::effective_font_size(css * dpr),
-                        specified: css,
-                    })
-                    .collect(),
-            );
-        }
+        // The editor renderer's font cache seeds at the capture's density
+        // (the app's own UI text; docs/engine/text.md, "The renderer's font
+        // cache"), as text_corpus and pm-cli parity model them.
+        measure
+            .compat()
+            .set_font_cache_seeds(pm_text::compat::app_ui_font_cache_seeds(&[dpr]));
         renderer.set_text_fonts(Some(Box::new(text::MainThreadFonts(measure, None))));
         for pdir in projects_of(capture) {
             let p = load_project(capture, &pdir);

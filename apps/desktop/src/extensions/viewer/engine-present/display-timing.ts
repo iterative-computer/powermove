@@ -7,7 +7,7 @@
  * them is pulled off by outliers. Instead:
  *
  * - the period is the display's nominal refresh interval when known, else
- *   the median interval;
+ *   a line through refresh indices inferred from the median interval;
  * - the phase is the median of every sample's offset from the newest one,
  *   folded into one period;
  * - the display link's phase can jump by about half a period (after a
@@ -68,7 +68,37 @@ export class VsyncEstimator {
     if (this.nominalHz) return 1000 / this.nominalHz;
     const deltas: number[] = [];
     for (let i = 1; i < recent.length; i++) deltas.push(recent[i]! - recent[i - 1]!);
-    return median(deltas);
+    const approximate = median(deltas);
+    if (!(approximate > 0)) return 1000 / 60;
+    // Adjacent timestamps are coarsened (120 Hz becomes mostly 8.3 ms,
+    // with occasional 8.4 ms). Their median loses the fractional period:
+    // at 2× shuttle the resulting phase drift is 0.133 ms per frame,
+    // reset at each refit. Infer skipped refreshes first, then fit across
+    // the whole window so rounding error cannot accumulate.
+    let index = 0;
+    const indices = [0];
+    const times = [0];
+    let elapsed = 0;
+    for (const delta of deltas) {
+      const steps = Math.max(1, Math.round(delta / approximate));
+      index += steps;
+      // A display-link phase jump changes phase, not frequency. Remove
+      // that discontinuity from the slope fit; fit() still sees the raw
+      // timestamps and follows the new phase with its recent median.
+      const residual = delta - steps * approximate;
+      elapsed += Math.abs(residual) > approximate / 4 ? steps * approximate : delta;
+      indices.push(index);
+      times.push(elapsed);
+    }
+    const mx = indices.reduce((a, b) => a + b, 0) / indices.length;
+    const my = times.reduce((a, t) => a + t, 0) / times.length;
+    let covariance = 0, variance = 0;
+    for (let i = 0; i < recent.length; i++) {
+      const x = indices[i]! - mx;
+      covariance += x * (times[i]! - my);
+      variance += x * x;
+    }
+    return variance > 0 ? covariance / variance : approximate;
   }
 
   private fold(t: number, ref: number, periodMs: number): number {

@@ -181,7 +181,7 @@ impl FaceRecord {
         }
     }
 
-    fn info(&self, data: FontBytes, index: u32) -> FaceInfo {
+    pub(crate) fn info(&self, data: FontBytes, index: u32) -> FaceInfo {
         FaceInfo {
             data,
             index,

@@ -82,6 +82,18 @@ fn main() {
     // A fresh renderer measures 24 px system-ui at opsz 24 ...
     assert_eq!(c.measure(&content(24.0), "1"), 10.8046875);
     assert_eq!(c.measure(&content(26.0), "T"), 15.4501953125);
+    // optimizeLegibility DOM entries have a different platform-data key.
+    // Their opsz must not replace default Canvas2D auto measurements.
+    let canvas_key = r#"["auto","auto",true,true,"normal","100%","horizontal","normal","none",[],"normal","normal",true,false,false,false]"#;
+    c.set_font_cache_seeds(vec![FontCacheSeed {
+        family: "system-ui".into(),
+        weight: 400.0,
+        italic: false,
+        size: 24.0,
+        specified: 12.0,
+        cache_key: Some(canvas_key.replacen("auto", "optimizelegibility", 1)),
+    }]);
+    assert_eq!(c.measure(&content(24.0), "1"), 10.8046875);
     // ... and a renderer whose UI laid 12 and 13 px system-ui text out at a
     // device scale factor of 2 at opsz 12 and 13 (the capture).
     c.set_font_cache_seeds(vec![
@@ -91,6 +103,7 @@ fn main() {
             italic: false,
             size: 24.0,
             specified: 12.0,
+            cache_key: None,
         },
         FontCacheSeed {
             family: "System-UI".into(),
@@ -98,6 +111,7 @@ fn main() {
             italic: false,
             size: 26.0,
             specified: 13.0,
+            cache_key: None,
         },
     ]);
     assert_eq!(c.measure(&content(24.0), "1"), 11.203125);
@@ -116,6 +130,21 @@ fn main() {
     let mut fresh = Compat::new(CoreTextRegistry::new());
     assert_eq!(c.measure(&bold, "1"), fresh.measure(&bold, "1"));
     assert_eq!(c.measure(&italic, "1"), fresh.measure(&italic, "1"));
+    // The app's UI seeds at 2x are these seeds.
+    let mut app = Compat::new(CoreTextRegistry::new());
+    app.set_font_cache_seeds(pm_text::compat::app_ui_font_cache_seeds(&[2.0]));
+    assert_eq!(app.measure(&content(24.0), "1"), 11.203125);
+    assert_eq!(app.measure(&content(26.0), "T"), 16.6943359375);
+    let line = TextContent {
+        text: "system-ui 24 px measured as the editor does".into(),
+        ..content(24.0)
+    };
+    let seeded = app.line_runs(&line);
+    let plain = fresh.line_runs(&line);
+    assert_ne!(
+        seeded[0].width, plain[0].width,
+        "line runs follow the seeds"
+    );
     println!("ok font cache seeds");
 }
 

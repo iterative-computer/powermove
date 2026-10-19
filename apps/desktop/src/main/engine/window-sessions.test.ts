@@ -26,7 +26,7 @@ function fakeEngine() {
     },
     event: (_p, body, session) => events.push({ body, session })
   };
-  return { engine, sent, events, staged, restart: () => { launch = { port: 9, generation: 2 }; } };
+  return { engine, sent, events, staged, restart: (session?: number) => { launch = { port: 9, generation: 2 }; if (session !== undefined) nextSession = session; } };
 }
 
 function defs(generation: number | null = 4) {
@@ -65,6 +65,53 @@ describe('main’s snapshot sessions for windows', () => {
     expect(f.sent.slice(3).map((s) => s.body.type)).toEqual(['pushDefinitions', 'resync']);
     expect((f.sent[3]!.body as unknown as DefinitionsUpdate).generation).toBe(2);
     expect(sessions.stats).toMatchObject({ opened: 1, resyncs: 2, definitions: 2, needsDocument: 1 });
+  });
+
+  it('waits for the originating window font seeds before sending its document, and forgets them on close', async () => {
+    const f = fakeEngine();
+    let release!: () => void;
+    const owner = vi.fn((_session: number, window: number | null) => window === null ? Promise.resolve() : new Promise<void>(r => { release = r; }));
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {}, undefined, owner);
+    const pending = sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() });
+    await vi.waitFor(() => expect(owner).toHaveBeenCalledWith(40, 9));
+    expect(f.sent.map(s => s.body.type)).toEqual(['openSession']);
+    release();
+    await pending;
+    expect(f.sent.map(s => s.body.type)).toContain('resync');
+    sessions.forget(9);
+    expect(owner).toHaveBeenLastCalledWith(40, null);
+  });
+
+  it('refuses and closes a snapshot session whose window font seeds were not accepted', async () => {
+    const f = fakeEngine();
+    const owner = vi.fn(async (_session: number, window: number | null) => {
+      if (window !== null) throw new Error('font seeds were refused');
+    });
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {}, undefined, owner);
+    await expect(sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() })).rejects.toThrow('font seeds were refused');
+    expect(sessions.has(9)).toBe(false);
+    expect(f.sent.map(s => s.body.type)).toEqual(['openSession', 'closeSession']);
+    expect(owner).toHaveBeenLastCalledWith(40, null);
+  });
+
+  it('forgets every old-launch font binding before session ids can be reused', async () => {
+    const f = fakeEngine();
+    const owners = new Map<number, number>();
+    const owner = async (session: number, window: number | null) => {
+      if (window === null) owners.delete(session);
+      else owners.set(session, window);
+    };
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {}, undefined, owner);
+    const doc = { id: 'doc', revision: 1, hash, json: json() };
+    await sessions.prepare(9, doc);
+    await sessions.prepare(10, doc);
+    f.restart(41); // New window 9 reuses the old session id of window 10.
+    await sessions.prepare(9, doc);
+    await sessions.prepare(10, doc);
+    expect(owners.get(41)).toBe(9);
+    expect(owners.get(42)).toBe(10);
+    expect(owners.has(40)).toBe(false);
+    sessions.dispose();
   });
 
   it('stages a large document instead of sending it inline', async () => {

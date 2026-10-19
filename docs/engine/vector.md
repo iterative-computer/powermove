@@ -271,16 +271,29 @@ least recent use.
 **A miss** is recorded per frame (`SvgRasterNeed`: the request, the file, the
 first layer and composition that drew it):
 
-- *Preview* (`SvgMissPolicy::Substitute`): the content's most recently drawn
-  bucket stands in (the quad and UVs do not depend on the bucket), or nothing
-  when there is none (a new import, a replaced file), and the frame is
-  presented with `FrameQuality.standIn`. The interactive engine asks the view's
-  renderer (`CompatMessage::SvgRequests`, once per key while pending, again
-  after 10 s unanswered or 5 s after a failure) and draws every view again when
-  the bands arrive. So a miss shows the previous bucket or nothing until one
-  round trip to the window ends, as today's asynchronous `<img>` decode shows
-  nothing until it resolves. During a scale animation that is the frame after
-  a bucket change; paused, the next frame is exact.
+- *Viewer preview* (`Composer` scopes `Renderer::svg_waiting_viewer`): the
+  frame is not submitted until every exact bucket is present. Missing
+  buckets are requested during render-ahead over the viewer session's port;
+  the view retains that frame's schedule position while the port answers,
+  allowing other views and audio to continue. The prior frame stays on
+  screen rather than publishing a new frame with the old bucket. An edit,
+  view change, transport epoch, or new surface pool cancels the obsolete
+  wait. Completion wakes the view. A bucket the window cannot draw
+  (`SvgFailed`: `missing`, `decode`, `stale`, `size`, `unavailable`), a
+  refused band, or no answer within 5 s of the ask
+  (`pm_node::present::svg::VIEW_WAIT_US`) ends the wait at once: the key is
+  marked failed in the renderer (`Renderer::fail_svg_raster`) and the frame
+  is drawn without that image, as today's compositor draws the frame without
+  a layer whose `rasterSvgAsset` throws. Such a frame is not a stand-in (no
+  other bucket is shown; `Stats::svg_failed_frames` counts it). The bucket is
+  asked for again 5 s after the failure while a view still draws without it,
+  without drawing a frame for it; its raster arriving clears the failure and
+  draws it. Snapshots and exports never skip a failed bucket (pm-node
+  `present::wait`; tests `a_viewer_frame_draws_without_a_bucket_the_window_could_not_draw`,
+  `an_svg_raster_the_window_cannot_draw_never_freezes_the_viewer`,
+  `an_unanswered_svg_raster_times_out_instead_of_freezing_the_viewer`).
+  `SvgMissPolicy::Substitute` remains available to diagnostic callers but
+  the app viewer does not use it.
 - *Exports, agent frames, and snapshots* (`SvgMissPolicy::Wait`: an export
   request, `Renderer::set_svg_wait` on a renderer the caller owns, or
   `Renderer::svg_waiting` for a snapshot on the viewer's renderer, a guard
@@ -592,3 +605,20 @@ leaves, so together they hold at most `bytes`. Switching the coverage backend
 drops the cache. Coverage atlas pages, paint globals, and vertex buffers live
 only while a scene renders and are not counted; Vello's internal buffer pool
 is not counted either.
+
+### Perf3: no SVG bucket stand-ins (2026-10-19)
+
+The historical preview stand-in counts above are superseded for the app viewer.
+`Composer` now uses the same scoped exact-raster policy as snapshots. The
+presenter asks for the missing raster without advancing the render-ahead frame;
+it renders that frame when the bands complete. Shader fallback requests also
+retain their pending frame rather than advancing past unanswered pixels.
+
+The two targeted `engine-svg.spec.ts` regressions passed under the Electron
+lock: ten scale edits with zero stand-ins and exact reference pixels; the
+60%→310% scale animation with 63 presented frames, 17 bucket requests and
+zero stand-ins, followed by the exact 1.5-second frame (zero differing pixels).
+The regression identifies an edited frame by its document revision, so a
+previously cached bucket also completes without requiring another upload.
+This is functional/pixel evidence; no paired performance pass is claimed while
+the display is asleep. The final release addon built successfully.
