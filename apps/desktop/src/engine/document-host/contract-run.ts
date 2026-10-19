@@ -4,7 +4,10 @@
  * call ids) and the final document in canonical form. Shared by the vitest
  * worker check and the Electron contract spec.
  */
-import { canonicalProject, canonicalStringify } from '../../shared/canonical-json';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { canonicalProject } from '../../shared/canonical-json';
 import type { AgentToolResponseEvent } from '../../shared/ipc';
 import { CONTRACT_SEQUENCE, WORKSPACE_DOCUMENT_FIELDS, type ContractCall } from './contract';
 import type { ExtensionRecord } from '../../shared/extensions';
@@ -31,6 +34,7 @@ export const CONTRACT_PROJECT_ID = 'Pcontract';
  */
 export const contractProject = (): Record<string, unknown> => ({
   ...structuredClone(FIXTURE), id: CONTRACT_PROJECT_ID, name: 'Contract',
+  assetFolders: { Fsource: { id: 'Fsource', name: 'Source', parent: null }, Fparent: { id: 'Fparent', name: 'Parent', parent: null } },
   assets: { Avoice: { id: 'Avoice', kind: 'audio', name: 'Voice.wav', storageKey: 'media:contract-voice', size: 1024, dur: 6, mime: 'audio/wav' } },
   layers: [{
     id: 'Lvoice', type: 'audio', name: 'Voice', from: 0, dur: 6, color: '#7f8cff', on: true, lock: false, solo: false,
@@ -44,7 +48,7 @@ export function answerOf(response: AgentToolResponseEvent | Omit<AgentToolRespon
   return JSON.parse(JSON.stringify(rest));
 }
 
-export const canonicalDocument = (doc: unknown): string => canonicalStringify(canonicalProject(doc as never)) ?? '';
+export const canonicalDocument = (doc: unknown): string => JSON.stringify(canonicalProject(doc as never)) ?? '';
 
 const ID_KEYS = new Set(['id', 'i', 'historyId']);
 
@@ -95,13 +99,15 @@ export function normalizeMintedIds(transcript: ContractTranscript, initial: unkn
 }
 
 /** `extensions`: the host's extension list (the desktop's, in the Electron spec). */
-export async function runContractOnWorker(script: string, sequence: ContractCall[] = CONTRACT_SEQUENCE, extensions?: ExtensionRecord[]): Promise<ContractTranscript> {
+export async function runContractOnWorker(script: string, sequence: ContractCall[] = CONTRACT_SEQUENCE, extensions?: ExtensionRecord[], rasters?: Record<string, unknown>): Promise<ContractTranscript> {
   const host = hostServices();
   host.seed(CONTRACT_PROJECT_ID, 'Contract', contractProject());
   if (extensions) host.services.extensions = extensionHost(extensions).service;
+  const referenceDir = rasters ? mkdtempSync(path.join(tmpdir(), 'pm-ink-reference-')) : null;
+  if (referenceDir) writeFileSync(path.join(referenceDir, 'rasters.json'), JSON.stringify(rasters));
   const pool = new DocumentHostPool({
     services: host.services, newEngine: true, script,
-    env: { POWERMOVE_PM_WASM: WASM, POWERMOVE_PM_BRIDGE: BRIDGE, POWERMOVE_DOCUMENT_HOST_TEST_SEED: '1' },
+    env: { POWERMOVE_PM_WASM: WASM, POWERMOVE_PM_BRIDGE: BRIDGE, POWERMOVE_DOCUMENT_HOST_TEST_SEED: '1', ...(referenceDir ? { POWERMOVE_NATIVE_EVALUATOR: 'audit', POWERMOVE_DOCUMENT_HOST_TEXT_REFERENCE: path.join(referenceDir, 'rasters.json') } : {}) },
   });
   try {
     let revision = 0;
@@ -112,9 +118,13 @@ export async function runContractOnWorker(script: string, sequence: ContractCall
       answers.push(answerOf(response));
     }
     const workspace = workspaceDocumentFields(await pool.call(CONTRACT_PROJECT_ID, { runId: 'run-w', callId: 'contract-workspace', tool: 'get_workspace_state', arguments: {}, baseRevision: revision }));
+    const stats = await pool.stats(CONTRACT_PROJECT_ID);
+    if (referenceDir && (!stats.dual || !stats.dual.comparedOps?.['edit.captureFontAnchor'] || !stats.dual.comparedOps?.['edit.anchorReference'] || stats.dual.mismatched)) throw new Error(`Ink audit failed: ${JSON.stringify(stats)}`);
+    if (Object.keys(stats.fallbacks).length || stats.failures.length) throw new Error(`Strict contract used fallback: ${JSON.stringify(stats)}`);
     await pool.shutdown();
     return { answers, document: canonicalDocument(host.sessions.document(CONTRACT_PROJECT_ID)), workspace };
   } finally {
     await pool.shutdown();
+    if (referenceDir) rmSync(referenceDir, { recursive: true, force: true });
   }
 }

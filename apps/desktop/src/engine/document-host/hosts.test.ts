@@ -150,6 +150,36 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('a document host worke
     expect(stats.dual!.mismatched).toBe(0);
   }, 120_000);
 
+  it('answers nested and replacement-time scopes natively in a required-engine worker', async () => {
+    const project = structuredClone(FIXTURE);
+    project.comps = { outer: { id: 'outer', layers: [], comps: { same: { id: 'same', fps: 24, layers: [{ id: 'Linner', type: 'solid', from: 0, dur: 10, p: { opacity: { v: 73, kf: [], expr: null } }, d: { w: 100, h: 100 } }] } } } };
+    const record = userRecord('scope-check');
+    const ext = extensionHost([record], {
+      [record.bundleUrl!]: `export default function activate(api) {
+        const pm = api.host.pm;
+        const inner = pm.proj.comps.outer.comps.same;
+        pm.scope = [inner];
+        const check = () => { if (pm.EngineDoc.api.ev(inner.layers[0], 'opacity', 0) !== 73) throw new Error('wrong nested answer'); };
+        try {
+          check();
+          const comps = pm.proj.comps;
+          pm.proj.comps = {}; pm.doc.touched([['comps']]);
+          check();
+          pm.proj.comps = comps; pm.doc.touched([['comps']]);
+        } finally { pm.scope = []; }
+      }`,
+    });
+    const host = hostServices(new Map(), { extensions: ext.service });
+    host.seed('Pscope', 'Scopes', project);
+    const pool = newPool(host.services);
+    await pool.open('Pscope');
+    const stats = await pool.stats('Pscope');
+    expect(stats.extensions.failed).toEqual([]);
+    expect(stats.calls).toBeGreaterThanOrEqual(2);
+    expect(stats.fallbacks).toEqual({});
+    expect(stats.failures).toEqual([]);
+  }, 60_000);
+
   it('records font-anchor bounds natively: text edits that need glyph ink have no fallback', async () => {
     // A size, font, weight, tracking or box edit on a text layer records its
     // ink bounds (font-anchor.ts captureFontAnchor). The worker loads whole

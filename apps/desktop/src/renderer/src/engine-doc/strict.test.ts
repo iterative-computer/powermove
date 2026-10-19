@@ -176,6 +176,27 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     expect(doc.failures().some(f => f.code === 'font-service-unavailable' && f.retry)).toBe(true);
   });
 
+  it.runIf(existsSync(BRIDGE))('warms nested text and fonts keyed after the layer start', async () => {
+    const { FontRegistry } = createRequire(import.meta.url)(BRIDGE) as any;
+    const registry = new FontRegistry();
+    const asked: string[] = [];
+    const { PM, doc } = await editor('on', true, {
+      sync: true, answer: q => { asked.push(q); return registry.answer(q); },
+      subset: (b, i) => registry.subset(b, i), whole: (b, i) => registry.whole(b, i),
+    });
+    const title = PM.mkLayer('text');
+    title.d.font = PM.P('Helvetica Neue', { kf: [PM.KF(0, 'Helvetica Neue'), PM.KF(3, 'Georgia')] });
+    const inner = { id: 'inner', fps: 30, w: 640, h: 360, dur: 10, layers: [title] };
+    PM.proj.comps.outer = { id: 'outer', layers: [], comps: { inner } };
+    PM.doc.touched([['comps']]);
+    await doc.warmFonts();
+    expect(asked.join(' ')).toContain('Helvetica Neue');
+    expect(asked.join(' ')).toContain('Georgia');
+    PM.scope = [inner];
+    doc.api!.textLayout(title, 3);
+    expect(fallbacks(doc)).toEqual({});
+  });
+
   it('ignores worker evaluator environment overrides in production', () => {
     for (const override of ['audit', 'audit-proxy', 'strict', 'off', 'on', undefined]) {
       expect(workerMode(override, true, false)).toEqual(parseMode('on'));

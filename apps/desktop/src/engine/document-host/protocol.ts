@@ -257,3 +257,7 @@ export type ServiceName =
 /** Tool routes the hidden host keeps outside workers (mirrors pm_protocol::document_host). */
 export const DOM_TOOLS = ['capture_panel', 'computer_use_panel', 'interact_panel', 'get_panel_state', 'open_panel', 'get_panel_layout', 'set_panel_layout'] as const;
 export const JOB_TOOLS = ['export_video', 'get_render_status'] as const;
+
+/** Explicit entries in the default document route (schema and arguments are
+ * the harness's own). New document tools still use that default route. */
+export const DOCUMENT_TOOLS = ['manage_media', '__composition_info', 'get_workspace_state'] as const;

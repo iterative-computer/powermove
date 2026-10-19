@@ -43,6 +43,9 @@ const L = (id: string) => id;
  * the rest describes an editor window, WORKSPACE_DOCUMENT_FIELDS).
  */
 export const CONTRACT_SEQUENCE: ContractCall[] = [
+  { runId: 'run-1', tool: 'get_3d_scene', arguments: {} },
+  { runId: 'run-1', tool: 'edit_3d', arguments: {}, fails: true },
+  { runId: 'run-1', tool: '__composition_info', arguments: {} },
   { runId: 'run-1', tool: 'get_project_state', arguments: {} },
   { runId: 'run-1', tool: 'apply_commands', arguments: { label: 'Build the scene', commands: [
     { type: 'add_layer', id: L('Lrig'), layerType: 'null', name: 'Rig' },
@@ -107,6 +110,14 @@ export const CONTRACT_SEQUENCE: ContractCall[] = [
   { runId: 'run-2', tool: 'apply_commands', arguments: { label: 'Rolled back', commands: [{ type: 'delete_layers', targets: ['Ltitle'] }] } },
   { runId: 'run-2', tool: 'rollback_changes', arguments: {} },
   { runId: 'run-2', tool: '__finish_run', arguments: { commit: false } },
+  { runId: 'run-3', tool: 'manage_media', arguments: { operation: 'create_folder', name: 'New folder' } },
+  { runId: 'run-3', tool: 'manage_media', arguments: { operation: 'rename_folder', folderId: 'Fsource', name: 'Renamed folder' } },
+  { runId: 'run-3', tool: 'manage_media', arguments: { operation: 'move_folder', folderId: 'Fsource', parentId: 'Fparent' } },
+  { runId: 'run-3', tool: 'manage_media', arguments: { operation: 'rename', assetIds: ['Avoice'], name: 'Renamed.wav' } },
+  { runId: 'run-3', tool: 'manage_media', arguments: { operation: 'move', assetIds: ['Avoice'], folderId: 'Fsource' } },
+  { runId: 'run-3', tool: 'manage_media', arguments: { operation: 'delete_folder', folderId: 'Fsource' } },
+  { runId: 'run-3', tool: 'manage_media', arguments: { operation: 'delete', assetIds: ['Avoice'] }, fails: true },
+  { runId: 'run-3', tool: 'manage_media', arguments: { operation: 'delete', assetIds: ['Avoice'], removeReferenced: true } },
   { runId: 'run-3', tool: 'check_project', arguments: {} },
   { runId: 'run-3', tool: 'get_project_state', arguments: {} },
   { runId: 'run-3', tool: '__finish_run', arguments: { commit: true } },
@@ -114,3 +125,17 @@ export const CONTRACT_SEQUENCE: ContractCall[] = [
 
 /** get_workspace_state's fields that come from the document and the kernel, not from an editor window. */
 export const WORKSPACE_DOCUMENT_FIELDS = ['project', 'extensions', 'registeredEffects', 'selection', 'errors'] as const;
+
+
+/** Reviewed exclusions from the document mutation corpus (round 4, decision D).
+ * Host/DOM/job lists are checked separately; these need those services or
+ * window state and have their own integration gates. A new tool is never
+ * implicitly excluded. */
+export const CONTRACT_EXCLUSIONS: Record<string, string> = {
+  get_workspace_state: 'Compared separately; editor window preferred, historical hidden viewport otherwise (decision E).',
+  __engine_frames_plan: 'Internal render planning for the job engine; pixel/agents gate.',
+  render_frames: 'Pixel output: job/agents gate, not a document mutation.',
+  import_media: 'Requires real host media ingest; media lane integration gate.',
+  replace_media: 'Requires real host media ingest; media lane integration gate.',
+  stage_fork_rebase: 'Extension workspace staging; extension compatibility gate.',
+};

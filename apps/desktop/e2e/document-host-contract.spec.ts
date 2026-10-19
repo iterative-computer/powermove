@@ -27,13 +27,6 @@ test('the agent-tool contract leaves byte-identical documents on the desktop and
     await loader.whenIdle();
     return JSON.parse(JSON.stringify(loader.records()));
   });
-  const bundle = await buildEngineBundle();
-  let worker: ContractTranscript;
-  try {
-    worker = await runContractOnWorker(bundle.script, CONTRACT_SEQUENCE, extensions);
-  } finally {
-    bundle.dispose();
-  }
 
   await page.evaluate((project) => {
     const PM = (window as any).PM;
@@ -46,6 +39,15 @@ test('the agent-tool contract leaves byte-identical documents on the desktop and
     const PM = (window as any).PM;
     let revision = PM.proj.revision || 0;
     const answers: unknown[] = [];
+    const rasters: Record<string, unknown> = {};
+    const raster = PM.raster;
+    // Canonical key serialization only; values retain Canvas's exact numbers.
+    const sort = (v: any): any => Array.isArray(v) ? v.map(sort) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sort(v[k])])) : v;
+    PM.raster = (layer: any, scale: number, t: number) => {
+      const result = raster(layer, scale, t);
+      if (layer.type === 'text' && scale === 1) rasters[JSON.stringify(sort({ d: layer.d, p: layer.p, t }))] = result ? JSON.parse(JSON.stringify({ selection: result.selection, fontOffset: result.fontOffset })) : null;
+      return result;
+    };
     for (const [index, call] of sequence.entries()) {
       // The answer as the host receives it (errors included), as a worker gives it.
       const answer = await PM.AgentHarness.test.answerLiveAgentTool({ runId: call.runId, callId: `contract-${index}`, tool: call.tool, arguments: call.arguments, baseRevision: revision });
@@ -53,8 +55,14 @@ test('the agent-tool contract leaves byte-identical documents on the desktop and
       answers.push(JSON.parse(JSON.stringify(answer)));
     }
     const workspace = await PM.AgentHarness.test.answerLiveAgentTool({ runId: 'run-w', callId: 'contract-workspace', tool: 'get_workspace_state', arguments: {}, baseRevision: revision });
-    return { answers, document: JSON.stringify(PM.proj), workspace: JSON.parse(JSON.stringify(workspace)) };
+    PM.raster = raster;
+    return { rasters, answers, document: JSON.stringify(PM.proj), workspace: JSON.parse(JSON.stringify(workspace)) };
   }, CONTRACT_SEQUENCE);
+
+  const bundle = await buildEngineBundle();
+  let worker: ContractTranscript;
+  try { worker = await runContractOnWorker(bundle.script, CONTRACT_SEQUENCE, extensions, desktop.rasters); }
+  finally { bundle.dispose(); }
 
   const desktopTranscript = normalizeMintedIds({ answers: desktop.answers.map((a) => answerOf(a as never)), document: canonicalDocument(JSON.parse(desktop.document)), workspace: workspaceDocumentFields(answerOf(desktop.workspace as never)) }, contractProject());
   const workerTranscript = normalizeMintedIds(worker, contractProject());

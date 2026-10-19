@@ -15,6 +15,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Window } from 'happy-dom';
 
+import { canonicalStringify } from '../../shared/canonical-json';
 import type { PowermoveBridge } from '../../shared/ipc';
 import type { FontProvider } from '../../renderer/src/engine-doc/fonts';
 import type { EngineDocMode } from '../../renderer/src/engine-doc/flags';
@@ -50,6 +51,8 @@ export function installDom(): Window {
   window = new Window({ url: 'https://engine.powermove.local/' });
   const globals = globalThis as Record<string, unknown>;
   globals['window'] = window;
+  // Today's hidden MCP host's Chromium context (server/mcp.ts).
+  globals['innerWidth'] = 1440; globals['innerHeight'] = 1000; globals['devicePixelRatio'] = 1;
   for (const key of ['document', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event', 'CustomEvent', 'requestAnimationFrame', 'cancelAnimationFrame', 'getComputedStyle', 'matchMedia', 'localStorage', 'sessionStorage', 'Image', 'Blob', 'File', 'FileReader', 'DOMParser', 'XMLSerializer', 'MutationObserver', 'ResizeObserver', 'IntersectionObserver']) {
     const value = (window as unknown as Record<string, unknown>)[key];
     if (value !== undefined && globals[key] === undefined) globals[key] = typeof value === 'function' && !/^[A-Z]/.test(key) ? (value as (...a: unknown[]) => unknown).bind(window) : value;
@@ -107,8 +110,8 @@ export interface EnginePolicy {
  */
 export async function installHeadlessEngineDoc(PM: Record<string, any>, log: (line: string) => void, policy: EnginePolicy = { newEngine: false }): Promise<{ ready: boolean; mode: string; fonts: 'registry' | 'none' }> {
   const { installEngineDoc } = await import('../../renderer/src/engine-doc/install');
-  const { parseMode, withNewEngine } = await import('../../renderer/src/engine-doc/flags');
-  const mode: EngineDocMode = withNewEngine(parseMode(policy.evaluator ?? process.env['POWERMOVE_NATIVE_EVALUATOR'] ?? 'on'), policy.newEngine);
+  const { parseMode, workerMode } = await import('../../renderer/src/engine-doc/flags');
+  const mode: EngineDocMode = workerMode(policy.evaluator ?? process.env['POWERMOVE_NATIVE_EVALUATOR'], policy.newEngine, import.meta.env.DEV || import.meta.env.MODE === 'test');
   const path = pmWasmPath();
   const present = existsSync(path);
   if (mode.evaluator && !present) {
@@ -121,6 +124,7 @@ export async function installHeadlessEngineDoc(PM: Record<string, any>, log: (li
     loadModule: () => WebAssembly.compile(readFileSync(path)),
     sink: (line) => log(`[engine] ${line}`),
     headless: true,
+    textReference: import.meta.env.MODE === 'test' && !!process.env['POWERMOVE_DOCUMENT_HOST_TEXT_REFERENCE'],
     fonts,
     strict: policy.newEngine,
   });
@@ -175,6 +179,16 @@ export async function bootChain(options: ChainOptions): Promise<Chain> {
   PM['store'] = options.store;
   void kernel.installKernel(PM as never);
   for (const step of [uiState, memory, fonts, easing, model, selection, anim, history]) step.install(PM as never);
+  // Electron records today's Canvas measurements; a headless audit replays
+  // those values through the unmodified legacy ink kernels. Test builds only.
+  if (import.meta.env.MODE === 'test' && process.env['POWERMOVE_DOCUMENT_HOST_TEXT_REFERENCE']) {
+    const rasters = JSON.parse(readFileSync(process.env['POWERMOVE_DOCUMENT_HOST_TEXT_REFERENCE']!, 'utf8'));
+    PM['raster'] = (layer: any, _scale: number, t: number) => {
+      const key = canonicalStringify({ d: layer.d, p: layer.p, t });
+      if (!Object.hasOwn(rasters, key!)) throw new Error(`Missing Canvas text reference: ${key}`);
+      return structuredClone(rasters[key!]);
+    };
+  }
   const engine = await installHeadlessEngineDoc(PM, options.log, options.policy);
   for (const step of [library, projects, editing, capabilities, media, shaders, transitions]) step.install(PM as never);
   captions.installCaptions(PM as never);

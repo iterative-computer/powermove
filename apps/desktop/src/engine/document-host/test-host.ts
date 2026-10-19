@@ -23,7 +23,7 @@ export async function buildEngineBundle(): Promise<{ script: string; dispose(): 
   const out = mkdtempSync(path.join(desktop, 'out', 'dochost-test-'));
   // A child process: Playwright's module hooks cannot load vite's config in-process.
   await new Promise<void>((resolve, reject) => {
-    execFile(path.join(desktop, 'node_modules/.bin/vite'), ['build', '-c', 'engine.vite.config.ts', '--logLevel', 'error'], {
+    execFile(path.join(desktop, 'node_modules/.bin/vite'), ['build', '-c', 'engine.vite.config.ts', '--mode', 'test', '--logLevel', 'error'], {
       cwd: desktop, env: { ...process.env, POWERMOVE_ENGINE_OUT: out }, maxBuffer: 16 * 1024 * 1024,
     }, (error, _stdout, stderr) => (error ? reject(new Error(`engine bundle build failed: ${stderr || error.message}`)) : resolve()));
   });
