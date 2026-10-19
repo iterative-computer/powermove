@@ -110,6 +110,14 @@ export async function engineRaster(transport: EngineRenderTransport, host: Raste
   return snapshot ? toRasterSurface(withoutInk(snapshot, layer, scale), layer, window, (s) => transport.toCanvas(s), host, time) : null;
 }
 
+/** Playback's base pixels, asynchronously prepared at dependency priority. */
+export async function engineRasterPrepared(transport: EngineRenderTransport, host: RasterHost, layer: any, scale: number, time: number, crop: RasterCrop): Promise<EngineRasterSurface | null> {
+  const window = engineCrop(crop);
+  const where = host.locate(layer);
+  const snapshot = await transport.rasterForCompat(String(layer?.id ?? ''), scale, time, window, rasterOptions(layer, where));
+  return snapshot ? toRasterSurface(withoutInk(snapshot, layer, scale), layer, window, s => transport.toCanvas(s), host, time) : null;
+}
+
 /** Today's raster at zero, a negative scale, or NaN draws through a
  *  degenerate density onto a canvas of at most one pixel: nothing lands on
  *  it (the captions rasterizer alone floors its density at 0.05). The

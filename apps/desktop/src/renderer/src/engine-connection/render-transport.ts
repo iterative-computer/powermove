@@ -221,13 +221,14 @@ const LOOKAHEAD_BUDGET_MS = 6;
 const LOOKAHEAD_MAX_ANSWERS = 16;
 const LOOKAHEAD_POLL_MS = 4;
 
-type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; revision: number | null; clockCursor: number | null };
+type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; revision: number | null; clockCursor: number | null };
 
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
 
 /** `fresh`: never `reuse` (an export frame, or a need asked again after a
- *  reuse); `layer`: the layer as an export's snapshot holds it (JSON). */
-export type CompatAnswerOptions = { fresh?: boolean; layer?: string };
+ *  reuse); `layer`: the layer as an export's snapshot holds it (JSON);
+ *  `prepared`: an interactive answer with its exact base pixels ready. */
+export type CompatAnswerOptions = { fresh?: boolean; layer?: string; prepared?: boolean };
 
 export type RenderTransportOptions = {
   native: Pick<EngineBridge, 'snapshotSync' | 'snapshot' | 'onCompatAsk' | 'answerCompat'>;
@@ -320,6 +321,8 @@ export class EngineRenderTransport {
   private readonly producers = new Map<CompatSource, CompatProducer>();
   /** Producers of viewer frames' and snapshots' compatibility answers. */
   private readonly answerers = new Map<CompatSource, CompatAnswerer>();
+  private readonly preparers = new Map<CompatSource, (need: CompatNeed, revision: number) => Promise<void>>();
+  private aheadInFlight = 0;
   /** Needs answered with `reuse`, so a repeated ask gets pixels instead
    *  (the engine dropped that raster meanwhile). */
   private readonly reused = new Set<string>();
@@ -331,7 +334,7 @@ export class EngineRenderTransport {
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private aheadTurn = 0;
   private pumpingAhead = false;
-  readonly lookaheadStats = { answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, recent: [] as number[] };
+  readonly lookaheadStats = { answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, inFlight: 0, maxInFlight: 0, obsolete: 0, slowestAnswerMs: 0, answerMs: 0, recentAnswers: [] as { time: number; ms: number }[], recent: [] as number[] };
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
   /** UI snapshots (thumbnails, library cards, posters, the project thumbnail). */
@@ -349,6 +352,7 @@ export class EngineRenderTransport {
     this.ahead.clear();
     this.producers.clear();
     this.answerers.clear();
+    this.preparers.clear();
   }
 
   /* ── compatibility answers (the `raster` override; pm_render::compat) ── */
@@ -377,12 +381,16 @@ export class EngineRenderTransport {
    * `needsRenderer` rounds). The session learns which producers it has; the
    * engine asks none without one. Returns an unregister.
    */
-  answerCompat(source: CompatSource, answerer: CompatAnswerer): () => void {
+  answerCompat(source: CompatSource, answerer: CompatAnswerer, prepare?: (need: CompatNeed, revision: number) => Promise<void>): () => void {
+    for (const [key, entry] of this.ahead) if (entry.need.source === source) this.ahead.delete(key);
     this.answerers.set(source, answerer);
+    if (prepare) this.preparers.set(source, prepare); else this.preparers.delete(source);
     this.syncProducers();
     return () => {
       if (this.answerers.get(source) !== answerer) return;
       this.answerers.delete(source);
+      this.preparers.delete(source);
+      for (const [key, entry] of this.ahead) if (entry.need.source === source) this.ahead.delete(key);
       this.syncProducers();
     };
   }
@@ -408,7 +416,9 @@ export class EngineRenderTransport {
       // Answer the clock's frame instead of filling an obsolete FIFO.
       const stale = !!clock && need.composition === this.options.composition() && frame > 0
         && Math.sign(clock.rate) * (clock.time - need.time) > frame;
-      const answered = !stale && this.answerNeed(need, session);
+      const asynchronous = playing && this.preparers.has(need.source);
+      const answered = !stale && !asynchronous && this.answerNeed(need, session);
+      if (asynchronous && !stale) this.ahead.get(this.aheadTag(need))?.sent.delete(need.time);
       if (stale) this.lookaheadStats.skipped++;
       if (playing) {
         this.lookaheadStats.asked++;
@@ -459,10 +469,17 @@ export class EngineRenderTransport {
         for (let i = 0; i < entries.length; i++) {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
           const time = entry.cursor + offset * entry.step;
-          if (time < 0 || entry.sent.has(time)) continue;
+          if (time < 0 || entry.sent.has(time) || entry.pending.has(time)) continue;
           pending++;
           if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
+          const prepare = this.preparers.get(entry.need.source);
+          if (prepare && this.aheadInFlight >= 2) continue;
           done++;
+          if (prepare) {
+            this.prepareAhead(entry, time, revision ?? 0, prepare);
+            pending--;
+            continue;
+          }
           if (this.answerNeed({ ...entry.need, time }, entry.session)) {
             entry.sent.add(time);
             entry.posted = time;
@@ -480,6 +497,44 @@ export class EngineRenderTransport {
 
   playbackStarted(): void {
     this.presentedWhilePlaying();
+  }
+
+  private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>): void {
+    const need = { ...entry.need, time };
+    entry.pending.add(time);
+    this.aheadInFlight++;
+    this.lookaheadStats.inFlight = this.aheadInFlight;
+    this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
+    void Promise.resolve().then(() => prepare(need, revision)).then(() => {
+      const clock = this.options.playhead?.();
+      const cursor = clock && need.composition === this.options.composition()
+        ? Math.floor(clock.time / Math.abs(entry.step)) * Math.abs(entry.step) : entry.cursor;
+      const distance = Math.sign(entry.step) * (time - cursor);
+      if (!this.options.playing?.() || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
+        || this.preparers.get(need.source) !== prepare || revision !== this.options.revision() || distance < -Math.abs(entry.step) || distance > COMPAT_LOOKAHEAD * Math.abs(entry.step)) {
+        this.lookaheadStats.obsolete++;
+        return;
+      }
+      const answered = this.answerNeed(need, entry.session, true);
+      entry.sent.add(time);
+      if (answered) {
+        entry.posted = time;
+        this.lookaheadStats.answered++;
+      }
+    }).catch(error => {
+      // Retry only after a fresh native need or clock position, never a
+      // self-sustaining chain of immediately rejected microtasks.
+      entry.sent.add(time);
+      if (this.options.onProducerError) this.options.onProducerError(error, need);
+      else this.options.log('warn', `Preparing a compatibility raster failed: ${String(error)}`);
+    }).finally(() => {
+      entry.pending.delete(time);
+      this.aheadInFlight--;
+      this.lookaheadStats.inFlight = this.aheadInFlight;
+      // Each completed answer is independent: a slower sibling does not
+      // hold its ready pixels behind a Promise.all barrier.
+      this.presentedWhilePlaying();
+    });
   }
 
   private scheduleAhead(): void {
@@ -507,7 +562,7 @@ export class EngineRenderTransport {
     const step = frame * (clock && clock.rate < 0 ? -1 : 1);
     const entry: AheadEntry = same ? previous : {
       need, session, step, cursor: need.time, posted: need.time,
-      sent: new Set<number>(), revision: this.options.revision(), clockCursor: null
+      sent: new Set<number>(), pending: new Set<number>(), revision: this.options.revision(), clockCursor: null
     };
     entry.need = need;
     // Never infer reverse playback from a late need. Only the transport's
@@ -522,13 +577,14 @@ export class EngineRenderTransport {
   }
 
   /** Draws one need with its producer and posts the answer; false when there was none. */
-  private answerNeed(need: CompatNeed, session: TransportSession): boolean {
+  private answerNeed(need: CompatNeed, session: TransportSession, prepared = false): boolean {
     const answerer = this.answerers.get(need.source);
     // A producer that asks for a frame from inside its own answer (an
     // override calling `render.snapshot`) gets none: that frame would need
     // the answer being made.
     if (!answerer || this.answering > 0) return false;
     this.compatStats.needs++;
+    const began = performance.now();
     const revision = this.options.revision() ?? 0;
     const crop = need.crop ? { crop: { ...need.crop } } : {};
     const tag = `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.source}\u0000${need.scale}\u0000${need.crop ? `${need.crop.x},${need.crop.y},${need.crop.width},${need.crop.height}` : ''}`;
@@ -539,7 +595,7 @@ export class EngineRenderTransport {
     this.answering++;
     try {
       if (!(Number.isFinite(need.scale) && need.scale > 0 && need.scale <= 32)) throw new EngineSnapshotError('invalidMessage', `Compatibility raster scale ${need.scale} for layer ${need.layer} is outside 0..32.`);
-      answer = answerer(need, revision, fresh ? { fresh: true } : undefined);
+      answer = answerer(need, revision, fresh || prepared ? { ...(fresh ? { fresh: true } : {}), ...(prepared ? { prepared: true } : {}) } : undefined);
     } catch (error) {
       // Today a throwing wrapper fails the compositor's frame: the frame is
       // not drawn and the error is reported. The engine's frame waits for an
@@ -550,6 +606,11 @@ export class EngineRenderTransport {
       answer = null;
     } finally {
       this.answering--;
+      const ms = performance.now() - began;
+      this.lookaheadStats.slowestAnswerMs = Math.max(this.lookaheadStats.slowestAnswerMs, ms);
+      this.lookaheadStats.answerMs += ms;
+      this.lookaheadStats.recentAnswers.push({ time: need.time, ms });
+      if (this.lookaheadStats.recentAnswers.length > 12) this.lookaheadStats.recentAnswers.shift();
     }
     if (answer?.kind === 'reuse' && fresh) answer = null;
     if (!answer) {
@@ -856,6 +917,10 @@ export class EngineRenderTransport {
 
   /** The same, asynchronously (`async` or `idle` class). */
   async snapshot(options: EngineSnapshotOptions, cls: Exclude<SnapshotClass, 'sync'> = 'async'): Promise<EngineSnapshot> {
+    return this.snapshotAsyncAt(options, cls);
+  }
+
+  private async snapshotAsyncAt(options: EngineSnapshotOptions, cls: SnapshotClass): Promise<EngineSnapshot> {
     const native = this.options.native;
     if (!native.snapshot) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no engine snapshots.'), 'snapshot');
     const uploaded: string[] = [];
@@ -917,6 +982,18 @@ export class EngineRenderTransport {
   async raster(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, options: RasterOptions = {}): Promise<EngineSnapshot | null> {
     try {
       return await this.snapshot(this.rasterOptions(layer, scale, time, crop, options));
+    } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'empty') return null;
+      throw error;
+    }
+  }
+
+  /** Playback depends on these pixels. Await over async IPC, but admit at
+   * sync priority: ordinary async snapshots yield to a due viewer frame,
+   * which itself cannot render until this compatibility answer arrives. */
+  async rasterForCompat(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, options: RasterOptions = {}): Promise<EngineSnapshot | null> {
+    try {
+      return await this.snapshotAsyncAt(this.rasterOptions(layer, scale, time, crop, options), 'sync');
     } catch (error) {
       if (error instanceof EngineSnapshotError && error.code === 'empty') return null;
       throw error;

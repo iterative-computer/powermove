@@ -9,16 +9,18 @@ const shape = { id: 'box', type: 'shape', d: { shape: 'rect', w: 40, h: 20 }, fx
 const captions = { id: 'subs', type: 'captions', d: {}, fx: [] as any[] };
 const nested = { id: 'inner', type: 'text', d: { text: 'Nested' }, fx: [] as any[] };
 
-function setup() {
+function setup(withAsync = false) {
   const PM: any = {
     time: 0,
     proj: { id: 'P', compId: 'P-root', layers: [text, shape, captions], comps: { inner: { id: 'inner', layers: [nested] } } },
     bus: { on: vi.fn(() => () => {}) }
   };
   const services = createServicesRegistry();
-  const engineRaster = vi.fn((layer: any, scale: number, time: number) => ({
+  const surface = (layer: any, scale: number, time: number) => ({
     cv: { width: Math.round(48 * scale), height: Math.round(24 * scale) }, w: 48, h: 24, anchorX: 4, anchorY: 18, layer, scale, time, key: `engine:${layer.id}`
-  }));
+  });
+  const engineRaster = vi.fn(surface);
+  const engineRasterAsync = vi.fn(async (layer: any, scale: number, time: number) => surface(layer, scale, time));
   const readPixels = vi.fn((source: { width: number; height: number }) => ({ width: source.width, height: source.height, format: 'rgba8Premultiplied' as const, data: new Uint8Array(source.width * source.height * 4).fill(7) }));
   let base: any;
   const compat = createRasterCompat(PM, {
@@ -26,6 +28,7 @@ function setup() {
     chain: () => services.get('raster'),
     onChainChange: (fn) => services.onChange('raster', fn),
     engineRaster,
+    engineRasterAsync: withAsync ? engineRasterAsync : undefined,
     readPixels,
     log: () => {}
   });
@@ -33,10 +36,84 @@ function setup() {
   services.register('raster', base);
   const need = (layer: string, time = 0.5, scale = 2, composition = 'P-root'): CompatNeed =>
     ({ composition, layer, time: Math.round(time * TICKS_PER_SECOND), source: 'rasterOverride', scale });
-  return { PM, services, compat, engineRaster, readPixels, base, need };
+  return { PM, services, compat, engineRaster, engineRasterAsync, readPixels, base, need };
 }
 
 describe('the raster override producer', () => {
+  it('propagates a preparation failure instead of drawing a blank or blocking in a sync retry', async () => {
+    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, ...args: any[]) => ({ ...original(layer, ...args), key: 'prepared' }));
+    engineRasterAsync.mockRejectedValue(new Error('native preparation failed'));
+    await expect(compat.prepare(need('title'), 4)).rejects.toThrow('native preparation failed');
+    expect(engineRaster).not.toHaveBeenCalled();
+  });
+
+  it('uses a prepared live base for the exact need without a synchronous engine raster', async () => {
+    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, ...rest: any[]) => ({ ...original(layer, ...rest), key: 'prepared' }));
+    const request = need('title', 0.5, 2);
+    await compat.prepare(request, 4);
+    expect(engineRasterAsync).toHaveBeenCalledWith(text, 2, 0.5, undefined);
+    expect(compat.answer(request, 4, { prepared: true })).toMatchObject({ kind: 'raster', key: 'prepared' });
+    expect(engineRaster).not.toHaveBeenCalled();
+  });
+
+  it('keeps a synchronous caller on the current base after preparation', async () => {
+    const { services, compat, engineRaster, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, ...rest: any[]) => ({ ...original(layer, ...rest), key: 'current' }));
+    const request = need('title');
+    await compat.prepare(request, 4);
+    expect(compat.answer(request, 4)).toMatchObject({ kind: 'raster', key: 'current' });
+    expect(engineRaster).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not use a prepared base for another layer, time, crop, or detached layer', async () => {
+    const { services, compat, engineRaster, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, ...rest: any[]) => ({ ...original(layer, ...rest), key: `copy:${layer.id}` }));
+    await compat.prepare(need('title', 0.5, 2), 4);
+    compat.answer(need('box', 0.5, 2), 4, { prepared: true });
+    compat.answer(need('title', 1, 2), 4, { prepared: true });
+    compat.answer({ ...need('title', 0.5, 2), crop: { x: 1, y: 2, width: 3, height: 4 } }, 4, { prepared: true });
+    expect(engineRaster).toHaveBeenCalledTimes(3);
+    services.register('raster', (layer: any, ...rest: any[]) => ({ ...original({ ...layer }, ...rest), key: 'detached' }));
+    await compat.prepare(need('title', 0.5, 2), 4);
+    compat.answer(need('title', 0.5, 2), 4, { prepared: true });
+    expect(engineRaster).toHaveBeenCalledTimes(4);
+  });
+
+  it('drops prepared samples after reset and when the document revision changes', async () => {
+    const { services, compat, engineRaster, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, ...rest: any[]) => ({ ...original(layer, ...rest), key: 'changed' }));
+    const request = need('title');
+    await compat.prepare(request, 4);
+    compat.reset();
+    compat.answer(request, 4, { prepared: true });
+    expect(engineRaster).toHaveBeenCalledTimes(1);
+    await compat.prepare(request, 4);
+    compat.answer(request, 5, { prepared: true });
+    expect(engineRaster).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores an asynchronous surface that finishes after reset', async () => {
+    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, ...rest: any[]) => ({ ...original(layer, ...rest), key: 'late' }));
+    let resolve!: (surface: any) => void;
+    engineRasterAsync.mockImplementation(() => new Promise((done) => { resolve = done; }));
+    const pending = compat.prepare(need('title'), 4);
+    await Promise.resolve();
+    compat.reset();
+    resolve({ cv: { width: 96, height: 48 }, w: 48, h: 24, anchorX: 4, anchorY: 18 });
+    await pending;
+    compat.answer(need('title'), 4, { prepared: true });
+    expect(engineRaster).toHaveBeenCalledTimes(1);
+  });
+
   it('answers native for a wrapper that passes a layer through, without drawing the base', () => {
     const { services, compat, engineRaster, need } = setup();
     const original = services.get<any>('raster');

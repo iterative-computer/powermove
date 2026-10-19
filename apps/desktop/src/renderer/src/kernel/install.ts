@@ -52,7 +52,7 @@ import { createExtensionAPI, type ExtensionHandle, type HostDeps, type PanelsBac
 import { createLoader, type BuiltinFactory, type Loader, type LoaderOptions } from './loader';
 import { createKernel, runKernelCommand, type Kernel } from './registries';
 import { makeScene3DAPI } from '../core/scene3d/api';
-import { engineRaster, engineRasterSync, locateLayer, type RasterCrop, type RasterHost } from '../engine-connection/raster-surface';
+import { engineRaster, engineRasterPrepared, engineRasterSync, locateLayer, type RasterCrop, type RasterHost } from '../engine-connection/raster-surface';
 import { records as storeRecords } from './extensions.svelte';
 import { installRuntimeGlobals } from './runtime-globals';
 import { installKernelSignals } from './signals.svelte';
@@ -960,6 +960,11 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     engineRaster: (layer, scale, time, crop) => {
       const engine = engineRender(PM);
       return engine ? engineRasterBase(PM, engine, [layer as Layer, scale, time, undefined, crop as RasterWindow | undefined]) : null;
+    },
+    engineRasterAsync: async (layer, scale, time, crop) => {
+      const engine = engineRender(PM);
+      if (!engine) return null;
+      return await engineRasterPrepared(engine, rasterHost(PM), layer, scale, time, crop as RasterCrop);
     }
   });
   const rasterBase: RenderAPI['raster'] = (...args) => {
