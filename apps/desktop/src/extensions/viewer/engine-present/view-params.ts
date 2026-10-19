@@ -23,7 +23,37 @@ export type ViewerLayoutState = {
   /** The 3D viewport's state when the composition has a 3D scene. */
   scene3d?: { hasScene: boolean; shading: Shading3d; xray: boolean } | null;
   playEveryFrame?: boolean;
+  /** Today's output scale for this view (`todaysOutputScale`). */
+  svgScale?: readonly [number, number] | null;
 };
+
+/** The viewport fields `todaysOutputScale` reads (`PreviewViewport`). */
+type CroppedViewport = { width: number; height: number };
+
+/**
+ * Today's compositor's output scale (`outputScale(W, H)` in
+ * legacy/gl/compositor.ts) on the canvas today's viewer sizes for a view:
+ * canvas pixels per composition pixel, per axis. `render` is that canvas
+ * (`previewRenderSize`, the explicit preview resolution, or the cropped
+ * viewport's `renderWidth` × `renderHeight`), `viewport` the crop
+ * (`previewRenderViewport`), null when the whole composition is drawn.
+ * Level 1 SVG images pick their bucket at this scale
+ * (`svgRasterDimensions(…, scaledWorld(L, T, W, H))`), and today's viewer
+ * caps it at one pixel per composition pixel below fit (`min(1, zoom ×
+ * DPR) × quality`), where the engine draws at zoom × DPR. Null when it
+ * cannot be computed (the engine then keeps its own scale).
+ */
+export function todaysOutputScale(
+  compWidth: number, compHeight: number,
+  render: { width: number; height: number },
+  viewport: CroppedViewport | null | undefined,
+): [number, number] | null {
+  const W = Number(render.width), H = Number(render.height);
+  const scale: [number, number] = viewport
+    ? [W / Math.max(1e-6, viewport.width), H / Math.max(1e-6, viewport.height)]
+    : [W / Math.max(1, Number(compWidth) || W), H / Math.max(1, Number(compHeight) || H)];
+  return scale.every((v) => Number.isFinite(v) && v > 0) ? scale : null;
+}
 
 /** The preview resolution menu (Auto, Full, Half, Quarter) as contract 2's enum. */
 export function previewResolution(value: string | number | null | undefined): PreviewResolution {
@@ -42,6 +72,7 @@ export function viewParamsFor(state: ViewerLayoutState): ViewParams {
     resolution: previewResolution(state.previewResolution),
     media: 'automatic',
     playEveryFrame: !!state.playEveryFrame,
+    ...(state.svgScale ? { svgScale: [state.svgScale[0], state.svgScale[1]] as [number, number] } : {}),
     ...(scene ? { camera: null, shading: scene.shading, xray: scene.xray } : {})
   };
 }

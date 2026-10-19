@@ -24,6 +24,7 @@
  * presenting engine session for a stage nobody sees).
  */
 import type { EngineViewerService, ViewParams } from '../../../extensions/viewer/engine-present/presentation';
+import { todaysOutputScale } from '../../../extensions/viewer/engine-present/view-params';
 
 /** Mirrors engine-present/presentation.ts `ENGINE_STAGE_EVENT`. */
 export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
@@ -145,8 +146,10 @@ export class EngineCanvasBinding {
   }
 
   /** `render.gl.resize(width, height, previewViewport)`: the canvas moved
-   *  or changed size; the engine follows. */
-  resize(): void {
+   *  or changed size; the engine follows. The caller's backing size and
+   *  crop are today's compositor's canvas, so level 1 SVG images pick
+   *  today's buckets (`todaysOutputScale`). */
+  resize(width?: number, height?: number, viewport?: { width: number; height: number } | null): void {
     const canvas = this.canvas;
     if (!canvas) return;
     if (!canvas.isConnected) {
@@ -183,8 +186,9 @@ export class EngineCanvasBinding {
       box.left + box.width / 2 - (parent.left + parent.width / 2),
       box.top + box.height / 2 - (parent.top + parent.height / 2)
     ];
+    const svgScale = width !== undefined && height !== undefined ? todaysOutputScale(comp.w, comp.h, { width, height }, viewport) : null;
     this.presentation.update(
-      { zoom: zoom > 0 && Number.isFinite(zoom) ? zoom : 1, pan, resolution: resolution(this.options.quality()), media: 'automatic', playEveryFrame: false },
+      { zoom: zoom > 0 && Number.isFinite(zoom) ? zoom : 1, pan, resolution: resolution(this.options.quality()), media: 'automatic', playEveryFrame: false, ...(svgScale ? { svgScale } : {}) },
       { width: parent.width, height: parent.height }
     );
   }

@@ -45,6 +45,21 @@ describe('ViewSequencer', () => {
     expect(sequencer.next({ ...input }).state.view).toBeNull();
   });
 
+  it('carries today’s SVG output scale; a change of it is a new view', () => {
+    const sequencer = new ViewSequencer();
+    const none = sequencer.next(input).state;
+    expect(none).not.toHaveProperty('svgScale');
+    const capped = sequencer.next({ ...input, svgScale: [1, 1] });
+    expect(capped.changed).toBe(true);
+    expect(capped.state.svgScale).toEqual([1, 1]);
+    expect(capped.state.viewSeq).toBe(none.viewSeq + 1);
+    expect(sequencer.next({ ...input, svgScale: [1, 1] }).changed).toBe(false);
+    // A scale the engine would refuse is not sent (the engine keeps its own).
+    for (const bad of [[Number.NaN, 1], [0, 1], [65, 1]] as [number, number][]) {
+      expect(new ViewSequencer().next({ ...input, svgScale: bad }).state).not.toHaveProperty('svgScale');
+    }
+  });
+
   it('sanitizes sizes and numbers', () => {
     expect(deviceSize(0, 10_000, 2)).toEqual({ width: 1, height: 16384 });
     const state = new ViewSequencer().next({ ...input, zoom: Number.NaN, devicePixelRatio: 0, pan: [Number.POSITIVE_INFINITY, 2] }).state;

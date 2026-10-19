@@ -27,6 +27,12 @@ describe('view parameters', () => {
     expect(scene).toMatchObject({ camera: null, shading: 'solid', xray: true });
   });
 
+  it('sends today’s SVG output scale when the viewer has one', () => {
+    expect(viewParamsFor({ shown: 0.61, fit: false, pan: [0, 0], previewResolution: 'auto', svgScale: [1, 0.9990740740740741] }).svgScale)
+      .toEqual([1, 0.9990740740740741]);
+    expect(viewParamsFor({ shown: 0.61, fit: false, pan: [0, 0], previewResolution: 'auto', svgScale: null })).not.toHaveProperty('svgScale');
+  });
+
   it('yields a view override with X-ray only in draft shading', () => {
     const sequencer = new ViewSequencer();
     const base = { composition: 'c', cssWidth: 100, cssHeight: 50, devicePixelRatio: 2, colorSpace: 'srgb' as const, edr: false };

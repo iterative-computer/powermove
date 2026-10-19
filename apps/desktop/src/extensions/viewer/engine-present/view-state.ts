@@ -30,6 +30,8 @@ export type ViewInput = {
   localView?: string[];
   /** The 3D chrome wants each frame's depth and object-id surface. */
   depthId?: boolean;
+  /** Today's output scale for level 1 SVG buckets (`todaysOutputScale`). */
+  svgScale?: readonly [number, number] | null;
 };
 
 const MAX_EDGE = 16384;
@@ -38,6 +40,11 @@ const MAX_EDGE = 16384;
 export function deviceSize(cssWidth: number, cssHeight: number, dpr: number): { width: number; height: number } {
   const edge = (css: number): number => Math.min(MAX_EDGE, Math.max(1, Math.round(css * (dpr > 0 ? dpr : 1))));
   return { width: edge(cssWidth), height: edge(cssHeight) };
+}
+
+/** A scale the engine accepts (`ViewerState::validate`: positive, at most 64). */
+function validScale(scale: readonly [number, number] | null | undefined): scale is readonly [number, number] {
+  return !!scale && scale.length === 2 && scale.every((v) => Number.isFinite(v) && v > 0 && v <= 64);
 }
 
 function sameState(a: ViewerState, b: ViewerState): boolean {
@@ -82,7 +89,8 @@ export class ViewSequencer {
       playEveryFrame: input.playEveryFrame,
       edr: input.edr,
       viewSeq: this.seq,
-      ...(input.depthId ? { depthId: true } : {})
+      ...(input.depthId ? { depthId: true } : {}),
+      ...(validScale(input.svgScale) ? { svgScale: [input.svgScale[0], input.svgScale[1]] as [number, number] } : {})
     };
     if (this.last && sameState(this.last, candidate)) return { state: this.last, changed: false };
     this.seq += 1;

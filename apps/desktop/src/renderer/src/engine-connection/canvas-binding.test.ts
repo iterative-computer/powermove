@@ -119,6 +119,19 @@ describe('EngineCanvasBinding (render.gl.init/resize with the engine on)', () =>
     expect(binding.bound).toBeNull();
   });
 
+  it('passes today’s output scale of the caller’s backing size and crop (level 1 SVG buckets)', () => {
+    const { binding, made, canvas } = setup();
+    binding.bind(canvas);
+    binding.resize(960, 540);
+    expect(made[0]!.updates.at(-1)!.params.svgScale).toEqual([0.5, 0.5]);
+    // A cropped preview viewport: its render size over its composition size.
+    binding.resize(1500, 900, { width: 375, height: 225 });
+    expect(made[0]!.updates.at(-1)!.params.svgScale).toEqual([4, 4]);
+    // Without a size (an old caller): the engine keeps its own scale.
+    binding.resize();
+    expect(made[0]!.updates.at(-1)!.params).not.toHaveProperty('svgScale');
+  });
+
   it('a caller that tears its canvas down without another resize leaves no presenter behind', () => {
     const watched: Array<{ canvas: HTMLCanvasElement; changed: () => void; stopped: boolean }> = [];
     const made: FakePresentation[] = [];
