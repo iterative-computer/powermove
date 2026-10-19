@@ -179,10 +179,10 @@ impl PresenterConfig {
                     .filter(|p| !p.is_empty())
                     .map(std::path::PathBuf::from),
                 fonts: None,
-                send_delay: send_delay(env(SEND_DELAY_ENV)),
                 external_wait_cap_us: env(EXTERNAL_WAIT_ENV)
                     .and_then(|v| v.parse::<u32>().ok())
                     .map(|ms| i64::from(ms) * 1_000),
+                send_delay: send_delay(env(SEND_DELAY_ENV)),
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),

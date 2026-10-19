@@ -163,6 +163,7 @@ test('plays, shuttles, seeks and loops without a viewer; follows the open compos
   expect(join.catchUp).not.toBeNull();
   expect(join.catchUp!).toBeLessThan(1 / 30);
   const maxJoinError = join.uiError;
+  expect(join.uiError, 'P5: every viewer-join sample stays within 0.08 seconds').toBeLessThan(0.08);
   await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.session().frames)).toBeGreaterThan(0);
   // Closing again retires presentation, not the running session or device.
   const closedAgain = await page.evaluate(async () => {

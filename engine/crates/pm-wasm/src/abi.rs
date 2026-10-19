@@ -436,12 +436,14 @@ pub extern "C" fn pm_stats() -> usize {
     with(|s| {
         let st = s.engine.stats;
         let text = format!(
-            "{{\"batches\":{},\"ops\":{},\"resyncs\":{},\"queries\":{},\"unanswered\":{},\"revision\":{}}}",
+            "{{\"batches\":{},\"ops\":{},\"resyncs\":{},\"queries\":{},\"unanswered\":{},\"detachedHits\":{},\"detachedMisses\":{},\"revision\":{}}}",
             st.batches,
             st.ops,
             st.resyncs,
             st.queries,
             st.unanswered,
+            st.detached_hits,
+            st.detached_misses,
             s.engine.revision()
         );
         reply(s, &text, false)
