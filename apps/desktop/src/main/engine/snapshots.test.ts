@@ -71,6 +71,16 @@ describe('snapshot requests', () => {
     expect(validSnapshotRequest(null)).toBe(false);
   });
 
+  it('accept a window\'s compatibility events only with its document', () => {
+    const document = { id: 'doc', revision: 3 };
+    const events = [{ type: 'compat', compat: 'producers', sources: ['rasterOverride'] }, { type: 'compat', compat: 'pixels', data: new Uint8Array(4) }];
+    expect(validSnapshotRequest({ ...request({}, { session: null }), document, compatEvents: events })).toBe(true);
+    expect(validSnapshotRequest({ ...request(), compatEvents: events })).toBe(false);
+    expect(validSnapshotRequest({ ...request({}, { session: null }), document, compatEvents: [{ type: 'compat', compat: 'needs' }] })).toBe(false);
+    expect(validSnapshotRequest({ ...request({}, { session: null }), document, compatEvents: [{ type: 'compat', compat: 'pixels', data: 'x' }] })).toBe(false);
+    expect(validSnapshotRequest({ ...request({}, { session: null }), document, compatEvents: [{ type: 'shaderFallback' }] })).toBe(false);
+  });
+
   it('accept a bounded Blender wait for async and idle captures only', () => {
     expect(validSnapshotRequest(request({ class: 'async', blenderWaitMs: 600_000 }))).toBe(true);
     expect(validSnapshotRequest(request({ class: 'idle', blenderWaitMs: 0 }))).toBe(true);
@@ -225,7 +235,7 @@ describe('sync snapshots served by main’s session for the window', () => {
     const service = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare }, log: () => {} });
     const reply = await service.snapshot(12, request({}, { session: null, generation: 0, document: doc }));
     expect(reply.status).toBe('rendered');
-    expect(prepare).toHaveBeenCalledWith(12, doc, []);
+    expect(prepare).toHaveBeenCalledWith(12, doc, [], []);
     expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
     expect(service.status().windowSessions).toBe(1);
   });

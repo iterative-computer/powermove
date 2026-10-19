@@ -33,7 +33,7 @@
  *   the job engine's export frames are drawn by (main asks the window).
  */
 import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, SnapshotPixels, SnapshotRequest } from '../../../shared/engine-protocol';
-import type { EngineBridge, EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
+import type { EngineBridge, EngineCompatAsk, EngineCompatEvent, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
 
 /** Rounds of `needsRenderer` a snapshot goes through before it fails. */
@@ -164,12 +164,18 @@ export type CompatAnswerResult =
   | null;
 
 /** Answers the engine's needs for one source (the raster override's producer). */
-export type CompatAnswerer = (need: CompatNeed, revision: number, options?: { fresh?: boolean }) => CompatAnswerResult;
+export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
+
+/** `fresh`: never `reuse` (an export frame, or a need asked again after a
+ *  reuse); `layer`: the layer as an export's snapshot holds it (JSON). */
+export type CompatAnswerOptions = { fresh?: boolean; layer?: string };
 
 export type RenderTransportOptions = {
   native: Pick<EngineBridge, 'snapshotSync' | 'snapshot' | 'onCompatAsk' | 'answerCompat'>;
   /** The session snapshots are taken of (the newest viewer session). */
   session: () => TransportSession | null;
+  /** A producer threw while answering a frame's need (today's failed frame). */
+  onProducerError?: (error: unknown, need: CompatNeed) => void;
   /** Every open session of the window (viewer sessions and the standby):
    *  each learns which compatibility producers the window has. */
   sessions?: () => TransportSession[];
@@ -279,17 +285,25 @@ export class EngineRenderTransport {
     this.compatStats.needs++;
     const revision = this.options.revision() ?? 0;
     const tag = `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.source}\u0000${need.scale}`;
+    // Asked again after a `reuse` at this revision: the engine no longer
+    // holds that raster (evicted), so this answer carries the pixels.
+    const fresh = this.reused.has(`${tag}\u0000${revision}`);
     let answer: CompatAnswerResult;
     this.answering++;
     try {
-      answer = answerer(need, revision);
+      answer = answerer(need, revision, fresh ? { fresh: true } : undefined);
     } catch (error) {
-      this.options.log('warn', `the ${need.source} producer failed for layer ${need.layer}: ${error instanceof Error ? error.message : String(error)}`);
+      // Today a throwing wrapper fails the compositor's frame: the frame is
+      // not drawn and the error is reported. The engine's frame waits for an
+      // answer that does not come (the last frame stays), and the error is
+      // reported the same way.
+      if (this.options.onProducerError) this.options.onProducerError(error, need);
+      else this.options.log('warn', `the ${need.source} producer failed for layer ${need.layer}: ${error instanceof Error ? error.message : String(error)}`);
       answer = null;
     } finally {
       this.answering--;
     }
-    if (answer?.kind === 'reuse' && this.reused.has(`${tag}\u0000${revision}`)) answer = null;
+    if (answer?.kind === 'reuse' && fresh) answer = null;
     if (!answer) {
       this.compatStats.unanswered++;
       return false;
@@ -396,11 +410,22 @@ export class EngineRenderTransport {
     return e;
   }
 
-  /** Compatibility needs a snapshot of main's own session for the window
-   *  cannot get: their answers go on the window's session port, which that
-   *  session does not read (main never opens one with producers). */
-  private compatUnmet(compat: CompatNeed[]): EngineSnapshotError | null {
-    return compat.length ? new EngineSnapshotError('notHeadlessRenderable', `The frame needs ${compat.length} compatibility raster(s) this snapshot path does not draw.`) : null;
+  /** A round's needs for a snapshot of main's own session for the window:
+   *  drawn here, and carried with the next request (main posts them on its
+   *  session). Throws when a need has no producer. */
+  private collectAnswers(compat: CompatNeed[]): EngineCompatEvent[] {
+    const events: EngineCompatEvent[] = [];
+    const carrier: TransportSession = {
+      id: 0, closed: false, generation: 0, resyncPending: false, applied: 1,
+      uploadFallback: () => {},
+      post: (event) => { events.push(event as EngineCompatEvent); return true; }
+    };
+    for (const need of compat) {
+      if (!this.answerNeed(need, carrier)) {
+        throw new EngineSnapshotError('notHeadlessRenderable', `No ${need.source === 'rasterOverride' ? 'raster override' : 'compatibility context'} in this window answered for layer ${need.layer}.`);
+      }
+    }
+    return events;
   }
 
   /**
@@ -471,6 +496,9 @@ export class EngineRenderTransport {
     const revision = flushed ?? doc.revision;
     const uploaded: string[] = [];
     let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
+    // The window's producers go with every request (main's session then
+    // asks for those layers), and the answers to a round's needs with the next.
+    let compatEvents: EngineCompatEvent[] = this.answerers.size ? [{ type: 'compat', compat: 'producers', sources: [...this.answerers.keys()] }] : [];
     let send = !(this.sentToMain && this.sentToMain.id === doc.id && this.sentToMain.revision === doc.revision);
     let body: { json: Uint8Array; hash: string; revision: number } | null = null;
     for (let round = 0; round < MAX_ROUNDS + 1; round++) {
@@ -481,9 +509,11 @@ export class EngineRenderTransport {
         session: null,
         revision,
         document: body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
-        ...(fallbackPixels.length ? { fallbackPixels } : {})
+        ...(fallbackPixels.length ? { fallbackPixels } : {}),
+        ...(compatEvents.length ? { compatEvents } : {})
       });
       fallbackPixels = [];
+      compatEvents = this.answerers.size ? [{ type: 'compat', compat: 'producers', sources: [...this.answerers.keys()] }] : [];
       if (reply.status === 'failed' && reply.code === 'needsDocument' && !send) {
         // Main's session lost that revision (an engine restart): send it.
         send = true;
@@ -500,8 +530,7 @@ export class EngineRenderTransport {
       if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
       if (reply.status === 'failed') throw failure(reply);
       this.stats.rounds++;
-      const unmet = this.compatUnmet(reply.compat);
-      if (unmet) throw unmet;
+      if (reply.compat.length) compatEvents.push(...this.collectAnswers(reply.compat));
       if (!reply.fallback.length) continue;
       const runner = this.options.fallbackRunner();
       if (!runner) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');
@@ -700,7 +729,10 @@ export class EngineRenderTransport {
     const answer = this.options.native.answerCompat;
     if (!answer) return;
     const no = (message: string) => answer({ ask: ask.ask, status: 'unavailable', message });
-    if (ask.request.document !== this.options.document()) return no('This window has another document open.');
+    // An ask carrying the export snapshot's layer is drawn from it in any
+    // window with the producer (today's render queue ran its jobs in the
+    // window, whatever it had open); otherwise only the document's window.
+    if (ask.layer === undefined && ask.request.document !== this.options.document()) return no('This window has another document open.');
     const producer = this.producers.get(ask.request.source);
     const answerer = this.answerers.get(ask.request.source);
     if (!producer && answerer) {
@@ -711,7 +743,7 @@ export class EngineRenderTransport {
       let result: CompatAnswerResult = null;
       this.answering++;
       try {
-        result = answerer({ composition: request.composition, layer: request.layer, time: request.time, source: request.source, scale: request.scale }, Number(request.revision), { fresh: true });
+        result = answerer({ composition: request.composition, layer: request.layer, time: request.time, source: request.source, scale: request.scale }, Number(request.revision), { fresh: true, ...(ask.layer !== undefined ? { layer: ask.layer } : {}) });
       } catch (error) {
         return no(error instanceof Error ? error.message : String(error));
       } finally {

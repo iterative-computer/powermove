@@ -32,7 +32,7 @@
  * sent again), so the next frame asks afresh.
  */
 import type { CompatNeed } from '../../../shared/engine-protocol';
-import type { CompatAnswerResult, EngineRenderTransport } from '../engine-connection/render-transport';
+import type { CompatAnswerOptions, CompatAnswerResult, EngineRenderTransport } from '../engine-connection/render-transport';
 import type { Disposable } from './api';
 
 type LegacyPM = Record<string, any>;
@@ -69,7 +69,7 @@ export interface RasterCompatHandle {
   /** Drops every answer the engine holds (a font change, an extension reload). */
   reset(): void;
   /** Answers one need (tests, the transport); `fresh`: never `reuse` (an export frame). */
-  answer(need: CompatNeed, revision: number, options?: { fresh?: boolean }): CompatAnswerResult;
+  answer(need: CompatNeed, revision: number, options?: CompatAnswerOptions): CompatAnswerResult;
   dispose(): void;
 }
 
@@ -89,6 +89,26 @@ export function findLayer(PM: LegacyPM, composition: string, layer: string): any
     if (found) return found;
   }
   return null;
+}
+
+/**
+ * The layer an export's snapshot holds (`json`): the window's own layer
+ * object when it is the same (wrappers keep their per-layer caches), else a
+ * copy of the snapshot's, so an export draws the project as it was
+ * exported (a render queue job, or an export of an edited project).
+ */
+export function snapshotLayer(PM: LegacyPM, composition: string, layer: string, json: string): any {
+  const live = findLayer(PM, composition, layer);
+  try {
+    if (live && JSON.stringify(live) === json) return live;
+  } catch {
+    // A live layer that does not serialize: use the snapshot's.
+  }
+  try {
+    return JSON.parse(json);
+  } catch {
+    return live;
+  }
 }
 
 /** A surface whose fields come from `load` on first read. */
@@ -216,8 +236,10 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       return lazySurface({ layer, scale: s, time: t, crop }, load);
     },
 
-    answer(need: CompatNeed, revision: number, answerOptions?: { fresh?: boolean }): CompatAnswerResult {
-      const layer = findLayer(PM, String(need.composition), String(need.layer));
+    answer(need: CompatNeed, revision: number, answerOptions?: CompatAnswerOptions): CompatAnswerResult {
+      const layer = answerOptions?.layer !== undefined
+        ? snapshotLayer(PM, String(need.composition), String(need.layer), answerOptions.layer)
+        : findLayer(PM, String(need.composition), String(need.layer));
       // A layer the window no longer has: the engine draws its own.
       if (!layer) return { kind: 'native' };
       const chain = options.chain();
@@ -230,8 +252,12 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       try {
         result = chain(layer, scale, time, undefined, undefined);
       } catch (error) {
+        // Today the exception leaves the compositor's draw and fails the
+        // frame; here it fails the answer (render-transport.ts reports it,
+        // and an export frame fails with its message). The layer is never
+        // drawn without the wrapper instead.
         log(`the raster override failed for layer ${String(need.layer)}: ${error instanceof Error ? error.message : String(error)}`);
-        return { kind: 'native' };
+        throw error;
       } finally {
         producing--;
       }

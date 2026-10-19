@@ -283,6 +283,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     : null;
 
   const engineNowUs = engineClock(bridgeAddon);
+  /** The job records' snapshots (set once the job engine's client exists below). */
+  let agentJobsRef: { compatLayer(session: number | null, request: import('../../shared/engine-protocol').CompatFrameRequest): string | null } | null = null;
   const cacheDirectory = path.join(options.userData, 'Engine Cache');
   // Exports of layers only a window draws (a `raster` override, a
   // compatibility WebGL2 context): the job engine asks, the windows answer.
@@ -298,7 +300,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!compatFrames.answer(event.sender.id, answer)) log('warn', `window ${event.sender.id} sent a compatibility answer nobody asked for`);
   });
   engine = new NativeEngine({
-    compatFrame: (request) => compatFrames.serve(request),
+    // The export's own snapshot of the layer goes with the ask (agent-jobs.ts).
+    compatFrame: (request, session) => compatFrames.serve(request, agentJobsRef?.compatLayer(session, request) ?? null),
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
       const child = utilityProcess.fork(script, [], {
@@ -454,7 +457,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     }
   };
   let renderQueue: RenderQueue | null = null;
-  const agentJobs = new AgentJobs({
+  const agentJobs = agentJobsRef = new AgentJobs({
     engine,
     ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}),
     log,

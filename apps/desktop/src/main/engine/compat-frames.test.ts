@@ -27,6 +27,17 @@ function setup(windowIds: number[]) {
 const pixels = (ask: number, w = 2, h = 2) => ({ ask, status: 'pixels' as const, key: 'k', width: w, height: h, format: 'rgba8Premultiplied' as const, origin: [0, 0] as [number, number], scale: 1, data: new Uint8Array(w * h * 4).fill(9) });
 
 describe('CompatFrames', () => {
+  it('sends the export snapshot\'s layer with the ask when main has it', async () => {
+    const { frames, asks } = setup([1]);
+    const answer = frames.serve(request, '{"id":"L7"}');
+    const sent = asks.get(1)![0]!;
+    expect(sent.layer).toBe('{"id":"L7"}');
+    frames.answer(1, pixels(sent.ask));
+    await answer;
+    void frames.serve(request);
+    expect('layer' in asks.get(1)![1]!).toBe(false);
+  });
+
   it('asks every window and takes the first pixels', async () => {
     const { frames, asks } = setup([1, 2]);
     const answer = frames.serve(request);

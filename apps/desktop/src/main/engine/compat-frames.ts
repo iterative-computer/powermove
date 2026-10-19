@@ -76,8 +76,9 @@ export class CompatFrames {
 
   constructor(private readonly options: CompatFramesOptions) {}
 
-  /** The job engine's `compatFrame` request. */
-  async serve(request: CompatFrameRequest): Promise<Response> {
+  /** The job engine's `compatFrame` request; `layer`: the layer as the
+   *  export's snapshot holds it (JSON), when main has the snapshot. */
+  async serve(request: CompatFrameRequest, layer: string | null = null): Promise<Response> {
     if (this.pending.size >= MAX_ASKS) throw new ProtocolError('budgetExceeded', 'Too many compatibility frames are being drawn.');
     const windows = this.options.windows();
     const closed = 'This layer is drawn by an extension in the editor; open the project in a window to export it.';
@@ -89,7 +90,7 @@ export class CompatFrames {
         resolve({ ask, status: 'unavailable', message: `The editor did not draw the layer within ${ASK_TIMEOUT_MS / 1000} s.` });
       }, ASK_TIMEOUT_MS);
       this.pending.set(ask, { windows: new Set(windows.map((w) => w.id)), last: closed, resolve, timer });
-      for (const window of windows) window.ask({ ask, request });
+      for (const window of windows) window.ask({ ask, request, ...(layer !== null ? { layer } : {}) });
     });
     if (answer.status === 'native') {
       return { type: 'compatFrame', key: 'native', width: 1, height: 1, format: 'rgba8Premultiplied', origin: [0, 0], scale: request.scale, payload: { kind: 'inline', bytes: new Uint8Array(0) }, native: true } as Response;

@@ -82,6 +82,8 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (v['session'] === null ? document === undefined : !safeUint(v['session'])) return false;
   const fallback = v['fallbackPixels'];
   if (fallback !== undefined && (document === undefined || !validFallback(fallback))) return false;
+  const compat = v['compatEvents'];
+  if (compat !== undefined && (document === undefined || !validCompatEvents(compat))) return false;
   if (v['revision'] !== null && !safeUint(v['revision'])) return false;
   const s = v['snapshot'] as Record<string, unknown> | null;
   if (!s || typeof s !== 'object') return false;
@@ -121,6 +123,8 @@ export const MAX_DOCUMENT_BYTES = 512 * 1024 * 1024;
 /** Most fallback programs one request carries, and their bytes. */
 export const MAX_FALLBACK_PIXELS = 16;
 export const MAX_FALLBACK_BYTES = 256 * 1024 * 1024;
+/** Compatibility events in one `document` snapshot request (bands included). */
+export const MAX_COMPAT_EVENTS = 4096;
 
 function validDocument(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -141,6 +145,22 @@ function validFallback(value: unknown): boolean {
     const data = p['rgba16f'];
     if (!(data instanceof Uint8Array) || data.byteLength !== (p['width'] as number) * (p['height'] as number) * 8) return false;
     bytes += data.byteLength;
+  }
+  return bytes <= MAX_FALLBACK_BYTES;
+}
+
+/** Compatibility events a window sends with a `document` snapshot: their
+ *  shape and size here; the engine checks each message fully. */
+export function validCompatEvents(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > MAX_COMPAT_EVENTS) return false;
+  let bytes = 0;
+  for (const e of value as Record<string, unknown>[]) {
+    if (!e || typeof e !== 'object' || e['type'] !== 'compat') return false;
+    if (!['producers', 'native', 'reuse', 'pixels'].includes(e['compat'] as string)) return false;
+    if (e['compat'] === 'pixels') {
+      if (!(e['data'] instanceof Uint8Array)) return false;
+      bytes += e['data'].byteLength;
+    }
   }
   return bytes <= MAX_FALLBACK_BYTES;
 }
@@ -227,7 +247,7 @@ export class SnapshotService {
       try {
         // Bounded like the snapshot itself: a blocked window always gets a reply.
         prepared = await Promise.race([
-          sessions.prepare(windowId, request.document, (request.fallbackPixels ?? []).map((p) => ({ ...p }))),
+          sessions.prepare(windowId, request.document, (request.fallbackPixels ?? []).map((p) => ({ ...p })), request.compatEvents ?? []),
           new Promise<'timeout'>((resolve) => {
             prepareTimer = setTimeout(() => resolve('timeout'), Math.max(0, deadline - now()));
           })

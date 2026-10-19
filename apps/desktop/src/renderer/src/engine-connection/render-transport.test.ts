@@ -196,6 +196,24 @@ describe('EngineRenderTransport', () => {
     expect(byAsk(3)).toMatchObject({ status: 'unavailable' });
   });
 
+  it('an export ask carrying the snapshot\'s layer is drawn from it, in any window with the producer', async () => {
+    const { transport, ask, answers } = setup([]);
+    const seen: unknown[] = [];
+    transport.answerCompat('rasterOverride', (_need, _revision, options) => {
+      seen.push(options);
+      return { kind: 'raster', key: 'k', width: 1, height: 1, format: 'rgba8Premultiplied', data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] };
+    });
+    const request = { document: 'queued-project', composition: 'comp-1', layer: 'L7', time: 0, source: 'rasterOverride' as const, scale: 1, revision: 1 };
+    ask({ ask: 7, request, layer: '{"id":"L7","type":"text"}' });
+    ask({ ask: 8, request });
+    await new Promise((r) => setTimeout(r, 0));
+    const byAsk = (n: number) => answers.find((a) => (a as { ask: number }).ask === n);
+    expect(byAsk(7)).toMatchObject({ status: 'pixels' });
+    expect(seen).toEqual([{ fresh: true, layer: '{"id":"L7","type":"text"}' }]);
+    // Without the snapshot's layer, only the document's window answers.
+    expect(byAsk(8)).toMatchObject({ status: 'unavailable', message: 'This window has another document open.' });
+  });
+
   it('layer rasters: pixels with anchor and box, null when the layer draws nothing', () => {
     const raster: EngineSnapshotReply = { ...rendered(3, 2), pixels: 'premultiplied', origin: [4, 5], layerBox: [3, 2] } as EngineSnapshotReply;
     const { transport, asked } = setup([raster, { status: 'empty', revision: 12 }, { status: 'failed', code: 'unsupported', message: 'not text' }]);
@@ -269,6 +287,28 @@ describe('EngineRenderTransport', () => {
       expect(runner.renderSync).toHaveBeenCalledTimes(1);
       expect(asked[1]).toMatchObject({ session: null, snapshot: { uploaded: ['c'.repeat(64)] } });
       expect((asked[1] as any).fallbackPixels[0]).toMatchObject({ key: 'c'.repeat(64), width: 2, height: 2 });
+    });
+
+    it('a raster override: main\'s session learns the producers, and the needs\' answers go along with the next round', () => {
+      const d = doc();
+      const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
+      const { transport, asked } = setup([
+        { status: 'needsRenderer', revision: 12, fallback: [], compat: [need] },
+        rendered(2, 2)
+      ], { session: null, windowDocument: d.windowDocument });
+      transport.answerCompat('rasterOverride', () => ({ kind: 'raster', key: 'k', width: 1, height: 1, format: 'rgba8Premultiplied', data: new Uint8Array(4).fill(7), anchor: [0, 0], size: [1, 1] }));
+      transport.snapshotSync({ time: 0, width: 2, height: 2 });
+      expect((asked[0] as any).compatEvents).toEqual([{ type: 'compat', compat: 'producers', sources: ['rasterOverride'] }]);
+      const events = (asked[1] as any).compatEvents as any[];
+      expect(events.map((e) => e.compat)).toEqual(['producers', 'pixels']);
+      expect(events[1]).toMatchObject({ id: { layer: 'title', key: 'k' }, revision: 12, width: 1, height: 1 });
+    });
+
+    it('a document snapshot whose need no producer answers fails by name, never draws without it', () => {
+      const d = doc();
+      const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
+      const { transport } = setup([{ status: 'needsRenderer', revision: 12, fallback: [], compat: [need] }], { session: null, windowDocument: d.windowDocument });
+      expect(() => transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(/No raster override in this window answered for layer title/);
     });
 
     it('a session with the document and no resync on its way serves it directly', () => {

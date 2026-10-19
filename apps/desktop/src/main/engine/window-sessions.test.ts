@@ -85,6 +85,18 @@ describe('main’s snapshot sessions for windows', () => {
     expect(f.events[0]).toMatchObject({ session: 40, body: { type: 'shaderFallback', fallback: 'pixels', key: 'k'.repeat(64), row: 0, rows: 3 } });
   });
 
+  it('posts the window\'s compatibility producers and answers to its session before the snapshot', async () => {
+    const f = fakeEngine();
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {});
+    const events = [
+      { type: 'compat', compat: 'producers', sources: ['rasterOverride'] },
+      { type: 'compat', compat: 'native', composition: 'c', layer: 'L', time: 0, source: 'rasterOverride', scale: 1, revision: 1 }
+    ];
+    await sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() }, [], events);
+    expect(f.events.map((e: any) => e.body)).toEqual(events);
+    expect(f.events.every((e: any) => e.session === 40)).toBe(true);
+  });
+
   it('opens a new session after an engine restart, and asks for the document again', async () => {
     const f = fakeEngine();
     const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {});

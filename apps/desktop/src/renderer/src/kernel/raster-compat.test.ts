@@ -97,12 +97,26 @@ describe('the raster override producer', () => {
     expect(compat.answer(need('subs'), 2)).toEqual({ kind: 'native' });
   });
 
-  it('draws nothing for a null result and the layer itself when the wrapper throws', () => {
+  it('an export frame draws the snapshot\'s layer: the live one when equal, else the snapshot\'s copy', () => {
+    const { services, compat, need } = setup();
+    const layers: any[] = [];
+    services.register('raster', (layer: any) => { layers.push(layer); return { cv: { width: 2, height: 2 }, w: 2, h: 2, anchorX: 0, anchorY: 0, key: `w:${layer.d.text}` }; });
+    compat.answer(need('title'), 1, { fresh: true, layer: JSON.stringify(text) });
+    expect(layers[0]).toBe(text);
+    const queued = { ...text, d: { text: 'As queued' } };
+    const result = compat.answer(need('title'), 1, { fresh: true, layer: JSON.stringify(queued) });
+    expect(layers[1]).not.toBe(text);
+    expect(layers[1].d.text).toBe('As queued');
+    expect(result).toMatchObject({ kind: 'raster', key: 'w:As queued' });
+  });
+
+  it('draws nothing for a null result, and fails (never draws the plain layer) when the wrapper throws', () => {
     const { services, compat, need } = setup();
     services.register('raster', () => null);
     expect(compat.answer(need('title'), 1)).toMatchObject({ kind: 'raster', width: 1, height: 1, data: new Uint8Array(4) });
     services.register('raster', () => { throw new Error('broken'); });
-    expect(compat.answer(need('title'), 1)).toEqual({ kind: 'native' });
+    // Today the exception leaves the compositor's draw and fails the frame.
+    expect(() => compat.answer(need('title'), 1)).toThrow('broken');
   });
 
   it('is the session\'s producer only while a wrapper is registered, and drops its answers when the chain changes', () => {
@@ -149,14 +163,35 @@ describe('the render transport\'s compatibility answers', () => {
     expect(band.data.byteLength).toBe(24);
   });
 
-  it('answers a repeated reuse with pixels (the engine dropped that raster)', () => {
+  it('answers a need asked again after a reuse with fresh pixels (the engine evicted that raster)', () => {
     const posted: any[] = [];
     const { t, session } = transport(posted);
-    const answers = [{ kind: 'reuse', key: 'k' }, { kind: 'reuse', key: 'k' }];
-    t.answerCompat('rasterOverride', () => answers.shift() as any ?? { kind: 'native' });
+    const calls: Array<{ fresh?: boolean } | undefined> = [];
+    t.answerCompat('rasterOverride', (_need, _revision, options) => {
+      calls.push(options);
+      return options?.fresh
+        ? { kind: 'raster', key: 'k', width: 1, height: 1, format: 'rgba8Premultiplied', data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] }
+        : { kind: 'reuse', key: 'k' };
+    });
     t.receiveCompat({ compat: 'needs', needs: [need] }, session);
     t.receiveCompat({ compat: 'needs', needs: [need] }, session);
-    expect(posted.filter((e) => e.compat !== 'producers').map((e) => e.compat)).toEqual(['reuse']);
+    expect(posted.filter((e) => e.compat !== 'producers').map((e) => e.compat)).toEqual(['reuse', 'pixels']);
+    expect(calls).toEqual([undefined, { fresh: true }]);
+    expect(t.compatStats.unanswered).toBe(0);
+  });
+
+  it('reports a producer that throws as a failed frame and leaves the need unanswered', () => {
+    const posted: any[] = [];
+    const failures: unknown[] = [];
+    const session: TransportSession = { id: 3, closed: false, generation: 2, resyncPending: false, applied: 5, uploadFallback: () => {}, post: (e) => { posted.push(e); return true; } };
+    const t = new EngineRenderTransport({
+      native: {}, session: () => session, revision: () => 5, composition: () => 'P-root', document: () => 'P', viewSeq: () => null, fallbackRunner: () => null, log: () => {},
+      onProducerError: (error: unknown) => failures.push(error)
+    } as any);
+    t.answerCompat('rasterOverride', () => { throw new Error('wrapper broke'); });
+    t.receiveCompat({ compat: 'needs', needs: [need] }, session);
+    expect(failures.map((e) => (e as Error).message)).toEqual(['wrapper broke']);
+    expect(posted.filter((e) => e.compat !== 'producers')).toEqual([]);
     expect(t.compatStats.unanswered).toBe(1);
   });
 

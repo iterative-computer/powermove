@@ -48,6 +48,8 @@ import {
 } from '../../shared/delivery';
 import type {
   AgentFrameOutcome,
+  CompatFrameRequest,
+  CompatSource,
   EngineError,
   EngineProcess,
   ExportSettings,
@@ -194,7 +196,7 @@ export function wireSettings(input: {
   draft?: boolean;
   preview?: boolean;
   sequenceName?: string;
-  compat?: import('../../shared/engine-protocol').CompatSource[];
+  compat?: CompatSource[];
 }): ExportSettings {
   const { format, delivery } = input;
   const image = format === 'png' || format === 'still';
@@ -235,7 +237,7 @@ export function wireSettings(input: {
  *  render at 32-bit precision (amendment 8 asks for it whenever a source
  *  exceeds 10 bits; agent exports do not inspect sources first), and 8-bit
  *  outputs are dithered (section 17). */
-export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput): ExportSettings {
+export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput, compat: readonly CompatSource[] = []): ExportSettings {
   const project = asProject(projectValue);
   const rate = resolveFrameRate(project['fps'], project['fpsRational']);
   if (!rate) throw new AgentJobError('The project has no valid frame rate.');
@@ -255,7 +257,9 @@ export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput
     format, delivery, alpha, quality: 'high',
     size: { width: evenSize(width), height: evenSize(height) },
     rate, start, end, audio: input.audio, motionBlur: input.motionBlur,
-    sequenceName: suggestedName(project, input.name)
+    sequenceName: suggestedName(project, input.name),
+    // The window's compatibility producers: the job asks it for those layers.
+    compat: compatSources(compat)
   });
 }
 
@@ -283,10 +287,33 @@ export function userExportSettings(projectValue: unknown, options: UserExportOpt
     format, delivery, alpha: o.alpha, quality: o.quality, size, rate,
     start: o.start, end: format === 'still' ? Math.max(o.end, o.start + 1 / (rate.num / rate.den)) : o.end,
     audio: o.audio, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
-    ...(Array.isArray(o.compat) ? { compat: o.compat.filter((s) => s === 'rasterOverride' || s === 'compatContext') } : {}),
+    ...(Array.isArray(o.compat) ? { compat: compatSources(o.compat) } : {}),
     ...(extra.preview ? { preview: true } : {}),
     ...(extra.sequenceName ? { sequenceName: extra.sequenceName } : {})
   });
+}
+
+/** A layer object of a project (its root composition or a nested one) by id. */
+export function snapshotLayer(project: Project, composition: string, layer: string): unknown {
+  const root = String(project['compId'] ?? project['id'] ?? '');
+  const comps = project['comps'] && typeof project['comps'] === 'object' ? project['comps'] as Record<string, { layers?: unknown }> : {};
+  const lists: unknown[] = [];
+  if (composition === root) lists.push(project['layers']);
+  if (comps[composition]) lists.push(comps[composition]!.layers);
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    const found = list.find((l) => !!l && typeof l === 'object' && (l as Record<string, unknown>)['id'] === layer);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** The compatibility producers a window named (unknown values dropped). */
+export function compatSources(value: unknown): CompatSource[] {
+  if (!Array.isArray(value)) return [];
+  const out: CompatSource[] = [];
+  for (const s of value) if ((s === 'rasterOverride' || s === 'compatContext') && !out.includes(s)) out.push(s);
+  return out;
 }
 
 /** The file name the agent asked for, or the project's, as a bare name part. */
@@ -326,6 +353,8 @@ type JobRecord = {
   size: { width: number; height: number };
   fps: number;
   changed: Array<() => void>;
+  /** The project as the job's snapshot holds it (compatibility frames name its layers). */
+  project?: Project;
 };
 
 type FrameSession = { session: number; revision: number; hash: string; generation: number };
@@ -376,13 +405,30 @@ export class AgentJobs {
     return this.options.engine.isReady('job');
   }
 
+  /**
+   * The layer a job's compatibility frame names, as the job's snapshot
+   * holds it (JSON): the window draws that layer rather than its live one,
+   * so an export (and a render queue job started later) draws the project
+   * as it was exported, as today's exporter and queue did. Null when the
+   * session is not a job of these or the layer is not in its snapshot.
+   */
+  compatLayer(session: number | null, request: CompatFrameRequest): string | null {
+    if (session === null) return null;
+    for (const record of this.jobs.values()) {
+      if (record.session !== session || !record.project) continue;
+      const layer = snapshotLayer(record.project, String(request.composition), String(request.layer));
+      return layer === null ? null : JSON.stringify(layer);
+    }
+    return null;
+  }
+
   /* ── export_video ──────────────────────────────────────────────────── */
 
   /** Runs an agent export. Resolves `routed` when the engine cannot render
    *  the project (the caller runs the legacy exporter); throws on failure. */
-  async exportVideo(owner: number, run: string, projectValue: unknown, input: ExportVideoInput, onStarted?: () => void): Promise<ExportVideoResult> {
+  async exportVideo(owner: number, run: string, projectValue: unknown, input: ExportVideoInput, onStarted?: () => void, compat: readonly CompatSource[] = []): Promise<ExportVideoResult> {
     const project = asProject(projectValue);
-    const settings = exportSettingsFor(project, input);
+    const settings = exportSettingsFor(project, input, compat);
     const { format, delivery } = agentFormat(input);
     // PNG sequences are folders (`png` names the frames' extension); the job
     // engine asks for a folder destination by the format.
@@ -396,7 +442,8 @@ export class AgentJobs {
       name: suggestedName(project, input.name),
       size: settings.size,
       fps: Number(project['fps']) || settings.frameRate.num / settings.frameRate.den,
-      changed: []
+      changed: [],
+      ...(settings.delivery?.compat?.length ? { project } : {})
     };
     this.jobs.set(jobId, record);
     try {
@@ -577,7 +624,8 @@ export class AgentJobs {
       name: suggestedName(project, undefined),
       size: settings.size,
       fps: options.fps,
-      changed: []
+      changed: [],
+      ...(settings.delivery?.compat?.length ? { project } : {})
     };
     this.jobs.set(jobId, record);
     try {

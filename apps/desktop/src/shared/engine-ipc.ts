@@ -248,7 +248,15 @@ export type EngineSnapshotRequest = {
   /** Shader fallback pixels drawn for an earlier `needsRenderer` answer of
    *  a `document` snapshot (a window's own session gets them on its port). */
   fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];
+  /** The window's compatibility events for a `document` snapshot (its
+   *  producers, and its answers to an earlier `needsRenderer` round's
+   *  `compat` needs): main posts them on its session for the window before
+   *  the snapshot, as the window's own session gets them on its port. */
+  compatEvents?: EngineCompatEvent[];
 };
+
+/** A `compat` session event (pm_protocol `CompatMessage`) a window sends. */
+export type EngineCompatEvent = { type: 'compat'; compat: 'producers' | 'native' | 'reuse' | 'pixels' } & Record<string, unknown>;
 
 export type EngineSnapshotDocument = { id: string; revision: number; hash?: string | null; json?: Uint8Array | null };
 
@@ -290,7 +298,14 @@ export type EngineSnapshotReply =
 
 /** main → renderer: compatibility pixels the job engine needs for an export
  *  frame (contract 14 `compatFrame`). */
-export type EngineCompatAsk = { ask: number; request: import('./engine-protocol').CompatFrameRequest };
+export type EngineCompatAsk = {
+  ask: number;
+  request: import('./engine-protocol').CompatFrameRequest;
+  /** The layer as the export's snapshot holds it (JSON), when main has
+   *  the snapshot: the window draws that layer, not its live one (a render
+   *  queue job renders the project as queued, as today's queue did). */
+  layer?: string;
+};
 
 /** renderer → main: the answer to an `EngineCompatAsk`. */
 export type EngineCompatAnswer =

@@ -263,6 +263,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     openSession();
     return sessionReady ?? Promise.resolve();
   };
+  let lastProducerFailure = -Infinity;
   const documentEncoder = new TextEncoder();
   const renderTransport = new EngineRenderTransport({
     native,
@@ -298,6 +299,15 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       };
     },
     usesBlender: () => usesBlender(PM.proj),
+    // A `raster` override that throws fails the frame, reported as today's
+    // frame loop reports a compositor throw (legacy/core/engine.ts).
+    onProducerError: (error) => {
+      const now = performance.now();
+      if (now - lastProducerFailure <= 2000) return;
+      lastProducerFailure = now;
+      console.error('[engine] frame render failed', error);
+      PM.toast?.('The preview could not be rendered. See the console for details.');
+    },
     log
   });
   (PM as any).EngineRender = renderTransport;
