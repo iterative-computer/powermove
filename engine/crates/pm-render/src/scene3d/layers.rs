@@ -123,10 +123,44 @@ impl TextureSource for DocumentTextures<'_> {
             return None;
         }
         let path = self.assets.path(asset, Some(record))?;
+        if node::is_str(node::member(Some(record), "format"), "svg") {
+            return (path.exists()
+                && !pm_media::image::svg::broken_image_file(&path).unwrap_or(false))
+            .then_some(path);
+        }
         match super::textures::Textures::probe(&path) {
             Err(super::textures::MapError::Failed(_)) => None,
             _ => Some(path),
         }
+    }
+
+    fn svg(&self, asset: &str) -> Option<pm_protocol::svg_raster::SvgRasterRequest> {
+        let record = node::member(node::member(Some(self.root), "assets"), asset)?;
+        if !node::is_str(node::member(Some(record), "format"), "svg") {
+            return None;
+        }
+        let path = self.assets.path(asset, Some(record))?;
+        let size = |field| {
+            node::number(node::member(Some(record), field))
+                .unwrap_or(1.0)
+                .max(1.0)
+                .ceil() as u32
+        };
+        let (w, h) = (size("w"), size("h"));
+        let scale = (16384.0 / f64::from(w.max(h))).min(1.0);
+        let (width, height) = (
+            (f64::from(w) * scale).floor() as u32,
+            (f64::from(h) * scale).floor() as u32,
+        );
+        Some(pm_protocol::svg_raster::SvgRasterRequest {
+            asset: asset.to_owned(),
+            key: pm_protocol::svg_raster::SvgRasterKey {
+                content: crate::vector::svg::content_hash(&path).ok()?,
+                texture: Some(true),
+                width,
+                height,
+            },
+        })
     }
 }
 
@@ -675,7 +709,8 @@ fn check_object(
             }
             let format = str_member(Some(record), "format").unwrap_or_default();
             if format.eq_ignore_ascii_case("svg") {
-                out.push("SVG texture maps".to_owned());
+                // Chromium draws SVG maps through the same upload channel as
+                // level 1 SVG images, with the map's own unpack flags.
                 continue;
             }
             match assets {

@@ -318,6 +318,46 @@ impl Textures {
         Ok(t)
     }
 
+    /// Installs Chromium's SVG map bytes into the ordinary map cache.
+    /// The key includes the source file version, as it does for decoded stills.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_svg(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        path: &Path,
+        srgb: bool,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), MapError> {
+        let (len, modified) =
+            stamp(path).ok_or_else(|| MapError::Failed("SVG map is offline".into()))?;
+        let key = MapKey {
+            path: path.to_path_buf(),
+            len,
+            modified,
+            srgb,
+        };
+        if let Some(e) = self.maps.get_mut(&key) {
+            e.used = self.generation;
+            return Ok(());
+        }
+        let texture = self.upload_rgba(device, queue, encoder, width, height, rgba, srgb, true);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.maps
+            .retain(|k, _| k.path != key.path || k.srgb != srgb);
+        self.maps.insert(
+            key,
+            MapEntry {
+                texture: Arc::new(MapTexture { texture, view }),
+                used: self.generation,
+            },
+        );
+        Ok(())
+    }
+
     /// An RGBA8 texture from tight rows (top row first), with
     /// `generateMipmap`'s chain when `mips` (box filters, in linear light
     /// for sRGB textures).

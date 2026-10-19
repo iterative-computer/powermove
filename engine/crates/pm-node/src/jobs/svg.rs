@@ -84,11 +84,16 @@ impl SvgRasterSource for HostSvgRasters {
             }
             Err(e) => return Err(e.message),
         };
-        let expected = format!("{}:{}x{}", key.content, key.width, key.height);
+        let expected = key.upload_key().trim_start_matches("svg:").to_owned();
         if frame.key != expected
             || frame.width != key.width
             || frame.height != key.height
-            || frame.format != CompatFormat::Rgba8Premultiplied
+            || frame.format
+                != if key.texture == Some(true) {
+                    CompatFormat::Rgba8Straight
+                } else {
+                    CompatFormat::Rgba8Premultiplied
+                }
         {
             return Err(format!(
                 "The window drew another SVG raster ({} {}x{}) than the {}x{} one asked for.",

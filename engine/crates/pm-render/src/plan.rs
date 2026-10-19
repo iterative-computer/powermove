@@ -1272,6 +1272,7 @@ fn native_content_quad<'d>(
                     return Ok(Some(Quad::Texture {
                         source: Source::Vector(Box::new(crate::vector::VectorSource::SvgImage {
                             key: pm_protocol::svg_raster::SvgRasterKey {
+                                texture: None,
                                 content,
                                 width,
                                 height,

@@ -85,6 +85,8 @@ impl Camera3d {
 pub struct Texture3d {
     pub asset: String,
     pub path: PathBuf,
+    /// Chromium SVG map upload (distinct from a 2D SVG bucket).
+    pub svg: Option<pm_protocol::svg_raster::SvgRasterRequest>,
     /// Color and emissive maps decode sRGB (`SRGBColorSpace`); data maps
     /// are linear.
     pub srgb: bool,
@@ -503,6 +505,9 @@ pub trait TextureSource {
     /// The image file of an image asset, or `None` when it is not an image
     /// asset (`asset.kind !== 'image'`) or offline.
     fn image(&self, asset: &str) -> Option<PathBuf>;
+    fn svg(&self, _asset: &str) -> Option<pm_protocol::svg_raster::SvgRasterRequest> {
+        None
+    }
 }
 
 /// What an object's `assetId` resolves to (`makeObject`).
@@ -903,6 +908,7 @@ impl SceneBuilder {
             let id = maps.and_then(|m| text(m, key))?;
             match textures.image(&id) {
                 Some(path) => Some(Texture3d {
+                    svg: textures.svg(&id),
                     asset: id,
                     path,
                     srgb,

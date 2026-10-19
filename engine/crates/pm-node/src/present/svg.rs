@@ -32,7 +32,8 @@ pub const ASK_AGAIN_US: i64 = 10_000_000;
 pub const RETRY_US: i64 = 5_000_000;
 /// Most rasters assembling at once, and their bytes.
 pub const MAX_PENDING: usize = 256;
-pub const MAX_PENDING_BYTES: u64 = 512 * 1024 * 1024;
+// One full-size material map is 16384² straight RGBA8 texels.
+pub const MAX_PENDING_BYTES: u64 = 1024 * 1024 * 1024;
 
 struct Pending {
     /// The session that was asked (or that announced it).
@@ -222,6 +223,7 @@ mod tests {
 
     fn key(w: u32, h: u32) -> SvgRasterKey {
         SvgRasterKey {
+            texture: None,
             content: "ab".repeat(32),
             width: w,
             height: h,

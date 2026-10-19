@@ -1149,7 +1149,13 @@ impl Renderer {
             ));
         }
         let svg_misses = self.vector.svg.take_misses();
-        if !svg_misses.is_empty() && (request.export || self.svg_wait) {
+        if !svg_misses.is_empty()
+            && (request.export
+                || self.svg_wait
+                || svg_misses
+                    .iter()
+                    .any(|need| need.request.key.texture == Some(true)))
+        {
             return Err(RenderError::SvgRastersPending(svg_misses));
         }
         Ok(Rendered {

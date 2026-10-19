@@ -3142,6 +3142,22 @@ impl Thread {
                         }
                     }
                 }
+                Err(pm_render::RenderError::SvgRastersPending(needs)) => {
+                    // An SVG map is part of the scene, not optional chrome.
+                    // Keep the last presented frame while Chromium supplies
+                    // its exact texels; never present an absent 3D object.
+                    if Self::ask_svg(
+                        &mut self.svg,
+                        &self.sink,
+                        composer.renderer(),
+                        key,
+                        Revision::new(doc.revision()).ok(),
+                        &needs,
+                    ) {
+                        view.dirty = true;
+                    }
+                    return None;
+                }
                 Err(pm_render::RenderError::ShaderFallbackPending(requests)) => {
                     // Layers only the fallback runner draws (decision 19):
                     // ask the view's renderer, and render the frame again

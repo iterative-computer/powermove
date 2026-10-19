@@ -1460,6 +1460,71 @@ impl Scene3dRenderer {
         Ok(())
     }
 
+    /// Fetches the SVG map uploads this scene needs. No scene geometry is
+    /// drawn by Chromium: it only decodes the SVG image into today's texels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_svg_maps(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &super::Object3dPlan,
+        rasters: &mut crate::vector::svg_rasters::SvgRasters,
+        composition: &str,
+    ) -> bool {
+        self.start_generation();
+        let mut ready = true;
+        for object in &plan.scene.objects {
+            for mesh in &object.meshes {
+                for material in mesh.materials.iter() {
+                    for (_, map) in material.maps.all() {
+                        let Some(map) = map else { continue };
+                        let Some(request) = &map.svg else { continue };
+                        let key = &request.key;
+                        if !rasters.contains(key)
+                            && rasters.rasterizer
+                                == crate::vector::svg_rasters::SvgRasterizer::Resvg
+                        {
+                            // pm-cli's explicitly reported SVG approximation.
+                            if let Ok((doc, _)) = crate::vector::svg::document(&map.path) {
+                                let mut pixels = doc.raster(key.width, key.height).rgba;
+                                crate::blender::snapshot::unpremultiply(&mut pixels);
+                                let row = key.width as usize * 4;
+                                for y in 0..key.height as usize / 2 {
+                                    let other = key.height as usize - 1 - y;
+                                    for x in 0..row {
+                                        pixels.swap(y * row + x, other * row + x);
+                                    }
+                                }
+                                let _ = rasters.put(key.clone(), pixels);
+                            }
+                        }
+                        if rasters.rasterizer == crate::vector::svg_rasters::SvgRasterizer::Resvg {
+                            rasters.approximated += 1;
+                        }
+                        if let Some(pixels) = rasters.get(key) {
+                            // The file was probed when the scene was planned;
+                            // if it disappeared, resolve_maps reports Missing texture.
+                            let _ = self.textures.put_svg(
+                                device, queue, encoder, &map.path, map.srgb, key.width, key.height,
+                                &pixels,
+                            );
+                        } else {
+                            rasters.miss(crate::vector::svg_rasters::SvgRasterNeed {
+                                request: request.clone(),
+                                path: map.path.clone(),
+                                composition: composition.into(),
+                                layer: plan.layer.clone(),
+                            });
+                            ready = false;
+                        }
+                    }
+                }
+            }
+        }
+        ready
+    }
+
     /// Records a 3D render into `encoder`: a layer of the 3D scene pass, a
     /// legacy scene layer, or a legacy mesh layer. Targets come from `pool`;
     /// the caller returns them after the frame is submitted.

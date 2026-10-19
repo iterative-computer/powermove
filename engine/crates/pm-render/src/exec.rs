@@ -461,6 +461,16 @@ impl Exec<'_> {
                         }
                     },
                     Source::Object3d(object) => {
+                        if !self.scene3d.prepare_svg_maps(
+                            self.device,
+                            self.queue,
+                            encoder,
+                            object,
+                            &mut self.vector.svg,
+                            &plan.composition,
+                        ) {
+                            return;
+                        }
                         match self.scene3d.render(
                             self.device,
                             self.queue,
