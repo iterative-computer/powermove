@@ -171,6 +171,26 @@ describe('the raster override producer', () => {
     expect(compat.answer(need('box'), 10)).toEqual({ kind: 'native' });
   });
 
+  it('posts a wrapper key the engine accepts: a long non-ASCII key becomes its digest, distinct per frame, and reuses by it', () => {
+    // A wrapper's own key carrying the layer's text: 400 UTF-16 units of
+    // "·" and "—" is 1,200 bytes of UTF-8, over pm-protocol's 512-byte bound,
+    // which used to close the window's engine connection (C1).
+    const { services, compat, need } = setup();
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, scale: number, time: number, uploaded: unknown, crop: unknown) => {
+      const full = original(layer, scale, time, uploaded, crop);
+      return { ...full, cv: { width: 8, height: 4 }, key: `wrapped-text:${'·—'.repeat(200)}:${time.toFixed(3)}`, w: 8, h: 4 };
+    });
+    const first = compat.answer(need('title', 0.5), 3) as any;
+    const second = compat.answer(need('title', 0.6), 3) as any;
+    for (const answer of [first, second]) {
+      expect(answer.kind).toBe('raster');
+      expect(new TextEncoder().encode(answer.key).length).toBeLessThanOrEqual(512);
+    }
+    expect(first.key).not.toBe(second.key);
+    expect(compat.answer(need('title', 0.5), 3)).toEqual({ kind: 'reuse', key: first.key });
+  });
+
   it('anchors a shape without paths at its center, as the compositor does', () => {
     const { services, compat, need } = setup();
     const original = services.get<any>('raster');

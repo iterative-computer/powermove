@@ -33,6 +33,7 @@
  */
 import type { CompatNeed } from '../../../shared/engine-protocol';
 import type { CompatAnswerOptions, CompatAnswerResult, EngineRenderTransport } from '../engine-connection/render-transport';
+import { compatKey } from '../../../shared/protocol-strings';
 import type { Disposable } from './api';
 
 type LegacyPM = Record<string, any>;
@@ -371,7 +372,9 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       if (mark && mark.layer === layer && mark.scale === scale && mark.crop === crop && !mark.touched) return { kind: 'native' };
       if (result == null) return TRANSPARENT;
       const tag = `${String(need.composition)}\u0000${String(need.layer)}\u0000${need.time}\u0000${scale}\u0000${crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : ''}`;
-      const ownKey = typeof result.key === 'string' && result.key ? result.key : '';
+      // The engine holds the key in at most MAX_COMPAT_KEY_BYTES of UTF-8; a
+      // longer or broken one becomes its digest (a cut would merge keys).
+      const ownKey = typeof result.key === 'string' && result.key ? compatKey(result.key) : '';
       if (ownKey && !answerOptions?.fresh && posted.get(tag) === ownKey) return { kind: 'reuse', key: ownKey };
       const source = canvasOf(result);
       if (!source) return TRANSPARENT;
@@ -382,7 +385,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const centered = layer.type === 'shape' && !layer.d?.paths?.length;
       const anchor: [number, number] = centered ? [w / 2, h / 2] : [Number(result.anchorX) || 0, Number(result.anchorY) || 0];
       const uv = resultUv(result, pixels.width, pixels.height);
-      const key = (ownKey || `powermove:${++serial}:${revision}`).slice(0, 512);
+      const key = ownKey || `powermove:${++serial}:${revision}`;
       if (!answerOptions?.fresh) posted.set(tag, key);
       if (posted.size > 8192) posted.clear();
       return { kind: 'raster', key, ...pixels, anchor, size: [w, h], ...(uv ? { uv } : {}) };

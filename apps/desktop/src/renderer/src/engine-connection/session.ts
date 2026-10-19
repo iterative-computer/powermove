@@ -17,6 +17,7 @@
  * it.
  */
 import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import { limitUtf8 } from '../../../shared/protocol-strings';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
 
@@ -613,7 +614,7 @@ export class DocumentSession {
       const reason = error instanceof ShaderFallbackError ? error.reason : 'unavailable';
       const message = error instanceof Error ? error.message : String(error);
       this.options.log('warn', `engine: the shader fallback runner could not draw a program of layer ${request.layer} (${reason}: ${message})`);
-      send({ fallback: 'failed', key: request.key, reason, message: message.slice(0, 1024) });
+      send({ fallback: 'failed', key: request.key, reason, message: limitUtf8(message, 1024) });
     }
   }
 
