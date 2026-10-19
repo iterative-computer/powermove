@@ -185,8 +185,9 @@ export class ShaderFallbackRunner {
    * path (render-transport.ts), where the thread is blocked on a snapshot
    * that needs these pixels and nothing may wait for a task. The program
    * links as WebGL's `LINK_STATUS` query does (blocking, so no compile
-   * deadline), and every pass's fence is polled on this thread within the
-   * same draw deadline, so the watchdog holds here too. A context lost
+   * deadline), and every pass finishes on this thread before its pixels are read.
+   * Chromium's GPU watchdog bounds the blocking driver call, and the
+   * elapsed draw deadline is checked before delivering pixels. A context lost
    * under it is made again and the request drawn once more, as `render`.
    */
   renderSync(request: ShaderFallbackRequest, textures: Uint16Array[] = []): ShaderFallbackPixels {

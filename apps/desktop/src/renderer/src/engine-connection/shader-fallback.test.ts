@@ -488,6 +488,16 @@ describe('the runner on the calling thread (the synchronous snapshot path)', () 
     await expect(runner.render(effect(), [input, backdrop])).resolves.toMatchObject({ width: 2 });
   });
 
+  it('does not poll a same-task WebGL fence, which the browser cannot signal', () => {
+    const { canvas } = fakeGl([], () => { throw new Error('same-task fences cannot signal'); });
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    let finished = 0;
+    gl['finish'] = () => { finished++; };
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    expect(runner.renderSync(request(2, 1, '8d'.repeat(32)))).toMatchObject({ width: 2 });
+    expect(finished).toBe(1);
+  });
+
   it('refuses a request without its textures rather than drawing it unsampled', () => {
     const { canvas, state } = fakeGl([], () => 25);
     const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });

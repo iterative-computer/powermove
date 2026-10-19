@@ -428,6 +428,62 @@ impl crate::exec::Exec<'_> {
         if !span.builtin && self.effects.watchdog.hold(&span.subject) {
             return Err(Missed::Held);
         }
+        let probe_code = if self.shaders.fallback_runner && self.effects.parity.enabled() {
+            match &source.program {
+                ProgramRef::Code { source, .. } => Some(source.to_string()),
+                ProgramRef::Definition { id, .. } => {
+                    self.effects.parity_source(DefinitionKind::Layer, id)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let probe = probe_code.as_ref().and_then(|code| {
+            let mut verdict = self.effects.parity.verdict(code);
+            let request = Arc::new(super::fallback::request(
+                source.layer.clone(),
+                code.clone(),
+                source.width,
+                source.height,
+                &source.calls,
+                &crate::effects::exec::parity_failure(),
+            ));
+            if verdict == crate::effects::parity::Verdict::Unknown {
+                let program = super::fallback::program_id(&request);
+                if self.shaders.failed.contains_key(&program) {
+                    // Its reference can never be drawn (a lasting runner
+                    // failure): pinned, and the runner's failure handling
+                    // below decides what today's app shows.
+                    self.effects.parity.pin(code);
+                    verdict = crate::effects::parity::Verdict::Runner;
+                } else if self.effects.fallback.retries.last(&program).is_some() {
+                    // Its reference failed transiently: the runner's retry
+                    // and backoff below decide when it is asked for again
+                    // (drawing nothing until then, as a pinned program).
+                    // Once the runner draws it, its streak ends and the
+                    // next frame probes it.
+                    return Some((crate::effects::parity::Verdict::Runner, request));
+                }
+            }
+            if verdict == crate::effects::parity::Verdict::NativeVerified {
+                if self.effects.parity.take_present(code).as_deref() == Some(request.key.as_str()) {
+                    return Some((verdict, request));
+                }
+                return None;
+            }
+            Some((verdict, request))
+        });
+        if let Some((verdict, request)) = &probe
+            && (*verdict != crate::effects::parity::Verdict::Unknown
+                || self.effects.parity.pending(&request.fragment))
+        {
+            // The runner's outcome, with its retry, backoff and failure
+            // handling (a program it cannot draw draws nothing, as today).
+            let mut fallback = source.clone();
+            fallback.program = ProgramRef::Fallback(request.clone());
+            return self.shader_source(encoder, &fallback);
+        }
         let out = self
             .pool
             .take_working(self.device, source.width, source.height, self.precision);
@@ -525,6 +581,47 @@ impl crate::exec::Exec<'_> {
         );
         if let (Some(timer), Some((_, e))) = (self.timer.as_ref(), queries) {
             timer.mark(device, encoder, &out.view, e);
+        }
+        if let Some((_, request)) = probe {
+            let done = std::mem::replace(
+                encoder,
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("pm frame after shader parity probe"),
+                }),
+            );
+            queue.submit([done.finish()]);
+            match crate::effects::exec::read_half(device, queue, &out) {
+                Ok(native) => self
+                    .effects
+                    .parity
+                    .start(&request.key, &request.fragment, native),
+                Err(error) => self
+                    .effects
+                    .watchdog
+                    .report(pm_protocol::error::EngineError::new(
+                        pm_protocol::error::ErrorCode::Internal,
+                        pm_protocol::error::ErrorScope::Layer {
+                            layer: source.layer.as_str().into(),
+                        },
+                        format!("shader parity readback failed ({error})"),
+                    )),
+            }
+            self.pool.give(out);
+            let Some(angle) = self
+                .shaders
+                .fallback
+                .get(&request.key)
+                .filter(|p| p.fits(&request))
+            else {
+                return Err(Missed::Pending(request));
+            };
+            self.effects.parity.answer(&request.key, &angle);
+            self.effects.parity.take_present(&request.fragment);
+            let target = self
+                .shaders
+                .fallback_target(device, queue, &request)
+                .expect("checked above");
+            return Ok((target, false));
         }
         Ok((out, true))
     }
