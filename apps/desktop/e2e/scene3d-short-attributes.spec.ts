@@ -53,5 +53,21 @@ test('Chromium binds only final-program attributes and packs short morphs in JS'
     expect(result[name].activeAttributes, name).toEqual(['position', 'uv']);
     expect(result[name].rgb, name).toEqual([0, 0, 0]);
   }
+  // meshbasic_vert binds `normal` under USE_SKINNING or USE_ENVMAP, and the
+  // physical program binds it even under flat shading. This includes
+  // overlay.ts's MeshBasicMaterial outline-mask and grid-depth overrides.
+  for (const name of ['basicSkinnedNormal', 'maskOverrideSkinnedNormal', 'maskOverrideShortNormal'] as const) {
+    expect(result[name].exception, name).toBeNull();
+    expect(result[name].error, name).toBe(0);
+    expect(result[name].rgb[0], name).toBeGreaterThan(100);
+  }
+  expect(result.maskOverrideShortNormal.activeAttributes).toEqual(['position']);
+  for (const name of ['basicSkinnedShortNormal', 'basicEnvShortNormal', 'standardFlatShortNormal',
+    'standardSkinnedFlatShortNormal', 'maskOverrideSkinnedShortNormal'] as const) {
+    expect(result[name].exception, name).toBeNull();
+    expect(result[name].error, name).toBe(1282);
+    expect(result[name].rgb, name).toEqual([0, 0, 0]);
+    expect(result[name].activeAttributes, name).toContain('normal');
+  }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

@@ -7,7 +7,10 @@ type Case = 'uvUnused' | 'uvUsed' | 'uvUsedIndexedTail' | 'uv1Unused' | 'uv1Used
   'normalUnlit' | 'normalLit' | 'normalLitNoLights' | 'normalLitAmbientOnly' | 'normalOverride' |
   'normalDepth' | 'colorDepth' |
   'tangentUnused' | 'tangentUsed' | 'shortMorph' | 'badIndex' |
-  'normalOnlyMorph' | 'colorOnlyMorph';
+  'normalOnlyMorph' | 'colorOnlyMorph' |
+  'basicSkinnedNormal' | 'basicSkinnedShortNormal' | 'basicEnvShortNormal' |
+  'standardFlatShortNormal' | 'standardSkinnedFlatShortNormal' |
+  'maskOverrideShortNormal' | 'maskOverrideSkinnedShortNormal' | 'maskOverrideSkinnedNormal';
 
 function run(): Record<Case, { rgb: number[]; error: number; exception: string | null;
   activeAttributes: string[]; png: string }> {
@@ -42,7 +45,16 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
     'normalUnlit', 'normalLit',
     'normalLitNoLights', 'normalLitAmbientOnly', 'normalOverride',
     'normalDepth', 'colorDepth',
-    'tangentUnused', 'tangentUsed', 'shortMorph', 'badIndex', 'normalOnlyMorph', 'colorOnlyMorph'];
+    'tangentUnused', 'tangentUsed', 'shortMorph', 'badIndex', 'normalOnlyMorph', 'colorOnlyMorph',
+    'basicSkinnedNormal', 'basicSkinnedShortNormal', 'basicEnvShortNormal',
+    'standardFlatShortNormal', 'standardSkinnedFlatShortNormal',
+    'maskOverrideShortNormal', 'maskOverrideSkinnedShortNormal', 'maskOverrideSkinnedNormal'];
+  // An equirect env map: WebGLCubeMaps converts it, and the Basic program
+  // gets USE_ENVMAP.
+  const env = tex([255, 255, 255, 255]);
+  env.mapping = THREE.EquirectangularReflectionMapping;
+  // overlay.ts's outline mask override (MeshBasicMaterial, DoubleSide).
+  const mask = new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide });
   for (const name of cases) {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(
@@ -56,8 +68,14 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
         new THREE.Float32BufferAttribute(name === 'uvUsedIndexedTail'
           ? [0, 0, 1, 0, .5, 1] : [0, 0, 1, 0], 2));
     }
-    if (name.startsWith('normal')) geometry.setAttribute('normal',
-      new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1], 3));
+    const skinned = name.includes('Skinned');
+    const fullNormal = name === 'basicSkinnedNormal' || name === 'maskOverrideSkinnedNormal';
+    if (name.startsWith('normal') || name.includes('Normal')) geometry.setAttribute('normal',
+      new THREE.Float32BufferAttribute(fullNormal ? [0, 0, 1, 0, 0, 1, 0, 0, 1] : [0, 0, 1, 0, 0, 1], 3));
+    if (skinned) {
+      geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(new Array(12).fill(0), 4));
+      geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], 4));
+    }
     if (name === 'colorDepth' || name === 'colorDistance') geometry.setAttribute('color',
       new THREE.Float32BufferAttribute([1, 0, 0, 1, 0, 0], 3));
     if (name.startsWith('tangent')) {
@@ -90,10 +108,13 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
         map: name === 'uvDepthMapOpaque' || name === 'uvDepthMapAlphaTest' ? white : null,
         alphaTest: name === 'uvDepthMapAlphaTest' ? .5 : 0,
         vertexColors: name === 'colorDepth' })
-      : name.startsWith('normalLit') || name.startsWith('tangent')
+      : name.startsWith('normalLit') || name.startsWith('tangent') || name.startsWith('standard') ||
+        name.startsWith('maskOverride')
       ? new THREE.MeshStandardMaterial({ color: 0xff0000, side: THREE.DoubleSide,
+        flatShading: name.startsWith('standard'),
         normalMap: name === 'tangentUsed' ? flatNormal : null })
       : new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide,
+        envMap: name === 'basicEnvShortNormal' ? env : null,
         map: name.startsWith('uv') && (name.endsWith('Used') || name === 'uvUsedIndexedTail') ? white : null });
     if (name.startsWith('uv')) white.channel = Number(name.match(/^uv([123])/)?.[1] ?? 0);
     if (material instanceof THREE.MeshDistanceMaterial) {
@@ -106,7 +127,17 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
       light.updateMatrixWorld();
       (renderer.properties.get(material) as any).light = light;
     }
-    const mesh = new THREE.Mesh(geometry, material);
+    let mesh: THREE.Mesh;
+    if (skinned) {
+      const bone = new THREE.Bone();
+      const skin = new THREE.SkinnedMesh(geometry, material);
+      skin.add(bone);
+      skin.bind(new THREE.Skeleton([bone]));
+      mesh = skin;
+    } else {
+      mesh = new THREE.Mesh(geometry, material);
+    }
+    scene.overrideMaterial = name.startsWith('maskOverride') ? mask : null;
     if (name === 'normalOverride') mesh.material = new THREE.MeshStandardMaterial({
       color: 0xff0000, side: THREE.DoubleSide,
     });
@@ -121,7 +152,8 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
       exception = String(error);
     }
     const error = gl.getError();
-    const active = (renderer.properties.get(mesh.material) as any).currentProgram?.getAttributes?.();
+    const active = (renderer.properties.get(scene.overrideMaterial ?? mesh.material) as any)
+      .currentProgram?.getAttributes?.();
     const pixel = new Uint8Array(4);
     gl.readPixels(16, 16, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
     out[name] = { rgb: [...pixel.slice(0, 3)], error, exception,
@@ -132,7 +164,8 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
     if (mesh.material !== material) mesh.material.dispose();
     material.dispose();
   }
-  white.dispose(); flatNormal.dispose(); renderer.dispose();
+  scene.overrideMaterial = null;
+  white.dispose(); flatNormal.dispose(); env.dispose(); mask.dispose(); renderer.dispose();
   return out;
 }
 
