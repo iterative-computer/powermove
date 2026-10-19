@@ -93,11 +93,18 @@ export type ServeOptions = {
  * worker cannot see: 0 to 40% of frames the first way, by run and load),
  * and the panel shows it a refresh after that draw (8% two refreshes),
  * 3.2 ms into that refresh (measured on the 120 Hz panel, viz's
- * presentation feedback). The prediction sits between the two draws, so
- * with the nearest refresh either lands within a refresh of the frame's
- * time on the audio clock.
+ * presentation feedback).
+ *
+ * 1.75 rather than halfway (1.5): measured again on 2026-10-18
+ * (docs/engine/perf.md, "A/V sync under load"), the draw and the
+ * presentation together took two refreshes for nearly every frame idle and
+ * more under load (a live resize holds presentation two to four
+ * refreshes), so halfway left every rate's offsets 3 to 4 ms late (idle
+ * 0 to +7.3 ms at 25 fps) and frames a refresh late outside ±10 ms. A
+ * quarter of a refresh later centers the two-refresh case and keeps a run
+ * where the race goes the early way (one refresh) within ±10 ms.
  */
-export const WORKER_LATENCY_REFRESHES = 1.5;
+export const WORKER_LATENCY_REFRESHES = 1.75;
 export const WORKER_PRESENT_OFFSET_MS = 3.2;
 
 /** How often the worker sends a session's stats while frames flow. */

@@ -595,7 +595,10 @@ function avSync(raw, presented, ctx, fps) {
   }
   return {
     outsideNear,
-    offsetNearMs: Object.fromEntries(Object.entries(nearOffsets).map(([k, xs]) => [k, { ...dist(xs, 2), p5: +pct(xs, 0.05).toFixed(2) }])),
+    offsetNearMs: Object.fromEntries(Object.entries(nearOffsets).map(([k, xs]) => [k, { ...dist(xs, 2), p5: +pct(xs, 0.05).toFixed(2), hist: xs.reduce((h, o) => ((h[Math.round(o)] = (h[Math.round(o)] ?? 0) + 1), h), {}) }])),
+    // Signed offsets in 1 ms bins (frames per bin): presentation is
+    // quantized to refreshes, so the bins show which refresh each frame hit.
+    offsetHistMs: out.reduce((h, o) => ((h[Math.round(o)] = (h[Math.round(o)] ?? 0) + 1), h), {}),
     offsetMs: dist(out, 2),
     absOffsetMs: dist(out.map(Math.abs), 2),
     p5Ms: out.length ? +pct(out, 0.05).toFixed(2) : null,
