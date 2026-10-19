@@ -86,6 +86,28 @@ A wrapper that calls `render.snapshot` from inside its own answer gets `''`
   180 asks (2 layers × 90 frames); red pixels equal to today's compositor at
   frames 0, 45, 89 (7418/7418, 7360/7360, 7359/7358).
 
+### The corpus (measured 2026-10-18, flag on, 4 of 4 passed in one run)
+
+`e2e/engine-customization-corpus.spec.ts`:
+
+- Forks of today's shipped built-ins (`fixtures/compat-corpus/shipped`, the
+  source on `main`), laid out as `api.extensions.fork` writes them: 8 of 9
+  load, replace their built-in, and stay healthy; the pre-engine viewer fork
+  binds the engine's presentation through `render.gl.init` and
+  `render.gl.context.canvas === render.gl.canvas`. The inspector fork fails
+  to build exactly as on today's app (its shipped source imports
+  `../../renderer/src/…`, which `main`'s compiler also refuses). Timeline is
+  not in the fixtures (a gitleaks false positive on a new file; see the
+  fixture README); its shipped fork fails the same way on today's app.
+- The API probe at apiVersion 1, 2 and 3 (trusted): every check passes —
+  live `project.get()` identity, `exportDefaults.format` `prores`, sync
+  `render.snapshot`/`renderFrameTo`/`raster` shapes, `gl.context`, `textLayout`,
+  `gl.bounds`, `anim.ev`/`worldMatrix`/`resolveContent`, the raster
+  service, editor helpers from a compiled bundle (`resolveContent`,
+  `evaluatedValue`, `is3DLayer`, `planeMatrix`, `countTextUnits`,
+  constants), the async siblings, and `frame:rendered` with its viewport
+  identical to `render.gl.previewViewport`.
+
 ## Deprecations and warnings (amendment 23)
 
 `DEPRECATED_MEMBERS` lists every compatibility member and its replacement;
@@ -127,9 +149,10 @@ new ids through a typed accessor; none is added in this lane.
   the typewriter project: max 57 code values, 554 channel values over 8
   (`/tmp/ne-extcompat-evidence/typewriter-engine-left-today-right.png`, left
   engine, right today). Text-render lane.
-- **Corpus:** forks of today's shipped built-ins and the API probe at
-  apiVersion 1 to 3 (trusted) are in `engine-customization-corpus.spec.ts`;
-  not built: the oldest fork shape from git history, overrides by id of each
+- **Export pixels:** the shape export matches today's red coverage but
+  differs from today's compositor by up to 35 code values in 3 channel
+  values a frame (not localized in this lane).
+- **Corpus:** not built: the oldest fork shape from git history, overrides by id of each
   built-in contribution, the probe in the declared full-access Store and
   sandbox contexts, the rebase gates (conflict, no-conflict, undo, deprecated
   calls migrated), and a probe per `scene3d.*` and controller member.
