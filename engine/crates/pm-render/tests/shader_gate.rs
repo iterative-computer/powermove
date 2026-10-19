@@ -259,6 +259,9 @@ struct Tally {
     awaiting_runner: Vec<String>,
     failures: Vec<String>,
     known: Vec<String>,
+    /// Matched variants whose WebGL draw raised a GL error (both show the
+    /// cleared target); listed for the record, counted as matches.
+    draw_error_matched: Vec<String>,
 }
 
 /// Probes and cases whose WebGL and engine answers differ for a documented
@@ -589,13 +592,18 @@ fn every_shader_matches_webgl() {
             }
             match outcome {
                 Outcome::Rendered(pixels) => {
-                    if !webgl_draws {
+                    if !webgl_draws && !webgl_links {
                         tally.failures.push(format!(
-                            "{shown} {name}: WebGL does not draw it ({}), the engine does",
-                            webgl["log"].as_str().unwrap_or("draw error")
+                            "{shown} {name}: WebGL does not link it ({}), the engine draws it",
+                            webgl["log"].as_str().unwrap_or("link error")
                         ));
                         continue;
                     }
+                    // A program WebGL links but whose draw raises a GL error
+                    // leaves the cleared target, which is what WebGL's
+                    // output holds and what today's compositor shows: the
+                    // engine must show the same (judged below like any
+                    // other output; a visible difference fails).
                     let Some(reference) = read_f16(
                         &dir.join("webgl-metal")
                             .join(&folder)
@@ -613,6 +621,12 @@ fn every_shader_matches_webgl() {
                         .flatten();
                     if unstable.is_some() {
                         dump_unstable(shown, name, &pixels, &reference, width, true);
+                    }
+                    if !webgl_draws && m.pass() {
+                        tally.draw_error_matched.push(format!(
+                            "{shown} {name}: WebGL's draw raises GL error {}; both show the cleared target",
+                            webgl["glError"]
+                        ));
                     }
                     record(tally, shown, id, name, m, via_fallback, unstable);
                 }
@@ -643,6 +657,9 @@ fn every_shader_matches_webgl() {
         );
         for k in &t.known {
             eprintln!("  known: {k}");
+        }
+        for d in &t.draw_error_matched {
+            eprintln!("  draw error: {d}");
         }
         for a in &t.awaiting_runner {
             eprintln!("  runner: {a}");
