@@ -51,9 +51,9 @@ export const BLENDER_WAIT_MS = 900_000;
  *  and the largest side. */
 export type RasterOptions = { composition?: string; content?: Uint8Array | null; maxEdge?: number };
 
-/** Largest side of a layer raster asked for: 6,000² is under the engine's
- *  40-million-pixel snapshot cap. */
-export const MAX_RASTER_EDGE = 6000;
+/** Today's largest layer bitmap side. Layer rasters have their own
+ *  bounded 8192² admission limit; frame captures retain their 40 MP cap. */
+export const MAX_RASTER_EDGE = 8192;
 /** How long a UI snapshot waits for the viewer's session before the
  *  connection opens a standby one. */
 export const STANDBY_AFTER_MS = 5_000;
