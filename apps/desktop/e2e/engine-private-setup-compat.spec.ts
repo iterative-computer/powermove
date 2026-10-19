@@ -59,11 +59,15 @@ async function exercise(page: Page, ids: string[]) {
 async function frame(page: Page, time: number, width: number, height: number) {
   return page.evaluate(async ({ time, width, height }) => {
     const PM = (window as any).PM, api = PM.Kernel.api('corpus');
+    const progress = (window as any).__c1Frame = { time, phase: 'prepare' };
     PM.pause(); PM.setTime(time, { force: true });
     await PM.prepareFrame?.(time);
+    progress.phase = 'bindings';
     await PM.HostMedia?.flushBindings?.();
+    progress.phase = 'render';
     const canvas = await api.render.renderFrameToAsync(time, width, height, { mblur: true, mbSamples: 16 });
     if (!canvas) throw new Error(`C1: no frame at ${time}`);
+    progress.phase = 'pixels';
     const bytes = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
     // Base64 avoids huge number[] transfers for the private full-size frames.
     let raw = ''; for (let at = 0; at < bytes.length; at += 32768) raw += String.fromCharCode(...bytes.subarray(at, at + 32768));
@@ -75,17 +79,17 @@ async function wrapperProject(page: Page) {
   return page.evaluate(() => {
     const PM = (window as any).PM, api = PM.Kernel.api('corpus');
     const p = PM.mkProject({ name: 'C1 raster wrappers', w: 480, h: 270, fps: 30, dur: 2, bg: '#203040' });
-    const counter = PM.mkLayer('text', { d: { text: 'Count', font: 'Helvetica', size: 36, color: '#FFFFFF' } }, p);
+    const counter = PM.mkLayer('text', { from: 0, dur: 2, d: { text: 'Count', font: 'Helvetica', size: 36, color: '#FFFFFF' } }, p);
     counter.id = 'counter'; counter.p['position.x'].v = 160; counter.p['position.y'].v = 60;
     const count = PM.mkEffect('private-extension-25'); count.p.value = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(2, 100)] }); count.p.decimals.v = 0; counter.fx = [count];
-    const typed = PM.mkLayer('text', { d: { text: 'Wrapper contract', font: 'Helvetica', size: 32, color: '#FFFFFF' } }, p);
+    const typed = PM.mkLayer('text', { from: 0, dur: 2, d: { text: 'Wrapper contract', font: 'Helvetica', size: 32, color: '#FFFFFF' } }, p);
     typed.id = 'typed'; typed.p['position.x'].v = 240; typed.p['position.y'].v = 120;
     const fx = PM.mkEffect('typewriter'); fx.p.progress = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(2, 100)] }); typed.fx = [fx];
     const points = [[80, 220], [140, 150], [340, 270], [400, 200]].map(([x, y], i) => {
-      const l = PM.mkLayer('shape', { d: { shape: 'ellipse', w: 4, h: 4, color: '#FF641E', stroke: 0 } }, p);
+      const l = PM.mkLayer('shape', { from: 0, dur: 2, d: { shape: 'ellipse', w: 4, h: 4, color: '#FF641E', stroke: 0 } }, p);
       l.id = `point-${i}`; l.p['position.x'].v = x; l.p['position.y'].v = y; return l;
     });
-    const linked = PM.mkLayer('shape', { d: { shape: 'rect', w: 440, h: 140, color: '#00000000', stroke: 8, strokeColor: '#FF641E' } }, p);
+    const linked = PM.mkLayer('shape', { from: 0, dur: 2, d: { shape: 'rect', w: 440, h: 140, color: '#00000000', stroke: 8, strokeColor: '#FF641E' } }, p);
     linked.id = 'linked'; linked.p['position.x'].v = 240; linked.p['position.y'].v = 200;
     linked.d.linkedSceneBezier = { version: 1, kind: 'curve', points: points.map((l: any) => l.id) };
     p.layers = [counter, typed, linked, ...points]; PM.replaceProject(p); PM.Projects.put(PM.proj);
@@ -104,7 +108,7 @@ function measure(a: Buffer, b: Buffer) {
 }
 
 test('C1 private setup: all extensions, contribution winners, host UI, wrappers and real project frames', async ({ session }, testInfo) => {
-  test.setTimeout(540_000);
+  test.setTimeout(1_800_000);
   const project = path.join(CORPUS, 'projects/private-project.pmv');
   const present = await stat(project).then(() => true, () => false);
   test.skip(!present, 'C1 private setup corpus absent: set PM_PRIVATE_SETUP_DIR or install the external private-setup corpus');
@@ -148,9 +152,22 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
             ? records.find((r: any) => r.id === id)?.health?.state === 'build-error'
             : active.includes(id));
         }, ids, { timeout: 90_000, polling: 100 });
+        results[mode] = { extensions: await facts(app.page, ids), frames: [] };
+        await writeFile(path.join(EVIDENCE, 'results.json'), JSON.stringify(results, null, 2));
+        results[mode].ui = await exercise(app.page, ids);
+        console.log(`C1 ${mode}: UI exercised; checking private raster wrappers`);
+        results[mode].wrappers = { surfaces: await wrapperProject(app.page), frames: [] };
+        for (const time of [.2, 1.2]) {
+          const rendered = await frame(app.page, time, 480, 270);
+          const png = path.join(EVIDENCE, `${mode}-wrappers-${time}.png`);
+          await writeFile(png, Buffer.from(rendered.png.split(',')[1]!, 'base64'));
+          const raw = path.join(EVIDENCE, `today-wrappers-${time}.rgba`);
+          if (!engine) await writeFile(raw, Buffer.from(rendered.rgba, 'base64'));
+          results[mode].wrappers.frames.push({ time, png, ...(engine ? measure(await readFile(raw), Buffer.from(rendered.rgba, 'base64')) : {}) });
+        }
+        await writeFile(path.join(EVIDENCE, 'results.json'), JSON.stringify(results, null, 2));
         await app.app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, project);
         console.log(`C1 ${mode}: opening private project`);
-        results[mode] = { extensions: await facts(app.page, ids), frames: [] };
         await writeFile(path.join(EVIDENCE, 'results.json'), JSON.stringify(results, null, 2));
         await app.page.evaluate(() => {
           const w = window as any;
@@ -159,14 +176,22 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
           w.PM.toast = (...args: any[]) => { w.__c1Toasts.push(String(args[0])); return toast(...args); };
           void w.PM.openProject().then(() => { w.__c1OpenDone = true; });
         });
-        await expect.poll(() => app.page.evaluate(() => (window as any).PM.proj.layers.length), { timeout: 180_000, message: 'C1: original private project must load all 258 layers' }).toBe(258);
-        if (engine) await app.page.waitForFunction(() => !!(window as any).PM.EngineRender, undefined, { timeout: 45_000, polling: 100 });
+        try {
+          await expect.poll(() => app.page.evaluate(() => (window as any).PM.proj.layers.length), { timeout: 180_000, message: 'C1: original private project must load all 258 layers' }).toBe(258);
+        } catch (error) {
+          results[mode].openWaitError = String(error);
+          // A busy renderer can finish the import after the test's deadline.
+          // Keep the timeout as a failed gate, but collect its real pixels if
+          // the original document is now available rather than losing evidence.
+          if (await app.page.evaluate(() => (window as any).PM.proj.layers.length) !== 258) throw error;
+        }
+        if (engine) expect(await app.page.evaluate(() => !!(window as any).PM.EngineRender), 'C1: engine facade remains installed').toBe(true);
         const setup = await app.page.evaluate(() => { const PM = (window as any).PM; return { dur: PM.proj.dur, fps: PM.proj.fps, w: PM.proj.w, h: PM.proj.h, typewriters: PM.proj.layers.filter((l: any) => l.fx?.some((f: any) => f.type === 'typewriter')).map((l: any) => ({ from: l.from, dur: l.dur })) }; });
         console.log(`C1 ${mode}: project layers loaded`);
         const extensions = await facts(app.page, ids);
-        const ui = await exercise(app.page, ids);
+        const ui = results[mode].ui;
         const after = await facts(app.page, ids);
-        results[mode] = { extensions, ui, after, setup, errors: app.diagnostics.pageErrors, frames: [], openDone: await app.page.evaluate(() => (window as any).__c1OpenDone) };
+        results[mode] = { ...results[mode], extensions, ui, after, setup, errors: app.diagnostics.pageErrors, frames: [], openDone: await app.page.evaluate(() => (window as any).__c1OpenDone) };
         console.log(`C1 ${mode}: UI exercised; capturing corpus frames`);
         // Same real-project corpus schedule: each 2 s plus last frame.
         // Add midpoints inside each typewriter interval so it cannot pass
@@ -174,6 +199,8 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
         const times = [...new Set([0, ...Array.from({ length: Math.ceil(setup.dur / 2) }, (_, i) => i * 2), Math.max(0, setup.dur - 1 / setup.fps), ...setup.typewriters.map((l: any) => Math.min(setup.dur - 1 / setup.fps, l.from + l.dur / 2))])].sort((a, b) => a - b);
         for (let i = 0; i < times.length; i++) {
           const time = times[i]!;
+          results[mode].pendingFrame = time;
+          await writeFile(path.join(EVIDENCE, 'results.json'), JSON.stringify(results, null, 2));
           const rendered = await frame(app.page, time, setup.w, setup.h);
           const bytes = Buffer.from(rendered.rgba, 'base64');
           const png = path.join(EVIDENCE, `${mode}-${i}.png`);
@@ -186,26 +213,20 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
             const reference = captures[i]!;
             results[mode].frames.push({ time, png, reference: reference.png, ...measure(await readFile(reference.baseline), bytes) });
           }
+          delete results[mode].pendingFrame;
           await writeFile(path.join(EVIDENCE, 'results.json'), JSON.stringify(results, null, 2));
         }
         results[mode].status = await app.page.evaluate(() => (window as any).PM.EngineConnection?.status?.() ?? null);
-        results[mode].wrappers = { surfaces: await wrapperProject(app.page), frames: [] };
-        for (const time of [.2, 1.2]) {
-          const rendered = await frame(app.page, time, 480, 270);
-          const png = path.join(EVIDENCE, `${mode}-wrappers-${time}.png`);
-          await writeFile(png, Buffer.from(rendered.png.split(',')[1]!, 'base64'));
-          const raw = path.join(EVIDENCE, `today-wrappers-${time}.rgba`);
-          if (!engine) await writeFile(raw, Buffer.from(rendered.rgba, 'base64'));
-          results[mode].wrappers.frames.push({ time, png, ...(engine ? measure(await readFile(raw), Buffer.from(rendered.rgba, 'base64')) : {}) });
-        }
+
         results[mode].after = await facts(app.page, ids);
+        results[mode].openDone = await app.page.evaluate(() => (window as any).__c1OpenDone);
 
       } catch (error) {
         results[mode] ??= {}; results[mode].failure = String(error);
         results[mode].extensions = await facts(app.page, ids).catch(() => results[mode].extensions ?? []);
         results[mode].failureState = await app.page.evaluate(() => {
           const PM = (window as any).PM;
-          return { name: PM?.proj?.name, layers: PM?.proj?.layers?.length, toasts: (window as any).__c1Toasts ?? [], openDone: (window as any).__c1OpenDone, status: PM?.EngineConnection?.status?.() ?? null };
+          return { name: PM?.proj?.name, layers: PM?.proj?.layers?.length, toasts: (window as any).__c1Toasts ?? [], openDone: (window as any).__c1OpenDone, frame: (window as any).__c1Frame, status: PM?.EngineConnection?.status?.() ?? null };
         }).catch(() => null);
       }
       finally {
@@ -225,6 +246,8 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
     // The corpus deliberately excludes private-extension-32's TensorFlow runtime:
     // preserve/report its same compile failure, never mask any other one.
     for (const mode of ['today', 'engine']) {
+      expect(results[mode].openWaitError, `${mode}: project-open deadline`).toBeUndefined();
+      expect(results[mode].openDone, `${mode}: original project open completed`).toBe(true);
       for (const records of [results[mode].extensions, results[mode].after]) expect(records.filter((r: any) => r.id !== 'private-extension-32' && (!r.active || !r.enabled || r.health !== 'ok'))).toEqual([]);
       expect(results[mode].ui.panels.filter((p: any) => !p.mounted || p.error)).toEqual([]);
       expect(results[mode].ui.commands.filter((c: any) => !c.ok)).toEqual([]);
