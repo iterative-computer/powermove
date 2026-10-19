@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { installUiFontCensus, startUiFontCensus, useOf } from './ui-font-census';
-import type { UiFontCensus } from '../../../shared/engine-fonts-seeds';
+import { CANVAS_FONT_CACHE_KEY, type UiFontCensus } from '../../../shared/engine-fonts-seeds';
 
 // happy-dom does no layout: every element with text counts as laid out
 // unless the test hides it.
@@ -18,9 +18,9 @@ describe('the UI font census', () => {
 
   it('reads the description text is laid out with', () => {
     expect(useOf({ fontFamily: '"SF Pro Text", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif', fontSize: '14px', fontWeight: '500', fontStyle: 'normal', fontStretch: '100%' }))
-      .toEqual({ families: ['sf pro text', '-apple-system', 'blinkmacsystemfont', 'helvetica neue', 'sans-serif'], size: 14, weight: 500, italic: false });
+      .toEqual({ families: ['sf pro text', '-apple-system', 'blinkmacsystemfont', 'helvetica neue', 'sans-serif'], size: 14, weight: 500, italic: false, cacheKey: CANVAS_FONT_CACHE_KEY });
     expect(useOf({ fontFamily: 'system-ui', fontSize: '12px', fontWeight: '400', fontStyle: 'italic', fontStretch: 'normal' })!.italic).toBe(true);
-    expect(useOf({ fontFamily: 'system-ui', fontSize: '12px', fontWeight: '400', fontStyle: 'normal', fontStretch: '75%' })).toBeNull();
+    expect(useOf({ fontFamily: 'system-ui', fontSize: '12px', fontWeight: '400', fontStyle: 'normal', fontStretch: '75%' })!.cacheKey).not.toBe(CANVAS_FONT_CACHE_KEY);
   });
 
   it('reports each new description once, with the device pixel ratio, and what mutations add later', async () => {

@@ -1,6 +1,7 @@
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
+import { CANVAS_FONT_CACHE_KEY } from '../src/shared/engine-fonts-seeds';
 import { launchApp } from './helpers/app';
 
 test('census and canvas-first font seeds match this renderer’s Canvas2D advances', async () => {
@@ -18,13 +19,15 @@ test('census and canvas-first font seeds match this renderer’s Canvas2D advanc
       const width = canvas.measureText('First creator AVATAR 123').width;
       const menu = document.createElement('div');
       menu.id = 'font-seed-menu';
-      menu.style.cssText = 'position:fixed;top:20px;left:20px;z-index:99999;font:400 15px system-ui';
+      menu.style.cssText = 'position:fixed;top:20px;left:20px;z-index:99999;font:400 15px system-ui;text-rendering:auto';
       menu.textContent = 'Menu that appears after a canvas';
       document.body.append(menu);
       menu.getBoundingClientRect();
       // Also verify UI-first keys: these descriptions were parked offscreen
       // at startup, and only now create their visible 2x strike.
-      for (const weight of [500, 600]) {
+      // Use distinct weights so the startup 30/500 and 30/600 probes below
+      // still test the formerly poisoned optimizeLegibility entries.
+      for (const weight of [450, 650]) {
         const visible = menu.cloneNode(true) as HTMLElement;
         visible.id = `font-seed-ui-${weight}`;
         visible.style.top = `${40 + (weight-500)/5}px`;
@@ -42,8 +45,8 @@ test('census and canvas-first font seeds match this renderer’s Canvas2D advanc
     });
     await session.page.waitForTimeout(1500);
     const seeds = await session.page.evaluate(async () => JSON.parse((await (window as any).__powermoveTestBridge.engineFonts.seeds()).value));
-    const existing = first.before.seeds.find((s: any) => s.size === 30 && s.weight === 400 && !s.italic);
-    expect(seeds.seeds.find((s: any) => s.size === 30 && s.weight === 400 && !s.italic)?.specified).toBe(existing?.specified ?? 30);
+    const existing = first.before.seeds.find((s: any) => s.size === 30 && s.weight === 400 && !s.italic && (s.cacheKey ?? CANVAS_FONT_CACHE_KEY) === CANVAS_FONT_CACHE_KEY);
+    expect(seeds.seeds.find((s: any) => s.size === 30 && s.weight === 400 && !s.italic && (s.cacheKey ?? CANVAS_FONT_CACHE_KEY) === CANVAS_FONT_CACHE_KEY)?.specified).toBe(existing?.specified ?? 30);
     const cases = seeds.seeds.filter((s: any) => s.family === 'system-ui').map((s: any) => ({ size: s.size, weight: s.weight, italic: s.italic }));
     // Keep the four formerly poisoned descriptions even when culling
     // correctly leaves them out of the census. No regression case escapes.

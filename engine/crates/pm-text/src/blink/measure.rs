@@ -63,6 +63,10 @@ pub struct FontCacheSeed {
     pub size: f32,
     /// The specified size of the description that created the entry.
     pub specified: f32,
+    /// Complete Blink platform-data identity; legacy static captures use
+    /// the default Canvas2D key when absent.
+    #[serde(default, rename = "cacheKey", skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
 }
 
 /// The CSS sizes of the app's own UI text that create `system-ui` entries in
@@ -90,6 +94,7 @@ pub fn app_ui_font_cache_seeds(scale_factors: &[f32]) -> Vec<FontCacheSeed> {
                 italic: false,
                 size: crate::compat::canvas::effective_font_size(css * scale),
                 specified: css,
+                cache_key: None,
             };
             // The first creator of a key fixes it.
             if !out
@@ -118,9 +123,19 @@ fn same_cache_family(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b) || (system(a) && system(b))
 }
 
+/// Same default key as shared/engine-fonts-seeds.ts. Only identical
+/// platform-data keys can share the first creator's optical size.
+const CANVAS_FONT_CACHE_KEY: &str = r#"["auto","auto",true,true,"normal","100%","horizontal","normal","none",[],"normal","normal",true,false,false,false]"#;
+
 impl FontCacheSeed {
     fn matches(&self, family: &str, desc: &FontDesc) -> bool {
-        same_cache_family(&self.family, family)
+        let canvas_key = if desc.italic {
+            CANVAS_FONT_CACHE_KEY.replace("\"normal\",\"100%\"", "\"italic\",\"100%\"")
+        } else {
+            CANVAS_FONT_CACHE_KEY.to_string()
+        };
+        self.cache_key.as_deref().unwrap_or(&canvas_key) == canvas_key
+            && same_cache_family(&self.family, family)
             && self.weight == desc.weight
             && self.italic == desc.italic
             && self.size == desc.size

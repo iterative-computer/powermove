@@ -81,8 +81,16 @@ was found on the corpus's real project and checked against Chromium itself
    rounding. At fractional sizes that is one 16.16 unit less about half the
    time (`BlinkFuncs::harfbuzz_advance`).
 3. **The renderer's font cache.** `FontPlatformDataCache` keys platform
-   data by family, effective size, and selection request (weight, width,
-   slope), not by specified size. Whoever creates an entry first fixes its
+   data by family, effective size, selection request (weight, width,
+   slope), and the full `FontDescription::CacheKey` options, not by
+   specified size. Those options include text rendering, optical sizing,
+   synthesis permissions and synthetic flags, orientation, subpixel
+   positioning, emoji variant, size adjustment, variation axes, palette,
+   variant alternates and unique-face matching. macOS uses a constant
+   device-scale component in this key. Kerning, feature settings and
+   shaping variants were checked against Blink: they affect shaping but
+   do not enter this platform-data cache key. Adding them here would
+   incorrectly prevent Chromium's real sharing. Whoever creates an entry first fixes its
    `opsz` for every later user in that renderer. DOM text is laid out at its
    CSS size times the zoom, and on macOS the device scale factor applies as
    zoom: UI text in `system-ui` at 12 px on a 2x display creates the 24 px
@@ -97,8 +105,8 @@ was found on the corpus's real project and checked against Chromium itself
    factor of 1.
 
    `Compat::set_font_cache_seeds` declares such entries (`FontCacheSeed`:
-   family, weight, italic, effective size, and the specified size that
-   created it), so level 1 can reproduce a renderer in that state. Without
+   family, weight, italic, effective size, full cache identity, and the
+   specified size that created it), so level 1 can reproduce a renderer in that state. Without
    seeds pm-text measures as a fresh renderer. The corpus test seeds the
    capture's renderer from its device pixel ratio. Today's layout of such
    text therefore depends on the display and on what the UI drew before;
@@ -140,7 +148,7 @@ was found on the corpus's real project and checked against Chromium itself
      who installs SF Pro Text has no system font entries, as in Chromium.
    - **Each window keeps its entries in creation order**
      (`FontSeedTracker`): the first description to create a key (effective
-     size, weight, slope) fixes its `opsz`; a window keeps every display's
+     size, weight, slope and complete platform-data identity) fixes its `opsz`; a window keeps every display's
      entries; a closed window or a new renderer process
      (`render-process-gone`) forgets them.
    - pm-text matches a seed for any of the system font aliases
@@ -161,46 +169,45 @@ was found on the corpus's real project and checked against Chromium itself
    (2026-10-18) shows the census at work: 11 and 12 seeds in a fresh editor
    window, where the static model had 2.
 
-   **Canvas creators (round 4).** The census wraps the browser's native
-   Canvas2D and OffscreenCanvas2D `font` setters, retaining native parsing
-   and rejection behavior, and reports the accepted description at DPR 1.
-   Pending UI descriptions are drained first (Blink's font setter itself
-   flushes style/layout-tree updates). Main's existing first-creator rule
-   then preserves a canvas entry when a later menu reports the same key.
-   The wrapper is removed when the census stops. Pure transform/opacity
-   style changes do not schedule a tree walk; font/layout-affecting styles
-   still do. Aggregate scan time, maximum scan time, visited nodes and
-   reports are available in `EngineDoc.stats().fontCensus` for measurement.
+   **Canvas creators (round 5).** Platform data is lazy: setting `font`
+   alone need not realize it, and a context can change `textRendering` or
+   stretch before measuring or drawing. The census wraps native
+   `measureText`, `fillText` and `strokeText` on main-thread Canvas2D and
+   OffscreenCanvas2D, keeps native parsing, and records the description
+   actually used by that operation at DPR 1. Repeated detached-context
+   state takes a WeakMap fast path. Pending DOM descriptions are drained
+   first; all wrappers are removed when the census stops. Pure transform
+   and opacity updates do not trigger a tree walk; changes to cache-key
+   properties do. Aggregate scan costs remain exposed through
+   `EngineDoc.stats().fontCensus`.
 
-   Parked panels at -9999 px have layout boxes but do not paint a
-   DPR-scaled strike. The census now requires a visible client rect
-   intersecting the viewport. The first in-app comparison exposed four
-   false seeds; this removed the offscreen 24 px / weight 560 entry, but
-   the final merged run still fails for 20 px / weight 400 and 30 px /
-   weights 500 and 600. The native fresh resolver agrees with Canvas2D
-   where those proposed UI seeds do not. This is a blocker: measured
-   advance errors for the 24-character probe were 6.45, 40.26 and 39.64 px,
-   respectively. The cache-creation order/culling boundary remains open;
-   viewport intersection alone is insufficient. The final diagnostics show
-   `text-rendering: optimizeLegibility` on the DOM origins, while
-   `CanvasRenderingContext2DState::SetFont` sets the context's own text
-   rendering mode (default auto). `FontDescription::CacheKey` includes
-   that mode, which the reduced census key loses. This is a demonstrated
-   identity boundary; the complete origin of the still-shared 24/26 px
-   entries remains unresolved, so simply dropping all DOM seeds is not a
-   valid fix. Primary sources: [Blink cache key](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/platform/fonts/font_description.cc)
+   Round 5 closes the live-seed failure. Global UI text uses
+   `optimizeLegibility`; Canvas2D defaults to `auto`. The previous reduced
+   key conflated those entries, producing 6.45–40.26 px advance errors.
+   Visible buttons and select labels instead use `auto` and legitimately
+   seed the 24/26 px keys; retaining those entries preserves their sharing.
+   Parked panels at -9999 px remain excluded, preserving the 24/560 fix.
+   The native seed matcher accepts only a complete identity equal to the
+   requested canvas description. Static captures without `cacheKey` keep
+   their original default-canvas interpretation.
+
+   The live e2e checks the census-derived seeds against the same page's
+   Canvas2D and pm-wasm. Its 23 rows agree within 0.00001526 px, including
+   20/400, 30/500/600, 24/560, valid 24/26 sharing, canvas-first 30/400 before
+   an `auto` 15 px menu at 2x, and UI-first `auto` weights 450/650. The latter
+   use distinct weights so the former startup failures remain independent
+   probes. Primary sources: [Blink platform-data cache key](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/platform/fonts/font_description.cc)
    and [Canvas font state](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_state.cc).
 
    Remaining unmodelled entries also include pseudo-element text,
    font-cache purges under memory pressure and worker-owned canvases.
    Offscreen text scrolling into view without a DOM mutation is not yet
-   observed. Blink's cache key also carries optical sizing, synthesis,
-   text rendering, variation and palette state; the census's reduced key
-   has not been validated for arbitrary custom CSS. The new in-app
+   observed. Arbitrary custom CSS still needs independent captures beyond
+   the default and differing text-rendering identities. The in-app
    `native-engine-font-seeds.spec.ts` checks the census-derived seeds
    against this renderer's actual Canvas2D and pm-wasm advances, including
    the 30 px canvas before a visible 15 px menu at 2x (that first-creator
-   check passes), UI-first weights 500/600, and the formerly poisoned
+   check passes), UI-first weights 450/650, and the formerly poisoned
    descriptions even if the census leaves them out. It records fresh
    resolver diagnostics and can capture failures outside Git with
    `PM_FONT_SEEDS_CAPTURE`. Its failing rows must not be described as T1

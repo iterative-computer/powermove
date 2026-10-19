@@ -26,6 +26,37 @@
  * (corpus tests, parity).
  */
 
+/** Fields in Blink FontDescription::CacheKey/FontCacheKey beyond family,
+ * effective size and selection request. Kerning/feature/variant shaping
+ * state is deliberately separate: it is not in the platform-data key. */
+export interface FontCacheStyle {
+  textRendering?: string; fontOpticalSizing?: string; fontSynthesis?: string;
+  fontSynthesisWeight?: string; fontSynthesisStyle?: string; fontStyle?: string;
+  fontStretch?: string; writingMode?: string; textOrientation?: string;
+  fontVariantEmoji?: string; fontSizeAdjust?: string; fontVariationSettings?: string;
+  fontPalette?: string; fontVariantAlternates?: string;
+}
+
+export function fontCacheKey(style: FontCacheStyle = {}): string {
+  const value = (v: string | undefined, fallback: string) => (v || fallback).trim().toLowerCase();
+  const synthesis = value(style.fontSynthesis, 'weight style small-caps').split(/\s+/);
+  const allow = (explicit: string | undefined, token: string) => explicit ? explicit !== 'none' : synthesis.includes(token);
+  const variations = (style.fontVariationSettings || 'normal').trim();
+  const axes = variations === 'normal' ? [] : variations.split(',').map(v => v.trim()).sort();
+  const width = value(style.fontStretch, '100%');
+  const writing = value(style.writingMode, 'horizontal-tb');
+  return JSON.stringify([
+    value(style.textRendering, 'auto'), value(style.fontOpticalSizing, 'auto'),
+    allow(style.fontSynthesisWeight, 'weight'), allow(style.fontSynthesisStyle, 'style'),
+    value(style.fontStyle, 'normal'), width === 'normal' ? '100%' : width,
+    writing === 'horizontal-tb' ? 'horizontal' : `${writing}:${value(style.textOrientation, 'mixed')}`,
+    value(style.fontVariantEmoji, 'normal'), value(style.fontSizeAdjust, 'none'), axes,
+    (style.fontPalette || 'normal').trim(), (style.fontVariantAlternates || 'normal').trim(),
+    true, false, false, false, // subpixel position; synthetic flags; unique-face match
+  ]);
+}
+export const CANVAS_FONT_CACHE_KEY = fontCacheKey();
+
 /** pm-text's `FontCacheSeed`. */
 export interface FontCacheSeed {
   family: string;
@@ -35,6 +66,8 @@ export interface FontCacheSeed {
   size: number;
   /** The specified size of the description that created the entry. */
   specified: number;
+  /** Absent only in legacy/static capture seeds (the default canvas key). */
+  cacheKey?: string;
 }
 
 /** The CSS sizes of the default-density UI text at startup (`--fs-sm`,
@@ -95,6 +128,7 @@ export interface UiFontUse {
   size: number;
   weight: number;
   italic: boolean;
+  cacheKey?: string;
 }
 
 /** What a renderer reports: text it laid out at this device pixel ratio
@@ -146,14 +180,14 @@ export function uiFontSeed(use: UiFontUse, dpr: number, installed: (family: stri
   if (!(Number.isFinite(dpr) && dpr > 0 && Number.isFinite(use.size) && use.size > 0 && Number.isFinite(use.weight))) return null;
   for (const family of use.families) {
     if (SYSTEM_FONT_ALIASES.has(family)) {
-      return { family: 'system-ui', weight: use.weight, italic: use.italic, size: effectiveFontSize(Math.fround(Math.fround(use.size) * Math.fround(dpr))), specified: Math.fround(use.size) };
+      return { family: 'system-ui', weight: use.weight, italic: use.italic, size: effectiveFontSize(Math.fround(Math.fround(use.size) * Math.fround(dpr))), specified: Math.fround(use.size), ...(use.cacheKey ? { cacheKey: use.cacheKey } : {}) };
     }
     if (NAMED_GENERICS.has(family) || installed(family)) return null;
   }
   return null;
 }
 
-const seedKey = (s: FontCacheSeed) => `${s.size}|${s.weight}|${s.italic}`;
+const seedKey = (s: FontCacheSeed) => `${s.size}|${s.weight}|${s.italic}|${s.cacheKey ?? CANVAS_FONT_CACHE_KEY}`;
 
 /**
  * Each window's renderer font cache, as its UI text created it (main tracks
@@ -251,10 +285,11 @@ export function parseUiFontCensus(json: unknown, limits = { uses: 4096, families
   const out: UiFontUse[] = [];
   for (const u of uses) {
     if (!u || typeof u !== 'object') return null;
-    const { families, size, weight, italic } = u as Record<string, unknown>;
+    const { families, size, weight, italic, cacheKey } = u as Record<string, unknown>;
     if (!Array.isArray(families) || families.length > limits.families || !families.every((f) => typeof f === 'string' && f.length <= limits.chars)) return null;
     if (typeof size !== 'number' || typeof weight !== 'number' || typeof italic !== 'boolean') return null;
-    out.push({ families: families as string[], size, weight, italic });
+    if (cacheKey !== undefined && (typeof cacheKey !== 'string' || cacheKey.length > 4096)) return null;
+    out.push({ families: families as string[], size, weight, italic, ...(cacheKey ? { cacheKey: cacheKey as string } : {}) });
   }
   return { dpr, uses: out };
 }

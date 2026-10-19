@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { appUiFontCacheSeeds, effectiveFontSize, engineSeedsJson, FontSeedTracker, parseFontFamilies, parseUiFontCensus, seedsJson, uiFontSeed, type UiFontUse } from './engine-fonts-seeds';
+import { fontCacheKey, CANVAS_FONT_CACHE_KEY, appUiFontCacheSeeds, effectiveFontSize, engineSeedsJson, FontSeedTracker, parseFontFamilies, parseUiFontCensus, seedsJson, uiFontSeed, type UiFontUse } from './engine-fonts-seeds';
 
 const UI = ['sf pro text', '-apple-system', 'blinkmacsystemfont', 'helvetica neue', 'sans-serif'];
 const use = (size: number, weight = 400, families = UI, italic = false): UiFontUse => ({ families, size, weight, italic });
@@ -16,6 +16,20 @@ describe('font cache seeds', () => {
     expect(appUiFontCacheSeeds([1.1])[0]!.size).toBe(Math.fround(13.2));
     expect(appUiFontCacheSeeds([])).toEqual([]);
     expect(seedsJson(appUiFontCacheSeeds([2]))).toBe('{"seeds":[{"family":"system-ui","weight":400,"italic":false,"size":24,"specified":12},{"family":"system-ui","weight":400,"italic":false,"size":26,"specified":13}]}');
+  });
+
+  it('keeps DOM and canvas platform keys separate, preserving the first creator of each', () => {
+    const tracker = new FontSeedTracker();
+    const domKey = fontCacheKey({ textRendering: 'optimizeLegibility' });
+    tracker.report(1, { dpr: 2, uses: [{ ...use(15, 600), cacheKey: domKey }] });
+    tracker.report(1, { dpr: 1, uses: [{ ...use(30, 600), cacheKey: CANVAS_FONT_CACHE_KEY }] });
+    tracker.report(1, { dpr: 2, uses: [{ ...use(15, 600), cacheKey: CANVAS_FONT_CACHE_KEY }] });
+    expect(tracker.seedsFor(1).map(s => [s.cacheKey, s.specified])).toEqual([[domKey, 15], [CANVAS_FONT_CACHE_KEY, 30]]);
+    expect(fontCacheKey({ fontVariationSettings: '"OPSZ" 15' }))
+      .not.toBe(fontCacheKey({ fontVariationSettings: '"opsz" 15' }));
+    for (const style of [{ fontOpticalSizing: 'none' }, { fontSynthesis: 'none' }, { fontVariationSettings: '\'opsz\' 15' }, { fontPalette: '--palette' }, { writingMode: 'vertical-rl' }]) {
+      expect(fontCacheKey(style)).not.toBe(CANVAS_FONT_CACHE_KEY);
+    }
   });
 
   it('floor the effective size as Blink does, in float', () => {

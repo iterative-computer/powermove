@@ -20,7 +20,7 @@
  * display, page zoom) or the root's attributes change (density, theme), and
  * otherwise only what mutations touched, when the renderer is idle.
  */
-import { parseFontFamilies, type UiFontCensus, type UiFontUse } from '../../../shared/engine-fonts-seeds';
+import { fontCacheKey, parseFontFamilies, type UiFontCensus, type UiFontUse } from '../../../shared/engine-fonts-seeds';
 
 export interface UiFontCensusHost {
   /** Sends a census message (`engine-fonts:ui-fonts`). */
@@ -43,9 +43,7 @@ export function useOf(style: Pick<CSSStyleDeclaration, 'fontFamily' | 'fontSize'
   const size = Number.parseFloat(style.fontSize);
   const weight = style.fontWeight === 'normal' || !style.fontWeight ? 400 : style.fontWeight === 'bold' ? 700 : Number.parseFloat(style.fontWeight);
   if (!(size > 0) || !Number.isFinite(weight)) return null;
-  // Only normal-width text reaches the seeds' cache keys.
-  if (style.fontStretch && style.fontStretch !== 'normal' && style.fontStretch !== '100%') return null;
-  return { families: parseFontFamilies(style.fontFamily), size, weight, italic: style.fontStyle !== 'normal' };
+  return { families: parseFontFamilies(style.fontFamily), size, weight, italic: !!style.fontStyle && style.fontStyle !== 'normal', cacheKey: fontCacheKey(style) };
 }
 
 function hasOwnText(el: Element): boolean {
@@ -92,7 +90,7 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
     if (style.visibility !== 'visible' && style.visibility !== '') return;
     const use = useOf(style);
     if (!use) return;
-    const key = `${dpr}|${use.families.join(',')}|${use.size}|${use.weight}|${use.italic}`;
+    const key = `${dpr}|${use.families.join(',')}|${use.size}|${use.weight}|${use.italic}|${use.cacheKey}`;
     if (seen.has(key)) return;
     seen.add(key);
     out.push(use);
@@ -143,7 +141,7 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
     const after = (record.target as HTMLElement).style;
     before.cssText = record.oldValue ?? '';
     const names = new Set([...Array.from(before), ...Array.from(after)]);
-    return [...names].some((name) => /^(font|line-height|display|content-visibility|visibility|--)/.test(name)
+    return [...names].some((name) => /^(font|text-rendering|writing-mode|text-orientation|line-height|display|content-visibility|visibility|--)/.test(name)
       && before.getPropertyValue(name) !== after.getPropertyValue(name));
   };
   const takeRecords = (records: MutationRecord[]): void => {
@@ -159,34 +157,57 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
   const observer = new view.MutationObserver(takeRecords);
   observer.observe(doc, { subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true, attributeFilter: ['class', 'style', 'hidden', 'open', 'data-density'] });
 
-  // A canvas font setter creates platform data too, even on the 1/100 px
-  // grid. Capture it before a later menu can claim the same cache key.
-  // Drain pending DOM layout first, then preserve the canvas's CSS size
-  // without applying DPR (canvas font measurement is in CSS pixels).
+  // Platform data is lazy: font assignments can be followed by changes
+  // to textRendering/stretch before the first measure or draw. Record the
+  // description actually used by text preparation, after native parsing.
   const restoreCanvas: Array<() => void> = [];
   for (const proto of [(view as any).CanvasRenderingContext2D?.prototype, (view as any).OffscreenCanvasRenderingContext2D?.prototype]) {
     if (!proto) continue;
-    const descriptor = Object.getOwnPropertyDescriptor(proto, 'font');
-    if (!descriptor?.set || !descriptor.get || !descriptor.configurable) continue;
     const declaration = doc.createElement('span').style;
-    const setter = function (this: CanvasRenderingContext2D, value: string): void {
-      takeRecords(observer.takeRecords());
-      if (full || pending.size) flush();
-      descriptor.set!.call(this, value);
-      declaration.font = descriptor.get!.call(this);
+    const contextStates = new WeakMap<object, string>();
+    const record = (ctx: CanvasRenderingContext2D): void => {
+      const detached = !(ctx.canvas instanceof view.HTMLCanvasElement) || !ctx.canvas.isConnected;
+      const state = `${ctx.font}|${ctx.textRendering}|${ctx.fontStretch}`;
+      if (detached && contextStates.get(ctx) === state) return;
+      declaration.font = ctx.font;
       const use = useOf(declaration);
       if (!use) return;
-      const key = `1|${use.families.join(',')}|${use.size}|${use.weight}|${use.italic}`;
+      if (detached) contextStates.set(ctx, state);
+      const canvas = ctx.canvas;
+      const inherited = canvas instanceof view.HTMLCanvasElement && canvas.isConnected ? view.getComputedStyle(canvas) : null;
+      use.cacheKey = fontCacheKey({
+        textRendering: ctx.textRendering,
+        fontOpticalSizing: inherited?.fontOpticalSizing,
+        fontSynthesis: inherited?.fontSynthesis,
+        fontStyle: declaration.fontStyle,
+        fontStretch: ctx.fontStretch === 'normal' ? declaration.fontStretch : ctx.fontStretch,
+        fontVariantEmoji: inherited?.getPropertyValue('font-variant-emoji'),
+        fontSizeAdjust: inherited?.fontSizeAdjust,
+        fontVariationSettings: inherited?.fontVariationSettings,
+        fontPalette: inherited?.fontPalette,
+        fontVariantAlternates: inherited?.fontVariantAlternates,
+      });
+      const key = `1|${use.families.join(',')}|${use.size}|${use.weight}|${use.italic}|${use.cacheKey}`;
       if (seen.has(key)) return;
       seen.add(key);
-      const census: UiFontCensus = { dpr: 1, uses: [use] };
       stats.reports++;
-      host.report(JSON.stringify(census)).catch(() => undefined);
+      host.report(JSON.stringify({ dpr: 1, uses: [use] } satisfies UiFontCensus)).catch(() => undefined);
     };
-    Object.defineProperty(proto, 'font', { ...descriptor, set: setter });
-    restoreCanvas.push(() => {
-      if (Object.getOwnPropertyDescriptor(proto, 'font')?.set === setter) Object.defineProperty(proto, 'font', descriptor);
-    });
+    for (const name of ['measureText', 'fillText', 'strokeText']) {
+      const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+      if (typeof descriptor?.value !== 'function' || !descriptor.configurable) continue;
+      const method = function(this: CanvasRenderingContext2D, ...args: unknown[]) {
+        takeRecords(observer.takeRecords());
+        if (full || pending.size) flush();
+        const result = descriptor.value.apply(this, args);
+        record(this);
+        return result;
+      };
+      Object.defineProperty(proto, name, { ...descriptor, value: method });
+      restoreCanvas.push(() => {
+        if (Object.getOwnPropertyDescriptor(proto, name)?.value === method) Object.defineProperty(proto, name, descriptor);
+      });
+    }
   }
 
   // Another display or page zoom lays every text out again.

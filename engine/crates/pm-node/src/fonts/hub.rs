@@ -396,6 +396,7 @@ mod tests {
             italic: false,
             size: 24.0,
             specified: 12.0,
+            cache_key: None,
         };
         let table = |seeds: Vec<FontCacheSeed>| crate::fonts::SeedTable {
             fallback: seeds,
@@ -415,6 +416,7 @@ mod tests {
     fn layouts_measure_with_the_seeds_of_their_window() {
         use pm_render::text::served::{SeedScope, SeedSource};
         let seed = |size: f32, specified: f32| FontCacheSeed {
+        cache_key: None,
             family: "system-ui".into(),
             weight: 400.0,
             italic: false,
