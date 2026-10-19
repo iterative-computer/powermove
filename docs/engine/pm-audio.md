@@ -1126,7 +1126,10 @@ decode delay). Reproduce the repetition commands above with the additional
 local environment setting `CARGO_PROFILE_RELEASE_LTO=off`. Thin-LTO test
 builds in this environment failed with `failed to get bitcode from object
 file for LTO (Can't find section __bitcode)`, including a retry with explicit
-embedded bitcode. The tests passed with optimized release code and LTO off;
+embedded bitcode. (The cause was pm-media bundling CrabbyAvif's Rust
+staticlib, whose objects carry no bitcode, into its rlib; not kache or this
+machine. Fixed since: [release-build.md](release-build.md).) The tests passed
+with optimized release code and LTO off;
 the repository's release profile was not changed. These counts therefore do
 not claim a successful thin-LTO test link. No parity tolerance or corpus case
 was changed.
@@ -1188,7 +1191,8 @@ Remaining: the mixed-readiness start needs the orchestrator's confirmation
 (see the A3 review follow-ups); long-gap stretch continuity (over 120 ms of
 dropped output) restarts by deterministic pre-roll; 4,096-frame and larger
 callbacks leave mid-run misses beside a sounding voice no reserve-bounded
-wait; thin-LTO test links still fail locally as in round 1.
+wait; thin-LTO test links still failed as in round 1 (fixed since:
+release-build.md).
 
 ### A4 review round 3 (2026-10-18)
 
@@ -1267,7 +1271,7 @@ four build jobs, four test threads, other lanes building on the same Mac):
 
 Remaining: the three orchestrator decisions above; stretch continuity past
 `catch_up_limit` restarts by deterministic pre-roll; thin-LTO test links
-still fail locally.
+still failed (fixed since: release-build.md).
 
 
 ## A6: uninterrupted clock, adaptive ring, paused preparation (2026-10-18)
@@ -1433,8 +1437,9 @@ measurement), 11 decode-readiness, 14 mixer and 6 stretch tests; pm-node's
 The app, pm-wasm and native addon builds pass; the paired hidden app capture
 has zero page errors, zero source-starved renders and no audio problems.
 
-As in A4, thin-LTO test linking fails locally with `Can't find section
-__bitcode`. Tests, clippy and the measured addon use the local environment
+As in A4, thin-LTO test linking failed with `Can't find section
+__bitcode` (pm-media's bundled CrabbyAvif archive; fixed since, see
+release-build.md). Tests, clippy and the measured addon use the local environment
 setting `CARGO_PROFILE_RELEASE_LTO=off`; repository release settings are
 unchanged. The repetition gate executes the built playback test binary
 with the same four-thread arguments and FFmpeg library path supplied by
