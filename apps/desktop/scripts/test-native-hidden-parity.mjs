@@ -75,12 +75,20 @@ try {
   const old = await open(legacyProfile, false); const expectedWorkspace = await old.tool('get_workspace_state'); await old.tool('finish_session', { commit: true }); await old.close();
   const native = await open(nativeProfile, true); const actualWorkspace = await native.tool('get_workspace_state');
   if (evidence) { await mkdir(evidence, { recursive: true }); await writeFile(path.join(evidence, 'workspace-legacy.json'), JSON.stringify(expectedWorkspace)); await writeFile(path.join(evidence, 'workspace-native.json'), JSON.stringify(actualWorkspace)); }
-  assert.equal(JSON.stringify(actualWorkspace), JSON.stringify(expectedWorkspace), 'full persisted workspace answer must be byte-identical');
-  assert(actualWorkspace.layout.registeredPanels.some(p => p.id === 'host-parity.panel'), 'user panel remains registered');
+  const workspaceBytesEqual = JSON.stringify(actualWorkspace) === JSON.stringify(expectedWorkspace);
+  const userPanel = actualWorkspace.layout.registeredPanels.some(p => p.id === 'host-parity.panel');
   const hiddenExport = await native.tool('export_video', { name: 'Pinned hidden', format: 'png', audio: false, motionBlur: false });
-  const before = await pngs(desktopExport.path), after = await pngs(hiddenExport.path); assert.equal(after.length, before.length); assert(before.length > 0);
-  for (let i = 0; i < before.length; i++) assert(pixels(before[i]).equals(pixels(after[i])), `pinned export pixels differ at frame ${i}`);
-  if (evidence) { await cp(desktopExport.path, path.join(evidence, 'desktop-png'), { recursive: true }); await cp(hiddenExport.path, path.join(evidence, 'hidden-png'), { recursive: true }); await writeFile(path.join(evidence, 'result.json'), JSON.stringify({ frames: before.length, pixelsEqual: true, workspaceBytesEqual: true, pinnedPrograms: markers.filter(n => n.endsWith('.runner')).length }, null, 2)); }
+  const before = await pngs(desktopExport.path), after = await pngs(hiddenExport.path);
+  if (evidence) { await cp(desktopExport.path, path.join(evidence, 'desktop-png'), { recursive: true }); await cp(hiddenExport.path, path.join(evidence, 'hidden-png'), { recursive: true }); }
+  const differentFrames = [];
+  for (let i = 0; i < Math.min(before.length, after.length); i++) if (!pixels(before[i]).equals(pixels(after[i]))) differentFrames.push(i);
+  const pixelsEqual = before.length > 0 && before.length === after.length && differentFrames.length === 0;
+  const result = { frames: before.length, hiddenFrames: after.length, pixelsEqual, differentFrames, workspaceBytesEqual, userPanel, pinnedPrograms: markers.filter(n => n.endsWith('.runner')).length };
+  if (evidence) await writeFile(path.join(evidence, 'result.json'), JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(result));
   await native.tool('finish_session', { commit: true }); await native.close();
+  assert(pixelsEqual, `pinned export pixels differ: ${JSON.stringify(result)}`);
+  assert(workspaceBytesEqual, 'full persisted workspace answer must be byte-identical');
+  assert(userPanel, 'user panel remains registered');
   console.log(`Native hidden parity passed: ${before.length} pinned-program PNG frames pixel-identical to the desktop; complete workspace bytes equal today's hidden host, including a user panel.`);
 } finally { for (const child of [...children]) await stop(child); await rm(root, { recursive: true, force: true }); }
