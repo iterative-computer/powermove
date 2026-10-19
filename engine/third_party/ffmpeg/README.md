@@ -1,6 +1,6 @@
 # Powermove's FFmpeg build
 
-A reproducible, LGPL-only FFmpeg for macOS arm64, built from pinned and checksummed
+A reproducible, LGPL-only FFmpeg for macOS arm64 and x86_64, built from pinned and checksummed
 sources. It replaces the bundled `ffmpeg-static` binary, a third-party build whose
 configuration includes GPL and nonfree components (plan section 24 item 1, decision 12). The engine
 links its dylibs; the `ffmpeg` and `ffprobe` executables come from the same configuration
@@ -28,7 +28,15 @@ Builds are bit-for-bit reproducible with the same toolchain: three clean builds
 `manifest.json` files. A different Xcode or SDK changes the binaries; the manifest
 records which was used.
 
-Environment overrides: `PM_FFMPEG_OUT`, `PM_FFMPEG_WORK`, `PM_FFMPEG_DOWNLOADS`,
+For Intel CLI prebuilds, cross-compile on Apple silicon with
+`PM_FFMPEG_ARCH=x86_64` and distinct `PM_FFMPEG_OUT` / `PM_FFMPEG_WORK`
+directories. The sources, enabled components, licensing flags and minimum macOS
+version stay the same. Architecture-specific compiler, Meson and configure settings
+select Intel code; `nasm` is required. Verification runs the Intel executables under
+Rosetta and checks the requested architecture. Both architectures are ad-hoc signed
+after binary edits, before the manifest records their checksums.
+
+Environment overrides: `PM_FFMPEG_ARCH` (`arm64`, the default, or `x86_64`), `PM_FFMPEG_OUT`, `PM_FFMPEG_WORK`, `PM_FFMPEG_DOWNLOADS`,
 `PM_FFMPEG_JOBS`, `PM_FFMPEG_PYTHON` (python 3.10 or newer, for meson), and
 `PM_FFMPEG_SKIP_VERIFY=1`.
 

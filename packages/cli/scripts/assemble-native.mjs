@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const args = process.argv.slice(2), flags = new Map();
 while (args.length) {
   const flag = args.shift(), value = args.shift();
-  if (!['--arch', '--artifacts', '--ffmpeg', '--out', '--node'].includes(flag) || !value) throw new Error(`Invalid assembly option ${flag}`);
+  if (!['--arch', '--artifacts', '--ffmpeg', '--out', '--node', '--media-native'].includes(flag) || !value) throw new Error(`Invalid assembly option ${flag}`);
   flags.set(flag, value);
 }
 const arch = flags.get('--arch');
@@ -51,14 +51,22 @@ function dependencies(source, target) {
   }
 }
 try {
-  for (const [from, to] of [['libpm_node.dylib', 'pm_node.node'], ['libpm_bridge.dylib', 'pm_bridge.node'], ['pm-cli', 'pm-cli']]) {
+  for (const [from, to] of [['libpm_node_addon.dylib', 'pm_node.node'], ['libpm_bridge_addon.dylib', 'pm_bridge.node'], ['pm-cli', 'pm-cli']]) {
     const source = copyBinary(path.join(artifacts, from), path.join(stage, to));
     dependencies(source, path.join(stage, to));
   }
   cpSync(path.join(ffmpeg, 'share/licenses'), path.join(stage, 'share/licenses'), { recursive: true });
   copyFileSync(path.join(ffmpeg, 'manifest.json'), path.join(stage, 'ffmpeg-manifest.json'));
+  const mediaNative = flags.get('--media-native') ?? process.env.PM_MEDIA_NATIVE_DIR;
+  if (mediaNative) {
+    if (!existsSync(path.join(mediaNative, 'stamp')) || !existsSync(path.join(mediaNative, 'share/licenses'))) throw new Error('--media-native must name a completed pinned media-library build');
+    cpSync(path.join(mediaNative, 'share/licenses'), path.join(stage, 'share/licenses'), { recursive: true });
+    copyFileSync(path.join(mediaNative, 'stamp'), path.join(stage, 'media-native-stamp'));
+    if (existsSync(path.join(mediaNative, 'target'))) copyFileSync(path.join(mediaNative, 'target'), path.join(stage, 'media-native-target'));
+  } else process.stderr.write('Native image-decoder license assembly is pending: pass --media-native for the final prebuild.\n');
   for (const file of [...copied.keys()].map(name => path.join(lib, name)).concat(['pm_node.node', 'pm_bridge.node', 'pm-cli'].map(name => path.join(stage, name)))) run('codesign', ['--force', '--sign', '-', file]);
   const node = flags.get('--node') ?? process.execPath;
+  if (run(node, ['-p', 'process.arch']).trim() !== arch) throw new Error('--node must match the prebuild architecture');
   if (Number(run(node, ['-p', 'process.versions.node.split(".")[0]']).trim()) !== 22) throw new Error('--node must name a clean Node 22 executable for the required load test');
   run(node, ['-e', 'const a = require(process.argv[1]); const b = require(process.argv[2]); if (!a.buildId() || typeof a.EngineHost !== "function" || typeof b.FontRegistry !== "function") process.exit(1); const engine = new a.EngineHost("job"); engine.tick(); engine.pump();', path.join(stage, 'pm_node.node'), path.join(stage, 'pm_bridge.node')]);
   run(path.join(stage, 'pm-cli'), ['--help']);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds Powermove's FFmpeg from pinned sources for macOS arm64.
+# Builds Powermove's FFmpeg from pinned sources for macOS arm64 or x86_64.
 #
 #   engine/third_party/ffmpeg/build.sh            # full build, then verify.sh
 #   PM_FFMPEG_JOBS=8 engine/third_party/ffmpeg/build.sh
@@ -17,6 +17,7 @@
 #   manifest.json   versions, checksums, configure line, toolchain, outputs
 #
 # Environment overrides:
+#   PM_FFMPEG_ARCH       arm64 (default) or x86_64
 #   PM_FFMPEG_OUT        output directory           (default: <here>/out)
 #   PM_FFMPEG_WORK       scratch build directory    (default: <here>/work)
 #   PM_FFMPEG_DOWNLOADS  verified source cache      (default: <here>/downloads)
@@ -26,6 +27,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ARCH="${PM_FFMPEG_ARCH:-arm64}"
+case "$ARCH" in arm64) FFMPEG_ARCH=aarch64 ;; x86_64) FFMPEG_ARCH=x86_64 ;; *) echo "Unsupported PM_FFMPEG_ARCH: $ARCH" >&2; exit 1 ;; esac
 OUT="${PM_FFMPEG_OUT:-$HERE/out}"
 WORK="${PM_FFMPEG_WORK:-$HERE/work}"
 DOWNLOADS="${PM_FFMPEG_DOWNLOADS:-$HERE/downloads}"
@@ -44,7 +47,8 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 # ── Preflight ────────────────────────────────────────────────────────────────
 
 [[ "$(uname -s)" == "Darwin" ]] || die "this script builds for macOS only"
-[[ "$(uname -m)" == "arm64" ]] || die "this script builds on and for arm64 only (found $(uname -m))"
+[[ "$(uname -m)" == "arm64" || "$(uname -m)" == "x86_64" ]] || die "unsupported build host"
+if [[ "$ARCH" == x86_64 ]]; then command -v nasm >/dev/null || die "x86_64 requires nasm"; fi
 
 for tool in clang clang++ make cmake ninja pkg-config python3 curl shasum tar xz autoconf automake glibtoolize xcrun otool; do
   command -v "$tool" >/dev/null 2>&1 || die "missing build tool: $tool (see README.md, Build requirements)"
@@ -81,7 +85,7 @@ TOOLS="$WORK/tools"
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 # __FILE__ and similar strings in dependencies never carry local paths.
 PATH_MAP="-ffile-prefix-map=$WORK=/pm-ffmpeg"
-BASE_FLAGS="-arch arm64 -mmacosx-version-min=$DEPLOYMENT_TARGET $PATH_MAP"
+BASE_FLAGS="-arch $ARCH -mmacosx-version-min=$DEPLOYMENT_TARGET $PATH_MAP"
 
 # ── Sources ──────────────────────────────────────────────────────────────────
 
@@ -142,12 +146,31 @@ MESON=("$PYTHON" -I "$(src_of meson)/meson.py")
 MESON_COMMON=(--prefix="$PREFIX" --libdir=lib --buildtype=release --default-library=static
   --wrap-mode=nofallback --auto-features=disabled -Db_ndebug=true -Db_staticpic=true)
 CMAKE_COMMON=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib
-  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
+  -DCMAKE_OSX_ARCHITECTURES="$ARCH" -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
   -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" -DCMAKE_FIND_FRAMEWORK=LAST
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_SHARED_LIBS=OFF)
 
+if [[ "$ARCH" != "$(uname -m)" ]]; then
+  cat > "$WORK/cross.ini" <<EOF
+[binaries]
+c = ['clang', '-arch', '$ARCH']
+cpp = ['clang++', '-arch', '$ARCH']
+ar = 'ar'
+strip = 'strip'
+pkg-config = 'pkg-config'
+[host_machine]
+system = 'darwin'
+cpu_family = '$ARCH'
+cpu = '$ARCH'
+endian = 'little'
+[properties]
+needs_exe_wrapper = false
+EOF
+  MESON_COMMON+=(--cross-file="$WORK/cross.ini")
+fi
+
 with_flags() {
-  CFLAGS="-O2 $BASE_FLAGS" CXXFLAGS="-O2 $BASE_FLAGS" LDFLAGS="-arch arm64 -mmacosx-version-min=$DEPLOYMENT_TARGET" "$@"
+  CFLAGS="-O2 $BASE_FLAGS" CXXFLAGS="-O2 $BASE_FLAGS" LDFLAGS="-arch $ARCH -mmacosx-version-min=$DEPLOYMENT_TARGET" "$@"
 }
 
 # ── Static dependencies ──────────────────────────────────────────────────────
@@ -166,8 +189,8 @@ build_libvpx() {
   # libvpx compiles its configure arguments into the library
   # (vpx_codec_build_config), so no path is passed to configure: the prefix is
   # given to make instead. darwin22 = macOS 13; that target only adds -arch.
-  CFLAGS="$BASE_FLAGS" CXXFLAGS="$BASE_FLAGS" LDFLAGS="-arch arm64 -mmacosx-version-min=$DEPLOYMENT_TARGET" \
-    "$(src_of libvpx)/configure" --target=arm64-darwin22-gcc \
+  CFLAGS="$BASE_FLAGS" CXXFLAGS="$BASE_FLAGS" LDFLAGS="-arch $ARCH -mmacosx-version-min=$DEPLOYMENT_TARGET" \
+    "$(src_of libvpx)/configure" --target="$ARCH-darwin22-gcc" \
     --enable-static --disable-shared --enable-pic --enable-vp8 --enable-vp9 --enable-vp9-highbitdepth \
     --enable-runtime-cpu-detect --disable-examples --disable-tools --disable-docs --disable-unit-tests \
     --disable-debug --disable-install-bins --disable-install-srcs
@@ -178,7 +201,7 @@ build_libvpx() {
 build_opus() {
   log "build opus"
   cd "$(src_of opus)"
-  with_flags ./configure --prefix="$PREFIX" --libdir="$PREFIX/lib" --enable-static --disable-shared --with-pic \
+  with_flags ./configure --host="$FFMPEG_ARCH-apple-darwin" --prefix="$PREFIX" --libdir="$PREFIX/lib" --enable-static --disable-shared --with-pic \
     --disable-doc --disable-extra-programs
   make -j"$JOBS"
   make install
@@ -186,7 +209,7 @@ build_opus() {
 
 build_dav1d() {
   log "build dav1d"
-  CFLAGS="$BASE_FLAGS" LDFLAGS="-arch arm64 -mmacosx-version-min=$DEPLOYMENT_TARGET" \
+  CFLAGS="$BASE_FLAGS" LDFLAGS="-arch $ARCH -mmacosx-version-min=$DEPLOYMENT_TARGET" \
     "${MESON[@]}" setup "$WORK/build/dav1d" "$(src_of dav1d)" "${MESON_COMMON[@]}" \
     -Denable_tools=false -Denable_tests=false -Denable_examples=false -Denable_docs=false -Denable_asm=true
   "${MESON[@]}" install -C "$WORK/build/dav1d"
@@ -203,7 +226,7 @@ build_svtav1() {
 build_freetype() {
   log "build freetype"
   # zlib from our prefix; no png, bzip2, brotli, or harfbuzz (drawtext needs none).
-  CFLAGS="$BASE_FLAGS" LDFLAGS="-arch arm64 -mmacosx-version-min=$DEPLOYMENT_TARGET" \
+  CFLAGS="$BASE_FLAGS" LDFLAGS="-arch $ARCH -mmacosx-version-min=$DEPLOYMENT_TARGET" \
     "${MESON[@]}" setup "$WORK/build/freetype" "$(src_of freetype)" "${MESON_COMMON[@]}" \
     -Dzlib=system -Dpng=disabled -Dbzip2=disabled -Dbrotli=disabled -Dharfbuzz=disabled -Dtests=disabled -Dmmap=enabled
   "${MESON[@]}" install -C "$WORK/build/freetype"
@@ -212,7 +235,7 @@ build_freetype() {
 build_harfbuzz() {
   log "build harfbuzz"
   # FFmpeg's drawtext shapes text with harfbuzz over freetype (hb-ft).
-  CFLAGS="$BASE_FLAGS" CXXFLAGS="$BASE_FLAGS" LDFLAGS="-arch arm64 -mmacosx-version-min=$DEPLOYMENT_TARGET" \
+  CFLAGS="$BASE_FLAGS" CXXFLAGS="$BASE_FLAGS" LDFLAGS="-arch $ARCH -mmacosx-version-min=$DEPLOYMENT_TARGET" \
     "${MESON[@]}" setup "$WORK/build/harfbuzz" "$(src_of harfbuzz)" "${MESON_COMMON[@]}" \
     -Dfreetype=enabled -Dglib=disabled -Dgobject=disabled -Dcairo=disabled -Dchafa=disabled -Dicu=disabled \
     -Dgraphite=disabled -Dgraphite2=disabled -Dcoretext=disabled -Draster=disabled -Dvector=disabled \
@@ -228,7 +251,7 @@ build_zimg() {
   # host's autoconf, automake and libtool (versions recorded in the manifest).
   # MKDIR_P keeps configure from picking up GNU mkdir (gmkdir) when coreutils is installed.
   LIBTOOLIZE=glibtoolize ./autogen.sh >/dev/null
-  MKDIR_P="mkdir -p" with_flags ./configure --prefix="$PREFIX" --libdir="$PREFIX/lib" --enable-static --disable-shared --with-pic \
+  MKDIR_P="mkdir -p" with_flags ./configure --host="$FFMPEG_ARCH-apple-darwin" --prefix="$PREFIX" --libdir="$PREFIX/lib" --enable-static --disable-shared --with-pic \
     --disable-testapp --disable-example --disable-unit-test
   make -j"$JOBS"
   make install
@@ -251,7 +274,7 @@ fi
 CONFIGURE_FLAGS=(
   --prefix="$FAKE_PREFIX"
   --install-name-dir=@rpath
-  --arch=aarch64 --target-os=darwin --cc=clang --cxx=clang++
+  --arch="$FFMPEG_ARCH" --target-os=darwin --cc=clang --cxx=clang++
   --enable-shared --disable-static
   --disable-autodetect
   --enable-pthreads
@@ -263,14 +286,17 @@ CONFIGURE_FLAGS=(
   --disable-decoder=prores_raw
   --disable-ffplay --disable-doc --disable-debug
   --pkg-config=pkg-config --pkg-config-flags=--static
-  --extra-cflags="-mmacosx-version-min=$DEPLOYMENT_TARGET"
-  --extra-ldflags="-mmacosx-version-min=$DEPLOYMENT_TARGET"
+  --extra-cflags="-arch $ARCH -mmacosx-version-min=$DEPLOYMENT_TARGET"
+  --extra-ldflags="-arch $ARCH -mmacosx-version-min=$DEPLOYMENT_TARGET"
   --extra-ldexeflags="-Wl,-rpath,@executable_path/../lib"
   --extra-ldsoflags="-Wl,-rpath,@loader_path"
   # libc++ for harfbuzz and zimg (C++); libiconv because the iconv probe passes
   # without it but libavcodec's subtitle decoding needs it at link time.
   --extra-libs="-lc++ -liconv"
 )
+
+if [[ "$ARCH" != "$(uname -m)" ]]; then CONFIGURE_FLAGS+=(--enable-cross-compile); fi
+export PM_FFMPEG_ARCH="$ARCH"
 
 log "configure FFmpeg $(version_of ffmpeg)"
 cd "$(src_of ffmpeg)"
@@ -313,6 +339,13 @@ for i in "${!NAMES[@]}"; do
   for file in "${files[@]}"; do
     cp "$SRC/${DIRS[$i]}/$file" "$OUT/share/licenses/$name/$(basename "$file")"
   done
+done
+
+# install_name_tool and the linker may leave Intel Mach-O binaries unsigned.
+# Sign after all binary edits and before recording their checksums.
+for binary in "$OUT"/bin/ffmpeg "$OUT"/bin/ffprobe "$OUT"/lib/*.dylib; do
+  [[ -L "$binary" ]] && continue
+  codesign --force --sign - "$binary"
 done
 
 # ── Manifest ─────────────────────────────────────────────────────────────────
