@@ -21,8 +21,9 @@
  * for every scenario. Legacy completion is the first successful GL.render
  * with the changed layer text, sampled by the same RAF polling loop.
  */
-import { appendFile } from 'node:fs/promises';
+import { appendFile, statfs } from 'node:fs/promises';
 import os from 'node:os';
+import path from 'node:path';
 
 import { expect, test } from '@playwright/test';
 
@@ -45,12 +46,23 @@ for (const scenario of [
 ]) {
   for (const mode of MODES) test(`canvas text typing: ${scenario.name} (${mode})`, async () => {
     test.skip(!MEASURE, 'set PM_TEXT_TYPING_MEASURE=1');
-    test.setTimeout(600_000);
-    const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: mode === 'native' ? '1' : '0', POWERMOVE_ENGINE_FRAME_SOURCE: 'document' } });
+    test.setTimeout(1_800_000);
+    const untilQuiet = Date.now() + 15 * 60_000;
+    while (os.loadavg()[0] > 8 && Date.now() < untilQuiet) await new Promise(r=>setTimeout(r,30_000));
+    if (os.loadavg()[0] > 8) throw new Error('Machine load remained above 8; typing row is unmeasured');
+    const disk = await statfs('/System/Volumes/Data');
+    if (disk.bavail * disk.bsize < 40 * 1024 ** 3) throw new Error('Disk below required 40 GiB before typing launch');
+    const loadBefore = os.loadavg();
+    const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: mode === 'native' ? '1' : '0', POWERMOVE_ENGINE_FRAME_SOURCE: 'document', POWERMOVE_BRIDGE_TRACE: '1' } });
     try {
       const { page } = session;
+      const displayBefore = await session.app.evaluate(({}, harnessPath) => process.getBuiltinModule('module').createRequire(harnessPath)(harnessPath).displayState(), process.env.POWERMOVE_PM_BRIDGE_HARNESS ?? path.join(os.homedir(),'Library/Caches/powermove-engine/pm_bridge_harness.node'));
+      if (displayBefore.asleep || displayBefore.locked) throw new Error('Display asleep or locked; typing row is unmeasured');
       await session.openEditor();
-      if (mode === 'native') await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
+      if (mode === 'native') {
+        await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
+        await page.evaluate(() => (window as any).PM.EngineConnection.setTrace(true));
+      }
       const id = await page.evaluate((d) => {
         const PM = (window as any).PM;
         const project = PM.mkProject({ name: 'Typing', w: 1920, h: 1080, fps: 30, dur: 10, bg: '#101010' });
@@ -96,16 +108,21 @@ for (const scenario of [
           if (result !== false && p && w.PM.resolveContent(w.PM.L(id), w.PM.time)?.text !== p.text) legacyRevision++;
           return result;
         };
-        w.__typing = { pending: null as null | { t: number; revision: number }, samples: [] as number[], failures: 0 };
+        w.__typing = { pending: null as null | { t: number; revision: number }, samples: [] as number[], keys: [] as any[], batches: [] as any[], frames: [] as any[], failures: 0 };
+        if (mode === 'native') {
+          w.PM.EngineDoc.subscribe((b:any)=>w.__typing.batches.push({at:performance.now(),revision:b.revision}));
+          viewer.enginePresentation.onPresented((f:any)=>w.__typing.frames.push({at:performance.now(),seq:f.seq,revision:f.revision,rafMs:f.rafMs}));
+        }
         document.addEventListener('keydown', (e) => {
           const frame = mode === 'native' ? viewer.engineFrame() : { revision: legacyRevision };
-          w.__typing.pending = { t: e.timeStamp, revision: frame?.revision ?? -1, text: w.PM.resolveContent(w.PM.L(id), w.PM.time)?.text };
+          w.__typing.pending = { t: e.timeStamp, handled:performance.now(), revision: mode === 'native' ? (w.PM.EngineDoc.barrier?.revision ?? -1) : frame?.revision ?? -1, text: w.PM.resolveContent(w.PM.L(id), w.PM.time)?.text };
         }, { capture: true });
         const tick = (now: number) => {
           const p = w.__typing.pending;
           const frame = mode === 'native' ? viewer.engineFrame() : { revision: legacyRevision };
           if (p && frame && frame.revision > p.revision) {
             w.__typing.samples.push(now - p.t);
+            w.__typing.keys.push({...p,presentedRaf:now,shownRevision:frame.revision});
             w.__typing.pending = null;
           }
           requestAnimationFrame(tick);
@@ -125,13 +142,15 @@ for (const scenario of [
         }
         await page.waitForTimeout(60);
       }
-      const result = await page.evaluate(() => {
+      const result = await page.evaluate(async () => {
         const w = window as any;
         const PM = w.PM;
-        return { samples: w.__typing.samples as number[], route: PM.EngineConnection?.status()?.route ?? 'legacy', text: PM.L(PM.sel.layers?.[0] ?? '')?.d?.text };
+        const viewer = PM.Kernel.services.get('viewer');
+        return { details:{keys:w.__typing.keys,batches:w.__typing.batches,frames:w.__typing.frames,hostOffsetUs:PM.EngineConnection?.status().hostOffsetUs,trace:mode === 'native' ? await viewer.enginePresentation.takeTrace() : null}, samples: w.__typing.samples as number[], route: PM.EngineConnection?.status()?.route ?? 'legacy', text: PM.L(PM.sel.layers?.[0] ?? '')?.d?.text };
       });
       await page.keyboard.press('Escape');
       const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive') ?? null);
+      const displayAfter = await session.app.evaluate(({}, harnessPath) => process.getBuiltinModule('module').createRequire(harnessPath)(harnessPath).displayState(), process.env.POWERMOVE_PM_BRIDGE_HARNESS ?? path.join(os.homedir(),'Library/Caches/powermove-engine/pm_bridge_harness.node'));
       const samples = result.samples;
       const value = {
         scenario: scenario.name,
@@ -141,15 +160,18 @@ for (const scenario of [
         missed,
         p50: samples.length ? Math.round(percentile(samples, 50) * 100) / 100 : null,
         p95: samples.length ? Math.round(percentile(samples, 95) * 100) / 100 : null,
+        p99: samples.length ? Math.round(percentile(samples, 99) * 100) / 100 : null,
         max: samples.length ? Math.round(Math.max(...samples) * 100) / 100 : null,
         route: result.route,
         layerFailures: report?.presenter?.layerFailures ?? null,
         renderErrors: report?.presenter?.renderErrors ?? null,
         fonts: report?.fonts ?? null,
       };
-      await appendFile(OUT, `${JSON.stringify({ row: 'canvas-text-typing', at: new Date().toISOString(), cpu: os.cpus()[0]?.model ?? null, load: os.loadavg(), value })}\n`);
+      await appendFile(OUT, `${JSON.stringify({ row: 'canvas-text-typing', at: new Date().toISOString(), cpu: os.cpus()[0]?.model ?? null, displayBefore,displayAfter,loadBefore, load: os.loadavg(), invalid:os.loadavg()[0]>8?'machine load exceeded 8':null, value, details:result.details, engineTrace:report?.presentTrace??null })}\n`);
       console.log(`[measure] canvas text typing: ${JSON.stringify(value)}`);
       if (mode === 'native') expect(result.route).toBe('engine');
+      expect(displayAfter.asleep || displayAfter.locked).toBe(false);
+      expect(os.loadavg()[0], 'machine load exceeded 8; retry this pair').toBeLessThanOrEqual(8);
       expect(missed).toBe(0);
       expect(samples.length).toBe(KEYS);
       expect(value.p95!).toBeLessThanOrEqual(33);

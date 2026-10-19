@@ -491,6 +491,16 @@ describe('the runner on the calling thread (the synchronous snapshot path)', () 
     expect(state.draws).toHaveLength(0);
   });
 
+  it('uses a blocking GPU barrier for a sync snapshot, whose fence cannot signal in the same JavaScript task', () => {
+    const { canvas } = fakeGl([], () => { throw new Error('same-task fence polling would spin'); });
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    let barriers = 0;
+    gl['finish'] = () => { barriers++; };
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    expect(runner.renderSync(request(2, 1, '8a'.repeat(32)))).toMatchObject({ width: 2 });
+    expect(barriers).toBe(1);
+  });
+
   it('keeps the watchdog: a draw past its deadline loses the context and the program is never run again', () => {
     let clock = 0;
     // The fence never signals; the clock moves each poll.
@@ -538,4 +548,19 @@ describe('the runner on the calling thread (the synchronous snapshot path)', () 
     await expect(pending).resolves.toMatchObject({ key: '7d'.repeat(32) });
     expect(programs).toBe(1);
   });
+});
+
+// All finite binary16 values, including signed zero and subnormals.
+it('bulk half conversion preserves every finite binary16 value and view offset', () => {
+  const values = new Float32Array(65538);
+  for (let bits = 0; bits < 65536; bits++) {
+    const sign = bits & 0x8000 ? -1 : 1, exp = bits >>> 10 & 31, frac = bits & 1023;
+    values[bits + 1] = exp === 31 ? (frac ? NaN : sign * Infinity)
+      : sign * (exp ? (1 + frac / 1024) * 2 ** (exp - 15) : frac * 2 ** -24);
+  }
+  const converted = toHalfArray(values.subarray(1, 65537));
+  for (let bits = 0; bits < 65536; bits++) {
+    if ((bits & 0x7c00) === 0x7c00 && (bits & 1023)) expect(converted[bits]! & 0x7fff).toBeGreaterThan(0x7c00);
+    else expect(converted[bits]).toBe(bits);
+  }
 });

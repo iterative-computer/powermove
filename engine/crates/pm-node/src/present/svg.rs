@@ -15,8 +15,15 @@
 //! - A snapshot the renderer answered names the keys it posted
 //!   (`SnapshotRequest::uploaded`, [`SvgRasterKey::upload_key`]):
 //!   [`SvgState::expect`] marks them pending so the job waits for them.
-//! - A failure (`CompatMessage::SvgFailed`) is logged once per key and
-//!   asked again only after [`RETRY_US`].
+//! - A viewer frame waits for the exact bucket (no stand-in), at most
+//!   [`VIEW_WAIT_US`] from when it was asked. A failure
+//!   (`CompatMessage::SvgFailed`), a refused band, or no answer within that
+//!   wait ends the wait at once: the key is marked failed in the renderer
+//!   (`Renderer::fail_svg_raster`) and the frame is drawn without that
+//!   image, as today's compositor draws the frame without a layer whose
+//!   `rasterSvgAsset` throws. The failure is logged once per key, and the
+//!   key is asked again after [`RETRY_US`] while a view still draws
+//!   without it ([`SvgState::retry_at`]); its raster arriving draws it.
 //! - Pending asks the renderer never answered are asked again after
 //!   [`ASK_AGAIN_US`]; a closed session's asks are dropped.
 
@@ -30,6 +37,9 @@ use super::render::Key;
 pub const ASK_AGAIN_US: i64 = 10_000_000;
 /// A key the renderer could not draw is asked again after this long.
 pub const RETRY_US: i64 = 5_000_000;
+/// Longest a viewer frame waits for a bucket it asked for before it is
+/// drawn without it (the ask stays open: its raster draws when it lands).
+pub const VIEW_WAIT_US: i64 = RETRY_US;
 /// Most rasters assembling at once, and their bytes.
 pub const MAX_PENDING: usize = 256;
 pub const MAX_PENDING_BYTES: u64 = 512 * 1024 * 1024;
@@ -51,8 +61,9 @@ pub enum Band {
     Partial,
     /// The raster is complete.
     Complete(SvgRasterKey, Vec<u8>),
-    /// Refused (too many rasters assembling).
-    Refused,
+    /// Refused (too many rasters assembling): this raster will not
+    /// complete from the bands sent, so whoever waits for it stops.
+    Refused(SvgRasterKey),
 }
 
 /// The render thread's SVG raster asks.
@@ -138,14 +149,14 @@ impl SvgState {
         let bytes = band.key.bytes();
         if !self.pending.contains_key(&band.key) {
             if self.pending.len() >= MAX_PENDING {
-                return Band::Refused;
+                return Band::Refused(band.key);
             }
             self.expect(session, &band.key, now);
         }
         let p = self.pending.get_mut(&band.key).expect("inserted above");
         if p.data.is_empty() {
             if self.bytes + bytes > MAX_PENDING_BYTES {
-                return Band::Refused;
+                return Band::Refused(band.key);
             }
             self.bytes += bytes;
             p.data = vec![0; bytes as usize];
@@ -188,6 +199,24 @@ impl SvgState {
     /// arrived since).
     pub fn has_failed(&self, key: &SvgRasterKey) -> bool {
         self.failed.contains_key(key)
+    }
+
+    /// When `key` was last asked for, while it is pending.
+    pub fn asked_at(&self, key: &SvgRasterKey) -> Option<i64> {
+        self.pending.get(key).map(|p| p.asked_us)
+    }
+
+    /// When a frame that drew without `key` should ask for it again: a
+    /// failure after [`RETRY_US`], an ask nothing arrived for after
+    /// [`ASK_AGAIN_US`] ([`SvgState::wanted`] decides then).
+    pub fn retry_at(&self, key: &SvgRasterKey) -> Option<i64> {
+        if let Some(at) = self.failed.get(key) {
+            return Some(at + RETRY_US);
+        }
+        self.pending
+            .get(key)
+            .filter(|p| p.data.is_empty())
+            .map(|p| p.asked_us + ASK_AGAIN_US)
     }
 
     /// A session closed: its asks and partial rasters go.
@@ -325,5 +354,49 @@ mod tests {
             1
         );
         assert_eq!(s.failures, 2);
+    }
+
+    #[test]
+    fn a_failed_or_unanswered_key_says_when_to_ask_again() {
+        let mut s = SvgState::default();
+        let k = key(2, 2);
+        assert_eq!(s.retry_at(&k), None, "never asked");
+        s.wanted(session(1), &[need(k.clone())], 100, |_| false);
+        assert_eq!(s.asked_at(&k), Some(100));
+        assert_eq!(s.retry_at(&k), Some(100 + ASK_AGAIN_US), "unanswered");
+        // Bands arriving: it is on its way.
+        s.band(session(1), band(&k, 0, 1, 1), 200);
+        assert_eq!(s.retry_at(&k), None);
+        s.failed(&k, 300);
+        assert_eq!(s.asked_at(&k), None, "no longer pending");
+        assert_eq!(s.retry_at(&k), Some(300 + RETRY_US));
+        assert!(
+            s.wanted(session(1), &[need(k.clone())], 300 + RETRY_US - 1, |_| {
+                false
+            })
+            .is_empty()
+        );
+        assert_eq!(
+            s.wanted(session(1), &[need(k.clone())], 300 + RETRY_US, |_| false)
+                .len(),
+            1,
+            "asked again once due"
+        );
+    }
+
+    #[test]
+    fn a_refused_band_names_its_raster() {
+        let mut s = SvgState::default();
+        for i in 0..MAX_PENDING as u32 {
+            assert_eq!(
+                s.band(session(1), band(&key(1, 2 + i), 0, 1, 0), 0),
+                Band::Partial
+            );
+        }
+        let k = key(3, 3);
+        assert_eq!(
+            s.band(session(1), band(&k, 0, 1, 0), 0),
+            Band::Refused(k.clone())
+        );
     }
 }

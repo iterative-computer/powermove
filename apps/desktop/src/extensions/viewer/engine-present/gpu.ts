@@ -19,6 +19,7 @@ type GPUDeviceLike = {
   queue: { submit(buffers: unknown[]): void; onSubmittedWorkDone(): Promise<void> };
   createShaderModule(d: { code: string }): unknown;
   createRenderPipeline(d: any): { getBindGroupLayout(i: number): unknown };
+  createRenderPipelineAsync?(d: any): Promise<{ getBindGroupLayout(i: number): unknown }>;
   createSampler(d: any): unknown;
   createBindGroup(d: any): unknown;
   createCommandEncoder(): {
@@ -100,23 +101,38 @@ export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu
   if (!adapter) throw new Error('no WebGPU adapter');
   const device = await adapter.requestDevice();
   const context = (canvas as HTMLCanvasElement).getContext('webgpu') as unknown as GPUCanvasContextLike | null;
-  if (!context) throw new Error('no WebGPU canvas context');
+  if (!context) { device.destroy(); throw new Error('no WebGPU canvas context'); }
   const module = device.createShaderModule({ code: SHADER });
   const sampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
   const pipelines = new Map<string, { getBindGroupLayout(i: number): unknown }>();
+  const pipelineDescriptor = (format: string) => ({
+    layout: 'auto',
+    vertex: { module, entryPoint: 'vs' },
+    fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' }
+  });
   const pipelineFor = (format: string) => {
     let pipeline = pipelines.get(format);
     if (!pipeline) {
-      pipeline = device.createRenderPipeline({
-        layout: 'auto',
-        vertex: { module, entryPoint: 'vs' },
-        fragment: { module, entryPoint: 'fs', targets: [{ format }] },
-        primitive: { topology: 'triangle-list' }
-      });
+      pipeline = device.createRenderPipeline(pipelineDescriptor(format));
       pipelines.set(format, pipeline);
     }
     return pipeline;
   };
+  // Prepare both output formats before any session starts. Pipeline
+  // compilation then stays out of the first timed frame, including EDR.
+  try {
+    await Promise.all([...new Set([gpu.getPreferredCanvasFormat(), 'rgba16float'])].map(async format => {
+      const descriptor = pipelineDescriptor(format);
+      const pipeline = device.createRenderPipelineAsync
+        ? await device.createRenderPipelineAsync(descriptor)
+        : device.createRenderPipeline(descriptor);
+      pipelines.set(format, pipeline);
+    }));
+  } catch (error) {
+    device.destroy();
+    throw error;
+  }
   let canvasFormat = gpu.getPreferredCanvasFormat();
   let configured = '';
   let disposed = false;

@@ -257,6 +257,10 @@ pub struct Renderer {
     /// Frames that are not exports wait for level 1 SVG rasters too
     /// (snapshots) instead of substituting ([`Renderer::set_svg_wait`]).
     svg_wait: bool,
+    /// A waiting frame that is not an export draws without the buckets the
+    /// window could not draw instead of waiting for them (the viewer;
+    /// [`Renderer::svg_waiting_viewer`]).
+    svg_skip_failed: bool,
     /// Where a waiting frame gets missing level 1 SVG rasters itself (the
     /// job engine's host services; [`Renderer::set_svg_source`]).
     svg_source: Option<Arc<dyn crate::vector::svg_rasters::SvgRasterSource>>,
@@ -295,6 +299,7 @@ impl Renderer {
             reuse_enabled: false,
             prefix: Default::default(),
             svg_wait: false,
+            svg_skip_failed: false,
             svg_source: None,
         }
     }
@@ -370,11 +375,45 @@ impl Renderer {
     /// snapshot that bails out never leaves the viewer waiting (a viewer
     /// that waits fails its frames instead of asking for the rasters).
     pub fn svg_waiting(&mut self) -> SvgWaiting<'_> {
-        let restore = std::mem::replace(&mut self.svg_wait, true);
+        let restore = (
+            std::mem::replace(&mut self.svg_wait, true),
+            std::mem::replace(&mut self.svg_skip_failed, false),
+        );
         SvgWaiting {
             renderer: self,
             restore,
         }
+    }
+
+    /// This renderer waiting for level 1 SVG rasters as a viewer frame
+    /// does, until the guard is dropped: a missing bucket fails the frame
+    /// pending ([`RenderError::SvgRastersPending`]) unless the window could
+    /// not draw it ([`Renderer::fail_svg_raster`]); such a bucket is drawn
+    /// as nothing and named in [`Rendered::svg_misses`] (asked for again
+    /// later), as today's compositor draws the frame without a layer whose
+    /// SVG raster throws. Exports still wait for every bucket.
+    pub fn svg_waiting_viewer(&mut self) -> SvgWaiting<'_> {
+        let restore = (
+            std::mem::replace(&mut self.svg_wait, true),
+            std::mem::replace(&mut self.svg_skip_failed, true),
+        );
+        SvgWaiting {
+            renderer: self,
+            restore,
+        }
+    }
+
+    /// The document's window could not draw a level 1 SVG bucket (or did
+    /// not answer for it in time): viewer frames draw without it until its
+    /// raster arrives ([`Renderer::put_svg_raster`]).
+    pub fn fail_svg_raster(&mut self, key: pm_protocol::svg_raster::SvgRasterKey) {
+        self.vector.svg.fail(key);
+    }
+
+    /// Whether a bucket failed ([`Renderer::fail_svg_raster`]) and has not
+    /// arrived since.
+    pub fn svg_raster_failed(&self, key: &pm_protocol::svg_raster::SvgRasterKey) -> bool {
+        self.vector.svg.is_failed(key)
     }
 
     /// Stores a level 1 SVG raster the document's renderer drew:
@@ -1387,6 +1426,7 @@ impl Renderer {
         self.effects.fallback.pending.clear();
         self.effects.fallback.fatal = None;
         self.effects.fallback.blocked = false;
+        let svg_skip_failed = self.svg_skip_failed && !request.export;
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
             let mut exec = Exec {
@@ -1463,7 +1503,7 @@ impl Renderer {
             // so media caches filled by this encoder stay valid.
             let held = exec.effects.watchdog.take_held();
             let svg_waits = exec.svg_policy == crate::vector::svg_rasters::SvgMissPolicy::Wait
-                && exec.vector.svg.missed();
+                && exec.vector.svg.missed_waiting(svg_skip_failed);
             let complete = exec.unsupported.is_empty()
                 && exec.fallback_pending.is_empty()
                 && exec.effects.fallback.pending.is_empty()
@@ -1558,7 +1598,11 @@ impl Renderer {
             ));
         }
         let svg_misses = self.vector.svg.take_misses();
-        if !svg_misses.is_empty() && (request.export || self.svg_wait) {
+        if (request.export || self.svg_wait)
+            && svg_misses
+                .iter()
+                .any(|m| !(svg_skip_failed && self.vector.svg.is_failed(&m.request.key)))
+        {
             return Err(RenderError::SvgRastersPending(svg_misses));
         }
         Ok(Rendered {
@@ -1942,7 +1986,8 @@ pub fn effective_precision(request: Precision, project: Precision) -> Precision 
 /// ([`Renderer::svg_waiting`]); dropping it restores the renderer's policy.
 pub struct SvgWaiting<'a> {
     renderer: &'a mut Renderer,
-    restore: bool,
+    /// The policy found: (`svg_wait`, `svg_skip_failed`).
+    restore: (bool, bool),
 }
 
 impl std::ops::Deref for SvgWaiting<'_> {
@@ -1960,6 +2005,6 @@ impl std::ops::DerefMut for SvgWaiting<'_> {
 
 impl Drop for SvgWaiting<'_> {
     fn drop(&mut self) {
-        self.renderer.svg_wait = self.restore;
+        (self.renderer.svg_wait, self.renderer.svg_skip_failed) = self.restore;
     }
 }
