@@ -2122,7 +2122,7 @@ fn child_svg_font_failure() {
     let outcome = serve_media(&mut c, &path, Duration::from_secs(40), answer(50));
     assert_eq!(
         outcome.err(),
-        Some(ErrorCode::Timeout),
+        Some(ErrorCode::Unsupported),
         "the snapshot fails on its fonts"
     );
     // The viewer shares the snapshot's renderer: its misses still ask the

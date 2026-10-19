@@ -2320,6 +2320,7 @@ dependencies = [
  "pm-gpu",
  "pm-media",
  "pm-model",
+ "pm-node",
  "pm-protocol",
  "pm-render",
  "pm-text",

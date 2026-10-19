@@ -2,8 +2,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type { EngineViewerService, ViewParams } from '../../../extensions/viewer/engine-present/presentation';
-import { ENGINE_STAGE_EVENT as PRESENTATION_STAGE_EVENT } from '../../../extensions/viewer/engine-present/presentation';
-import { ENGINE_STAGE_EVENT, EngineCanvasBinding, type BoundPresentation } from './canvas-binding';
+import { ENGINE_SELF_PRESENTS_ATTRIBUTE as PRESENTATION_SELF_PRESENTS, ENGINE_STAGE_EVENT as PRESENTATION_STAGE_EVENT } from '../../../extensions/viewer/engine-present/presentation';
+import { ENGINE_SELF_PRESENTS_ATTRIBUTE, ENGINE_STAGE_EVENT, EngineCanvasBinding, watchRemoval, type BoundPresentation } from './canvas-binding';
 
 class FakePresentation implements BoundPresentation {
   readonly exclusive = true;
@@ -86,6 +86,25 @@ describe('EngineCanvasBinding (render.gl.init/resize with the engine on)', () =>
     expect(made).toHaveLength(1);
   });
 
+  it('never presents over a viewer that presents by itself, before its presentation exists or after it is gone', () => {
+    const { binding, made, stage, canvas } = setup();
+    expect(ENGINE_SELF_PRESENTS_ATTRIBUTE).toBe(PRESENTATION_SELF_PRESENTS);
+    // The built-in viewer marks its stage at mount, before render.gl.init;
+    // its presentation comes once the engine connection is up.
+    stage.setAttribute(ENGINE_SELF_PRESENTS_ATTRIBUTE, '');
+    binding.bind(canvas);
+    binding.resize();
+    expect(made).toHaveLength(0);
+    expect(canvas.style.visibility).toBe('');
+    // It unmounts (disabled, say) and its WebGL canvas stays in the panel.
+    stage.removeAttribute(ENGINE_SELF_PRESENTS_ATTRIBUTE);
+    expect(made).toHaveLength(0);
+    // An old fork that mounts on the same skeleton and draws through the
+    // compositor gets the binding.
+    binding.resize();
+    expect(made).toHaveLength(1);
+  });
+
   it('one binding per window: a new canvas replaces the old; a detached canvas unbinds', () => {
     const { binding, made, canvas } = setup();
     binding.bind(canvas);
@@ -97,6 +116,96 @@ describe('EngineCanvasBinding (render.gl.init/resize with the engine on)', () =>
     expect(binding.bound).toBe(other);
     other.remove();
     binding.resize();
+    expect(binding.bound).toBeNull();
+  });
+
+  it('a caller that tears its canvas down without another resize leaves no presenter behind', () => {
+    const watched: Array<{ canvas: HTMLCanvasElement; changed: () => void; stopped: boolean }> = [];
+    const made: FakePresentation[] = [];
+    const binding = new EngineCanvasBinding({
+      service: () => ({ exclusive: true }) as unknown as EngineViewerService,
+      composition: () => ({ w: 1920, h: 1080 }),
+      quality: () => 1,
+      present: ({ stage, before }) => {
+        const p = new FakePresentation(stage, before);
+        made.push(p);
+        return p;
+      },
+      watch: (canvas, changed) => {
+        const entry = { canvas, changed, stopped: false };
+        watched.push(entry);
+        return () => { entry.stopped = true; };
+      }
+    });
+    const stage = document.createElement('div');
+    const canvas = document.createElement('canvas');
+    stage.append(canvas);
+    document.body.append(stage);
+    rect(stage, { left: 0, top: 0, width: 1000, height: 600 });
+    rect(canvas, { left: 20, top: 30, width: 960, height: 540 });
+    binding.bind(canvas);
+    binding.resize();
+    expect(watched).toHaveLength(1);
+    // A size change while connected is the caller's to report.
+    watched[0]!.changed();
+    expect(made[0]!.disposed).toBe(false);
+    // A disabled viewer extension (say) removes its stage and calls nothing more.
+    stage.remove();
+    watched[0]!.changed();
+    expect(made[0]!.disposed).toBe(true);
+    expect(binding.bound).toBeNull();
+    expect(binding.presenting).toBe(false);
+    expect(watched[0]!.stopped).toBe(true);
+  });
+
+  it('the default watch reports a 0x0 canvas whose ancestor is removed', async () => {
+    const stage = document.createElement('div');
+    const canvas = document.createElement('canvas');
+    canvas.width = 0;
+    canvas.height = 0;
+    stage.append(canvas);
+    document.body.append(stage);
+    let calls = 0;
+    const stop = watchRemoval(canvas, () => { calls += 1; });
+    // An unrelated mutation while the canvas stays connected reports nothing.
+    document.body.append(document.createElement('span'));
+    await Promise.resolve();
+    expect(calls).toBe(0);
+    stage.remove();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(calls).toBeGreaterThan(0);
+    const seen = calls;
+    stop();
+    document.body.append(stage);
+    stage.remove();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(calls).toBe(seen);
+  });
+
+  it('a bound 0x0 canvas removed without another resize leaves no presenter behind', async () => {
+    const made: FakePresentation[] = [];
+    const binding = new EngineCanvasBinding({
+      service: () => ({ exclusive: true }) as unknown as EngineViewerService,
+      composition: () => ({ w: 1920, h: 1080 }),
+      quality: () => 1,
+      present: ({ stage, before }) => {
+        const p = new FakePresentation(stage, before);
+        made.push(p);
+        return p;
+      }
+    });
+    const stage = document.createElement('div');
+    const canvas = document.createElement('canvas');
+    stage.append(canvas);
+    document.body.append(stage);
+    rect(stage, { left: 0, top: 0, width: 1000, height: 600 });
+    rect(canvas, { left: 0, top: 0, width: 0, height: 0 });
+    binding.bind(canvas);
+    binding.resize();
+    expect(made).toHaveLength(1);
+    stage.remove();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(made[0]!.disposed).toBe(true);
     expect(binding.bound).toBeNull();
   });
 

@@ -20,6 +20,7 @@
 
 pub(crate) mod exec;
 pub mod fallback;
+pub mod parity;
 pub mod plan;
 pub mod program;
 pub mod watchdog;
@@ -111,6 +112,8 @@ pub struct Effects {
     /// Effects and transitions only the fallback runner draws
     /// ([`fallback`]).
     pub fallback: fallback::EffectFallback,
+    /// First-use decisions shared by effects, transitions and fragment layers.
+    pub parity: parity::Parity,
     /// Fingerprints added to [`ANGLE_ONLY`] ([`Effects::add_angle_only`]).
     angle_only: Vec<(String, String)>,
     /// What an empty texture unit samples: (0, 0, 0, 1), per format.
@@ -268,6 +271,7 @@ impl Effects {
             context,
             watchdog: Watchdog::default(),
             fallback: Default::default(),
+            parity: Default::default(),
             angle_only: Vec::new(),
             dummies: Default::default(),
             simple: Default::default(),
@@ -307,13 +311,36 @@ impl Effects {
     /// An empty definition set sharing this one's translation cache (one
     /// per view of a device: each keeps its own programs and watchdog).
     pub fn sibling(&self) -> Effects {
-        Effects::with_cache(self.cache.clone(), self.context.clone())
+        let mut sibling = Effects::with_cache(self.cache.clone(), self.context.clone());
+        sibling
+            .parity
+            .configure(self.parity_environment(), self.parity_directory());
+        sibling
     }
 
     /// Keeps prepared programs on disk across processes. Siblings made
     /// before the call keep the previous cache.
     pub fn set_cache_dir(&mut self, dir: Option<std::path::PathBuf>) {
         self.cache = Arc::new(pm_glsl::Cache::new(self.context.clone(), dir));
+    }
+
+    fn parity_environment(&self) -> Option<String> {
+        self.parity.environment().map(str::to_owned)
+    }
+    fn parity_directory(&self) -> Option<std::path::PathBuf> {
+        self.parity.directory().map(std::path::Path::to_path_buf)
+    }
+
+    /// A definition requiring a first-use probe, or already pinned.
+    pub(crate) fn parity_source(&self, kind: DefinitionKind, id: &str) -> Option<String> {
+        if !self.fallback.runner || !self.parity.enabled() {
+            return None;
+        }
+        let d = self.get(kind, id)?;
+        if d.origin == pm_protocol::definitions::DefinitionOrigin::BuiltIn {
+            return None;
+        }
+        Some(d.glsl.as_ref()?.source.clone())
     }
 
     pub fn configured(&self) -> bool {

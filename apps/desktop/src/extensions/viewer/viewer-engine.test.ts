@@ -72,6 +72,22 @@ describe('viewer engine presentation hook', () => {
     runtime.dispose();
   });
 
+  it('a layout queued before dispose sizes nothing afterwards (no render.gl.resize for a viewer that is gone)', () => {
+    const api = viewerApi(new Map(), () => {});
+    const resize = api.render.gl.resize as unknown as ReturnType<typeof vi.fn>;
+    const runtime = createViewerRuntime(api) as any;
+    mount(runtime);
+    runtime.layout();
+    expect(resize).toHaveBeenCalled();
+    runtime.dispose();
+    const calls = resize.mock.calls.length;
+    // The animation frame attach schedules, or a resize observer's last
+    // callback, lands after the runtime was disposed: with the engine on,
+    // that resize would bind engine presentation to the canvas it left.
+    runtime.layout();
+    expect(resize.mock.calls.length).toBe(calls);
+  });
+
   it('attaches a presentation canvas under the overlay when the service is registered, and removes it on dispose', async () => {
     const services = new Map<string, unknown>();
     const logs: string[] = [];

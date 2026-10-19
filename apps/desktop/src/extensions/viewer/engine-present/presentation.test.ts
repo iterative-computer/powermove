@@ -513,9 +513,64 @@ describe('ViewerPresentation', () => {
     second.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
     runFrames(rafs, performance.now() + 40);
     expect(presentation.status).toBeNull();
-    // Capability routing (scaffolding until it is removed) still hands back.
-    second.handlers.message({ type: 'routed', route: 'legacy', reason: 'x', revision: 9 } as never, performance.now());
-    expect(hidden).toEqual([1]);
+    // A composition the engine cannot draw (amendment 21): the stage says
+    // why and is never handed back; a frame the engine produced before the
+    // report, still in the presenter, stays off it; the next frame the
+    // engine draws clears it.
+    const why = 'The new engine cannot draw this composition yet: path masks (layer box in C).';
+    second.handlers.message({ type: 'frame', frame: { ...desc(2, 1), revision: 9 } }, performance.now());
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: why, revision: 9 } as never, performance.now());
+    expect(hidden).toEqual([]);
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.latest).toBeNull();
+    expect(presentation.status).toBe(why);
+    expect(stage.querySelector('[data-engine-status]')?.getAttribute('role')).toBe('status');
+    runFrames(rafs, performance.now() + 60);
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.status).toBe(why);
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: '', revision: 9 } as never, performance.now());
+    expect(presentation.status).toBe(PRESENTATION_STATUS.unsupported);
+    second.handlers.message({ type: 'frame', frame: { ...desc(3, 1), revision: 10 } }, performance.now());
+    runFrames(rafs, performance.now() + 80);
+    runFrames(rafs, performance.now() + 100);
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.status).toBeNull();
+    expect(hidden).toEqual([]);
+    // A composition switch, A (cannot draw) to B and back, twice: the
+    // document batch reaches the engine before the viewer state, so it
+    // reports A at the revision it then draws B at. B's frame at that very
+    // revision shows and clears the line; A's report hides it again.
+    let seq = 3;
+    for (const revision of [11, 12]) {
+      second.handlers.message({ type: 'routed', route: 'legacy', reason: why, revision } as never, performance.now());
+      expect(presentation.status).toBe(why);
+      expect(presentation.presenting).toBe(false);
+      second.handlers.message({ type: 'frame', frame: { ...desc(++seq, 1), revision } }, performance.now());
+      runFrames(rafs, performance.now() + 120 + seq * 20);
+      runFrames(rafs, performance.now() + 130 + seq * 20);
+      expect(presentation.presenting).toBe(true);
+      expect(presentation.latest?.revision).toBe(revision);
+      expect(presentation.status).toBeNull();
+    }
+    // The report names the newest seq the engine had given the view (7):
+    // frames 6 and 7, of revision 12, were still on the GPU. Frame 6 arrives
+    // after the report with a higher seq than any delivered: it is stale and
+    // the line stays. Frame 8 is a later decision.
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: why, revision: 13, seq: 7 } as never, performance.now());
+    expect(presentation.status).toBe(why);
+    second.handlers.message({ type: 'frame', frame: { ...desc(6, 1), revision: 12 } }, performance.now());
+    runFrames(rafs, performance.now() + 300);
+    runFrames(rafs, performance.now() + 320);
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.latest).toBeNull();
+    expect(presentation.status).toBe(why);
+    second.handlers.message({ type: 'frame', frame: { ...desc(8, 1), revision: 13 } }, performance.now());
+    runFrames(rafs, performance.now() + 340);
+    runFrames(rafs, performance.now() + 360);
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.latest?.seq).toBe(8);
+    expect(presentation.status).toBeNull();
+    expect(hidden).toEqual([]);
     presentation.dispose();
     expect(stage.querySelector('[data-engine-status]')).toBeNull();
   });
