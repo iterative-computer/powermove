@@ -129,12 +129,14 @@ impl Parser<'_> {
     fn object(&mut self) -> Result<Value, ParseError> {
         self.enter()?;
         self.pos += 1; // {
-        let mut map = Map::new();
+        // Members are collected, then sorted once (already sorted in
+        // canonical JSON) into a map holding exactly them.
+        let mut members: Vec<(JsString, Value)> = Vec::new();
         self.skip_whitespace();
         if self.peek() == Some(b'}') {
             self.pos += 1;
             self.depth -= 1;
-            return Ok(Value::Object(map));
+            return Ok(Value::Object(Map::new()));
         }
         loop {
             self.skip_whitespace();
@@ -149,7 +151,7 @@ impl Parser<'_> {
             self.pos += 1;
             self.skip_whitespace();
             let value = self.value()?;
-            map.insert(key, value);
+            members.push((key, value));
             self.skip_whitespace();
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -161,7 +163,7 @@ impl Parser<'_> {
             }
         }
         self.depth -= 1;
-        Ok(Value::Object(map))
+        Ok(Value::Object(members.into_iter().collect()))
     }
 
     fn array(&mut self) -> Result<Value, ParseError> {

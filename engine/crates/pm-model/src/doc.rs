@@ -50,7 +50,7 @@ use std::sync::Arc;
 
 use crate::hash::{canonical_digest, canonical_hash};
 use crate::json::write::{JsonTree, View};
-use crate::json::{JsString, Map, Value};
+use crate::json::{JsString, Map, ObjectMap, Value};
 use crate::ops::{self, Op};
 use crate::patch::{self, NodeMut, Patch, PatchError, PathPart, Tree};
 
@@ -69,7 +69,7 @@ pub enum NodeKind {
     Number(f64),
     String(JsString),
     Array(Arc<Vec<Node>>),
-    Object(Arc<BTreeMap<JsString, Node>>),
+    Object(Arc<ObjectMap<Node>>),
 }
 
 impl Clone for Node {
@@ -260,7 +260,7 @@ fn same(node: &Node, value: &Value) -> bool {
     }
 }
 
-fn same_object(old: &BTreeMap<JsString, Node>, new: &Map) -> bool {
+fn same_object(old: &ObjectMap<Node>, new: &Map) -> bool {
     old.len() == new.len()
         && old
             .iter()
@@ -272,8 +272,8 @@ fn same_array(old: &[Node], new: &[Value]) -> bool {
     old.len() == new.len() && old.iter().zip(new).all(|(n, v)| same(n, v))
 }
 
-fn reconcile_object(old: &mut BTreeMap<JsString, Node>, new: Map, rev: u64) -> bool {
-    let new = new.into_btree();
+fn reconcile_object(old: &mut ObjectMap<Node>, new: Map, rev: u64) -> bool {
+    let new = new.into_members();
     let before = old.len();
     old.retain(|key, _| new.contains_key(key));
     let mut changed = old.len() != before;

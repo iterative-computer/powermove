@@ -13,15 +13,16 @@
 //!   strings and numbers, with object keys sorted by UTF-16 code units.
 
 mod jsnum;
+pub mod object_map;
 mod parse;
 mod string;
 pub mod write;
 
 use std::collections::BTreeMap;
-use std::collections::btree_map;
 
 pub(crate) use jsnum::array_index;
 pub use jsnum::{js_trim, number_to_js_string, string_to_number};
+pub use object_map::ObjectMap;
 pub use parse::{ParseError, parse, parse_bytes, parse_file_text};
 pub use string::JsString;
 pub use write::{to_canonical_string, write_canonical};
@@ -43,11 +44,11 @@ pub enum Value {
 /// Stored sorted by WTF-8 bytes (code point order); [`write`](mod@write) re-sorts by
 /// UTF-16 code units where the two orders differ.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub struct Map(BTreeMap<JsString, Value>);
+pub struct Map(ObjectMap<Value>);
 
 impl Map {
     pub fn new() -> Map {
-        Map(BTreeMap::new())
+        Map(ObjectMap::new())
     }
 
     pub fn len(&self) -> usize {
@@ -90,38 +91,45 @@ impl Map {
         self.0.remove(key)
     }
 
-    pub fn iter(&self) -> btree_map::Iter<'_, JsString, Value> {
+    pub fn iter(&self) -> object_map::Iter<'_, Value> {
         self.0.iter()
     }
 
-    pub fn iter_mut(&mut self) -> btree_map::IterMut<'_, JsString, Value> {
+    pub fn iter_mut(&mut self) -> object_map::IterMut<'_, Value> {
         self.0.iter_mut()
     }
 
-    pub fn keys(&self) -> btree_map::Keys<'_, JsString, Value> {
+    pub fn keys(&self) -> object_map::Keys<'_, Value> {
         self.0.keys()
     }
 
-    pub fn values(&self) -> btree_map::Values<'_, JsString, Value> {
+    pub fn values(&self) -> object_map::Values<'_, Value> {
         self.0.values()
     }
 
-    pub fn as_btree(&self) -> &BTreeMap<JsString, Value> {
+    /// The members (the object map documents share with their trees).
+    pub fn as_members(&self) -> &ObjectMap<Value> {
         &self.0
     }
 
-    pub fn as_btree_mut(&mut self) -> &mut BTreeMap<JsString, Value> {
+    pub fn as_members_mut(&mut self) -> &mut ObjectMap<Value> {
         &mut self.0
     }
 
-    pub fn into_btree(self) -> BTreeMap<JsString, Value> {
+    pub fn into_members(self) -> ObjectMap<Value> {
         self.0
+    }
+}
+
+impl From<ObjectMap<Value>> for Map {
+    fn from(map: ObjectMap<Value>) -> Map {
+        Map(map)
     }
 }
 
 impl From<BTreeMap<JsString, Value>> for Map {
     fn from(map: BTreeMap<JsString, Value>) -> Map {
-        Map(map)
+        Map(map.into_iter().collect())
     }
 }
 
@@ -133,7 +141,7 @@ impl FromIterator<(JsString, Value)> for Map {
 
 impl IntoIterator for Map {
     type Item = (JsString, Value);
-    type IntoIter = btree_map::IntoIter<JsString, Value>;
+    type IntoIter = std::vec::IntoIter<(JsString, Value)>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }
@@ -141,7 +149,7 @@ impl IntoIterator for Map {
 
 impl<'a> IntoIterator for &'a Map {
     type Item = (&'a JsString, &'a Value);
-    type IntoIter = btree_map::Iter<'a, JsString, Value>;
+    type IntoIter = object_map::Iter<'a, Value>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }

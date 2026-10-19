@@ -23,8 +23,6 @@
 //! The canonical hash ([`crate::hash`]) is the SHA-256 of those UTF-8 bytes,
 //! written as 64 lowercase hex digits.
 
-use std::collections::BTreeMap;
-
 use super::jsnum::push_js_number;
 use super::string::utf16_order_matches_bytes;
 use super::{JsString, Value};
@@ -43,7 +41,7 @@ pub enum View<'a, C> {
     Number(f64),
     String(&'a JsString),
     Array(&'a [C]),
-    Object(&'a BTreeMap<JsString, C>),
+    Object(&'a super::ObjectMap<C>),
 }
 
 impl JsonTree for Value {
@@ -55,7 +53,7 @@ impl JsonTree for Value {
             Value::Number(n) => View::Number(*n),
             Value::String(s) => View::String(s),
             Value::Array(items) => View::Array(items),
-            Value::Object(map) => View::Object(map.as_btree()),
+            Value::Object(map) => View::Object(map.as_members()),
         }
     }
 }
