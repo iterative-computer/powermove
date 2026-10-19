@@ -281,10 +281,11 @@ f0a927e3 (PROTOCOL_BUILD `protocol-243ac2c6ec3d6e99`):
 - The round-three diagnosis of the zoom gate was wrong. The engine did
   zoom, but protocol validation rejected raster densities above 16, leaving
   the previous frame on screen without a failure report. Raster density is
-  now bounded at today's 32 independently of output-frame scaling; the
-  layer-snapshot and export-answer validators agree. Bad densities produce
+  now bounded at today's 32 independently of output-frame scaling for the
+  compositor's compatibility messages. Bad densities there produce
   `invalidMessage` in `EngineConnection.status().failures` and the viewer's
-  report line. The old hidden legacy-window comparison was not a zoomed
+  report line. (Round five: a public `render.raster` takes any scale, and an
+  extension's failed snapshot no longer reaches the viewer; see below.) The old hidden legacy-window comparison was not a zoomed
   reference. The replacement gate drives the engine view, checks advancing
   frames and seeks, and compares stable-view crop windows with the shipped
   TypeScript crop planner. It explicitly requests a 16x engine view in
@@ -432,7 +433,7 @@ the legacy TypeScript function. It keeps the same density and pixel checks.
 | 8× zoom, density 24 | Frames 1 → 8 → 9; crop `(2304,1024,1792,1024)` |
 | 16× custom-viewer request, density 32 | Frames 9 → 12 → 13; crop `(2816,1280,1024,768)` |
 | Both zooms | Presented 0.2 s then 1.7 s at the current view sequence; no failures; text pixels change |
-| Synchronous `render.raster` at 16.25, 24, 32 | Geometry equal to today; max 0; invalid 33 appears by name in status and the viewer report |
+| Synchronous `render.raster` at 16.25, 24, 32 | Geometry equal to today; max 0 (round four refused 33; superseded in round five) |
 | Substituted text, sync and async raster APIs | Geometry equal; full-frame max 0 at 0.2 s and max 1 at 1.2 s; no RGB values over 1 |
 | Trusted API v1–3, full-access Store v3, sandbox v1–3 | Behavior probes pass, including all sixteen public events in the trusted contexts |
 | Viewport/controller | All 104 compiled per-member probes pass |
@@ -536,3 +537,85 @@ ten-minute allowance for that prerequisite, and stops before captures if
 opening is unfinished. Renderer exit reasons are collected from main even
 when the renderer can no longer answer diagnostics. Private measurements,
 crash evidence and automatic Playwright artifacts remain outside the worktree.
+
+## Round five: public rasters at any scale, the viewer keeps its frame
+
+**Any scale, as today.** Today's `PM.raster` (legacy `gl/raster.ts`) has no
+upper bound on `scale`: every rasterizer takes
+`density = min(scale, 8192 / w, 8192 / h)` (`textRasterGeometry`,
+`shapeRasterGeometry`, `rasterPaths`, the captions rasterizer, which also
+floors at 0.05). The 32 of `continuousRasterScale` bounds only what the
+compositor asks for. Round four had put `0.01..32` on the public path too,
+so `render.raster(layer, 40)` returned null. Now:
+
+- `pm_protocol::snapshot::valid_layer_raster_scale`: a `Layer` snapshot
+  takes any positive finite scale (main's `validSnapshotRequest` agrees).
+  `MAX_RASTER_SCALE` (32) stays on the compositor's compatibility messages
+  (`CompatNeed`, `Native`, `Reuse`, `CompatPixels`, `CompatFrameRequest`,
+  `CompatFrame`), which only carry `continuousRasterScale`.
+- The engine's rasterizers already applied today's cap
+  (`layer_raster.rs` `js_density`, `TextRasterizer` text/animated
+  text/captions, `pm_vector::shape::ShapeRaster`, `raster_paths`).
+- `layerRasterScale` (render-transport.ts) sends a positive scale as is up
+  to `Number.MAX_SAFE_INTEGER`, and anything above it (Infinity, 1e300) as
+  that: every number above 2^53 is an integer main's MessagePack encoder
+  refuses (the first e2e run of this gate sent `Number.MAX_VALUE` and the
+  request went unanswered for 15 s), and any raster box wider than 1e-12
+  pixels meets the 8192 cap far below it. Zero, negatives and NaN, whose raster today is a canvas of at most one
+  pixel with nothing on it, as `VANISHING_RASTER_SCALE` (1e-9). At that
+  density the text rasterizer can leave one faint pixel (alpha 82
+  measured), so the raster surface clears non-positive requests to today's
+  transparent pixel (`withoutInk`; captions keep their 0.05 floor).
+  `engineRasterBase` no longer turns scale 0 into 1.
+- Known difference kept: today's NaN canvas is 0×0 and a non-positive
+  paths raster throws (an invalid canvas size); the engine returns the
+  one-pixel transparent surface with today's geometry for both.
+
+**The viewer keeps its frame.** `DocumentSession.reportFailure(code,
+message, at, frame)`: an extension's failed snapshot (`render.raster`,
+`render.snapshot`, `renderFrameTo`, through the transport's `onFailure`) is
+recorded in `EngineConnection.status().failures` and logged, but never sent
+to the viewer as `{type:'failure'}`, which hides the canvas until the next
+frame. The viewer's own frame failures (the engine's session report, a
+raster producer answering the compositor) still name themselves on the
+stage.
+
+**Tests.** pm-protocol `a_public_layer_raster_takes_any_positive_scale_as_today`;
+pm-node `snapshot` (a 40×20 box at 40, 50, 1000, `f64::MAX`, 0.005 and 1e-9:
+today's canvas `ceil(48·d) × ceil(28·d)` capped at 8192, anchor, box and
+selection unchanged, ink inside) and `render_fonts` (a text layer at 40,
+1000, `f64::MAX`: 8192×3594 from a 310×136 base; 1e-9: 1×1); vitest
+`layerRasterScale`, `withoutInk`, and the session's frame flag. The e2e
+gate `render.raster at any scale returns today's surface…` compares the
+engine with today's rasterizer at 16.25, 24, 32, 33, 40, 50 (a 16×12 box),
+1000 and Infinity (a 200×2 bar that meets the 8192 edge), 0.005, 0 and -1,
+and checks that no failure was recorded and the presentation canvas stays
+on the stage.
+
+The oldest-viewer gate now also requires the presentation canvas (engine)
+or the viewer's GL canvas (today) to be on the stage, not only readable
+through the compatibility context's preserved copies.
+
+### Measured (2026-10-19, round five, e2e under the Electron lock, flag on)
+
+Release addon `protocol-8a10dfb17b4ff9bc`. Targeted run: the any-scale
+raster gate, the oldest-viewer gate, the zoom 8/16 gate, label
+substitution and the WebM context gate. The first run passed four of five;
+`render.raster(bar, Infinity)` timed out after 15 s because the scale went
+on the wire as `Number.MAX_VALUE` (fixed: `MAX_SAFE_INTEGER`). The rerun of
+the two changed gates passed:
+
+| `render.raster` | Canvas (engine = today) | Pixels | Sync call |
+|---|---|---|---|
+| box 16×12 at 16.25, 24, 32 | 390×325, 576×480, 768×640 | max 0 | 7, 8, 13 ms |
+| box at 33, 40, 50 | 792×660, 960×800, 1200×1000 | max 0 | 14, 20, 30 ms |
+| bar 200×2 at 1000, Infinity | 8192×394 (the 8192 cap) | max 0 | 56, 55 ms |
+| box at 0.005, 0, -1 | 1×1, no ink on either side | max 0 | ≤ 1 ms |
+
+Box, anchor and selection equal today's in every row. No failure was
+recorded, the status line stayed empty, and the presentation canvas stayed
+on the stage. The oldest viewer fork and replaces-only folder pass with the
+new stage check (`shown: true` on both sides; whole-canvas max 2, 37 of
+3,619,008 RGB values over 1, as in round four). Zoom 8/16 (frames 9 → 12 →
+13 at 16×, density 32), label substitution and the WebM context gate passed
+in the first run.
