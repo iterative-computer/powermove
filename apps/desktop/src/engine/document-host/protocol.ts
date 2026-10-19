@@ -111,6 +111,8 @@ export interface DocumentHostServices {
     read(key: string): Promise<unknown | null>;
     write(key: string, value: unknown): Promise<void>;
     remove(key: string): Promise<void>;
+    /** Initial synchronous editor preferences/library view. */
+    snapshot?(): Promise<Record<string, unknown>>;
   };
   /**
    * The project session: the document every member shares. `join` answers
@@ -127,6 +129,8 @@ export interface DocumentHostServices {
   };
   /** Agent media and captions find a project's media through the host's store. */
   mediaPath?: { lookup(request: MediaPathLookupRequest): Promise<MediaPathResult | null> };
+  /** Native hidden-host import preparation: durable bytes and engine facts. */
+  mediaImport?: { prepare(args: { path: string; storage?: string }): Promise<{ fingerprint: string; storageKey: string; sourcePath: string; kind: string; prepared: Record<string, unknown> }> };
   /** On-device transcription (captions). Absent: `generate_captions` says no model is available. */
   transcription?: {
     status(): Promise<TranscriptionStatus>;
@@ -250,9 +254,9 @@ export type FromWorker =
   | { t: 'log'; line: string };
 
 export type ServiceName =
-  | 'store.read' | 'store.write' | 'store.remove'
+  | 'store.read' | 'store.write' | 'store.remove' | 'store.snapshot'
   | 'session.join' | 'session.patch' | 'session.leave'
-  | 'mediaPath.lookup'
+  | 'mediaPath.lookup' | 'mediaImport.prepare'
   | 'transcription.status' | 'transcription.transcribe' | 'transcription.cancelTranscribe'
   | 'extensions.list' | 'extensions.bundle' | 'extensions.values';
 

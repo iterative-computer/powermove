@@ -103,6 +103,7 @@ export async function importMedia(PM: PMRegistry, args: Record<string, unknown>,
   assertCurrent();
   if (replace && PM.assets.loading?.has?.(assetId)) throw new Error('This media is still loading. Wait before replacing it.');
   if (replace && args.missingOnly === true && PM.assets.get(assetId)) return { status: 'already_available', assetId, persisted: meta.persisted === true };
+  if (PM.HostImportMedia) return PM.HostImportMedia(args, replace, assertCurrent);
   const file = await readLocalMediaSource({ id: assetId || 'agent-import', name: path.split(/[\\/]/).pop()!, sourcePath: path }, () => {
     try { assertCurrent(); return true; } catch { return false; }
   }, MAX_FILE_BYTES);
