@@ -259,9 +259,6 @@ struct Tally {
     awaiting_runner: Vec<String>,
     failures: Vec<String>,
     known: Vec<String>,
-    /// Amendment 9: WebGL's own output moves past the tolerance under a
-    /// one-step input or 2^-20 uniform perturbation; judged by review.
-    unstable: Vec<String>,
 }
 
 /// Probes and cases whose WebGL and engine answers differ for a documented
@@ -538,9 +535,6 @@ fn every_shader_matches_webgl() {
                         if unstable.is_some() {
                             dump_unstable(shown, name, &pixels, &reference, width, false);
                         }
-                        // An ANGLE-only program is judged as drawn by the
-                        // runner: never listed apart as WebGL-unstable.
-                        let unstable = unstable.filter(|_| !angle_only);
                         record(tally, shown, id, name, m, angle_only, unstable);
                     }
                     Err(e) => tally.failures.push(format!("{shown} {name}: {e}")),
@@ -634,23 +628,19 @@ fn every_shader_matches_webgl() {
     let mut failed = 0;
     eprintln!("shader gate corpus {}", dir.display());
     eprintln!(
-        "| Group | Variants | Match WebGL | via fallback runner | Both refuse | Awaiting runner | WebGL-unstable | Known open | Failures |"
+        "| Group | Variants | Match WebGL | via fallback runner | Both refuse | Awaiting runner | Known open | Failures |"
     );
     for (group, t) in &groups {
         eprintln!(
-            "| {group} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {group} | {} | {} | {} | {} | {} | {} | {} |",
             t.variants,
             t.matched,
             t.via_fallback,
             t.both_refuse,
             t.awaiting_runner.len(),
-            t.unstable.len(),
             t.known.len(),
             t.failures.len()
         );
-        for u in &t.unstable {
-            eprintln!("  WebGL-unstable: {u}");
-        }
         for k in &t.known {
             eprintln!("  known: {k}");
         }
@@ -768,6 +758,15 @@ fn dump_unstable(
     support::write_png(&dir.join(format!("{stem}-diff.png")), w, h, &diff);
 }
 
+/// Judges one compared variant. A variant that differs from WebGL fails,
+/// whether or not WebGL moves against its own perturbed runs
+/// (`webgl_unstable`, given as `unstable`): amendment 22 and decision DEFS-2
+/// accept no difference on level 1 content, and a program whose native
+/// translation differs draws through the runner (`effects::ANGLE_ONLY`), so
+/// the gate must fail to name it. The perturbation result is kept in the
+/// failure as the explanation (and `PM_SHADER_GATE_DIFFS` gets the
+/// side-by-side). Only the documented undefined-behavior probes
+/// (`known_open`, which are not user content) are listed apart.
 #[allow(clippy::too_many_arguments)]
 fn record(
     tally: &mut Tally,
@@ -778,15 +777,6 @@ fn record(
     via_fallback: bool,
     unstable: Option<String>,
 ) {
-    if !m.pass()
-        && let Some(why) = unstable
-    {
-        tally.unstable.push(format!(
-            "{shown} {name}: {} px over 1 CV (max {} CV); WebGL against itself {why}",
-            m.over_one, m.max_cv
-        ));
-        return;
-    }
     if m.pass() {
         tally.matched += 1;
         if via_fallback {
@@ -799,7 +789,7 @@ fn record(
         ));
     } else {
         tally.failures.push(format!(
-            "{shown} {name}: {} px over 1 CV (max {} CV); above-1.0 rule {} px, max {:.2} CV{}",
+            "{shown} {name}: {} px over 1 CV (max {} CV); above-1.0 rule {} px, max {:.2} CV{}{}",
             m.over_one,
             m.max_cv,
             m.hdr_over_one,
@@ -808,9 +798,70 @@ fn record(
                 " (fallback runner)"
             } else {
                 ""
+            },
+            match unstable {
+                Some(why) => format!(
+                    "; WebGL also moves against itself ({why}): ill-conditioned in WebGL, \
+                     so it must draw as WebGL does (add its body fingerprint to \
+                     pm_render::effects::ANGLE_ONLY)"
+                ),
+                None => String::new(),
             }
         ));
     }
+}
+
+#[test]
+fn a_difference_webgl_is_unstable_under_fails_the_gate() {
+    // The perturbation class used to be listed apart as "WebGL-unstable"
+    // and passed the gate; it is a failure like any other difference.
+    let differs = Metrics {
+        over_one: 40,
+        max_cv: 9,
+        hdr_over_one: 0,
+        hdr_max_cv: 0.0,
+        pixels: 36_864,
+    };
+    assert!(!differs.pass());
+    let mut tally = Tally::default();
+    record(
+        &mut tally,
+        "store/acme/glass",
+        "store/acme/glass",
+        "viewport",
+        differs,
+        false,
+        Some("webgl-metal-input-perturbed: 52 px over 1 CV, max 11 CV".into()),
+    );
+    assert_eq!(tally.matched, 0);
+    assert_eq!(tally.failures.len(), 1, "{:?}", tally.failures);
+    assert!(tally.failures[0].contains("ANGLE_ONLY"), "{}", tally.failures[0]);
+    // Through the runner too (an ANGLE-only program the runner drew
+    // differently).
+    let mut tally = Tally::default();
+    record(
+        &mut tally,
+        "store/acme/glass",
+        "store/acme/glass",
+        "viewport",
+        differs,
+        true,
+        Some("webgl-metal-perturbed: 3 px over 1 CV, max 2 CV".into()),
+    );
+    assert_eq!(tally.failures.len(), 1);
+    assert_eq!(tally.via_fallback, 0);
+    // A match stays a match, an undefined-behavior probe stays apart.
+    let same = Metrics {
+        over_one: 0,
+        max_cv: 0,
+        hdr_over_one: 0,
+        hdr_max_cv: 0.0,
+        pixels: 36_864,
+    };
+    let mut tally = Tally::default();
+    record(&mut tally, "x", "x", "v", same, false, None);
+    record(&mut tally, "probe/ub-shift", "probe/ub-shift", "v", differs, false, None);
+    assert_eq!((tally.matched, tally.known.len(), tally.failures.len()), (1, 1, 0));
 }
 
 #[test]

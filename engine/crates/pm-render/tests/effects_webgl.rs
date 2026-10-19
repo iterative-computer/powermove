@@ -491,8 +491,35 @@ fn webgl_instability_under_a_one_step_input_perturbation() {
             unstable.contains_key("builtin/effect/posterize"),
             "Posterize is a step function of its input; expected it to move under a one-step perturbation"
         );
+        // The built-ins exposed to rounding-level drift are the ones known:
+        // a new one needs the same proof as these (bit-exact against WebGL
+        // at every corpus parameter set, `PM_SHADER_STATS`), not a list
+        // that excuses it.
+        let builtins: Vec<&str> = unstable
+            .keys()
+            .filter_map(|id| id.strip_prefix("builtin/effect/"))
+            .collect();
+        for id in &builtins {
+            assert!(
+                EXPOSED_BUILTINS.contains(id),
+                "built-in {id} is ill-conditioned in WebGL; prove it bit-exact and add it to EXPOSED_BUILTINS"
+            );
+        }
     }
 }
+
+/// Built-in effects in amendment 9's WebGL-unstable class: today's WebGL
+/// output itself moves past the Standard tolerance when its input moves by
+/// one binary16 step (Posterize and Levels are step functions at some
+/// parameters, Color's hue rotation at saturated extremes). Where the
+/// engine's input to them or its arithmetic differed from today's at
+/// rounding level, their output differed at isolated pixels. Since
+/// 2026-10-19 neither does: their inputs (Level 1 stills as `Rgba8Unorm`)
+/// and their programs' built-in calls (`pm_render::glsl`) match today's, and
+/// all three are bit-exact against WebGL at every corpus parameter set. No
+/// test lists their frames apart; this records which built-ins are exposed
+/// if either drifts.
+const EXPOSED_BUILTINS: &[&str] = &["posterize", "levels", "color"];
 
 /// The corpus's fallback runner: answers a request with the pixels the
 /// app's runner drew for it in Chromium (`tools/shaders/fallback-runner.ts
