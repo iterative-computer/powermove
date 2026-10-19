@@ -1632,6 +1632,21 @@ impl Thread {
             self.refresh_timing(key);
         }
         self.warm_audio(key);
+        if self.views[&key].state.headless == Some(true) {
+            if let Some(blender) = &self.blender {
+                blender.forget(key);
+            }
+            if let Some(old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
+                self.retire_pool(key, old);
+            }
+            self.configure_depth(key, None);
+            let view = self.views.get_mut(&key).expect("configured");
+            view.retry = None;
+            view.stand_in = None;
+            view.schedule.reset();
+            view.sample_due = true;
+            return;
+        }
         let Some(spec) = pool else {
             return;
         };
@@ -2074,7 +2089,11 @@ impl Thread {
             if let Some(at) = view.retry.and_then(|r| r.at) {
                 wake = wake.min(at);
             }
-            if view.dirty || !view.requests.is_empty() || view.sample_due {
+            if (view.dirty && view.state.headless != Some(true))
+                || !view.requests.is_empty()
+                || (view.sample_due
+                    && (view.state.headless != Some(true) || view.reported == Some(Route::Engine)))
+            {
                 return Duration::ZERO;
             }
             if view.stand_in.is_some() {
@@ -2094,6 +2113,9 @@ impl Thread {
             if view.clock.is_playing() {
                 let sample_at = view.last_sample.unwrap_or(now) + SAMPLE_INTERVAL_US;
                 wake = wake.min(sample_at);
+                if view.state.headless == Some(true) {
+                    continue;
+                }
                 let mut schedule = view.schedule.clone();
                 let phase = Self::phase(&self.config, &view.state);
                 match schedule.next_in_phase(&view.clock, now, self.config.lead, phase) {
@@ -2261,7 +2283,10 @@ impl Thread {
         if changed {
             view.reported = Some(route.clone());
             match &route {
-                Route::Engine => view.dirty = true,
+                Route::Engine => {
+                    view.dirty = true;
+                    view.sample_due = true;
+                }
                 Route::Legacy(_) | Route::Pending(_) => {
                     stop = view.clock.is_playing() || view.awaiting.is_some();
                 }
@@ -2344,11 +2369,17 @@ impl Thread {
                 && view
                     .last_sample
                     .is_none_or(|last| t - last >= SAMPLE_INTERVAL_US);
-            if view.sample_due || periodic {
+            if (view.sample_due || periodic) && (!view.state.headless.is_some_and(|h| h) || draws) {
                 view.sample_due = false;
                 view.last_sample = Some(t);
                 let sample = view.clock.sample(t);
-                self.event(key, Event::Clock(sample), None);
+                let revision = view
+                    .state
+                    .headless
+                    .filter(|h| *h)
+                    .and_then(|_| self.docs.get(&key))
+                    .and_then(|doc| Revision::new(doc.revision()).ok());
+                self.event(key, Event::Clock(sample), revision);
             }
         }
         if !draws {
@@ -2365,6 +2396,32 @@ impl Thread {
                     "The current engine draws this composition.",
                 );
             }
+            return;
+        }
+        // Headless sessions follow the device and publish clock/levels and
+        // stats, but allocate and render no presentation frame. Offscreen
+        // callers use snapshots; a frame request needs an attached viewer.
+        if self
+            .views
+            .get(&key)
+            .is_some_and(|v| v.state.headless == Some(true))
+        {
+            while let Some((id, _, _)) = self
+                .views
+                .get_mut(&key)
+                .and_then(|v| v.requests.pop_front())
+            {
+                self.error(
+                    key,
+                    id,
+                    ErrorCode::Unsupported,
+                    "Attach a viewer before requesting a presentation frame.",
+                );
+            }
+            if let Some(view) = self.views.get_mut(&key) {
+                view.dirty = false;
+            }
+            self.send_stats(key);
             return;
         }
         // Frame requests (viewer and scrub): shown at the next refresh.
@@ -2975,6 +3032,11 @@ impl Thread {
                 continue;
             }
             pressure.playing = true;
+            // Headless transport has no presentation deadline to compete with
+            // foreground captures. Idle captures still wait for playback.
+            if view.state.headless == Some(true) {
+                continue;
+            }
             let mut schedule = view.schedule.clone();
             let phase = Self::phase(&self.config, &view.state);
             let due = match schedule.next_in_phase(&view.clock, now, self.config.lead, phase) {
@@ -3640,7 +3702,9 @@ fn blender_frames(
     let hashes: Vec<[u8; 32]> = snaps.snapshots.iter().map(|s| s.hash().0).collect();
     let own = match &job.blender {
         Some(BlenderPrep::Ready(frames))
-            if hashes.iter().all(|h| frames.iter().any(|(fh, _, _)| fh == h)) =>
+            if hashes
+                .iter()
+                .all(|h| frames.iter().any(|(fh, _, _)| fh == h)) =>
         {
             Some(frames.clone())
         }

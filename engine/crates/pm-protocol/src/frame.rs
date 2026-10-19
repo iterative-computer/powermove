@@ -496,6 +496,10 @@ pub struct FrameRelease {
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ViewerState {
+    /// Keep the transport and audio alive without allocating or drawing a view.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub headless: Option<bool>,
     pub composition: CompositionId,
     /// Canvas size in device pixels.
     pub size: Size,
@@ -700,6 +704,7 @@ mod tests {
 
     fn viewer_state() -> ViewerState {
         ViewerState {
+            headless: None,
             composition: "main".into(),
             size: Size::new(2400, 1300),
             device_pixel_ratio: 2.0,

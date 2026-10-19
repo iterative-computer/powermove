@@ -825,10 +825,10 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
       // overlay redraws then); a service without it needs the redraw here.
       if (!engineService?.presented) schedulePresentation();
     });
-    // The WebGL canvas shows again (the engine session ended): it takes the
-    // size it skipped while the engine presented, and draws.
+    // An exclusive native service retains the stage while it reconnects.
+    // Other services restore the WebGL canvas when their session ends.
     presentation.onHidden(() => {
-      if (V.el) V.el.style.visibility = '';
+      if (V.el) V.el.style.visibility = presentation.exclusive ? 'hidden' : '';
       commitPendingResize();
       schedulePresentation();
     });
