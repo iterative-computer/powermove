@@ -3,15 +3,13 @@
 use crate::mixer::Mixer;
 use pm_eval::Evaluator;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 const QOS_USER_INTERACTIVE: u32 = 0x21;
-#[cfg(target_os = "macos")]
-const QOS_UTILITY: u32 = 0x11;
 /// Sets the calling thread's Darwin QoS class and relative priority.
 #[cfg(target_os = "macos")]
 fn set_qos(class: u32, priority: i32) {
@@ -28,6 +26,7 @@ fn set_qos(class: u32, priority: i32) {
 pub(crate) type Evaluators = Arc<dyn Fn() -> Evaluator + Send + Sync>;
 type Job = (
     usize,
+    Arc<AtomicBool>,
     Box<dyn Fn() -> bool + Send>,
     Box<dyn FnOnce() + Send>,
 );
@@ -35,6 +34,29 @@ struct Queue {
     jobs: Vec<Job>,
     background: usize,
 }
+impl Queue {
+    fn ready_index(&self) -> Option<(usize, usize)> {
+        self.jobs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, j)| {
+                let priority = job_priority(j);
+                ((priority == 0 || self.background == 0) && (j.2)()).then_some((i, priority))
+            })
+            .min_by_key(|(_, priority)| *priority)
+    }
+}
+fn job_priority(job: &Job) -> usize {
+    if job.1.load(Ordering::Acquire) {
+        0
+    } else {
+        job.0
+    }
+}
+pub(crate) fn wake_workers() {
+    Executor::shared().wake.notify_all();
+}
+
 struct Executor {
     jobs: Mutex<Queue>,
     wake: Condvar,
@@ -65,10 +87,9 @@ impl Executor {
                         // An idle worker waits at user-interactive QoS: the class a
                         // thread holds when it is woken decides how soon it runs,
                         // and a worker woken at utility QoS was starved by default
-                        // class load for longer than a start's shared head lasts
-                        // (the producer then primed every unstarted history itself,
-                        // serially, and the ring ran dry). Boundary refill lowers
-                        // itself to utility QoS for the length of its job.
+                        // class load for longer than a start's shared head lasts.
+                        // Actual preparation (including boundary histories) now
+                        // joins the real-time audio schedule while it works.
                         #[cfg(target_os = "macos")]
                         set_qos(QOS_USER_INTERACTIVE, 0);
                         #[cfg(target_os = "linux")]
@@ -79,18 +100,9 @@ impl Executor {
                             let (background, job) = {
                                 let mut queue = p.jobs.lock().unwrap_or_else(|e| e.into_inner());
                                 loop {
-                                    if let Some(at) = queue
-                                        .jobs
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(_, j)| {
-                                            (j.0 == 0 || queue.background == 0) && (j.1)()
-                                        })
-                                        .min_by_key(|(_, j)| j.0)
-                                        .map(|(i, _)| i)
-                                    {
-                                        let (priority, _, job) = queue.jobs.remove(at);
+                                    if let Some((at, priority)) = queue.ready_index() {
                                         let background = priority != 0;
+                                        let (_, _, _, job) = queue.jobs.remove(at);
                                         if background {
                                             queue.background += 1;
                                         }
@@ -101,17 +113,10 @@ impl Executor {
                             };
                             // Playhead preparation is latency-sensitive even at
                             // edit time, before Play arrives. Boundary refill
-                            // runs at utility QoS (background mode would also
-                            // throttle I/O) and keeps its single-job limit.
-                            #[cfg(target_os = "macos")]
-                            if background {
-                                set_qos(QOS_UTILITY, -5);
-                            }
+                            // keeps its single-job limit; its closure enters
+                            // real-time CPU scheduling and restores the worker's
+                            // effective Mach priority before it waits again.
                             job();
-                            #[cfg(target_os = "macos")]
-                            if background {
-                                set_qos(QOS_USER_INTERACTIVE, 0);
-                            }
                             if background {
                                 p.jobs.lock().unwrap_or_else(|e| e.into_inner()).background -= 1;
                             }
@@ -125,9 +130,19 @@ impl Executor {
             pool
         })
     }
+    #[cfg(test)]
     fn submit(
         &self,
         priority: usize,
+        ready: impl Fn() -> bool + Send + 'static,
+        job: impl FnOnce() + Send + 'static,
+    ) {
+        self.submit_promotable(priority, Arc::new(AtomicBool::new(false)), ready, job);
+    }
+    fn submit_promotable(
+        &self,
+        priority: usize,
+        critical: Arc<AtomicBool>,
         ready: impl Fn() -> bool + Send + 'static,
         job: impl FnOnce() + Send + 'static,
     ) {
@@ -135,7 +150,7 @@ impl Executor {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .jobs
-            .push((priority, Box::new(ready), Box::new(job)));
+            .push((priority, critical, Box::new(ready), Box::new(job)));
         self.wake.notify_one();
     }
 }
@@ -151,8 +166,34 @@ struct Done {
     claimed: bool,
     profile: crate::profile::Profile,
 }
+#[derive(Default)]
+pub(crate) struct SchedulingCounters {
+    pub(crate) workgroup: AtomicU64,
+    pub(crate) mach: AtomicU64,
+    pub(crate) failed: AtomicU64,
+    pub(crate) workgroup_error: AtomicI32,
+    pub(crate) mach_error: AtomicI32,
+}
+impl SchedulingCounters {
+    fn record(&self, status: crate::realtime::ScheduleStatus) {
+        if let Some(e) = status.workgroup_error {
+            self.workgroup_error.store(e, Ordering::Relaxed);
+        }
+        if let Some(e) = status.mach_error {
+            self.mach_error.store(e, Ordering::Relaxed);
+        }
+        let counter = match status.method.label() {
+            "device-workgroup" => &self.workgroup,
+            "mach-time-constraint" => &self.mach,
+            _ => &self.failed,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
 pub(crate) struct Preparation {
     generation: Arc<AtomicU64>,
+    schedule: crate::realtime::AudioSchedule,
+    pub(crate) scheduling: Arc<SchedulingCounters>,
     make: Evaluators,
     static_content: bool,
     pending: HashSet<(i64, usize)>,
@@ -166,12 +207,17 @@ impl Preparation {
         Executor::shared();
         Self {
             generation: Arc::new(AtomicU64::new(0)),
+            schedule: crate::realtime::AudioSchedule::new(48_000, 512, None),
+            scheduling: Arc::new(SchedulingCounters::default()),
             make: Arc::new(Evaluator::new),
             static_content: true,
             pending: HashSet::new(),
             tx,
             rx,
         }
+    }
+    pub(crate) fn set_schedule(&mut self, schedule: crate::realtime::AudioSchedule) {
+        self.schedule = schedule;
     }
     pub(crate) fn is_standard(&self) -> bool {
         self.static_content
@@ -214,9 +260,13 @@ impl Preparation {
                 let static_content = self.static_content;
                 let tx = self.tx.clone();
                 let gate = work.gate.clone();
+                let schedule = self.schedule.clone();
+                let scheduling = self.scheduling.clone();
                 let ready_generation = current.clone();
-                Executor::shared().submit(
+                let critical = work.critical.clone();
+                Executor::shared().submit_promotable(
                     priority + usize::from(!urgent),
+                    critical,
                     move || {
                         ready_generation.load(Ordering::Relaxed) != generation
                             || gate.as_ref().is_none_or(|g| g.load(Ordering::Acquire))
@@ -227,8 +277,8 @@ impl Preparation {
                             return;
                         }
                         if !work.claim() {
-                            // The producer (or paused preparation) owns this
-                            // history now. Report only so the slot is freed.
+                            // Paused preparation already owns this history.
+                            // Report only so the pending queue slot is freed.
                             let _ = tx.send(Done {
                                 generation,
                                 start,
@@ -240,8 +290,16 @@ impl Preparation {
                             });
                             return;
                         }
+                        // Boundary and secondary starts can become audible
+                        // before their queued histories finish too. Every job
+                        // enters the audio schedule; the queue still limits
+                        // background refill to one job at a time.
+                        let _realtime = schedule.enter();
+                        scheduling.record(_realtime.status());
                         crate::profile::reset();
                         let ready = work.run(&mut make(), static_content, cancelled);
+                        let profile = crate::profile::snapshot();
+                        drop(_realtime);
                         let _ = tx.send(Done {
                             generation,
                             start,
@@ -249,7 +307,7 @@ impl Preparation {
                             history,
                             ready,
                             claimed: false,
-                            profile: crate::profile::snapshot(),
+                            profile,
                         });
                     },
                 );
@@ -290,26 +348,6 @@ impl Preparation {
 }
 #[cfg(test)]
 impl Preparation {
-    /// What a worker reports after dequeuing `(start, voice)` and finding
-    /// its history claimed by another thread (the producer at an exhausted
-    /// head, or paused preparation).
-    pub(crate) fn deliver_claimed(
-        &mut self,
-        start: i64,
-        voice: usize,
-        history: Arc<Mutex<crate::stretch::StretchRun>>,
-    ) {
-        self.pending.insert((start, voice));
-        let _ = self.tx.send(Done {
-            generation: self.generation.load(Ordering::Relaxed),
-            start,
-            voice,
-            history,
-            ready: Ok(false),
-            claimed: true,
-            profile: Default::default(),
-        });
-    }
     /// Jobs submitted and not yet accepted.
     pub(crate) fn pending(&self) -> &HashSet<(i64, usize)> {
         &self.pending
@@ -325,62 +363,89 @@ impl Drop for Preparation {
 mod tests {
     use super::*;
 
-    fn own_qos() -> u32 {
-        let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
-        let mut relative = 0;
-        // SAFETY: queries the calling thread into valid out-parameters.
-        unsafe {
-            libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative);
-        }
-        class as u32
-    }
-
-    fn observe(priority: usize) -> u32 {
-        let (tx, rx) = channel();
-        Executor::shared().submit(
-            priority,
-            || true,
-            move || {
-                let _ = tx.send(own_qos());
-            },
-        );
-        rx.recv_timeout(Duration::from_secs(30)).unwrap()
-    }
-
-    /// An idle worker waits at user-interactive QoS, so a playhead job is not
-    /// starved behind default-class load before it can start (the class a
-    /// thread holds when woken decides when it runs). Only boundary refill
-    /// runs at utility QoS, and only for its own job.
+    /// Mach scheduling permanently opts these owned audio threads out of
+    /// pthread QoS. Their *kernel* idle priority must still stay interactive.
     #[test]
-    fn idle_workers_wait_at_user_interactive_qos() {
-        assert_eq!(observe(0), QOS_USER_INTERACTIVE);
-        assert_eq!(observe(1), QOS_UTILITY);
-        assert_eq!(observe(0), QOS_USER_INTERACTIVE, "restored after refill");
-        // The idle class itself, read from outside the worker while it waits.
-        // Other tests share the pool: a sample may land on a refill job.
-        let (tx, rx) = channel();
-        Executor::shared().submit(
-            1,
-            || true,
-            move || {
-                let _ = tx.send(unsafe { libc::pthread_self() } as usize);
-            },
+    fn idle_workers_restore_interactive_kernel_priority() {
+        for priority in [0, 1, 0] {
+            let (tx, rx) = channel();
+            let (release, wait) = channel();
+            Executor::shared().submit(
+                priority,
+                || true,
+                move || {
+                    let before = crate::realtime::current_thread_priority();
+                    let schedule = crate::realtime::AudioSchedule::new(48_000, 512, None);
+                    {
+                        let guard = schedule.enter();
+                        assert_eq!(guard.method().label(), "mach-time-constraint");
+                    }
+                    let after = crate::realtime::current_thread_priority();
+                    let failures = schedule.metrics().restore_failures;
+                    let _ = tx.send((
+                        unsafe { libc::pthread_self() } as usize,
+                        before,
+                        after,
+                        failures,
+                    ));
+                    // A leased idle worker cannot be mistaken for a thread
+                    // another concurrent test has already put back into DSP.
+                    let _ = wait.recv_timeout(Duration::from_secs(30));
+                },
+            );
+            let (worker, before, after, failures) =
+                rx.recv_timeout(Duration::from_secs(30)).unwrap();
+            let target = Some(
+                before
+                    .expect("kernel priority before real-time work")
+                    .max(47),
+            );
+            assert_eq!(after, target, "owned audio thread idle kernel priority");
+            assert_eq!(failures, 0);
+            for _ in 0..20 {
+                assert_eq!(
+                    crate::realtime::thread_priority(worker as libc::pthread_t),
+                    target
+                );
+            }
+            let _ = release.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    #[test]
+    fn an_audible_history_bypasses_the_serial_boundary_limit() {
+        let critical = Arc::new(AtomicBool::new(false));
+        let ready = Arc::new(AtomicBool::new(true));
+        let gate = ready.clone();
+        let queue = Queue {
+            jobs: vec![(
+                1,
+                critical.clone(),
+                Box::new(move || gate.load(Ordering::Acquire)),
+                Box::new(|| {}),
+            )],
+            background: 1,
+        };
+        assert_eq!(
+            queue.ready_index(),
+            None,
+            "ordinary boundary work stays serial"
         );
-        let worker = rx.recv_timeout(Duration::from_secs(30)).unwrap() as libc::pthread_t;
-        std::thread::sleep(Duration::from_millis(20));
-        let idle = (0..20)
-            .filter(|_| {
-                std::thread::sleep(Duration::from_millis(2));
-                let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
-                let mut relative = 0;
-                // SAFETY: pool workers never exit, so the handle stays valid.
-                unsafe { libc::pthread_get_qos_class_np(worker, &mut class, &mut relative) };
-                class as u32 == QOS_USER_INTERACTIVE
-            })
-            .count();
-        assert!(
-            idle >= 15,
-            "idle worker at user-interactive QoS in {idle} of 20 samples"
+        critical.store(true, Ordering::Release);
+        assert_eq!(
+            queue.ready_index(),
+            Some((0, 0)),
+            "audible histories become parallel foreground work"
+        );
+        ready.store(false, Ordering::Release);
+        assert_eq!(
+            queue.ready_index(),
+            None,
+            "promotion never bypasses the representative head gate"
         );
     }
 }

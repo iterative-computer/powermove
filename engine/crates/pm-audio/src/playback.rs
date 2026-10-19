@@ -126,6 +126,11 @@ impl DeviceSide {
         }
     }
 
+    /// Producer publication and observer upper bounds for this epoch's PCM.
+    pub fn publication_for_queued_frames(&self, frames: usize) -> Option<crate::ring::Publication> {
+        self.consumer.publication_for_queued_frames(frames)
+    }
+
     /// Chunks of [`CHUNK`] frames queued for the device (a chunk being played
     /// counts whole). For hosts that drive a device themselves, such as a
     /// simulated device that must not outrun a starved test machine.
@@ -163,6 +168,7 @@ enum Control {
     Solo(Option<HashSet<String>>),
     /// Polled about once a second: the output device id and its latency.
     Watch(DeviceWatch),
+    Schedule(crate::realtime::AudioSchedule),
     Evaluator(Box<Evaluator>, crate::preparation::Evaluators, bool),
     Shutdown,
 }
@@ -180,6 +186,8 @@ struct Shared {
     device_rate: u32,
     prepared: Mutex<Vec<i64>>,
     start_timing: StartTrace,
+    scheduling: Arc<crate::preparation::SchedulingCounters>,
+    schedule: Mutex<crate::realtime::AudioSchedule>,
 }
 
 /// Times of a run's first buffer on the shared monotonic host clock.
@@ -205,22 +213,40 @@ pub struct StartTiming {
     pub late_voice_frames: Vec<(String, u64)>,
     /// The run's first ring publications: frames published so far (at the
     /// ring's rate) and the host time (µs) each push completed, recorded by
-    /// the producer itself, so a deadline check does not depend on when an
-    /// observer polled the ring.
+    /// the producer itself. This trace is diagnostic; deadline checks use
+    /// the ring's atomic publication and observer bounds.
     pub publications: Vec<(u64, u64)>,
     /// Wall time (µs) the producer held a segment because an installed head
     /// ended before a worker finished that voice's history, summed over the
     /// run, and the number of such holds.
     pub history_wait_us: u64,
     pub history_waits: u64,
-    /// Histories the producer claimed at an exhausted head and primed itself.
+    /// Legacy diagnostic, now zero: independent histories are worker-only.
     pub history_claims: u64,
-    /// The longest single segment render (µs) of the run: claimed priming
-    /// and other producer DSP show up here.
+    /// The longest single segment render (µs) of the run.
     pub max_render_us: u64,
     /// The fewest frames queued in the ring when the producer came back to
     /// fill it, after the run's first publication (its low-water mark).
     pub min_queued_frames: u64,
+    /// Actual scheduler selected on the producer; counters are cumulative
+    /// all preparation entries for this Playback, including speculative edits.
+    pub producer_scheduling: String,
+    pub worker_workgroup_joins: u64,
+    pub worker_mach_joins: u64,
+    pub worker_scheduling_failures: u64,
+    pub producer_workgroup_error: Option<i32>,
+    pub producer_mach_error: Option<i32>,
+    pub worker_workgroup_error: i32,
+    pub worker_mach_error: i32,
+    pub scheduling_max_unit_ns: u64,
+    pub scheduling_max_period_cpu_ns: u64,
+    pub scheduling_computation_overruns: u64,
+    pub scheduling_constraint_overruns: u64,
+    /// Throttling since this epoch's Play; preparation before Play remains
+    /// included in the lifetime maxima and entry/failure counters above.
+    pub scheduling_throttle_sleeps: u64,
+    pub scheduling_total_sleep_ns: u64,
+    pub scheduling_restore_failures: u64,
 }
 
 /// Publications recorded per run, enough for several device callbacks.
@@ -251,6 +277,9 @@ struct StartTrace {
     history_claims: AtomicU64,
     max_render: AtomicU64,
     min_queued: AtomicU64,
+    scheduling: Mutex<String>,
+    scheduling_errors: Mutex<(Option<i32>, Option<i32>)>,
+    scheduling_baseline: Mutex<crate::realtime::RealtimeMetrics>,
 }
 
 impl StartTrace {
@@ -363,8 +392,31 @@ impl StartTrace {
             .values()
             .copied()
             .sum();
+        let (producer_workgroup_error, producer_mach_error) = *self
+            .scheduling_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = StartTiming {
             epoch,
+            producer_scheduling: self
+                .scheduling
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            worker_workgroup_joins: 0,
+            worker_mach_joins: 0,
+            worker_scheduling_failures: 0,
+            producer_workgroup_error,
+            producer_mach_error,
+            worker_workgroup_error: 0,
+            worker_mach_error: 0,
+            scheduling_max_unit_ns: 0,
+            scheduling_max_period_cpu_ns: 0,
+            scheduling_computation_overruns: 0,
+            scheduling_constraint_overruns: 0,
+            scheduling_throttle_sleeps: 0,
+            scheduling_total_sleep_ns: 0,
+            scheduling_restore_failures: 0,
             requested_us: self.requested.load(Ordering::Relaxed),
             applied_us: self.applied.load(Ordering::Relaxed),
             queued_us: self.queued.load(Ordering::Acquire),
@@ -522,6 +574,9 @@ impl Playback {
             .latency_us
             .store(stream.info.latency_us(), Ordering::Relaxed);
         let rate = stream.info.sample_rate;
+        let device = crate::device::default_output_state(rate).map(|(id, _)| id);
+        let schedule = crate::realtime::AudioSchedule::new(rate, stream.info.buffer_frames, device);
+        let _ = playback.tx.send(Control::Schedule(schedule));
         let _ = playback.tx.send(Control::Watch(Box::new(move || {
             crate::device::default_output_state(rate)
         })));
@@ -549,6 +604,9 @@ impl Playback {
         let chunks = ((config.ahead_ms as f64 * 2.0 / chunk_ms).ceil() as usize).max(8);
         let ring = Ring::new(chunks, ring_channels);
         let seq = Arc::new(AtomicU64::new(0));
+        let schedule = crate::realtime::AudioSchedule::new(device_rate, 512, None);
+        let mut preparation = crate::preparation::Preparation::new();
+        preparation.set_schedule(schedule.clone());
         let shared = Arc::new(Shared {
             clock: ClockSlot::default(),
             latency_us: AtomicU32::new(latency_us),
@@ -562,6 +620,8 @@ impl Playback {
             device_rate,
             prepared: Mutex::new(Vec::new()),
             start_timing: StartTrace::default(),
+            scheduling: preparation.scheduling.clone(),
+            schedule: Mutex::new(schedule.clone()),
         });
         let (tx, rx) = channel();
         let empty = Arc::new(Document::new(None, 0));
@@ -597,7 +657,8 @@ impl Playback {
             startup: None,
             render_failure: None,
             mixer,
-            preparation: crate::preparation::Preparation::new(),
+            preparation,
+            schedule,
             config,
             solo: None,
             converter: None,
@@ -791,7 +852,43 @@ impl Playback {
 
     /// Diagnostic timing of the most recently started device epoch.
     pub fn start_timing(&self) -> Option<StartTiming> {
-        self.shared.start_timing.latest()
+        self.shared.start_timing.latest().map(|mut timing| {
+            timing.worker_workgroup_joins =
+                self.shared.scheduling.workgroup.load(Ordering::Relaxed);
+            timing.worker_mach_joins = self.shared.scheduling.mach.load(Ordering::Relaxed);
+            timing.worker_scheduling_failures =
+                self.shared.scheduling.failed.load(Ordering::Relaxed);
+            timing.worker_workgroup_error = self
+                .shared
+                .scheduling
+                .workgroup_error
+                .load(Ordering::Relaxed);
+            timing.worker_mach_error = self.shared.scheduling.mach_error.load(Ordering::Relaxed);
+            let metrics = self
+                .shared
+                .schedule
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .metrics();
+            timing.scheduling_max_unit_ns = metrics.max_unit_ns;
+            timing.scheduling_max_period_cpu_ns = metrics.max_period_cpu_ns;
+            timing.scheduling_computation_overruns = metrics.computation_overruns;
+            timing.scheduling_constraint_overruns = metrics.constraint_overruns;
+            let baseline = *self
+                .shared
+                .start_timing
+                .scheduling_baseline
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            timing.scheduling_throttle_sleeps = metrics
+                .throttle_sleeps
+                .saturating_sub(baseline.throttle_sleeps);
+            timing.scheduling_total_sleep_ns = metrics
+                .total_sleep_ns
+                .saturating_sub(baseline.total_sleep_ns);
+            timing.scheduling_restore_failures = metrics.restore_failures;
+            timing
+        })
     }
 
     /// Paused starts whose source and voice DSP pre-roll is ready (diagnostics).
@@ -1217,6 +1314,7 @@ struct RenderThread {
     render_failure: Option<String>,
     mixer: Mixer,
     preparation: crate::preparation::Preparation,
+    schedule: crate::realtime::AudioSchedule,
     config: PlaybackConfig,
     solo: Option<HashSet<String>>,
     converter: Option<Converter>,
@@ -1249,6 +1347,8 @@ impl RenderThread {
             }
         }
         self.publish_stopped();
+        let _idle_priority = StartPriority::new();
+        let mut realtime: Option<crate::realtime::AudioScheduleGuard> = None;
         let mut need_preroll = false;
         let mut last_prefetch: Option<i64> = None;
         let mut lookahead_pending = false;
@@ -1266,6 +1366,9 @@ impl RenderThread {
             match next {
                 Ok(Control::Shutdown) => return,
                 Ok(c) => {
+                    // Document/control work has no bounded audio quantum.
+                    // Keep it outside the real-time computation reservation.
+                    drop(realtime.take());
                     if self.control(c) {
                         need_preroll = true;
                     }
@@ -1281,10 +1384,14 @@ impl RenderThread {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => return,
             }
-            if self.last_watch.elapsed() >= Duration::from_secs(1) && self.device_changed() {
-                need_preroll = true;
+            if self.last_watch.elapsed() >= Duration::from_secs(1) {
+                drop(realtime.take());
+                if self.device_changed() {
+                    need_preroll = true;
+                }
             }
             if !self.transport.is_running() {
+                drop(realtime.take());
                 if self.stop_pending && self.ring.queued() == 0 {
                     self.stop_pending = false;
                     self.publish_stopped();
@@ -1292,14 +1399,32 @@ impl RenderThread {
                 self.prepare_paused();
                 continue;
             }
-            let start_priority = need_preroll.then(StartPriority::new);
+
+            if realtime.is_none() {
+                let guard = self.schedule.enter();
+                *self
+                    .shared
+                    .start_timing
+                    .scheduling
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = guard.method().label().to_string();
+                *self
+                    .shared
+                    .start_timing
+                    .scheduling_errors
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) =
+                    (guard.status().workgroup_error, guard.status().mach_error);
+                realtime = Some(guard);
+            }
+            crate::realtime::checkpoint();
             if need_preroll {
                 need_preroll = false;
                 self.preroll();
                 last_prefetch = None;
             }
             self.fill();
-            drop(start_priority);
+
             if self.late_start.is_some() {
                 continue;
             }
@@ -1437,6 +1562,12 @@ impl RenderThread {
                 }
                 let restart = match &result {
                     Ok(Effect::Restart) => {
+                        *self
+                            .shared
+                            .start_timing
+                            .scheduling_baseline
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = self.schedule.metrics();
                         self.shared
                             .start_timing
                             .begin(self.transport.epoch(), requested_us);
@@ -1521,6 +1652,16 @@ impl RenderThread {
                 self.mixer.standard_content(static_content);
                 false
             }
+            Control::Schedule(schedule) => {
+                self.preparation.set_schedule(schedule.clone());
+                *self
+                    .shared
+                    .schedule
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = schedule.clone();
+                self.schedule = schedule;
+                false
+            }
             Control::Watch(w) => {
                 self.watch = Some(w);
                 self.device_state = self.watch.as_mut().and_then(|w| w());
@@ -1543,6 +1684,19 @@ impl RenderThread {
             return false;
         }
         self.device_state = now;
+        if let Some((device, _)) = now {
+            let frames =
+                crate::device::default_output_info().map_or(512, |info| info.buffer_frames);
+            let schedule =
+                crate::realtime::AudioSchedule::new(self.device_rate, frames, Some(device));
+            self.preparation.set_schedule(schedule.clone());
+            *self
+                .shared
+                .schedule
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = schedule.clone();
+            self.schedule = schedule;
+        }
         if let Some((_, latency)) = now {
             self.shared.latency_us.store(latency, Ordering::Relaxed);
         }
@@ -1797,6 +1951,7 @@ impl RenderThread {
                 && self.ring.played_frames().saturating_sub(device_start)
                     < self.device_rate as u64 * SOURCE_WAIT_MS / 1000
             {
+                crate::realtime::checkpoint();
                 self.preparation
                     .wait(&mut self.mixer, Duration::from_micros(250));
                 self.preparation
@@ -1815,6 +1970,7 @@ impl RenderThread {
             && self.mixer.begin_prepared(position)
         {
             self.late_start = Some(position);
+            crate::preparation::wake_workers();
         }
         self.shared.start_timing.prefill_ready.store(
             self.mixer.prefill_ready_at(position).unwrap_or(0),
@@ -1853,11 +2009,13 @@ impl RenderThread {
             && self.ring.played_frames().saturating_sub(device_start)
                 < self.device_rate as u64 * SOURCE_WAIT_MS / 1000
         {
+            crate::realtime::checkpoint();
             let _timing = crate::profile::timer(crate::profile::Kind::Hold);
             std::thread::sleep(Duration::from_millis(1));
         }
         if speed == 1 && self.late_start.is_none() {
             self.mixer.use_prepared(position);
+            crate::preparation::wake_workers();
         }
         if let Some(c) = &mut self.converter {
             c.reset();
@@ -1898,6 +2056,7 @@ impl RenderThread {
                 target
             }
         {
+            crate::realtime::checkpoint();
             let retry = self.pending_segment.is_some();
             let Some(seg) = self
                 .pending_segment
@@ -1924,20 +2083,14 @@ impl RenderThread {
             // so stretched voices resample there (see RenderOptions).
             let (lo, hi) = seg.media_span();
             if self.mixer.awaiting_history(lo, (hi - lo) as usize) {
-                // Never wait on a queued job at an exhausted head: a busy or
-                // small pool could leave it unstarted while the ring drains.
-                // Unstarted histories are primed here from the head's start.
-                let claimed = self.mixer.claim_histories(lo, (hi - lo) as usize);
-                self.shared
-                    .start_timing
-                    .history_claims
-                    .fetch_add(claimed as u64, Ordering::Relaxed);
-                if self.mixer.awaiting_history(lo, (hi - lo) as usize) {
-                    self.history_wait
-                        .get_or_insert_with(std::time::Instant::now);
-                    self.pending_segment = Some(seg);
-                    return;
-                }
+                // The bounded serial claim budget is zero. Every independent
+                // history stays on its real-time preparation worker. Priming
+                // sixteen queued histories here spent 68-111 ms without one
+                // ring publication and exhausted the audible reserve.
+                self.history_wait
+                    .get_or_insert_with(std::time::Instant::now);
+                self.pending_segment = Some(seg);
+                return;
             }
             if let Some(since) = self.history_wait.take() {
                 self.shared
@@ -1979,6 +2132,7 @@ impl RenderThread {
                 })
             {
                 self.mixer.use_prepared(lo);
+                crate::preparation::wake_workers();
             }
             let rendering = std::time::Instant::now();
             let mut result = {

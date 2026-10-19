@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 use pm_protocol::clock::TransportState;
 use pm_protocol::common::{PlaybackRate, TickRange};
 
+use crate::clock::host_now_us;
+
 /// Frames per chunk.
 pub const CHUNK: usize = 256;
 /// The widest device the ring carries.
@@ -54,6 +56,8 @@ struct Slot {
     next: AtomicPtr<Slot>,
     tag: UnsafeCell<Tag>,
     data: UnsafeCell<[f32; CHUNK * MAX_CHANNELS]>,
+    /// An upper bound on publication, stored after `head` publishes it.
+    published_after_us: AtomicU64,
 }
 
 /// Shared state. `head` counts chunks written, `tail` chunks consumed.
@@ -102,6 +106,7 @@ impl Ring {
                     next: AtomicPtr::new(std::ptr::null_mut()),
                     tag: UnsafeCell::new(Tag::default()),
                     data: UnsafeCell::new([0.0; CHUNK * MAX_CHANNELS]),
+                    published_after_us: AtomicU64::new(0),
                 })
             })
             .collect();
@@ -155,6 +160,7 @@ impl Ring {
                 next: AtomicPtr::new(after),
                 tag: UnsafeCell::new(Tag::default()),
                 data: UnsafeCell::new([0.0; CHUNK * MAX_CHANNELS]),
+                published_after_us: AtomicU64::new(0),
             }));
         }
         for i in base..slots.len() - 1 {
@@ -229,10 +235,16 @@ impl Ring {
                 ..tag
             };
         }
+        slot.published_after_us.store(0, Ordering::Relaxed);
         self.written.fetch_add(frames as u64, Ordering::Relaxed);
         self.producer
             .store(slot.next.load(Ordering::Acquire), Ordering::Relaxed);
+        // The zeroed timestamp and PCM become visible together here. If the
+        // producer is descheduled before the following stamp, an observer can
+        // still use its own clock as an upper bound on publication.
         self.head.store(head + 1, Ordering::Release);
+        slot.published_after_us
+            .store(host_now_us(), Ordering::Release);
         true
     }
 }
@@ -251,6 +263,17 @@ pub struct Heard {
     pub offset: usize,
 }
 
+/// Two upper bounds on a chunk's publication on the monotonic host clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Publication {
+    /// Producer clock sampled after the release, if it stamped the slot yet.
+    pub published_us: Option<u64>,
+    /// Observer clock sampled after acquiring the published slot.
+    pub observed_us: u64,
+    /// Earlier of those upper bounds: the deadline must hold for this value.
+    pub visible_by_us: u64,
+}
+
 impl Consumer {
     pub fn new(ring: Arc<Ring>) -> Consumer {
         Consumer { ring, offset: 0 }
@@ -264,11 +287,27 @@ impl Consumer {
     /// rest of the chunk being played counts its unplayed frames only).
     /// Called from the callback's side, like `fill`.
     pub fn queued_frames(&self) -> usize {
+        self.queued_snapshot(usize::MAX).0
+    }
+
+    /// Upper bounds on when at least `frames` of the current epoch were
+    /// queued. The crossing chunk is read under the same acquired `head`
+    /// snapshot as its tag and PCM. Either side may be descheduled after the
+    /// release; the earlier clock still bounds publication from above.
+    pub fn publication_for_queued_frames(&self, frames: usize) -> Option<Publication> {
+        if frames == 0 {
+            return None;
+        }
+        self.queued_snapshot(frames).1
+    }
+
+    fn queued_snapshot(&self, threshold: usize) -> (usize, Option<Publication>) {
         let ring = &*self.ring;
         let current = ring.epoch.load(Ordering::Acquire);
         let tail = ring.tail.load(Ordering::Relaxed);
         let head = ring.head.load(Ordering::Acquire);
         let mut frames = 0;
+        let mut publication = None;
         let mut ptr = ring.consumer.load(Ordering::Relaxed);
         for i in 0..head - tail {
             // SAFETY: all nodes before the acquired head are published.
@@ -282,8 +321,18 @@ impl Consumer {
             }
             let played = if i == 0 { self.offset } else { 0 };
             frames += (tag.frames as usize).saturating_sub(played);
+            if publication.is_none() && frames >= threshold {
+                let stamped = slot.published_after_us.load(Ordering::Acquire);
+                let observed_us = host_now_us();
+                let published_us = (stamped != 0).then_some(stamped);
+                publication = Some(Publication {
+                    published_us,
+                    observed_us,
+                    visible_by_us: published_us.map_or(observed_us, |at| at.min(observed_us)),
+                });
+            }
         }
-        frames
+        (frames, publication)
     }
 
     /// Fills `out` (interleaved, `device_channels` wide) from the ring.
@@ -413,6 +462,52 @@ mod tests {
         c.fill(&mut out, 1);
         assert_eq!(ring.buffered_frames(), (CHUNK - 100) as u64);
         assert_eq!(c.queued_frames(), CHUNK - 100);
+    }
+
+    #[test]
+    fn publication_clock_follows_the_threshold_chunk_and_epoch() {
+        let ring = Ring::new(4, 1);
+        let mut consumer = Consumer::new(ring.clone());
+        let first = vec![1.0; CHUNK];
+        let second = vec![2.0; CHUNK];
+        let third = vec![3.0; CHUNK];
+        assert!(ring.push(tag(0, 0, CHUNK as u32), &first));
+        assert!(ring.push(tag(CHUNK as i64, 0, CHUNK as u32), &second));
+        let first_slot = ring.consumer.load(Ordering::Relaxed);
+        let second_slot = unsafe { (*first_slot).next.load(Ordering::Relaxed) };
+        let second_stamp = unsafe { (*second_slot).published_after_us.load(Ordering::Acquire) };
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let publication = consumer.publication_for_queued_frames(2 * CHUNK).unwrap();
+        assert_eq!(publication.published_us, Some(second_stamp));
+        assert_eq!(publication.visible_by_us, second_stamp);
+        assert!(publication.observed_us >= second_stamp);
+        assert!(
+            consumer
+                .publication_for_queued_frames(2 * CHUNK + 1)
+                .is_none()
+        );
+
+        ring.set_epoch(1);
+        assert!(ring.push(tag(10_000, 1, CHUNK as u32), &third));
+        let third_slot = unsafe { (*second_slot).next.load(Ordering::Relaxed) };
+        assert_eq!(consumer.queued_frames(), CHUNK);
+        let third_stamp = unsafe { (*third_slot).published_after_us.load(Ordering::Acquire) };
+        let publication = consumer.publication_for_queued_frames(CHUNK).unwrap();
+        assert_eq!(publication.published_us, Some(third_stamp));
+        assert_eq!(
+            publication.visible_by_us,
+            third_stamp.min(publication.observed_us)
+        );
+
+        // Model an observer arriving after the release but before the
+        // producer's post-release stamp. Its own clock still bounds the PCM.
+        unsafe { (*third_slot).published_after_us.store(0, Ordering::Release) };
+        let publication = consumer.publication_for_queued_frames(CHUNK).unwrap();
+        assert_eq!(publication.published_us, None);
+        assert_eq!(publication.visible_by_us, publication.observed_us);
+        let mut out = vec![0.0; CHUNK];
+        assert_eq!(consumer.fill(&mut out, 1).unwrap().tag.epoch, 1);
+        assert_eq!(out, third);
     }
 
     #[test]

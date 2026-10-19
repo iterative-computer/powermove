@@ -589,6 +589,7 @@ impl StretchRun {
             let input: Vec<&[f32]> = self.scratch_in.iter().map(|c| &c[..len]).collect();
             let mut output: Vec<&mut [f32]> =
                 self.scratch_out.iter_mut().map(|c| &mut c[..m]).collect();
+            crate::realtime::checkpoint();
             let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
             let _scope = crate::profile::timer(crate::profile::Kind::DspProcess);
             live.stretcher

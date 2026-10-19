@@ -294,9 +294,6 @@ type SharedHead = Arc<HeadSlot>;
 struct Prefill {
     head: Arc<Head>,
     finished: Arc<AtomicBool>,
-    /// The independent history job's claim. Whoever sets it first runs
-    /// the history: a worker, or the producer at the head's end.
-    started: Arc<AtomicBool>,
 }
 
 /// Detached priming work. It never touches live histories, meters or the transport.
@@ -313,6 +310,7 @@ pub(crate) struct PrepareVoice {
     run: Arc<std::sync::Mutex<StretchRun>>,
     head: Option<SharedHead>,
     pub(crate) gate: Option<Arc<AtomicBool>>,
+    pub(crate) critical: Arc<AtomicBool>,
     started: Arc<AtomicBool>,
     /// Set by whoever ran this job once its history is released. A head's
     /// consumer waits on it alone: never on the job's result reaching the
@@ -323,8 +321,8 @@ impl PrepareVoice {
     pub(crate) fn history(&self) -> Arc<std::sync::Mutex<StretchRun>> {
         self.run.clone()
     }
-    /// Claims this job for the caller. False when another thread (a worker,
-    /// or the producer at an exhausted head) already owns its history.
+    /// Claims this job for a worker or paused preparation. False when another
+    /// thread already owns its history.
     pub(crate) fn claim(&self) -> bool {
         !self.started.swap(true, Ordering::AcqRel)
     }
@@ -393,6 +391,7 @@ impl PrepareVoice {
                     let _timing = crate::profile::timer(crate::profile::Kind::Bounds);
                     let span = CONTROL * READ_GROUP;
                     for group in lo.div_euclid(span)..=(hi - 1).div_euclid(span) {
+                        crate::realtime::checkpoint();
                         if cancelled() {
                             return Err(crate::error::AudioError::Device(
                                 "superseded preparation".into(),
@@ -493,7 +492,7 @@ impl PrepareVoice {
 
 /// Detached histories for one start. A history handed to the audible mix
 /// leaves its entry at once ([`Prepared::release`]): the entry then holds
-/// only histories no voice plays, so no later job, claim or reuse (a loop
+/// only histories no voice plays, so no later job or reuse (a loop
 /// wrap) ever touches a live run.
 struct Prepared {
     runs: Vec<Option<Arc<std::sync::Mutex<StretchRun>>>>,
@@ -503,6 +502,7 @@ struct Prepared {
     finished: Vec<Arc<AtomicBool>>,
     /// The claim of each voice's latest submitted job.
     started: Vec<Arc<AtomicBool>>,
+    critical: Vec<Arc<AtomicBool>>,
 }
 impl Prepared {
     fn new(voices: usize) -> Self {
@@ -511,6 +511,9 @@ impl Prepared {
             ready: vec![false; voices],
             heads: vec![None; voices],
             finished: (0..voices)
+                .map(|_| Arc::new(AtomicBool::new(false)))
+                .collect(),
+            critical: (0..voices)
                 .map(|_| Arc::new(AtomicBool::new(false)))
                 .collect(),
             started: (0..voices)
@@ -527,6 +530,7 @@ impl Prepared {
         self.heads[i] = None;
         self.finished[i] = Arc::new(AtomicBool::new(false));
         self.started[i] = Arc::new(AtomicBool::new(false));
+        self.critical[i] = Arc::new(AtomicBool::new(false));
     }
     fn output_ready(&self, i: usize) -> bool {
         self.ready[i]
@@ -729,6 +733,7 @@ impl Mixer {
                     run: run.clone(),
                     head: None,
                     gate: None,
+                    critical: prepared.critical[vi].clone(),
                     started: prepared.started[vi].clone(),
                     finished: prepared.finished[vi].clone(),
                 };
@@ -822,6 +827,7 @@ impl Mixer {
             // is still exiting can never mark this one finished.
             prepared.finished[vi] = Arc::new(AtomicBool::new(false));
             prepared.started[vi] = Arc::new(AtomicBool::new(false));
+            prepared.critical[vi] = Arc::new(AtomicBool::new(false));
             work.push(PrepareVoice {
                 start,
                 target,
@@ -835,6 +841,7 @@ impl Mixer {
                 run: run.clone(),
                 head: prepared.heads[vi].clone(),
                 gate,
+                critical: prepared.critical[vi].clone(),
                 started: prepared.started[vi].clone(),
                 finished: prepared.finished[vi].clone(),
             });
@@ -940,11 +947,11 @@ impl Mixer {
                 // ready voice. Never silence it for an unfinished CPU job.
                 // The history leaves the entry with the voice: it is marked
                 // served, so no job is scheduled on it and the join skips it.
+                p.critical[i].store(true, Ordering::Release);
                 voice.stretch = Some(run);
                 voice.prefill = Some(Prefill {
                     head,
                     finished: p.finished[i].clone(),
-                    started: p.started[i].clone(),
                 });
                 p.ready[i] = true;
             } else if missing[i] {
@@ -1056,11 +1063,11 @@ impl Mixer {
                     .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).clone())
                     && let Some(run) = p.runs[i].take()
                 {
+                    p.critical[i].store(true, Ordering::Release);
                     voice.stretch = Some(run);
                     voice.prefill = Some(Prefill {
                         head,
                         finished: p.finished[i].clone(),
-                        started: p.started[i].clone(),
                     });
                     p.release(i);
                 }
@@ -1080,33 +1087,6 @@ impl Mixer {
                     !p.finished.load(Ordering::Acquire) && !p.head.covers(a, (b - a) as usize)
                 })
         })
-    }
-
-    /// Takes over the independent histories that [`Self::awaiting_history`]
-    /// would wait on and that no worker has started: the producer then primes
-    /// them itself from the head's original start (`prepare_join`), so the
-    /// wait at an exhausted head is bounded by jobs already running, never by
-    /// a saturated pool's queue. Returns how many were claimed.
-    pub(crate) fn claim_histories(&mut self, at: i64, frames: usize) -> usize {
-        let rate = self.format.sample_rate as f64;
-        let mut claimed = 0;
-        for (v, plan) in self.voices.iter().zip(&self.graph.voices) {
-            let (first, last) = voice_bounds(&v.reader, plan, rate);
-            let a = at.max(first);
-            let b = (at + frames as i64).min(last);
-            if b <= a {
-                continue;
-            }
-            if let Some(p) = &v.prefill
-                && !p.finished.load(Ordering::Acquire)
-                && !p.head.covers(a, (b - a) as usize)
-                && !p.started.swap(true, Ordering::AcqRel)
-            {
-                p.finished.store(true, Ordering::Release);
-                claimed += 1;
-            }
-        }
-        claimed
     }
 
     /// Whether a retune glide is in progress.
@@ -1417,6 +1397,7 @@ impl Mixer {
         let open = comps[0].clone();
         let solo = monitor_solo.filter(|s| !s.is_empty());
         for (vi, plan) in graph.voices.iter().enumerate() {
+            crate::realtime::checkpoint();
             self.voice_dropped_frames = 0;
             let mut voice_options;
             let options = if options.drop_voices.contains(&plan.id) && !options.wait {
@@ -1926,6 +1907,7 @@ impl Mixer {
         // Time-mapped voices: (index, first and last sample heard here).
         let mut mapped: Vec<(usize, i64, i64)> = Vec::new();
         for (vi, plan) in graph.voices.iter().enumerate() {
+            crate::realtime::checkpoint();
             if only.is_some_and(|o| o != vi) {
                 continue;
             }
@@ -1981,6 +1963,7 @@ impl Mixer {
         for g in all {
             let (g0, g1) = (g * span, (g + 1) * span);
             for &(vi, first, last) in &mapped {
+                crate::realtime::checkpoint();
                 if g1 <= first || g0 >= last {
                     continue;
                 }
@@ -2813,12 +2796,11 @@ mod prepared_tests {
         }
     }
 
-    /// A saturated pool must not stall the mix at an exhausted shared head:
-    /// histories no worker has started are claimed and primed by the
-    /// producer from the head's original start, bit exact; a history a
-    /// worker already runs is waited for, and only that one.
+    /// At the end of a complete shared head, the producer waits for every
+    /// independent history. A queued job remains queued; only its worker may
+    /// prime it, and the handoff must retain the exact offline PCM.
     #[test]
-    fn an_exhausted_head_never_waits_for_an_unstarted_history() {
+    fn an_exhausted_head_waits_for_queued_and_running_histories() {
         let f = Fixture::new();
         let mut mix = f.mixer(0.7, 1.5, 10.0);
         mix.standard_content(true);
@@ -2829,10 +2811,14 @@ mod prepared_tests {
         assert!(first.run(&mut Evaluator::new(), true, || false).unwrap());
         mix.prepared_voice(start, 0, true);
         let rest: Vec<_> = jobs.collect();
-        assert_eq!(rest.len(), 3);
-        // A worker has started v1's history; v2 and v3 are still queued.
-        let running = rest.iter().position(|j| j.vi == 1).unwrap();
-        assert!(rest[running].claim());
+        assert_eq!(rest.iter().map(|j| j.vi).collect::<Vec<_>>(), [1, 2, 3]);
+        // v1 has been taken by a worker. v2 and v3 are still queued.
+        assert!(rest[0].claim());
+        assert!(
+            rest[1..]
+                .iter()
+                .all(|job| !job.started.load(Ordering::Acquire))
+        );
         mix.use_prepared(start);
         let mut reference = f.mixer(0.7, 1.5, 10.0);
         let options = RenderOptions {
@@ -2854,27 +2840,28 @@ mod prepared_tests {
         compare(&mut mix, 0, HEAD_FRAMES);
         let end = start + HEAD_FRAMES as i64;
         assert!(mix.awaiting_history(end, 256));
-        assert_eq!(
-            mix.claim_histories(end, 256),
-            2,
-            "v2 and v3 were never started"
-        );
-        assert!(
-            mix.awaiting_history(end, 256),
-            "the running history is still awaited"
-        );
-        for job in &rest {
-            assert!(!job.claim(), "no history runs twice");
+        for (i, job) in rest.into_iter().enumerate() {
+            if i > 0 {
+                assert!(
+                    job.claim(),
+                    "queued v{} still belongs to its worker",
+                    job.vi
+                );
+            }
+            let vi = job.vi;
+            let ready = job.run(&mut Evaluator::new(), true, || false).unwrap();
+            assert!(ready, "worker v{vi} completed its independent history");
+            assert_eq!(
+                mix.awaiting_history(end, 256),
+                i < 2,
+                "head handoff after worker v{vi}"
+            );
         }
-        let vi = rest[running].vi;
-        let job = rest.into_iter().nth(running).unwrap();
-        let ready = job.run(&mut Evaluator::new(), true, || false).unwrap();
-        mix.prepared_voice(start, vi, ready);
         assert!(!mix.awaiting_history(end, 256));
         compare(&mut mix, HEAD_FRAMES, HEAD_FRAMES + 8192);
     }
 
-    /// The bit-exact comparison the claim tests share: `mix` against a fresh
+    /// The bit-exact comparison the handoff tests share: `mix` against a fresh
     /// mixer rendering the same frames from `start` on.
     struct Reference {
         mix: Mixer,
@@ -2898,7 +2885,7 @@ mod prepared_tests {
                 let at = start + offset as i64;
                 assert!(
                     !mix.awaiting_history(at, 256),
-                    "the producer waits on no job at {offset}"
+                    "worker histories must be ready at {offset}"
                 );
                 mix.render(at, 256, &mut self.actual, &options).unwrap();
                 self.mix
@@ -2926,16 +2913,83 @@ mod prepared_tests {
         (mix, rest)
     }
 
-    /// Claim, the claimed workers' reports, then boundary preparation at the
-    /// same start (a work-area start that Play used). No job is ever
-    /// scheduled on a history the audible mix plays, the producer never
-    /// waits again, and the next loop wrap gets fresh, exact histories
-    /// without a producer pre-roll.
+    /// The actual pool owns the queued histories behind an installed head.
+    /// Boundary preparation cannot take those live histories while they are
+    /// unfinished; after the workers release them, a loop wrap gets fresh,
+    /// exact histories from a second pool pass.
     #[test]
-    fn claimed_installed_histories_are_never_rescheduled() {
+    fn worker_finished_installed_histories_are_never_rescheduled() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct WorkerGate {
+            open: std::sync::Mutex<bool>,
+            wake: std::sync::Condvar,
+            entered: AtomicUsize,
+        }
+        struct WaitInWorker(Arc<WorkerGate>);
+        impl pm_eval::EvalHooks for WaitInWorker {
+            fn resolve_content(
+                &self,
+                _: &pm_eval::Comp<'_>,
+                _: &pm_model::Node,
+                _: f64,
+                _: &mut pm_eval::evaluator::Content,
+                _: &mut dyn pm_eval::evaluator::PropEval,
+            ) -> pm_eval::js_sem::JsResult<()> {
+                self.0.entered.fetch_add(1, Ordering::Release);
+                let mut open = self.0.open.lock().unwrap_or_else(|e| e.into_inner());
+                while !*open {
+                    open = self.0.wake.wait(open).unwrap_or_else(|e| e.into_inner());
+                }
+                Ok(())
+            }
+        }
+        struct OpenOnDrop(Arc<WorkerGate>);
+        impl Drop for OpenOnDrop {
+            fn drop(&mut self) {
+                *self.0.open.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                self.0.wake.notify_all();
+            }
+        }
         let f = Fixture::new();
         let start = 192_000;
-        let (mut mix, rest) = partly_installed(&f, start);
+        let mut mix = f.mixer(0.7, 1.5, 10.0);
+        mix.standard_content(true);
+        let mut jobs = mix.preparation_work(start, start).into_iter();
+        let first = jobs.next().unwrap();
+        assert!(first.claim());
+        assert!(first.run(&mut Evaluator::new(), true, || false).unwrap());
+        mix.prepared_voice(start, 0, true);
+        assert_eq!(jobs.count(), 3);
+        let gate = Arc::new(WorkerGate {
+            open: std::sync::Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+            entered: AtomicUsize::new(0),
+        });
+        let open_on_drop = OpenOnDrop(gate.clone());
+        let mut prep = crate::preparation::Preparation::new();
+        prep.evaluators(
+            Arc::new({
+                let gate = gate.clone();
+                move || Evaluator::new().with_hooks(Arc::new(WaitInWorker(gate.clone())))
+            }),
+            true,
+        );
+        // A 64-frame callback at 48 kHz leaves 1.333 ms per constraint
+        // period. Exercise the same pool DSP with this short device budget.
+        let schedule = crate::realtime::AudioSchedule::new(48_000, 64, None);
+        prep.set_schedule(schedule.clone());
+        prep.schedule(&mut mix, &[start], true);
+        assert_eq!(prep.pending().len(), 3);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while gate.entered.load(Ordering::Acquire) == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            gate.entered.load(Ordering::Acquire) > 0,
+            "pool started a history"
+        );
+        mix.use_prepared(start);
         let live: Vec<_> = mix
             .voices
             .iter()
@@ -2945,12 +2999,6 @@ mod prepared_tests {
         reference.compare(&mut mix, start, 0, HEAD_FRAMES);
         let end = start + HEAD_FRAMES as i64;
         assert!(mix.awaiting_history(end, 256));
-        assert_eq!(mix.claim_histories(end, 256), 3);
-        let mut prep = crate::preparation::Preparation::new();
-        for job in rest {
-            assert!(!job.claim(), "the producer owns this history");
-            prep.deliver_claimed(start, job.vi, job.history());
-        }
         // prepare_boundaries: retain the boundary, then schedule it.
         mix.retain_prepared(&[start]);
         prep.schedule(&mut mix, &[start], false);
@@ -2960,28 +3008,65 @@ mod prepared_tests {
         assert_eq!(
             scheduled,
             [0, 1, 2, 3],
-            "released slots are prepared afresh"
+            "one fresh boundary job and three unfinished live jobs"
         );
-        for vi in scheduled {
-            let run = mix.prepared[&start].runs[vi].clone().unwrap();
-            assert!(
-                live.iter().all(|l| !Arc::ptr_eq(l, &run)),
-                "v{vi}'s job runs on a history no voice plays"
-            );
-        }
+        assert!(mix.prepared[&start].runs[1..].iter().all(Option::is_none));
+        let fresh_first = mix.prepared[&start].runs[0].as_ref().unwrap();
+        assert!(live.iter().all(|l| !Arc::ptr_eq(l, fresh_first)));
         for (v, l) in mix.voices.iter().zip(&live) {
             assert!(Arc::ptr_eq(v.stretch.as_ref().unwrap(), l));
         }
-        // The fresh jobs run on the pool while the live mix plays on.
-        for from in (HEAD_FRAMES..HEAD_FRAMES + 16_384).step_by(1024) {
-            reference.compare(&mut mix, start, from, from + 1024);
-            prep.poll(&mut mix);
-        }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        assert!(mix.awaiting_history(end, 256), "no producer takeover");
+        drop(open_on_drop);
         while !prep.pending().is_empty() && std::time::Instant::now() < deadline {
             prep.wait(&mut mix, std::time::Duration::from_millis(10));
         }
-        assert!(prep.pending().is_empty(), "the fresh jobs completed");
+        assert!(
+            prep.pending().is_empty(),
+            "installed workers and first refill completed"
+        );
+        assert!(!mix.awaiting_history(end, 256));
+        // The released entry can now submit its remaining fresh histories.
+        prep.schedule(&mut mix, &[start], false);
+        assert_eq!(prep.pending().len(), 3);
+        for vi in 1..4 {
+            let run = mix.prepared[&start].runs[vi].as_ref().unwrap();
+            assert!(live.iter().all(|l| !Arc::ptr_eq(l, run)), "fresh v{vi}");
+        }
+        while !prep.pending().is_empty() && std::time::Instant::now() < deadline {
+            prep.wait(&mut mix, std::time::Duration::from_millis(10));
+        }
+        assert!(
+            prep.pending().is_empty(),
+            "fresh histories completed on the pool"
+        );
+        // Done follows each schedule guard's restoration, so accepting all
+        // reports also makes every worker's final scheduling metrics visible.
+        // The artificial gate wait is wall time rather than CPU service.
+        let metrics = schedule.metrics();
+        eprintln!(
+            "A8 64-frame pool: max DSP unit {} ns, max period CPU {} ns, computation overruns {}, constraint overruns {}, throttle sleeps {}, total sleep {} ns, restore failures {}",
+            metrics.max_unit_ns,
+            metrics.max_period_cpu_ns,
+            metrics.computation_overruns,
+            metrics.constraint_overruns,
+            metrics.throttle_sleeps,
+            metrics.total_sleep_ns,
+            metrics.restore_failures,
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let joined = prep.scheduling.workgroup.load(Ordering::Acquire)
+                + prep.scheduling.mach.load(Ordering::Acquire);
+            assert_eq!(joined, 7, "three live jobs and four fresh jobs entered RT");
+            assert!(metrics.max_unit_ns > 0, "worker CPU was measured");
+            assert_eq!(metrics.constraint_overruns, 0, "64-frame CPU constraint");
+            assert_eq!(metrics.restore_failures, 0, "workers restored their policy");
+        }
+        // The live histories continue exactly through and beyond the handoff.
+        for from in (HEAD_FRAMES..HEAD_FRAMES + 16_384).step_by(1024) {
+            reference.compare(&mut mix, start, from, from + 1024);
+        }
         assert!(mix.prepared_ready(&[start]));
         // The next loop wrap.
         mix.use_prepared(start);
@@ -3006,27 +3091,49 @@ mod prepared_tests {
         let f = Fixture::new();
         let start = 192_000;
         let (mut mix, rest) = partly_installed(&f, start);
+        assert!(
+            rest.iter()
+                .all(|work| work.critical.load(Ordering::Acquire)),
+            "installed heads promote every queued independent history"
+        );
         let running = rest.iter().position(|j| j.vi == 1).unwrap();
         assert!(rest[running].claim());
         let mut reference = Reference::new(&f);
         reference.compare(&mut mix, start, 0, HEAD_FRAMES);
         mix.invalidate_prepared();
         let end = start + HEAD_FRAMES as i64;
-        assert_eq!(mix.claim_histories(end, 256), 2);
         assert!(mix.awaiting_history(end, 256), "v1 is still running");
-        let job = rest.into_iter().nth(running).unwrap();
-        assert!(job.run(&mut Evaluator::new(), true, || false).unwrap());
+        for (i, job) in rest.into_iter().enumerate() {
+            if i != running {
+                assert!(
+                    job.claim(),
+                    "queued v{} still belongs to its worker",
+                    job.vi
+                );
+            }
+            assert!(job.run(&mut Evaluator::new(), true, || false).unwrap());
+            assert_eq!(
+                mix.awaiting_history(end, 256),
+                i < 2,
+                "the installed head follows job completion despite entry eviction"
+            );
+        }
         reference.compare(&mut mix, start, HEAD_FRAMES, HEAD_FRAMES + 8192);
     }
 
     /// Paused or boundary preparation of a start that Play installed never
-    /// takes a queued job's live history: it prepares fresh ones, and the
-    /// producer can still claim every unstarted history at the head's end.
+    /// takes a queued job's live history: it prepares fresh ones while the
+    /// installed head continues to wait for its original workers.
     #[test]
     fn paused_preparation_never_runs_a_queued_job_on_a_live_history() {
         let f = Fixture::new();
         let start = 192_000;
         let (mut mix, rest) = partly_installed(&f, start);
+        assert!(
+            rest.iter()
+                .all(|work| work.critical.load(Ordering::Acquire)),
+            "installed heads promote every queued independent history"
+        );
         let live: Vec<_> = mix
             .voices
             .iter()
@@ -3040,9 +3147,15 @@ mod prepared_tests {
             assert!(live.iter().all(|l| !Arc::ptr_eq(l, run)), "v{vi}");
         }
         let end = start + HEAD_FRAMES as i64;
-        assert_eq!(mix.claim_histories(end, 256), 3, "no queued job was taken");
-        for job in &rest {
-            assert!(!job.claim());
+        assert!(mix.awaiting_history(end, 256));
+        for (i, job) in rest.into_iter().enumerate() {
+            assert!(
+                job.claim(),
+                "paused preparation did not take live v{}",
+                job.vi
+            );
+            assert!(job.run(&mut Evaluator::new(), true, || false).unwrap());
+            assert_eq!(mix.awaiting_history(end, 256), i < 2);
         }
         reference.compare(&mut mix, start, HEAD_FRAMES, HEAD_FRAMES + 8192);
     }
