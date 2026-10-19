@@ -14,12 +14,12 @@
  *   pm-electron-lock bunx playwright test e2e/engine-extension-compat.spec.ts --workers=1
  */
 import { execFileSync } from 'node:child_process';
-import { cp, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { ElectronApplication, Page } from 'playwright';
 
-import { expect, test } from './helpers/app';
+import { expect, launchApp, test } from './helpers/app';
 import { ffmpegBinary } from './helpers/ffmpeg';
 
 const ON = { POWERMOVE_NEW_ENGINE: '1' };
@@ -68,10 +68,52 @@ async function shapeTintProject(page: Page): Promise<void> {
   });
 }
 
+/** The fixtures' folder of each extension id the tests install. */
+const FIXTURE: Record<string, string> = {
+  'shape-tint': 'fixtures/compat-corpus/shape-tint',
+  'typewriter-effect': 'fixtures/typewriter-effect'
+};
+
+/** Today's app: a fresh profile with `extension` installed and "Use New Engine" off. */
+async function flagOffApp(extension: string | null) {
+  const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-today-'));
+  if (extension) await cp(path.join(__dirname, FIXTURE[extension]!), path.join(userData, 'extensions', extension), { recursive: true });
+  return launchApp({ userData, env: {} });
+}
+
+/** Today's exporter's PNG frames: the session closes, and today's app
+ *  (a fresh profile with the same extension, "Use New Engine" off) sets the
+ *  project up again and exports it the same way. Returns the frames' RGBA. */
+async function todayPngExport(session: { userData: string; close(): Promise<void> }, extension: string, setup: (page: Page) => Promise<void>, folder: string, frames: number[]): Promise<Buffer[]> {
+  await session.close();
+  const off = await flagOffApp(extension);
+  try {
+    await off.openEditor();
+    await off.page.waitForFunction((id) => (window as any).PM?.Kernel?.loader?.activeIds?.().includes(id), extension).catch(async (error) => {
+      console.log('flag off, not active:', JSON.stringify(await off.page.evaluate((id) => ({ ids: (window as any).PM?.Kernel?.loader?.activeIds?.(), record: (window as any).PM?.Kernel?.api('corpus')?.extensions?.list?.().find((r: any) => r.id === id) }), extension).catch((e) => String(e))));
+      throw error;
+    });
+    await setup(off.page);
+    await stubSavePanel(off.app, folder, true);
+    const result = await off.page.evaluate(async () => (window as any).PM.Export.run({ format: 'png', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false, alpha: false }));
+    expect(result).toEqual({ cancelled: false });
+    expect(off.diagnostics.pageErrors).toEqual([]);
+  } finally {
+    await off.close();
+    await rm(off.userData, { recursive: true, force: true });
+  }
+  const files = (await readdir(folder)).filter((f) => f.endsWith('.png')).sort();
+  expect(files.length).toBe(90);
+  return frames.map((f) => pngRgba(path.join(folder, files[f]!)));
+}
+
 /** The next save panel answers `file`. */
-async function stubSavePanel(app: ElectronApplication, file: string): Promise<void> {
+async function stubSavePanel(app: ElectronApplication, file: string, folder = false): Promise<void> {
+  // Today's exporter picks an image sequence's folder (an existing one) with an open panel.
+  if (folder) await mkdir(file, { recursive: true });
   await app.evaluate(({ dialog }, target) => {
     dialog.showSaveDialog = (async () => ({ canceled: false, filePath: target })) as typeof dialog.showSaveDialog;
+    dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [target] })) as typeof dialog.showOpenDialog;
   }, file);
 }
 
@@ -231,11 +273,9 @@ test.describe('Use New Engine: existing extensions', () => {
       expect(run.exportAsks, 'export asks (0: the export went to the current exporter)').toBeGreaterThanOrEqual(90);
       const files = (await readdir(folder)).filter((f) => f.endsWith('.png')).sort();
       expect(files.length).toBe(90);
+      expect(session.diagnostics.pageErrors).toEqual([]);
       const frames = [0, 24, 75];
-      const today = await page.evaluate((frames) => {
-        const PM = (window as any).PM;
-        return frames.map((f) => Array.from(PM.renderFrameTo(f / 30, 480, 270, { mblur: false }).getContext('2d').getImageData(0, 0, 480, 270).data as Uint8ClampedArray));
-      }, frames);
+      const today = await todayPngExport(session, 'typewriter-effect', typewriterProject, path.join(root, 'Today'), frames);
       const diffs = frames.map((frame, i) => {
         const exported = pngRgba(path.join(folder, files[frame]!));
         let max = 0, over1 = 0, values = 0;
@@ -249,10 +289,9 @@ test.describe('Use New Engine: existing extensions', () => {
       });
       console.log(JSON.stringify(diffs));
       for (const d of diffs) {
-        expect(d.over1, `frame ${d.frame}: vs today`).toBeLessThanOrEqual(d.values * 0.001);
-        expect(d.max, `frame ${d.frame}: vs today`).toBeLessThanOrEqual(4);
+        expect(d.over1, `frame ${d.frame}: vs today's export`).toBeLessThanOrEqual(d.values * 0.001);
+        expect(d.max, `frame ${d.frame}: vs today's export`).toBeLessThanOrEqual(4);
       }
-      expect(session.diagnostics.pageErrors).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -273,10 +312,17 @@ test.describe('Use New Engine: existing extensions', () => {
       const folder = path.join(root, 'Queued');
       await stubSavePanel(app, folder);
       const frames = [0, 45, 89];
-      // Today's compositor at the queued state, then an edit the job must not see.
-      const today = await page.evaluate(async (frames) => {
+      // The export sheet's engine export at the queued state (held to today's
+      // exporter by the export gate below), then an edit the job must not see.
+      const sheetFolder = path.join(root, 'Sheet');
+      await stubSavePanel(app, sheetFolder);
+      expect(await page.evaluate(async () => (window as any).PM.Export.run({ format: 'png', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false, alpha: false }))).toEqual({ cancelled: false });
+      const sheetFiles = (await readdir(sheetFolder)).filter((f) => f.endsWith('.png')).sort();
+      expect(sheetFiles.length).toBe(90);
+      await stubSavePanel(app, folder);
+      const today = await page.evaluate(async () => {
         const PM = (window as any).PM;
-        const reference = frames.map((f) => Array.from(PM.renderFrameTo(f / 30, 320, 180, { mblur: false }).getContext('2d').getImageData(0, 0, 320, 180).data as Uint8ClampedArray));
+        const reference = null;
         const added = await PM.Export.addToQueue({ format: 'png', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false, alpha: false });
         const tinted = PM.proj.layers.find((l: any) => l.id === 'tinted');
         // Its raster changes too (a narrower ellipse), not only where it sits.
@@ -284,7 +330,7 @@ test.describe('Use New Engine: existing extensions', () => {
         tinted.d.w = 60;
         PM.touch();
         return { reference, added };
-      }, frames);
+      });
       expect(today.added).toMatchObject({ status: 'added' });
       const asksBefore = await page.evaluate(() => (window as any).PM.EngineRender.compatStats.exportAsks);
       await page.evaluate(() => (window as any).PM.Export.queueDialog());
@@ -295,11 +341,12 @@ test.describe('Use New Engine: existing extensions', () => {
       expect(asks).toBeGreaterThanOrEqual(90);
       const files = (await readdir(folder)).filter((f) => f.endsWith('.png')).sort();
       expect(files.length).toBe(90);
-      const diffs = frames.map((frame, i) => {
+      const diffs = frames.map((frame) => {
         const exported = pngRgba(path.join(folder, files[frame]!));
+        const sheet = pngRgba(path.join(sheetFolder, sheetFiles[frame]!));
         let max = 0, over1 = 0, values = 0;
         for (let p = 0; p < 320 * 180 * 4; p += 4) for (let c = 0; c < 3; c++) {
-          const d = Math.abs(exported[p + c]! - today.reference[i]![p + c]!);
+          const d = Math.abs(exported[p + c]! - sheet[p + c]!);
           values++;
           if (d > max) max = d;
           if (d > 1) over1++;
@@ -307,14 +354,67 @@ test.describe('Use New Engine: existing extensions', () => {
         return { frame, max, over1, values };
       });
       console.log(JSON.stringify({ asks, diffs }));
-      for (const d of diffs) {
-        expect(d.over1, `frame ${d.frame}: vs today at the queued state`).toBeLessThanOrEqual(d.values * 0.001);
-        expect(d.max, `frame ${d.frame}: vs today at the queued state`).toBeLessThanOrEqual(4);
-      }
+      for (const d of diffs) expect(d.max, `frame ${d.frame}: the queued state`).toBe(0);
       expect(session.diagnostics.pageErrors).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test('playback with a raster override keeps today\'s cadence: every frame asks the window, none stalls', async ({ session }) => {
+    test.setTimeout(240_000);
+    await cp(path.join(__dirname, 'fixtures/compat-corpus/shape-tint'), path.join(session.userData, 'extensions/shape-tint'), { recursive: true });
+    await session.relaunch();
+    await session.openEditor();
+    /** Plays 3 s from 0 and records when frames were presented. */
+    const play = (page: Page) => page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const api = PM.Kernel.api('cadence-probe');
+      const at: number[] = [];
+      const off: any = api.events.on('frame:rendered', () => at.push(performance.now()));
+      const needs = PM.EngineRender?.compatStats?.needs ?? 0;
+      PM.setTime(0);
+      await new Promise((r) => setTimeout(r, 300));
+      at.length = 0;
+      PM.play();
+      await new Promise((r) => setTimeout(r, 3000));
+      PM.pause();
+      if (typeof off === 'function') off(); else off?.dispose?.();
+      const gaps = at.slice(1).map((v, i) => v - at[i]!);
+      const sorted = [...gaps].sort((a, b) => a - b);
+      return { frames: at.length, maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null };
+    });
+    const { page } = session;
+    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint') && Boolean((window as any).PM?.EngineRender));
+    await shapeTintProject(page);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
+    const engine = await play(page);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    await session.close();
+    const off = await flagOffApp('shape-tint');
+    let today: Awaited<ReturnType<typeof play>>;
+    try {
+      await off.openEditor();
+      await off.page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint')).catch(async (error) => {
+        console.log('flag off, not active:', JSON.stringify(await off.page.evaluate(() => ({ ids: (window as any).PM?.Kernel?.loader?.activeIds?.(), record: (window as any).PM?.Kernel?.api('corpus')?.extensions?.list?.().find((r: any) => r.id === 'shape-tint') })).catch((e) => String(e))));
+        throw error;
+      });
+      await shapeTintProject(off.page);
+      await off.page.waitForTimeout(800);
+      today = await play(off.page);
+    } finally {
+      await off.close();
+      await rm(off.userData, { recursive: true, force: true });
+    }
+    console.log(JSON.stringify({ engine, today }));
+    // Each presented frame asked the window for the override's layer.
+    expect(engine.asked).toBeGreaterThanOrEqual(engine.frames);
+    // No stall (an unanswered need waits a second before it is asked again),
+    // and no fewer frames than today's compositor presents.
+    expect(engine.maxGap).toBeLessThanOrEqual(Math.max(today.maxGap, 100));
+    // (A 3 s window can start or end one frame apart: one frame of alignment.)
+    expect(engine.frames).toBeGreaterThanOrEqual(today.frames - 1);
   });
 
   test('an export of a project with a raster override draws the override, frame by frame', async ({ session }, testInfo) => {
@@ -345,12 +445,32 @@ test.describe('Use New Engine: existing extensions', () => {
       expect(run.exportAsks).toBeGreaterThanOrEqual(90);
       const files = (await readdir(folder)).filter((f) => f.endsWith('.png')).sort();
       expect(files.length).toBe(90);
-      // Today's compositor in the same window at the same frames.
+      expect(session.diagnostics.pageErrors).toEqual([]);
+      // Today's exporter: the same project and extension with "Use New
+      // Engine" off, exported to PNG the same way.
       const frames = [0, 45, 89];
-      const today = await page.evaluate((frames) => {
-        const PM = (window as any).PM;
-        return frames.map((f) => Array.from(PM.renderFrameTo(f / 30, 320, 180, { mblur: false }).getContext('2d').getImageData(0, 0, 320, 180).data as Uint8ClampedArray));
-      }, frames);
+      const todayFolder = path.join(root, 'Today');
+      const today = await todayPngExport(session, 'shape-tint', shapeTintProject, todayFolder, frames);
+      const todayFiles = (await readdir(todayFolder)).filter((f) => f.endsWith('.png')).sort();
+      // Diagnosis: today's export of the same project without any extension
+      // (the plain rectangle is drawn the same either way).
+      {
+        const plainFolder = path.join(root, 'TodayPlain');
+        const off = await flagOffApp(null);
+        try {
+          await off.openEditor();
+          await shapeTintProject(off.page);
+          await stubSavePanel(off.app, plainFolder, true);
+          expect(await off.page.evaluate(async () => (window as any).PM.Export.run({ format: 'png', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false, alpha: false }))).toEqual({ cancelled: false });
+        } finally {
+          await off.close();
+          await rm(off.userData, { recursive: true, force: true });
+        }
+        const plainFiles = (await readdir(plainFolder)).filter((f) => f.endsWith('.png')).sort();
+        const plain = pngRgba(path.join(plainFolder, plainFiles[45]!));
+        const at = (px: Buffer, x: number, y: number) => [...px.subarray((y * 320 + x) * 4, (y * 320 + x) * 4 + 4)];
+        console.log(JSON.stringify({ todayWithoutExtension_195_110: at(plain, 195, 110), todayWithExtension_195_110: at(today[1]!, 195, 110) }));
+      }
       const diffs = frames.map((frame, i) => {
         const exported = pngRgba(path.join(folder, files[frame]!));
         let max = 0, over1 = 0, values = 0, red = 0, todayRed = 0;
@@ -372,7 +492,7 @@ test.describe('Use New Engine: existing extensions', () => {
       });
       console.log(JSON.stringify(diffs));
       await testInfo.attach('export-frame-45', { path: path.join(folder, files[45]!), contentType: 'image/png' });
-      expect(session.diagnostics.pageErrors).toEqual([]);
+      await testInfo.attach('today-export-frame-45', { path: path.join(todayFolder, todayFiles[45]!), contentType: 'image/png' });
       for (const d of diffs) {
         // The override drew (the tint is red), and the frame is today's
         // (section 25: <= 1 CV for 99.9% of values, <= 4 for any).

@@ -237,7 +237,7 @@ export class EngineRenderTransport {
    * compositor called the wrapper synchronously at each frame it drew.
    */
   private readonly ahead = new Map<string, { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number }>();
-  readonly lookaheadStats = { answered: 0 };
+  readonly lookaheadStats = { answered: 0, asked: 0, askedAhead: 0, recent: [] as number[] };
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
   /** UI snapshots (thumbnails, library cards, posters, the project thumbnail). */
@@ -295,6 +295,16 @@ export class EngineRenderTransport {
     // Paused, the layers asked for are remembered so playback starts with
     // its next frames answered.
     const playing = !!this.options.playing?.();
+    if (playing) {
+      for (const need of needs) {
+        this.lookaheadStats.asked++;
+        const entry = this.ahead.get(`${need.composition}\u0000${need.layer}\u0000${need.source}`);
+        // Asked although answered ahead: the answer was missed.
+        if (entry && Math.sign(entry.step) * (entry.posted - need.time) >= 0 && need.time !== entry.cursor) this.lookaheadStats.askedAhead++;
+        this.lookaheadStats.recent.push(need.time);
+        if (this.lookaheadStats.recent.length > 12) this.lookaheadStats.recent.shift();
+      }
+    }
     for (const need of needs) this.lookahead(need, session, playing);
   }
 
@@ -343,7 +353,9 @@ export class EngineRenderTransport {
     // Fallen behind the clock: answer from the frame it is on.
     if (Math.sign(entry.step) * (entry.cursor - entry.posted) > 0) entry.posted = entry.cursor - entry.step;
     const until = entry.cursor + COMPAT_LOOKAHEAD * entry.step;
-    while (Math.sign(entry.step) * (until - entry.posted) > 0 && performance.now() < deadline) {
+    // At least two frames per call (one keeps pace, one catches up), more within the budget.
+    let done = 0;
+    while (Math.sign(entry.step) * (until - entry.posted) > 0 && (done++ < 2 || performance.now() < deadline)) {
       entry.posted += entry.step;
       if (entry.posted < 0) break;
       if (!this.answerNeed({ ...entry.need, time: entry.posted }, entry.session)) break;
