@@ -9,11 +9,8 @@
 //! legacy code painted, as the compositor uploads it (premultiplied RGBA8).
 //!
 //! Gate: today's pixels exactly (amendment 22): every channel of every pixel
-//! within 1 code value of the capture. Cases known to differ are pinned in
-//! `tests/fixtures/text-raster-pins.json` with the most pixels beyond 1 code
-//! value and the largest difference they may have (each a gap in
-//! docs/engine/text-render.md); a pinned case may not get worse, and a pin
-//! whose case is exact fails too, so pins only shrink. Reported besides:
+//! within 1 code value of the capture. Refusals and any pixels beyond the
+//! bound fail; no differences are accepted by pins. Reported besides:
 //! SSIM (the mean of the four channels' maps, 11 × 11 Gaussian, σ = 1.5)
 //! over ink windows (pixels whose local mean alpha exceeds 1/512 in either
 //! image) and over the full canvas.
@@ -21,8 +18,7 @@
 //! The captures are private (renders of the system fonts): `PM_TEXT_RASTER`
 //! names one, else the newest `text-raster-*` (main set) and the newest
 //! `text-closure-*` (closure set: distance-field text in every form, COLR
-//! fonts, CSS Color 4 colors; pins in `fixtures/text-closure-pins.json`,
-//! which also lists the cases the renderer refuses, each a gap) in the
+//! fonts, CSS Color 4 colors) in the
 //! corpus directory are both gated. Without one the test reports and
 //! passes vacuously. Capture with `pm-electron-lock bun
 //! engine/crates/pm-text/capture/render.ts [--set closure]` (the closure set
@@ -68,24 +64,24 @@ fn main() {
         return;
     }
     let mut failed = 0;
-    for (dir, pins) in &sets {
+    for (dir, _) in &sets {
         println!("\n== {}", dir.display());
-        failed += gate(dir, pins);
+        failed += gate(dir);
     }
     assert!(
         failed == 0,
-        "{failed} cases differ from today beyond their pins"
+        "{failed} cases differ from today (within 1 code value required)"
     );
 }
 
 #[cfg(target_os = "macos")]
-const MAIN_PINS: &str = include_str!("fixtures/text-raster-pins.json");
+const MAIN_PINS: &str = "main";
 #[cfg(target_os = "macos")]
-const CLOSURE_PINS: &str = include_str!("fixtures/text-closure-pins.json");
+const CLOSURE_PINS: &str = "closure";
 
-/// One capture against its pins: the number of cases that fail.
+/// Every capture is compared with the same bound; no accepted differences.
 #[cfg(target_os = "macos")]
-fn gate(dir: &std::path::Path, pins_json: &str) -> usize {
+fn gate(dir: &std::path::Path) -> usize {
     use pm_protocol::color::Precision;
     use pm_render::Renderer;
     use serde_json::{Value, json};
@@ -126,35 +122,7 @@ fn gate(dir: &std::path::Path, pins_json: &str) -> usize {
     }
     let only = std::env::var("PM_TEXT_ONLY").ok();
     let diffs = std::env::var("PM_TEXT_DIFFS").ok().map(PathBuf::from);
-    // Known differences: the most pixels beyond 1 code value and the largest
-    // difference (docs/engine/text-render.md, Gaps).
-    let pins_value: Value = serde_json::from_str(pins_json).unwrap();
-    let pins: std::collections::BTreeMap<String, (usize, u8)> = pins_value["pins"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.clone(),
-                (
-                    v["over1"].as_u64().unwrap() as usize,
-                    v["max"].as_u64().unwrap() as u8,
-                ),
-            )
-        })
-        .collect();
-    // Cases the renderer refuses (a gap each): a refused case not listed
-    // fails, and so does a listed one that is now drawn.
-    let refused_ok: std::collections::BTreeMap<String, String> = pins_value["refused"]
-        .as_object()
-        .map(|o| {
-            o.iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_owned()))
-                .collect()
-        })
-        .unwrap_or_default();
     let mut refused = 0;
-    let mut pinned = 0;
     let mut exact = 0;
     let mut rows = Vec::new();
     let mut failed = Vec::new();
@@ -208,22 +176,12 @@ fn gate(dir: &std::path::Path, pins_json: &str) -> usize {
             scale,
             Precision::Float16,
         ) {
-            Ok(r) => {
-                if refused_ok.contains_key(id) {
-                    let line = format!("{id:<26} drawn now: remove its refusal pin");
-                    println!("{line}");
-                    failed.push(line);
-                    continue;
-                }
-                r
-            }
+            Ok(r) => r,
             Err(e) => {
                 let line = format!("{id:<26} refused: {e}");
                 println!("{line}");
                 refused += 1;
-                if !refused_ok.contains_key(id) {
-                    failed.push(line);
-                }
+                failed.push(line);
                 continue;
             }
         };
@@ -253,32 +211,14 @@ fn gate(dir: &std::path::Path, pins_json: &str) -> usize {
             max_diff = max_diff.max(d);
             off += usize::from(d > 1);
         }
-        let pin = pins.get(id).copied();
-        let stale = pin.is_some() && off == 0;
-        let pass = geometry.is_empty()
-            && !stale
-            && match pin {
-                Some((most, max)) => off <= most && max_diff <= max,
-                None => off == 0,
-            };
-        pinned += usize::from(pin.is_some());
+        let pass = geometry.is_empty() && off == 0;
         exact += usize::from(off == 0);
         let line = format!(
-            "{id:<26} {:>5}x{:<5} ink SSIM {ink:.4}  full {full:.4}  ink ratio {ratio:.3}  max Δ {max_diff:>3}  >1 CV {off:>6}{}{} {geometry}",
-            cw,
-            ch,
-            match pin {
-                Some((most, max)) => format!(" (pinned ≤{most}, ≤{max})"),
-                None => String::new(),
-            },
-            if stale {
-                " exact now: remove its pin"
-            } else {
-                ""
-            }
+            "{id:<26} {:>5}x{:<5} ink SSIM {ink:.4}  full {full:.4}  ink ratio {ratio:.3}  max Δ {max_diff:>3}  >1 CV {off:>6} {geometry}",
+            cw, ch,
         );
         println!("{line}");
-        let write_diff = !pass || (pin.is_some() && std::env::var("PM_TEXT_DIFFS_PINNED").is_ok());
+        let write_diff = !pass;
         if !pass {
             failed.push(line);
         }
@@ -331,11 +271,10 @@ fn gate(dir: &std::path::Path, pins_json: &str) -> usize {
     }
     let stats = renderer.text_gpu().stats;
     println!(
-        "\n{} cases in {:.1} s; {} exact within 1 code value; {} pinned (gaps); {} refused (gaps); {} failed; pages {} (cpu {}); vello: {}",
+        "\n{} cases in {:.1} s; {} exact within 1 code value; {} refused (gaps); {} failed; pages {} (cpu {}); vello: {}",
         rows.len() + refused,
         started.elapsed().as_secs_f64(),
         exact,
-        pinned,
         refused,
         failed.len(),
         stats.pages,

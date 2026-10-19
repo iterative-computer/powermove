@@ -23,7 +23,7 @@ import { sha256, timeLabel, writeFile, writeFloat, writePng, straightTopDown, ty
 import { legacyScript } from './inject';
 import { installCorpusPage, renderingPerformanceScenarios } from './page';
 import { allProjects, type CorpusProject } from './projects';
-import { textOnlyProjects } from './text-only';
+import { textOnly, textOnlyProjects } from './text-only';
 import { compareSubset, type Issue } from './validate';
 import { verifyCapture } from './verify';
 
@@ -325,7 +325,7 @@ async function captureScenarios(session: Session, out: string): Promise<Record<s
   return summary;
 }
 
-async function captureReal(session: Session, out: string, file: string, step: number, evaluate: boolean): Promise<ProjectRecord> {
+async function captureReal(session: Session, out: string, file: string, step: number, evaluate: boolean, isolateText = false): Promise<ProjectRecord> {
   const started = performance.now();
   const slug = path.basename(file, path.extname(file)).toLowerCase().replace(/[^a-z0-9]+/g, '-');
   const dir = `real/${slug}`;
@@ -343,6 +343,11 @@ async function captureReal(session: Session, out: string, file: string, step: nu
     await session.legacy.waitFor((id: string) => (window as any).PM.proj.id !== id, before, 120_000);
     await session.legacy.evaluate(async () => { await (window as any).PM.projectAssetsReady; });
     record.mediaPending = await session.legacy.evaluate(() => (window as any).__corpus.waitForMedia(180000));
+    if (isolateText) {
+      const snapshot = await session.legacy.evaluate(() => JSON.stringify((window as any).PM.proj));
+      const isolated = textOnly(JSON.parse(snapshot));
+      await session.legacy.evaluate((doc: any) => { const PM = (window as any).PM; PM.replaceProject(doc); PM.invalidate(); }, isolated);
+    }
     const info = await session.legacy.evaluate(() => { const PM = (window as any).PM; return { w: PM.proj.w, h: PM.proj.h, dur: PM.proj.dur, fps: PM.proj.fps, name: PM.proj.name, layers: PM.proj.layers.length, comps: Object.keys(PM.proj.comps || {}).length, assets: Object.keys(PM.proj.assets || {}).length }; });
     record.title = info.name;
     record.covers = [`${info.layers} root layers`, `${info.comps} nested compositions`, `${info.assets} assets`, `${info.w}x${info.h} at ${info.fps} fps, ${info.dur}s`];
@@ -423,7 +428,7 @@ export async function capture(options: Options): Promise<string> {
       if (!existsSync(options.realPath)) log(`Real project ${options.realPath} not found; skipped`);
       else {
         await session.restart([]);
-        real = await captureReal(session, out, options.realPath, options.realStep, options.evaluate);
+        real = await captureReal(session, out, options.realPath, options.realStep, options.evaluate, options.textOnly);
         log(`Real project ${real.title ?? real.id}: ${real.samples.filter(s => !s.error).length}/${real.samples.length} samples${real.error ? `, ERROR ${real.error}` : ''} (${real.ms} ms)`);
       }
     }
@@ -487,5 +492,5 @@ export async function capture(options: Options): Promise<string> {
 }
 
 if (import.meta.main) {
-  capture(parseArgs(process.argv.slice(2))).then(out => console.log(out), error => { console.error(error); process.exit(1); });
+  capture(parseArgs(process.argv.slice(2))).then(out => { console.log(out); process.exit(0); }, error => { console.error(error); process.exit(1); });
 }

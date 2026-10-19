@@ -6,12 +6,8 @@
 //! Classes: the *text pixels* are those our frame changes when its text and
 //! captions layers are hidden (opacity 0), grown by 3 pixels. Text matches
 //! today exactly (amendment 22): every text pixel within 2 code values of
-//! the capture. Frames known to differ are pinned in
-//! `tests/fixtures/text-corpus-pins.json` with the most text pixels beyond
-//! 2 code values and the largest difference they may have (each a gap in
-//! `docs/engine/text-render.md`); a pinned frame may not get worse, and a
-//! pin that is no longer needed fails too, so the pins only shrink. SSIM
-//! over the text pixels is reported. Every other pixel keeps the Standard
+//! the capture. Every difference beyond that bound fails. SSIM over the text
+//! pixels is reported. Every other pixel keeps the Standard
 //! class (≤ 1 CV for 99.9%, ≤ 4 for any). `tests/corpus.rs` leaves these
 //! projects to this test.
 //!
@@ -34,7 +30,7 @@
 //! `PM_ENGINE_CORPUS` picks captures (default: the newest `v1-*`, `render-*`
 //! and `text-proj-*`, plus the newest `text-iso-*`); `PM_TEXT_ONLY` limits
 //! project names by prefix; `PM_TEXT_DIFFS=<dir>` writes engine and legacy
-//! PNGs of failures and pinned frames.
+//! PNGs of failures.
 //!
 //! Runs without the harness (the CoreText registry needs the main thread).
 
@@ -61,25 +57,6 @@ fn main() {
     {
         captures.push(iso.clone());
     }
-    let pins: std::collections::BTreeMap<String, (usize, u8)> = {
-        let v: serde_json::Value =
-            serde_json::from_str(include_str!("fixtures/text-corpus-pins.json")).unwrap();
-        v["pins"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    (
-                        v["over2"].as_u64().unwrap() as usize,
-                        v["max"].as_u64().unwrap() as u8,
-                    ),
-                )
-            })
-            .collect()
-    };
-    let mut pins_used = std::collections::BTreeSet::new();
     // Projects compared in full or in isolation, by name.
     let mut covered = std::collections::BTreeSet::new();
     let mut exact = 0;
@@ -256,40 +233,20 @@ fn main() {
                 let rest_ok = !rest.contains(&true) || d.passes();
                 compared += 1;
                 covered.insert(p.name.clone());
-                let key = format!(
-                    "{}{} t={}",
-                    if in_isolation { "iso:" } else { "" },
-                    p.name,
-                    s.time
-                );
-                let pin = pins.get(&key).copied();
-                if pin.is_some() {
-                    pins_used.insert(key.clone());
-                }
-                let text_ok = match pin {
-                    Some((most, max)) => over2 <= most && tmax <= max,
-                    None => over2 == 0,
-                };
+                let text_ok = over2 == 0;
                 exact += usize::from(over2 == 0);
                 let line = format!(
-                    "{:<44} t={:<6} text px {:>7} SSIM {:.4} >2 CV {:>6} max {:>3}{} | rest ≤1 {:>7.3}% max {}",
+                    "{:<44} t={:<6} text px {:>7} SSIM {:.4} >2 CV {:>6} max {:>3} | rest ≤1 {:>7.3}% max {}",
                     format!("{}{tag}", p.name),
                     s.time,
                     n,
                     text_ssim,
                     over2,
                     tmax,
-                    match pin {
-                        Some((most, max)) => format!(" (pinned ≤{most}, ≤{max})"),
-                        None => String::new(),
-                    },
                     100.0 * d.fraction_within_one(),
                     d.max
                 );
                 println!("{line}");
-                if pin.is_some() && over2 == 0 {
-                    failed.push(format!("{line}: exact now; remove its pin"));
-                }
                 if !text_ok || !rest_ok {
                     failed.push(line);
                     if let Some(dir) = &diffs {
@@ -315,15 +272,6 @@ fn main() {
             failed.push(format!(
                 "{label}: not compared ({why}) and no text-in-isolation capture covers it"
             ));
-        }
-    }
-    for key in pins.keys() {
-        if !pins_used.contains(key)
-            && only
-                .as_deref()
-                .is_none_or(|o| key.trim_start_matches("iso:").starts_with(o))
-        {
-            failed.push(format!("{key}: pinned but not compared; remove its pin"));
         }
     }
     println!(

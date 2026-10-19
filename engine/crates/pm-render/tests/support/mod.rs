@@ -175,6 +175,7 @@ pub fn load_project(capture: &Path, dir: &Path) -> Project {
     Project {
         name: dir
             .strip_prefix(capture.join("projects"))
+            .or_else(|_| dir.strip_prefix(capture))
             .unwrap()
             .display()
             .to_string(),
@@ -200,6 +201,13 @@ pub fn projects(capture: &Path) -> Vec<PathBuf> {
                 out.push(p.path());
             }
         }
+    }
+    if let Ok(real) = std::fs::read_dir(capture.join("real")) {
+        out.extend(
+            real.flatten()
+                .map(|p| p.path())
+                .filter(|p| p.join("loaded.json").is_file()),
+        );
     }
     out.sort();
     out
