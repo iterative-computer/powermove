@@ -32,9 +32,11 @@ export interface ExpressionFrameGroup {
   reads: ExpressionFrameSlot[];
   misses: number;
   breaks: number;
-  /** End of the last evaluated run, and that run's length. */
+  /** End of the last evaluated run, that run's length, and where the
+   * current streak is predicted to end (-1: no prediction). */
   runEnd: number;
   run: number;
+  predictedEnd: number;
   epochs: number;
   /** Distinct reads so far (one per slot and epoch). */
   clock: number;
@@ -42,8 +44,9 @@ export interface ExpressionFrameGroup {
   size: number;
 }
 
-/** A run that starts anywhere evaluates up to four ids; each continuation
- * doubles. Runs only extend over recently read members. */
+/** A new run evaluates up to four ids (fewer when the last epoch read fewer
+ * from its start); a continued run covers at least four. Runs extend only
+ * over recently read members otherwise. */
 const FIRST_RUN = 4;
 /** Members unread for this many epochs leave the group once they are a
  * quarter of it (checked every 64 epochs). Until then they cost nothing: runs
@@ -58,11 +61,12 @@ const PRUNE_EPOCHS = 1024;
  * project of sequential layers reads few of them at any time). Evaluating every
  * registered id at each new time would pay for inactive and deleted layers too.
  * Instead, each group orders its members as frames read them, and the first
- * read of a member at a new time evaluates a run starting at that member: as
- * long as the member's last epoch read in order from it (at least four),
- * doubling while reads continue along the order, and extending only over
- * members read recently (about the last two frames' worth of reads). A frame
- * that reads like the last one crosses into wasm once per streak; other
+ * read of a member at a new time evaluates a short run starting at that
+ * member. When reads continue it, the rest of the streak the member's last
+ * epoch read in order follows in one run, then runs double; runs extend only
+ * over members read recently (about the last two frames' worth of reads). A
+ * frame that reads like the last one crosses into wasm about twice per
+ * streak; an isolated read evaluates only what its last epoch read; other
  * patterns evaluate at most about twice the ids they read, plus three per
  * run. Reads of ids that are not members use the scalar call and join the
  * members, right after the member read before them, at the next epoch;
@@ -86,7 +90,7 @@ export class ExpressionFrames {
     }
     let group = this.groups.get(comp);
     if (!group) {
-      group = { members: [], values: new Float64Array(0), kinds: new Uint8Array(0), serial: 0, revision: -1, reads: [], misses: 0, breaks: 0, runEnd: -1, run: 0, epochs: 0, clock: 0, size: 0 };
+      group = { members: [], values: new Float64Array(0), kinds: new Uint8Array(0), serial: 0, revision: -1, reads: [], misses: 0, breaks: 0, runEnd: -1, run: 0, predictedEnd: -1, epochs: 0, clock: 0, size: 0 };
       this.groups.set(comp, group);
     }
     const slot: ExpressionFrameSlot = { id, group, pos: -1, seen: -1, done: -1, at: -1, hint: 0, released: false };
@@ -119,15 +123,27 @@ export class ExpressionFrames {
    * not a member yet, or was released).
    */
   read(wasm: PmWasm, slot: ExpressionFrameSlot, time: number, revision: number): number {
-    if (slot.released) return -1;
     const group = slot.group;
+    // A lone channel gains nothing from runs: the scalar call is cheaper.
+    if (slot.released || group.size < 2) return -1;
     if (group.revision !== revision || !Object.is(group.time, time)) this.advance(group, time, revision);
     if (slot.seen !== group.serial) this.note(group, slot);
     const pos = slot.pos;
     if (pos < 0) return -1;
     if (slot.done !== group.serial) {
-      if (pos === group.runEnd) group.run *= 2;
-      else { group.run = Math.max(FIRST_RUN, slot.hint); group.breaks += 1; }
+      // A new run starts short; once a read continues it, the rest of the
+      // streak the last epoch read from its start follows in one run (so an
+      // isolated read, such as a curve editor's sample, stays short), then
+      // runs double.
+      const continuing = pos === group.runEnd;
+      if (continuing) {
+        group.run = group.predictedEnd > pos ? group.predictedEnd - pos : group.run * 2;
+        group.predictedEnd = -1;
+      } else {
+        group.breaks += 1;
+        group.run = slot.hint > 0 ? Math.min(slot.hint, FIRST_RUN) : FIRST_RUN;
+        group.predictedEnd = slot.hint > FIRST_RUN ? pos + slot.hint : -1;
+      }
       // A run extends only over members read recently (about the last two
       // frames' worth of reads): those frames are about to read again. A
       // layer that went inactive or was deleted stops being evaluated.
@@ -135,9 +151,10 @@ export class ExpressionFrames {
       const recent = group.clock - (2 * members.length + 64);
       let end = pos + 1;
       while (end < limit && members[end]!.at >= recent && members[end]!.at >= 0) end += 1;
-      // At least a short run: the next members may be a layer that just
-      // became active again (read in order, but not recently).
-      end = Math.max(end, Math.min(members.length, pos + FIRST_RUN));
+      // Reads continuing in order past recent members: at least a short run
+      // (a layer that just became active again is read in order, but was not
+      // read recently).
+      if (continuing) end = Math.max(end, Math.min(members.length, pos + FIRST_RUN));
       if (!group.batch || group.wasm !== wasm) {
         group.batch = wasm.prepareBatch(group.members.map(s => s.id));
         group.wasm = wasm;
@@ -211,6 +228,7 @@ export class ExpressionFrames {
     group.breaks = 0;
     group.runEnd = -1;
     group.run = 0;
+    group.predictedEnd = -1;
   }
 
   private setMembers(group: ExpressionFrameGroup, members: ExpressionFrameSlot[]) {

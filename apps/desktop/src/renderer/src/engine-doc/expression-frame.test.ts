@@ -45,8 +45,9 @@ it('evaluates resident expression channels in runs, exactly, across time, edits,
   for (const time of [2, 3, 0, -0, 1.5]) {
     runs.length = 0; error.mockClear();
     compare(time);
-    // The last epoch read all 120 in order: one run covers them exactly once.
-    expect(runs.map(r => r[3])).toEqual([120]);
+    // The last epoch read all 120 in order: a short run, then the rest of
+    // the predicted streak, cover them exactly once.
+    expect(runs.map(r => r[3])).toEqual([4, 116]);
     expect(evaluated()).toBe(120);
     expect(error.mock.calls.length).toBe(time === 0 ? 60 : 0);
     for (let i = 0; i < 120; i++) expect(api.errors.has(PM.proj.layers[i].p.opacity)).toBe(time === 0 && i % 2 === 0);
@@ -124,6 +125,18 @@ it('pays only for the channels a frame reads: sequential layers, deleted layers,
     }
   }
   expect(evaluated()).toBeLessThanOrEqual(reads * 2);
+  // A curve editor samples one channel at many times between full frames:
+  // the first sample after a frame runs short, later ones evaluate only it.
+  const sampled = PM.proj.layers[7];
+  for (let redraw = 0; redraw < 3; redraw++) {
+    read(PM.proj.layers, 50 + redraw / 30);
+    runs.length = 0;
+    for (let s = 0; s < 40; s++) {
+      const t = 60 + redraw + s / 40;
+      expect(Object.is(api.evP(sampled, sampled.p.e1, t, 'e1'), PM.evP(sampled, sampled.p.e1, t, 'e1'))).toBe(true);
+    }
+    expect(evaluated()).toBeLessThanOrEqual(40 + 3);
+  }
   expect((doc.stats() as any).native.fallbacks).toEqual({});
 });
 
