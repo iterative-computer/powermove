@@ -35,6 +35,12 @@ pub(crate) struct Pass3d {
     scene: Option<Result<Arc<Scene3d>, String>>,
     /// Per object layer id: its render.
     layers: HashMap<String, Render3d>,
+    /// The pass in drawing order (top first), as indices into the
+    /// composition's layers, and the build's inputs: what a motion-blur
+    /// sample needs to rebuild the 3D state at its own time
+    /// ([`Pass3d::at_time`]).
+    ordered: Vec<usize>,
+    root_comp: bool,
 }
 
 /// The view override as the 3D pass applies it.
@@ -359,9 +365,31 @@ pub(crate) fn order_pass<'d>(
         }
     }
     // Depth sets over the ordered pass.
+    if let Ok(sc) = &scene {
+        ctx.layers = depth_sets(scope, &ordered, sc, time)?;
+    }
+    let layers = scope.layers();
+    ctx.ordered = ordered
+        .iter()
+        .filter_map(|l| layers.iter().position(|n| std::ptr::eq(n, *l)))
+        .collect();
+    ctx.root_comp = root_comp;
+    ctx.scene = Some(scene);
+    Ok((ordered, ctx))
+}
+
+/// `compositionDepthIds` and the bottom layer of each object layer of a
+/// pass in drawing order (top first), with activity, solo, and opacity at
+/// `time`.
+fn depth_sets<'d>(
+    scope: &mut Scope<'_, 'd>,
+    ordered: &[&'d Node],
+    s: &Scene3d,
+    time: f64,
+) -> JsResult<HashMap<String, Render3d>> {
     let any_solo = scope.layers().iter().any(|l| js::flag(l, "solo"));
     let mut entries = Vec::with_capacity(ordered.len());
-    for l in &ordered {
+    for l in ordered {
         let active = scope.active(l, time)?;
         let r = role(l);
         let opacity = if r == Some(Role::Object) && active {
@@ -372,43 +400,80 @@ pub(crate) fn order_pass<'d>(
         entries.push(PassEntry {
             active,
             role: r,
-            soloed: js::flag(l, "solo") || soloed_in_pass(l, &ordered),
+            soloed: js::flag(l, "solo") || soloed_in_pass(l, ordered),
             opacity,
         });
     }
-    if let Ok(s) = &scene {
-        let index: HashMap<&str, usize> = s
-            .objects
-            .iter()
-            .enumerate()
-            .map(|(i, o)| (o.id.as_str(), i))
-            .collect();
-        for (i, l) in ordered.iter().enumerate() {
-            if Role3d::of(l) != Some(Role3d::Object) || !entries[i].active {
-                continue;
-            }
-            let id = js::layer_id(l);
-            let Some(&object) = index.get(id.as_str()) else {
-                continue;
-            };
-            let set = layering::depth_set(&entries, i, any_solo);
-            let bottom = layering::bottom(&set) == Some(i);
-            let depth_set: Vec<usize> = set
-                .iter()
-                .filter_map(|&k| index.get(js::layer_id(ordered[k]).as_str()).copied())
-                .collect();
-            ctx.layers.insert(
-                id,
-                Render3d::Layer {
-                    object,
-                    depth_set,
-                    background: bottom,
-                },
-            );
+    let index: HashMap<&str, usize> = s
+        .objects
+        .iter()
+        .enumerate()
+        .map(|(i, o)| (o.id.as_str(), i))
+        .collect();
+    let mut out = HashMap::new();
+    for (i, l) in ordered.iter().enumerate() {
+        if Role3d::of(l) != Some(Role3d::Object) || !entries[i].active {
+            continue;
         }
+        let id = js::layer_id(l);
+        let Some(&object) = index.get(id.as_str()) else {
+            continue;
+        };
+        let set = layering::depth_set(&entries, i, any_solo);
+        let bottom = layering::bottom(&set) == Some(i);
+        let depth_set: Vec<usize> = set
+            .iter()
+            .filter_map(|&k| index.get(js::layer_id(ordered[k]).as_str()).copied())
+            .collect();
+        out.insert(
+            id,
+            Render3d::Layer {
+                object,
+                depth_set,
+                background: bottom,
+            },
+        );
     }
-    ctx.scene = Some(scene);
-    Ok((ordered, ctx))
+    Ok(out)
+}
+
+impl Pass3d {
+    /// The 3D state of this pass for a motion-blur sample at `time`
+    /// (`drawContent(L, T + dt, …)` of a blurred object layer): today's
+    /// `compositionRuntime(PM, T + dt)` syncs the whole scene (objects,
+    /// lights, camera) at the sample time and `compositionDepthIds` reads
+    /// activity and opacity at that time, over the pass as it was ordered
+    /// at the center time (`PM._renderComposition3DPass`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn at_time<'d>(
+        &self,
+        scope: &mut Scope<'_, 'd>,
+        time: f64,
+        width: u32,
+        height: u32,
+        assets: &dyn AssetResolver,
+        view: Option<&View3d>,
+    ) -> JsResult<Pass3d> {
+        let mut ctx = Pass3d {
+            ordered: self.ordered.clone(),
+            root_comp: self.root_comp,
+            ..Pass3d::default()
+        };
+        if self.scene.is_none() {
+            return Ok(ctx);
+        }
+        let comp_id = scope.comp.id().to_string_lossy();
+        ctx.key = Some((comp_id, time.to_bits(), width, height));
+        let scene = composition_scene(scope, time, width, height, assets, view, self.root_comp)?
+            .map(Arc::new);
+        let layers = scope.layers();
+        let ordered: Vec<&'d Node> = self.ordered.iter().filter_map(|&i| layers.get(i)).collect();
+        if let Ok(sc) = &scene {
+            ctx.layers = depth_sets(scope, &ordered, sc, time)?;
+        }
+        ctx.scene = Some(scene);
+        Ok(ctx)
+    }
 }
 
 /// `PM.groupAncestors(l, passLayers).some(g => g.solo)`: only groups

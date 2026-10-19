@@ -85,16 +85,18 @@ type Clip = Vec<ClipShape>;
 /// One recorded draw, rasterized when the canvas is finished.
 #[derive(Debug, Clone)]
 enum Op {
-    /// Closed polygons in window coordinates with the nonzero rule: the
+    /// Closed polygons in device coordinates with the nonzero rule: the
     /// tessellated fill renderers (which require MSAA) or the non-AA bounds
-    /// renderer (which does not).
+    /// renderer (which does not). The pass's viewport maps them to window
+    /// coordinates when they are rasterized.
     Polygons {
-        polys: Vec<Vec<[f64; 2]>>,
+        polys: Vec<Vec<P>>,
         color: Paint,
         msaa: bool,
         rule: Rule,
     },
-    /// The union of triangles (the tessellated stroke renderer, MSAA).
+    /// The union of triangles in device coordinates (the tessellated fill
+    /// and stroke renderers, MSAA).
     Triangles {
         tris: Vec<[P; 3]>,
         color: Paint,
@@ -410,12 +412,12 @@ impl Context {
             return self.fill_rect(r, &m, color);
         }
         if p.is_convex() {
-            let tris = tess::convex_wedge_triangles(p, &m, self.width, self.height);
+            let tris = tess::convex_wedge_triangles(p, &m);
             self.record(Op::Triangles { tris, color });
             return Ok(());
         }
         let local = tess::fill_polygons_local(p, &m);
-        let polys = tess::to_device(&local, &m, self.width, self.height);
+        let polys = tess::to_device(&local, &m);
         self.record(Op::Polygons {
             polys,
             color,
@@ -462,7 +464,7 @@ impl Context {
             let near = |v: f32| (v - libm::roundf(v)).abs() <= 0.0039;
             if near(a[0]) && near(a[1]) && near(b[0]) && near(b[1]) {
                 let corners = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
-                let polys = tess::to_device(&[corners.to_vec()], m, self.width, self.height);
+                let polys = tess::to_device(&[corners.to_vec()], m);
                 self.record(Op::Polygons {
                     polys,
                     color,
@@ -572,13 +574,14 @@ fn render_op(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>) {
     use super::msaa::{fill_triangles, unorm8};
     let mut mask = target.mask();
     let mut coverage = None;
+    let viewport = tess::Viewport::of(target.width, target.height);
     let paint = match op {
         Op::Polygons { polys, color, rule, .. } => {
-            fill_polygons(&mut mask, polys, *rule);
+            fill_polygons(&mut mask, &viewport.map_polygons(polys), *rule);
             color
         }
         Op::Triangles { tris, color } => {
-            fill_triangles(&mut mask, tris);
+            fill_triangles(&mut mask, &viewport.map_triangles(tris));
             color
         }
         Op::Analytic { inst, color } => {
@@ -591,7 +594,7 @@ fn render_op(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>) {
                 let mut union = vec![0.0; target.samples.len()];
                 for (p, m, rule, geometry) in shapes {
                     let local = tess::fill_polygons_local(p, m);
-                    let polys = tess::to_device(&local, m, target.width, target.height);
+                    let polys = viewport.map_polygons(&tess::to_device(&local, m));
                     if let Some(g) = geometry {
                         let c = analytic::rasterize(&analytic::instance(g, m), target.width, target.height, target.pattern);
                         for (a, b) in union.iter_mut().zip(c.coverage) {
