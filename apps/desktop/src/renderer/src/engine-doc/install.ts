@@ -29,7 +29,7 @@ import { findPath, NativeApi } from './native';
 import { NativeEdits } from './edits';
 import { createTracker, patchCloning, querySite, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
-import { compileFrom, imports, instantiate, MODULE_PATH, PmWasm } from './wasm';
+import { compileEditorModule, imports, instantiate, moduleCompileTiming, PmWasm } from './wasm';
 import { FontLoader, type FontProvider } from './fonts';
 import { fontCensusStats } from './ui-font-census';
 import { bridge as hostBridge } from '../kernel/bridge';
@@ -131,6 +131,11 @@ export interface EngineDoc {
   failures(): EngineFailure[];
   /** Loads the module again after a `pm-wasm-unavailable` failure; resolves with readiness. */
   retry(): Promise<boolean>;
+  /**
+   * `fn` runs once the module becomes ready after `whenReady` resolved false
+   * (a successful `retry()`): the extension loader activates what waited.
+   */
+  onReady(fn: () => void): () => void;
   /** Loads the faces the open composition's text needs before anything asks (asynchronous font providers). */
   warmFonts(): Promise<void>;
 }
@@ -151,7 +156,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false),
       check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
-      failures: () => [], retry: () => Promise.resolve(false), warmFonts: () => Promise.resolve(),
+      failures: () => [], retry: () => Promise.resolve(false), onReady: () => () => {}, warmFonts: () => Promise.resolve(),
     };
     PM.EngineDoc = off;
     return off;
@@ -429,9 +434,11 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const subscribers = new Set<(batch: PatchBatch) => void>();
   const pendingListeners = new Set<() => void>();
   const eager = new Set<() => boolean>();
+  const readyListeners = new Set<() => void>();
   let readyResolve: (ok: boolean) => void = () => {};
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
+  const startup = { startedAt: performance.now(), moduleMs: 0, instantiateMs: 0, mirrorMs: 0, readyMs: 0 };
   const state: EngineDoc = {
     mode, enabled: true, ready: false, api, edits, barrier: null, wasm: null, auditor, dual, tracker, whenReady,
     check(reason) {
@@ -447,6 +454,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     stats() {
       return {
         mode: mode.name, ready: state.ready,
+        startup: { ...startup, ...moduleCompileTiming() },
         barrier: barrier ? { revision: barrier.revision, ...barrier.stats } : null,
         native: api.stats,
         fontCensus: typeof document === 'undefined' ? null : fontCensusStats(document),
@@ -464,14 +472,21 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       api.fonts?.retry();
       failed.clear();
       if (state.ready) return Promise.resolve(true);
-      return start().then((ok) => { if (ok) afterReady(); return ok; });
+      return start().then((ok) => {
+        if (ok) {
+          afterReady();
+          for (const fn of [...readyListeners]) { try { fn(); } catch (error) { console.error(error); } }
+        }
+        return ok;
+      });
     },
+    onReady(fn) { readyListeners.add(fn); return () => { readyListeners.delete(fn); }; },
     warmFonts: () => (state.ready ? api.warmFonts() : Promise.resolve()),
   };
   PM.EngineDoc = state;
 
   // ── loading ───────────────────────────────────────────────────────────
-  const loadModule = options.loadModule ?? (() => compileFrom(() => fetch(new URL(MODULE_PATH, (globalThis as any).document?.baseURI ?? (globalThis as any).location?.href).href)));
+  const loadModule = options.loadModule ?? compileEditorModule;
   let compiledModule: WebAssembly.Module | null = null;
   /** Puts a fresh instance in place and resyncs it (the barrier keeps its revisions). */
   const attach = (instance: PmWasm): void => {
@@ -498,8 +513,17 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   };
   const start = async (): Promise<boolean> => {
     try {
+      const started = performance.now();
       compiledModule = await loadModule();
-      attach(await instantiate(compiledModule));
+      const loaded = performance.now();
+      startup.moduleMs = loaded - started;
+      const instance = await instantiate(compiledModule);
+      startup.instantiateMs = performance.now() - loaded;
+      const attached = performance.now();
+      attach(instance);
+      startup.mirrorMs = performance.now() - attached;
+      performance.mark?.('powermove:document-ready');
+      startup.readyMs = performance.now() - started;
       return true;
     } catch (error) {
       state.ready = false;

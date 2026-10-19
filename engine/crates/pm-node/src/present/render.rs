@@ -282,12 +282,12 @@ pub struct ThreadConfig {
     /// captions layers are drawn natively. `None`: no fonts, those layers
     /// are refused.
     pub fonts: Option<crate::fonts::render::RenderFonts>,
-    /// Tests only ([`super::SEND_DELAY_ENV`]): how long the completion
-    /// thread holds a finished paused frame before sending it.
-    pub send_delay: Option<Duration>,
     /// Caps the viewer's waits for its window's pixels (`EXTERNAL_WAIT_ENV`;
     /// [`super::wait::Bounds`]).
     pub external_wait_cap_us: Option<i64>,
+    /// Tests only ([`super::SEND_DELAY_ENV`]): how long the completion
+    /// thread holds a finished paused frame before sending it.
+    pub send_delay: Option<Duration>,
 }
 
 /// Today's capture error for a Blender composition whose frame was not
