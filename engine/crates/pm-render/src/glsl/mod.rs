@@ -38,13 +38,59 @@ use pm_gpu::glsl::naga;
 ///   about 10% of pixels by one binary16 step (`effects_webgl`,
 ///   `builtin/effect/levels` defaults, viewport, hdr) and is bit-exact with
 ///   `powr`.
-pub const ANGLE_CALLS: &[(&str, &str)] = &[("metal::pow(", "metal::powr(")];
+/// - `normalize`: ANGLE emits `metal::fast::normalize` (vectors; the scalar
+///   overload is `sign`, `pm_glsl`'s polyfill).
+/// - `tanh`: ANGLE emits `metal::precise::tanh`.
+pub const ANGLE_CALLS: &[(&str, &str)] = &[
+    ("metal::pow(", "metal::powr("),
+    ("metal::normalize(", "metal::fast::normalize("),
+    ("metal::tanh(", "metal::precise::tanh("),
+];
 
-/// naga's MSL with ANGLE's calls ([`ANGLE_CALLS`]).
+/// Calls replaced only inside the named polyfills `pm_glsl` injects, as
+/// (function name prefix, naga's call, ANGLE's call): GLSL's `round` reaches
+/// naga as `roundEven` inside `pm_round` (glslang and naga give both the same
+/// IR), and ANGLE writes `round` as `metal::round` (ties away from zero).
+pub const ANGLE_POLYFILL_CALLS: &[(&str, &str, &str)] =
+    &[("pm_round_u0028", "metal::rint(", "metal::round(")];
+
+/// naga's MSL with ANGLE's calls ([`ANGLE_CALLS`], [`ANGLE_POLYFILL_CALLS`]).
 pub fn angle_calls(msl: &str) -> String {
     let mut out = msl.to_owned();
     for (naga_call, angle_call) in ANGLE_CALLS {
         out = out.replace(naga_call, angle_call);
+    }
+    for (function, naga_call, angle_call) in ANGLE_POLYFILL_CALLS {
+        out = in_functions(&out, function, |body| body.replace(naga_call, angle_call));
+    }
+    out
+}
+
+/// `msl` with `edit` applied to the body of every function whose name
+/// starts with `prefix`. naga writes a function as its signature from
+/// column 0 (`<type> <name>(`), its parameters, then the body up to a `}`
+/// alone on a line.
+fn in_functions(msl: &str, prefix: &str, edit: impl Fn(&str) -> String) -> String {
+    let mut out = String::with_capacity(msl.len());
+    let mut lines = msl.split_inclusive('\n');
+    while let Some(line) = lines.next() {
+        let starts = !line.starts_with(char::is_whitespace)
+            && line
+                .split_whitespace()
+                .nth(1)
+                .is_some_and(|name| name.starts_with(prefix));
+        if !starts {
+            out.push_str(line);
+            continue;
+        }
+        let mut body = String::from(line);
+        for line in lines.by_ref() {
+            body.push_str(line);
+            if line.trim_end() == "}" {
+                break;
+            }
+        }
+        out.push_str(&edit(&body));
     }
     out
 }
@@ -176,6 +222,29 @@ mod tests {
             out,
             "float pow_(float x){ return x; }\nfloat a = metal::powr(x, y) + metal::powr(x, y) + pow_(1.0);\nmetal::float3 b = metal::powr(v, metal::float3(2.0));"
         );
+    }
+
+    #[test]
+    fn round_is_angles_only_inside_the_round_polyfill() {
+        let msl = "float pm_round_u0028_f1_u003b(\n    thread float& x\n) {\n    float _e1 = x;\n    return metal::rint(_e1);\n}\n\nfragment main_(){\n    float r = metal::rint(y);\n}\n";
+        let out = angle_calls(msl);
+        assert!(out.contains("return metal::round(_e1);"), "{out}");
+        assert!(
+            out.contains("float r = metal::rint(y);"),
+            "roundEven stays: {out}"
+        );
+    }
+
+    #[test]
+    fn round_polyfill_reaches_naga_as_a_named_function() {
+        // The prefix `ANGLE_POLYFILL_CALLS` matches what naga writes for
+        // `pm_glsl`'s polyfill.
+        let src = "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform float u_x;\nout vec4 o;\nvoid main(){ o = vec4(round(u_x), roundEven(u_x), round(v_uv)); }\n";
+        let p = pm_glsl::translate(src, 0).expect("translates");
+        let msl = pm_glsl::pipeline::msl(&p.fragment.module).expect("msl");
+        let out = angle_calls(&msl);
+        assert_eq!(out.matches("metal::round(").count(), 2, "{out}");
+        assert!(out.contains("metal::rint("), "roundEven: {out}");
     }
 
     #[test]

@@ -148,6 +148,44 @@ fn update(
     }
 }
 
+/// GLSL built-ins whose Metal call the engine takes from ANGLE
+/// (`pm_render::glsl`): `round` rounds ties away from zero as WebGL does
+/// today (ANGLE's `metal::round`), `roundEven` to even (`metal::rint`).
+#[test]
+fn round_ties_away_from_zero_as_in_webgl() {
+    let _gpu = gpu();
+    const ROUND: &str = "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nuniform float u_x;\nout vec4 o;\nvoid main(){ o = vec4(round(u_x) * 0.25, roundEven(u_x) * 0.25, round(-u_x - 1.0) * -0.125, 1.0); }\n";
+    let params = json!([{ "type": "number", "key": "x", "default": 0.5, "min": 0, "max": 10, "step": null }]);
+    let mut set = builtin_definitions();
+    set.definitions
+        .push(raw_effect("acme.round", ROUND, params, false));
+    let mut r = Renderer::headless().unwrap();
+    let failures = r.set_definitions(&set).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    for (x, want) in [
+        (0.5, [0.25, 0.0, 0.25]),
+        (2.5, [0.75, 0.5, 0.5]),
+        (1.25, [0.25, 0.25, 0.25]),
+    ] {
+        let (doc, res) = document(
+            vec![fx("f1", "acme.round", json!({ "x": ch(json!(x)) }))],
+            None,
+        );
+        let px = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+        // The effect writes every pixel of the layer's buffer; the image
+        // layer is opaque where its alpha is, so read the composite where
+        // nothing else is drawn over it: the frame's first pixel.
+        let i = 0;
+        let got = [px[i], px[i + 1], px[i + 2]];
+        for c in 0..3 {
+            assert!(
+                (got[c] - want[c]).abs() < 1e-3,
+                "x = {x}: {got:?}, want {want:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn effects_are_routed_without_definitions_and_drawn_with_them() {
     let _gpu = gpu();
