@@ -407,3 +407,18 @@ where dual answers and the auditor load the main thread, and 0 of 12 with the fl
 `on` or `off`; the spec should poll for the clip path. `export-code.spec.ts:9`
 (the web player's `stopped` flag) failed once under the same load and passed the
 other 4 runs.
+
+
+## Round 4: strict answers and synchronous fonts
+
+With Use New Engine on, every refusal in NativeApi and NativeEdits reports and
+throws `EngineFailure`; `fonts`, `ink`, `host`, `3d`, `legacy`, `flush`, `exception`
+and missing context never execute the legacy fallback. The main-frame-only
+synchronous font channel supplies whole faces on demand. Retry re-enables the
+font loader and forgets failed face-cache entries. Font warmup visits nested
+compositions and every keyed time, off the UI installation chain.
+
+Composition addresses may identify a nested canonical member path. Replacement
+scopes detached from the current project are evaluated as native `compJson`
+inputs, with the open project's rate and members retained. See document-host.md
+for tests, remaining 3D/cyclic-pose failures and cross-lane edits.

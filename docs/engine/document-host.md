@@ -113,7 +113,8 @@ them into the tool's error text, with "(retry the call)" when `retry` holds.
 |---|---|---|
 | pm-wasm missing or fails to load | `pm-wasm-unavailable`, retry | today's behavior: the legacy evaluator, logged |
 | Font service (pm-bridge `FontRegistry`) missing | `font-service-unavailable`, retry | loaded only with `POWERMOVE_ENGINE_FONTS=1` |
-| Evaluator mode | at least `on` | `POWERMOVE_NATIVE_EVALUATOR` (default `on`) |
+| Evaluator mode (production) | `on` | `off` |
+| Evaluator mode (development/test build) | at least `on` | `POWERMOVE_NATIVE_EVALUATOR` (default `on`) |
 | `installEngineDoc` `strict` | yes: named failures (below) | no |
 
 A retry is a new worker: the pool drops a worker whose open failed, so the next call
@@ -156,11 +157,14 @@ Shared with the editor (docs/engine/write-path.md has the details):
 | a non-object where a channel or path belongs | `invalid-input`: the legacy code throws reading it before any evaluation, and that throw is the API's answer |
 | `error:*` | Still counted; `pm-wasm-error` named failure with the new engine on |
 | `unavailable` | Workers never answer before the module is ready (open fails by name). In the editor, the boot window before `whenReady` remains (below) |
-| `fonts` | Synchronous in workers (no fallback). In the editor, the first question per face still waits on main (below); a provider that stopped answering is `font-service-unavailable` |
-| `ink`, `host`, `3d` | Interfaces to the fonts and threed lanes (below) |
+| `fonts` | Synchronous registry answers and whole faces in workers and the editor; missing faces/services are named failures with Retry |
+| `ink` | Whole faces supply outlines in both hosts |
+| `host`, `3d`, `legacy`, `flush`, `exception`, missing context | Named strict failure; never a legacy answer |
 
-`gl.bounds` and `gl.pick` have no legacy reference headlessly (no compositor), so the
-dual answers skip them in a worker; the editor's dual answers compare them.
+`gl.bounds` and `gl.pick` have no legacy reference headlessly (no compositor).
+The desktop contract records real Canvas measurements and replays them through
+the unmodified legacy font-anchor kernels in a test-built worker. Their dual
+comparison counts are required to be nonzero; missing measurements fail the run.
 
 The dual, audit, and tracking modes are development-only: a production build takes
 them only from its build flag; a profile's stored override can turn the plain mirror
@@ -223,7 +227,7 @@ which the editor's decoder wrote at import. Lookups settle before every call, so
 and never depend on timing. Importing and replacing media still refuse in a worker
 (survey C24). `get_workspace_state` reads the project's file state from the profile
 store (`projectMeta.<id>`), unsaved unless the document's fingerprint equals the saved
-or baseline hash; a worker reports no viewport (it has no window).
+or baseline hash; a worker reports the historical hidden Chromium context's viewport (1440 × 1000, DPR 1).
 
 ## Text ink
 
@@ -236,24 +240,32 @@ Anchor bounds keep the legacy key order (x0, y0, x1, y1) whichever side measured
 the desktop's. Where there is no raster, `PM.textLayout` (the glyph layout
 `get_project_state` reports for selected text) is pm-wasm's `glyphLayout`; kernels and
 queries with no headless legacy reference (`captureFontAnchor`, `anchorReference`,
-`glyphLayout`, `gl.bounds`, `gl.pick`) are not dual-compared in a worker.
+`glyphLayout`, `gl.bounds`, `gl.pick`) have no live headless reference.
+The Electron contract replays recorded Canvas rasters for the font-anchor kernels
+and requires that both ink kernels were actually dual-compared.
 
 ## The editor with the new engine on
 
-`legacy/bootstrap.ts` waits (bounded at 15 s) for the mirror before the project opens,
-then (bounded at 10 s) for the boot project's faces (`EngineDoc.warmFonts`, which asks
-pm-wasm directly and loads what its text layers need), and warms the faces of every
-project opened later. A module that does not load is the named `pm-wasm-unavailable`
-failure with Retry.
+`legacy/bootstrap.ts` installs the UI without awaiting the mirror or fonts.
+Once the mirror is ready, fonts warm in the background, also on later project
+opens. Warming visits every composition (including nested `comps`) and every
+keyed time in each text layer. Question-time font misses resolve synchronously
+through the main-frame-only font channel; whole faces carry outlines.
+
+Every strict native refusal reports a named `EngineFailure` (bus, report, existing
+failure toast), then throws. No fallback branch calls the legacy evaluator in
+strict production mode. Audit builds intentionally execute references for comparison.
+Retry resets a disabled font loader, including its face cache; a missing bridge is
+a named font-service failure on the first text question.
 
 ## Interfaces to other lanes
 
-- **Fonts (editor ink and new faces).** The editor's provider is asynchronous (main
-  relays to the font service) and has no `whole`, so in the editor an ink question
-  still answers `{ink}`, and a face first used after a project opened (a font picked
-  in the inspector) is answered by the legacy code while it loads. Closing both needs
-  a synchronous channel from the renderer to a registry in main
-  (`ipcRenderer.sendSync`, the fonts and bridge lanes' files) and `whole` on it.
+- **Fonts.** `main/engine-fonts.ts` owns one synchronous CoreText registry per
+  editor sender. The preload exposes `answerSync` and `wholeSync`. Project font
+  mutations update that sender's registry before acknowledging, alongside the
+  asynchronous interactive-engine service. The shared channel keeps the same
+  sender check and byte/query limits. Failed registry creation retries on the next
+  request; a failed face load is not marked loaded.
 - **3D (host, 3d).** pm-wasm's `RefuseHost` and the `3d` pick fallback are the threed
   lane's (`pm-geom3d` in pm-wasm). Nothing here routes around them.
 - **Agents (hidden MCP host).** Builds on `DocumentHostPoolApi`, implements
@@ -273,22 +285,98 @@ failure with Retry.
 | Desktop vs worker | `pm-electron-lock playwright test e2e/document-host-contract.spec.ts --workers=1` | 32 calls from the same document, errors included: **byte-identical canonical documents and identical answers, with no pinned difference**; `get_workspace_state`'s document fields equal with the desktop's extension list |
 | Exact answers | `vitest run src/renderer/src/engine-doc/strict.test.ts` | 6 tests: the previous 5, plus warmed faces answer the editor's first text question natively (an unwarmed one falls back, measured) |
 
-## What remains
+## Round 4 verification and remaining work
 
-- **The editor's first question about a face picked after open**, and **ink in the
-  editor**, wait for the fonts lane's synchronous channel (above). Workers have neither.
-- **`context`** (no `compId`, or `PM.curComp()` not registered in `comps`, mid-replacement
-  or a nested composition from a composition's own `comps`) still answers with the
-  legacy code; making it exact needs pm-wasm to address compositions by path.
-- **`get_workspace_state`'s window fields** (`layout`, `viewport`, `openProjects`,
-  `projectsScreenOpen`) describe an editor window; a worker has none. Its document
-  fields match the desktop's. Whether the route table sends the tool to an open editor
-  window is the orchestrator's decision.
-- **Media decoding facts** a worker cannot know without engine probes: decode failures
-  and cloud placeholders (`media-failed`, `media-in-cloud`), a video's audio track when
-  the record does not say, and media import and replace (survey C24).
-- **3D** questions (`host`, `3d`) wait for the threed lane.
-- **Export and save** from workers (survey C23) and the hidden MCP host's tool
-  routing are the agents lane's on this interface.
-- Store extensions use Web Workers or `XMLHttpRequest` only in a browser; the
-  contained runtime offers neither.
+The earlier verification table above is historical. Round 4 was rerun on
+integration tip `e9a80939` (protocol `c137021c07039329`):
+
+| Check | Observed result |
+|---|---|
+| Pool | 15/15, including 32 seeded interleavings, reconciliation-send windows, refused-batch retry and changed-hash history import |
+| Strict query/edit guards | 12/12, including nested/replacement scopes, on-demand fonts, keyed nested font warmup, disabled-loader recovery and explicit group lists |
+| Desktop / worker, setting off and on | Both pass: 43 answers (6 expected errors) and live document bytes after every call; only generated ids renamed. Each headless run compares 144 dual answers, including font-anchor capture/reference, with 0 mismatches, 0 fallbacks and 0 auditor failures |
+| Real app boot | Five alternating pairs, no engine failures. UI p50 off/on 986.35/964.98 ms; observed max 1010.02/1013.63 ms. Editor p50 1396.28/1363.28 ms. These are five observations per mode, not a tail-latency estimate |
+| Required broader unit selection | 138 files passed, 1 failed, 2 skipped; 1157 tests passed, 1 failed, 2 skipped. Failure: unchanged `legacy/core/project-file.test.ts:153`, a 5000 ms timeout on the 3 MiB Blob comparison, also reproduced in isolation. No timeout or tolerance was changed |
+| Rust | pm-wasm, pm-eval and pm-text: 102 standard tests across 19 successful targets; the custom 5200-case Canvas text corpus also passes, identical breaks and max layout error 0.001047 px |
+| Svelte / node TypeScript | Svelte: 0 errors, 1 existing warning. Node tsc: 75 existing errors (missing cloud generated types, resulting API types, and TS6307 file-list issues); no errors in the lane files |
+
+Remaining parity gaps are blockers, not allowed differences. Detailed transcripts,
+full workspace-state fields and diagnostics are retained outside Git in the lane
+report's evidence paths.
+
+- Reconciliation flushes chain a fresh batch behind a pending reconciliation;
+  the reconciliation's own batch joins `unacked`. A conflict during that send
+  requests another reconciliation. Refused paths retain their current values for
+  the next retry instead of disappearing into the acknowledged baseline. Each
+  successful tool answer waits for all of that work. Pool tests cover the two named windows and 32 seeded interleavings.
+- Nested compositions use canonical member-path addresses (`@path:`), retaining
+  identity even when nested maps reuse ids. A detached current scope during
+  replacement is evaluated natively from `compJson`. A project without `compId`
+  uses its stored root id. Both query and interned-property paths resolve nested
+  addresses. Tests compare nested and replacement queries against the old evaluator.
+- Production workers ignore `POWERMOVE_NATIVE_EVALUATOR` entirely; only the setting
+  decides. Test bundles explicitly use Vite mode `test`. Deterministic clock/id
+  seams and Canvas-reference replay are compiled out of production.
+- The contract includes `manage_media` rename/move/delete and every folder action,
+  referenced-delete refusal and `removeReferenced`, and `__composition_info`.
+  `DOCUMENT_TOOLS` documents their default route. A coverage test audits the public
+  spec and harness dispatch names against the sequence and explicit exclusions.
+  Document comparison uses the worker's live `JSON.stringify(PM.proj)` bytes,
+  exposed only by an explicitly seeded test build, and the desktop's live bytes.
+  Only minted ids are renamed; there is no composition projection or key sorting.
+- `get_workspace_state` prefers a tab on the run's project in `RunHub`; an unrelated
+  tab is never selected. Without a tab, the worker's viewport is today's hidden
+  Chromium context, 1440 × 1000 at DPR 1 (`server/mcp.ts`). Exact persisted window
+  layout and open-project fields still need the hidden-host embedder's window
+  state integration; the document fields remain contract-compared. This is a gap,
+  not an accepted difference.
+- Persisted history is imported even if the document hash changed, matching the
+  desktop's unconditional import. A test changes the stored document between
+  worker lifetimes and verifies the retained history and foreign edit.
+- Native 3D bounds/picking still require the threed lane's host geometry service.
+  Calls reaching those queries (`get_project_state` with selected 3D content and
+  geometry edits through `apply_commands`, including alignment/group placement)
+  now fail visibly instead of silently invoking three.js. The cache-dependent
+  cyclic camera/light reparent refusal (`apply_commands` / `set_layer` parent)
+  is also named; its exact stale-cache behavior remains to be ported.
+- Host media import/replace, render pixel output, and staging/rebase are explicit
+  corpus exclusions with reasons; their service-specific gates remain with the
+  media, agents and extension lanes. No missing tool is silently excluded.
+- Detached `NativeEdits` alignment, leave-attributes and anchor-reference helpers
+  are named `context` failures when the layer is outside the open document. They
+  never execute a legacy fallback in strict mode. Normal document tool targets
+  remain live ids; none of the 43 contract calls hits this failure.
+- The 750 ms history debounce still means SIGKILL inside that interval can lose
+  undo entries; the document itself has reached the session before each answer.
+- Store containment limitations from the earlier rounds remain: no OS sandbox
+  outside macOS, and no headless XHR/EventSource/Web Workers/Blob IPC parity.
+
+## Out-of-ownership edits (all rounds)
+
+Owned lane paths are `src/engine`, `renderer/src/engine-doc`, `editing.ts`, shared
+stamp/reader guards, the worker interface and the document-host/write-path notes.
+The following edits outside them are intentional and local:
+
+- `shared/store-keys.ts`, `main/store-engine.ts`, `legacy/core/projects.ts`:
+  history key namespace, size limit, and project-destruction cleanup.
+- `kernel/install.ts`, `kernel/loader.ts`, `kernel/sandbox-host.ts`: headless
+  extension boot, external contained-process sandbox transport, and isolation.
+- `legacy/core/scripting.ts`: contained script runtime hook.
+- `legacy/assistant/harness.ts`: live tool answer seam and headless viewport guard.
+- `legacy/bootstrap.ts`: engine installation and background font warming.
+- `engine.vite.config.ts`, `e2e/document-host-contract.spec.ts`,
+  `e2e/document-host-boot.spec.ts`: runtime bundle and integration gates.
+- `main/engine-fonts.ts` and its tests, `preload/index.ts`,
+  `shared/engine-fonts-ipc.ts`: synchronous full-face font channel (fonts/bridge).
+- `server/runs.ts` and its tests: project-window preference for workspace state.
+- `pm-text/src/subset.rs`, `pm-text/src/registry/coretext.rs`,
+  `pm-bridge/src/fonts.rs`: whole face service, including collections.
+- `pm-eval/src/bounds.rs`: detached input support from the first round;
+  `pm-eval/src/comp.rs`: nested and ad-hoc composition addressing.
+- `pm-wasm/src/engine.rs` and `tests/queries.rs`: detached query inputs, nested
+  composition scopes and replacement-time native queries.
+- `docs/engine/rfcs/15-document-host.md`: frozen version-1 interface description;
+  `docs/engine/pm-eval.md`: composition-scope API notes.
+
+Idle/close policy belongs to the agents lane: workers remain alive until explicit
+close or shutdown; no competing eviction policy was added here.
