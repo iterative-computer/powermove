@@ -327,6 +327,12 @@ pub struct FrameTrace {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
+    /// Render-thread turns (one command batch, or one pass over the views)
+    /// longer than [`STALL_US`]: the clock, frames, and audio status wait
+    /// behind them. The longest, and what the last one was doing.
+    pub stalls: u64,
+    pub stall_us_max: i64,
+    pub last_stall: Option<String>,
     pub checked_in: bool,
     pub check_in_us: i64,
     pub bridge_error: Option<String>,
@@ -644,21 +650,58 @@ pub fn run(
         match rx.recv_timeout(timeout) {
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(command) => {
+                let started = now();
+                let what = command_name(&command);
                 if !thread.apply(command) {
                     break;
                 }
+                thread.note_turn(what, started);
                 while let Ok(command) = rx.try_recv() {
+                    let started = now();
+                    let what = command_name(&command);
                     if matches!(command, Command::Shutdown) || !thread.apply(command) {
                         thread.shutdown();
                         return;
                     }
+                    thread.note_turn(what, started);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
         }
+        let started = now();
         thread.work();
+        thread.note_turn("work", started);
     }
     thread.shutdown();
+}
+
+/// A render-thread turn longer than this is a stall (diagnostics: the
+/// status report and a warning in the engine log).
+pub const STALL_US: i64 = 250_000;
+
+/// What a command is, for stall diagnostics.
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Shutdown => "shutdown",
+        Command::Configure { .. } => "viewer state",
+        Command::Release { .. } => "release",
+        Command::Transport { .. } => "transport",
+        Command::Audio { .. } => "audio",
+        Command::Render { .. } => "frame request",
+        Command::Close { .. } => "close",
+        Command::ClosePort { .. } => "close port",
+        Command::Document { .. } => "document",
+        Command::Definitions { .. } => "definitions",
+        Command::Media { .. } => "media",
+        Command::ShaderFallback { .. } => "shader fallback",
+        Command::FrameCache { .. } => "frame cache",
+        Command::Snapshot(_) => "snapshot",
+        Command::Compat { .. } => "compat",
+        Command::LoseDevice => "lose device",
+        Command::FontsChanged => "fonts",
+        #[allow(unreachable_patterns)]
+        _ => "command",
+    }
 }
 
 impl Thread {
@@ -668,6 +711,27 @@ impl Thread {
 
     fn stats(&self) -> std::sync::MutexGuard<'_, Stats> {
         self.stats.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records a turn that stalled the thread (see [`STALL_US`]).
+    fn note_turn(&self, what: &'static str, started: i64) {
+        let took = now() - started;
+        if took < STALL_US {
+            return;
+        }
+        {
+            let mut stats = self.stats();
+            stats.stalls += 1;
+            stats.stall_us_max = stats.stall_us_max.max(took);
+            stats.last_stall = Some(format!("{what}: {} ms", took / 1000));
+        }
+        self.log(
+            LogLevel::Warn,
+            format!(
+                "presenter: the render thread spent {} ms on {what}",
+                took / 1000
+            ),
+        );
     }
 
     fn check_in(&mut self) {
