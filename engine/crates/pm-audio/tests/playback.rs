@@ -3102,21 +3102,36 @@ fn play_preempts_paused_preparation_after_an_edit() {
 /// preserves every warmed voice, and the result is the edited offline PCM.
 #[test]
 fn edit_then_play_reuses_all_sixteen_stretched_voices() {
-    assert_sixteen_voice_edit_starts(false);
+    assert_sixteen_voice_edit_starts(false, false);
 }
 
 #[test]
 fn cold_seek_and_speed_edit_prepare_sixteen_voices_in_parallel() {
-    assert_sixteen_voice_edit_starts(true);
+    assert_sixteen_voice_edit_starts(true, false);
 }
 
-fn assert_sixteen_voice_edit_starts(cold: bool) {
+/// The same starts with sixteen different signals (each voice trimmed
+/// 61.3 ms further): no voice can reuse another's stretched head, so every
+/// voice is prepared by its own vocoder job and must still start complete.
+#[test]
+fn edit_then_play_reuses_sixteen_distinct_stretched_voices() {
+    assert_sixteen_voice_edit_starts(false, true);
+}
+
+#[test]
+fn cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous() {
+    assert_sixteen_voice_edit_starts(true, true);
+}
+
+fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
     let _load = stress_enabled().then(CpuContention::start);
-    let dir = temp_dir(if cold {
-        "a8-cold-start"
-    } else {
-        "a8-level-start"
+    let dir = temp_dir(match (cold, distinct) {
+        (true, false) => "a8-cold-start",
+        (false, false) => "a8-level-start",
+        (true, true) => "a8-cold-distinct",
+        (false, true) => "a8-level-distinct",
     });
+    let trim = |i: usize| if distinct { i as f64 * 0.0613 } else { 0.0 };
     let file = dir.join("tone.wav");
     write_wav(
         &file,
@@ -3145,7 +3160,7 @@ fn assert_sixteen_voice_edit_starts(cold: bool) {
                     "s",
                     0.0,
                     8.0,
-                    &format!(r#", "speed":{speed}, "gain":{gain}"#),
+                    &format!(r#", "speed":{speed}, "gain":{gain}, "trim":{}"#, trim(i)),
                     "",
                 )
             })
@@ -3189,19 +3204,48 @@ fn assert_sixteen_voice_edit_starts(cold: bool) {
             ])
             .unwrap();
         let bound = Duration::from_secs_f64(512.0 / SR as f64);
-        while side.queued_frames() < 512 && at.elapsed() < bound {
+        // The deadline is checked against the producer's own publication
+        // time, not against when this thread happened to observe the ring:
+        // an observer descheduled under load must not hide a late queue,
+        // nor fail an on-time one.
+        while side.queued_frames() < 512 && at.elapsed() < Duration::from_secs(5) {
             std::thread::yield_now();
         }
+        let observed = at.elapsed();
         assert!(
             side.queued_frames() >= 512,
-            "edited first buffer: {:?}",
-            at.elapsed()
-        );
-        eprintln!(
-            "A8 sixteen-voice edit cold={cold} first buffer: {:.3} ms",
-            at.elapsed().as_secs_f64() * 1000.0
+            "edited first buffer: {observed:?}"
         );
         side.callback(&mut out, 2, host_now_us());
+        let timing = playback.start_timing().unwrap();
+        let &(frames, published_us) = timing
+            .publications
+            .iter()
+            .find(|(frames, _)| *frames >= 512)
+            .expect("first 512 frames published");
+        let published = Duration::from_micros(published_us.saturating_sub(timing.requested_us));
+        eprintln!(
+            "A8 sixteen-voice edit cold={cold} distinct={distinct} first buffer: published {:.3} ms ({frames} frames), observed {:.3} ms",
+            published.as_secs_f64() * 1000.0,
+            observed.as_secs_f64() * 1000.0
+        );
+        // Sixteen identical voices share one representative head, which
+        // must publish within one 512-frame callback. Sixteen distinct cold
+        // voices each run the canonical pre-roll (about two P-core job
+        // lengths on this pool); their latency is gated by the paired app
+        // captures against today, and only reported here.
+        assert!(
+            (distinct && cold) || published <= bound,
+            "first 512 frames published {published:?} after Play (bound {bound:?}, cold={cold}, distinct={distinct})"
+        );
+        // Distinct signals cannot share an immutable head; identical cold
+        // starts do (the representative job's prefix serves all sixteen).
+        if distinct {
+            assert_eq!(
+                timing.prefill_ready_us, 0,
+                "distinct voices used a shared head"
+            );
+        }
         let rig = Rig::new(&[("s", file.as_path())]);
         let mut reference = rig.mixer((*edited).clone(), "C", MixFormat::stereo(SR));
         let mut expected = vec![vec![]; 2];
@@ -3224,6 +3268,9 @@ fn assert_sixteen_voice_edit_starts(cold: bool) {
                 captured.extend_from_slice(&out);
             }
             let timing = playback.start_timing().unwrap();
+            if !distinct {
+                assert_ne!(timing.prefill_ready_us, 0, "identical voices share a head");
+            }
             assert_eq!(
                 timing.omitted_prefix_frames, 0,
                 "ordinary cold start must be complete"
@@ -3246,37 +3293,53 @@ fn assert_sixteen_voice_edit_starts(cold: bool) {
                 max_gap < 8192,
                 "every voice must join within the captured span"
             );
-            // Exact full mix from the first sample, with no omitted voice.
-            let one = project(
-                30.0,
-                8.0,
-                &[audio(
-                    "v0",
-                    "s",
-                    0.0,
-                    8.0,
-                    &format!(
-                        r#", "speed":{}, "gain":{gain}"#,
-                        if trial % 2 == 0 { 1.6 } else { 1.5 }
-                    ),
-                    "",
-                )],
-                &[],
-                "",
-            );
-            let mut single = rig.mixer(one, "C", MixFormat::stereo(SR));
-            let mut pcm = vec![vec![]; 2];
-            single
-                .render(
-                    target * SR as i64,
-                    8192,
-                    &mut pcm,
-                    &pm_audio::RenderOptions {
-                        wait: true,
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
+            // Exact full mix from the first sample, with no omitted voice:
+            // each voice rendered alone, offline, then summed in voice order.
+            let pcm: Vec<Vec<Vec<f32>>> = (0..16)
+                .map(|voice| {
+                    if !distinct && voice > 0 {
+                        return vec![];
+                    }
+                    let one = project(
+                        30.0,
+                        8.0,
+                        &[audio(
+                            &format!("v{voice}"),
+                            "s",
+                            0.0,
+                            8.0,
+                            &format!(
+                                r#", "speed":{}, "gain":{gain}, "trim":{}"#,
+                                if trial % 2 == 0 { 1.6 } else { 1.5 },
+                                trim(voice)
+                            ),
+                            "",
+                        )],
+                        &[],
+                        "",
+                    );
+                    let mut single = rig.mixer(one, "C", MixFormat::stereo(SR));
+                    let mut pcm = vec![vec![]; 2];
+                    single
+                        .render(
+                            target * SR as i64,
+                            8192,
+                            &mut pcm,
+                            &pm_audio::RenderOptions {
+                                wait: true,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                    pcm
+                })
+                .collect();
+            if distinct {
+                assert!(
+                    (0..8192).any(|i| pcm[0][0][i] != pcm[1][0][i]),
+                    "the trims must give different signals"
+                );
+            }
             for i in 0..8192 {
                 for c in 0..2 {
                     let mut sum = 0.0f32;
@@ -3287,7 +3350,7 @@ fn assert_sixteen_voice_edit_starts(cold: bool) {
                             .find(|(v, _)| *v == id)
                             .map_or(0, |(_, n)| *n as usize);
                         if i >= gap {
-                            sum += pcm[c][i];
+                            sum += pcm[if distinct { voice } else { 0 }][c][i];
                         }
                     }
                     assert_eq!(
