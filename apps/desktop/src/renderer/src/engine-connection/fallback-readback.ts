@@ -28,16 +28,6 @@ export class FallbackReadback {
       && gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.HALF_FLOAT;
   }
 
-  readSync(width: number, height: number): Uint16Array {
-    const gl = this.gl;
-    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-    const half = this.half();
-    const pixels = half ? new Uint16Array(width * height * 4) : new Float32Array(width * height * 4);
-    gl.readPixels(0, 0, width, height, gl.RGBA, half ? gl.HALF_FLOAT : gl.FLOAT, pixels);
-    if (gl.getError() !== gl.NO_ERROR) throw new Error('Fallback pixel readback failed');
-    return half ? pixels as Uint16Array : toHalfArray(pixels as Float32Array);
-  }
-
   /** Called after ready(), with the output framebuffer bound. */
   async read(width: number, height: number): Promise<Uint16Array> {
     if (this.disposed || this.active >= CAPACITY) throw new Error('Fallback readback has no free slot');
