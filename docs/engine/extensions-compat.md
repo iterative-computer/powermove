@@ -133,6 +133,11 @@ asked for as before.
 
 ### Measured (2026-10-19, e2e under the Electron lock, flag on)
 
+Playback (`engine-extension-compat.spec.ts`, a shape override, 3 s at 30
+fps, against today's app with the flag off on the same project): 90 frames
+presented, longest gap 42 ms, p95 34 ms; today 90, 41 ms, 34 ms. 192
+answers were made ahead and no frame was asked for during playback.
+
 `e2e/engine-compat-context.spec.ts` (the built-in viewer, 1464 × 824):
 the context reads back the frame on screen exactly (`max 0` against the
 engine's canvas region); against today's compositor on the same canvas, max
@@ -151,10 +156,14 @@ next frame; `render.renderFrameTo` never includes it.
   today's exactly (`w` 310, `h` 140, canvas 465 × 210, anchor 155, 48). The
   test then fails on the unaffected plain text (below).
 - Shape override export (PNG sequence, 90 frames): 180 asks (2 layers × 90
-  frames). Against today's compositor capture (`PM.renderFrameTo`) one
-  pixel at (195, 110) differed by 35 code values in every frame; that pixel
-  is in today's capture, not in today's export, so the reference is now
-  today's own PNG export from a flag-off app.
+  frames). Against today's own PNG export (a flag-off app, the same
+  extension): every pixel equal except one, (195, 110), inside the plain
+  blue rectangle the engine draws itself: today (46, 89, 169), the engine
+  (51, 102, 204), 35 code values. Today's export of the same project with no
+  extension has the same pixel, so it is today's drawing of a plain shape,
+  not the override (vector/composite lanes; the gate fails on it).
+  Side by side: `/tmp/ne-extcompat-evidence/shape-export-engine-left-today-right-frame45.png`
+  and the 8× crop `shape-export-zoom-195-110-engine-left-today-right.png`.
 - Render queue: a job queued with a raster override, the project then edited
   (the tinted ellipse narrowed and moved), draws the project as queued:
   equal to the export sheet's engine export of the queued state at frames 0,
@@ -177,7 +186,11 @@ next frame; `render.renderFrameTo` never includes it.
   tool wrote it, and the same source as a `replaces`-only folder (the shape
   before the fork tool). Each is compared with today's app (flag off, a
   fresh profile) on whether the viewer shows the composition, through the
-  old viewer's own `render.gl.context`.
+  old viewer's own `render.gl.context`. Measured: neither works on today's
+  app (the old viewer's `#gl` canvas ends up out of the document; today's
+  compositor draws into it unseen), and neither on the engine; the engine
+  behaves as today. A frozen viewer that called `init` before the engine
+  connection installed is now bound when it does (`bindLate`).
 - An override by id of every built-in contribution
   (`fixtures/compat-corpus/override-builtins`): 16 effects, 4 transitions,
   48 commands, 6 panels, 264 keybindings, 2 themes, 6 layer types, an
@@ -263,8 +276,10 @@ new ids through a typed accessor; none is added in this lane.
 - **The hidden host and `pm-cli`** have no window to draw a raster
   override's layers: such an export fails by name there (plan: the hidden
   host's on-demand Chromium, L6).
-- Playback with a raster override: see the measurement in the report; the
-  lookahead answers at the open composition's frame rate only.
+- The oldest fork shapes do not work on today's app either (above); the
+  oldest shape that works on today's app lies between 155481d0 and
+  470eeaf3 and is not bisected.
+- The lookahead answers at the open composition's frame rate only.
 - `drawImage(render.gl.context.canvas)` reads the bound canvas the engine
   presents over (blank), where today it read the composite; `readPixels` is
   the supported readback.
