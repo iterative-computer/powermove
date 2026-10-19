@@ -285,7 +285,10 @@ same window. After the reference-failure fix (same date), one rerun of
 `e2e/engine-shader-parity.spec.ts` measured the stable program at 864 ms
 first use and 5.7 to 6.5 ms for the five snapshots right after it (zero
 runner rounds), and the pinned program at 631 ms then 436 to 462 ms (five
-rounds). The window did not appear in that run; with one run its cause is
+rounds). After merging the integration branch (with PERF3's runner
+work), a second rerun measured 874 ms then 6.3 to 7.1 ms for the stable
+program and 312 ms then 23.9 to 24.8 ms for the pinned one (debug engine,
+239x137, shared machine load). The window did not appear in either run; its cause is
 not established (a candidate is the viewer session's own asynchronous
 probe failing transiently while the window's thread is blocked in
 synchronous snapshots, which before the fix left the program re-probing),
