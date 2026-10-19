@@ -766,7 +766,14 @@ PM.autosave = () => {
   }, 550);
 };
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
-['layers','project','assets','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
+['layers','project','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
+// A project's media being read for display (restoreProjectAssets) is not an
+// edit. Each asset it finishes announces 'assets' for the UI; when those
+// arrived further apart than the autosave debounce (media read through main
+// with the new engine), each one wrote the whole project again (C1: a 50 s
+// write each for a 180 MB project, over and over during the open). The
+// restore's last announcement, after it ends, still autosaves once.
+PM.bus.on('assets', () => { if (!PM.assetsRestoring) PM.autosave(); });
 
 async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {}): Promise<boolean> {
   APP.saving = true; PM.invalidate('status');
