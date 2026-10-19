@@ -210,9 +210,12 @@ const BUILTINS_450_ONLY: &[&str] = &[
 ///   them into, so the MSL can make ANGLE's calls (`pm_render::glsl`).
 ///   glslang and naga give `round` and `roundEven` the same IR (`metal::rint`,
 ///   ties to even), while ANGLE writes `round` as `metal::round` (ties away
-///   from zero: `round(2.5)` is 3 in WebGL); `pm_round` wraps `roundEven`
-///   in a function the MSL writer recognizes by name and gives
-///   `metal::round`. naga writes `radians(x)` as `(x) * c`; ANGLE's
+///   from zero: `round(2.5)` is 3 in WebGL). `pm_round` computes ties away
+///   from zero itself, exactly (`x - trunc(x)` is exact in binary floating
+///   point, so `abs(x - t) >= 0.5` finds the halves without the error of
+///   `floor(x + 0.5)` just below 0.5), so every back end rounds as WebGL; the
+///   Metal MSL writer recognizes the function by name and gives its body
+///   ANGLE's own call, `metal::round`. naga writes `radians(x)` as `(x) * c`; ANGLE's
 ///   `ANGLE_radians` is `c * x` (the constant first), and likewise `degrees`.
 const POLYFILLS: &[(&str, &str)] = &[
     (
@@ -273,8 +276,10 @@ vec4 pm_modf(vec4 x, out vec4 i){ i = trunc(x); return mix(x - i, vec4(0.0), isi
     ),
     (
         "round",
-        "float pm_round(float x){ return roundEven(x); } vec2 pm_round(vec2 x){ return roundEven(x); } \
-vec3 pm_round(vec3 x){ return roundEven(x); } vec4 pm_round(vec4 x){ return roundEven(x); }",
+        "float pm_round(float x){ float t = trunc(x); return t + (abs(x - t) >= 0.5 ? sign(x) : 0.0); } \
+vec2 pm_round(vec2 x){ vec2 t = trunc(x); return t + mix(vec2(0.0), sign(x), greaterThanEqual(abs(x - t), vec2(0.5))); } \
+vec3 pm_round(vec3 x){ vec3 t = trunc(x); return t + mix(vec3(0.0), sign(x), greaterThanEqual(abs(x - t), vec3(0.5))); } \
+vec4 pm_round(vec4 x){ vec4 t = trunc(x); return t + mix(vec4(0.0), sign(x), greaterThanEqual(abs(x - t), vec4(0.5))); }",
     ),
     (
         "radians",
@@ -514,6 +519,59 @@ pub fn normalize(source: &str) -> Result<Normalized, NormalizeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `pm_round`'s arithmetic in f32, as the GPU evaluates it.
+    fn pm_round(x: f32) -> f32 {
+        let t = x.trunc();
+        let sign = if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 };
+        t + if (x - t).abs() >= 0.5 { sign } else { 0.0 }
+    }
+
+    #[test]
+    fn pm_round_rounds_ties_away_from_zero_exactly() {
+        // WebGL's `round` on ANGLE's Metal back end is `metal::round`: ties
+        // away from zero, as Rust's `f32::round`. Every back end evaluates
+        // the polyfill's own arithmetic, so it must be exact on its own
+        // (the Metal MSL writer gives it ANGLE's call, the same value).
+        let below_half = f32::from_bits(0.5f32.to_bits() - 1);
+        let mut values = vec![
+            0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, below_half, -below_half,
+            0.49999997, 1.4999999, 8388607.5, -8388607.5, 8388608.0, 16777217.0,
+            f32::MAX, f32::MIN, f32::MIN_POSITIVE, 1e-45, 3.4e38,
+        ];
+        let mut bits = 0x9E37_79B9u32;
+        for _ in 0..200_000 {
+            bits = bits.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let x = f32::from_bits(bits);
+            if x.is_finite() {
+                values.push(x);
+            }
+        }
+        for i in -4096..4096 {
+            values.push(i as f32 * 0.25);
+        }
+        // Compared without the sign of a zero result (`-0.0 + 0.0` is
+        // `+0.0` where `metal::round(-0.3)` is `-0.0`): it changes no value
+        // a program writes but `1.0 / x`, and only off Metal.
+        for x in values {
+            assert_eq!(pm_round(x).to_bits() & !0x8000_0000, x.round().to_bits() & !0x8000_0000, "round({x})");
+        }
+        // `floor(x + 0.5)` would round the largest float below 0.5 up.
+        assert_eq!((below_half + 0.5).floor(), 1.0);
+        assert_eq!(pm_round(below_half), 0.0);
+    }
+
+    #[test]
+    fn pm_round_does_not_reach_a_back_end_as_ties_to_even() {
+        // Without the Metal MSL writer (wgpu's own translation on any other
+        // back end) the polyfill is what runs: no `roundEven` in it.
+        let src = "#version 300 es\nprecision highp float;\nuniform float u_x;\nout vec4 o;\nvoid main(){ o = vec4(round(u_x), round(vec3(u_x))); }\n";
+        let p = crate::pipeline::translate(src, 0).expect("translates");
+        let msl = crate::pipeline::msl(&p.fragment.module).expect("msl");
+        assert!(msl.contains("pm_round"), "{msl}");
+        assert!(!msl.contains("metal::rint("), "{msl}");
+        assert!(msl.contains("metal::trunc("), "{msl}");
+    }
 
     #[test]
     fn rewrites_version_and_precision_keeping_lines() {

@@ -47,29 +47,50 @@ pub const ANGLE_CALLS: &[(&str, &str)] = &[
     ("metal::tanh(", "metal::precise::tanh("),
 ];
 
-/// Calls replaced only inside the named polyfills `pm_glsl` injects, as
-/// (function name prefix, naga's call, ANGLE's call): GLSL's `round` reaches
-/// naga as `roundEven` inside `pm_round` (glslang and naga give both the same
-/// IR), and ANGLE writes `round` as `metal::round` (ties away from zero).
-pub const ANGLE_POLYFILL_CALLS: &[(&str, &str, &str)] =
-    &[("pm_round_u0028", "metal::rint(", "metal::round(")];
+/// Polyfills `pm_glsl` injects whose Metal body is ANGLE's single call, as
+/// (function name prefix, ANGLE's call). `pm_round` computes ties away from
+/// zero itself so that every back end rounds as WebGL; on Metal its body
+/// becomes `return metal::round(x);`, the call ANGLE writes for `round`
+/// (ties away from zero, the same value).
+pub const ANGLE_POLYFILLS: &[(&str, &str)] = &[("pm_round_u0028", "metal::round")];
 
-/// naga's MSL with ANGLE's calls ([`ANGLE_CALLS`], [`ANGLE_POLYFILL_CALLS`]).
+/// naga's MSL with ANGLE's calls ([`ANGLE_CALLS`], [`ANGLE_POLYFILLS`]).
 pub fn angle_calls(msl: &str) -> String {
     let mut out = msl.to_owned();
     for (naga_call, angle_call) in ANGLE_CALLS {
         out = out.replace(naga_call, angle_call);
     }
-    for (function, naga_call, angle_call) in ANGLE_POLYFILL_CALLS {
-        out = in_functions(&out, function, |body| body.replace(naga_call, angle_call));
+    for (function, angle_call) in ANGLE_POLYFILLS {
+        out = in_functions(&out, function, |text| single_call(text, angle_call));
     }
     out
 }
 
-/// `msl` with `edit` applied to the body of every function whose name
-/// starts with `prefix`. naga writes a function as its signature from
-/// column 0 (`<type> <name>(`), its parameters, then the body up to a `}`
-/// alone on a line.
+/// A one-parameter function whose body is replaced by `return call(param);`.
+/// naga writes the signature, its parameters, then `) {` ending a line; a
+/// function not written that way is kept as it is.
+fn single_call(function: &str, call: &str) -> String {
+    let Some(open) = function.find('(') else {
+        return function.to_owned();
+    };
+    let Some(close) = function.find(") {\n") else {
+        return function.to_owned();
+    };
+    let params = &function[open + 1..close];
+    let Some(param) = params
+        .split_whitespace()
+        .last()
+        .filter(|p| !params.contains(',') && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    else {
+        return function.to_owned();
+    };
+    format!("{}    return {call}({param});\n}}\n", &function[..close + 4])
+}
+
+/// `msl` with `edit` applied to every function whose name starts with
+/// `prefix` (its signature through the `}` that closes it). naga writes a
+/// function as its signature from column 0 (`<type> <name>(`), its
+/// parameters, then the body up to a `}` alone on a line.
 fn in_functions(msl: &str, prefix: &str, edit: impl Fn(&str) -> String) -> String {
     let mut out = String::with_capacity(msl.len());
     let mut lines = msl.split_inclusive('\n');
@@ -294,7 +315,8 @@ mod tests {
     fn round_is_angles_only_inside_the_round_polyfill() {
         let msl = "float pm_round_u0028_f1_u003b(\n    thread float& x\n) {\n    float _e1 = x;\n    return metal::rint(_e1);\n}\n\nfragment main_(){\n    float r = metal::rint(y);\n}\n";
         let out = angle_calls(msl);
-        assert!(out.contains("return metal::round(_e1);"), "{out}");
+        assert!(out.contains(") {\n    return metal::round(x);\n}\n"), "{out}");
+        assert!(!out.contains("_e1"), "the polyfill's own body is replaced: {out}");
         assert!(
             out.contains("float r = metal::rint(y);"),
             "roundEven stays: {out}"
@@ -303,7 +325,7 @@ mod tests {
 
     #[test]
     fn round_polyfill_reaches_naga_as_a_named_function() {
-        // The prefix `ANGLE_POLYFILL_CALLS` matches what naga writes for
+        // The prefix `ANGLE_POLYFILLS` matches what naga writes for
         // `pm_glsl`'s polyfill.
         let src = "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform float u_x;\nout vec4 o;\nvoid main(){ o = vec4(round(u_x), roundEven(u_x), round(v_uv)); }\n";
         let p = pm_glsl::translate(src, 0).expect("translates");
@@ -311,6 +333,34 @@ mod tests {
         let out = angle_calls(&msl);
         assert_eq!(out.matches("metal::round(").count(), 2, "{out}");
         assert!(out.contains("metal::rint("), "roundEven: {out}");
+        // Each `pm_round` overload's body is ANGLE's single call.
+        let overloads = std::cell::RefCell::new(Vec::new());
+        in_functions(&out, "pm_round_u0028", |f| {
+            overloads.borrow_mut().push(f.to_owned());
+            f.to_owned()
+        });
+        let overloads = overloads.into_inner();
+        assert_eq!(overloads.len(), 2, "{out}");
+        for f in &overloads {
+            let body = &f[f.find(") {\n").expect("naga's signature") + 4..];
+            let lines: Vec<&str> = body.lines().map(str::trim).collect();
+            assert_eq!(lines.len(), 2, "{f}");
+            assert!(lines[0].starts_with("return metal::round(") && lines[0].ends_with(");"), "{f}");
+            assert_eq!(lines[1], "}", "{f}");
+        }
+    }
+
+    #[test]
+    fn single_call_keeps_what_it_does_not_recognize() {
+        let f = "float pm_round_u0028_f1_u0029_(\n    float x\n) {\n    float t = metal::trunc(x);\n    return t;\n}\n";
+        assert_eq!(
+            single_call(f, "metal::round"),
+            "float pm_round_u0028_f1_u0029_(\n    float x\n) {\n    return metal::round(x);\n}\n"
+        );
+        let two = "float pm_round_u0028_f1_u0029_(\n    float x,\n    float y\n) {\n    return x;\n}\n";
+        assert_eq!(single_call(two, "metal::round"), two);
+        let odd = "float pm_round_u0028_f1_u0029_(float x) { return x; }\n";
+        assert_eq!(single_call(odd, "metal::round"), odd);
     }
 
     #[test]
