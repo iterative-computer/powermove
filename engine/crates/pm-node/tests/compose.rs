@@ -26,13 +26,18 @@ fn ch(v: serde_json::Value) -> serde_json::Value {
 }
 
 fn doc(background: &str) -> pm_model::Document {
+    doc_sized(background, (160, 90), (40.0, 30.0))
+}
+
+/// A `size` composition with a 40 × 20 red solid at `at`.
+fn doc_sized(background: &str, size: (u32, u32), at: (f64, f64)) -> pm_model::Document {
     let layer = json!({
         "id": "box", "type": "solid", "name": "box", "from": 0, "dur": 2, "on": true, "lock": false,
         "shy": false, "collapsed": true, "threeD": false, "solo": false, "color": "#4C8DFF",
         "blend": "normal", "mblur": false, "parent": null, "group": null, "matteSource": null,
         "p": {
-            "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(40)),
-            "position.y": ch(json!(30)), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
+            "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(at.0)),
+            "position.y": ch(json!(at.1)), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
             "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
         },
         "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
@@ -44,7 +49,7 @@ fn doc(background: &str) -> pm_model::Document {
         json!({ "type": "solid", "angle": 0, "stops": [{ "id": "s1", "color": background, "position": 0 }] })
     };
     let project = json!({
-        "id": "P", "name": "p", "w": 160, "h": 90, "fps": 30, "dur": 2, "bg": "#000000",
+        "id": "P", "name": "p", "w": size.0, "h": size.1, "fps": 30, "dur": 2, "bg": "#000000",
         "backgroundFill": fill, "compId": "P-root", "compName": "p", "markers": [], "work": [0, 2],
         "params": {}, "revision": 0, "edits": [], "created": 0, "shutter": 0.5, "layers": [layer],
         "assets": {}, "comps": {}
@@ -94,6 +99,15 @@ fn draw_state(
     s: &ViewerState,
     check_overlay: bool,
 ) -> (Vec<u8>, usize, pm_node::present::compose::Placement) {
+    draw_doc(&doc(background), (160.0, 90.0), s, check_overlay)
+}
+
+fn draw_doc(
+    document: &pm_model::Document,
+    comp: (f64, f64),
+    s: &ViewerState,
+    check_overlay: bool,
+) -> (Vec<u8>, usize, pm_node::present::compose::Placement) {
     let gpu = pm_gpu::Gpu::new("compose test").unwrap();
     let transform = DisplayTransform::new(&gpu.device, &gpu.queue);
     let working = WorkingTexture::new(&gpu.device, Size::new(W, H));
@@ -106,10 +120,9 @@ fn draw_state(
     )
     .unwrap();
     let mut composer = Composer::new(&gpu.device, &gpu.queue);
-    let document = doc(background);
     let composed = composer
         .compose(
-            &document,
+            document,
             "P-root",
             &MediaMap::default(),
             Ticks::ZERO,
@@ -141,7 +154,8 @@ fn draw_state(
         })
         .unwrap();
     let surface = &pool.surfaces[0];
-    let place = placement(s, 160.0, 90.0);
+    let place = placement(s, comp.0, comp.1);
+    assert_eq!(composed.reduced, place.reduced);
     // The overlay geometry names the layer where it is drawn.
     let layer = &composed.overlay.layers[0];
     assert_eq!(layer.layer.as_str(), "box");
@@ -283,4 +297,57 @@ fn todays_canvas_box_snaps_each_edge_and_renders_what_is_visible() {
     // Frame pixel 0 reads texels 16 and 17 (u = 21.5 / 1.225 − 0.5 = 17.05).
     let r = p.region.unwrap();
     assert_eq!((r.x, r.y, r.width, r.height), (17, 0, 143, 90));
+}
+
+/// Today's crop at 500% on a 2x display of a 1920 × 1080 composition,
+/// panned to its right edge (`previewRenderViewport` for a 400 × 300 CSS
+/// stage: a 656 × 556 CSS crop at composition (1788.8, 444.4), a 1312 ×
+/// 1112 canvas). Its output from the composition's origin would be 19,200
+/// pixels wide, past the largest output: the crop is drawn from a smaller
+/// canvas, but into today's box, so every layer lands where today's does.
+#[test]
+fn a_crop_past_the_largest_output_is_drawn_where_todays_canvas_is() {
+    let mut s = state(PreviewResolution::Automatic);
+    s.zoom = 5.0;
+    s.canvas = Some(ViewerCanvas {
+        width: 1312,
+        height: 1112,
+        crop: Rect {
+            x: 1788.8,
+            y: 444.4,
+            width: 131.2,
+            height: 111.2,
+        },
+        css: Rect {
+            x: -256.0,
+            y: -128.0,
+            width: 656.0,
+            height: 556.0,
+        },
+    });
+    // The red solid covers composition (1880, 500) to (1920, 520): CSS
+    // (200, 150) to (400, 250) with the frame at (−9200, −2350).
+    let document = doc_sized("#3366CC", (1920, 1080), (1880.0, 500.0));
+    let (bytes, bpr, place) = draw_doc(&document, (1920.0, 1080.0), &s, false);
+    assert!(place.canvas);
+    let (kx, _) = place.reduced.expect("below today's resolution");
+    assert!(kx < 1.0 && kx > 0.8, "{kx}");
+    let red = [0, 0, 255, 255];
+    let bg = [0xCC, 0x66, 0x33, 255];
+    // Device pixels: red from (400, 300) to (800, 500); the edges are
+    // bilinear over at most two reduced texels.
+    assert_eq!(bgra(&bytes, bpr, 403, 303), red);
+    assert_eq!(bgra(&bytes, bpr, 797, 497), red);
+    assert_eq!(bgra(&bytes, bpr, 396, 400), bg);
+    assert_eq!(bgra(&bytes, bpr, 600, 296), bg);
+    assert_eq!(bgra(&bytes, bpr, 600, 504), bg);
+    assert_eq!(bgra(&bytes, bpr, 10, 10), bg);
+    // Where the 50% coverage falls: within one device pixel of today's edge.
+    let row: Vec<u8> = (390..410).map(|x| bgra(&bytes, bpr, x, 400)[2]).collect();
+    let edge = (390..410)
+        .zip(&row)
+        .find(|(_, r)| **r >= 128)
+        .map(|(x, _)| x)
+        .unwrap();
+    assert!((399..=401).contains(&edge), "{edge}: {row:?}");
 }

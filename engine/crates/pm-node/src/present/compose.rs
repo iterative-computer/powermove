@@ -53,6 +53,16 @@ pub struct Placement {
     /// Today's canvas (decision V1): the region is stored as today's 8-bit
     /// canvas and scaled into its box with Chromium's bilinear sampling.
     pub canvas: bool,
+    /// The fraction of today's resolution drawn, per axis, when the output
+    /// could not hold it (`None`: today's resolution). The output always
+    /// starts at the composition's origin (`pm-render` has no output
+    /// origin), so a cropped canvas whose far edge passes the largest
+    /// output ([`MAX_OUTPUT_DIMENSION`](pm_protocol::frame::MAX_OUTPUT_DIMENSION)),
+    /// or a view larger than it without a canvas, is drawn from fewer
+    /// pixels into the same rectangle: the geometry is today's, the detail
+    /// is lower. A visible difference, reported by the frame
+    /// ([`Composed::reduced`]) and in docs/engine/bridge.md.
+    pub reduced: Option<(f64, f64)>,
 }
 
 impl Placement {
@@ -92,12 +102,8 @@ pub fn resolution_scale(resolution: PreviewResolution) -> f64 {
 /// today's canvas when the viewer sends it ([`canvas_placement`]), else the
 /// composition at zoom × DPR × the preview resolution.
 pub fn placement(state: &ViewerState, width: f64, height: f64) -> Placement {
-    if let Some(p) = state
-        .canvas
-        .as_ref()
-        .and_then(|c| canvas_placement(state, c, width, height))
-    {
-        return p;
+    if let Some(canvas) = state.canvas.as_ref() {
+        return canvas_placement(state, canvas, width, height);
     }
     let dpr = if state.device_pixel_ratio > 0.0 {
         state.device_pixel_ratio
@@ -113,22 +119,30 @@ pub fn placement(state: &ViewerState, width: f64, height: f64) -> Placement {
     let x = ((frame_w - full_w) / 2.0 + state.pan[0] * dpr).round();
     let y = ((frame_h - full_h) / 2.0 + state.pan[1] * dpr).round();
     let max = f64::from(pm_protocol::frame::MAX_OUTPUT_DIMENSION);
-    let output = Size::new(
-        (full_w * resolution).round().clamp(1.0, max) as u32,
-        (full_h * resolution).round().clamp(1.0, max) as u32,
+    let (want_w, want_h) = ((full_w * resolution).round(), (full_h * resolution).round());
+    let output = Size::new(want_w.clamp(1.0, max) as u32, want_h.clamp(1.0, max) as u32);
+    // Output pixels per frame pixel: the preview resolution, or less where
+    // the output could not hold the view (the rectangle stays the view's).
+    let per = |want: f64, out: u32, full: f64| {
+        if want > max {
+            f64::from(out) / full
+        } else {
+            resolution
+        }
+    };
+    let (rx, ry) = (
+        per(want_w, output.width, full_w),
+        per(want_h, output.height, full_h),
     );
-    let span = |origin: f64, frame: f64, out: u32| -> Option<(u32, u32)> {
-        let a = ((0.0 - origin) * resolution)
-            .floor()
-            .clamp(0.0, f64::from(out));
-        let b = ((frame - origin) * resolution)
-            .ceil()
-            .clamp(0.0, f64::from(out));
+    let reduced = (want_w > max || want_h > max).then_some((rx / resolution, ry / resolution));
+    let span = |origin: f64, frame: f64, out: u32, r: f64| -> Option<(u32, u32)> {
+        let a = ((0.0 - origin) * r).floor().clamp(0.0, f64::from(out));
+        let b = ((frame - origin) * r).ceil().clamp(0.0, f64::from(out));
         (b > a).then_some((a as u32, (b - a) as u32))
     };
     let region = match (
-        span(x, frame_w, output.width),
-        span(y, frame_h, output.height),
+        span(x, frame_w, output.width, rx),
+        span(y, frame_h, output.height, ry),
     ) {
         (Some((rx, rw)), Some((ry, rh))) => Some(PixelRect {
             x: rx,
@@ -141,19 +155,20 @@ pub fn placement(state: &ViewerState, width: f64, height: f64) -> Placement {
     Placement {
         x,
         y,
-        fx: 1.0 / resolution,
-        fy: 1.0 / resolution,
+        fx: 1.0 / rx,
+        fy: 1.0 / ry,
         output,
         scale: None,
         region,
         comp: Rect {
             x,
             y,
-            width: f64::from(output.width) / resolution,
-            height: f64::from(output.height) / resolution,
+            width: f64::from(output.width) / rx,
+            height: f64::from(output.height) / ry,
         },
         clip: None,
         canvas: false,
+        reduced,
     }
 }
 
@@ -161,42 +176,76 @@ pub fn placement(state: &ViewerState, width: f64, height: f64) -> Placement {
 /// viewer draws (its backing size, at today's `outputScale`: the canvas
 /// over the part of the composition it holds), and it covers the canvas's
 /// CSS box snapped to whole device pixels as Blink snaps a replaced
-/// element's content box (each edge rounded). `None` when the canvas does
-/// not fit an output (a crop beyond the largest output).
+/// element's content box (each edge rounded).
+///
+/// The output starts at the composition's origin, so a crop's output runs
+/// from the composition's origin to the crop's far edge. When that passes
+/// the largest output (a 1920-pixel composition from 500% on a 2x
+/// display, a 4K one from about 213%), the same crop is drawn from a
+/// smaller canvas into the same box ([`Placement::reduced`]). A crop that
+/// starts before the composition's origin (only a custom viewer's
+/// `render.gl.resize` can ask for one) is drawn from the origin on: the
+/// part of its box before the composition shows the stage.
 pub fn canvas_placement(
     state: &ViewerState,
     canvas: &pm_protocol::frame::ViewerCanvas,
     width: f64,
     height: f64,
-) -> Option<Placement> {
+) -> Placement {
     let dpr = if state.device_pixel_ratio > 0.0 {
         state.device_pixel_ratio
     } else {
         1.0
     };
+    let canvas = from_origin(canvas);
     let snap = |v: f64| (v * dpr).round();
     let (x0, x1) = (snap(canvas.css.x), snap(canvas.css.x + canvas.css.width));
     let (y0, y1) = (snap(canvas.css.y), snap(canvas.css.y + canvas.css.height));
-    let (w, h) = (f64::from(canvas.width), f64::from(canvas.height));
-    // `outputScale(W, H)`: the canvas over the composition part it holds.
-    let (sx, sy) = (w / canvas.crop.width, h / canvas.crop.height);
     let whole = canvas.crop.x == 0.0
         && canvas.crop.y == 0.0
         && canvas.crop.width == width
         && canvas.crop.height == height;
-    // A crop starts at its own pixel grid; the output's starts at the
-    // composition's origin (the crop's origin lands on the nearest output
-    // pixel).
-    let (ox, oy) = if whole {
-        (0.0, 0.0)
-    } else {
-        ((canvas.crop.x * sx).round(), (canvas.crop.y * sy).round())
+    // `outputScale(W, H)` of a `w` × `h` canvas: the canvas over the
+    // composition part it holds. A crop starts at its own pixel grid; the
+    // output's starts at the composition's origin (the crop's origin lands
+    // on the nearest output pixel).
+    let fit = |w: f64, h: f64| {
+        let (sx, sy) = (w / canvas.crop.width, h / canvas.crop.height);
+        let (ox, oy) = if whole {
+            (0.0, 0.0)
+        } else {
+            ((canvas.crop.x * sx).round(), (canvas.crop.y * sy).round())
+        };
+        (sx, sy, ox, oy)
     };
     let max = f64::from(pm_protocol::frame::MAX_OUTPUT_DIMENSION);
-    if !(ox >= 0.0 && oy >= 0.0 && ox + w <= max && oy + h <= max) {
-        return None;
+    let (w0, h0) = (f64::from(canvas.width), f64::from(canvas.height));
+    let (mut w, mut h) = (w0, h0);
+    let (mut sx, mut sy, mut ox, mut oy) = fit(w, h);
+    let mut reduced = None;
+    if ox + w > max || oy + h > max {
+        // The largest canvas over the same crop whose output fits.
+        let k = (max / (ox + w)).min(max / (oy + h));
+        w = (w0 * k).floor().max(1.0);
+        h = (h0 * k).floor().max(1.0);
+        loop {
+            (sx, sy, ox, oy) = fit(w, h);
+            let (over_x, over_y) = (ox + w > max, oy + h > max);
+            if !(over_x || over_y) || (w <= 1.0 && h <= 1.0) {
+                break;
+            }
+            if over_x {
+                w = (w - 1.0).max(1.0);
+            }
+            if over_y {
+                h = (h - 1.0).max(1.0);
+            }
+        }
+        reduced = Some((w / w0, h / h0));
     }
-    let output = Size::new((ox + w) as u32, (oy + h) as u32);
+    // A crop wholly before the composition's origin holds nothing of it.
+    let before = ox < 0.0 || oy < 0.0;
+    let output = Size::new(((ox + w) as u32).max(1), ((oy + h) as u32).max(1));
     let fx = (x1 - x0) / w;
     let fy = (y1 - y0) / h;
     let x = x0 - ox * fx;
@@ -239,7 +288,8 @@ pub fn canvas_placement(
         ),
         _ => (None, None),
     };
-    Some(Placement {
+    let (region, clip) = if before { (None, None) } else { (region, clip) };
+    Placement {
         x,
         y,
         fx,
@@ -250,7 +300,36 @@ pub fn canvas_placement(
         comp,
         clip,
         canvas: true,
-    })
+        reduced,
+    }
+}
+
+/// `canvas` from the composition's origin on: a crop starting before it
+/// loses the canvas texels and box before it (the output has no pixels
+/// there). Today's viewer never asks for one (`previewRenderViewport`
+/// clamps its crop to the composition).
+fn from_origin(canvas: &pm_protocol::frame::ViewerCanvas) -> pm_protocol::frame::ViewerCanvas {
+    let mut c = *canvas;
+    let cut = |start: f64, size: f64, texels: u32, css_start: f64, css_size: f64| {
+        if start >= 0.0 || start + size <= 0.0 {
+            return (start, size, texels, css_start, css_size);
+        }
+        let kept = (start + size) / size;
+        let texels_kept = ((f64::from(texels) * kept).round() as u32).max(1);
+        let cut_css = css_size * (1.0 - kept);
+        (
+            0.0,
+            start + size,
+            texels_kept,
+            css_start + cut_css,
+            css_size - cut_css,
+        )
+    };
+    (c.crop.x, c.crop.width, c.width, c.css.x, c.css.width) =
+        cut(c.crop.x, c.crop.width, c.width, c.css.x, c.css.width);
+    (c.crop.y, c.crop.height, c.height, c.css.y, c.css.height) =
+        cut(c.crop.y, c.crop.height, c.height, c.css.y, c.css.height);
+    c
 }
 
 /// What a composed frame reports.
@@ -266,6 +345,9 @@ pub struct Composed {
     /// Level 1 SVG rasters the frame drew without (decision S1): another
     /// bucket stood in, or the layer drew nothing (`super::svg`).
     pub svg_misses: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
+    /// The frame was drawn below today's resolution because the output
+    /// could not hold the view ([`Placement::reduced`]).
+    pub reduced: Option<(f64, f64)>,
 }
 
 const BLIT_WGSL: &str = r#"
@@ -904,6 +986,7 @@ impl Composer {
             cpu_us: super::render::now_us() - start,
             stand_ins,
             svg_misses,
+            reduced: place.reduced,
         })
     }
 }
@@ -1095,9 +1178,178 @@ mod tests {
         assert_eq!(p.to_frame([1000.0, 500.0]), [50.0, -80.0]);
         let r = p.region.unwrap();
         assert_eq!((r.x, r.y, r.width, r.height), (1000, 580, 1500, 820));
-        // Beyond the largest output: the engine's own placement.
-        s.canvas.as_mut().unwrap().crop.x = 2000.0;
-        assert!(!placement(&s, 600.0, 338.0).canvas);
+        assert_eq!(p.reduced, None);
+    }
+
+    /// The box of today's canvas, in frame pixels, is where the composition
+    /// rectangle puts the crop: `comp.x + crop.x × comp.width / width`.
+    fn crop_lands_in_its_box(
+        p: &Placement,
+        canvas: &pm_protocol::frame::ViewerCanvas,
+        dpr: f64,
+        width: f64,
+        height: f64,
+    ) {
+        let left = p.comp.x + canvas.crop.x * p.comp.width / width;
+        let top = p.comp.y + canvas.crop.y * p.comp.height / height;
+        let right = p.comp.x + (canvas.crop.x + canvas.crop.width) * p.comp.width / width;
+        let bottom = p.comp.y + (canvas.crop.y + canvas.crop.height) * p.comp.height / height;
+        let snap = |v: f64| (v * dpr).round();
+        // Within the half output pixel the crop's origin is rounded by.
+        let (hx, hy) = (p.fx / 2.0 + 1e-6, p.fy / 2.0 + 1e-6);
+        assert!((left - snap(canvas.css.x)).abs() <= hx, "left {left} {p:?}");
+        assert!((top - snap(canvas.css.y)).abs() <= hy, "top {top} {p:?}");
+        assert!(
+            (right - snap(canvas.css.x + canvas.css.width)).abs() <= hx,
+            "right {right} {p:?}"
+        );
+        assert!(
+            (bottom - snap(canvas.css.y + canvas.css.height)).abs() <= hy,
+            "bottom {bottom} {p:?}"
+        );
+        // The composition is drawn at the size the zoom gives it.
+        let zoom = canvas.css.width / canvas.crop.width * dpr;
+        assert!(
+            (p.comp.width - width * zoom).abs() <= 1.0,
+            "{} vs {}",
+            p.comp.width,
+            width * zoom
+        );
+        assert!((p.comp.height - height * zoom).abs() <= 1.0);
+    }
+
+    /// Today's crop at 500% on a 2x display of a 1920 × 1080 composition,
+    /// panned to its right edge: the crop's far edge (1920 × 10 output
+    /// pixels) passes the largest output, so the crop is drawn from a
+    /// smaller canvas into the same box, at the same place and size.
+    #[test]
+    fn a_crop_beyond_the_largest_output_keeps_its_geometry_at_a_lower_resolution() {
+        let mut s = state(1600, 1000, 5.0, [0.0, 0.0], 2.0, PreviewResolution::Full);
+        // `previewRenderViewport`: an 800 × 500 CSS stage plus 128 px each
+        // side, the crop at the composition's right edge.
+        let canvas = pm_protocol::frame::ViewerCanvas {
+            width: 2112,
+            height: 1512,
+            crop: Rect {
+                x: 1920.0 - 211.2,
+                y: 400.0,
+                width: 211.2,
+                height: 151.2,
+            },
+            css: Rect {
+                x: -128.0,
+                y: -128.0,
+                width: 1056.0,
+                height: 756.0,
+            },
+        };
+        s.canvas = Some(canvas);
+        let p = placement(&s, 1920.0, 1080.0);
+        assert!(p.canvas);
+        let max = pm_protocol::frame::MAX_OUTPUT_DIMENSION;
+        assert!(p.output.width <= max && p.output.height <= max, "{p:?}");
+        let (kx, ky) = p.reduced.expect("drawn below today's resolution");
+        // 16384 / 19200 of today's canvas, at most a texel less.
+        assert!((kx - 16384.0 / 19200.0).abs() < 2.0 / 2112.0, "{kx}");
+        assert!((ky - kx).abs() < 2.0 / 1512.0, "{ky}");
+        crop_lands_in_its_box(&p, &canvas, 2.0, 1920.0, 1080.0);
+        // Every visible frame pixel is drawn: the box covers the stage.
+        let clip = p.clip.unwrap();
+        assert_eq!(
+            (clip.x, clip.y, clip.width, clip.height),
+            (0, 0, 1600, 1000)
+        );
+        let r = p.region.unwrap();
+        assert!(r.x + r.width <= p.output.width && r.y + r.height <= p.output.height);
+
+        // A 4K composition from about 213% on a 2x display.
+        let mut s = state(1600, 1000, 2.5, [0.0, 0.0], 2.0, PreviewResolution::Full);
+        let canvas = pm_protocol::frame::ViewerCanvas {
+            width: 2112,
+            height: 1512,
+            crop: Rect {
+                x: 3840.0 - 422.4,
+                y: 0.0,
+                width: 422.4,
+                height: 302.4,
+            },
+            css: Rect {
+                x: -128.0,
+                y: -128.0,
+                width: 1056.0,
+                height: 756.0,
+            },
+        };
+        s.canvas = Some(canvas);
+        let p = placement(&s, 3840.0, 2160.0);
+        assert!(p.reduced.is_some());
+        crop_lands_in_its_box(&p, &canvas, 2.0, 3840.0, 2160.0);
+        // The same view nearer the origin fits: today's resolution.
+        s.canvas.as_mut().unwrap().crop.x = 1000.0;
+        let p = placement(&s, 3840.0, 2160.0);
+        assert_eq!(p.reduced, None);
+        assert_eq!(p.output.width, 2112 + 5000);
+        crop_lands_in_its_box(&p, s.canvas.as_ref().unwrap(), 2.0, 3840.0, 2160.0);
+    }
+
+    /// Without a canvas, a view larger than the largest output keeps its
+    /// rectangle (the composition at zoom × DPR) and draws fewer pixels.
+    #[test]
+    fn a_view_beyond_the_largest_output_keeps_its_rectangle() {
+        let s = state(1600, 1000, 8.0, [0.0, 0.0], 2.0, PreviewResolution::Full);
+        let p = placement(&s, 1920.0, 1080.0);
+        assert_eq!(p.output, Size::new(16384, 16384));
+        assert_eq!((p.comp.width, p.comp.height), (30720.0, 17280.0));
+        let (kx, ky) = p.reduced.unwrap();
+        assert!((kx - 16384.0 / 30720.0).abs() < 1e-12 && (ky - 16384.0 / 17280.0).abs() < 1e-12);
+        let r = p.region.unwrap();
+        let rr = p.region_rect().unwrap();
+        // The region covers the stage.
+        assert!(rr.x <= 0.0 && rr.y <= 0.0, "{rr:?}");
+        assert!(
+            rr.x + rr.width >= 1600.0 && rr.y + rr.height >= 1000.0,
+            "{rr:?} {r:?}"
+        );
+        // Within the largest output: as before.
+        let p = placement(
+            &state(1600, 1000, 4.0, [0.0, 0.0], 2.0, PreviewResolution::Full),
+            1920.0,
+            1080.0,
+        );
+        assert_eq!(p.reduced, None);
+        assert_eq!((p.fx, p.fy), (1.0, 1.0));
+    }
+
+    /// A custom viewer's crop that starts before the composition's origin is
+    /// drawn from the origin on, the rest of its box where it was.
+    #[test]
+    fn a_crop_before_the_origin_is_drawn_from_the_origin() {
+        let mut s = state(1600, 1000, 2.0, [0.0, 0.0], 1.0, PreviewResolution::Full);
+        let canvas = pm_protocol::frame::ViewerCanvas {
+            width: 400,
+            height: 200,
+            crop: Rect {
+                x: -50.0,
+                y: 0.0,
+                width: 200.0,
+                height: 100.0,
+            },
+            css: Rect {
+                x: 100.0,
+                y: 100.0,
+                width: 400.0,
+                height: 200.0,
+            },
+        };
+        s.canvas = Some(canvas);
+        let p = placement(&s, 640.0, 360.0);
+        // Composition x 0 at css 100 + 50 × 2.
+        assert_eq!(p.to_frame([0.0, 0.0]), [200.0, 100.0]);
+        assert_eq!(p.clip.unwrap().x, 200);
+        assert_eq!(p.output, Size::new(300, 200));
+        // Wholly before the origin: nothing is drawn.
+        s.canvas.as_mut().unwrap().crop.x = -300.0;
+        assert_eq!(placement(&s, 640.0, 360.0).region, None);
     }
 
     trait IntoState {

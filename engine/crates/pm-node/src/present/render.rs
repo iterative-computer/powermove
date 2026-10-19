@@ -433,6 +433,10 @@ pub struct Stats {
     /// pixels that timed out (docs/engine/perf.md).
     pub svg_failed_frames: u64,
     pub external_wait_timeouts: u64,
+    /// Viewer frames drawn below today's canvas resolution because the
+    /// output could not hold the view (docs/engine/bridge.md, "Beyond the
+    /// largest output"): a visible difference, counted and logged.
+    pub reduced_frames: u64,
     /// Stand-in frames sent: (seq, the source frame the first stand-in
     /// layer shows), for measurements that count the distinct frames a
     /// drag showed. Kept only with [`ThreadConfig::stand_in_log`].
@@ -540,6 +544,10 @@ struct View {
     /// Level 1 SVG buckets the latest frame drew without (the window could
     /// not draw them): asked for again while it shows them.
     svg_without: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
+    /// The latest frame was drawn below today's canvas resolution (its
+    /// output could not hold today's crop; `compose::Placement::reduced`),
+    /// logged once each time a view starts drawing that way.
+    reduced: bool,
     requests: VecDeque<(RequestId, FrameRequest, Option<Revision>)>,
     /// The pool to make again after a failed hand-off.
     retry: Option<PoolRetry>,
@@ -2017,6 +2025,7 @@ impl Thread {
             dirty: true,
             external_wait: None,
             svg_without: Vec::new(),
+            reduced: false,
             requests: VecDeque::new(),
             retry: None,
             reported: None,
@@ -3381,6 +3390,25 @@ impl Thread {
                     // other (`SvgRastersPending`). They are asked for again
                     // after a while, and the view draws again when one
                     // arrives. Not a stand-in: no other bucket is shown.
+                    // Below today's resolution (the output could not hold
+                    // the view): never silent.
+                    if let Some((kx, ky)) = composed.reduced {
+                        self.stats
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .reduced_frames += 1;
+                        if !view.reduced {
+                            (self.sink)(vec![Action::Log {
+                                level: LogLevel::Warn,
+                                message: format!(
+                                    "viewer: this view needs a canvas larger than the largest output; drawn at {:.1}% × {:.1}% of today's resolution",
+                                    kx * 100.0,
+                                    ky * 100.0
+                                ),
+                            }]);
+                        }
+                    }
+                    view.reduced = composed.reduced.is_some();
                     view.svg_without = composed.svg_misses.clone();
                     if !composed.svg_misses.is_empty() {
                         self.stats
