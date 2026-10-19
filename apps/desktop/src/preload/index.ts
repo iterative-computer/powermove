@@ -661,6 +661,26 @@ ipcRenderer.on(ENGINE_IPC.status, (_event, status: unknown) => {
 contextBridge.executeInMainWorld({
   func: (value: unknown) => {
     Object.defineProperty(globalThis, 'powermove', { value, configurable: true, enumerable: false, writable: false });
+    // Fetch/compile while the editor's module graph loads, before its synchronous
+    // install chain. The renderer consumes this public module and setting once.
+    if (location.pathname !== '/' && !location.pathname.endsWith('/index.html')) return;
+    let enabled: boolean;
+    try { enabled = (value as typeof bridge).nativeEngine?.enabledSync?.() === true; } catch { return; }
+    const boot: { enabled: boolean; module?: Promise<WebAssembly.Module>; timing?: {sourceMs:number;compileMs:number} } = {enabled};
+    Object.defineProperty(globalThis, '__powermoveDocumentBoot', {value:boot,configurable:true});
+    if (!enabled) return;
+    const started = performance.now();
+    boot.module = fetch(new URL('engine/pm_wasm.wasm', location.href).href).then(async response => {
+      const fetched = performance.now();
+      if (!response.ok) throw new Error(`pm-wasm: ${response.status} fetching the module`);
+      const module = typeof WebAssembly.compileStreaming === 'function' && response.headers.get('content-type')?.includes('wasm')
+        ? await WebAssembly.compileStreaming(response)
+        : await WebAssembly.compile(await response.arrayBuffer());
+      boot.timing = {sourceMs:fetched-started,compileMs:performance.now()-fetched};
+      return module;
+    });
+    // The activation gate reports a named load failure; avoid an early unhandled rejection.
+    void boot.module.catch(() => {});
   },
   args: [bridge]
 });

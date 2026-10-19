@@ -29,7 +29,7 @@ import { findPath, NativeApi } from './native';
 import { NativeEdits } from './edits';
 import { createTracker, patchCloning, querySite, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
-import { compileFrom, imports, instantiate, moduleCompileTiming, MODULE_PATH, PmWasm } from './wasm';
+import { compileEditorModule, imports, instantiate, moduleCompileTiming, PmWasm } from './wasm';
 import { FontLoader, type FontProvider } from './fonts';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { setEvaluationWriter } from '../legacy/core/temporal-bridge';
@@ -423,7 +423,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   let readyResolve: (ok: boolean) => void = () => {};
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
-  const startup = { moduleMs: 0, instantiateMs: 0, readyMs: 0 };
+  const startup = { startedAt: performance.now(), moduleMs: 0, instantiateMs: 0, mirrorMs: 0, readyMs: 0 };
   const state: EngineDoc = {
     mode, enabled: true, ready: false, api, edits, barrier: null, wasm: null, auditor, dual, tracker, whenReady,
     check(reason) {
@@ -463,7 +463,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   PM.EngineDoc = state;
 
   // ── loading ───────────────────────────────────────────────────────────
-  const loadModule = options.loadModule ?? (() => compileFrom(() => fetch(new URL(MODULE_PATH, (globalThis as any).document?.baseURI ?? (globalThis as any).location?.href).href)));
+  const loadModule = options.loadModule ?? compileEditorModule;
   let compiledModule: WebAssembly.Module | null = null;
   /** Puts a fresh instance in place and resyncs it (the barrier keeps its revisions). */
   const attach = (instance: PmWasm): void => {
@@ -495,7 +495,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       startup.moduleMs = loaded - started;
       const instance = await instantiate(compiledModule);
       startup.instantiateMs = performance.now() - loaded;
+      const attached = performance.now();
       attach(instance);
+      startup.mirrorMs = performance.now() - attached;
+      performance.mark?.('powermove:document-ready');
       startup.readyMs = performance.now() - started;
       return true;
     } catch (error) {

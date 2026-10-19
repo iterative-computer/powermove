@@ -292,6 +292,23 @@ export function moduleCompileTiming(): typeof compileTiming { return compileTimi
 /** Where the editor serves the module (`public/engine/`, see engine/crates/pm-wasm/scripts/build.mjs). */
 export const MODULE_PATH = 'engine/pm_wasm.wasm';
 
+type EditorBoot = { enabled: boolean; module?: Promise<WebAssembly.Module>; timing?: { sourceMs: number; compileMs: number } };
+const editorBoot: EditorBoot | undefined = (globalThis as any).__powermoveDocumentBoot;
+if (editorBoot) delete (globalThis as any).__powermoveDocumentBoot;
+
+/** The preload read the launch setting once before the renderer module graph. */
+export function preloadedEngineEnabled(): boolean | undefined { return editorBoot?.enabled; }
+
+/** Reuse compilation that overlapped module loading, or load in a standalone renderer. */
+export function compileEditorModule(): Promise<WebAssembly.Module> {
+  if (!compiled && editorBoot?.module) {
+    compiled = editorBoot.module.then(module => { compileTiming = editorBoot.timing ?? null; return module; });
+    delete editorBoot.module;
+    compiled.catch(() => { compiled = null; });
+  }
+  return compiled ?? compileFrom(() => fetch(new URL(MODULE_PATH, globalThis.document?.baseURI ?? globalThis.location?.href).href));
+}
+
 export function compileFrom(source: () => Promise<Response | ArrayBuffer | Uint8Array>): Promise<WebAssembly.Module> {
   compiled ??= (async () => {
     const started = performance.now();
