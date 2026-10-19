@@ -3,8 +3,8 @@
  * docs/engine/tracer.md), behind "Use New Engine": the viewer shows
  * engine frames for a composition the engine supports, edits reach the
  * engine through pm-wasm's patch stream, overlays line up with engine
- * geometry, unsupported compositions stay with the current engine without
- * errors, playback runs on the engine's clock, a killed engine and a lost
+ * geometry, a composition the engine cannot draw says why on the stage
+ * while the transport stays on the engine (amendment 21), playback runs on the engine's clock, a killed engine and a lost
  * GPU recover, and switching engines loses nothing.
  *
  * Run serially, one Electron at a time:
@@ -291,16 +291,34 @@ test.describe('Use New Engine: the tracer bullet', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('a composition with unsupported features stays with the current engine, without errors', async ({ session }) => {
+  test('a composition the engine cannot draw names why on the stage and keeps the transport on the engine', async ({ session }) => {
     const { page } = session;
     await openTracer(session, { pathMask: true });
     await waitRoute(page, 'legacy');
     expect((await status(page)).routeReason).toMatch(/path masks/);
+    /** The stage: the current engine's canvas, the engine's state line. */
+    const stage = () => page.evaluate(() => {
+      const V = (window as any).PM.Kernel.services.get('viewer');
+      const line = V.stage.querySelector('[data-engine-status]') as HTMLElement | null;
+      const box = line?.getBoundingClientRect();
+      return { legacy: V.el.style.visibility as string, status: line?.textContent ?? null, role: line?.getAttribute('role') ?? null, visible: !!box && box.width > 0 && box.height > 0 };
+    });
+    // Amendment 21: nothing hands the viewer to the current engine. Its
+    // canvas stays hidden and the stage says what the engine cannot draw.
+    await expect.poll(async () => (await stage()).status, { timeout: 20_000 }).toMatch(/cannot draw this composition yet: .*path masks/);
+    expect(await stage()).toMatchObject({ legacy: 'hidden', role: 'status', visible: true });
     expect(await enginePresenting(page)).toBe(false);
-    expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').el.style.visibility)).toBe('');
-    // The legacy compositor draws it.
-    await expect.poll(() => page.evaluate(() => Boolean((window as any).PM.GL.gl))).toBe(true);
-    // Removing the path mask brings engine frames back; adding one routes again.
+    // The transport and its clock stay with the engine: Play plays.
+    expect((await status(page)).driving).toBe(true);
+    await page.evaluate(() => { const PM = (window as any).PM; PM.loop = false; PM.setTime(0.5); PM.play(); });
+    await expect.poll(async () => (await status(page)).clock?.state, { timeout: 10_000 }).toBe('playing');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.time), { timeout: 10_000 }).toBeGreaterThan(0.9);
+    expect(await page.evaluate(() => (window as any).PM.playing)).toBe(true);
+    expect((await stage()).legacy).toBe('hidden');
+    await page.evaluate(() => (window as any).PM.pause());
+    await expect.poll(async () => (await status(page)).clock?.state, { timeout: 10_000 }).toBe('stopped');
+    // Removing the path mask brings engine frames back and clears the line;
+    // adding one says so again.
     await page.evaluate(() => {
       const PM = (window as any).PM;
       const box = PM.proj.layers.find((l: any) => l.id === 'box');
@@ -310,6 +328,9 @@ test.describe('Use New Engine: the tracer bullet', () => {
     });
     await waitRoute(page, 'engine');
     await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
+    // Cleared once that frame is on screen (the canvas shows it a few
+    // animation frames after the GPU finished it).
+    await expect.poll(async () => (await stage()).status, { timeout: 5_000 }).toBeNull();
     await page.evaluate(() => {
       const PM = (window as any).PM;
       PM.hist.do('Path mask', () => {
@@ -321,6 +342,8 @@ test.describe('Use New Engine: the tracer bullet', () => {
     await waitRoute(page, 'legacy');
     expect((await status(page)).routeReason).toMatch(/path masks/);
     await expect.poll(() => enginePresenting(page)).toBe(false);
+    await expect.poll(async () => (await stage()).status).toMatch(/cannot draw this composition yet: .*path masks/);
+    expect((await stage()).legacy).toBe('hidden');
     const errors = session.diagnostics.console.filter((c) => c.type === 'error');
     expect(errors.map((e) => e.text)).toEqual([]);
     expect(session.diagnostics.pageErrors).toEqual([]);
