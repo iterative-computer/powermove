@@ -63,6 +63,37 @@ fn field(kind: &str, key: &str) -> Option<(f64, f64, f64, bool)> {
     })
 }
 
+/// `RECIPE_PARAMETERS[kind]`'s default values.
+fn defaults(kind: &str) -> Vec<(&'static str, Value)> {
+    let n = |k: &'static str, v: f64| (k, Value::Number(v));
+    match kind {
+        "rocket" => vec![
+            n("length", 2.8),
+            n("radius", 0.6),
+            n("nose", 1.0),
+            n("fins", 4.0),
+            n("finSize", 0.8),
+        ],
+        "staircase" => vec![
+            n("steps", 12.0),
+            n("radius", 1.5),
+            n("rise", 0.22),
+            n("turn", 30.0),
+            n("width", 1.2),
+            n("depth", 0.5),
+        ],
+        "text" => vec![
+            ("text", Value::String(JsString::from("Powermove"))),
+            n("size", 1.0),
+            n("depth", 0.12),
+            n("bevel", 0.02),
+        ],
+        "lathe" => vec![n("segments", 48.0)],
+        "extrude" => vec![n("depth", 0.2)],
+        _ => Vec::new(),
+    }
+}
+
 fn num(v: f64) -> Value {
     Value::Number(v)
 }
@@ -332,6 +363,62 @@ pub fn recipe_part(
 }
 
 impl<'d> Scope<'_, 'd> {
+    /// `evaluatedRecipe(PM, group, time)`: the group's stored recipe with
+    /// its parameters (`RECIPE_PARAMETERS`' defaults, then the stored ones,
+    /// then the evaluated `d.modeling.p` channels), or `None` for a group
+    /// without `d.modeling`. Invalid parameters throw a `ZodError`, as
+    /// `recipeSchema.parse` does.
+    pub fn evaluated_recipe(&mut self, group: &'d Node, time: f64) -> JsResult<Option<Value>> {
+        let modeling = node::member(node::member(Some(group), "d"), "modeling");
+        if !node::truthy(modeling) {
+            return Ok(None);
+        }
+        let Some(recipe) = node::member(modeling, "recipe") else {
+            return Ok(None);
+        };
+        let Value::Object(mut out) = recipe.to_value() else {
+            return Ok(None);
+        };
+        let kind = node::string(node::member(Some(recipe), "kind"))
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        let mut parameters = Map::new();
+        for (k, v) in defaults(&kind) {
+            parameters.insert(k, v);
+        }
+        if let Some(Value::Object(stored)) = out.get("parameters") {
+            for (k, v) in stored.iter() {
+                parameters.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(p) = node::member(modeling, "p")
+            && let NodeKind::Object(map) = p.kind()
+        {
+            for (k, prop) in map {
+                let key = k.to_string_lossy();
+                let v = self.channel_p(group, Some(prop), time, &format!("model.{key}"))?;
+                let valid = match (field(&kind, &key), &v) {
+                    (Some((_, lo, hi, integer)), JsValue::Number(n)) => {
+                        n.is_finite() && *n >= lo && *n <= hi && (!integer || n.fract() == 0.0)
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return Err(JsThrow {
+                        kind: "ZodError",
+                        message: format!("Invalid model parameter: {key}"),
+                    });
+                }
+                parameters.insert(k.clone(), v.to_json().unwrap_or(Value::Null));
+            }
+        }
+        out.insert("parameters", Value::Object(parameters));
+        if out.get("modifiers").is_none() {
+            out.insert("modifiers", Value::Array(Vec::new()));
+        }
+        Ok(Some(Value::Object(out)))
+    }
+
     /// `animatedPart(PM, layer, time)`: the part's evaluated recipe geometry
     /// and base when its group's recipe is animated, else `None`.
     pub fn animated_part(&mut self, layer: &'d Node, time: f64) -> JsResult<Option<AnimatedPart>> {

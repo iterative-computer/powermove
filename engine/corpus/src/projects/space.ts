@@ -273,7 +273,8 @@ function modelGroups(): CorpusProject {
   b.add(stairs);
   b.add(b.light3d({ type: 'sun', p: { intensity: 2.5 } }, { position: [-3, 5, 4] }));
   b.add(camera(b, {}, [0, .8, 7]));
-  return project(b, { group: '3D', title: 'Animated model-group recipes (rocket, staircase)', covers: ['model groups', 'animated recipe parameters', 'recipe part geometry', 'recipe part base offsets'], samples: [0, 1.5, 3] });
+  return project(b, { group: '3D', title: 'Animated model-group recipes (rocket, staircase)', covers: ['model groups', 'animated recipe parameters', 'recipe part geometry', 'recipe part base offsets', 'Blender snapshots of recipe parts'], samples: [0, 1.5, 3],
+    blender: { engine: 'eevee', samples: 16, previewSamples: 8, previewScale: .5 } });
 }
 
 export function spaceProjects(): CorpusProject[] {

@@ -40,9 +40,11 @@
 //!   other images converted to 8-bit PNG (`<id>.png`; today's Canvas2D
 //!   conversion, appendix A item 3), other assets by name.
 //!
-//! Imported glTF models and model-group recipe parts are not built here
-//! (the glTF lane's loader and `pm-geom3d`'s recipe geometry); the builder
-//! answers why, and the caller routes the frame.
+//! - **generated**: a model group's part carries the group's evaluated
+//!   recipe and its part name (`object.blender.object` or the part id),
+//!   unless the recipe is a mesh recipe without a mesh.
+//!
+//! Imported glTF models are not built here yet; the builder answers why.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -639,10 +641,8 @@ pub fn build<'d>(
     if imports_gltf(scope) {
         return Ok(Err("imported models".into()));
     }
+    // Recipe parts carry their group's evaluated recipe (`generated`).
     let evaluated = scope.composition_scene(time)?;
-    if !evaluated.recipe_parts.is_empty() {
-        return Ok(Err("model-group recipe parts".into()));
-    }
     let scene_json = evaluated.scene;
     let scene = match crate::scene3d::layers::composition_scene(
         scope,
@@ -693,6 +693,9 @@ pub fn build<'d>(
         }
         if let Some(r) = node.get("receiveShadow") {
             m.insert("receiveShadow", r.clone());
+        }
+        if let Some(g) = generated(scope, layer, time)? {
+            m.insert("generated", g);
         }
         objects.push(Value::Object(m));
         ids.push(id);
@@ -754,4 +757,41 @@ pub fn build<'d>(
         json: Value::Object(snapshot),
         assets,
     }))
+}
+
+/// `generated` of a recipe part: `{ recipe: evaluatedRecipe(group, time),
+/// part }` when `recipe.kind !== 'mesh' || recipe.mesh`.
+fn generated<'d>(scope: &mut Scope<'_, 'd>, layer: &'d Node, time: f64) -> JsResult<Option<Value>> {
+    let object = node::member(
+        node::member(node::member(Some(layer), "d"), "data"),
+        "object",
+    );
+    let Some(generation) = node::member(object, "generation").filter(|g| node::truthy(Some(g)))
+    else {
+        return Ok(None);
+    };
+    let group_id = node::get(generation, b"groupId");
+    let Some(group) = scope.layer_by_id(&group_id) else {
+        return Ok(None);
+    };
+    let Some(recipe) = scope.evaluated_recipe(group, time)? else {
+        return Ok(None);
+    };
+    let mesh_without_mesh = recipe.get("kind").and_then(Value::as_str) == Some("mesh")
+        && !recipe
+            .get("mesh")
+            .is_some_and(|m| pm_eval::JsValue::from(m).truthy());
+    if mesh_without_mesh {
+        return Ok(None);
+    }
+    let blender_object = node::member(node::member(object, "blender"), "object");
+    let part = if node::truthy(blender_object) {
+        node::js_value_opt(blender_object)
+    } else {
+        node::js_value_opt(node::member(Some(generation), "partId"))
+    };
+    let mut m = Map::new();
+    m.insert("recipe", recipe);
+    m.insert("part", part.to_json().unwrap_or(Value::Null));
+    Ok(Some(Value::Object(m)))
 }
