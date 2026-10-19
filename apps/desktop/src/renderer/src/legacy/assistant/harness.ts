@@ -1,3 +1,4 @@
+import { captureAgentFrames } from './agent-frames';
 import { setPanelLayout } from './workspace-layout';
 import { mcpProjectTool } from './mcp-project-tools';
 import { createAgentCheckpoint } from './checkpoint';
@@ -177,6 +178,7 @@ function projectState(options: any = {}) {
 
 async function capture(times = defaultTimes(), width = 480) {
   const chosen = safeTimes(times, defaultTimes());
+  if (PM.EngineDoc?.enabled || PM.EngineCaptures) return captureAgentFrames(PM, hostBridge()?.nativeEngine, chosen, width);
   const images = [];
   for (const time of chosen) {
     await new Promise((resolve: any) => window.requestAnimationFrame(resolve));
@@ -580,7 +582,11 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     // `export_video` reads its project here and then renders in the job
     // engine with this window's definitions: a publication earlier in the
     // run reaches main before this answer does (contract 10).
-    if (request.tool === '__mcp_context') await PM.EngineDefinitions?.settle?.();
+    if (request.tool === '__mcp_context') {
+      await PM.EngineDoc?.whenReady;
+      await PM.HostMedia?.flushBindings?.();
+      await PM.EngineDefinitions?.settle?.();
+    }
     const value = await mcpProjectTool(PM, request.tool, request.arguments);
     if (request.tool === '__mcp_context') refreshLiveTransaction(request);
     return { ok: true, content: [toolText(value)], revision: currentRevision() };
@@ -721,12 +727,20 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     transaction.changed ||= transaction.revision !== transaction.baseRevision;
     return { ok: true, content: [toolText(state)], changed: transaction.changed, revision: transaction.revision };
   }
+  if (request.tool === '__engine_save_plan') {
+    await PM.EngineDoc?.whenReady;
+    await PM.HostMedia?.flushBindings?.();
+    return { ok: true, content: [toolText({ home: PM.isHomeProject?.() === true, projectJSON: JSON.stringify(PM.proj),
+      documentJSON: JSON.stringify({ ...JSON.parse(PM.serialize()), history: PM.hist.export?.() }) })], revision: currentRevision() };
+  }
   if (request.tool === '__engine_frames_plan') {
     // render_frames through the job engine (main/engine/agent-jobs.ts): the
     // same times and width the capture below would use, and the project at
     // the revision the agent sees. Extension reloads and registrations
     // still pending (a publication just before) reach main's definitions
     // first, so the frames never show a false "missing" (contract 10).
+    await PM.EngineDoc?.whenReady;
+    await PM.HostMedia?.flushBindings?.();
     await PM.EngineDefinitions?.settle?.();
     const rawTimes = Array.isArray(request.arguments.times) ? request.arguments.times : undefined;
     const times = safeTimes(rawTimes?.slice(0, 5).map(Number).filter(Number.isFinite), defaultTimes());

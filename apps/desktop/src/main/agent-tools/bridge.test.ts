@@ -102,7 +102,7 @@ describe('native Powermove agent tool bridge', () => {
     expect(() => legacy({ format: 'webm-vp9' })).toThrow('not format webm-vp9');
   });
 
-  it('routes export_video and render_frames through the job engine and falls back when it routes', async () => {
+  it('uses the enabled job engine even during recovery and never falls back', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);
     const project = { id: 'P', name: 'P', compId: 'P-root', w: 320, h: 180, fps: 30, dur: 1, layers: [] };
@@ -118,13 +118,13 @@ describe('native Powermove agent tool bridge', () => {
     let route = false;
     const engineJobs = {
       available: true,
-      exportVideo: vi.fn(async (_owner: number, _run: string, _project: unknown, input: { mode?: string }) => route
-        ? { status: 'routed' as const, reason: 'text layer' }
-        : input.mode === 'async' ? { status: 'queued' as const, jobId: 'job-1' }
-        : { status: 'done' as const, jobId: 'job-1', path: '/exports/P.mp4', width: 320, height: 180, fps: 30 }),
-      renderFrames: vi.fn(async () => route
-        ? { status: 'routed' as const, reason: 'text layer' }
-        : { status: 'rendered' as const, revision: 1, queuedMs: 0, images: [0, 0.5].map((time) => ({ time, data: new Uint8Array([1]), mimeType: 'image/jpeg' as const, width: 320, height: 180 })) }),
+      exportVideo: vi.fn(async (_owner: number, _run: string, _project: unknown, input: { mode?: string }) => {
+        if (route) throw new Error('unsupported: text layer');
+        return input.mode === 'async' ? { status: 'queued' as const, jobId: 'job-1' }
+        : { status: 'done' as const, jobId: 'job-1', path: '/exports/P.mp4', width: 320, height: 180, fps: 30 }; }),
+      renderFrames: vi.fn(async () => {
+        if (route) throw new Error('unsupported: text layer');
+        return { status: 'rendered' as const, revision: 1, queuedMs: 0, images: [0, 0.5].map((time) => ({ time, data: new Uint8Array([1]), mimeType: 'image/jpeg' as const, width: 320, height: 180 })) }; }),
       status: vi.fn(() => ({ jobId: 'job-1', state: 'running' as const, progress: 0.5 })),
       cancelRun: vi.fn(async () => 1)
     };
@@ -143,21 +143,12 @@ describe('native Powermove agent tool bridge', () => {
       expect(frames.content.filter((item) => item.type === 'image')).toHaveLength(2);
       expect(frames.revision).toBe(4);
       expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', 'get_project_state', '__mcp_context', '__engine_frames_plan']);
-      // Routed: the legacy exporter and capture run, without the engine-only mode.
       route = true;
+      engineJobs.available = false; // recovery cannot authorize legacy rendering
       owner.requests.length = 0;
-      await bridge.callTool(session, 'export_video', { audio: true, mode: 'async' });
-      await bridge.callTool(session, 'render_frames', { times: [0] });
-      expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', '__mcp_export_video', '__engine_frames_plan', 'render_frames']);
-      expect(owner.requests[2]!.arguments).toEqual({ format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false });
-      // Presets the current exporter writes fall back to it too.
-      owner.requests.length = 0;
-      await bridge.callTool(session, 'export_video', { preset: 'web-h264' });
-      expect(owner.requests.at(-1)!.arguments).toEqual({ format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false });
-      await bridge.callTool(session, 'export_video', { preset: 'master-alpha', name: 'Key' });
-      expect(owner.requests.at(-1)!.arguments).toEqual({ name: 'Key', format: 'prores', range: 'all', audio: true, motionBlur: true, alpha: true });
-      await expect(bridge.callTool(session, 'export_video', { preset: 'web-hevc' })).rejects.toThrow('not preset web-hevc');
-      await expect(bridge.callTool(session, 'export_video', { alpha: true })).rejects.toThrow('ProRes');
+      await expect(bridge.callTool(session, 'export_video', { audio: true, mode: 'async' })).rejects.toThrow('unsupported: text layer');
+      await expect(bridge.callTool(session, 'render_frames', { times: [0] })).rejects.toThrow('unsupported: text layer');
+      expect(owner.requests.map(r => r.tool)).toEqual(['get_project_state', '__mcp_context', '__engine_frames_plan']);
       await expect(bridge.callTool(session, 'export_video', { codec: 'x' })).rejects.toThrow('does not take codec');
       // Rolling back the run cancels its jobs.
       await session.finish(false);
@@ -201,10 +192,10 @@ describe('native Powermove agent tool bridge', () => {
       expect(headless).toMatchObject({ valid: true, compiled: true });
       expect(headless.warnings[0]).toContain('the viewer and exports');
       expect(headless.warnings[0]).toContain('pm-cli, headless renders) cannot draw it');
-      // The new engine off: the renderer's own validator, as before.
+      // Recovery keeps native validation; availability is not the engine setting.
       engineJobs.available = false;
       await bridge.callTool(session, 'validate_effect', { definition });
-      expect(owner.requests.at(-1)!.tool).toBe('validate_effect');
+      expect(owner.requests.at(-1)!.tool).toBe('__validate_effect_snapshot');
     } finally { await bridge.shutdown(); }
   });
 
@@ -681,6 +672,8 @@ describe('native Powermove agent tool bridge', () => {
     bridges.push(bridge);
     const session = await bridge.openSession({ runId: 'native-run-large', owner: owner as never, baseRevision: 0 });
     await expect(bridge.callRenderer(session, 'get_project_state', {})).rejects.toThrow('oversized response');
+    const plan = await bridge.callRenderer(session, '__engine_save_plan', {});
+    expect((plan.content[0] as { text: string }).text.length).toBe(2_000_001);
     owner.destroyed = true;
   });
 

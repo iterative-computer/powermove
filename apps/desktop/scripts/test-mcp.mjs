@@ -9,7 +9,7 @@
  * the exports are verified with our FFmpeg. Run it under the Electron lock:
  *   ~/Library/Caches/powermove-engine/bin/pm-electron-lock node scripts/test-mcp.mjs --desktop */
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, writeFile, rm, stat, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, stat, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -28,6 +28,8 @@ const ffprobe = ffmpegDir ? path.join(ffmpegDir, 'bin/ffprobe') : 'ffprobe';
 const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-mcp-video-'));
 const profile = path.join(root, 'profile'), exportsDir = path.join(root, 'exports');
 const audio = path.join(root, 'tone.wav');
+const sourceVideo = path.join(root, 'source.mov');
+execFileSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=160x90:r=24', '-t', '1', '-c:v', 'prores_videotoolbox', '-profile:v', '0', sourceVideo]);
 const frames = 48000, bytes = Buffer.alloc(44 + frames * 2);
 bytes.write('RIFF', 0); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
 bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
@@ -110,7 +112,9 @@ async function desktopSmoke() {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
-  await tool('start_session', { prompt: 'Create a red video with an audible tone' });
+  const started = text(await tool('start_session', { prompt: 'Create a red video with an audible tone' }));
+  const videoAsset = text(await tool('import_media', { path: sourceVideo }));
+  assert.equal(videoAsset.persisted, true);
   const imported = text(await tool('import_media', { path: audio }));
   assert.equal(imported.persisted, true);
   await tool('get_project_state');
@@ -159,38 +163,46 @@ async function desktopSmoke() {
   assert(prores.streams.some(item => item.codec_tag_string === 'tmcd' && item.tags?.timecode === '00:00:00:00'), JSON.stringify(prores));
   const other = await rpc('tools/call', { name: 'get_render_status', arguments: { jobId: 'not-a-job' } });
   assert.equal(other.isError, true);
-  // Capability routing: text layers are not in the Phase 2 renderer, so the
-  // project goes to the current exporter and capture, and still delivers.
+  // Text stays in the native job engine, including the host font service.
   await tool('get_project_state');
-  await tool('apply_commands', { label: 'Title', commands: [JSON.stringify({ type: 'add_layer', layerType: 'text', name: 'Title', content: { text: 'Routed' }, duration: 1 })] });
-  const routedFrames = await tool('render_frames', { times: [0.25], width: 320 });
-  assert.equal(routedFrames.content.filter(item => item.type === 'image').length, 1);
-  assert.match(appLog, /render_frames routed to the current engine: .*text layers/);
-  const routed = text(await tool('export_video', { name: 'MCP desktop routed', audio: true, motionBlur: false }));
-  assert.equal(routed.jobId, undefined, 'a routed export runs in the current exporter');
-  assert.match(appLog, /export_video routed to the current engine: .*text layers/);
-  assert(routed.path.startsWith(exportsDir) && (await stat(routed.path)).size > 1000, routed.path);
-  assert(probe(routed.path, 'stream=codec_name').streams.some(item => item.codec_name === 'h264'));
-  // A routed batch never holds the job engine: without the text layer,
-  // render_frames and export_video run in the job engine again, promptly.
+  await tool('apply_commands', { label: 'Title', commands: [JSON.stringify({ type: 'add_layer', layerType: 'text', name: 'Title', content: { text: 'Native' }, duration: 1 })] });
+  const titledFrames = await tool('render_frames', { times: [0.25], width: 320 });
+  assert.equal(titledFrames.content.filter(item => item.type === 'image').length, 1);
+  const titled = text(await tool('export_video', { name: 'MCP desktop title', audio: true, motionBlur: false }));
+  assert(titled.jobId, 'text exports must stay in the job engine');
+  assert(!/render_frames routed|export_video routed/.test(appLog), 'native tools must never route to the legacy renderer');
+
+  // Publication must settle before the next batch, with the new winning shader.
+  const stage = path.join(started.stagingDirectory, 'mcp-render-smoke');
+  await mkdir(stage, { recursive: true });
+  await writeFile(path.join(stage, 'manifest.json'), JSON.stringify({ id: 'mcp-render-smoke', name: 'MCP render smoke', version: '1.0.0', apiVersion: 3, permissions: [], contributes: ['effects'] }));
+  await writeFile(path.join(stage, 'index.ts'), `import type { PowermoveAPI } from 'powermove';
+export default function activate(api: PowermoveAPI) {
+  api.effects.register({ id: 'mcp-render-smoke.effect', label: 'MCP render smoke', params: [], frag: 'o = texture(u_tex, v_st);' });
+}
+`);
+  await tool('publish_extensions', { extensions: [{ id: 'mcp-render-smoke', action: 'created', summary: 'MCP render contract fixture' }] });
   const title = text(await tool('get_project_state')).layers.find(layer => layer.name === 'Title');
   assert(title, 'the Title layer');
-  await tool('apply_commands', { label: 'No title', commands: [JSON.stringify({ type: 'delete_layers', targets: [title.id] })] });
-  const routedSoFar = (appLog.match(/render_frames routed/g) ?? []).length;
-  const again = Date.now();
-  const unblocked = await tool('render_frames', { times: [0.75], width: 320 });
-  assert.equal(unblocked.content.filter(item => item.type === 'image').length, 1);
-  assert.equal((appLog.match(/render_frames routed/g) ?? []).length, routedSoFar, 'render_frames ran in the job engine again');
-  assert(Date.now() - again < 30000, `render_frames after a routed batch took ${Date.now() - again} ms`);
-  const after = text(await tool('export_video', { name: 'MCP desktop after routing', audio: false, motionBlur: false }));
-  assert(after.jobId, `export_video after a routed batch did not run in the job engine: ${JSON.stringify(after)}`);
+  await tool('apply_commands', { label: 'Published effect', commands: [JSON.stringify({ type: 'add_effect', target: title.id, effect: 'mcp-render-smoke.effect' })] });
+  const publishedFrames = await tool('render_frames', { times: [0.75], width: 320 });
+  assert.equal(publishedFrames.content.filter(item => item.type === 'image').length, 1);
+  const saved = text(await tool('save_project'));
+  const packed = await readFile(saved.path);
+  assert.equal(packed.subarray(0, 5).toString(), 'PMV4\n');
+  const footer = packed.subarray(-64), offset = footer.readDoubleLE(8), length = footer.readUInt32LE(16);
+  const index = JSON.parse(packed.subarray(offset, offset + length));
+  assert(index.media.some(record => record.id === imported.assetId && record.length > 0), 'self-contained save embeds original audio');
+  const document = JSON.parse(packed.subarray(index.document.offset, index.document.offset + index.document.length));
+  assert(document.proj && document.history && document.proj.layers.some(layer => layer.name === 'Title'), 'save keeps project and Undo history');
+  assert.equal((await stat(saved.path)).mode & 0o777, 0o600);
   await tool('finish_session', { commit: true });
   // No temporary or empty files are left behind.
   const left = await readdir(exportsDir);
   assert.deepEqual(left.filter(name => name.startsWith('.powermove-')), []);
   for (const name of left) assert((await stat(path.join(exportsDir, name))).size > 0, name);
   await quit();
-  console.log(`MCP desktop smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, a text project routed to the current exporter, and the job engine still serving after it; ${left.length} verified exports.`);
+  console.log(`MCP desktop smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, native text, published shader plus frames, and a self-contained PMV4 with Undo history; ${left.length} verified exports.`);
 }
 
 try {
@@ -201,6 +213,8 @@ try {
   assert.equal(new Set(tools).size, tools.length, 'MCP tool names must be unique');
   const project = text(await tool('create_project', { name: 'MCP smoke video', width: 320, height: 180, fps: 12, duration: 1 }));
   await tool('start_session', { prompt: 'Create a red video with an audible tone' });
+  const videoAsset = text(await tool('import_media', { path: sourceVideo }));
+  assert.equal(videoAsset.persisted, true);
   const firstImport = text(await tool('import_media', { path: audio }));
   assert.equal(firstImport.status, 'imported'); assert.equal(firstImport.persisted, true);
   assert.equal(text(await tool('get_project_state')).layerCount, 0);

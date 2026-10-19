@@ -43,6 +43,9 @@ const MEDIA_TOOL_NAMES = new Set<string>(AGENT_MEDIA_TOOL_NAMES);
 const TOOL_TIMEOUT_MS = 120_000;
 const MAX_SOCKET_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_TEXT_CHARS = 2_000_000;
+// Private host plans carry complete documents and Undo, not paged agent state.
+const DOCUMENT_PLAN_TOOLS = new Set(['__mcp_context', '__engine_frames_plan', '__engine_save_plan']);
+const MAX_DOCUMENT_PLAN_CHARS = 64 * 1024 * 1024;
 const MAX_TOOL_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TOOL_CONTENT_ITEMS = 8;
 
@@ -53,6 +56,7 @@ export interface AgentEngineJobs {
    *  count from then: plan section 17). */
   exportVideo(owner: number, run: string, project: unknown, input: ExportVideoInput, onStarted?: () => void): Promise<ExportVideoResult>;
   renderFrames(owner: number, run: string, plan: FramesPlan): Promise<AgentFramesResult>;
+  saveProject?(project: unknown, document?: unknown): Promise<string>;
   status(owner: number, jobId: string): RenderStatus;
   cancelRun(run: string): Promise<number>;
   /** Compiles definition snapshots through the engine's pipeline (`validate_effect`). */
@@ -567,9 +571,8 @@ export class PowermoveAgentToolBridge {
       // The normal provider connection owns this session; no separate MCP setup.
       await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
       const engine = this.options.engineJobs;
-      if (engine?.available) {
-        const routed = await this.engineExport(session, engine, input, onJobStarted);
-        if (routed) return routed;
+      if (engine) {
+        return this.engineExport(session, engine, input, onJobStarted);
       }
       // The legacy exporter: renderer frames, main's encoder (render-encoder.ts).
       const legacy = legacyExportArgs(input);
@@ -579,6 +582,15 @@ export class PowermoveAgentToolBridge {
     if (tool === 'save_project') {
       // The normal provider connection owns this session; no separate MCP setup.
       await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
+      if (this.options.engineJobs) {
+        if (Object.keys(args).length) throw new Error('save_project does not take arguments.');
+        const plan = await this.rendererValue(session, '__engine_save_plan', {});
+        if (plan?.home === true) throw new Error('Open a project before saving.');
+        if (!this.options.engineJobs.saveProject) throw new Error('project-save-unavailable: The host project packer is unavailable.');
+        const project = JSON.parse(String(plan.projectJSON));
+        const path = await this.options.engineJobs.saveProject(project, JSON.parse(String(plan.documentJSON)));
+        return { runId: session.runId, callId: `main-${randomUUID()}`, ok: true, content: [{ type: 'text', text: JSON.stringify({ path, projectId: project.id }) }] };
+      }
       return withAgentExport(session.owner, this.options.exportDirectory, () =>
         this.callRenderer(session, `__mcp_${tool}`, args));
     }
@@ -614,7 +626,7 @@ export class PowermoveAgentToolBridge {
         ? await this.computerUsePanel(session, args)
         : tool === 'render_frames'
           ? await this.renderFrames(session, args)
-          : tool === 'validate_effect' && this.options.engineJobs?.available && this.options.engineJobs.compileDefinitions
+          : tool === 'validate_effect' && this.options.engineJobs?.compileDefinitions
             ? await this.validateEffect(session, args)
             : await this.callRenderer(session, tool, args);
     session.noteResponse(response);
@@ -678,6 +690,22 @@ export class PowermoveAgentToolBridge {
         // would not finish in time is not started, and one still rendering at
         // the deadline is abandoned, so the tool answers within the client's
         // tool timeout with the frames that did finish.
+        const engine = this.options.engineJobs;
+        if (engine) {
+          if (until !== undefined && Date.now() >= until) throw new Error('The composition frame deadline expired before rendering started.');
+          // Contact sheets are one engine batch, so the document and winning
+          // definitions freeze together even if the user edits while it renders.
+          const plan = await this.rendererValue(session, '__engine_frames_plan', { times: times.slice(0, 5), width });
+          const pending = engine.renderFrames(session.owner.id, session.runId, {
+            project: JSON.parse(String(plan.project)), times, width: plan.width, revision: plan.revision
+          });
+          let timer: NodeJS.Timeout | undefined;
+          const result = await (until === undefined ? pending : Promise.race([
+            pending,
+            new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('The composition did not render before the contact sheet deadline.')), Math.max(1, until - Date.now())); timer.unref(); })
+          ])).finally(() => clearTimeout(timer));
+          return result.images.map(image => ({ data: image.data, mimeType: image.mimeType }));
+        }
         const frames: Array<{ data: Uint8Array; mimeType: 'image/png' | 'image/jpeg' }> = [];
         let slowest = 0;
         for (let offset = 0; offset < times.length; offset += 5) {
@@ -738,17 +766,12 @@ export class PowermoveAgentToolBridge {
     return JSON.parse(item.text);
   }
 
-  /** `export_video` through the job engine; null when the engine routes the
-   *  project to the legacy exporter (capability routing, section 26). */
-  private async engineExport(session: PowermoveAgentToolSession, engine: AgentEngineJobs, input: ExportVideoInput, onJobStarted?: () => void): Promise<AgentToolResponseEvent | null> {
+  /** `export_video` through the job engine with named failures. */
+  private async engineExport(session: PowermoveAgentToolSession, engine: AgentEngineJobs, input: ExportVideoInput, onJobStarted?: () => void): Promise<AgentToolResponseEvent> {
     const context = await this.rendererValue(session, '__mcp_context', {});
     if (context?.home === true) throw new Error('Open a project before exporting.');
     const project = JSON.parse(String(context?.projectJSON ?? 'null'));
     const result = await engine.exportVideo(session.owner.id, session.runId, project, input, onJobStarted);
-    if (result.status === 'routed') {
-      console.info(`[engine] export_video routed to the current engine: ${result.reason}`);
-      return null;
-    }
     const value = result.status === 'done'
       ? { path: result.path, projectId: context.projectId, width: result.width, height: result.height, fps: result.fps, jobId: result.jobId }
       : { status: 'queued', jobId: result.jobId, projectId: context.projectId };
@@ -766,10 +789,10 @@ export class PowermoveAgentToolBridge {
 
   /** `render_frames`: agent frames through the job engine at the agent's
    *  revision, never pausing playback; the legacy capture when the engine is
-   *  off or routes the composition (section 20). */
+   *  off (section 20). Engine failures never invoke legacy capture. */
   async renderFrames(session: PowermoveAgentToolSession, args: Record<string, unknown>): Promise<AgentToolResponseEvent> {
     const engine = this.options.engineJobs;
-    if (engine?.available) {
+    if (engine) {
       const plan = await this.rendererValue(session, '__engine_frames_plan', args);
       const result = await engine.renderFrames(session.owner.id, session.runId, {
         project: JSON.parse(String(plan.project)),
@@ -777,19 +800,16 @@ export class PowermoveAgentToolBridge {
         width: plan.width,
         revision: plan.revision
       });
-      if (result.status === 'rendered') {
-        return {
-          runId: session.runId,
-          callId: `main-${randomUUID()}`,
-          ok: true,
-          content: [
-            { type: 'text', text: JSON.stringify({ times: result.images.map((image) => image.time), width: plan.width, rendered: result.images.length }) },
-            ...result.images.map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }))
-          ],
-          revision: plan.revision
-        };
-      }
-      console.info(`[engine] render_frames routed to the current engine: ${result.reason}`);
+      return {
+        runId: session.runId,
+        callId: `main-${randomUUID()}`,
+        ok: true,
+        content: [
+          { type: 'text', text: JSON.stringify({ times: result.images.map((image) => image.time), width: plan.width, rendered: result.images.length }) },
+          ...result.images.map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }))
+        ],
+        revision: plan.revision
+      };
     }
     return this.callRenderer(session, 'render_frames', args);
   }
@@ -935,7 +955,7 @@ export class PowermoveAgentToolBridge {
     if (!isRecord(value) || typeof value.callId !== 'string') return;
     const call = this.pending.get(value.callId);
     if (!call || call.session.runId !== value.runId || call.session.owner !== event.sender) return;
-    const response = this.parseRendererResponse(value);
+    const response = this.parseRendererResponse(value, DOCUMENT_PLAN_TOOLS.has(call.tool) ? MAX_DOCUMENT_PLAN_CHARS : MAX_TOOL_TEXT_CHARS);
     if (!response) {
       this.pending.delete(value.callId);
       clearTimeout(call.timer);
@@ -950,7 +970,7 @@ export class PowermoveAgentToolBridge {
     pending.resolve(response);
   }
 
-  private parseRendererResponse(value: unknown): AgentToolResponseEvent | null {
+  private parseRendererResponse(value: unknown, textLimit = MAX_TOOL_TEXT_CHARS): AgentToolResponseEvent | null {
     if (
       !isRecord(value) ||
       !isString(value.runId, 80) ||
@@ -963,7 +983,7 @@ export class PowermoveAgentToolBridge {
     for (const item of value.content) {
       if (!isRecord(item) || !isString(item.type, 20)) return null;
       if (item.type === 'text') {
-        if (!isString(item.text, MAX_TOOL_TEXT_CHARS)) return null;
+        if (!isString(item.text, textLimit)) return null;
         content.push({ type: 'text', text: item.text });
       } else if (item.type === 'image') {
         if (

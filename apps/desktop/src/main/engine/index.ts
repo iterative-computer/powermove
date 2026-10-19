@@ -1,3 +1,5 @@
+import { packAgentProject } from '../agent-tools/project-packer';
+import { installAgentFramesIpc } from './agent-frames';
 /*
  * Wires the native engine into the Electron app behind "Use New Engine".
  *
@@ -484,6 +486,10 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   let renderQueue: RenderQueue | null = null;
   const agentJobs = new AgentJobs({
     engine,
+    ...(options.resolveAsset ? { packProject: (project: Record<string, any>, session: number, document: unknown) => packAgentProject(project, {
+      directory: options.automaticOutputDirectory ?? path.join(options.home, 'Powermove'),
+      resolveAsset: asset => options.resolveAsset!(asset, { process: 'job', session })
+    }, document) } : {}),
     ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}),
     log,
     // Each job renders its window's winning registrations (contract 10).
@@ -507,6 +513,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     onQueueStatus: (jobId, status) => renderQueue?.status(jobId, status),
     onAgentJob: (job) => renderQueue?.agentJob(job)
   });
+  const removeAgentFramesIpc = installAgentFramesIpc(options.ipc, agentJobs, options.isTrustedSender);
   jobOwners = agentJobs;
   renderQueue = new RenderQueue({
     windowOpen: (owner) => { const contents = webContents.fromId(owner); return !!contents && !contents.isDestroyed(); },
@@ -675,6 +682,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     snapshots,
     attachWindow,
     dispose: async () => {
+      removeAgentFramesIpc();
       removeSnapshotIpc();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
       windowSessions.dispose();
