@@ -154,7 +154,16 @@ const RUNS = [
   // Phase 3a (docs/engine/phase3a-gate.md): layer drag on the 884-layer
   // project (the corpus perf copy), today and with Use New Engine on, idle.
   { name: 'p3a-drag-today-884-idle', ...latency, app: true, mode: 'today', load: false, inputModes: ['drag'], dir: 'docs/engine/phase3a-gate-measurements' },
-  { name: 'p3a-drag-engine-884-idle', ...latency, app: true, mode: 'tracer', load: false, inputModes: ['drag'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3a-gate-measurements' }
+  { name: 'p3a-drag-engine-884-idle', ...latency, app: true, mode: 'tracer', load: false, inputModes: ['drag'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3a-gate-measurements' },
+  // Phase 3c (plan section 25, "3D orbit, 3D corpus scene with shadows",
+  // p95 ≤ 33 ms pointer-to-pixel): a middle-button orbit in the 3D
+  // viewport's editor view of the corpus primitives scene with a sun
+  // casting shadows, 1920 × 1080, today's WebGL viewer and the engine
+  // drawing the document, idle and under the gate load.
+  { name: 'p3c-orbit-today-idle', ...latency, app: true, mode: 'today', load: false, synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], dir: 'docs/engine/phase3c-measurements' },
+  { name: 'p3c-orbit-engine-idle', ...latency, app: true, mode: 'tracer', load: false, synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3c-measurements' },
+  { name: 'p3c-orbit-today-load', ...latency, app: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], dir: 'docs/engine/phase3c-measurements' },
+  { name: 'p3c-orbit-engine-load', ...latency, app: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3c-measurements' }
 ];
 
 /** The tracer's runs: layer drag on 500 layers (engine and today, idle and
@@ -801,7 +810,10 @@ function analyzeLatency(raw) {
     // Engine frames echo the view sequence (pans) or, on the tracer, the
     // document revision (layer drags).
     const engineLike = page.mode === 'engine' || page.mode === 'tracer';
-    const draws = (engineLike ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: page.mode === 'tracer' ? d[2] : d[6], submitMs: d[5], arrivedMs: d[4], seq: d[1] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null, arrivedMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
+    // An orbit changes the view, not the document: its engine frames echo
+    // the view sequence on the tracer too.
+    const byView = page.mode === 'engine' || mode === 'orbit';
+    const draws = (engineLike ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: byView ? d[6] : d[2], submitMs: d[5], arrivedMs: d[4], seq: d[1] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null, arrivedMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
     // When the page handled each input (ms, page clock): the first dispatch
     // that carried it.
     const handledOf = new Map();

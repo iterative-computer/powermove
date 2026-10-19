@@ -35,7 +35,7 @@ type AppConfig = {
   /** `tracer`: the app's own engine connection draws the document (Use New Engine). */
   mode: 'today' | 'engine' | 'tracer';
   /** A synthetic project of slice features instead of the corpus project. */
-  synthetic?: { layers: number; fps?: number; fpsRational?: [number, number] | null; images?: number; seed?: number };
+  synthetic?: { layers: number; fps?: number; fpsRational?: [number, number] | null; images?: number; seed?: number; scene3d?: boolean };
   /** Playback only: an inspector edit every `everyMs` while recording (tracer). */
   edits?: { everyMs: number };
   load: boolean;
@@ -45,7 +45,7 @@ type AppConfig = {
   project: string;
   /** Content time playback starts from, seconds. */
   startS?: number;
-  inputModes?: ('drag' | 'pan')[];
+  inputModes?: ('drag' | 'pan' | 'orbit')[];
   /** `false`: engine-path gestures keep `pointermove` (before step 2). */
   rawGestures?: boolean;
   /** `false`: the viewer draws engine frames on the page's main thread, not in its presentation worker. */
