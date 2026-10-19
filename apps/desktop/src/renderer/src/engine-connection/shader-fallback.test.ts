@@ -12,6 +12,7 @@ import { PROTOCOL_BUILD, type Envelope } from '../../../shared/engine-protocol';
 import { decodeEnvelope, encodeEnvelope, envelope, localRanges } from '../../../main/engine/protocol';
 import { EngineConnection, type PortLike } from './connection';
 import { DocumentSession, MAX_FALLBACK_BAND_BYTES, type FallbackRunner, type StreamBatch } from './session';
+import { toHalfArray } from './half-float';
 import { ShaderFallbackError, applyCalls, toHalf, type ShaderFallbackRequest } from './shader-fallback';
 
 class FakePort implements PortLike {
@@ -159,4 +160,19 @@ describe('the runner helpers', () => {
     expect(toHalf(1 + 3 * 2 ** -11)).toBe(0x3c02);
     expect(toHalf(2 ** -24)).toBe(1);
   });
+});
+
+// All finite binary16 values, including signed zero and subnormals.
+it('bulk half conversion preserves every finite binary16 value and view offset', () => {
+  const values = new Float32Array(65538);
+  for (let bits = 0; bits < 65536; bits++) {
+    const sign = bits & 0x8000 ? -1 : 1, exp = bits >>> 10 & 31, frac = bits & 1023;
+    values[bits + 1] = exp === 31 ? (frac ? NaN : sign * Infinity)
+      : sign * (exp ? (1 + frac / 1024) * 2 ** (exp - 15) : frac * 2 ** -24);
+  }
+  const converted = toHalfArray(values.subarray(1, 65537));
+  for (let bits = 0; bits < 65536; bits++) {
+    if ((bits & 0x7c00) === 0x7c00 && (bits & 1023)) expect(converted[bits]! & 0x7fff).toBeGreaterThan(0x7c00);
+    else expect(converted[bits]).toBe(bits);
+  }
 });

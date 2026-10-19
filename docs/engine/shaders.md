@@ -367,3 +367,31 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
   (`assert!(overran)`) passed 1 of 6 runs on the base and 1 of 6 on this
   branch. Both are the effects lane's GPU-timestamp watchdog, not this lane's
   code.
+
+## Perf3: bounded asynchronous runner readback (2026-10-19)
+
+`ShaderFallbackRunner` retains its RGBA16F framebuffer at an unchanged size.
+Its asynchronous path serializes GL submission and allows at most three
+pixel-pack buffers to wait for GPU fences, yielding to the browser between
+polls. A synchronous compatibility snapshot may draw between those submissions:
+each PBO already owns its read command and is copied from its own buffer after
+completion. Context replacement/disposal ends pending reads and frees the
+buffers; a read has a 10-second bound. The blocking snapshot path remains
+available.
+
+RGBA16F is read as binary16 when the implementation exposes that read pair;
+the float path converts the input view's bits without per-component allocation.
+The conversion test covers every finite binary16 value, signed zero, subnormals
+and a nonzero source byte offset. The real Electron/WebGL regression compares
+more than 60 million components from concurrent requests against the blocking
+path, with size changes and an interleaved synchronous snapshot: zero differing
+components (`e2e/shader-fallback-readback.spec.ts`, 2026-10-19, under the Electron
+lock). This is a correctness pass, not a paired export-throughput pass.
+
+The effects/transition runner implementation on `feat/ne-defs` is not in this
+lane's integration base (`c3c5f8b7`). Its effect requests, input texture protocol,
+watchdog and host transport must be preserved when merging this runner change.
+In particular, use `FallbackReadback` after the final pass, keep the defs
+watchdog's pass fences, and retain its `MAX_TEXTURE_SIZE` limit and retry rules.
+The 60-frame HD export and animated-effect viewer rows remain unmeasured here;
+no faster-than-today claim follows from the PBO regression.
