@@ -266,18 +266,17 @@ apart. On `shaders-20261018-022611` with the rule (and `PIPELINE_REVISION`
 2, `pm_round` exact): 507 of 522 match (7 through the runner), 15 both
 refuse, 0 failures, the same as before it.
 
-**A user's own programs: Private setup's setup** (second review, 2026-10-19).
-`collect.ts --local <private-setup/extensions>` adds a user's
+**A user's own programs: a private user setup** (second review, 2026-10-19).
+`collect.ts --local <user-setups/<setup>/extensions>` adds a user's
 installed extensions (private group `local`; a local extension that does
 not load in the collector is noted, not fatal). Corpus
-`private-shader-corpus` (186 cases, 695 variants; the repository's cases
-as of the merge, the Store's 4 releases, and Private setup's extensions): 34 of his
-38 extension folders load (`private-extension-01`, `private-extension-13`
-and `pexels-browser` need DOM APIs at activation and register no GLSL
-there; `private-extension-32` imports a file its folder does not hold) and register
+`shaders-20261019-<setup>` (186 cases, 695 variants; the repository's cases
+as of the merge, the Store's 4 releases, and the user's extensions): 34 of
+38 extension folders load (three need DOM APIs at activation and register
+no GLSL there; one imports a file its folder does not hold) and register
 38 effects and 2 extension layers, 166 variants: 163 match WebGL and 3
 both refuse (one extension layer compares a `uniform bool` with a float,
-which WebGL refuses too). No program of his differs natively, so none is
+which WebGL refuses too). No program of that setup differs natively, so none is
 listed in `ANGLE_ONLY`. All groups: 677 of 695 match (11 through the
 runner), 18 both refuse, 0 failures, after two gate changes the corpus
 called for:
