@@ -50,6 +50,8 @@ export interface EngineDocOptions {
   /** The headless document host: no renderer, so 2D bounds and picks
    *  (`PM.GL`) come from pm-wasm alone. */
   headless?: boolean;
+  /** Test builds: replayed Canvas raster measurements give ink kernels a legacy reference. */
+  textReference?: boolean;
   /** Registry answers and subsets for text layout (engine-doc/fonts.ts). The
    *  editor uses `window.powermove.engineFonts` when the preload exposes it. */
   fonts?: FontProvider | null;
@@ -65,7 +67,7 @@ export interface EngineDocOptions {
 
 /** A named engine failure ("Use New Engine" on). */
 export interface EngineFailure {
-  code: 'pm-wasm-unavailable' | 'pm-wasm-trap' | 'pm-wasm-error' | 'font-service-unavailable';
+  code: 'native-answer-unavailable' | 'pm-wasm-unavailable' | 'pm-wasm-trap' | 'pm-wasm-error' | 'font-service-unavailable';
   message: string;
   /** Whether `PM.EngineDoc.retry()` can recover. */
   retry: boolean;
@@ -377,7 +379,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
   };
   const edits = new NativeEdits(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, dual, () => api.fonts);
-  if (options.headless) for (const kernel of ['captureFontAnchor', 'anchorReference']) edits.noReference.add(kernel);
+  if (options.headless && !options.textReference) for (const kernel of ['captureFontAnchor', 'anchorReference']) edits.noReference.add(kernel);
   edits.revive = () => reviveNow();
   edits.onFailure = (code, message) => fail(code, message, code === 'font-service-unavailable');
   const auditor = mode.audit ? new ShadowAuditor(() => (state.ready ? barrier : null), f => reporter.emit({ type: 'audit', kind: f.kind, revision: f.revision, paths: f.paths, detail: f.detail })) : null;
@@ -387,6 +389,16 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     PM.bus?.emit?.('engine:consistency-mismatch', { reason: result.reason, revision: result.revision, missed: result.missed.length });
   };
 
+  if (options.strict) {
+    api.onFallback = edits.onFallback = (op, reason) => {
+      const code = reason === 'fonts' || reason === 'ink' ? 'font-service-unavailable' : 'native-answer-unavailable';
+      const message = `The new engine could not answer ${op} (${reason}).`;
+      fail(code, message, code === 'font-service-unavailable' || reason === 'unavailable');
+      const error = new Error(message);
+      error.name = 'EngineFailure';
+      throw error;
+    };
+  }
   const failures: EngineFailure[] = [];
   const failed = new Set<string>();
   /** Reports a named failure once per code and message (strict mode only). */
@@ -402,7 +414,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     // Visible, never silent (amendment 21): the editor's own toast, with
     // Retry where reloading the module can help.
     PM.toast?.(message, 8000, { error: true, key: `engine-failure-${code}`,
-      ...(code === 'pm-wasm-unavailable' ? { action: { label: 'Retry', run: () => { void state.retry(); } } } : {}) });
+      ...(retry ? { action: { label: 'Retry', run: () => { void state.retry(); } } } : {}) });
   }
 
   const subscribers = new Set<(batch: PatchBatch) => void>();
@@ -438,8 +450,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     summary() { reporter.emit({ type: 'summary', session, ...state.stats() }); },
     failures: () => failures.slice(),
     retry: () => {
-      if (state.ready) return Promise.resolve(true);
+      if (!api.fonts && options.fonts === undefined) { const provider = editorFonts(); if (provider) api.fonts = new FontLoader(provider); }
+      api.fonts?.retry();
       failed.clear();
+      if (state.ready) return Promise.resolve(true);
       return start().then((ok) => { if (ok) afterReady(); return ok; });
     },
     warmFonts: () => (state.ready ? api.warmFonts() : Promise.resolve()),
@@ -562,6 +576,12 @@ function editorFonts(): FontProvider | null {
     if (!r || typeof r !== 'object') throw new Error('the font registry did not answer');
     if (r.ok === false) throw new Error(r.error);
     return r.value;
+  };
+  if (typeof bridge.answerSync === 'function' && typeof bridge.wholeSync === 'function') return {
+    sync: true,
+    answer: (queries) => unwrapResult(bridge.answerSync(queries)),
+    subset: (blob, index) => new Uint8Array(unwrapResult(bridge.wholeSync(blob, index))),
+    whole: (blob, index) => new Uint8Array(unwrapResult(bridge.wholeSync(blob, index))),
   };
   return {
     sync: false,

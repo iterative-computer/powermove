@@ -83,3 +83,10 @@ export function rendererMode(): EngineDocMode {
   const env = (import.meta as any).env ?? {};
   return profileOverride(stored, env.DEV === true || env.MODE === 'test') ?? parseMode(env.VITE_POWERMOVE_NATIVE_EVALUATOR ?? 'off');
 }
+
+
+/** Worker runtime environment is a developer override only. Production is
+ * selected solely by Use New Engine, including the flag-off legacy path. */
+export function workerMode(value: string | undefined, newEngine: boolean, development: boolean): EngineDocMode {
+  return development ? withNewEngine(parseMode(value ?? 'on'), newEngine) : parseMode(newEngine ? 'on' : 'off');
+}

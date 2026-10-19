@@ -6,12 +6,12 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { makePM } from '../legacy/__tests__/make-pm';
 import { makeVectorPath, makeVertex } from '../legacy/core/vector-paths';
 import { installEngineDoc, type EngineDoc } from './install';
-import { parseMode, profileOverride } from './flags';
+import { parseMode, profileOverride, workerMode } from './flags';
 import type { FontProvider } from './fonts';
 import { createRequire } from 'node:module';
 
@@ -113,9 +113,9 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     const original = PmWasm.prototype.query;
     PmWasm.prototype.query = function (this: any) { this.dead = true; throw new WebAssembly.RuntimeError('unreachable'); };
     try {
-      doc.api!.worldMatrix(child, 1);
+      expect(() => doc.api!.worldMatrix(child, 1)).toThrow(/worldMatrix.*trap/);
     } finally { PmWasm.prototype.query = original; }
-    expect(failures.map((f) => [f.code, f.retry])).toEqual([['pm-wasm-trap', false]]);
+    expect(failures.map((f) => [f.code, f.retry])).toContainEqual(['pm-wasm-trap', false]);
     expect(doc.failures()[0]!.message).toMatch(/trapped twice answering worldMatrix/);
     // The engine keeps answering natively after it.
     expect(doc.ready).toBe(true);
@@ -133,6 +133,81 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     available = true;
     expect(await doc.retry()).toBe(true);
     expect(doc.ready).toBe(true);
+  });
+
+  it('answers nested composition paths and a root without compId natively', async () => {
+    const { PM, doc } = await editor('audit');
+    const { child } = content(PM);
+    const nested = { id: 'deep', fps: 24, layers: [clone(child)], w: 640, h: 480, dur: 10 };
+    PM.proj.comps.outer = { id: 'outer', layers: [], comps: { deep: nested } };
+    PM.scope = [nested];
+    PM.curComp = () => PM.scope.at(-1) ?? PM.proj;
+    PM.doc.touched([['comps']]);
+    doc.api!.worldMatrix(nested.layers[0], 1);
+    doc.api!.evP(nested.layers[0], nested.layers[0].p['position.y'], 1, 'position.y');
+    PM.proj.comps = {};
+    PM.doc.touched([['comps']]);
+    doc.api!.worldMatrix(nested.layers[0], 1);
+    PM.scope = [];
+    delete PM.proj.compId;
+    PM.touch();
+    doc.api!.worldMatrix(child, 1);
+    expect(fallbacks(doc)).toEqual({});
+    expect(doc.dual!.total().mismatched).toBe(0);
+  });
+
+  it.runIf(existsSync(BRIDGE))('recovers a repeatedly failing font provider on retry without a legacy answer', async () => {
+    const { FontRegistry } = createRequire(import.meta.url)(BRIDGE) as any;
+    const registry = new FontRegistry();
+    let available = false;
+    const { PM, doc } = await editor('on', true, {
+      sync: true,
+      answer: q => { if (!available) throw new Error('temporarily unavailable'); return registry.answer(q); },
+      subset: (b, i) => registry.subset(b, i), whole: (b, i) => registry.whole(b, i),
+    });
+    const text = PM.mkLayer('text');
+    PM.proj.layers = [text]; PM.touch();
+    for (let i = 0; i < 3; i++) expect(() => doc.api!.textLayout(text, 0)).toThrow(/fonts/);
+    expect(doc.api!.fonts!.disabled).toBe(true);
+    available = true;
+    expect(await doc.retry()).toBe(true);
+    expect(doc.api!.fonts!.disabled).toBe(false);
+    expect(doc.api!.textLayout(text, 0)).toBeTruthy();
+    expect(doc.failures().some(f => f.code === 'font-service-unavailable' && f.retry)).toBe(true);
+  });
+
+  it('ignores worker evaluator environment overrides in production', () => {
+    for (const override of ['audit', 'audit-proxy', 'strict', 'off', 'on', undefined]) {
+      expect(workerMode(override, true, false)).toEqual(parseMode('on'));
+      expect(workerMode(override, false, false)).toEqual(parseMode('off'));
+    }
+    expect(workerMode('audit', true, true).dual).toBe(true);
+    expect(workerMode('strict', false, true).proxy).toBe('throw');
+  });
+
+  it('never calls a legacy answer for a strict refusal, flush failure or exception', async () => {
+    const { PM, doc } = await editor('on');
+    const { child } = content(PM);
+    const legacy = vi.spyOn(PM, 'worldMatrix');
+    const query = doc.wasm!.query.bind(doc.wasm);
+    for (const reply of [{ host: true }, { ink: true }, { fonts: true }, { legacy: true }]) {
+      doc.wasm!.query = () => reply;
+      expect(() => doc.api!.worldMatrix(child, 0)).toThrow(/new engine could not answer/);
+    }
+    doc.wasm!.query = query;
+    const flush = doc.barrier!.flush.bind(doc.barrier);
+    doc.barrier!.flush = () => { throw new Error('flush failed'); };
+    expect(() => doc.api!.worldMatrix(child, 0)).toThrow(/new engine could not answer/);
+    doc.barrier!.flush = flush;
+    expect(legacy).not.toHaveBeenCalled();
+    const editLegacy = vi.fn();
+    for (const reply of [{ host: true }, { ink: true }, { fonts: true }, { legacy: true }]) {
+      doc.wasm!.query = () => reply;
+      expect(() => doc.edits!.edit('captureFontAnchor', {}, editLegacy, () => undefined)).toThrow(/new engine could not answer/);
+    }
+    expect(editLegacy).not.toHaveBeenCalled();
+    doc.wasm!.query = query;
+    expect(doc.failures().length).toBeGreaterThan(0);
   });
 
   it('keeps the development modes out of a profile override in production builds', () => {
@@ -165,7 +240,7 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     cold.proj.layers = [other];
     cold.ProjectIndex.invalidate();
     cold.touch();
-    coldDoc.api!.textLayout(other, 0);
+    expect(() => coldDoc.api!.textLayout(other, 0)).toThrow(/textLayout.*fonts/);
     expect(fallbacks(coldDoc)).toEqual({ 'textLayout:fonts': 1 });
   });
 });

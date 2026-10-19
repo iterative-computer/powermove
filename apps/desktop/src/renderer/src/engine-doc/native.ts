@@ -22,6 +22,7 @@ import { lookup, type DocumentBarrier } from './barrier';
 import type { PmWasm } from './wasm';
 import type { DualAnswers } from './dual';
 import { layer3DRole } from '../core/scene3d/layers';
+import { canonicalPath } from '../legacy/core/compositions';
 import type { FontLoader } from './fonts';
 
 type Legacy = Record<string, any>;
@@ -223,6 +224,8 @@ export class NativeApi {
    * alone there (the editor's dual answers check them against the GPU path).
    */
   readonly noReference = new Set<string>();
+  /** Strict hosts report and throw instead of executing any legacy fallback. */
+  onFallback: ((op: string, reason: string) => never) | null = null;
   /** Re-instantiates a trapped module synchronously (install.ts); false when it cannot. */
   revive: (() => boolean) | null = null;
   /** A named failure ("Use New Engine" on; install.ts decides whether to report it). */
@@ -271,13 +274,15 @@ export class NativeApi {
   /** `PM.curComp()`'s id and the open composition's. */
   private comps(): { comp: string; open: string; cur: any; liveCur: any } | null {
     const proj = this.unwrap(this.PM.proj);
-    if (!proj || typeof proj.compId !== 'string') return null;
+    if (!proj || typeof proj !== 'object') return null;
+    const open = typeof proj.compId === 'string' ? proj.compId : typeof proj.id === 'string' ? proj.id : '';
     const liveCur = this.PM.curComp?.() ?? this.PM.proj;
     const cur = this.unwrap(liveCur);
-    if (cur === proj) return { comp: proj.compId, open: proj.compId, cur, liveCur };
-    const id = typeof cur?.id === 'string' ? cur.id : null;
-    if (!id || this.unwrap(proj.comps?.[id]) !== cur) return null;
-    return { comp: id, open: proj.compId, cur, liveCur };
+    if (cur === proj) return { comp: open, open, cur, liveCur };
+    const path = findPath(proj, cur, 64);
+    if (!path) return cur && typeof cur === 'object' ? { comp: '@json:' + JSON.stringify(cur), open, cur, liveCur } : null;
+    const comp = path.length === 2 && path[0] === 'comps' ? String(path[1]) : '@path:' + JSON.stringify(canonicalPath(path, proj.compId));
+    return { comp, open, cur, liveCur };
   }
 
   private context(L: any): Context | null {
@@ -295,13 +300,13 @@ export class NativeApi {
     // what it holds). If not, a structural write bypassed the barrier: repair
     // before answering rather than answer for another layer.
     const barrier = this.barrier();
-    const mirrored = barrier ? lookup(barrier.shadow, ['comps', c.comp, 'layers', i, 'id']) : null;
-    if (barrier && (!mirrored?.exists || mirrored.value !== raw.id)) {
+    const mirrored = barrier ? lookup(barrier.shadow, [...(c.comp.startsWith('@path:') ? JSON.parse(c.comp.slice(6)) : ['comps', c.comp]), 'layers', i, 'id']) : null;
+    if (barrier && !c.comp.startsWith('@json:') && (!mirrored?.exists || mirrored.value !== raw.id)) {
       this.stats.repairs += 1;
       const missed = barrier.repair('structuralDiff');
       if (missed.length) this.onStale?.('context', missed);
     }
-    const first = typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
+    const first = !c.comp.startsWith('@json:') && typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
     return { comp: c.comp, open: c.open, layer: i, raw, first, live };
   }
 
@@ -309,11 +314,16 @@ export class NativeApi {
     let wasm = this.ready();
     if (!wasm) return { fallback: 'unavailable' };
     const ask = (instance: PmWasm): any => {
-      let reply = instance.query({ op, ...request });
+      const payload: Record<string, unknown> = { op, ...request };
+      if (typeof request.comp === 'string' && request.comp.startsWith('@json:')) {
+        payload.compJson = JSON.parse(request.comp.slice(6));
+        payload.comp = '@detached';
+      }
+      let reply = instance.query(payload);
       if (reply?.fonts && this.fonts) {
         // Text layout met fonts the mirror lacks: load them (at once from a
         // synchronous registry, in the background otherwise) and ask again.
-        reply = this.fonts.resolve(instance, () => instance.query({ op, ...request }), (r: any) => !!r?.fonts) ?? reply;
+        reply = this.fonts.resolve(instance, () => instance.query(payload), (r: any) => !!r?.fonts) ?? reply;
       }
       return reply;
     };
@@ -381,6 +391,7 @@ export class NativeApi {
     let got = run();
     if ('fallback' in got) {
       this.fell(op, got.fallback);
+      if (this.onFallback) return this.onFallback(op, got.fallback);
       return legacy();
     }
     if (this.dual && !this.noReference.has(op)) {
@@ -397,7 +408,7 @@ export class NativeApi {
           dual.stats.stale[op] = (dual.stats.stale[op] ?? 0) + 1;
           this.onStale?.(op, missed);
           const again = run();
-          if ('fallback' in again) { this.fell(op, again.fallback); return legacy(); }
+          if ('fallback' in again) { this.fell(op, again.fallback); if (this.onFallback) return this.onFallback(op, again.fallback); return legacy(); }
           got = again;
           verdict = dual.classify(op, answer(got), expected, this.unwrap);
         }
@@ -594,7 +605,7 @@ export class NativeApi {
   }
 
   evP(L: any, prop: any, T: any, key: any): any {
-    if (!prop || typeof prop !== 'object') return this.legacy.evP(L, prop, T, key);
+    if (!prop || typeof prop !== 'object') return null;
     if (!this.dual && typeof T === 'number') {
       const rawProp = this.unwrap(prop);
       const entry = this.props.get(rawProp);
@@ -904,24 +915,41 @@ export class NativeApi {
    */
   async warmFonts(): Promise<void> {
     const loader = this.fonts;
-    if (!loader || loader.provider.sync || loader.disabled) return;
-    const c = this.comps();
-    const layers: any[] = Array.isArray(c?.cur?.layers) ? c!.cur.layers : [];
-    for (let index = 0; index < layers.length; index++) {
-      const L = layers[index];
-      if (L?.type !== 'text') continue;
-      for (let round = 0; round < 6; round++) {
-        const wasm = this.ready();
-        const now = this.comps();
-        if (!wasm || !now || this.unwrap(now.cur?.layers?.[index]) !== this.unwrap(L)) return;
-        let reply: any;
-        try { reply = wasm.query({ op: 'textLayout', comp: now.comp, open: now.open, layer: index, t: Number(L.from) || 0 }); } catch { return; }
-        if (!reply?.fonts) break;
-        loader.resolve(wasm, () => reply, (r: any) => !!r?.fonts);
-        await loader.whenIdle();
-        if (loader.disabled) return;
+    if (!loader || loader.disabled) return;
+    const proj = this.unwrap(this.PM.proj);
+    if (!proj) return;
+    const open = proj.compId ?? proj.id ?? '';
+    const visit = async (comp: any, address: string): Promise<void> => {
+      const layers = Array.isArray(comp.layers) ? comp.layers : [];
+      for (let index = 0; index < layers.length; index++) {
+        const L = layers[index];
+        if (L?.type !== 'text') continue;
+        // Visit every keyed time, including content/range font changes. The
+        // on-demand synchronous provider covers interpolated and expression faces.
+        const times = new Set<number>([Number(L.from) || 0]);
+        const scan = (value: any) => {
+          if (!value || typeof value !== 'object') return;
+          if (Array.isArray(value.kf)) for (const key of value.kf) if (Number.isFinite(key.t)) times.add((Number(L.from) || 0) + key.t);
+          for (const child of Object.values(value)) scan(child);
+        };
+        scan(L);
+        for (const t of times) for (let round = 0; round < 6; round++) {
+          const wasm = this.ready();
+          if (!wasm) return;
+          const ask = () => wasm.query({ op: 'textLayout', comp: address, open, layer: index, t });
+          const reply: any = ask();
+          if (!reply?.fonts) break;
+          loader.resolve(wasm, ask, (r: any) => !!r?.fonts);
+          await loader.whenIdle();
+          if (loader.disabled) return;
+        }
       }
-    }
+      for (const child of Object.values(comp.comps ?? {})) {
+        const path = findPath(proj, child, 64);
+        if (path) await visit(child, path.length === 2 ? String(path[1]) : '@path:' + JSON.stringify(canonicalPath(path, proj.compId)));
+      }
+    };
+    await visit(proj, open);
   }
 
   /** `PM.textLayout` (the glyph layout: characters, words, lines) for a host without a raster. */
@@ -989,7 +1017,9 @@ export class NativeApi {
 
   validMatteSource(layers: any[], layer: any, id: any): boolean {
     const c = this.comps();
-    if (!c || this.unwrap(layers) !== c.cur.layers) return this.legacy.validMatteSource(layers, layer, id);
+    if (!c || this.unwrap(layers) !== c.cur.layers) return this.answer('validMatteSource',
+      () => this.query('validMatteSource', { comp: c?.comp ?? '', open: c?.open ?? '', compJson: { ...(c?.cur ?? {}), layers: asJson(layers) }, layer: asJson(layer), id: id === undefined ? { $u: 1 } : id }),
+      () => this.legacy.validMatteSource(layers, layer, id), () => ({ id }));
     return this.answer('validMatteSource', () => this.layerQuery('validMatteSource', layer, { id: id === undefined ? { $u: 1 } : id }),
       () => this.legacy.validMatteSource(layers, layer, id), () => ({ layer: layer?.id, id }));
   }

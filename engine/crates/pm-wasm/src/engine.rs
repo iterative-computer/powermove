@@ -708,12 +708,27 @@ impl Engine {
             .and_then(Value::as_str)
             .unwrap_or(comp_id);
         let revision = self.doc.revision();
-        let Ok(comp) = Comp::in_root(root, comp_id, revision) else {
+        let detached_comp = get(request, "compJson")
+            .filter(|v| matches!(v, Value::Object(_)))
+            .map(|v| Node::from_value(v.clone(), revision));
+        if detached_comp.is_some() {
+            self.ev.reset();
+        }
+        let resolved = detached_comp.as_ref().map_or_else(
+            || Comp::in_root(root, comp_id, revision),
+            |node| Ok(Comp::at_node(root, node, comp_id, revision)),
+        );
+        let Ok(comp) = resolved else {
             return Ok(Err(JsThrow::type_error(format!(
                 "No composition {comp_id}"
             ))));
         };
-        let Ok(open) = Comp::in_root(root, open_id, revision) else {
+        let resolved_open = if open_id.is_empty() {
+            Ok(Comp::at_node(root, root, open_id, revision))
+        } else {
+            Comp::in_root(root, open_id, revision)
+        };
+        let Ok(open) = resolved_open else {
             return Ok(Err(JsThrow::type_error(format!(
                 "No composition {open_id}"
             ))));

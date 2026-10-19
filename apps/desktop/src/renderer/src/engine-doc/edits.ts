@@ -207,6 +207,7 @@ export class NativeEdits {
    * reference measure nothing there. Dual modes apply the native answer.
    */
   readonly noReference = new Set<string>();
+  onFallback: ((op: string, reason: string) => never) | null = null;
   /** Re-instantiates a trapped module synchronously (install.ts), as for queries. */
   revive: (() => boolean) | null = null;
   onFailure: ((code: 'pm-wasm-trap' | 'pm-wasm-error' | 'font-service-unavailable', message: string) => void) | null = null;
@@ -226,11 +227,11 @@ export class NativeEdits {
   /** The open composition, the composition being edited, and its live layers. */
   private scope(): { open: string; comp: string; layers: any[] } | null {
     const proj = this.unwrap(this.PM.proj);
-    if (!proj || typeof proj.compId !== 'string') return null;
+    if (!proj || typeof proj !== 'object') return null;
     // Edits work on the open composition (`PM.proj`); a nested scope is a
     // render in progress, never an edit.
     if (this.PM.scope?.length) return null;
-    return { open: proj.compId, comp: proj.compId, layers: Array.isArray(proj.layers) ? proj.layers : [] };
+    return { open: proj.compId ?? proj.id ?? '', comp: proj.compId ?? proj.id ?? '', layers: Array.isArray(proj.layers) ? proj.layers : [] };
   }
 
   /** The index of a live layer in the open composition, or -1. */
@@ -334,7 +335,7 @@ export class NativeEdits {
   } = {}): T {
     this.count(this.stats.calls, name);
     const got = this.ask(name, request, options.wide);
-    if ('fallback' in got) { this.count(this.stats.fallbacks, `${name}:${got.fallback}`); return legacy(); }
+    if ('fallback' in got) { this.count(this.stats.fallbacks, `${name}:${got.fallback}`); if (this.onFallback) return this.onFallback(`edit.${name}`, got.fallback); return legacy(); }
     if (this.dual && !this.noReference.has(name)) return this.compare(name, got, legacy, options.where ?? (() => request), options.compareWith);
     if ('threw' in got) throw got.threw;
     this.apply(got.reply.ops);
@@ -352,7 +353,7 @@ export class NativeEdits {
   answer<T>(name: string, request: Record<string, unknown>, native: (reply: KernelReply) => T, legacy: () => T, compare: (native: T, legacy: T) => string | null = (a, b) => differs(a, b, close), options: { wide?: boolean } = {}): T {
     this.count(this.stats.calls, name);
     const got = this.ask(name, request, options.wide);
-    if ('fallback' in got) { this.count(this.stats.fallbacks, `${name}:${got.fallback}`); return legacy(); }
+    if ('fallback' in got) { this.count(this.stats.fallbacks, `${name}:${got.fallback}`); if (this.onFallback) return this.onFallback(`edit.${name}`, got.fallback); return legacy(); }
     const value = 'threw' in got ? undefined : native(got.reply);
     if (this.dual && !this.noReference.has(name)) {
       let expected: { value?: T; threw?: unknown };

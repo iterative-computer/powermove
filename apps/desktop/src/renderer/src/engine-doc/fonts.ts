@@ -48,14 +48,13 @@ function loadOnce(wasm: PmWasm, provider: FontProvider, loaded: Set<string>, gen
     if (!todo.length) return false;
     const load = provider.whole ? provider.whole.bind(provider) : provider.subset.bind(provider);
     const results = todo.map(([key, [blob, index]]) => {
-      loaded.add(key);
       return [blob, index, load(blob, index)] as const;
     });
     if (provider.sync) {
-      for (const [blob, index, bytes] of results) wasm.addFont(blob, index, bytes as Uint8Array);
+      for (const [blob, index, bytes] of results) { wasm.addFont(blob, index, bytes as Uint8Array); loaded.add(`${blob}.${index}`); }
       return true;
     }
-    return Promise.all(results.map(async ([blob, index, bytes]) => wasm.addFont(blob, index, await bytes))).then(() => true);
+    return Promise.all(results.map(async ([blob, index, bytes]) => { wasm.addFont(blob, index, await bytes); loaded.add(`${blob}.${index}`); })).then(() => true);
   };
   const addAnswers = (json: string): boolean | Promise<boolean> => {
     const parsed = JSON.parse(json);
@@ -143,12 +142,14 @@ export class FontLoader {
     return null;
   }
 
+  retry(): void { this.disabled = false; this.failedInARow = 0; this.perInstance = new WeakMap(); }
+
   private failed(error: unknown) {
     this.failures += 1;
     this.failedInARow += 1;
     if (this.failedInARow >= MAX_FAILURES) {
       this.disabled = true;
-      console.warn('[engine-doc] the font provider failed repeatedly; text layout stays with the legacy code', error);
+      console.warn('[engine-doc] the font provider failed repeatedly; text layout requires a retry', error);
     } else console.warn('[engine-doc] font loading failed', error);
   }
 }
