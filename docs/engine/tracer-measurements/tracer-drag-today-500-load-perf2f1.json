@@ -1,0 +1,163 @@
+{
+  "run": "tracer-drag-today-500-load-perf2f1",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "drag"
+    ],
+    "synthetic": {
+      "layers": 500,
+      "images": 2
+    }
+  },
+  "synthetic": {
+    "layers": 500,
+    "byType": {
+      "solid": 432,
+      "precomp": 10,
+      "image": 35,
+      "null": 4,
+      "group": 19
+    },
+    "groups": 19,
+    "precomps": 10,
+    "compositions": 5,
+    "keyframed": 301,
+    "images": 2,
+    "fps": 30,
+    "w": 1920,
+    "h": 1080
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      23.2041015625,
+      19.47607421875,
+      19.40380859375
+    ],
+    "after": [
+      32.056640625,
+      21.8388671875,
+      20.25390625
+    ]
+  },
+  "project": {
+    "name": "Synthetic 500 layers",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 10,
+    "layers": 450
+  },
+  "clock": {
+    "rttUs": 44,
+    "offsetUs": 555190610198.0001
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 24,
+      "ms": {
+        "n": 24,
+        "p50": 50.000708999999915,
+        "max": 51.720666000001074
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 453,
+      "replies": 453,
+      "replyBytes": 35647256,
+      "mainMsP50": 0.13854100000025937
+    },
+    "resizes": {
+      "n": 4,
+      "steps": 244
+    },
+    "eventCount": 28
+  },
+  "bridge": null,
+  "latency": {
+    "drag": {
+      "events": 2401,
+      "dispatches": 1338,
+      "draws": 1371,
+      "unmatched": 0,
+      "unpresented": 232,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2169,
+        "p50": 32.99,
+        "p95": 99.14,
+        "p99": 120.3,
+        "max": 149.36
+      },
+      "pointerToPixelWithDropsMs": {
+        "n": 2401,
+        "p50": 36.92,
+        "p95": 103.67,
+        "p99": 140.65,
+        "max": 199.05
+      },
+      "hopsMs": {
+        "inputToHandled": {
+          "n": 2169,
+          "p50": 8.93,
+          "p95": 53.51,
+          "p99": 68.22,
+          "max": 105.69
+        },
+        "handledToRaf": {
+          "n": 2169,
+          "p50": -5.8,
+          "p95": -0.9,
+          "p99": -0.6,
+          "max": -0.2
+        },
+        "rafToPresent": {
+          "n": 2169,
+          "p50": 36.47,
+          "p95": 53.23,
+          "p99": 95.26,
+          "max": 104.07
+        }
+      }
+    }
+  }
+}

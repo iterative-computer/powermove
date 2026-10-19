@@ -11,6 +11,7 @@
 import { PROTOCOL_BUILD, type Envelope, type Event, type Request, type Response } from '../../../shared/engine-protocol';
 import { MAX_MESSAGE_BYTES } from '../../../main/engine/msgpack';
 import { completeWelcome, decodeEnvelope, encodeEnvelope, engineRole, envelope, eventMessage, localRanges, Outstanding, requestMessage } from '../../../main/engine/protocol';
+import { coalesce, type ApplyPatches } from './patch-coalesce';
 
 /** The part of a `MessagePort` the connection uses (a fake in tests). */
 export interface PortLike {
@@ -35,6 +36,10 @@ export class EngineConnection {
   closed = false;
   /** Messages the connection could not decode (logged once each kind). */
   readonly errors: string[] = [];
+  /** Patch batches held until the current run ends (`patches`). */
+  private heldPatches: Array<{ body: ApplyPatches; session: number }> = [];
+  private heldLimit = Infinity;
+  private patchesQueued = false;
 
   constructor(
     readonly generation: number,
@@ -70,6 +75,32 @@ export class EngineConnection {
     this.post(envelope(eventMessage(body), session, revision));
   }
 
+  /**
+   * A session's patch batch, sent when the current synchronous run ends
+   * with the run's other batches of the session merged into it, so one edit
+   * is one batch and one render (patch-coalesce.ts). Anything else this
+   * connection sends first sends the batches held before it.
+   */
+  patches(body: ApplyPatches, session: number, limit: number): void {
+    if (this.closed) return;
+    this.heldPatches.push({ body, session });
+    this.heldLimit = Math.min(this.heldLimit, limit);
+    if (this.patchesQueued) return;
+    this.patchesQueued = true;
+    queueMicrotask(() => this.sendPatches());
+  }
+
+  /** Sends the held patch batches now. */
+  sendPatches(): void {
+    this.patchesQueued = false;
+    if (!this.heldPatches.length) return;
+    const held = coalesce(this.heldPatches, this.heldLimit);
+    this.heldPatches = [];
+    this.heldLimit = Infinity;
+    if (this.closed) return;
+    for (const { body, session } of held) this.send(envelope(eventMessage(body), session));
+  }
+
   /** Routes the session's events (and nothing else) to `listener`. */
   listen(session: number, listener: SessionListener): () => void {
     this.sessions.set(session, listener);
@@ -92,6 +123,7 @@ export class EngineConnection {
     if (this.closed) return;
     this.closed = true;
     this.ready = false;
+    this.heldPatches = [];
     try {
       this.port.close();
     } catch {
@@ -107,6 +139,12 @@ export class EngineConnection {
   }
 
   private post(message: Envelope): void {
+    // Batches held from this run go first: the engine sees the page's order.
+    if (this.heldPatches.length) this.sendPatches();
+    this.send(message);
+  }
+
+  private send(message: Envelope): void {
     try {
       this.port.postMessage(encodeEnvelope(message));
     } catch (error) {

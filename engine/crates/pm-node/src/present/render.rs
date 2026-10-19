@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -162,10 +162,26 @@ pub enum Command {
     ClosePort {
         port: PortId,
     },
-    /// The session's document changed (document source).
+    /// A frame shown at the next refresh finished on the GPU and its
+    /// descriptor went to the viewer (`super::complete`).
+    FrameSent {
+        key: Key,
+        meta: Box<super::complete::FrameMeta>,
+        gpu_done: i64,
+        sent: i64,
+    },
+    /// A submitted frame did not finish on the GPU: its slot is free again.
+    FrameFailed {
+        key: Key,
+        meta: Box<super::complete::FrameMeta>,
+        error: String,
+    },
+    /// The session's document changed (document source). `posted`: host
+    /// µs the engine handed it to the presenter (the per-frame trace).
     Document {
         key: Key,
         update: DocumentUpdate,
+        posted: i64,
     },
     /// The session's definitions (contract 10), and those a delta
     /// registered again.
@@ -305,7 +321,7 @@ fn media_lease(frame_cache: usize) -> pm_media::decode::service::MediaLease {
 }
 
 /// One frame's record for the S1 harness.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FrameTrace {
     pub seq: u64,
     pub k: i64,
@@ -321,6 +337,15 @@ pub struct FrameTrace {
     pub gpu_done: i64,
     pub sent: i64,
     pub timed: bool,
+    /// Host µs the pass that rendered this frame began (`work_view`):
+    /// from there to `start` is the pass's document step and requests.
+    pub work_start: i64,
+    /// CPU µs of the compose (planning and encoding).
+    pub cpu_us: i64,
+    /// The document revisions this frame is the first to show: revision,
+    /// host µs the engine handed it to the presenter, host µs the render
+    /// thread applied it.
+    pub revisions: Vec<[i64; 3]>,
 }
 
 /// Counters the engine reports in its status.
@@ -580,6 +605,13 @@ struct Thread {
     compat: super::compat::CompatStore,
     /// Waveform requests waiting for the host's media answer.
     peaks_waiting: BTreeSet<(Key, String)>,
+    /// With the per-frame trace on: each session's revisions not shown yet
+    /// (revision, posted, applied; host µs).
+    doc_trace: BTreeMap<Key, Vec<[i64; 3]>>,
+    /// Host µs the current `work_view` pass began.
+    work_start: i64,
+    /// Sends frames shown at the next refresh once their GPU work is done.
+    completer: Option<super::complete::Completer>,
 }
 
 /// Most waveform requests that wait for media answers at once.
@@ -613,6 +645,7 @@ fn view_name(key: Key) -> String {
 pub fn run(
     config: ThreadConfig,
     rx: Receiver<Command>,
+    back: Sender<Command>,
     sink: Sink,
     stats: Arc<Mutex<Stats>>,
     generations: Generations,
@@ -620,6 +653,17 @@ pub fn run(
     pm_bridge::set_thread_user_interactive();
     let fps = i64::from(config.fps.max(1));
     let peaks = super::peaks::PeakWorker::new(sink.clone());
+    // Without the completion thread every frame waits for the GPU here.
+    let completer = match super::complete::Completer::start(sink.clone(), back) {
+        Ok(c) => Some(c),
+        Err(error) => {
+            sink(vec![Action::Log {
+                level: LogLevel::Warn,
+                message: error,
+            }]);
+            None
+        }
+    };
     let mut thread = Thread {
         frame_ticks: TICKS_PER_SECOND / fps,
         frame_cache: pm_render::media::DEFAULT_FRAME_CACHE,
@@ -643,6 +687,9 @@ pub fn run(
         snapshot_costs: BTreeMap::new(),
         compat: super::compat::CompatStore::default(),
         peaks_waiting: BTreeSet::new(),
+        doc_trace: BTreeMap::new(),
+        work_start: 0,
+        completer,
     };
     thread.check_in();
     loop {
@@ -831,6 +878,8 @@ impl Thread {
     /// again on the new device as a new generation (the viewer imports the
     /// new surfaces), and every view redraws.
     fn recover_gpu(&mut self) {
+        // A lost device fails its submissions at once.
+        self.drain_frames();
         let Some(gpu) = self.gpu.take() else {
             return;
         };
@@ -982,7 +1031,34 @@ impl Thread {
                     self.forget_session(key);
                 }
             }
-            Command::Document { key, update } => self.document(key, update),
+            Command::Document {
+                key,
+                update,
+                posted,
+            } => self.document(key, update, posted),
+            Command::FrameSent {
+                key,
+                meta,
+                gpu_done,
+                sent,
+            } => self.record_frame(key, &meta, gpu_done, sent),
+            Command::FrameFailed { key, meta, error } => {
+                if let Some(view) = self.views.get_mut(&key) {
+                    if let (Some(live), Ok(seq)) = (view.pool.as_mut(), Seq::new(meta.seq))
+                        && live.spec.generation == meta.generation
+                    {
+                        let _ = live.ledger.release(FrameRelease {
+                            pool_index: meta.index,
+                            seq,
+                        });
+                    }
+                    view.dirty = true;
+                }
+                self.log(
+                    LogLevel::Error,
+                    format!("frame bridge: the GPU did not finish a frame: {error}"),
+                );
+            }
             Command::Definitions {
                 key,
                 set,
@@ -1169,7 +1245,8 @@ impl Thread {
 
     /// A document update: the mirror, the audio thread's mirror, the frame
     /// grid, and a redraw.
-    fn document(&mut self, key: Key, update: DocumentUpdate) {
+    fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64) {
+        let traced = i64::try_from(update.revision().get()).unwrap_or(i64::MAX);
         let doc = self.docs.entry(key).or_default();
         if let Err(error) = doc.update(&update) {
             // The engine applied this batch to its own mirror; this one could
@@ -1194,6 +1271,12 @@ impl Thread {
             audio.send(AudioCtl::Document(update));
         } else {
             self.warm_audio(key);
+        }
+        if self.config.trace {
+            let pending = self.doc_trace.entry(key).or_default();
+            if pending.len() < 4_096 {
+                pending.push([traced, posted, now()]);
+            }
         }
         self.refresh_timing(key);
         if let Some(view) = self.views.get_mut(&key) {
@@ -1648,6 +1731,8 @@ impl Thread {
         revision: Option<Revision>,
         pool: Option<PoolSpec>,
     ) {
+        // A new state or pool comes after the frames of the old one.
+        self.drain_frames();
         let frame_ticks = self.frame_ticks;
         let view = self.views.entry(key).or_insert_with(|| View {
             key,
@@ -2236,6 +2321,19 @@ impl Thread {
         }
     }
 
+    /// Waits until every frame waiting on the GPU is sent (or abandoned),
+    /// for anything whose order against them matters. Their bookkeeping
+    /// arrives as commands.
+    fn drain_frames(&mut self) {
+        let Some(completer) = &self.completer else {
+            return;
+        };
+        if completer.in_flight() == 0 {
+            return;
+        }
+        completer.drain();
+    }
+
     fn work(&mut self) {
         self.sync_font_generation();
         if self
@@ -2469,6 +2567,7 @@ impl Thread {
     }
 
     fn work_view(&mut self, key: Key) {
+        self.work_start = now();
         let lead = self.config.lead;
         self.retry_pool(key);
         let draws = !self.config.document || self.document_step(key);
@@ -2574,12 +2673,17 @@ impl Thread {
             .is_some_and(|v| v.dirty && v.pool.is_some() && !v.clock.is_playing());
         if paused_dirty {
             let media = self.views[&key].clock.media_at(now());
-            if let Some(descriptor) = self.render(key, media, -1, None) {
+            // At most `MAX_IN_FLIGHT` frames wait on the GPU; the completion
+            // thread sends this one (its descriptor is not sent here).
+            let deferred = self.completer.is_some();
+            if let Some(descriptor) = self.render(key, media, -1, None, deferred) {
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = false;
                 }
-                let revision = descriptor.revision;
-                self.event(key, Event::Frame(descriptor), Some(revision));
+                if !deferred {
+                    let revision = descriptor.revision;
+                    self.event(key, Event::Frame(descriptor), Some(revision));
+                }
             }
         } else if let Some(view) = self.views.get_mut(&key)
             && view.clock.is_playing()
@@ -2613,7 +2717,10 @@ impl Thread {
                         self.stats().rerendered += 1;
                     }
                     let started = now();
-                    let rendered = self.render(key, media, k, Some((shown_from, shown_for)));
+                    // Timed frames are sent in order after any frame still
+                    // finishing on the GPU.
+                    self.drain_frames();
+                    let rendered = self.render(key, media, k, Some((shown_from, shown_for)), false);
                     let Some(view) = self.views.get_mut(&key) else {
                         return;
                     };
@@ -2710,7 +2817,8 @@ impl Thread {
             return;
         }
         let media = request.time.get();
-        if let Some(descriptor) = self.render(key, media, -1, None) {
+        self.drain_frames();
+        if let Some(descriptor) = self.render(key, media, -1, None, false) {
             self.stats().responses += 1;
             let mut envelope = Envelope::new(Message::Response {
                 id,
@@ -2738,8 +2846,8 @@ impl Thread {
         media: i64,
         k: i64,
         timing: Option<(f64, f64)>,
+        deferred: bool,
     ) -> Option<FrameDescriptor> {
-        let trace = self.config.trace;
         let document = self.config.document;
         let gpu = self.gpu.as_mut()?;
         let view = self.views.get_mut(&key)?;
@@ -2990,26 +3098,25 @@ impl Thread {
             return None;
         }
         let submission = gpu.queue.submit([encoder.finish()]);
-        let done = gpu.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: Some(Duration::from_secs(2)),
-        });
-        let gpu_done = now();
-        if let Err(error) = done {
-            let message = format!("frame bridge: the GPU did not finish a frame: {error}");
-            (self.sink)(vec![Action::Log {
-                level: LogLevel::Error,
-                message,
-            }]);
-            return None;
-        }
-        let overlay_layers = overlay.layers.len();
         let seq_value = Seq::new(seq).ok()?;
-        if !live.ledger.present(index, seq_value) {
-            return None;
-        }
-        view.next_seq += 1;
         let duration = timing.map(|_| Ticks::new(view.clock.frame_ticks()).unwrap_or(Ticks::MAX));
+        let mut meta = super::complete::FrameMeta {
+            seq,
+            k,
+            index,
+            generation: live.spec.generation,
+            timing,
+            view_seq: view.state.view_seq.get(),
+            revision: view.revision.get(),
+            start,
+            work_start: self.work_start,
+            cpu_us,
+            overlay_layers: overlay.layers.len(),
+            failures: failures_n,
+            stand_in_shown,
+            depth: depth_surface.is_some(),
+            held: 0,
+        };
         let descriptor = FrameDescriptor {
             pool_index: index,
             pool_generation: Seq::new(u64::from(live.spec.generation)).unwrap_or(Seq::MAX),
@@ -3037,63 +3144,134 @@ impl Thread {
             view_seq: view.state.view_seq,
             duration,
         };
-        if depth_surface.is_some() {
-            self.stats
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .depth_frames += 1;
+        // A frame shown at the next refresh leaves now; the completion
+        // thread sends it once the GPU is done (`super::complete`).
+        if let (true, Some(completer)) = (deferred, self.completer.as_ref()) {
+            let mut envelope = Envelope::new(Message::Event {
+                body: Event::Frame(descriptor.clone()),
+            })
+            .with_session(key.1);
+            envelope.revision = Some(descriptor.revision);
+            let bytes = match codec::encode(&envelope) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    (self.sink)(vec![Action::Log {
+                        level: LogLevel::Error,
+                        message: format!("frame bridge: could not encode a message: {error}"),
+                    }]);
+                    return None;
+                }
+            };
+            if !live.ledger.present(index, seq_value) {
+                return None;
+            }
+            view.next_seq += 1;
+            meta.held = live.ledger.held_count() as u32;
+            if timing.is_none() {
+                self.last_interactive = Some(now());
+            }
+            completer.submit(super::complete::Pending {
+                key,
+                device: gpu.device.clone(),
+                submission,
+                bytes,
+                meta,
+            });
+            return Some(descriptor);
         }
-        view.costs.frame(
-            timing.is_some(),
-            cpu_us,
-            gpu_done - start - cpu_us.min(gpu_done - start),
-            overlay_layers,
-            failures_n,
-            view.revision.get(),
-        );
-        let held = live.ledger.held_count() as u32;
-        let generation = live.spec.generation;
-        let view_seq = view.state.view_seq.get();
-        let revision = view.revision.get();
+        let done = gpu.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(Duration::from_secs(2)),
+        });
+        let gpu_done = now();
+        if let Err(error) = done {
+            let message = format!("frame bridge: the GPU did not finish a frame: {error}");
+            (self.sink)(vec![Action::Log {
+                level: LogLevel::Error,
+                message,
+            }]);
+            return None;
+        }
+        if !live.ledger.present(index, seq_value) {
+            return None;
+        }
+        view.next_seq += 1;
+        meta.held = live.ledger.held_count() as u32;
+        self.record_frame(key, &meta, gpu_done, now());
+        Some(descriptor)
+    }
+
+    /// The stats, the session's costs, and the per-frame trace of a frame
+    /// sent at `sent` whose GPU work finished at `gpu_done` (host µs).
+    fn record_frame(
+        &mut self,
+        key: Key,
+        meta: &super::complete::FrameMeta,
+        gpu_done: i64,
+        sent: i64,
+    ) {
+        let trace = self.config.trace;
+        let elapsed = gpu_done - meta.start;
+        if let Some(view) = self.views.get_mut(&key) {
+            view.costs.frame(
+                meta.timing.is_some(),
+                meta.cpu_us,
+                elapsed - meta.cpu_us.min(elapsed),
+                meta.overlay_layers,
+                meta.failures,
+                meta.revision,
+            );
+        }
+        if meta.timing.is_none() {
+            self.last_interactive = Some(gpu_done);
+        }
         let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+        if meta.depth {
+            stats.depth_frames += 1;
+        }
         stats.frames += 1;
-        if timing.is_some() {
+        if meta.timing.is_some() {
             stats.timed_frames += 1;
         } else {
             stats.immediate_frames += 1;
         }
-        drop(stats);
-        if timing.is_none() {
-            self.last_interactive = Some(gpu_done);
-        }
-        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(shown) = stand_in_shown
+        if let Some(shown) = meta.stand_in_shown
             && self.config.stand_in_log
             && stats.stand_in_log.len() < STAND_IN_LOG_CAP
         {
-            stats.stand_in_log.push((seq, shown));
+            stats.stand_in_log.push((meta.seq, shown));
         }
-        stats.gpu_us_max = stats.gpu_us_max.max(gpu_done - start);
-        stats.gpu_us_total += gpu_done - start;
-        stats.max_held = stats.max_held.max(held);
+        stats.gpu_us_max = stats.gpu_us_max.max(elapsed);
+        stats.gpu_us_total += elapsed;
+        stats.max_held = stats.max_held.max(meta.held);
         if trace && stats.trace.len() < TRACE_CAP {
-            let (shown_from, shown_for) = timing.unwrap_or((0.0, 0.0));
+            let (shown_from, shown_for) = meta.timing.unwrap_or((0.0, 0.0));
+            let shown = i64::try_from(meta.revision).unwrap_or(i64::MAX);
             stats.trace.push(FrameTrace {
-                seq,
-                k,
-                slot: index,
-                generation,
+                seq: meta.seq,
+                k: meta.k,
+                slot: meta.index,
+                generation: meta.generation,
                 shown_from: shown_from.round() as i64,
                 shown_for: shown_for.round() as i64,
-                view_seq,
-                revision,
-                start,
+                view_seq: meta.view_seq,
+                revision: meta.revision,
+                start: meta.start,
                 gpu_done,
-                sent: now(),
-                timed: timing.is_some(),
+                sent,
+                timed: meta.timing.is_some(),
+                work_start: meta.work_start,
+                cpu_us: meta.cpu_us,
+                revisions: self
+                    .doc_trace
+                    .get_mut(&key)
+                    .map(|pending| {
+                        let split = pending.partition_point(|r| r[0] <= shown);
+                        pending.drain(..split).collect()
+                    })
+                    .unwrap_or_default(),
             });
         }
-        Some(descriptor)
     }
 
     /// Answers a snapshot with an error on main's host port.
@@ -3729,6 +3907,7 @@ impl Thread {
     }
 
     fn shutdown(&mut self) {
+        self.drain_frames();
         let views: Vec<View> = std::mem::take(&mut self.views).into_values().collect();
         for view in views {
             self.retire(view);

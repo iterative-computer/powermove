@@ -296,6 +296,28 @@ leaves the caller's targets untouched (the presenter keeps its last frame).
 Media caches key video sources and stills by file size and modification
 time, so a file replaced at the same path is reopened.
 
+## Reuse across frames (the interactive viewer)
+
+Two caches serve the viewer's frames of one paused time (gestures, inspector
+edits while paused); both are off unless the caller turns them on
+(`Renderer::set_draw_reuse`), and `pm-node`'s composer turns them on only around
+its own frames. Details and measurements: `perf.md`, "Draw reuse" and "Frame
+prefix".
+
+- `reuse.rs`: a layer's draws are given back from the last frame while its node,
+  its parents and enclosing groups (transitively), the composition's, open
+  composition's, and root's fields, the pass, the build's options, and its media
+  path are unchanged (node revisions since the last frame, unique ids). Only
+  solids and raster stills on today's fast path, without expressions; the plan
+  is the plan a fresh build makes.
+- `frame_prefix.rs`: the top-level pass draws from a kept copy of the target
+  after its first draws when the frame starts with the same draws (stable
+  content only: solids, stills, vector scenes, and groups and nested
+  compositions of those; stills checked by size and modification time); exact,
+  since splitting a pass and copying a float target change no pixel.
+- `tests/draw_reuse.rs` compares plans and read-back pixels with and without
+  them through seeded edit sequences and the parity corpus.
+
 ## Tests and measurements
 
 Measured on an Apple M4 Max (macOS 27), wgpu 30.0.1 on Metal, Chromium 151

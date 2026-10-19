@@ -136,6 +136,12 @@ impl<'a, 'd> Scope<'a, 'd> {
         self.ev.layer_index(self.comp)
     }
 
+    /// The composition's layer index (ids to positions, duplicated ids),
+    /// shared with the lookups of this scope.
+    pub fn layer_index(&mut self) -> Arc<LayerIndex> {
+        self.index()
+    }
+
     /// `parentOf(L)` (`anim.ts`): the first layer whose `id` is `L.parent`.
     /// Throws when some element of `comp.layers` is `null` (building the
     /// index reads every layer's `id`).
