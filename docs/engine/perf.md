@@ -1493,7 +1493,10 @@ pass (two opt-in benchmark skips); the earlier kernel/agent selection remains
 passing. Renderer typecheck has zero errors and the existing IconCropper
 warning, and the three changed libraries pass clippy with warnings denied.
 
-One combined Electron expression/startup confirmation attempt is queued under
-the shared lock, bounded to 20 minutes of acquisition wait. Its result is
-recorded below after the attempt completes; Node's pass does not infer an
-Electron or startup pass.
+The single combined Electron expression/startup confirmation attempt could
+not acquire the shared lock within its 20-minute window. Its own waiting
+wrapper was stopped; no Electron run started, and no other lane or lock was
+changed. Final-code Electron expression and five-pair startup confirmation are
+pending for the orchestrator's measurement window. Node's pass does not infer
+an Electron or startup pass. The worktree's `engine/target` was removed after
+validation; rebuilt addons and the release module remain staged outside Git.
