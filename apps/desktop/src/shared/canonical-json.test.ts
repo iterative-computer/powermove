@@ -58,6 +58,23 @@ describe('canonicalStringify', () => {
     expect(canonicalHash(value)).toBe(sha256Hex(new TextEncoder().encode('{"a":"é😀","b":[1,2]}')));
     expect(() => canonicalHash(undefined)).toThrow(TypeError);
   });
+
+  it('hashes in pieces exactly what the whole serialization hashes', () => {
+    // The streaming hash (no whole-document string) must equal the hash of
+    // canonicalStringify for every value shape, across piece boundaries.
+    const odd = { toJSON: (key: string) => ({ key, n: new Number(3) }) };
+    const big = Array.from({ length: 4000 }, (_, i) => ({
+      id: `L${i}`, t: i / 30, v: i % 7 ? i * 1.5 : -0, nan: NaN, skip: undefined, fn: () => 1,
+      text: i % 3 ? '· — “é😀”' : 'lone \ud800 end', list: [undefined, null, Infinity, () => 2, Symbol('s')], nested: { b: 1, a: [odd] }
+    }));
+    for (const value of [big, { z: big, a: 'x'.repeat(70_000), m: '😀'.repeat(40_000) }, [1, 'two', null, true], 'top', 12, null, odd, new String('boxed')]) {
+      expect(canonicalHash(value)).toBe(sha256Hex(new TextEncoder().encode(canonicalStringify(value)!)));
+    }
+    const cycle: any = { a: 1 }; cycle.self = cycle;
+    expect(() => canonicalHash(cycle)).toThrow(TypeError);
+    expect(() => canonicalHash({ n: 1n })).toThrow(TypeError);
+    expect(() => canonicalHash(() => 1)).toThrow(TypeError);
+  });
 });
 
 describe('canonicalProject', () => {
