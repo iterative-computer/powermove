@@ -344,3 +344,51 @@ fn hot_face_family_aliases_and_collection_keys_are_bounded() {
     assert_eq!(cache.engine.families().count(), 0);
     assert_bounded(&cache);
 }
+
+/// A character no face covers keeps its place and draws `.notdef` (glyph 0
+/// of the primary face), as level 1 and today's engine do; the rest of the
+/// text lays out as it would with the character covered. The layout is
+/// cached like any other.
+#[test]
+fn uncovered_characters_keep_their_place_as_notdef() {
+    let mut fonts = Fonts::new();
+    fonts.add("Sans", 400, "sans", FontBytes::new(font(400, 500, 400)), 0);
+    let mut measure = CompatMeasure::new(fonts);
+    let glyphs = |layout: &Level2Layout| -> Vec<(u32, usize, f64)> {
+        layout
+            .runs
+            .iter()
+            .flat_map(|r| {
+                r.glyphs
+                    .iter()
+                    .zip(&r.sources)
+                    .map(|(g, s)| (u32::from(g.id), *s, g.x))
+            })
+            .collect()
+    };
+    let covered = measure
+        .level2(&content("abxcd", "Sans", 400.0), &[])
+        .unwrap()
+        .layout;
+    let d = content("ab\u{e9}cd", "Sans", 400.0);
+    let layout = measure.level2(&d, &[]).expect("drawn, not refused").layout;
+    assert_eq!(layout.missing_glyphs, 1);
+    let (ours, theirs) = (glyphs(&layout), glyphs(&covered));
+    assert_eq!(ours.len(), 5);
+    for (i, (g, want)) in ours.iter().zip(&theirs).enumerate() {
+        assert_eq!(g.1, want.1, "source {i}");
+        assert_eq!(g.0 == 0, i == 2, "glyph {i}: {g:?}");
+        if i != 2 {
+            assert_eq!(g.0, want.0, "glyph {i}");
+        }
+    }
+    assert_eq!(layout.units.characters.len(), 5);
+    assert_eq!(layout.units.characters[2].text, "\u{e9}");
+    assert_eq!(layout.lines.len(), 1);
+    assert!(layout.width > 0.0);
+    let before = measure.level2_cache_stats();
+    assert_eq!(measure.level2(&d, &[]).unwrap().layout, layout);
+    let after = measure.level2_cache_stats();
+    assert_eq!(after.layouts, before.layouts, "the .notdef layout is cached");
+    assert_eq!(after.layout_hits, before.layout_hits + 1);
+}

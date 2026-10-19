@@ -422,26 +422,26 @@ impl Level2Cache {
         }
         let layout = self.engine.layout_styled(d, spans);
         self.counters.layouts += 1;
-        if layout.missing_glyphs == 0 {
-            let mut entry = LayoutEntry {
-                signature,
-                content: d.clone(),
-                spans: spans.to_vec(),
-                layout: layout.clone(),
-                bytes: 0,
-            };
-            entry.bytes = layout_entry_bytes(&entry);
-            if entry.bytes <= LAYOUT_LIMIT_BYTES {
-                self.layout_bytes += entry.bytes;
-                self.layouts.push_back(entry);
-                while self.layouts.len() > LAYOUT_LIMIT_ENTRIES
-                    || self.layout_bytes > LAYOUT_LIMIT_BYTES
-                {
-                    let Some(old) = self.layouts.pop_front() else {
-                        break;
-                    };
-                    self.layout_bytes -= old.bytes;
-                }
+        // The layout is a function of its key alone: a face added later
+        // changes the signature, so `.notdef` layouts are cached too.
+        let mut entry = LayoutEntry {
+            signature,
+            content: d.clone(),
+            spans: spans.to_vec(),
+            layout: layout.clone(),
+            bytes: 0,
+        };
+        entry.bytes = layout_entry_bytes(&entry);
+        if entry.bytes <= LAYOUT_LIMIT_BYTES {
+            self.layout_bytes += entry.bytes;
+            self.layouts.push_back(entry);
+            while self.layouts.len() > LAYOUT_LIMIT_ENTRIES
+                || self.layout_bytes > LAYOUT_LIMIT_BYTES
+            {
+                let Some(old) = self.layouts.pop_front() else {
+                    break;
+                };
+                self.layout_bytes -= old.bytes;
             }
         }
         layout
@@ -528,11 +528,12 @@ pub(super) fn shape<R: FontResolver>(
         fallback,
     };
     cache.activate(&signature);
+    // A cluster no registered face covers keeps its place in the layout and
+    // draws the primary face's `.notdef`, as level 1 and today's engine do
+    // (Blink's `FirstCandidateForNotdef`). Fonts that are still loading are
+    // the host's to report (`ServedFonts::incomplete`), not the layout's.
     let layout = cache.layout(signature, d, spans);
     cache.trim();
-    if layout.missing_glyphs > 0 {
-        return Err("level 2 text whose fonts are not loaded".into());
-    }
     let faces = faces.into_iter().map(|(k, (font, _))| (k, font)).collect();
     Ok(crate::text_level2::Shaped { layout, faces })
 }
