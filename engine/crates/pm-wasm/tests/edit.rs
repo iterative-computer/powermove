@@ -358,24 +358,23 @@ fn camera_project(looped: bool) -> String {
 }
 
 #[test]
-fn a_camera_reparented_into_a_space_that_moves_with_it_is_left_to_the_legacy_edit() {
+fn a_camera_reparented_into_a_space_that_moves_with_it_is_answered_natively() {
     let request = r#"{"op":"edit.reparent","comp":"C1","layer":0,"parent":2,"t":0.5}"#;
-    // S sits in G, which hangs from the camera: the legacy aim reads the
-    // camera's keys through a stale cache there (`pm_edit::LEGACY_ONLY`).
-    let mut e = Engine::new();
-    e.resync(camera_project(true).as_bytes(), 1).unwrap();
-    let reply = q(&mut e, request);
-    assert_eq!(member(&reply, "legacy"), &Value::Bool(true));
-    assert_eq!(e.revision(), 1);
-    // The same reparent without the loop is answered.
-    let mut e = Engine::new();
-    e.resync(camera_project(false).as_bytes(), 1).unwrap();
-    let reply = ok(&mut e, request);
-    assert!(
-        !ops::ops_from_value(member(&reply, "ops"))
-            .unwrap()
-            .is_empty()
-    );
+    // S sits in G, which hangs from the camera: the kernel reads the camera's
+    // keyed channels as the legacy evaluation cache has them (from before the
+    // pose write), as `preserveParentPose` does. The replay
+    // (pm-edit/tests/edit_parity.rs, `selfSpace` cases) holds the values to
+    // the legacy edit's.
+    for looped in [true, false] {
+        let mut e = Engine::new();
+        e.resync(camera_project(looped).as_bytes(), 1).unwrap();
+        let reply = ok(&mut e, request);
+        assert!(
+            !ops::ops_from_value(member(&reply, "ops"))
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
 
 #[test]

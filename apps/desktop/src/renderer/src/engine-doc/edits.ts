@@ -57,7 +57,7 @@ export interface NativeEditStats {
 }
 
 /** Reasons `align` leaves to the caller's own code (it evaluates natively, or fails by name). */
-const CALLER_REASONS: ReadonlySet<string> = new Set(['context', 'host', 'fonts', 'ink', 'legacy']);
+const CALLER_REASONS: ReadonlySet<string> = new Set(['context', 'host', 'fonts', 'ink']);
 
 /** Section 25's evaluation tolerance, with the `atan2` branch cut allowed. */
 const close = (a: number, b: number) => Math.abs(a - b) <= 1e-9 + 1e-9 * Math.abs(b) || atan2BranchCut(a, b);
@@ -308,7 +308,6 @@ export class NativeEdits {
     if (reply?.host) return { fallback: 'host' };
     if (reply?.fonts) return { fallback: 'fonts' };
     if (reply?.ink) return { fallback: 'ink' };
-    if (reply?.legacy) return { fallback: 'legacy' };
     this.onFailure?.('pm-wasm-error', `pm-wasm could not answer edit.${name}: ${reply?.error ?? 'unknown'}`);
     return { fallback: `error:${reply?.error ?? 'unknown'}` };
   }
@@ -395,7 +394,8 @@ export class NativeEdits {
    * The alignment strip's `set_property` commands for aligning `layers`
    * (`mode`: left, hcenter, right, top, vcenter, bottom) to the composition
    * frame at `time`: pm-edit's `align` kernel when every layer is in the open
-   * composition, `legacy` otherwise (and compared with it in dual modes).
+   * composition, the caller's own code (`legacy`, its own extension code) otherwise
+   * (and compared with it in dual modes).
    */
   align<T>(layers: any[], mode: string, time: number, legacy: () => T): T {
     // What the kernel does not cover is answered by the caller's own code

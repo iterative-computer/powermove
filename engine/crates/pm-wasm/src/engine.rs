@@ -169,8 +169,6 @@ pub(crate) enum Unanswered {
     /// subsets without outlines (docs/engine/pm-eval-layers.md, allowed
     /// difference 6).
     Ink,
-    /// An edit kernel left the edit to the legacy code (`pm_edit::LEGACY_ONLY`).
-    Legacy,
 }
 
 /// Measures through [`CompatMeasure`] and notes whether anything asked for
@@ -623,10 +621,6 @@ impl Engine {
             Err(Unanswered::Ink) => {
                 self.stats.unanswered += 1;
                 out.raw("{\"ink\":true}");
-            }
-            Err(Unanswered::Legacy) => {
-                self.stats.unanswered += 1;
-                out.raw("{\"legacy\":true}");
             }
         }
         out
