@@ -52,8 +52,13 @@ describe('detached input reads through real pm-wasm', () => {
   });
 
   it('matches fresh serialization after 1,200 deterministic arbitrary-reference mutations', async () => {
-    const { PM, doc, comp, cache } = await fixture();
-    const address = cache.address(comp), wasm=doc.wasm!;
+    const { PM, doc, comp } = await fixture();
+    const wasm=doc.wasm!;
+    // Keep each operation's last answer across mutations, so this also tests
+    // revalidation before a memoized answer can be returned.
+    const scopes = ['ev','active','worldMatrix'].map(op => {
+      const cache=new DetachedScopes(); return {op,cache,address:cache.address(comp)};
+    });
     let seed = 0x71f00d;
     const rand = () => { seed ^= seed<<13; seed ^= seed>>>17; seed ^= seed<<5; return (seed>>>0)/4294967296; };
     const int = (n:number) => Math.floor(rand()*n);
@@ -82,7 +87,7 @@ describe('detached input reads through real pm-wasm', () => {
         case 18: comp.w=int(4000)+1; break;
         case 19: L.p['unread'+int(10)]=PM.P(int(100)); break;
       }
-      for (const op of ['ev','active','worldMatrix']) {
+      for (const {op,cache,address} of scopes) {
         const request={op,comp:address,open:PM.proj.compId,layer:0,key:'opacity',t:0.5};
         const got=body(cache.query(address,request,wasm,doc.barrier!.revision));
         const fresh=body(wasm.query({...request,comp:'@detached',compJson:copy(comp)}));

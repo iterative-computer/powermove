@@ -501,3 +501,148 @@ both failed before yielding valid paired data. The corrected run is the table
 above, preserved in the evidence file together with the failed first zero-frame
 observation. No production behavior or test threshold was changed to correct
 those instrumentation errors.
+
+## fixups2 round 2: startup and a common playback clock
+
+The preload starts the editor's wasm fetch/compile while the renderer module
+graph loads. The renderer privately consumes that promise and the launch flag;
+`nativeEngine.enabledSync()` remains live for all other callers. A failed early
+load can retry normally. This is a small edit to the bridge-owned preload hook;
+no CSP or extension activation contract changed. Speculative font prewarming now
+waits for a paint opportunity and idle time. Visible queries still obtain their
+exact fonts on demand. Startup stats separate module wait, instantiation and
+mirror sync; install/connection/first-descriptor marks and separate V8 profiles
+make their timing inspectable.
+
+The viewer resize debounce restarted its 150 ms deadline whenever an update
+repeated the same pending size. The pending size now keeps its original deadline;
+a real new size restarts it. Moving to another window cancels the old window's
+timer and starts a new deadline there. Both regressions pass; Viewer is version
+1.2.2 so forks receive update notices. **This did not fix the observed HD spike:**
+the runtime trace establishes a different cause below. No gamut/EDR freeze was
+retained, and no production display semantics changed to stabilize the test.
+
+### Detached scope validation: large improvement, strict gate still fails
+
+The locked five-sample scope run uses the same 100-layer, 40-keyed-properties,
+five-keys/property fixture as round 1. Repeated root wrappers measure median
+45.25 ns native versus 46.08 ns today. Genuinely detached repeats measure median
+10.07 µs native versus 40.67 ns today, down from round 1's 19.57 ms. The native
+samples are 11.564, 10.633, 10.066, 9.821 and 9.828 µs. No full scope crosses the
+boundary on a stable repeat, and correctness tests assert no wasm query at all.
+This removes the frame-scale serialization cost but remains roughly 247 times
+the warmed legacy memo. The strict detached gate is not met. Structural checks
+must visit layer identities/order/parents, and exact read validation must inspect
+its inputs even when an object's identity did not change. No immutable/epoch
+contract was imposed on existing callers. The later serializer correctness guards
+passed unit tests but were not separately retimed after the disk stop.
+
+The real-wasm randomized test retains three independent cached operations across
+1,200 mutations and compares all 3,600 results with fresh full serialization.
+The final engine-doc plus kernel loader/install selection passes 147 tests with
+two opt-in measurement tests skipped; the strengthened mutation test was then
+rerun separately (nine detached tests pass).
+
+### Final five boot pairs: performance gate still fails
+
+The final production startup code was measured in five fresh alternating off/on
+pairs under the Electron lock. Times are launch-to-installed-UI and
+launch-to-opened-editor wall times. Every activation probe returned the exact
+native answer with zero fallbacks or named failures.
+
+| Wall time | Today p50 / max | Engine p50 / max |
+|---|---:|---:|
+| Installed UI | 1526.25 / 1636.00 ms | 1501.48 / 1528.24 ms |
+| Opened editor | 2065.01 / 2230.59 ms | 2129.16 / 2204.29 ms |
+
+| Pair | Engine minus today: UI | Engine minus today: opened editor |
+|---|---:|---:|
+| 1 | +58.72 ms | +86.96 ms |
+| 2 | -170.90 ms | +28.67 ms |
+| 3 | +164.46 ms | +150.10 ms |
+| 4 | +1.99 ms | +64.15 ms |
+| 5 | -123.87 ms | -26.30 ms |
+
+Four editor pairs regress; its p50 is 64.15 ms slower. Faster aggregate UI/maxima
+do not clear the owner's no-slower line. Other lanes' load changed substantially
+between runs; the paired results above remain failures, without a noise allowance.
+The earlier round-2 batch before preload overlap is preserved in
+`/tmp/ne-fixups2-evidence/before-preload/`; the final five pairs are `boot-r2.json`.
+Their old `openMs` field included a subsequent diagnostic page evaluation and is
+not an isolated open-action measurement. The harness now captures it immediately
+at editor-open completion, before that evaluation; no corrected five-pair rerun
+was possible after the disk stop.
+
+The early fetch takes 7.1–22.3 ms and compile 8.0–22.3 ms. The document installer
+still records a 122.1–147.0 ms module await: that interval includes the synchronous
+install chain before the promise continuation can run, not another compilation.
+Instantiation is 0.6–0.8 ms, mirror sync 3.0–3.5 ms and speculative font warmup
+0.0–0.3 ms. Module overlap alone has not closed editor-open latency.
+
+A separate profiled diagnostic (not one of the gate pairs) has isolated open
+164.93 ms today versus 169.42 ms native. The main engine reports `adapter: null`,
+zero pools and zero frames before open; afterward it has the M4 Max adapter, one
+pool and eight sent surfaces, still zero frames. Its connection is ready before
+open, but native GPU/pool initialization overlaps opening the editor. The renderer
+profile samples 396.2 ms today and 380.1 ms native: layout reads dominate both
+(88.9 / 92.9 ms `getBoundingClientRect`); native drawing initialization adds 4.2 ms
+self time. The profiles do not prove a single extra forced layout or justify
+changing canvas insertion speculatively. The editor metric is UI readiness, not
+proof of the first native image; these snapshots still have zero native frames.
+
+### HD playback: common feedback proves the display-capability transition
+
+The harness uses the same Chromium Graphics.Pipeline compositor-receive to
+DrawAndSwap presentation-feedback timeline for both canvas sinks, following S1.
+It retains every submission and flags missing/superseded/duplicate mappings.
+The windows are shown without activation entirely off every display using S1's
+existing helper, with bounds checked before and after showing. Both paths assert
+1920×1080 stage/raster size, Full resolution and adaptive quality off, with two
+seconds warmup and twelve measured seconds.
+
+| HD row | Shown / skipped | Feedback p50 / p95 / p99 / max |
+|---|---:|---:|
+| Today | 360 / 0 | 33.333 / 33.334 / 33.334 / 41.666 ms |
+| Engine | 357 / 3 | 33.333 / 41.667 / 44.848 / 125.000 ms |
+
+All 360 today and 357 native submissions match unique presentation feedback:
+zero missing, superseded or duplicate mappings, so the native tail was not
+removed by the parser's match bounds. The native row has zero render/layer
+errors, zero legacy routes and no named evaluator failure; it still fails.
+
+At page time 9670.1 ms, `MediaQueryList.refresh` changes only `colorSpace`
+(displayP3 to srgb) and `edr` (true to false). Device size remains 1920×1080,
+DPR 2, zoom 0.5, pan zero and Full resolution. No resize is pending. View sequence
+4 becomes 5, generation 2 becomes 3, and exactly three frames are generation
+drops. Raw display-query sampling observes the capability flip at 9659.7 ms.
+This reproduces and identifies the original HD mechanism; it is not a mask
+texture reallocation, size debounce, pool-budget change or DPR change. Whether
+the capability loss is physical display sleep or offscreen window reassociation
+is still unproven. First-show timing, both states and the callback stack are in
+`path-mask-playback-r2.jsonl` and the preserved `after-preload-first/` traces.
+
+The constant-generation assertion correctly failed on HD and stopped that run
+before UHD. It is now soft-but-failing so future diagnostic runs preserve every
+row. A later diagnostic records native display sleep/lock state and main-engine
+startup reports. It completed another today-HD row (360 frames, zero skips,
+feedback p95 33.334 ms, max 41.153 ms; physical display awake/unlocked), then was
+interrupted before a native row completed. Thus **UHD has no common-timeline
+result**; round 1's different-clock UHD comparison remains unresolved. The extra
+hidden-HD diagnostic also did not complete.
+
+### Validation and stop condition
+
+Targeted startup/handoff/retry/activation tests: 74 pass; viewer timer/popout
+suite: 15 pass. Web typecheck: zero errors and the existing IconCropper warning.
+Node typecheck still has the existing generated cloud-client and TS6307 errors;
+the one newly introduced optional-preload-field error was corrected. The latest
+metric-only `openMs` correction and native-display diagnostic instrumentation
+have not had a complete app rerun.
+
+The third app run was stopped with SIGINT when free disk fell below the mandatory
+40 GiB threshold (18 GiB observed). Its Electron and Playwright processes exited.
+No further app run or build was started. The first playback attempt failed before
+showing a window because the Electron evaluation context lacks `require`; it now
+loads the existing harness through `process.getBuiltinModule('module').createRequire`.
+All failed/interrupted evidence remains outside Git. There is no claim that the
+editor, steady-generation, or UHD common-clock gate passes.

@@ -521,7 +521,8 @@ with `toJSON` retain full native serialization semantics when a plain read-set
 snapshot cannot represent them; they do not route to the legacy evaluator.
 
 The real-wasm regression uses 1,200 deterministic mutations and compares 3,600
-answers with a fresh full serialization. It changes retained keyframe references,
+answers with a fresh full serialization. Each operation keeps its own last answer
+across mutations, exercising revalidation before memoized returns. It changes retained keyframe references,
 key arrays, expressions, composition settings, property identities, layer order,
 insertions/removals and parents. Separate checks cover newly discovered branch
 reads, no transmission on unchanged inputs, partial updates, changing query times,
