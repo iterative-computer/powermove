@@ -46,7 +46,9 @@ request, or an ANGLE shader request. A DOM page waits for document and complete
 extension boot, opens the session's project, then rejoins the authoritative
 remote project session before accepting tools. This discards an empty or stale
 local document restored by asynchronous tab boot, even when the project ID
-already matches. Later calls flush edits before answering. The setting-off host uses the same extension
+already matches. The worker’s seed also replaces an older boot copy (including
+recovered journal edits); a newer joined revision remains authoritative. Later
+calls flush edits before answering. The setting-off host uses the same extension
 readiness gate, so neither host exposes a partially registered panel list. Workspace
 tools invoke the production dispatcher, retaining persisted layout, workspace,
 viewport and the complete built-in/user panel registry. They do not return the

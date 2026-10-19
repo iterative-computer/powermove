@@ -1,3 +1,4 @@
+import { pinNativeDocument } from './pin-document';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import type { AgentToolRequestEvent, AgentToolResponseEvent } from '../../shared/ipc';
 import type { ShaderFallbackRequest } from '../../shared/engine-protocol';
@@ -35,7 +36,7 @@ export class LazyNativeBrowser implements NativeBrowser {
         const page = await (await this.start()).newPage();
         page.on('dialog', dialog => { void dialog.dismiss(); });
         page.on('console', event => { if (event.type() === 'error') this.log(`[native DOM] ${event.text()}`); });
-        await page.goto(new URL(this.host().url).origin, { waitUntil: 'domcontentloaded' });
+        await page.goto(`${new URL(this.host().url).origin}${project === 'powermove-home' ? '' : `?project=${encodeURIComponent(project)}`}`, { waitUntil: 'domcontentloaded' });
         await page.waitForFunction(() => !!(window as any).PM?.AgentHarness?.dispatch && !!(window as any).PM?.openProjectHere && !!(window as any).PM?.RemoteSync && !!(window as any).PM?.Kernel?.loader, { timeout: 60_000 });
         // The dispatcher is installed synchronously; extensions and the initial
         // document boot are asynchronous and can still replace the project.
@@ -46,14 +47,9 @@ export class LazyNativeBrowser implements NativeBrowser {
         });
         if (project !== 'powermove-home') {
           const snapshot = await this.host().native!.snapshot(project);
-          await page.evaluate(async doc => {
-            const PM = (window as any).PM;
-            PM.store.set(`project.${doc.id}`, { v: PM.version, proj: doc });
-            if (!await PM.openProjectHere(doc.id)) throw new Error('The pinned project could not be opened.');
-            await PM.EngineDoc?.whenReady;
-          }, snapshot.project);
+          await page.evaluate(pinNativeDocument, snapshot.project);
         }
-        await page.evaluate(async () => { const sync = (window as any).PM.RemoteSync; await sync.refresh(); await sync.flush(); });
+        await page.evaluate(async () => { await (window as any).PM.RemoteSync.flush(); });
         this.log(`[native] DOM tab pinned to ${project}`);
         return page;
       })().catch(error => { this.pages.delete(project); throw error; });
