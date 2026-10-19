@@ -1313,10 +1313,10 @@ impl Device {
         }
         if let Some(color) = self.color {
             if let Some(i) = self.rgba_index(x, y) {
-                let src = color.map(|v| v * (u32::from(aa) + 1) >> 8);
+                let src = color.map(|v| (v * (u32::from(aa) + 1)) >> 8);
                 for c in 0..4 {
                     self.data[i + c] = (src[c]
-                        + (u32::from(self.data[i + c]) * (256 - src[3]) >> 8))
+                        + ((u32::from(self.data[i + c]) * (256 - src[3])) >> 8))
                         .min(255) as u8;
                 }
             }
@@ -1368,9 +1368,8 @@ impl Device {
                 let prod = 0xffff - color[3] * scale;
                 (prod + (prod >> 8)) >> 8
             };
-            for c in 0..4 {
-                self.data[i + c] =
-                    ((color[c] * scale + u32::from(self.data[i + c]) * keep) >> 8) as u8;
+            for (d, &c) in self.data[i..i + 4].iter_mut().zip(&color) {
+                *d = ((c * scale + u32::from(*d) * keep) >> 8) as u8;
             }
         }
     }

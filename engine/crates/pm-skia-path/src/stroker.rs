@@ -69,7 +69,7 @@ fn stroke_rect(path: &Path, width: f32, miter: f32, join: LineJoin, fill: bool) 
             for _ in 0..4 {
                 i = if cw { (i + 1) % 8 } else { (i + 7) % 8 };
                 out.line_to(points[i][0], points[i][1]);
-                let corner = if cw { ((i + 1) / 2) % 4 } else { i / 2 };
+                let corner = if cw { i.div_ceil(2) % 4 } else { i / 2 };
                 i = if cw { (i + 1) % 8 } else { (i + 7) % 8 };
                 out.conic_to(
                     corners[corner][0],
@@ -549,8 +549,7 @@ impl PathStroker {
         let mut last_segment_is_line = false;
         let mut iter = path.segments();
         iter.set_auto_close(true);
-        loop {
-            let Some(segment) = iter.next() else { break };
+        while let Some(segment) = iter.next() {
             match segment {
                 PathSegment::MoveTo(p) => {
                     self.move_to(p);
