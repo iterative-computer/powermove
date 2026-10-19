@@ -57,8 +57,7 @@ pub fn has_bitmaps(face: FaceRef<'_>) -> bool {
     face.font().is_some_and(|f| !f.bitmap_strikes().is_empty())
 }
 
-/// Whether a face has color vector glyphs (`COLR` with `CPAL`), which this
-/// renderer does not draw.
+/// Whether a face has color vector glyphs (`COLR` with `CPAL`).
 pub fn has_colr(face: FaceRef<'_>) -> bool {
     face.font()
         .is_some_and(|f| f.colr().is_ok() && f.cpal().is_ok())
@@ -74,6 +73,8 @@ pub fn is_colr_glyph(face: FaceRef<'_>, glyph: u32) -> bool {
 #[derive(Default)]
 pub struct Bitmaps {
     map: HashMap<Key, Option<Arc<BitmapGlyph>>>,
+    #[cfg(feature = "cg-masks")]
+    pub(crate) colr: super::colr::Cache,
 }
 
 impl Bitmaps {
@@ -83,6 +84,8 @@ impl Bitmaps {
 
     pub fn clear(&mut self) {
         self.map.clear();
+        #[cfg(feature = "cg-masks")]
+        self.colr.clear();
     }
 
     /// The color bitmap of `glyph` for a run at `requested` device px,

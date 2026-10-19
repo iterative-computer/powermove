@@ -580,10 +580,40 @@ impl Painter<'_> {
                     continue;
                 }
                 if colr && super::bitmap::is_colr_glyph(run.face, g.id) {
-                    let what = "color vector glyphs (COLR)".to_owned();
-                    if !self.unsupported.contains(&what) {
-                        self.unsupported.push(what);
+                    #[cfg(feature = "cg-masks")]
+                    match self.bitmaps.colr.get(
+                        run.face,
+                        run.coords,
+                        g.id,
+                        dsize,
+                        skew_of(run) as f32,
+                        color,
+                    ) {
+                        Ok(Some(glyph)) => {
+                            let t = Affine::translate(((p.x + 0.125).floor(), (p.y + 0.5).floor()))
+                                * place.residual
+                                * glyph.transform;
+                            images.push(Item {
+                                bounds: t.transform_rect_bbox(Rect::new(
+                                    0.0,
+                                    0.0,
+                                    glyph.image.width as f64,
+                                    glyph.image.height as f64,
+                                )),
+                                content: ItemContent::Image {
+                                    image: glyph.image.clone(),
+                                    transform: t,
+                                },
+                                color,
+                                opacity,
+                                blur,
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => self.unsupported.push(format!("COLR: {error}")),
                     }
+                    #[cfg(not(feature = "cg-masks"))]
+                    self.unsupported.push("COLR rasterizer unavailable".into());
                     continue;
                 }
                 let Some(bare) = self.outlines.get(run.face, run.coords, g.id, plain) else {
@@ -862,7 +892,14 @@ impl Painter<'_> {
                 bounds,
             });
         }
-        out.extend(images);
+        // ARGB glyphs are drawn one by one into the canvas's RGBA8
+        // destination. Preserve rounding when out-of-base COLR layers of
+        // adjacent glyphs overlap, before the float composition pass.
+        if runs.iter().any(|r| super::bitmap::has_colr(r.face)) {
+            out.extend(flatten_color_glyphs(images, color, opacity, blur));
+        } else {
+            out.extend(images);
+        }
     }
 
     /// `strokeText` of the runs with `lineWidth = width` (layout px), round
@@ -881,6 +918,26 @@ impl Painter<'_> {
     ) {
         let place = Placement::of(m);
         if place.scale == 0.0 || width <= 0.0 {
+            return;
+        }
+        if runs.iter().any(|r| {
+            r.glyphs
+                .iter()
+                .any(|g| super::bitmap::is_colr_glyph(r.face, g.id))
+        }) {
+            for run in runs {
+                for glyph in run.glyphs {
+                    let single = Run {
+                        glyphs: std::slice::from_ref(glyph),
+                        ..*run
+                    };
+                    if super::bitmap::is_colr_glyph(run.face, glyph.id) {
+                        self.fill_text(out, &[single], origin, m, color, opacity, 0.0);
+                    } else {
+                        self.stroke_text(out, &[single], origin, m, width, color, opacity);
+                    }
+                }
+            }
             return;
         }
         #[cfg(feature = "cg-masks")]
@@ -1154,6 +1211,71 @@ impl Painter<'_> {
         out.extend(images);
         true
     }
+}
+
+/// One RGBA8 canvas draw from whole-pixel color glyph images.
+fn flatten_color_glyphs(items: Vec<Item>, color: Rgba, opacity: f64, blur: f64) -> Vec<Item> {
+    if items.is_empty() {
+        return items;
+    }
+    let translated = items.iter().all(|item| match &item.content {
+        ItemContent::Image { transform, .. } => {
+            let [a, b, c, d, x, y] = transform.as_coeffs();
+            [a, b, c, d] == [1.0, 0.0, 0.0, 1.0] && x.fract() == 0.0 && y.fract() == 0.0
+        }
+        _ => false,
+    });
+    if !translated {
+        return items;
+    }
+    let bounds = items
+        .iter()
+        .map(|i| i.bounds)
+        .reduce(|a, b| a.union(b))
+        .unwrap();
+    let left = bounds.x0.floor() as i64;
+    let top = bounds.y0.floor() as i64;
+    let width = (bounds.x1.ceil() as i64 - left) as usize;
+    let height = (bounds.y1.ceil() as i64 - top) as usize;
+    if width > 8192 || height > 8192 {
+        return items;
+    }
+    let alpha = (color[3] * opacity).clamp(0.0, 1.0) as f32;
+    let mut data = vec![0u8; width * height * 4];
+    for item in items {
+        let ItemContent::Image { image, transform } = item.content else {
+            unreachable!()
+        };
+        let [_, _, _, _, x, y] = transform.as_coeffs();
+        let x = x as i64 - left;
+        let y = y as i64 - top;
+        for sy in 0..image.height as usize {
+            for sx in 0..image.width as usize {
+                let src = &image.data[(sy * image.width as usize + sx) * 4..][..4];
+                let dst = &mut data[((sy + y as usize) * width + sx + x as usize) * 4..][..4];
+                let a = src[3] as f32 / 255.0 * alpha;
+                for c in 0..4 {
+                    dst[c] = (src[c] as f32 * alpha + dst[c] as f32 * (1.0 - a))
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+    vec![Item {
+        content: ItemContent::Image {
+            image: Arc::new(Rgba8 {
+                width: width as u32,
+                height: height as u32,
+                data,
+            }),
+            transform: Affine::translate((left as f64, top as f64)),
+        },
+        color: [1.0; 4],
+        opacity: 1.0,
+        blur,
+        bounds,
+    }]
 }
 
 /// Distance-field glyph coverage (`sdf::draw`) as one image item, each
@@ -1854,7 +1976,7 @@ mod tests {
     }
 
     #[test]
-    fn color_vector_glyphs_are_refused_not_drawn() {
+    fn color_vector_glyphs_draw_in_their_palette() {
         use skrifa::MetadataProvider;
         let Ok(arial) = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") else {
             eprintln!("Arial is not installed; skipped");
@@ -1908,9 +2030,12 @@ mod tests {
         // A plain glyph of the face draws.
         let (n, unsupported) = draw(&[glyph(b)]);
         assert!(n > 0 && unsupported.is_empty(), "{unsupported:?}");
-        // The color vector glyph is refused, not drawn as a monochrome outline.
-        let (_, unsupported) = draw(&[glyph(b), glyph(a)]);
-        assert_eq!(unsupported, vec!["color vector glyphs (COLR)".to_owned()]);
+        // A COLR glyph contributes its palette image, not the base outline.
+        let (n, unsupported) = draw(&[glyph(b), glyph(a)]);
+        #[cfg(feature = "cg-masks")]
+        assert!(n >= 2 && unsupported.is_empty(), "{unsupported:?}");
+        #[cfg(not(feature = "cg-masks"))]
+        assert!(!unsupported.is_empty());
     }
 
     /// Text drawn as paths: a square covers its pixels with all four
