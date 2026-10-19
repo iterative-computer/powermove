@@ -310,6 +310,7 @@ fn check_composition(
         out.insert(Unsupported::layer(comp_id, layer, feature));
     };
     let mut has_3d = false;
+    let groups = GroupIndex::new(layers);
     for layer in layers {
         let ty = js::layer_type(layer);
         if !DRAWN.contains(&ty.as_str()) && !NOT_VISUAL.contains(&ty.as_str()) {
@@ -437,7 +438,7 @@ fn check_composition(
         // other types keep routing. That includes 3D object, light, and
         // camera layers, whose scene pass is built at the center time and
         // whose placement inside a 3D group has no parity case.
-        let (three_d, blurred) = enclosing_groups(layers, layer);
+        let (three_d, blurred) = enclosing_groups(&groups, layer);
         if !crate::space25d::DRAWN_TYPES.contains(&ty.as_str())
             && !NOT_VISUAL.contains(&ty.as_str())
         {
@@ -574,7 +575,34 @@ fn any_member(n: &Node, name: &str, test: &dyn Fn(&Node) -> bool) -> bool {
 
 /// Whether any group enclosing `layer` (its `group` chain within `layers`)
 /// has the 3D switch, and whether any has motion blur (on or animated).
-fn enclosing_groups(layers: &[Node], layer: &Node) -> (bool, bool) {
+/// The group layers of one composition by id (the first group layer with
+/// each id, as a scan in layer order finds it): what [`enclosing_groups`]
+/// walks, built once per composition rather than scanned per layer (a
+/// 500-layer composition's check was 7.8 ms of the presenter's per-edit
+/// work; docs/engine/perf.md).
+struct GroupIndex<'a> {
+    groups: std::collections::HashMap<String, &'a Node>,
+    layers: usize,
+}
+
+impl<'a> GroupIndex<'a> {
+    fn new(layers: &'a [Node]) -> Self {
+        let mut groups = std::collections::HashMap::new();
+        for l in layers {
+            if js::layer_type(l) == "group" {
+                groups.entry(js::layer_id(l)).or_insert(l);
+            }
+        }
+        GroupIndex {
+            groups,
+            layers: layers.len(),
+        }
+    }
+}
+
+/// Whether a layer sits in a 3D group or a motion-blurred group, through
+/// any depth of group membership.
+fn enclosing_groups(index: &GroupIndex<'_>, layer: &Node) -> (bool, bool) {
     let id_of = |n: Option<&Node>| {
         n.filter(|g| node::truthy(Some(g)))
             .map(|g| node::js_value_opt(Some(g)).to_js_string().to_string_lossy())
@@ -582,12 +610,9 @@ fn enclosing_groups(layers: &[Node], layer: &Node) -> (bool, bool) {
     let (mut three_d, mut blurred) = (false, false);
     let mut next = id_of(node::member(Some(layer), "group"));
     // A cycle in group membership ends at the layer count.
-    for _ in 0..layers.len() {
+    for _ in 0..index.layers {
         let Some(id) = next else { break };
-        let Some(group) = layers
-            .iter()
-            .find(|l| js::layer_id(l) == id && js::layer_type(l) == "group")
-        else {
+        let Some(group) = index.groups.get(&id).copied() else {
             break;
         };
         three_d |= js::flag(group, "threeD");
@@ -794,5 +819,74 @@ mod tests {
         assert!(!drawn(&plain));
         plain = stamped(serde_json::json!({ "assets": {}, "color": { "linearBlending": true } }));
         assert!(!drawn(&plain));
+    }
+
+    /// The scan [`GroupIndex`] replaced: the first group layer with the id,
+    /// found again for every step of every layer.
+    fn enclosing_by_scan(layers: &[Node], layer: &Node) -> (bool, bool) {
+        let id_of = |n: Option<&Node>| {
+            n.filter(|g| node::truthy(Some(g)))
+                .map(|g| node::js_value_opt(Some(g)).to_js_string().to_string_lossy())
+        };
+        let (mut three_d, mut blurred) = (false, false);
+        let mut next = id_of(node::member(Some(layer), "group"));
+        for _ in 0..layers.len() {
+            let Some(id) = next else { break };
+            let Some(group) = layers
+                .iter()
+                .find(|l| js::layer_id(l) == id && js::layer_type(l) == "group")
+            else {
+                break;
+            };
+            three_d |= js::flag(group, "threeD");
+            let mblur = node::member(Some(group), "mblur");
+            blurred |= is_property(mblur) || node::truthy(mblur);
+            next = id_of(node::member(Some(group), "group"));
+        }
+        (three_d, blurred)
+    }
+
+    #[test]
+    fn the_group_index_walks_membership_as_the_scan_did() {
+        let layers = serde_json::json!([
+            // A non-group layer sharing a group's id comes first: skipped.
+            { "id": "g1", "type": "solid" },
+            { "id": "a", "type": "solid", "group": "g1" },
+            { "id": "g1", "type": "group", "group": "g2" },
+            { "id": "g2", "type": "group", "threeD": true },
+            // A second group with the same id: the first one wins.
+            { "id": "g2", "type": "group", "mblur": true },
+            { "id": "b", "type": "solid", "group": "g3" },
+            { "id": "g3", "type": "group", "mblur": { "v": 1, "kf": [] }, "group": "g4" },
+            // A membership cycle ends at the layer count.
+            { "id": "g4", "type": "group", "group": "g3" },
+            { "id": "c", "type": "solid", "group": "missing" },
+            { "id": "d", "type": "solid", "group": 7 },
+            { "id": 7, "type": "group", "threeD": true },
+            { "id": "e", "type": "solid", "group": "" },
+            { "id": "f", "type": "solid" }
+        ]);
+        let doc = Document::new(
+            Some(
+                pm_model::json::parse(&serde_json::json!({ "layers": layers }).to_string())
+                    .unwrap(),
+            ),
+            1,
+        );
+        let layers = node::array(node::member(doc.root(), "layers")).unwrap();
+        let index = GroupIndex::new(layers);
+        for layer in layers {
+            assert_eq!(
+                enclosing_groups(&index, layer),
+                enclosing_by_scan(layers, layer),
+                "{}",
+                js::layer_id(layer)
+            );
+        }
+        let at = |i: usize| enclosing_groups(&index, &layers[i]);
+        assert_eq!(at(1), (true, false));
+        assert_eq!(at(5), (false, true));
+        assert_eq!(at(8), (false, false));
+        assert_eq!(at(9), (true, false));
     }
 }
