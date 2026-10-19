@@ -1685,6 +1685,14 @@ decode-readiness test.
 
 ## A7/A8: prepared loop histories and edit-to-play (2026-10-18)
 
+> **Reading order.** The subsections from here through "A8 round 2" are the
+> historical record of rounds 1 and 2. Their statements that A8 is still a
+> blocker, that late voices omit a counted prefix, and that validation is
+> incomplete are superseded: round 3 made every ordinary start complete and
+> simultaneous, and round 4 (at the end of this section) qualifies it on
+> distinct voices and closes the review's follow-ups. Current behavior and
+> evidence are in "A8 round 3" and "A8 round 4".
+
 A7 keeps the loop/work-area history when Play consumes the playhead's
 prepared start. During playback the producer replenishes one prepared voice
 between ring fills. A forward wrap installs that start's ready histories;
@@ -1761,7 +1769,7 @@ PM_AUDIO_START_WAIT_MS=0 PM_AUDIO_LOOP_SECONDS=0 $L nice -n 15 bun \
   /tmp/pm-audio-start.wav /tmp/pm-audio-a8-immediate.json 30
 ```
 
-### Paired app latency: delivered and remaining
+### Paired app latency: delivered and remaining (historical, round 1–2)
 
 The final speaker captures used a 48 kHz device, 256-frame native callbacks,
 15.625 ms native device/stream latency, and WebAudio `baseLatency` 5.333 ms.
@@ -1803,7 +1811,7 @@ a same-device pass. Both paths recorded zero ring underruns for their 60 s
 loop windows; native also recorded zero decode starvation and device
 overloads. A repeat with consistent output metadata is reported separately.
 
-### A7 real-device loop gate and repeated stressed latency
+### A7 real-device loop gate and repeated stressed latency (historical, round 1–2)
 
 The final plain capture and the repeated stressed capture each played
 sixteen 1.5x voices over [4 s, 6 s) for 60 s: **zero loop-window ring
@@ -1823,7 +1831,7 @@ so this row also misses the brief's strict every-number requirement. It is
 not rounded into a pass. Combined with the cold-start rows above, A8 remains
 open despite the improvement for already prepared static level edits.
 
-### Final Rust validation and qualification
+### Final Rust validation and qualification (historical, round 1–2)
 
 The final binary passed **30/30 plain and 30/30 stressed playback suites**,
 35 tests each: 2,100 executions, zero failures and none ignored. Stress is
@@ -1858,7 +1866,7 @@ setting for test/addon links. The normal production check uses the default
 release configuration; no successful thin-LTO test link is claimed. The
 30-iteration reproduction commands in the A4/A6 sections still apply.
 
-### A8 round 2: parallel preparation and measured late joins
+### A8 round 2: parallel preparation and measured late joins (historical, round 1–2)
 
 The serial cold path was CPU-bound. In an opt-in timing capture of sixteen
 stretched voices at 48 kHz, the eleven actual speed changes (the first of
@@ -1946,7 +1954,7 @@ PCM comparisons and underrun assertions remain unchanged. Completed tasks
 also pin their history allocation with a strong reference until accepted,
 preventing a recycled allocation address from accepting obsolete work.
 
-#### Latest completed paired captures
+#### Latest completed paired captures (historical, round 1–2)
 
 Thirty starts per engine, sixteen stretched voices, 48 kHz, 256-frame
 callbacks. Native status and device-clock latency agreed at 15.625 ms;
@@ -1983,7 +1991,7 @@ The plain prepared baseline did show a 5.333 ms maximum node-start spread;
 it is not assumed to be zero in every capture. Prepared native starts
 omitted no frames.
 
-#### Three paired stressed repeats and all-ready controls
+#### Three paired stressed repeats and all-ready controls (historical, round 1–2)
 
 The following completed repeats precede the source-prefetch follow-up.
 Each row contains thirty starts per engine plus a 60-second loop per
@@ -2018,7 +2026,7 @@ The all-ready control was not repeated after the source-prefetch fix. A4's
 up-to-48 ms omitted prefix in the latest speed capture remains a measured
 loss relative to today's complete start, even where first onset passes.
 
-#### Validation status: incomplete repetition gate
+#### Validation status: incomplete repetition gate (historical, round 1–2)
 
 The last full playback smoke run passed all 37 tests. Targeted checks
 passed 56 library tests (one existing ignored measurement), 11 decode
@@ -2289,8 +2297,291 @@ and the production native addon build pass. Test/addon links use the
 existing local CARGO_PROFILE_RELEASE_LTO=off workaround; no fresh default
 thin-LTO runtime link is claimed.
 
-The only additional pm-node source change in this round is the four-line
-control-batch priority guard in present/audio.rs. No render.rs change is
+The only additional pm-node source change in round 3 is the four-line
+control-batch priority guard in present/audio.rs. Over the whole branch,
+`pm-node/src/present/audio.rs` changes in three commits, 31 insertions and
+19 deletions: 8345dba5 (SetLoop/Seek/Play as one ordered command batch),
+21fe9c6c (the `set_standard_evaluator` opt-in) and d2ccfadb (the start
+priority guard). Round 4 changes nothing in pm-node. No render.rs change is
 needed. The capture/repetition manifest verifies unchanged native addons
 and playback executable throughout the final campaign. Raw evidence stays
 outside the repository.
+
+### A8 round 4: distinct voices and review follow-ups (2026-10-18)
+
+The round-3 qualification used sixteen bit-identical voices, the best case
+for the shared immutable head: one representative job served all sixteen.
+Round 4 qualifies starts where no voice can share a head, and fixes the
+review's correctness follow-ups. Commits: e92a267e (engine), 30b16308
+(playback tests), ad3baecb (harness), 943b81fd, 987ef700 and fae25da8
+(test synchronization and the first-buffer check). No pm-node, protocol or
+render.rs change.
+
+**Changes.**
+
+- *Distinct-voice harness mode.* `PM_AUDIO_START_DISTINCT=trim` trims voice
+  *i* by *i* × 61.3 ms, so every voice has its own stretched signal.
+  Native samples must report `prefillReadyUs` 0 (no shared head) in
+  addition to the existing completeness assertions. Reproduce with the
+  commands above plus `PM_AUDIO_START_DISTINCT=trim`.
+- *Buffered start lead.* A start's own job now renders 1,024 frames
+  (rate-scaled, a whole number of ring chunks) of the voice's continuous
+  vocoder output before reporting ready, kept in the history's output
+  buffer. Without it, sixteen distinct voices whose second vocoder step fell
+  inside the first 512 frames (for example 2 s at 1.6x) made the producer
+  run sixteen vocoder steps serially between the first and second ring
+  chunk: about 4 ms with only one 256-frame chunk queued. The lead is the
+  same deterministic stream, so PCM is unchanged; the existing bit-exact
+  comparisons run through it.
+- *Per-voice A3 safety net.* When the A3 bound fires, only voices whose own
+  first-chunk input is still missing are marked late. A healthy voice whose
+  CPU job is still queued stays on its live history, which the ordinary
+  render primes by the canonical pre-roll: complete from its first sample.
+- *Bounded wait at an exhausted shared head.* Jobs carry a claim. When a
+  shared head ends before a voice's independent history, the producer claims
+  every such history no worker has started and primes it itself from the
+  head's original start (`prepare_join`), bit exact. Only a history a worker
+  is already running is awaited, so the wait is bounded by running work, not
+  by a saturated pool's queue. Paused synchronous preparation uses the same
+  claim, so no history is primed twice.
+- *Producer publication times.* `StartTiming.publications` records the
+  cumulative frames and host time of the run's first 16 ring pushes, taken
+  by the producer after each push. The headless check now waits for the
+  buffer and reads the producer's own publication time, so a descheduled
+  observer no longer decides the result. Prepared starts (no vocoder work
+  after Play) must publish 512 frames within one callback by that clock.
+  Cold starts report it per start; see the repeated suites below for why
+  it is not asserted, and the decision list.
+
+**New regressions.** The first three fail with their fix removed (checked
+by mutation); the map and distinct-voice tests guard existing behavior:
+`the_a3_safety_net_omits_only_voices_whose_own_input_is_missing` (a
+genuinely undecoded source beside a shared head and a CPU-pending healthy
+voice; first 8,192 frames bit exact against the mix without the late voice),
+`an_exhausted_head_never_waits_for_an_unstarted_history` (two unstarted
+histories claimed, the running one awaited, 8,192 frames past the head bit
+exact), `a_start_job_buffers_its_opening_output` (the lead is read with
+panicking map/read callbacks at three targets),
+`compiled_constant_maps_match_through_precomps_and_embedded_video` (one- and
+two-level linear-parent precompositions and a video's embedded audio; every
+`Point` field and map point bit-identical to the full evaluator), and the
+playback tests `edit_then_play_reuses_sixteen_distinct_stretched_voices`
+and `cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous`
+(sixteen voices at the target, zero spread, omission, A3 use and program
+underruns, no shared head, and all 8,192 stereo frames equal to the sum of
+per-voice offline renders).
+
+#### Paired qualification, round 4 revision
+
+Same method as round 3: thirty starts per engine per row, scheduled device
+presentation (no acoustic loopback), hidden isolated apps under
+`pm-electron-lock`, four busy-loop processes for stress. Revision
+ad3baecb; the playback executable and both addons were hashed
+before and after the campaign; engine source and addons are unchanged
+through fae25da8. Every native sample used 48 kHz, 64-frame
+callbacks and 15.625 ms device latency; today's base latency was 5.333 ms and
+output latency 24 ms.
+
+Identical voices (round-3 project, re-measured on this revision):
+
+| Case | Today p50/p95/max (ms) | Native p50/p95/max (ms) | Raw misses |
+| --- | ---: | ---: | --- |
+| Prepared level edit, plain | 30.429/32.720/32.825 | 19.875/20.563/20.698 | None |
+| Speed edit, plain | 30.334/31.737/32.424 | 23.932/24.863/24.933 | None |
+| Unprepared seek/edit, plain | 30.020/32.520/32.624 | 23.817/24.605/25.091 | None |
+| Prepared level edit, stress 1 | 29.234/31.634/32.434 | 19.844/20.446/20.613 | None |
+| Prepared level edit, stress 2 | 29.933/32.536/32.649 | 19.645/20.501/20.577 | None |
+| Prepared level edit, stress 3 | 30.634/32.126/32.231 | 19.817/20.758/20.789 | None |
+| Speed edit, stressed | 29.936/32.336/32.436 | 24.171/25.010/25.246 | None |
+| Unprepared seek/edit, stressed | 29.432/32.509/32.616 | 24.007/25.055/25.449 | None |
+| All-ready speed control | 29.318/32.329/32.616 | 24.072/24.883/24.899 | None |
+| All-ready seek control | 30.229/32.033/32.428 | 23.737/25.076/25.280 | None |
+
+Sixteen distinct voices (no shared head in any native sample):
+
+| Case | Today p50/p95/max (ms) | Native p50/p95/max (ms) | Raw misses |
+| --- | ---: | ---: | --- |
+| Prepared level edit, plain | 29.418/32.750/32.814 | 19.726/20.568/20.583 | None |
+| Speed edit, plain | 30.516/32.406/32.606 | 27.531/28.173/28.833 | None |
+| Unprepared seek/edit, plain | 30.017/32.416/32.614 | 27.509/29.437/29.934 | None |
+| Speed edit, stress 1 | 30.532/32.337/32.628 | 27.342/27.813/27.826 | None |
+| Speed edit, stress 2 | 29.837/31.734/32.137 | 27.468/27.903/27.932 | None |
+| Speed edit, stress 3 | 30.336/32.237/32.737 | 27.053/28.945/29.555 | None |
+| Unprepared seek/edit, stress 1 | 29.524/32.396/32.610 | 27.465/29.433/30.578 | None |
+| Unprepared seek/edit, stress 2 | 29.424/31.928/32.520 | 27.479/29.221/29.292 | None |
+| Unprepared seek/edit, stress 3 | 30.511/32.418/32.430 | 27.553/28.095/28.252 | None |
+| Prepared level edit, stressed, 60 s loop | 30.836/32.622/32.624 | 19.787/20.671/20.699 | None |
+
+All twenty paired rows meet today at p50, p95 and max.
+Identical rows: 300 native starts, 300 with a shared head.
+Distinct rows: 300 native starts, 0 with a shared head. In
+all 600 native starts: voices at the target sample
+[16], total omitted prefix 0 frames,
+maximum start spread 0 frames, A3 safety-net
+uses 0, program underruns 0,
+callback sizes [64] frames.
+
+The distinct project is the costly case: every voice runs the canonical
+pre-roll from its grid start (11,520 samples plus up to one 16,384-sample
+grid step). The margin to today is smaller than with identical voices but
+positive at every percentile; the worst distinct maximum is
+30.578 ms against today's
+32.137–32.814 ms
+range of maxima.
+
+| 60 s loop window [4 s, 6 s) | Today underruns | Native underruns | Native starved renders | Native overloads |
+| --- | ---: | ---: | ---: | ---: |
+| final-plain | 0 | 0 | 0 | 0 |
+| final-stress-1 | 0 | 0 | 0 | 0 |
+| final-stress-2 | 0 | 0 | 0 | 0 |
+| final-stress-3 | 0 | 0 | 0 | 0 |
+| distinct-plain | 0 | 0 | 0 | 0 |
+| distinct-loop-stress | 2 | 0 | 0 | 0 |
+
+Today's WebAudio path counted 2
+underrun events in the stressed distinct loop window; native counted none in
+any window. This is reported as measured, not as a claim about today's
+audible behavior.
+
+Opt-in profiles (native only, twelve starts each, `PM_AUDIO_PROFILE=1`;
+speed means exclude the first, unchanged-speed sample; summed worker scopes
+overlap the producer wait):
+
+| Mean ms | Distinct speed edit (n=11) | Distinct unprepared seek/edit (n=12) |
+| --- | ---: | ---: |
+| Producer wait for complete first output | 6.688 | 3.998 |
+| Summed worker DSP | 57.270 | 30.840 |
+|   initialization | 4.609 | 2.502 |
+|   output seek | 5.953 | 3.128 |
+|   processing | 46.690 | 25.201 |
+| Summed map evaluation | 0.004 | 0.046 |
+| Summed source reads | 0.405 | 0.208 |
+| First mix | 0.044 | 0.041 |
+
+Sixteen distinct jobs take about two job lengths: a headless probe with 14,
+16 and 18 workers measured the same ~7 ms from Play to all-ready. That is
+consistent with jobs beyond the twelve performance cores queueing or running
+on the slower efficiency cores, but per-core placement was not profiled. The
+pool size is unchanged.
+
+#### Repeated suites, round 4 revision
+
+The first campaign on ad3baecb failed its first stressed suite:
+`a_decode_wait_below_the_bound_is_bit_exact` asserted
+`blocked_decoders() > 0` at the turn its first starved render was counted,
+but the render counts the miss before the decode worker it queued reaches
+the test gate. 943b81fd waits for the worker to reach the gate (wall time
+only; no device callback runs, so no buffered device frames are spent) and
+changes nothing else; that failed log is kept beside the campaign. The
+engine source and addons of 943b81fd are those of the paired captures.
+
+On 943b81fd the first plain suite then failed the producer-timed bound
+for a cold identical start (published 10.823 ms; applied-to-ready 9.611 ms
+against about 3.7 ms unloaded) while the distinct cold test ran beside it on
+the same pool and other lanes' foreground work kept the load average near
+11. A locked six-suite check with the four sixteen-voice tests serialized
+still had one cold identical start at 11.146 ms (ready-to-published
+4.192 ms, the producer descheduled; load average about 13, other lanes'
+node, dsymutil and corpus processes at niceness 0). 987ef700 therefore
+serializes the four sixteen-voice tests (one shared pool) and asserts the
+producer-timed bound only for prepared starts. Those logs are kept with the
+campaign.
+
+On 987ef700, after twelve plain and eleven stressed suites passed, stressed
+suite 12 counted one ring underrun in the loaded time-mapped comparison
+(`a remapped soundtrack: device ring underruns`, a 40 ms real-time device;
+load average about 15). That assertion failed under machine load in rounds
+1 and 2 too, but round 4 doubled the sixteen-voice tests whose bursts of
+user-interactive pool jobs compete with another test's producer in the same
+process, which no app does during its own playback. fae25da8 makes the
+start tests hold a write lock that the two time-mapped comparisons share;
+no assertion, patience or comparison changed.
+
+On fae25da8 the frozen executable (40 tests: the 38 of round 3 plus the two
+distinct tests) passed **30/30 plain and 30/30 stressed
+suites** (2,400 executions) under `pm-electron-lock`,
+with `PM_AUDIO_PLAYBACK_STRESS=1` for stress, `nice -n 15` and four test
+threads. The mapped comparisons, patience, zero-underrun assertions and
+bit-exact checks are unchanged.
+
+Outside the lock, while another lane's Electron app and builds ran (load
+average about 15), 5 of 10 stressed suites of the ad3baecb executable failed:
+seven sixteen-voice starts published after the bound (11.301–25.475 ms; the
+prepared ones too), and the existing real-time mapped comparisons counted one
+or two ring underruns, and one forced-miss test missed its miss. Six stressed
+suites of 943b81fd under the lock right afterwards all passed. The
+producer-timed bound is therefore a real-time check: it holds on this
+machine without a concurrent app, and fails, like the existing real-time
+tests, when the test process (niceness 15) competes with that much
+foreground load.
+
+First 512 frames published, producer timestamps (p50/p95/max ms over all
+starts in the sixty suites; the observer column is the latest elapsed time
+at which the test thread saw the buffer):
+
+| Suite, start | Starts | Published p50/p95/max | Observed max | Published over 10.667 ms |
+| --- | ---: | ---: | ---: | ---: |
+| plain, prepared level edit, identical | 120 | 0.373/2.383/4.443 | 16.283 | 0 |
+| plain, cold seek/speed edit, identical | 120 | 4.186/6.489/7.986 | 20.500 | 0 |
+| plain, prepared level edit, distinct | 120 | 0.267/0.381/0.543 | 5.471 | 0 |
+| plain, cold seek/speed edit, distinct | 120 | 8.350/16.384/23.131 | 23.143 | 35 |
+| stress, prepared level edit, identical | 120 | 0.367/2.424/5.320 | 15.411 | 0 |
+| stress, cold seek/speed edit, identical | 120 | 4.195/7.193/8.026 | 21.276 | 0 |
+| stress, prepared level edit, distinct | 120 | 0.269/0.494/0.610 | 3.718 | 0 |
+| stress, cold seek/speed edit, distinct | 120 | 8.829/22.698/36.952 | 39.085 | 40 |
+
+Prepared starts are asserted against the one-callback bound on the
+producer's timestamp. Cold starts (identical and distinct) are reported
+only: their latency is the paired app gate above. The round-3 observer readings above 10.667 ms (up to
+14.046 ms) are consistent with observer delay: in these suites the observer
+saw buffers up to the observed maxima above while the producer had published
+them earlier.
+
+Targeted checks on this revision: 65 library tests (one existing ignored
+measurement), 11 decode-readiness, 14 mixer, 6 stretch, 5 sources, 2
+layouts, 1 legacy-parity, 3 resampler and 37 presenter tests pass; strict
+release clippy for pm-audio/pm-node all targets, formatting, the
+default-profile pm-node check and the production addon build pass (test and
+addon links use the existing local `CARGO_PROFILE_RELEASE_LTO=off`
+workaround).
+
+#### Remaining and orchestrator decisions
+
+- **64-frame native I/O request (decision).** Round 3 reversed the earlier
+  256-frame parity choice. This revision re-measured it: every paired native
+  start used 64-frame callbacks and all six 60 s loop windows (four
+  identical, two distinct, four of them stressed) had zero native underruns
+  and overloads. Energy use, Bluetooth/USB/aggregate devices and loads such
+  as concurrent GPU render or video decode remain unmeasured. It needs
+  explicit approval.
+- **Headless first-buffer bound (decision).** The check now uses the
+  producer's publication time. It is enforced for prepared starts; for cold
+  starts it is reported, because on this shared machine a niceness-15 test
+  process beside other lanes' foreground work measured cold identical
+  starts at 10.823 and 11.146 ms (locked) and up to 19.592 ms (unlocked),
+  where the round-3 observer-based check would usually have passed by being
+  late itself. In the final sixty suites no cold identical start exceeded it
+  (240 starts, maximum 8.026 ms); cold distinct starts exceeded it in 75 of
+  240 (maximum 36.952 ms under stress). Enforcing it for cold starts needs a
+  quiet machine or a different bound; the orchestrator should choose.
+- **Preparation pool load.** Up to fourteen workers at user-interactive QoS
+  during edits and seeks; a continuous speed or map drag resubmits sixteen
+  jobs per edit, and Signalsmith processing between map/read callbacks runs
+  to completion after cancellation. Effect on UI and render responsiveness
+  (D6 layer drag, S1 pan) is unmeasured.
+- **Trim drags on stretched clips.** The map key now includes span and on
+  states, so a live trim drag or on-toggle replaces that voice's history
+  and costs a fresh canonical pre-roll on the producer per edit (where the
+  base kept the run). Unmeasured.
+- **Cross-platform priority.** Foreground QoS elevation is macOS-only. Linux
+  workers stay at niceness 15 (an unprivileged thread cannot lower it again
+  per job) and Windows has no priority handling. Start latency there is
+  unmeasured (plan section 23).
+- **Slow-history wait.** The producer no longer waits for unstarted jobs at
+  an exhausted head, but a history a worker is running is still awaited
+  without its own deadline. Its length is that job's CPU work (reads are
+  nonblocking), so it is bounded in practice, not by a timer. No test runs a
+  descheduled worker.
+
+Raw captures, profiles, suite logs and the artifact manifest are outside Git
+in `/tmp/ne-w5/audioa7-r4`.
