@@ -552,6 +552,19 @@ describe('compatibility answers during playback', () => {
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 
+  it('warms reverse playback from the paused need rather than a stale clock position', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked, state } = rig(false);
+    state.rate = -1; state.time = 100 * frame;
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, async () => {});
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(20 * frame)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => (20 - i) * frame));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
   it('retires a paused warm-up whose slow preparations outlive its deadline', async () => {
     vi.useFakeTimers();
     const { t, session, asked } = rig(false);
