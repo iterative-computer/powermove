@@ -244,7 +244,7 @@ impl Ring {
         // still use its own clock as an upper bound on publication.
         self.head.store(head + 1, Ordering::Release);
         slot.published_after_us
-            .store(host_now_us(), Ordering::Release);
+            .store(host_now_us().saturating_add(1), Ordering::Release);
         true
     }
 }
@@ -291,7 +291,8 @@ impl Consumer {
     }
 
     /// Upper bounds on when at least `frames` of the current epoch were
-    /// queued. The crossing chunk is read under the same acquired `head`
+    /// queued. Clocks round up by one microsecond so truncation cannot turn
+    /// a sub-microsecond deadline miss into a pass. The crossing chunk is read under the same acquired `head`
     /// snapshot as its tag and PCM. Either side may be descheduled after the
     /// release; the earlier clock still bounds publication from above.
     pub fn publication_for_queued_frames(&self, frames: usize) -> Option<Publication> {
@@ -323,7 +324,7 @@ impl Consumer {
             frames += (tag.frames as usize).saturating_sub(played);
             if publication.is_none() && frames >= threshold {
                 let stamped = slot.published_after_us.load(Ordering::Acquire);
-                let observed_us = host_now_us();
+                let observed_us = host_now_us().saturating_add(1);
                 let published_us = (stamped != 0).then_some(stamped);
                 publication = Some(Publication {
                     published_us,

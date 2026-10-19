@@ -49,6 +49,12 @@ use pm_stretch::Stretcher;
 use crate::error::{AudioError, Result};
 use crate::mixer::CONTROL;
 
+// Called only on a scheduled audio thread. It does not panic or change the
+// stretcher's DSP state.
+extern "C" fn stretch_checkpoint() {
+    crate::realtime::checkpoint_dsp_step();
+}
+
 /// Grid of fresh-start boundaries (output samples, absolute).
 pub const GRID: i64 = 1 << 14;
 /// Read rates below this are a hold (silent).
@@ -139,9 +145,9 @@ pub struct StretchRun {
     spare: Option<Stretcher>,
     #[cfg(test)]
     test_preroll: Option<i64>,
-    /// A missing read stopped the render of output samples `[a, end)`.
-    /// Keep the valid history so the next request can catch up once the
-    /// input has decoded, when it continues that render: a retry of it, or
+    /// A missing read or detached preparation CPU yield paused the render of
+    /// output samples `[a, end)`. Keep the valid history so the next call can
+    /// continue that render: a retry of it, or
     /// a request starting inside it or where it ended (the continuation
     /// rule, for a caller that moves on past the miss). Any other request
     /// (a seek, a loop wrap, a direction change) starts fresh by the
@@ -162,6 +168,14 @@ pub type MapFn<'a> = dyn FnMut(i64) -> Result<MapPoint> + 'a;
 /// Reads project-rate source samples `[lo, lo + n)` into planar buffers;
 /// returns whether every sample was decoded.
 pub type ReadFn<'a> = dyn FnMut(i64, usize, &mut [Vec<f32>]) -> Result<bool> + 'a;
+
+/// A detached preparation slice never reports a CPU yield as missing media.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrepareOutcome {
+    Complete,
+    MissingInput,
+    Yielded,
+}
 
 impl StretchRun {
     pub fn new(channels: usize, rate: u32, key: u64) -> StretchRun {
@@ -210,19 +224,39 @@ impl StretchRun {
         read: &mut ReadFn<'_>,
         out: &mut [Vec<f32>],
     ) -> Result<bool> {
-        if self.pos < start + crate::ring::CHUNK as i64
-            && !self.render(start, crate::ring::CHUNK, map, read, out)?
-        {
-            return Ok(false);
+        let outcome = self.prepare_join_budgeted(start, at, map, read, out, &mut || false)?;
+        Ok(match outcome {
+            PrepareOutcome::Complete => true,
+            PrepareOutcome::MissingInput => false,
+            PrepareOutcome::Yielded => unreachable!("unsliced preparation cannot yield"),
+        })
+    }
+
+    /// The same join, pausing only after a complete native processing call.
+    /// The caller keeps ownership of this history across `Yielded` slices.
+    pub(crate) fn prepare_join_budgeted(
+        &mut self,
+        start: i64,
+        at: i64,
+        map: &mut MapFn<'_>,
+        read: &mut ReadFn<'_>,
+        out: &mut [Vec<f32>],
+        should_yield: &mut dyn FnMut() -> bool,
+    ) -> Result<PrepareOutcome> {
+        if self.pos < start + crate::ring::CHUNK as i64 {
+            match self.render_budgeted(start, crate::ring::CHUNK, map, read, out, should_yield)? {
+                PrepareOutcome::Complete => {}
+                other => return Ok(other),
+            }
         }
         if at > start {
             if !self.can_continue_at(at) {
                 self.pending = Some((self.buf_start, at));
                 self.dropped_from.get_or_insert(start);
             }
-            self.render(at, crate::ring::CHUNK, map, read, out)
+            self.render_budgeted(at, crate::ring::CHUNK, map, read, out, should_yield)
         } else {
-            Ok(true)
+            Ok(PrepareOutcome::Complete)
         }
     }
 
@@ -332,6 +366,26 @@ impl StretchRun {
         read: &mut ReadFn<'_>,
         out: &mut [Vec<f32>],
     ) -> Result<bool> {
+        let outcome = self.render_budgeted(a, n, map, read, out, &mut || false)?;
+        Ok(match outcome {
+            PrepareOutcome::Complete => true,
+            PrepareOutcome::MissingInput => false,
+            PrepareOutcome::Yielded => unreachable!("unsliced render cannot yield"),
+        })
+    }
+
+    /// Renders with an optional CPU fairness boundary after a whole native
+    /// call has committed its output and advanced the run. A yield retains
+    /// all DSP state and never means that source input is missing.
+    pub(crate) fn render_budgeted(
+        &mut self,
+        a: i64,
+        n: usize,
+        map: &mut MapFn<'_>,
+        read: &mut ReadFn<'_>,
+        out: &mut [Vec<f32>],
+        should_yield: &mut dyn FnMut() -> bool,
+    ) -> Result<PrepareOutcome> {
         let end = a + n as i64;
         for o in out.iter_mut() {
             o.clear();
@@ -353,13 +407,21 @@ impl StretchRun {
             self.fresh_starts += 1;
             if !self.fresh(a, map, read)? {
                 self.pending = Some((a, end));
-                return Ok(false);
+                return Ok(PrepareOutcome::MissingInput);
+            }
+            if self.pos < end && should_yield() {
+                self.pending = Some((a, end));
+                return Ok(PrepareOutcome::Yielded);
             }
         }
         while self.pos < end {
             if !self.produce(end, map, read)? {
                 self.pending = Some((a, end));
-                return Ok(false);
+                return Ok(PrepareOutcome::MissingInput);
+            }
+            if self.pos < end && should_yield() {
+                self.pending = Some((a, end));
+                return Ok(PrepareOutcome::Yielded);
             }
         }
         for (o, b) in out.iter_mut().zip(&self.buf) {
@@ -383,7 +445,7 @@ impl StretchRun {
             self.points.pop_front();
             self.points_from += 1;
         }
-        Ok(true)
+        Ok(PrepareOutcome::Complete)
     }
 
     /// Starts rendering at `a` without a usable history.
@@ -442,6 +504,14 @@ impl StretchRun {
         read: &mut ReadFn<'_>,
     ) -> Result<bool> {
         self.end_live();
+        crate::realtime::checkpoint_phase("stretch-map");
+        let k = s.div_euclid(CONTROL);
+        let l = self.point(k, map)?.x;
+        let r = self.point(k + 1, map)?.x;
+        let rate = ((r - l).abs() / CONTROL as f64).clamp(HOLD_RATE, CUT_RATE);
+        let u0 = (dir as f64 * l).round() as i64;
+        // A canceled map must not construct or reset a stretcher.
+        crate::realtime::checkpoint_phase_reserve("stretch-init", 1_000_000);
         let mut stretcher = {
             let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
             let _scope = crate::profile::timer(crate::profile::Kind::DspInit);
@@ -453,22 +523,27 @@ impl StretchRun {
                 None => Stretcher::new(self.channels, self.rate).map_err(stretch_error)?,
             }
         };
-        let k = s.div_euclid(CONTROL);
-        let l = self.point(k, map)?.x;
-        let r = self.point(k + 1, map)?.x;
-        let rate = ((r - l).abs() / CONTROL as f64).clamp(HOLD_RATE, CUT_RATE);
-        let u0 = (dir as f64 * l).round() as i64;
+        crate::realtime::checkpoint_phase("stretch-map");
         let len = stretcher.output_seek_length(rate).max(1);
+        crate::realtime::checkpoint_phase("stretch-read");
         if !self.stream(u0, len, dir, read)? {
             self.spare = Some(stretcher);
             return Ok(false);
         }
         {
             let views: Vec<&[f32]> = self.scratch_in.iter().map(|c| &c[..len]).collect();
+            crate::realtime::checkpoint_phase("stretch-output-seek");
             let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
             let _scope = crate::profile::timer(crate::profile::Kind::DspSeek);
-            stretcher.output_seek(&views).map_err(stretch_error)?;
+            if crate::realtime::has_active_guard() {
+                stretcher
+                    .output_seek_with_checkpoint(&views, stretch_checkpoint)
+                    .map_err(stretch_error)?;
+            } else {
+                stretcher.output_seek(&views).map_err(stretch_error)?;
+            }
         }
+        crate::realtime::checkpoint_phase("stretch-map");
         self.live = Some(Live {
             stretcher,
             dir,
@@ -577,6 +652,7 @@ impl StretchRun {
         let len = (to - fed) as usize;
         // Never feed zero-filled, undecoded input to the vocoder: it
         // changes every later analysis even after the cache catches up.
+        crate::realtime::checkpoint_phase("stretch-read");
         if !self.stream(fed, len, dir, read)? {
             return Ok(false);
         }
@@ -589,14 +665,22 @@ impl StretchRun {
             let input: Vec<&[f32]> = self.scratch_in.iter().map(|c| &c[..len]).collect();
             let mut output: Vec<&mut [f32]> =
                 self.scratch_out.iter_mut().map(|c| &mut c[..m]).collect();
-            crate::realtime::checkpoint();
+            crate::realtime::checkpoint_phase("stretch-process");
             let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
             let _scope = crate::profile::timer(crate::profile::Kind::DspProcess);
-            live.stretcher
-                .process(if len == 0 { &[] } else { &input }, &mut output)
-                .map_err(stretch_error)?;
+            let input: &[&[f32]] = if len == 0 { &[] } else { &input };
+            if crate::realtime::has_active_guard() {
+                live.stretcher
+                    .process_with_checkpoint(input, &mut output, stretch_checkpoint)
+                    .map_err(stretch_error)?;
+            } else {
+                live.stretcher
+                    .process(input, &mut output)
+                    .map_err(stretch_error)?;
+            }
             live.fed = to;
         }
+        crate::realtime::checkpoint_phase("stretch-map");
         for (b, o) in self.buf.iter_mut().zip(&self.scratch_out) {
             b.extend_from_slice(&o[..m]);
         }
@@ -618,6 +702,338 @@ fn stretch_error(e: pm_stretch::StretchError) -> AudioError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fair_slices_keep_native_read_calls_and_pcm_bit_exact() {
+        for speed in [0.5, 0.75, 1.5, 1.6, 2.0] {
+            for direction in [-1.0, 1.0] {
+                let start = 96_000;
+                let mut reference = StretchRun::new(2, 48_000, 0);
+                let mut sliced = StretchRun::new(2, 48_000, 0);
+                let mut whole_reads = Vec::new();
+                let mut sliced_reads = Vec::new();
+                let mut whole_map = |k: i64| {
+                    Ok(MapPoint {
+                        x: 200_000.0 + direction * k as f64 * CONTROL as f64 * speed,
+                        on: true,
+                    })
+                };
+                let mut sliced_map = |k: i64| {
+                    Ok(MapPoint {
+                        x: 200_000.0 + direction * k as f64 * CONTROL as f64 * speed,
+                        on: true,
+                    })
+                };
+                let mut whole_read = |lo: i64, n: usize, out: &mut [Vec<f32>]| {
+                    whole_reads.push((lo, n));
+                    sine(lo, n, out);
+                    Ok(true)
+                };
+                let mut sliced_read = |lo: i64, n: usize, out: &mut [Vec<f32>]| {
+                    sliced_reads.push((lo, n));
+                    sine(lo, n, out);
+                    Ok(true)
+                };
+                let mut expected = vec![Vec::new(); 2];
+                let mut actual = vec![Vec::new(); 2];
+                assert!(
+                    reference
+                        .render(start, 4096, &mut whole_map, &mut whole_read, &mut expected)
+                        .unwrap()
+                );
+                let mut yields = 0;
+                loop {
+                    match sliced
+                        .render_budgeted(
+                            start,
+                            4096,
+                            &mut sliced_map,
+                            &mut sliced_read,
+                            &mut actual,
+                            &mut || true,
+                        )
+                        .unwrap()
+                    {
+                        PrepareOutcome::Complete => break,
+                        PrepareOutcome::Yielded => {
+                            yields += 1;
+                            assert!(yields < 32, "slice did not progress");
+                        }
+                        PrepareOutcome::MissingInput => panic!("decoded input reported missing"),
+                    }
+                }
+                assert!(yields > 1, "pre-roll and process must both slice");
+                assert_eq!(
+                    whole_reads, sliced_reads,
+                    "native input calls {speed} {direction}"
+                );
+                assert_eq!(reference.fresh_starts, sliced.fresh_starts);
+                for (a, b) in expected.iter().zip(&actual) {
+                    assert_eq!(
+                        a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "PCM {speed} {direction}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sliced_join_resumes_without_treating_cpu_as_missing_input() {
+        let start = 96_000;
+        let at = start + 1024;
+        let mut reference = StretchRun::new(2, 48_000, 0);
+        let mut sliced = StretchRun::new(2, 48_000, 0);
+        let mut map = |k: i64| {
+            Ok(MapPoint {
+                x: 200_000.0 + k as f64 * CONTROL as f64 * 1.5,
+                on: true,
+            })
+        };
+        let mut whole_read = |lo, n, out: &mut [Vec<f32>]| {
+            sine(lo, n, out);
+            Ok(true)
+        };
+        let mut actual_read = |lo, n, out: &mut [Vec<f32>]| {
+            sine(lo, n, out);
+            Ok(true)
+        };
+        let mut expected = vec![Vec::new(); 2];
+        let mut actual = vec![Vec::new(); 2];
+        assert!(
+            reference
+                .prepare_join(start, at, &mut map, &mut whole_read, &mut expected)
+                .unwrap()
+        );
+        let mut yields = 0;
+        loop {
+            match sliced
+                .prepare_join_budgeted(
+                    start,
+                    at,
+                    &mut map,
+                    &mut actual_read,
+                    &mut actual,
+                    &mut || true,
+                )
+                .unwrap()
+            {
+                PrepareOutcome::Complete => break,
+                PrepareOutcome::Yielded => {
+                    yields += 1;
+                    assert!(yields < 32, "join did not progress");
+                }
+                PrepareOutcome::MissingInput => panic!("decoded join input reported missing"),
+            }
+        }
+        assert!(yields > 0);
+        assert_eq!(actual, expected);
+        assert_eq!(sliced.fresh_starts, reference.fresh_starts);
+
+        let mut missed_once = false;
+        let mut missing = |lo, n, out: &mut [Vec<f32>]| {
+            if !missed_once {
+                missed_once = true;
+                return Ok(false);
+            }
+            sine(lo, n, out);
+            Ok(true)
+        };
+        let mut retry = StretchRun::new(2, 48_000, 0);
+        let mut never_missed = StretchRun::new(2, 48_000, 0);
+        let mut retry_reference = vec![Vec::new(); 2];
+        assert!(
+            never_missed
+                .render(start, 256, &mut map, &mut whole_read, &mut retry_reference)
+                .unwrap()
+        );
+        assert_eq!(
+            retry
+                .render_budgeted(start, 256, &mut map, &mut missing, &mut actual, &mut || {
+                    true
+                })
+                .unwrap(),
+            PrepareOutcome::MissingInput
+        );
+        assert_eq!(retry.pending_retry(), Some((start, start + 256)));
+        let mut retries = 0;
+        loop {
+            match retry
+                .render_budgeted(start, 256, &mut map, &mut missing, &mut actual, &mut || {
+                    true
+                })
+                .unwrap()
+            {
+                PrepareOutcome::Complete => break,
+                PrepareOutcome::Yielded => {
+                    retries += 1;
+                    assert!(retries < 32);
+                }
+                PrepareOutcome::MissingInput => panic!("the one-time miss must recover"),
+            }
+        }
+        assert!(retries > 0);
+        for (a, b) in actual.iter().zip(&retry_reference) {
+            assert_eq!(
+                a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "resumed PCM equals never-missing PCM"
+            );
+        }
+    }
+
+    fn render_all_slices(
+        run: &mut StretchRun,
+        at: i64,
+        frames: usize,
+        map: &mut MapFn<'_>,
+        read: &mut ReadFn<'_>,
+        out: &mut [Vec<f32>],
+    ) -> usize {
+        let mut yields = 0;
+        loop {
+            match run
+                .render_budgeted(at, frames, map, read, out, &mut || true)
+                .unwrap()
+            {
+                PrepareOutcome::Complete => return yields,
+                PrepareOutcome::Yielded => {
+                    yields += 1;
+                    assert!(yields < 64, "native slices must advance");
+                }
+                PrepareOutcome::MissingInput => panic!("test input is fully decoded"),
+            }
+        }
+    }
+
+    fn assert_pcm_bits_equal(actual: &[Vec<f32>], expected: &[Vec<f32>]) {
+        assert_eq!(actual.len(), expected.len());
+        for (a, b) in actual.iter().zip(expected) {
+            assert_eq!(
+                a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                b.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn fair_slices_cross_forward_silence_and_reverse_classes_bit_exact() {
+        let start: i64 = 96_000;
+        let base = start.div_euclid(CONTROL);
+        let map_point = |k: i64| {
+            let rel = k - base;
+            let forward = 200_000.0 + 6.0 * CONTROL as f64 * 1.5;
+            MapPoint {
+                x: if rel <= 6 {
+                    200_000.0 + rel as f64 * CONTROL as f64 * 1.5
+                } else if rel <= 9 {
+                    forward
+                } else {
+                    forward - (rel - 9) as f64 * CONTROL as f64 * 1.5
+                },
+                on: true,
+            }
+        };
+        let mut class_map = |k| Ok(map_point(k));
+        let mut probe = StretchRun::new(2, 48_000, 0);
+        assert_eq!(probe.class(base, &mut class_map).unwrap(), Class::Run(1));
+        assert_eq!(
+            probe.class(base + 6, &mut class_map).unwrap(),
+            Class::Silent
+        );
+        assert_eq!(
+            probe.class(base + 9, &mut class_map).unwrap(),
+            Class::Run(-1)
+        );
+
+        let mut reference = StretchRun::new(2, 48_000, 0);
+        let mut sliced = StretchRun::new(2, 48_000, 0);
+        let mut whole_map = |k| Ok(map_point(k));
+        let mut sliced_map = |k| Ok(map_point(k));
+        let mut whole_reads = Vec::new();
+        let mut sliced_reads = Vec::new();
+        let mut whole_read = |lo, n, out: &mut [Vec<f32>]| {
+            whole_reads.push((lo, n));
+            sine(lo, n, out);
+            Ok(true)
+        };
+        let mut sliced_read = |lo, n, out: &mut [Vec<f32>]| {
+            sliced_reads.push((lo, n));
+            sine(lo, n, out);
+            Ok(true)
+        };
+        let mut expected = vec![Vec::new(); 2];
+        let mut actual = vec![Vec::new(); 2];
+        assert!(
+            reference
+                .render(start, 4096, &mut whole_map, &mut whole_read, &mut expected)
+                .unwrap()
+        );
+        assert!(
+            render_all_slices(
+                &mut sliced,
+                start,
+                4096,
+                &mut sliced_map,
+                &mut sliced_read,
+                &mut actual,
+            ) > 1
+        );
+        assert_eq!(
+            whole_reads, sliced_reads,
+            "same native reads across classes"
+        );
+        assert_pcm_bits_equal(&actual, &expected);
+        assert_eq!(sliced.fresh_starts, reference.fresh_starts);
+    }
+
+    #[test]
+    fn a_sliced_loop_wrap_restarts_with_exact_fresh_phase() {
+        let start = 96_000;
+        let wrapped = start - 4096;
+        let mut reference = StretchRun::new(2, 48_000, 0);
+        let mut sliced = StretchRun::new(2, 48_000, 0);
+        let mut map = |k: i64| {
+            Ok(MapPoint {
+                x: 200_000.0 + k as f64 * CONTROL as f64 * 1.5,
+                on: true,
+            })
+        };
+        let mut read = |lo, n, out: &mut [Vec<f32>]| {
+            sine(lo, n, out);
+            Ok(true)
+        };
+        let mut expected = vec![Vec::new(); 2];
+        let mut actual = vec![Vec::new(); 2];
+        assert!(
+            reference
+                .render(start, 4096, &mut map, &mut read, &mut expected)
+                .unwrap()
+        );
+        assert!(render_all_slices(&mut sliced, start, 4096, &mut map, &mut read, &mut actual,) > 0);
+        assert_pcm_bits_equal(&actual, &expected);
+        assert!(
+            reference
+                .render(wrapped, 4096, &mut map, &mut read, &mut expected)
+                .unwrap()
+        );
+        assert!(
+            render_all_slices(&mut sliced, wrapped, 4096, &mut map, &mut read, &mut actual,) > 0
+        );
+        assert_pcm_bits_equal(&actual, &expected);
+        assert_eq!(reference.fresh_starts, 2, "wrap starts a new phase");
+        assert_eq!(sliced.fresh_starts, reference.fresh_starts);
+
+        let mut fresh = StretchRun::new(2, 48_000, 0);
+        let mut fresh_pcm = vec![Vec::new(); 2];
+        assert!(
+            fresh
+                .render(wrapped, 4096, &mut map, &mut read, &mut fresh_pcm)
+                .unwrap()
+        );
+        assert_pcm_bits_equal(&actual, &fresh_pcm);
+    }
 
     #[test]
     fn shortening_the_prefix_changes_the_existing_offline_pcm() {

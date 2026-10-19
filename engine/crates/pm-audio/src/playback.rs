@@ -40,6 +40,8 @@ use crate::graph::{AssetResolver, MixGraph};
 use crate::kernel;
 use crate::meter::Meters;
 use crate::mixer::{MixFormat, Mixer, RenderOptions};
+/// Process-wide diagnostics for the shared preparation pool.
+pub use crate::preparation::{IdleLeaseState, IdleStats};
 #[doc(hidden)]
 pub use crate::priority::StartPriority;
 use crate::ring::{CHUNK, Consumer, Ring, Tag};
@@ -173,7 +175,84 @@ enum Control {
     Shutdown,
 }
 
+/// A ticket is published before a control enters the FIFO and remains live
+/// while that control is queued or deferred. Dropping a failed send or a
+/// receiver with queued controls releases its tickets as well.
+struct PendingControl(Arc<AtomicU64>);
+
+impl PendingControl {
+    fn new(count: Arc<AtomicU64>) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        Self(count)
+    }
+}
+
+impl Drop for PendingControl {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct ControlEnvelope {
+    control: Control,
+    pending: PendingControl,
+}
+
+impl ControlEnvelope {
+    /// Called only after the producer has established the scheduling policy
+    /// for this control; DSP workers may then resume as it is dispatched.
+    fn into_dispatch(self) -> Control {
+        let Self { control, pending } = self;
+        drop(pending);
+        control
+    }
+}
+
+#[derive(Clone)]
+struct ControlSender {
+    tx: Sender<ControlEnvelope>,
+    pending: Arc<AtomicU64>,
+}
+
+impl ControlSender {
+    fn send(
+        &self,
+        control: Control,
+    ) -> std::result::Result<(), std::sync::mpsc::SendError<ControlEnvelope>> {
+        self.tx.send(ControlEnvelope {
+            control,
+            pending: PendingControl::new(self.pending.clone()),
+        })
+    }
+}
+
+fn control_label(control: &Control, nested: bool) -> &'static str {
+    match control {
+        Control::Commands(..) => "commands",
+        Control::Command(command, ..) => match (nested, command) {
+            (false, TransportCommand::Play { .. }) => "play",
+            (true, TransportCommand::Play { .. }) => "nested-play",
+            (false, TransportCommand::Pause) => "pause",
+            (true, TransportCommand::Pause) => "nested-pause",
+            (false, TransportCommand::Seek { .. }) => "seek",
+            (true, TransportCommand::Seek { .. }) => "nested-seek",
+            (_, TransportCommand::SetLoop { .. }) => "set-loop",
+            (_, TransportCommand::Step { .. }) => "step",
+            (_, TransportCommand::PlayAround { .. }) => "play-around",
+            (_, TransportCommand::AudioScrub { .. }) => "audio-scrub",
+        },
+        Control::Project(..) => "project",
+        Control::Solo(..) => "solo",
+        Control::Watch(..) => "watch",
+        Control::Schedule(..) => "schedule",
+        Control::Evaluator(..) => "evaluator",
+        Control::Shutdown => "shutdown",
+    }
+}
+
 struct Shared {
+    #[cfg(test)]
+    render_turns: AtomicU64,
     clock: ClockSlot,
     latency_us: AtomicU32,
     reanchor: AtomicBool,
@@ -188,6 +267,8 @@ struct Shared {
     start_timing: StartTrace,
     scheduling: Arc<crate::preparation::SchedulingCounters>,
     schedule: Mutex<crate::realtime::AudioSchedule>,
+    idle_workers: crate::preparation::IdleLeaseHandle,
+    idle_startup_arm: Mutex<crate::preparation::IdleArmOutcome>,
 }
 
 /// Times of a run's first buffer on the shared monotonic host clock.
@@ -236,8 +317,10 @@ pub struct StartTiming {
     pub worker_scheduling_failures: u64,
     pub producer_workgroup_error: Option<i32>,
     pub producer_mach_error: Option<i32>,
+    pub producer_hint_error: Option<i32>,
     pub worker_workgroup_error: i32,
     pub worker_mach_error: i32,
+    pub worker_hint_error: i32,
     pub scheduling_max_unit_ns: u64,
     pub scheduling_max_period_cpu_ns: u64,
     pub scheduling_computation_overruns: u64,
@@ -246,7 +329,51 @@ pub struct StartTiming {
     /// included in the lifetime maxima and entry/failure counters above.
     pub scheduling_throttle_sleeps: u64,
     pub scheduling_total_sleep_ns: u64,
+    pub scheduling_policy_transition_waits: u64,
+    pub scheduling_policy_transition_wait_ns: u64,
+    pub scheduling_context_policy_transition_waits: u64,
+    pub scheduling_context_policy_transition_wait_ns: u64,
     pub scheduling_restore_failures: u64,
+    pub scheduling_hint_failures: u64,
+    pub scheduling_constraint_readback_failures: u64,
+    /// Controls yielding since this Play, alongside current-context totals.
+    pub scheduling_control_yields: u64,
+    pub scheduling_control_wait_ns: u64,
+    pub scheduling_context_control_yields: u64,
+    pub scheduling_context_control_wait_ns: u64,
+    pub scheduling_interval_starts: u64,
+    pub scheduling_interval_finishes: u64,
+    pub scheduling_interval_expired: u64,
+    pub scheduling_interval_late_finishes: u64,
+    pub scheduling_interval_failures: u64,
+    pub scheduling_interval_auto_finishes: u64,
+    pub scheduling_interval_error: i32,
+    pub scheduling_interval_last_requested_us: u64,
+    pub scheduling_interval_last_deadline_us: u64,
+    pub scheduling_interval_last_reanchor_us: u64,
+    pub scheduling_interval_last_anchor_tick: u64,
+    pub scheduling_interval_last_start_tick: u64,
+    pub scheduling_interval_last_deadline_tick: u64,
+    /// First audible callback's declared deadline, retained after later
+    /// callback cycles replace the context's latest-interval metrics.
+    pub scheduling_first_interval_requested_us: u64,
+    pub scheduling_first_interval_deadline_us: u64,
+    pub scheduling_first_interval_anchor_tick: u64,
+    pub scheduling_first_interval_start_tick: u64,
+    pub scheduling_first_interval_deadline_tick: u64,
+    pub scheduling_first_buffer_last_deadline_tick: u64,
+    pub scheduling_first_buffer_reanchors: u64,
+    pub scheduling_first_buffer_last_reanchor_us: u64,
+    pub scheduling_workgroup_recommended_threads: u32,
+    pub profile_worker_log_drops: u64,
+    pub profile_worker_flush_failures: u64,
+    /// Shared-pool totals; concurrent viewers contribute to these counters.
+    pub idle_pool: IdleStats,
+    /// Counter deltas since Play; peak fields remain process-lifetime maxima.
+    pub idle_pool_since_play: IdleStats,
+    pub idle_lease: Option<IdleLeaseState>,
+    /// Last construction-time arm result, before the handle exposed Play.
+    pub idle_startup_arm: String,
 }
 
 /// Publications recorded per run, enough for several device callbacks.
@@ -278,8 +405,17 @@ struct StartTrace {
     max_render: AtomicU64,
     min_queued: AtomicU64,
     scheduling: Mutex<String>,
-    scheduling_errors: Mutex<(Option<i32>, Option<i32>)>,
+    scheduling_errors: Mutex<(Option<i32>, Option<i32>, Option<i32>)>,
     scheduling_baseline: Mutex<crate::realtime::RealtimeMetrics>,
+    idle_baseline: Mutex<IdleStats>,
+    first_interval_requested: AtomicU64,
+    first_interval_deadline: AtomicU64,
+    first_interval_anchor_tick: AtomicU64,
+    first_interval_start_tick: AtomicU64,
+    first_interval_deadline_tick: AtomicU64,
+    first_buffer_last_deadline_tick: AtomicU64,
+    first_buffer_reanchors: AtomicU64,
+    first_buffer_last_reanchor: AtomicU64,
 }
 
 impl StartTrace {
@@ -291,6 +427,16 @@ impl StartTrace {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.published_frames.store(0, Ordering::Relaxed);
+        self.first_interval_requested.store(0, Ordering::Relaxed);
+        self.first_interval_deadline.store(0, Ordering::Relaxed);
+        self.first_interval_anchor_tick.store(0, Ordering::Relaxed);
+        self.first_interval_start_tick.store(0, Ordering::Relaxed);
+        self.first_interval_deadline_tick
+            .store(0, Ordering::Relaxed);
+        self.first_buffer_last_deadline_tick
+            .store(0, Ordering::Relaxed);
+        self.first_buffer_reanchors.store(0, Ordering::Relaxed);
+        self.first_buffer_last_reanchor.store(0, Ordering::Relaxed);
         self.history_wait.store(0, Ordering::Relaxed);
         self.history_waits.store(0, Ordering::Relaxed);
         self.history_claims.store(0, Ordering::Relaxed);
@@ -392,7 +538,7 @@ impl StartTrace {
             .values()
             .copied()
             .sum();
-        let (producer_workgroup_error, producer_mach_error) = *self
+        let (producer_workgroup_error, producer_mach_error, producer_hint_error) = *self
             .scheduling_errors
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -408,15 +554,69 @@ impl StartTrace {
             worker_scheduling_failures: 0,
             producer_workgroup_error,
             producer_mach_error,
+            producer_hint_error,
             worker_workgroup_error: 0,
             worker_mach_error: 0,
+            worker_hint_error: 0,
             scheduling_max_unit_ns: 0,
             scheduling_max_period_cpu_ns: 0,
             scheduling_computation_overruns: 0,
             scheduling_constraint_overruns: 0,
             scheduling_throttle_sleeps: 0,
             scheduling_total_sleep_ns: 0,
+            scheduling_policy_transition_waits: 0,
+            scheduling_policy_transition_wait_ns: 0,
+            scheduling_context_policy_transition_waits: 0,
+            scheduling_context_policy_transition_wait_ns: 0,
             scheduling_restore_failures: 0,
+            scheduling_hint_failures: 0,
+            scheduling_constraint_readback_failures: 0,
+            scheduling_control_yields: 0,
+            scheduling_control_wait_ns: 0,
+            scheduling_context_control_yields: 0,
+            scheduling_context_control_wait_ns: 0,
+            scheduling_interval_starts: 0,
+            scheduling_interval_finishes: 0,
+            scheduling_interval_expired: 0,
+            scheduling_interval_late_finishes: 0,
+            scheduling_interval_failures: 0,
+            scheduling_interval_auto_finishes: 0,
+            scheduling_interval_error: 0,
+            scheduling_interval_last_requested_us: 0,
+            scheduling_interval_last_deadline_us: 0,
+            scheduling_interval_last_reanchor_us: 0,
+            scheduling_interval_last_anchor_tick: 0,
+            scheduling_interval_last_start_tick: 0,
+            scheduling_interval_last_deadline_tick: 0,
+            scheduling_first_interval_requested_us: self
+                .first_interval_requested
+                .load(Ordering::Relaxed),
+            scheduling_first_interval_deadline_us: self
+                .first_interval_deadline
+                .load(Ordering::Relaxed),
+            scheduling_first_interval_anchor_tick: self
+                .first_interval_anchor_tick
+                .load(Ordering::Relaxed),
+            scheduling_first_interval_start_tick: self
+                .first_interval_start_tick
+                .load(Ordering::Relaxed),
+            scheduling_first_interval_deadline_tick: self
+                .first_interval_deadline_tick
+                .load(Ordering::Relaxed),
+            scheduling_first_buffer_last_deadline_tick: self
+                .first_buffer_last_deadline_tick
+                .load(Ordering::Relaxed),
+            scheduling_first_buffer_reanchors: self.first_buffer_reanchors.load(Ordering::Relaxed),
+            scheduling_first_buffer_last_reanchor_us: self
+                .first_buffer_last_reanchor
+                .load(Ordering::Relaxed),
+            scheduling_workgroup_recommended_threads: 0,
+            profile_worker_log_drops: 0,
+            profile_worker_flush_failures: 0,
+            idle_pool: IdleStats::default(),
+            idle_pool_since_play: IdleStats::default(),
+            idle_lease: None,
+            idle_startup_arm: String::new(),
             requested_us: self.requested.load(Ordering::Relaxed),
             applied_us: self.applied.load(Ordering::Relaxed),
             queued_us: self.queued.load(Ordering::Acquire),
@@ -517,7 +717,7 @@ impl ClockHandle {
 
 /// Playback of one composition.
 pub struct Playback {
-    tx: Sender<Control>,
+    tx: ControlSender,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
     stream: Option<OutputStream>,
@@ -558,13 +758,18 @@ impl Playback {
         config: PlaybackConfig,
     ) -> Result<Playback> {
         let info = crate::device::default_output_info()?;
-        let (mut playback, mut side) = Self::start_headless(
+        // The real stream gets its actual device schedule after open.
+        // Its temporary context is Mach-only, never a headless interval.
+        let initial_schedule =
+            crate::realtime::AudioSchedule::new(info.sample_rate, info.buffer_frames, None);
+        let (mut playback, mut side) = Self::start_with_schedule(
             format,
             cache,
             config,
             info.sample_rate,
             info.channels.min(crate::ring::MAX_CHANNELS),
             info.latency_us(),
+            initial_schedule,
         )?;
         let stream = OutputStream::open(move |out, channels, host_us| {
             side.callback(out, channels, host_us)
@@ -576,6 +781,15 @@ impl Playback {
         let rate = stream.info.sample_rate;
         let device = crate::device::default_output_state(rate).map(|(id, _)| id);
         let schedule = crate::realtime::AudioSchedule::new(rate, stream.info.buffer_frames, device);
+        // Arm the actual callback period on this constructor thread, before
+        // exposing Play. No queued transport control waits for this barrier.
+        playback.shared.idle_workers.set_schedule(&schedule);
+        let idle_arm = playback.shared.idle_workers.arm(Duration::from_millis(100));
+        *playback
+            .shared
+            .idle_startup_arm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = idle_arm;
         let _ = playback.tx.send(Control::Schedule(schedule));
         let _ = playback.tx.send(Control::Watch(Box::new(move || {
             crate::device::default_output_state(rate)
@@ -598,16 +812,45 @@ impl Playback {
         if !(8_000..=192_000).contains(&device_rate) {
             return Err(AudioError::Device(format!("device rate {device_rate}")));
         }
+        let schedule = crate::realtime::AudioSchedule::headless(device_rate, 512);
+        Self::start_with_schedule(
+            format,
+            cache,
+            config,
+            device_rate,
+            device_channels,
+            latency_us,
+            schedule,
+        )
+    }
+
+    fn start_with_schedule(
+        format: MixFormat,
+        cache: Arc<SourceCache>,
+        config: PlaybackConfig,
+        device_rate: u32,
+        device_channels: usize,
+        latency_us: u32,
+        schedule: crate::realtime::AudioSchedule,
+    ) -> Result<(Playback, DeviceSide)> {
+        if !(8_000..=192_000).contains(&device_rate) {
+            return Err(AudioError::Device(format!("device rate {device_rate}")));
+        }
         cache.ensure_workers(1);
         let ring_channels = device_channels.clamp(1, crate::ring::MAX_CHANNELS);
         let chunk_ms = CHUNK as f64 * 1000.0 / device_rate as f64;
         let chunks = ((config.ahead_ms as f64 * 2.0 / chunk_ms).ceil() as usize).max(8);
         let ring = Ring::new(chunks, ring_channels);
         let seq = Arc::new(AtomicU64::new(0));
-        let schedule = crate::realtime::AudioSchedule::new(device_rate, 512, None);
         let mut preparation = crate::preparation::Preparation::new();
         preparation.set_schedule(schedule.clone());
+        let idle_startup_arm = preparation.arm_idle_workers(Duration::from_millis(100));
+        let idle_workers = preparation.idle_handle();
+        let pending_controls = Arc::new(AtomicU64::new(0));
+        preparation.set_pending_controls(pending_controls.clone());
         let shared = Arc::new(Shared {
+            #[cfg(test)]
+            render_turns: AtomicU64::new(0),
             clock: ClockSlot::default(),
             latency_us: AtomicU32::new(latency_us),
             reanchor: AtomicBool::new(false),
@@ -622,8 +865,14 @@ impl Playback {
             start_timing: StartTrace::default(),
             scheduling: preparation.scheduling.clone(),
             schedule: Mutex::new(schedule.clone()),
+            idle_workers,
+            idle_startup_arm: Mutex::new(idle_startup_arm),
         });
-        let (tx, rx) = channel();
+        let (raw_tx, rx) = channel();
+        let tx = ControlSender {
+            tx: raw_tx,
+            pending: pending_controls,
+        };
         let empty = Arc::new(Document::new(None, 0));
         let graph = Arc::new(MixGraph {
             comp_id: String::new(),
@@ -645,6 +894,8 @@ impl Playback {
             rx,
             deferred: None,
             batching: false,
+            pending_prepare: false,
+            boundary_due: true,
             settled: None,
             shared: shared.clone(),
             ring: ring.clone(),
@@ -655,6 +906,10 @@ impl Playback {
             history_wait: None,
             stalls: HashMap::new(),
             startup: None,
+            preroll_hold: None,
+            interval_output_frames: 0,
+            interval_start_epoch: None,
+            interval_failed_epoch: None,
             render_failure: None,
             mixer,
             preparation,
@@ -864,12 +1119,36 @@ impl Playback {
                 .workgroup_error
                 .load(Ordering::Relaxed);
             timing.worker_mach_error = self.shared.scheduling.mach_error.load(Ordering::Relaxed);
-            let metrics = self
+            timing.worker_hint_error = self.shared.scheduling.hint_error.load(Ordering::Relaxed);
+            let schedule = self
                 .shared
                 .schedule
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .metrics();
+                .unwrap_or_else(|e| e.into_inner());
+            let metrics = schedule.metrics();
+            timing.scheduling_workgroup_recommended_threads = schedule.max_parallel_threads();
+            drop(schedule);
+            timing.idle_pool = self.shared.idle_workers.stats();
+            timing.idle_pool_since_play = timing.idle_pool.counter_delta(
+                *self
+                    .shared
+                    .start_timing
+                    .idle_baseline
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            );
+            timing.idle_lease = Some(self.shared.idle_workers.state());
+            timing.idle_startup_arm = format!(
+                "{:?}",
+                *self
+                    .shared
+                    .idle_startup_arm
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+            );
+            let profile_stats = crate::profile::worker_event_stats();
+            timing.profile_worker_log_drops = profile_stats.dropped;
+            timing.profile_worker_flush_failures = profile_stats.flush_failures;
             timing.scheduling_max_unit_ns = metrics.max_unit_ns;
             timing.scheduling_max_period_cpu_ns = metrics.max_period_cpu_ns;
             timing.scheduling_computation_overruns = metrics.computation_overruns;
@@ -886,7 +1165,38 @@ impl Playback {
             timing.scheduling_total_sleep_ns = metrics
                 .total_sleep_ns
                 .saturating_sub(baseline.total_sleep_ns);
+            timing.scheduling_policy_transition_waits = metrics
+                .policy_transition_waits
+                .saturating_sub(baseline.policy_transition_waits);
+            timing.scheduling_policy_transition_wait_ns = metrics
+                .policy_transition_wait_ns
+                .saturating_sub(baseline.policy_transition_wait_ns);
+            timing.scheduling_context_policy_transition_waits = metrics.policy_transition_waits;
+            timing.scheduling_context_policy_transition_wait_ns = metrics.policy_transition_wait_ns;
             timing.scheduling_restore_failures = metrics.restore_failures;
+            timing.scheduling_hint_failures = metrics.hint_failures;
+            timing.scheduling_constraint_readback_failures = metrics.constraint_readback_failures;
+            timing.scheduling_control_yields = metrics
+                .control_yields
+                .saturating_sub(baseline.control_yields);
+            timing.scheduling_control_wait_ns = metrics
+                .control_wait_ns
+                .saturating_sub(baseline.control_wait_ns);
+            timing.scheduling_context_control_yields = metrics.control_yields;
+            timing.scheduling_context_control_wait_ns = metrics.control_wait_ns;
+            timing.scheduling_interval_starts = metrics.interval_starts;
+            timing.scheduling_interval_finishes = metrics.interval_finishes;
+            timing.scheduling_interval_expired = metrics.interval_expired;
+            timing.scheduling_interval_late_finishes = metrics.interval_late_finishes;
+            timing.scheduling_interval_failures = metrics.interval_failures;
+            timing.scheduling_interval_auto_finishes = metrics.interval_auto_finishes;
+            timing.scheduling_interval_error = metrics.interval_error;
+            timing.scheduling_interval_last_requested_us = metrics.interval_last_requested_us;
+            timing.scheduling_interval_last_deadline_us = metrics.interval_last_deadline_us;
+            timing.scheduling_interval_last_reanchor_us = metrics.interval_last_reanchor_us;
+            timing.scheduling_interval_last_anchor_tick = metrics.interval_last_anchor_tick;
+            timing.scheduling_interval_last_start_tick = metrics.interval_last_start_tick;
+            timing.scheduling_interval_last_deadline_tick = metrics.interval_last_deadline_tick;
             timing
         })
     }
@@ -920,7 +1230,7 @@ impl Playback {
     }
 
     /// Stops the render thread and closes the device.
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) -> bool {
         let _ = self.tx.send(Control::Shutdown);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -928,12 +1238,15 @@ impl Playback {
         if let Some(s) = self.stream.take() {
             let _ = s.pause();
         }
+        // Diagnostic stderr never holds up a preparation worker. This
+        // ordinary caller drains records already queued at shutdown only.
+        crate::profile::flush_worker_events()
     }
 }
 
 impl Drop for Playback {
     fn drop(&mut self) {
-        self.shutdown();
+        let _ = self.shutdown();
     }
 }
 
@@ -1271,6 +1584,15 @@ struct VoiceStall {
     reported: bool,
 }
 
+/// The two preroll waits keep their wall deadlines and their shared device
+/// origin when a control interrupts preparation without starting a new epoch.
+struct PrerollHold {
+    epoch: u32,
+    device_start: u64,
+    stretch_deadline: std::time::Instant,
+    source_deadline: Option<std::time::Instant>,
+}
+
 /// Why a voice's wait ended, for its diagnostic.
 fn stall_message(id: &str, by_reserve: bool) -> String {
     if by_reserve {
@@ -1283,10 +1605,15 @@ fn stall_message(id: &str, by_reserve: bool) -> String {
 }
 
 struct RenderThread {
-    rx: Receiver<Control>,
+    rx: Receiver<ControlEnvelope>,
     /// A control that interrupted paused preparation; handled first.
-    deferred: Option<Control>,
+    deferred: Option<ControlEnvelope>,
     batching: bool,
+    /// Urgent jobs for the final control position, submitted after the full
+    /// control batch has been applied under the producer's audio schedule.
+    pending_prepare: bool,
+    /// A control or consumed loop head requires another boundary pass.
+    boundary_due: bool,
     /// The paused starts of the last complete preparation pass and when it
     /// ran: unchanged and still ready, they are re-checked only every
     /// [`PAUSED_REFRESH`] rather than every idle turn.
@@ -1310,6 +1637,11 @@ struct RenderThread {
     /// cold voice is start latency, not a gap: every missing voice gets the
     /// whole A3 hold from here.
     startup: Option<u64>,
+    preroll_hold: Option<PrerollHold>,
+    /// Output formed in the current producer-managed headless interval.
+    interval_output_frames: u64,
+    interval_start_epoch: Option<u32>,
+    interval_failed_epoch: Option<u32>,
     /// The whole-render failure of the latest render, if it failed.
     render_failure: Option<String>,
     mixer: Mixer,
@@ -1318,7 +1650,7 @@ struct RenderThread {
     config: PlaybackConfig,
     solo: Option<HashSet<String>>,
     converter: Option<Converter>,
-    /// The 2× J/K/L stretch, warmed during the first audible pause.
+    /// The 2× J/K/L stretch, warmed before accepting project controls.
     shuttle: Option<Shuttle>,
     device_rate: u32,
     ring_channels: usize,
@@ -1348,11 +1680,16 @@ impl RenderThread {
         }
         self.publish_stopped();
         let _idle_priority = StartPriority::new();
+        self.warm_shuttle();
+        crate::profile::init_control_events();
         let mut realtime: Option<crate::realtime::AudioScheduleGuard> = None;
         let mut need_preroll = false;
         let mut last_prefetch: Option<i64> = None;
         let mut lookahead_pending = false;
+        let mut paused_urgent_until: Option<std::time::Instant> = None;
         loop {
+            #[cfg(test)]
+            self.shared.render_turns.fetch_add(1, Ordering::Release);
             // Controls.
             let wait = if self.transport.is_running() || self.settled.is_none() {
                 Duration::from_millis(2)
@@ -1364,19 +1701,20 @@ impl RenderThread {
                 None => self.rx.recv_timeout(wait),
             };
             match next {
-                Ok(Control::Shutdown) => return,
                 Ok(c) => {
-                    // Document/control work has no bounded audio quantum.
-                    // Keep it outside the real-time computation reservation.
-                    drop(realtime.take());
-                    if self.control(c) {
+                    if matches!(&c.control, Control::Shutdown) {
+                        return;
+                    }
+                    self.schedule_for_control(&c.control, &mut realtime);
+                    if self.control(c.into_dispatch()) {
                         need_preroll = true;
                     }
                     while let Ok(c) = self.rx.try_recv() {
-                        if matches!(c, Control::Shutdown) {
+                        if matches!(&c.control, Control::Shutdown) {
                             return;
                         }
-                        if self.control(c) {
+                        self.schedule_for_control(&c.control, &mut realtime);
+                        if self.control(c.into_dispatch()) {
                             need_preroll = true;
                         }
                     }
@@ -1384,64 +1722,165 @@ impl RenderThread {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => return,
             }
-            if self.last_watch.elapsed() >= Duration::from_secs(1) {
+            if self.pending_prepare {
+                // A paused edit gets a short producer priority window from
+                // this dispatch, even if its decode or vocoder jobs stall.
+                let dispatched_at = std::time::Instant::now();
+                paused_urgent_until = (!self.transport.is_running())
+                    .then(|| dispatched_at + Duration::from_millis(20));
+                self.ensure_schedule(&mut realtime);
+                // An edit starts preparation before Play. A restart's cycle
+                // keeps the original request deadline, including delivery.
+                let requested = if self.transport.is_running() && need_preroll {
+                    self.shared.start_timing.requested.load(Ordering::Relaxed)
+                } else {
+                    host_now_us()
+                };
+                self.begin_audio_interval(requested);
+                crate::realtime::checkpoint();
+                {
+                    let _trace = crate::profile::control_timer("urgent-dispatch");
+                    self.preparation
+                        .schedule(&mut self.mixer, &[self.transport.position()], true);
+                }
+                self.pending_prepare = false;
+            }
+            let watch_elapsed = self.last_watch.elapsed();
+            // Let the first 512 frames finish before a due device probe can
+            // demote this producer; a stalled start defers it at most 20 ms.
+            let first_buffer_pending = self.transport.is_running()
+                && self
+                    .shared
+                    .start_timing
+                    .published_frames
+                    .load(Ordering::Relaxed)
+                    < 512
+                && host_now_us()
+                    .saturating_sub(self.shared.start_timing.requested.load(Ordering::Relaxed))
+                    < 20_000;
+            if watch_elapsed >= Duration::from_secs(1)
+                && !first_buffer_pending
+                && (!self.preparation.pending_start(self.transport.position())
+                    || watch_elapsed >= Duration::from_millis(1100))
+            {
                 drop(realtime.take());
                 if self.device_changed() {
                     need_preroll = true;
                 }
             }
             if !self.transport.is_running() {
-                drop(realtime.take());
                 if self.stop_pending && self.ring.queued() == 0 {
                     self.stop_pending = false;
                     self.publish_stopped();
                 }
-                self.prepare_paused();
+                if self.stop_pending {
+                    paused_urgent_until = None;
+                    drop(realtime.take());
+                    continue;
+                }
+                let start = self.transport.position();
+                let urgent =
+                    paused_urgent_until.is_some_and(|until| std::time::Instant::now() < until);
+                if urgent
+                    && (self.preparation.pending_start(start) || !self.mixer.stretches_ready(start))
+                {
+                    self.ensure_schedule(&mut realtime);
+                }
+                if !urgent {
+                    drop(realtime.take());
+                }
+                if realtime.is_some() {
+                    {
+                        let _trace = crate::profile::control_timer("paused-urgent-poll");
+                        self.preparation.poll(&mut self.mixer);
+                    }
+                    if !self.mixer.stretches_ready(start) && !self.preparation.pending_start(start)
+                    {
+                        crate::realtime::checkpoint();
+                        let _trace = crate::profile::control_timer("paused-urgent-retry");
+                        self.preparation.schedule(&mut self.mixer, &[start], true);
+                    }
+                    if (self.preparation.pending_start(start) || !self.mixer.stretches_ready(start))
+                        && paused_urgent_until
+                            .is_some_and(|until| std::time::Instant::now() < until)
+                    {
+                        // The receiver wait burns no CPU reservation. Keep
+                        // the producer eligible during the bounded edit
+                        // window, including jobs behind a shared head.
+                        continue;
+                    }
+                    drop(realtime.take());
+                }
+                self.preparation.poll(&mut self.mixer);
+                if !self.preparation.pending_start(start) && self.mixer.stretches_ready(start) {
+                    paused_urgent_until = None;
+                }
+                {
+                    let _trace = crate::profile::control_timer("paused-metadata");
+                    self.prepare_paused();
+                }
+                crate::profile::flush_control_events();
                 continue;
             }
 
-            if realtime.is_none() {
-                let guard = self.schedule.enter();
-                *self
-                    .shared
-                    .start_timing
-                    .scheduling
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = guard.method().label().to_string();
-                *self
-                    .shared
-                    .start_timing
-                    .scheduling_errors
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) =
-                    (guard.status().workgroup_error, guard.status().mach_error);
-                realtime = Some(guard);
-            }
+            paused_urgent_until = None;
+            self.ensure_schedule(&mut realtime);
             crate::realtime::checkpoint();
             if need_preroll {
+                if !self.preroll() {
+                    // The queued control owns its ticket until dispatch.
+                    // Do not fill this superseded run before handling it.
+                    continue;
+                }
                 need_preroll = false;
-                self.preroll();
                 last_prefetch = None;
             }
             self.fill();
+            // A partial first callback retains its original cycle across
+            // retries. Once complete, idle/metadata time is outside a cycle.
+            if self
+                .shared
+                .start_timing
+                .published_frames
+                .load(Ordering::Relaxed)
+                >= 512
+                || !self.transport.is_running()
+            {
+                self.finish_audio_interval();
+            }
 
             if self.late_start.is_some() {
                 continue;
             }
-            // Replenish one loop/work-area voice between fills, while the
-            // ring is full. Never put sixteen fresh pre-rolls on a wrap.
-            if self.pending_segment.is_none() && !self.preempted() {
-                self.prepare_boundaries();
+            if self
+                .shared
+                .start_timing
+                .published_frames
+                .load(Ordering::Relaxed)
+                < 512
+            {
+                // The first callback's whole buffer is still being formed.
+                // Bounds and speculative work wait until it is published.
+                continue;
             }
-            // Keep the sources decoding ahead of the playhead. Bounding a
-            // time-mapped voice's reads evaluates its control points, so a
-            // long look-ahead is spread over the loop's turns (the ring stays
-            // full between them).
             let position = self.transport.position();
             let rate = self.transport.rate() as i64;
-            if lookahead_pending
-                || last_prefetch.is_none_or(|last| (position - last).abs() > rate / 4)
-            {
+            let lookahead_due = lookahead_pending
+                || last_prefetch.is_none_or(|last| (position - last).abs() > rate / 4);
+            let boundaries_due = self.boundary_due && self.pending_segment.is_none();
+            if boundaries_due || lookahead_due {
+                // Bounds and speculative decode have no bounded audio
+                // quantum. Stay scheduled across the next receiver wait
+                // when neither maintenance pass is due.
+                drop(realtime.take());
+            }
+            // Replenish loop/work-area voices after a control or wrap.
+            if boundaries_due && !self.preempted() {
+                let _trace = crate::profile::control_timer("boundary-metadata");
+                self.boundary_due = !self.prepare_boundaries();
+            }
+            if lookahead_due {
+                let _trace = crate::profile::control_timer("lookahead-metadata");
                 // J/K/L reads ahead in its direction, as far as it plays.
                 let speed = self.transport.play_rate();
                 let ahead = self.config.lookahead_ms as i64 * rate / 1000 * speed.abs().max(1);
@@ -1456,6 +1895,192 @@ impl RenderThread {
                         .prefetch_within(from, ahead as usize, LOOKAHEAD_GROUPS);
                 last_prefetch = Some(position);
             }
+            if realtime.is_none() {
+                crate::profile::flush_control_events();
+            }
+        }
+    }
+
+    fn schedule_for_control(
+        &mut self,
+        control: &Control,
+        realtime: &mut Option<crate::realtime::AudioScheduleGuard>,
+    ) {
+        // Record the state at receipt, before this control changes policy.
+        crate::profile::control_mark(if realtime.is_some() {
+            "received-with-rt-guard"
+        } else {
+            "received-without-rt-guard"
+        });
+        let _trace = crate::profile::control_timer(match control {
+            Control::Project(..) => "schedule-project",
+            Control::Commands(..) => "schedule-commands",
+            Control::Command(TransportCommand::Play { .. }, ..) => "schedule-play",
+            Control::Command(TransportCommand::Seek { .. }, ..) => "schedule-seek",
+            Control::Command(TransportCommand::Pause, ..) => "schedule-pause",
+            _ => "schedule-other",
+        });
+        match control {
+            Control::Command(..) | Control::Commands(..) => {
+                self.ensure_schedule(realtime);
+                crate::realtime::checkpoint();
+            }
+            Control::Project(..) => {
+                // Cancel old real-time jobs before giving up the producer's
+                // priority to rebuild the document and mixer.
+                self.ensure_schedule(realtime);
+                crate::realtime::checkpoint();
+                self.preparation.invalidate();
+                drop(realtime.take());
+            }
+            _ => {
+                // Evaluator, device, and mix metadata can perform unbounded
+                // work and must use ordinary producer scheduling.
+                drop(realtime.take());
+            }
+        }
+    }
+
+    fn ensure_schedule(&mut self, realtime: &mut Option<crate::realtime::AudioScheduleGuard>) {
+        if realtime.is_some() {
+            return;
+        }
+        let guard = self.schedule.enter_producer();
+        self.interval_output_frames = 0;
+        self.interval_start_epoch = None;
+        *self
+            .shared
+            .start_timing
+            .scheduling
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = guard.method().label().to_string();
+        let status = guard.status();
+        let mut errors = self
+            .shared
+            .start_timing
+            .scheduling_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if errors.0.is_none() {
+            errors.0 = status.workgroup_error;
+        }
+        if errors.1.is_none() {
+            errors.1 = status.mach_error;
+        }
+        if errors.2.is_none() {
+            errors.2 = status.hint_error;
+        }
+        drop(errors);
+        *realtime = Some(guard);
+    }
+
+    fn begin_audio_interval(&mut self, requested_host_us: u64) {
+        if !self.schedule.interval_master() {
+            return;
+        }
+        let first_callback = self.transport.is_running()
+            && self
+                .shared
+                .start_timing
+                .published_frames
+                .load(Ordering::Relaxed)
+                < 512;
+        let epoch = self.transport.epoch();
+        let requested_host_us = if first_callback {
+            if self.interval_failed_epoch == Some(epoch)
+                || (self.schedule.interval_active() && self.interval_start_epoch == Some(epoch))
+            {
+                return;
+            }
+            // Every control and guard re-entry before first publication uses
+            // the original Play/Seek deadline. A paused edit's cycle is
+            // replaced once; nonrestart controls cannot renew this bound.
+            self.shared.start_timing.requested.load(Ordering::Relaxed)
+        } else {
+            requested_host_us
+        };
+        match self.schedule.begin_interval(requested_host_us) {
+            Ok(()) => {
+                self.interval_output_frames = 0;
+                self.interval_start_epoch = first_callback.then_some(epoch);
+                if first_callback {
+                    let metrics = self.schedule.metrics();
+                    self.shared
+                        .start_timing
+                        .first_buffer_last_deadline_tick
+                        .store(metrics.interval_last_deadline_tick, Ordering::Relaxed);
+                    if self
+                        .shared
+                        .start_timing
+                        .first_interval_requested
+                        .load(Ordering::Relaxed)
+                        == 0
+                    {
+                        self.shared
+                            .start_timing
+                            .first_interval_anchor_tick
+                            .store(metrics.interval_last_anchor_tick, Ordering::Relaxed);
+                        self.shared
+                            .start_timing
+                            .first_interval_start_tick
+                            .store(metrics.interval_last_start_tick, Ordering::Relaxed);
+                        self.shared
+                            .start_timing
+                            .first_interval_deadline_tick
+                            .store(metrics.interval_last_deadline_tick, Ordering::Relaxed);
+                        self.shared
+                            .start_timing
+                            .first_interval_requested
+                            .store(requested_host_us, Ordering::Relaxed);
+                        self.shared.start_timing.first_interval_deadline.store(
+                            requested_host_us
+                                .saturating_add(self.schedule.period_ns().div_ceil(1_000)),
+                            Ordering::Relaxed,
+                        );
+                    } else {
+                        self.shared
+                            .start_timing
+                            .first_buffer_reanchors
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    self.shared
+                        .start_timing
+                        .first_buffer_last_reanchor
+                        .store(host_now_us(), Ordering::Relaxed);
+                }
+            }
+            Err(_) if first_callback => {
+                // Keep the diagnostic in the schedule metrics. Repeated
+                // attempts with a newer timestamp would hide this miss.
+                // A failed finish may still leave the prior cycle active.
+                self.interval_failed_epoch = Some(epoch);
+            }
+            Err(_) => {}
+        }
+    }
+
+    fn finish_audio_interval(&mut self) {
+        if !self.schedule.interval_master() || !self.schedule.interval_active() {
+            return;
+        }
+        if self.schedule.finish_interval().is_ok() {
+            self.interval_output_frames = 0;
+            self.interval_start_epoch = None;
+        }
+    }
+
+    fn published_audio(&mut self, frames: u64) {
+        self.shared.start_timing.published(frames);
+        if !self.schedule.has_custom_interval() || !self.schedule.interval_active() {
+            return;
+        }
+        self.interval_output_frames = self.interval_output_frames.saturating_add(frames);
+        // Headless schedules declare the 512-frame callback period. Close
+        // each completed callback. The next cycle begins only if fill has
+        // another segment to form; no CPU reservation debt is restarted here.
+        if self.interval_output_frames >= 512 {
+            self.interval_failed_epoch = None;
+            self.finish_audio_interval();
         }
     }
 
@@ -1516,6 +2141,8 @@ impl RenderThread {
 
     /// Applies a control; returns whether playback must pre-roll.
     fn control(&mut self, c: Control) -> bool {
+        let _trace = crate::profile::control_timer(control_label(&c, self.batching));
+        self.boundary_due = true;
         self.shared
             .prepared
             .lock()
@@ -1526,6 +2153,7 @@ impl RenderThread {
                 let mut restart = false;
                 self.batching = true;
                 for command in commands {
+                    crate::realtime::checkpoint();
                     let (tx, rx) = std::sync::mpsc::sync_channel(1);
                     restart |= self.control(Control::Command(command, tx, requested_us));
                     if let Ok(Err(error)) = rx.try_recv() {
@@ -1535,8 +2163,7 @@ impl RenderThread {
                     }
                 }
                 self.batching = false;
-                self.preparation
-                    .schedule(&mut self.mixer, &[self.transport.position()], true);
+                self.pending_prepare = true;
                 let _ = reply.send(Ok(()));
                 restart
             }
@@ -1565,6 +2192,12 @@ impl RenderThread {
                         *self
                             .shared
                             .start_timing
+                            .idle_baseline
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = self.shared.idle_workers.stats();
+                        *self
+                            .shared
+                            .start_timing
                             .scheduling_baseline
                             .lock()
                             .unwrap_or_else(|e| e.into_inner()) = self.schedule.metrics();
@@ -1579,10 +2212,13 @@ impl RenderThread {
                         true
                     }
                     Ok(Effect::Stopped) => {
+                        self.finish_audio_interval();
                         if let Some(start) = self.late_start.take() {
                             self.mixer.discard_prepared(start);
                         }
+                        crate::realtime::checkpoint();
                         self.mixer.abandon_prefills();
+                        crate::realtime::checkpoint();
                         self.mixer.clear_preparing();
                         // A stop drops the run's starved segment: the next
                         // run renders from its own position.
@@ -1596,7 +2232,9 @@ impl RenderThread {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .new_run();
+                        crate::realtime::checkpoint();
                         self.mixer.abandon_retries();
+                        crate::realtime::checkpoint();
                         self.ring.set_epoch(self.transport.epoch());
                         self.stopped_published = false;
                         self.stop_pending = false;
@@ -1607,21 +2245,20 @@ impl RenderThread {
                 };
                 // SetLoop and Pause often precede a Seek in the same app
                 // task. Do not launch obsolete vocoders for those intermediate
-                // positions; Project/Seek still prepare immediately.
+                // positions; Project/Seek queue the final urgent batch after
+                // controls have drained.
                 if !self.batching
                     && !matches!(
                         cmd,
                         TransportCommand::SetLoop { .. } | TransportCommand::Pause
                     )
                 {
-                    self.preparation
-                        .schedule(&mut self.mixer, &[self.transport.position()], true);
+                    self.pending_prepare = true;
                 }
                 let _ = reply.send(result.map(|_| ()));
                 restart
             }
             Control::Project(doc, graph, rate, end) => {
-                self.preparation.invalidate();
                 if !self.preparation.is_standard() {
                     self.mixer.invalidate_prepared();
                 }
@@ -1634,8 +2271,7 @@ impl RenderThread {
                     self.mixer.set_graph(doc, graph);
                 }
                 self.transport.set_composition(rate, end);
-                self.preparation
-                    .schedule(&mut self.mixer, &[self.transport.position()], true);
+                self.pending_prepare = true;
                 false
             }
             Control::Solo(s) => {
@@ -1660,6 +2296,12 @@ impl RenderThread {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = schedule.clone();
                 self.schedule = schedule;
+                *self
+                    .shared
+                    .start_timing
+                    .scheduling_errors
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = (None, None, None);
                 false
             }
             Control::Watch(w) => {
@@ -1696,6 +2338,12 @@ impl RenderThread {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = schedule.clone();
             self.schedule = schedule;
+            *self
+                .shared
+                .start_timing
+                .scheduling_errors
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = (None, None, None);
         }
         if let Some((_, latency)) = now {
             self.shared.latency_us.store(latency, Ordering::Relaxed);
@@ -1747,13 +2395,10 @@ impl RenderThread {
         self.stopped_published = true;
     }
 
-    /// Idle work is cancellable between turns: decode around the playhead
-    /// first, then both work-area edges. Each target has its own vocoder.
-    fn prepare_paused(&mut self) {
-        if self.stop_pending {
-            return;
-        }
-        if self.shuttle.is_none() && !self.mixer.graph().voices.is_empty() {
+    /// Master FFT plans/workspace need no project input. Warm before
+    /// receiving controls so an immediate edit/Play cannot wait on them.
+    fn warm_shuttle(&mut self) {
+        if self.shuttle.is_none() {
             // Master FFT plans/workspace need no project input. Allocate and
             // exercise them off the Play path without advancing the mix.
             match Shuttle::new(self.mixer.format().channels(), self.transport.rate()) {
@@ -1765,6 +2410,14 @@ impl RenderThread {
                 }
                 Err(error) => self.error(error.to_string()),
             }
+        }
+    }
+
+    /// Idle work is cancellable between turns: decode around the playhead
+    /// first, then both work-area edges. Each target has its own vocoder.
+    fn prepare_paused(&mut self) {
+        if self.stop_pending || self.preempted() {
+            return;
         }
         let rate = self.transport.rate() as i64;
         let position = self.transport.position();
@@ -1823,7 +2476,8 @@ impl RenderThread {
                     break;
                 }
                 self.mixer.prefetch_within(start, CHUNK, LOOKAHEAD_GROUPS);
-                if !self.mixer.prepare_start(start) {
+                self.mixer.mark_unstretched_ready(start);
+                if !self.mixer.prepared_ready(&[start]) {
                     forward = false;
                     break;
                 }
@@ -1886,20 +2540,21 @@ impl RenderThread {
         starts
     }
 
-    fn prepare_boundaries(&mut self) {
+    fn prepare_boundaries(&mut self) -> bool {
         if self.transport.play_rate() < 0 {
-            return;
+            return true;
         }
         let starts = self.boundary_starts();
         self.mixer.retain_prepared(&starts);
         self.preparation.schedule(&mut self.mixer, &starts, false);
-        for start in starts {
+        for &start in &starts {
             if self.mixer.stretches_ready(start) && !self.mixer.prepared_ready(&[start]) {
                 self.mixer.prefetch_within(start, CHUNK, LOOKAHEAD_GROUPS);
-                self.mixer.prepare_start(start);
+                self.mixer.mark_unstretched_ready(start);
                 break;
             }
         }
+        self.mixer.prepared_ready(&starts)
     }
 
     /// A control arrived during idle preparation: keep it for the loop.
@@ -1913,7 +2568,10 @@ impl RenderThread {
     }
 
     /// Decodes what the first moments of playback need before queueing.
-    fn preroll(&mut self) {
+    fn preroll(&mut self) -> bool {
+        if self.preempted() {
+            return false;
+        }
         self.pending_segment = None;
         self.history_wait = None;
         self.last_segment_end = None;
@@ -1936,18 +2594,32 @@ impl RenderThread {
         self.mixer.abandon_prefills();
         self.mixer.abandon_retries();
         let position = self.transport.position();
-        let device_start = self.ring.played_frames();
+        let epoch = self.transport.epoch();
+        if self
+            .preroll_hold
+            .as_ref()
+            .is_none_or(|hold| hold.epoch != epoch)
+        {
+            self.preroll_hold = Some(PrerollHold {
+                epoch,
+                device_start: self.ring.played_frames(),
+                stretch_deadline: std::time::Instant::now()
+                    + Duration::from_millis(self.config.preroll_wait_ms as u64),
+                source_deadline: None,
+            });
+        }
+        let hold = self.preroll_hold.as_ref().unwrap();
+        let device_start = hold.device_start;
+        let stretch_deadline = hold.stretch_deadline;
         self.startup = Some(device_start);
         // Detached work was launched by Project/Seek. Join only the first
         // chunk, without re-evaluating every voice's source bounds serially.
         if self.transport.play_rate() == 1 {
-            let deadline = std::time::Instant::now()
-                + Duration::from_millis(self.config.preroll_wait_ms as u64);
             self.preparation
                 .schedule(&mut self.mixer, &[position], true);
             let _wait = crate::profile::timer(crate::profile::Kind::PrepareWait);
             while !self.mixer.stretches_ready(position)
-                && std::time::Instant::now() < deadline
+                && std::time::Instant::now() < stretch_deadline
                 && self.ring.played_frames().saturating_sub(device_start)
                     < self.device_rate as u64 * SOURCE_WAIT_MS / 1000
             {
@@ -1957,9 +2629,12 @@ impl RenderThread {
                 self.preparation
                     .schedule(&mut self.mixer, &[position], true);
                 if self.preempted() {
-                    break;
+                    return false;
                 }
             }
+        }
+        if self.preempted() {
+            return false;
         }
         let prepared = self.transport.play_rate() == 1 && self.mixer.prepared_ready(&[position]);
         if self.transport.play_rate() == 1
@@ -2001,17 +2676,30 @@ impl RenderThread {
         // Nothing of this run is queued, so no ready voice goes silent while
         // it waits. `fill` keeps holding a still-missing first segment by
         // device time from the same frame.
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(self.config.preroll_wait_ms as u64);
+        let source_deadline = *self
+            .preroll_hold
+            .as_mut()
+            .unwrap()
+            .source_deadline
+            .get_or_insert_with(|| {
+                std::time::Instant::now()
+                    + Duration::from_millis(self.config.preroll_wait_ms as u64)
+            });
         while !prepared
             && !self.mixer.is_ready(from, frames)
-            && std::time::Instant::now() < deadline
+            && std::time::Instant::now() < source_deadline
             && self.ring.played_frames().saturating_sub(device_start)
                 < self.device_rate as u64 * SOURCE_WAIT_MS / 1000
         {
+            if self.preempted() {
+                return false;
+            }
             crate::realtime::checkpoint();
             let _timing = crate::profile::timer(crate::profile::Kind::Hold);
             std::thread::sleep(Duration::from_millis(1));
+        }
+        if self.preempted() {
+            return false;
         }
         if speed == 1 && self.late_start.is_none() {
             self.mixer.use_prepared(position);
@@ -2023,6 +2711,7 @@ impl RenderThread {
         if let Some(s) = &mut self.shuttle {
             s.reset();
         }
+        true
     }
 
     /// Renders until the ring holds its callback-adapted look-ahead target.
@@ -2044,8 +2733,8 @@ impl RenderThread {
             .refill(self.ring.queued() as u64 * CHUNK as u64);
         let channels = self.mixer.format().channels();
         let mut planar = vec![Vec::new(); channels];
-        while self.ring.queued()
-            < if self.late_start.is_some() {
+        loop {
+            let required = if self.late_start.is_some() {
                 // Keep two callbacks ahead during the short CPU preparation
                 // gap, so a late voice does not also lose the whole 80 ms ring.
                 self.ring
@@ -2054,8 +2743,13 @@ impl RenderThread {
                     .div_ceil(CHUNK as u64) as usize
             } else {
                 target
+            };
+            if self.ring.queued() >= required {
+                break;
             }
-        {
+            if self.schedule.has_custom_interval() && !self.schedule.interval_active() {
+                self.begin_audio_interval(host_now_us());
+            }
             crate::realtime::checkpoint();
             let retry = self.pending_segment.is_some();
             let Some(seg) = self
@@ -2132,6 +2826,7 @@ impl RenderThread {
                 })
             {
                 self.mixer.use_prepared(lo);
+                self.boundary_due = true;
                 crate::preparation::wake_workers();
             }
             let rendering = std::time::Instant::now();
@@ -2400,9 +3095,10 @@ impl RenderThread {
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }
-            self.shared.start_timing.published(n as u64);
+            self.published_audio(n as u64);
             // Stateful DSP can consume many input segments before emitting
             // a device frame. Keep the cold-start hold until output exists.
+            self.preroll_hold = None;
             self.startup = None;
             done += n;
         }
@@ -2442,7 +3138,8 @@ impl RenderThread {
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }
-            self.shared.start_timing.published(u64::from(tag.frames));
+            self.published_audio(u64::from(tag.frames));
+            self.preroll_hold = None;
             self.startup = None;
         }
     }
@@ -2451,6 +3148,60 @@ impl RenderThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_tickets_cover_queue_deferral_and_dispatch() {
+        let pending = Arc::new(AtomicU64::new(0));
+        let (raw_tx, rx) = channel();
+        let sender = ControlSender {
+            tx: raw_tx,
+            pending: pending.clone(),
+        };
+        let another_sender = sender.clone();
+        assert!(sender.send(Control::Solo(None)).is_ok());
+        assert!(another_sender.send(Control::Shutdown).is_ok());
+        assert_eq!(pending.load(Ordering::Acquire), 2);
+
+        // Taking a control off the channel, including into deferred, does
+        // not free its ticket until the producer begins dispatching it.
+        let mut deferred = Some(rx.try_recv().unwrap());
+        assert_eq!(pending.load(Ordering::Acquire), 2);
+        assert!(matches!(
+            deferred.take().unwrap().into_dispatch(),
+            Control::Solo(None)
+        ));
+        assert_eq!(pending.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            rx.try_recv().unwrap().into_dispatch(),
+            Control::Shutdown
+        ));
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn control_tickets_release_on_failed_send_and_receiver_drop() {
+        let pending = Arc::new(AtomicU64::new(0));
+        let (raw_tx, rx) = channel();
+        let sender = ControlSender {
+            tx: raw_tx,
+            pending: pending.clone(),
+        };
+        drop(rx);
+        let failure = sender.send(Control::Shutdown).unwrap_err();
+        assert_eq!(pending.load(Ordering::Acquire), 1);
+        drop(failure);
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+
+        let (raw_tx, rx) = channel();
+        let sender = ControlSender {
+            tx: raw_tx,
+            pending: pending.clone(),
+        };
+        assert!(sender.send(Control::Shutdown).is_ok());
+        assert_eq!(pending.load(Ordering::Acquire), 1);
+        drop(rx);
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn first_buffer_timing_ignores_other_epochs_and_later_callbacks() {
@@ -2474,6 +3225,184 @@ mod tests {
         trace.queued();
         trace.heard(4, 50, 256);
         assert_eq!(trace.latest().unwrap().device_host_us, 50);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "test-hooks"))]
+    #[test]
+    fn blocked_first_buffer_reanchors_original_interval_after_project_control() {
+        use crate::offline::{PcmFormat, WavWriter};
+        use pm_model::json::parse;
+        use pm_protocol::clock::{SeekMode, TransportCommand};
+        use pm_protocol::common::{PlaybackRate, TICKS_PER_SECOND, Ticks};
+
+        struct ReleaseDecoder(Arc<SourceCache>, Arc<crate::source::Source>);
+        impl Drop for ReleaseDecoder {
+            fn drop(&mut self) {
+                self.0.set_decode_blocked(&self.1, false);
+            }
+        }
+        let dir =
+            std::env::temp_dir().join(format!("pm-audio-first-interval-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("source.wav");
+        let frames = 2 * crate::source::BLOCK;
+        let wav = std::fs::File::create(&file).unwrap();
+        let mut writer =
+            WavWriter::new(std::io::BufWriter::new(wav), PcmFormat::F32, 2, 48_000).unwrap();
+        writer.write(0, &vec![0.1; frames * 2]).unwrap();
+        writer.finish().unwrap();
+
+        let cache = SourceCache::new(64 << 20, 2);
+        let source = cache.open(&file, None).unwrap();
+        cache.block(&source, 0, true).unwrap();
+        cache.set_decode_blocked(&source, true);
+        let unblock = ReleaseDecoder(cache.clone(), source);
+        let (mut playback, side) = Playback::start_headless(
+            MixFormat::stereo(48_000),
+            cache.clone(),
+            PlaybackConfig {
+                lookahead_ms: 0,
+                preroll_wait_ms: 400,
+                ..PlaybackConfig::default()
+            },
+            48_000,
+            2,
+            0,
+        )
+        .unwrap();
+        // Give the regression ample wall time while checking that both
+        // actual cycles retain one declared deadline across guard re-entry.
+        let schedule = crate::realtime::AudioSchedule::headless(48_000, 1_920);
+        playback
+            .tx
+            .send(Control::Schedule(schedule.clone()))
+            .unwrap();
+        let duration = frames as f64 / 48_000.0;
+        let layer = format!(
+            r#"{{"id":"A","type":"audio","name":"A","from":0,"dur":{duration},"on":true,"solo":false,"group":null,"parent":null,"p":{{}},"fx":[],"masks":[],"d":{{"asset":"s","gain":1,"trim":0,"fadeIn":0,"fadeOut":0}}}}"#
+        );
+        let json = format!(
+            r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":30,"dur":{duration},"layers":[{layer}],"comps":{{}},"assets":{{}},"params":{{}}}}"#
+        );
+        let document = Arc::new(Document::new(Some(parse(&json).unwrap()), 1));
+        let resolver = |_: &str| Some(file.clone());
+        assert!(
+            playback
+                .set_project(document.clone(), "C", &resolver)
+                .unwrap()
+                .is_empty()
+        );
+        let target = (crate::source::BLOCK + 1_000) as f64 / 48_000.0;
+        playback
+            .commands([
+                TransportCommand::Seek {
+                    time: Ticks::new((target * TICKS_PER_SECOND as f64).round() as i64).unwrap(),
+                    mode: SeekMode::Exact,
+                },
+                TransportCommand::Play {
+                    rate: PlaybackRate::NORMAL,
+                },
+            ])
+            .unwrap();
+        let requested = playback
+            .shared
+            .start_timing
+            .requested
+            .load(Ordering::Acquire);
+        let wait_until = |condition: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !condition() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_micros(100));
+            }
+            assert!(condition(), "interval condition did not become true");
+        };
+        wait_until(&|| {
+            cache.blocked_decoders() > 0
+                && schedule.metrics().interval_last_requested_us == requested
+        });
+        assert_eq!(side.queued_frames(), 0);
+        let first = schedule.metrics();
+        assert_eq!(first.interval_last_deadline_us, requested + 40_000);
+
+        assert!(
+            playback
+                .set_project(document.clone(), "C", &resolver)
+                .unwrap()
+                .is_empty()
+        );
+        wait_until(&|| {
+            schedule.metrics().interval_starts > first.interval_starts
+                && playback
+                    .shared
+                    .start_timing
+                    .first_buffer_reanchors
+                    .load(Ordering::Relaxed)
+                    >= 1
+        });
+        let second = schedule.metrics();
+        assert!(second.interval_auto_finishes > first.interval_auto_finishes);
+        assert_eq!(second.interval_last_requested_us, requested);
+        assert_eq!(
+            second.interval_last_deadline_us,
+            first.interval_last_deadline_us
+        );
+        assert!(second.interval_last_reanchor_us >= first.interval_last_reanchor_us);
+        assert_eq!(
+            playback
+                .shared
+                .start_timing
+                .first_interval_requested
+                .load(Ordering::Relaxed),
+            requested
+        );
+        assert_eq!(
+            playback
+                .shared
+                .start_timing
+                .first_interval_deadline
+                .load(Ordering::Relaxed),
+            requested + 40_000
+        );
+        playback
+            .command(TransportCommand::SetLoop { range: None })
+            .unwrap();
+        let turns = playback.shared.render_turns.load(Ordering::Acquire);
+        wait_until(&|| playback.shared.render_turns.load(Ordering::Acquire) >= turns + 3);
+        assert_eq!(schedule.metrics().interval_starts, second.interval_starts);
+
+        std::thread::sleep(Duration::from_millis(45));
+        assert!(
+            playback
+                .set_project(document, "C", &resolver)
+                .unwrap()
+                .is_empty()
+        );
+        wait_until(&|| schedule.metrics().interval_expired > second.interval_expired);
+        let expired = schedule.metrics();
+        assert_eq!(expired.interval_last_requested_us, requested);
+        assert_eq!(
+            expired.interval_last_deadline_us,
+            first.interval_last_deadline_us
+        );
+        playback
+            .command(TransportCommand::SetLoop { range: None })
+            .unwrap();
+        let turns = playback.shared.render_turns.load(Ordering::Acquire);
+        wait_until(&|| playback.shared.render_turns.load(Ordering::Acquire) >= turns + 3);
+        assert_eq!(
+            schedule.metrics().interval_expired,
+            expired.interval_expired
+        );
+        assert_eq!(side.queued_frames(), 0);
+        assert!(
+            playback.take_errors().is_empty(),
+            "interval diagnostics are not user audio errors"
+        );
+        drop(unblock);
+        assert!(playback.shutdown());
+        cache.shutdown();
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir(dir);
     }
 
     #[test]
