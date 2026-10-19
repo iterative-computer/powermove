@@ -49,7 +49,10 @@
  */
 
 export type FallbackCallFn = '1f' | '2f' | '3f' | '4f' | '1i' | 'm3';
-export interface FallbackCall { fn: FallbackCallFn; name: string; v: number[]; alias?: string }
+/** One uniform call. `fn` is a `FallbackCallFn`; the protocol's type
+ *  (`ShaderFallbackCall`) carries it as a string, and a name the runner
+ *  does not know changes nothing (`applyCalls`). */
+export interface FallbackCall { fn: FallbackCallFn | (string & {}); name: string; v: number[]; alias?: string }
 /** Unit `unit` samples texture `texture` (or, with `chain`, the previous pass's output from the second pass on). */
 export interface FallbackUnit { unit: number; texture: number; chain: boolean }
 

@@ -11,7 +11,7 @@ const rendered = (width: number, height: number, fill = 7, revision = 12): Engin
   status: 'rendered', revision, viewSeq: 4, width, height, pixels: 'opaque', data: new Uint8Array(width * height * 4).fill(fill), origin: [0, 0], layerBox: null, raster: null, quality, waitedUs: 1, renderUs: 2, mainMs: 3
 });
 
-const fallbackRequest = (key: string): ShaderFallbackRequest => ({ key, layer: 'sky', vertex: 'v', fragment: 'f', width: 2, height: 2, calls: [], stage: 'bind', message: '' });
+const fallbackRequest = (key: string): ShaderFallbackRequest => ({ key, layer: 'sky', vertex: 'v', fragment: 'f', width: 2, height: 2, calls: [], stage: 'bind', message: '', textures: 0, units: [], morePasses: [] });
 
 function session(): TransportSession & { uploads: string[]; posted: Record<string, unknown>[] } {
   const uploads: string[] = [];
