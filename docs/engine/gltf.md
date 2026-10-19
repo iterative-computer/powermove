@@ -378,3 +378,36 @@ caster's rejected shadow, as well as drawing after a late map failure.
 The paired legacy/native shared-node and final-material capture is 100%
 within 2 CV. Applying the production 3D bar to its PNGs, without any edge
 exclusion, gives max 2 CV and object SSIM 0.99999768.
+
+## Phase 3c round 8: the NORMAL input of Basic and flat programs
+
+Round 7's draw rule treated `NORMAL` as consumed only by unflat Standard
+and Physical programs. Two parts of that were wrong against three r180:
+
+- `meshbasic.glsl.js` includes `beginnormal_vertex` under
+  `USE_ENVMAP || USE_SKINNING`, so a skinned (or env-mapped)
+  MeshBasicMaterial binds `normal`. A skinned `KHR_materials_unlit`
+  primitive with a short NORMAL therefore draws nothing today. The same
+  holds for the viewport chrome: `overlay.ts` draws its grid-occlusion depth
+  and outline mask with MeshBasicMaterial overrides, so a skinned glTF mesh
+  with a short NORMAL has no outline and no grid occlusion today. The native
+  chrome uses Basic overrides too (`chrome_gpu.rs`) and now applies the
+  same rule to its depth, ID and mask draws.
+- The physical vertex shader includes `beginnormal_vertex`
+  unconditionally, so flat shading does not deactivate `normal`. Only
+  `USE_TANGENT` depends on `flatShading === false`. No current file reaches
+  this, because GLTFLoader and the compatibility `Object3D` set flatShading
+  only when NORMAL is absent; the rule now matches the measured program.
+
+`consumes_short_attribute` now reads: depth/distance programs consume
+NORMAL only with a displacement map; Standard/Physical always; Basic (and
+LineBasic, which shares `meshbasic_vert`) only when skinned or env-mapped.
+Evidence: the Chromium probe (`e2e/scene3d-short-attributes.spec.ts`) has
+36 cases, 8 of them new: skinned Basic with full and short normals,
+env-mapped Basic, flat and skinned-flat Standard, and `overlay.ts`'s mask
+override on unskinned short, skinned short and skinned full normals. Every
+short case that binds `normal` gave `INVALID_OPERATION` and black; the
+others drew red. `pm-render`'s `viewport_chrome` test renders the color
+frame and all three chrome planes for skinned and unskinned, unlit and
+Standard short-normal GLBs (complete-normal controls draw everywhere), and
+fails against the round 7 rule.

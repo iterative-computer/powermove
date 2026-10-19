@@ -929,3 +929,27 @@ checked by the shared native validator.
   other lanes; no changed-lane diagnostics remain. Paired idle orbit is
   deferred to the orchestrator's quiet, awake measurement window; no current
   performance pass is claimed.
+
+## Phase 3c round 8: skinned short normals and session startup
+
+- Draw rule: skinned or env-mapped MeshBasic programs consume `NORMAL`,
+  and flat shading no longer exempts Standard/Physical (gltf.md, round 8).
+  This covers a skinned unlit glTF color draw and the native chrome's
+  Basic override draws (depth, IDs, outline mask), which today's
+  `overlay.ts` MeshBasicMaterial overrides lose for a skinned mesh with a
+  short NORMAL.
+- `DocumentSession.start()` is back to the bridge lane's semantics. A
+  refused or interrupted first resync no longer throws: a session closed
+  while starting logs no spurious warning, and a session whose first resync
+  failed stays open for a later gap or load resync. Only the cache
+  preview's wake (`documentWake` in `engine-connection/preview.ts`) refuses
+  an unaccepted document, with `EnginePreviewUnavailable`.
+- Decision kept: with the setting on and no `PM.EngineConnection` (the
+  install returned null: no frame bridge or kernel services),
+  `renderFrame` still throws `EnginePreviewUnavailable`. Rendering it
+  through today's three.js path would be the silent legacy routing the
+  owner rules forbid; `cancelRender` resolves because there is nothing to
+  cancel.
+- Still open for the orchestrator: whether the 500,000-vertex geometry
+  budget joins THREED-3's beta-list bug fixes (it stays a refusal, like
+  today), and the paired idle 3D orbit row (G).
