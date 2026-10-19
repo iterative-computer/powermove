@@ -245,3 +245,16 @@ there is no implicit seek, Play, epoch change or audio-device restart. Explicit
 presentation frame requests fail without a viewer; offscreen captures use the
 snapshot path. See RFC 16 for the renderer lifecycle. The generated build is
 `protocol-2f8d7cab61015d02`; addons and TypeScript must be rebuilt together.
+
+### Version note: optional SVG output scale (2026-10-19)
+
+`ViewerState.svgScale?: [number, number] | null` (Rust `svg_scale:
+Option<[f64; 2]>`, `#[serde(default)]`) is today's output scale for the view:
+the legacy compositor's `outputScale` over the canvas today's viewer sizes
+for it (`previewRenderSize`, the explicit preview resolution, or the cropped
+`previewRenderViewport`), canvas pixels per composition pixel per axis. The
+engine picks level 1 SVG image buckets at it (`RenderRequest::svg_scale`;
+docs/engine/vector.md, "Viewer buckets at today's scale"). Absent or null:
+the engine's own output scale, as before. Positive, finite and at most 64
+(`ViewerState::validate`). A change of it is a new view (`viewSeq`). The
+build id moved; addons and TypeScript are rebuilt together.

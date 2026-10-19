@@ -460,7 +460,8 @@ M4 Max), the machine shared with other lanes.
   state (stage 748 × 452 CSS px, DPR 2, quality 1, checked equal in both
   launches). At fit (114.4%: 1160 × 653, 600 × 338, 400 × 225) and at 237%
   with a cropped preview viewport and a pan (2360 × 1328, 1200 × 675, 760
-  × 428) the buckets are today's. **At 61% they are not**: today 520 × 293,
+  × 428) the buckets are today's. **At 61% they were not** (fixed
+  2026-10-19, "Viewer buckets at today's scale" below): today 520 × 293,
   280 × 158, 160 × 90; the engine 600 × 338, 320 × 180, 200 × 113. Not the
   rasters: today's viewer draws at most one output pixel per composition
   pixel when it does not crop (`previewRenderSize` in
@@ -513,7 +514,10 @@ M4 Max), the machine shared with other lanes.
   `previewRenderViewport` rules (the cap at one pixel per composition pixel,
   the crop's safety plan, the quality and explicit resolution settings),
   and the browser's upscale of the smaller frame. Until then the viewer
-  differs from today there for every layer kind.
+  differs from today there for every layer kind except the resolution of
+  level 1 SVG rasters, which follow today's scale since 2026-10-19 ("Viewer
+  buckets at today's scale" below); the engine still draws the frame (and
+  samples those rasters) at zoom × DPR.
 - Preview stand-ins during playback (above: 17 of 62 frames of a scale
   animation): prefetching the buckets of the frames ahead would remove
   them; a decision for the orchestrator.
@@ -622,3 +626,62 @@ The regression identifies an edited frame by its document revision, so a
 previously cached bucket also completes without requiring another upload.
 This is functional/pixel evidence; no paired performance pass is claimed while
 the display is asleep. The final release addon built successfully.
+
+### Viewer buckets at today's scale (2026-10-19)
+
+The perf3 review found the engine's viewer asking for sharper level 1 SVG
+buckets than today at 61% on a 2x display (600 × 338, 320 × 180, 200 × 113
+against today's 520 × 293, 280 × 158, 160 × 90). Today's viewer sizes its
+canvas itself and the compositor picks each bucket at that canvas's
+`outputScale`: below fit the canvas is at most one pixel per composition
+pixel (`previewRenderSize`: `min(1, zoom × min(2, DPR)) × quality`), with
+an explicit preview resolution it is `round(comp × quality)`, and above
+100% in a crop-safe project it is the cropped `previewRenderViewport`
+(`round(cssWidth × density)` over the crop's composition width). The
+engine's viewer draws at zoom × DPR (`placement`), so its buckets followed
+that scale.
+
+The fix keeps the engine's frame and changes only the bucket choice:
+
+- The viewer computes today's render geometry before it sends the view and
+  sends the compositor's `outputScale` over it as `ViewerState.svgScale`
+  (`todaysOutputScale` in `engine-present/view-params.ts`; RFC 02 version
+  note). The kernel's canvas binding does the same from the size and crop a
+  `render.gl.resize` caller passes. A change of it is a new view.
+- Composer passes it as `RenderRequest::svg_scale`; the plan picks level 1
+  SVG buckets at it (`svgRasterDimensions(…, scaledWorld)` with today's
+  scale), and a level 1 precomp derives its child's scale from today's
+  target (`round(w × sx)` over the child's size), as today's nested
+  `renderProject` does. Draw reuse keys on it.
+- Snapshots and exports send none: their scale is `W / comp.w`, which is
+  today's (`renderToPixels`, `renderInto` after `GL.resize(W, H)` with no
+  viewport). Level 2 is unchanged (native vectors at output resolution).
+- Perf3's exact-raster policy is untouched: the bucket is computed in the
+  plan of the frame that draws it, so the frame still waits for exactly
+  that raster (e2e: zero stand-ins).
+
+Measured:
+
+- `svg-buckets.test.ts` computes today's buckets with today's functions
+  over zoom 0.1 to 8 × DPR 1, 2, 3 × four layer scales (one anisotropic) ×
+  Auto and Half × crop safe and unsafe, plus an SVG in a precomp: 918
+  views, 216 of them cropped. `svg_level1.rs`
+  (`viewer_frames_pick_todays_buckets_at_todays_viewer_scale`) plans the
+  engine's viewer frame of each with the sent scale: 918 of 918 buckets are
+  today's; at the engine's own scale 491 differ.
+- e2e (`engine-svg.spec.ts`, Electron lock, one worker): the viewer asks
+  for today's buckets at fit, at 237% cropped and panned, and at 61%
+  (160 × 90, 280 × 158, 520 × 293), with zero stand-ins; ten bucket edits
+  and the 63-frame scale animation (17 asks) present no stand-in; 6 of 7
+  pass. The seventh is the exported still (E1, unchanged): SVG 56,037
+  channel values and the PNG control 59,892 off by 1 CV, the job engine's
+  32-bit still pipeline, not the rasters.
+- `svg_corpus`: 34 projects, 105 frames, 9,640,652 SVG pixels, 0 failed.
+
+Remaining: the engine still draws the viewer frame itself at zoom × DPR
+and samples the today-sized raster into it, where today's browser upscales
+the whole smaller canvas ("Level 1: what remains"). A level 1 SVG inside a
+level 2 precomp keeps the engine's scale (today has no level 2). During a
+zoom gesture today keeps its old canvas until the gesture settles
+(`canRetainNavigation`); the engine follows the new scale at once, so only
+transient gesture frames can differ.
