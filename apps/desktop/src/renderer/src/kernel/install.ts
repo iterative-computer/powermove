@@ -516,7 +516,9 @@ function makeRender(PM: LegacyPM): RenderAPI {
       const engine = engineRender(PM);
       const args = [layer, scale, time, undefined, crop ?? undefined] as Parameters<RenderAPI['raster']>;
       if (!engine) return raster(...args);
-      const wrapped = !!PM?.Kernel?.services?.get?.('raster') && PM.Kernel.services.get('raster') !== PM?.__rasterBase;
+      // A wrapper (a service registration, or a deprecated `PM.raster`
+      // assignment through `host.pm`) runs around the engine's raster.
+      const wrapped = PM?.RasterCompat?.wrapped?.() ?? (!!PM?.Kernel?.services?.get?.('raster') && PM.Kernel.services.get('raster') !== PM?.__rasterBase);
       if (wrapped) return raster(...args);
       const t = time ?? PM?.time ?? 0;
       return placed((await engineRaster(engine, rasterHost(PM), layer, Number(scale) || 1, t, crop as RasterCrop)) as ReturnType<RenderAPI['raster']>, args);
@@ -927,13 +929,28 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
      engine's raster override producer (raster-compat.ts): the engine asks
      for each text, captions, and shape layer, and the chain runs over lazy
      engine rasters. */
+  /* `PM.raster` as an extension reaches it through the deprecated
+     `api.host.pm` (apiVersion 1 to 3): today the compositor calls whatever
+     it holds, so a function assigned there wraps everything beneath it
+     (`rasterDispatch`: the services chain over the base). It is an
+     accessor so the engine's producer hears such an assignment. */
+  let assignedRaster: unknown = null;
+  const assignedListeners = new Set<() => void>();
+  const legacyWrapper = (): RenderAPI['raster'] | null =>
+    typeof assignedRaster === 'function' && assignedRaster !== rasterDispatch ? assignedRaster as RenderAPI['raster'] : null;
   const rasterCompat = createRasterCompat(PM, {
     isBase: (fn) => fn === rasterBase,
-    chain: () => kernel.services.get<RenderAPI['raster']>('raster'),
-    onChainChange: (fn) => kernel.services.onChange('raster', fn),
-    engineRaster: (layer, scale, time) => {
+    // Today's call order: an assigned `PM.raster` outermost, then the
+    // services chain (LIFO), then the base.
+    chain: () => legacyWrapper() ?? kernel.services.get<RenderAPI['raster']>('raster'),
+    onChainChange: (fn) => {
+      const services = kernel.services.onChange('raster', fn);
+      assignedListeners.add(fn);
+      return { dispose: () => { services.dispose(); assignedListeners.delete(fn); } };
+    },
+    engineRaster: (layer, scale, time, crop) => {
       const engine = engineRender(PM);
-      return engine ? engineRasterBase(PM, engine, [layer as Layer, scale, time]) : null;
+      return engine ? engineRasterBase(PM, engine, [layer as Layer, scale, time, undefined, crop as RasterWindow | undefined]) : null;
     }
   });
   const rasterBase: RenderAPI['raster'] = (...args) => {
@@ -977,10 +994,21 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   });
   const rasterDispatch: RenderAPI['raster'] = (...args) =>
     (kernel.services.get<RenderAPI['raster']>('raster') ?? rasterBase)(...args);
+  const assignRaster = (value: unknown) => {
+    if (value === assignedRaster) return;
+    assignedRaster = value;
+    for (const fn of [...assignedListeners]) {
+      try { fn(); } catch (error) { console.error('[raster] a raster change listener failed', error); }
+    }
+  };
   const attachRaster = (value: any) => {
     nativeRaster = value;
+    assignedRaster = rasterDispatch;
+    // Reads and writes behave as the plain writable property they were
+    // (`const raster = PM.raster; PM.raster = wrapper`; restoring it puts
+    // `rasterDispatch` back); the setter tells the engine's producer.
     Object.defineProperty(PM, 'raster', {
-      configurable: true, enumerable: true, writable: true, value: rasterDispatch
+      configurable: true, enumerable: true, get: () => assignedRaster, set: assignRaster
     });
   };
   if (typeof nativeRaster === 'function') attachRaster(nativeRaster);
