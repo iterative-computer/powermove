@@ -148,6 +148,12 @@ export function at(root: any, path: readonly PathPart[]): any {
 /** A detached input as the JSON the mirror would hold (evaluated ad hoc). */
 const asJson = (value: any): any => JSON.parse(JSON.stringify(value));
 
+/** V8's TypeError for `value[key]` on a nullish `value`. */
+const readThrows = (value: unknown, key: string): TypeError => new TypeError(`Cannot read properties of ${value === null ? 'null' : 'undefined'} (reading '${key}')`);
+/** V8's TypeError for `Object.entries(undefined)`. */
+const entriesThrows = (): TypeError => new TypeError('Cannot convert undefined or null to object');
+const isObject = (value: unknown): boolean => !!value && typeof value === 'object';
+
 interface Context {
   comp: string;
   open: string;
@@ -703,15 +709,14 @@ export class NativeApi {
 
   hasKeyAt(L: any, prop: any, T: any): any {
     return this.answer('hasKeyAt', () => {
+      // Not a channel at all: `p.kf.find(...)` throws before it reads the layer.
+      if (!isObject(prop)) return { threw: prop == null ? readThrows(prop, 'kf') : readThrows(undefined, 'find') };
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const path = findPath(ctx.raw, this.unwrap(prop));
       // A channel outside the layer: pm-wasm reads its JSON (its keys are
       // found by index, so the answer is still the live key).
       const detached = path ? {} : { prop: prop && typeof prop === 'object' ? asJson(this.unwrap(prop)) : prop };
-      // Not a channel at all: the legacy code throws reading its `kf` before
-      // any evaluation, and that throw is the API's answer.
-      if (!path && !(prop && typeof prop === 'object')) return { fallback: 'invalid-input' };
       return this.query('hasKeyAt', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path: path ?? [], ...detached, t: T }, (i) => i == null ? null : prop.kf[i] ?? null);
     }, () => this.legacy.hasKeyAt(L, prop, T), () => ({ layer: L?.id, t: T }));
   }
@@ -1001,13 +1006,14 @@ export class NativeApi {
 
   pathValues(L: any, path: any, time: number, prefix?: string): any {
     return this.answer('pathValues', () => {
+      // Not a path: `path.id` (the default prefix) or `Object.entries(path.p)` throws before the layer is read.
+      if (!isObject(path)) return { threw: path == null ? readThrows(path, prefix === undefined ? 'id' : 'p') : entriesThrows() };
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const index = (Array.isArray(ctx.raw.d?.paths) ? ctx.raw.d.paths : []).indexOf(this.unwrap(path));
       const live = this.unwrap(path);
       // A path outside `d.paths` is evaluated from its JSON, with the layer as context.
-      const detached = index < 0 ? (live && typeof live === 'object' ? { pathJson: asJson(live) } : null) : {};
-      if (!detached) return { fallback: 'invalid-input' };
+      const detached = index < 0 ? { pathJson: asJson(live) } : {};
       return this.query('pathValues', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, ...detached, t: time, ...(prefix === undefined ? {} : { prefix }) },
         (v: any) => {
           const out = keyOrder(v, live?.p);
@@ -1022,12 +1028,13 @@ export class NativeApi {
 
   groupMatrix(L: any, path: any, time: number): number[] {
     return this.answer('groupMatrix', () => {
+      // Not a path: `seen.has(path.id)` or pathValues' `Object.entries(path.p)` throws before the layer is read.
+      if (!isObject(path)) return { threw: path == null ? readThrows(path, 'id') : entriesThrows() };
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const index = (Array.isArray(ctx.raw.d?.paths) ? ctx.raw.d.paths : []).indexOf(this.unwrap(path));
       const live = this.unwrap(path);
-      const detached = index < 0 ? (live && typeof live === 'object' ? { pathJson: asJson(live) } : null) : {};
-      if (!detached) return { fallback: 'invalid-input' };
+      const detached = index < 0 ? { pathJson: asJson(live) } : {};
       return this.query('groupMatrix', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, ...detached, t: time });
     }, () => this.legacy.groupMatrix(L, path, time), () => ({ layer: L?.id, t: time }));
   }

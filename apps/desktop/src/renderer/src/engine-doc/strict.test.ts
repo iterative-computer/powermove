@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 import { makePM } from '../legacy/__tests__/make-pm';
-import { makeVectorPath, makeVertex } from '../legacy/core/vector-paths';
+import { groupMatrix, makeVectorPath, makeVertex, pathValues } from '../legacy/core/vector-paths';
 import { installEngineDoc, type EngineDoc } from './install';
 import { parseMode, profileOverride, workerMode } from './flags';
 import type { FontProvider } from './fonts';
@@ -154,6 +154,24 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     doc.api!.worldMatrix(child, 1);
     expect(fallbacks(doc)).toEqual({});
     expect(doc.dual!.total().mismatched).toBe(0);
+  });
+
+  it("throws the legacy TypeError natively for a detached input that is not an object", async () => {
+    const thrown = (fn: () => unknown) => { try { fn(); } catch (error) { return `${(error as Error).name}: ${(error as Error).message}`; } return 'no throw'; };
+    for (const mode of ['on', 'audit']) {
+      const { PM, doc } = await editor(mode);
+      const { child, shape } = content(PM);
+      const api = doc.api!;
+      for (const input of [undefined, null, 5, 'text', true]) {
+        expect(thrown(() => api.hasKeyAt(child, input, 1))).toBe(thrown(() => (input as any).kf.find(() => false)));
+        expect(thrown(() => api.pathValues(shape, input, 1))).toBe(thrown(() => pathValues(PM, shape, input as any, 1)));
+        expect(thrown(() => api.pathValues(shape, input, 1, 'g.x'))).toBe(thrown(() => pathValues(PM, shape, input as any, 1, 'g.x')));
+        expect(thrown(() => api.groupMatrix(shape, input, 1))).toBe(thrown(() => groupMatrix(PM, shape, input as any, 1)));
+      }
+      expect(fallbacks(doc)).toEqual({});
+      expect(doc.failures()).toEqual([]);
+      if (mode === 'audit') expect(doc.dual!.total().mismatched).toBe(0);
+    }
   });
 
   it('addresses a precomposition scope in O(1) and a nested one from a verified cache', async () => {
