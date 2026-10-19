@@ -208,6 +208,19 @@ pub struct StartTiming {
     /// the producer itself, so a deadline check does not depend on when an
     /// observer polled the ring.
     pub publications: Vec<(u64, u64)>,
+    /// Wall time (µs) the producer held a segment because an installed head
+    /// ended before a worker finished that voice's history, summed over the
+    /// run, and the number of such holds.
+    pub history_wait_us: u64,
+    pub history_waits: u64,
+    /// Histories the producer claimed at an exhausted head and primed itself.
+    pub history_claims: u64,
+    /// The longest single segment render (µs) of the run: claimed priming
+    /// and other producer DSP show up here.
+    pub max_render_us: u64,
+    /// The fewest frames queued in the ring when the producer came back to
+    /// fill it, after the run's first publication (its low-water mark).
+    pub min_queued_frames: u64,
 }
 
 /// Publications recorded per run, enough for several device callbacks.
@@ -233,6 +246,11 @@ struct StartTrace {
     late: Mutex<HashMap<String, u64>>,
     published_frames: AtomicU64,
     publications: Mutex<Vec<(u64, u64)>>,
+    history_wait: AtomicU64,
+    history_waits: AtomicU64,
+    history_claims: AtomicU64,
+    max_render: AtomicU64,
+    min_queued: AtomicU64,
 }
 
 impl StartTrace {
@@ -244,6 +262,11 @@ impl StartTrace {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.published_frames.store(0, Ordering::Relaxed);
+        self.history_wait.store(0, Ordering::Relaxed);
+        self.history_waits.store(0, Ordering::Relaxed);
+        self.history_claims.store(0, Ordering::Relaxed);
+        self.max_render.store(0, Ordering::Relaxed);
+        self.min_queued.store(u64::MAX, Ordering::Relaxed);
         self.voices
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -281,6 +304,22 @@ impl StartTrace {
             // The log is full: stop taking the lock for the rest of the run.
             self.published_frames.store(u64::MAX, Ordering::Relaxed);
         }
+    }
+
+    /// The producer came back to a ring holding `frames` (producer thread).
+    fn refill(&self, frames: u64) {
+        if self.published_frames.load(Ordering::Relaxed) != 0 {
+            self.min_queued.fetch_min(frames, Ordering::Relaxed);
+        }
+    }
+
+    fn history_wait(&self, us: u64) {
+        self.history_wait.fetch_add(us, Ordering::Relaxed);
+        self.history_waits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn rendered(&self, us: u64) {
+        self.max_render.fetch_max(us, Ordering::Relaxed);
     }
 
     fn heard(&self, epoch: u32, device_host: u64, frames: usize) {
@@ -352,6 +391,14 @@ impl StartTrace {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
+            history_wait_us: self.history_wait.load(Ordering::Relaxed),
+            history_waits: self.history_waits.load(Ordering::Relaxed),
+            history_claims: self.history_claims.load(Ordering::Relaxed),
+            max_render_us: self.max_render.load(Ordering::Relaxed),
+            min_queued_frames: match self.min_queued.load(Ordering::Relaxed) {
+                u64::MAX => 0,
+                n => n,
+            },
         };
         (epoch != 0
             && heard_epoch == epoch
@@ -545,6 +592,7 @@ impl Playback {
             pending_segment: None,
             last_segment_end: None,
             late_start: None,
+            history_wait: None,
             stalls: HashMap::new(),
             startup: None,
             render_failure: None,
@@ -1156,6 +1204,8 @@ struct RenderThread {
     /// continuous entry into the work area.
     last_segment_end: Option<i64>,
     late_start: Option<i64>,
+    /// When the producer began holding a segment for a running history.
+    history_wait: Option<std::time::Instant>,
     /// Each voice owns its deadline and notification until it recovers.
     stalls: HashMap<String, VoiceStall>,
     /// The device frame a play or seek began pre-rolling, until its first
@@ -1406,6 +1456,7 @@ impl RenderThread {
                         // A stop drops the run's starved segment: the next
                         // run renders from its own position.
                         self.pending_segment = None;
+                        self.history_wait = None;
                         self.stalls.clear();
                         self.startup = None;
                         self.render_failure = None;
@@ -1710,6 +1761,7 @@ impl RenderThread {
     /// Decodes what the first moments of playback need before queueing.
     fn preroll(&mut self) {
         self.pending_segment = None;
+        self.history_wait = None;
         self.last_segment_end = None;
         // A superseded late start's entry marks its installed voices served
         // without their histories: never reuse it for a later Play.
@@ -1829,6 +1881,9 @@ impl RenderThread {
             self.ring.refill_reserve() as usize,
             self.ring.capacity(),
         );
+        self.shared
+            .start_timing
+            .refill(self.ring.queued() as u64 * CHUNK as u64);
         let channels = self.mixer.format().channels();
         let mut planar = vec![Vec::new(); channels];
         while self.ring.queued()
@@ -1872,11 +1927,22 @@ impl RenderThread {
                 // Never wait on a queued job at an exhausted head: a busy or
                 // small pool could leave it unstarted while the ring drains.
                 // Unstarted histories are primed here from the head's start.
-                self.mixer.claim_histories(lo, (hi - lo) as usize);
+                let claimed = self.mixer.claim_histories(lo, (hi - lo) as usize);
+                self.shared
+                    .start_timing
+                    .history_claims
+                    .fetch_add(claimed as u64, Ordering::Relaxed);
                 if self.mixer.awaiting_history(lo, (hi - lo) as usize) {
+                    self.history_wait
+                        .get_or_insert_with(std::time::Instant::now);
                     self.pending_segment = Some(seg);
                     return;
                 }
+            }
+            if let Some(since) = self.history_wait.take() {
+                self.shared
+                    .start_timing
+                    .history_wait(since.elapsed().as_micros() as u64);
             }
             let track_start = self.startup.is_some() || self.late_start.is_some();
             if let Some(start) = self.late_start {
@@ -1914,10 +1980,14 @@ impl RenderThread {
             {
                 self.mixer.use_prepared(lo);
             }
+            let rendering = std::time::Instant::now();
             let mut result = {
                 let _render = crate::profile::timer(crate::profile::Kind::FirstRender);
                 self.mixer.render(lo, n, &mut planar, &options)
             };
+            self.shared
+                .start_timing
+                .rendered(rendering.elapsed().as_micros() as u64);
             if let Ok(report) = &result {
                 let now = self.ring.played_frames();
                 let hold = self.device_rate as u64 * SOURCE_WAIT_MS / 1000;
