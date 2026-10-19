@@ -184,6 +184,13 @@ pub struct SvgRasters {
     bytes: u64,
     max_bytes: u64,
     tick: u64,
+    /// `tick` when the latest frame began: rasters stored or read since are
+    /// the working set (the frame being drawn, the rasters fetched for its
+    /// next pass, the ones the window just answered) and are never
+    /// evicted, as today's raster cache always keeps the raster it just
+    /// drew (`cache.size <= 1`). A raster over the budget on its own is
+    /// therefore kept until a later frame no longer reads it.
+    frame_start: u64,
     misses: Vec<SvgRasterNeed>,
     pub(crate) rasterizer: SvgRasterizer,
     pub(crate) approximated: u64,
@@ -201,6 +208,7 @@ impl Default for SvgRasters {
             bytes: 0,
             max_bytes: DEFAULT_MAX_BYTES,
             tick: 0,
+            frame_start: 0,
             misses: Vec::new(),
             rasterizer: SvgRasterizer::default(),
             approximated: 0,
@@ -314,7 +322,14 @@ impl SvgRasters {
         self.evict(max_bytes);
     }
 
-    /// Evicts least recently used rasters down to `budget` bytes.
+    /// Starts a frame: what the previous frames stored or read may be
+    /// evicted from now on (`frame_start`).
+    pub fn begin_frame(&mut self) {
+        self.frame_start = self.tick;
+    }
+
+    /// Evicts least recently used rasters down to `budget` bytes, never the
+    /// working set (stored or read since the latest frame began).
     pub fn evict(&mut self, budget: u64) {
         if self.bytes <= budget {
             return;
@@ -322,6 +337,7 @@ impl SvgRasters {
         let mut by_age: Vec<(u64, SvgRasterKey)> = self
             .stored
             .iter()
+            .filter(|(_, s)| s.used <= self.frame_start)
             .map(|(k, s)| (s.used, k.clone()))
             .collect();
         by_age.sort_unstable();
@@ -361,8 +377,12 @@ mod tests {
         s.put(key('b', 2, 2), vec![3; 16]).unwrap();
         assert_eq!((s.len(), s.bytes()), (3, 64));
         assert_eq!(s.get(&key('a', 4, 2)).unwrap()[0], 2);
-        // Least recently used first: b, then a 2×2 (a 4×2 was just read).
+        // Least recently used first: b, then a 2×2 (a 4×2 was just read),
+        // once a later frame began.
         s.get(&key('b', 2, 2));
+        s.set_budget(48);
+        assert_eq!(s.len(), 3, "the working set stays");
+        s.begin_frame();
         s.set_budget(48);
         assert!(!s.contains(&key('a', 2, 2)));
         assert!(s.contains(&key('a', 4, 2)) && s.contains(&key('b', 2, 2)));
@@ -370,6 +390,30 @@ mod tests {
         assert_eq!((s.len(), s.bytes()), (1, 16));
         s.forget(None);
         assert!(s.is_empty() && s.bytes() == 0);
+    }
+
+    #[test]
+    fn a_frames_rasters_stay_even_over_the_budget() {
+        let mut s = SvgRasters::default();
+        s.set_budget(40);
+        // One raster over the budget on its own is kept (today keeps the
+        // raster it just drew), as are several a frame needs together.
+        s.put(key('a', 4, 4), vec![1; 64]).unwrap();
+        assert!(s.contains(&key('a', 4, 4)));
+        s.put(key('b', 4, 4), vec![2; 64]).unwrap();
+        assert!(s.contains(&key('a', 4, 4)) && s.contains(&key('b', 4, 4)));
+        // The next frame draws only b: a goes when room is needed.
+        s.begin_frame();
+        assert!(s.get(&key('b', 4, 4)).is_some());
+        s.put(key('c', 2, 2), vec![3; 16]).unwrap();
+        assert!(!s.contains(&key('a', 4, 4)));
+        assert!(s.contains(&key('b', 4, 4)) && s.contains(&key('c', 2, 2)));
+        assert_eq!(s.bytes(), 80);
+        // A frame that reads neither lets both go.
+        s.begin_frame();
+        s.begin_frame();
+        s.evict(40);
+        assert!(s.bytes() <= 40, "{}", s.bytes());
     }
 
     #[test]

@@ -273,6 +273,7 @@ impl VectorCache {
     /// bounded).
     pub fn begin_frame(&mut self) {
         self.frame += 1;
+        self.svg.begin_frame();
         self.evict(self.max_bytes, self.max_entries, false);
     }
 
