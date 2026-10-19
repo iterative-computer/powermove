@@ -512,7 +512,44 @@ mod child {
             .unwrap()
             .expect("the layer has ink");
         assert_eq!((raster.width, raster.height), painted.canvas);
-        assert_eq!(raster.origin, [painted.anchor.0, painted.anchor.1]);
+        // The origin is today's `RasterSurface` `anchorX`, `anchorY`: the
+        // anchor in the whole canvas the snapshot carries (legacy
+        // gl/raster.ts `textGeometry`), not in its inked crop. It is the
+        // layer raster's, and the crop's anchor moved by the crop's corner
+        // in layer pixels.
+        let whole = direct
+            .layer_raster(
+                &document,
+                "Pfonts-root",
+                "title",
+                None,
+                0.0,
+                1.0,
+                Precision::Float16,
+            )
+            .unwrap()
+            .expect("the layer has ink");
+        assert_eq!(whole.canvas, painted.canvas);
+        assert_eq!(raster.origin, [whole.anchor.0, whole.anchor.1]);
+        let [x0, y0, x1, y1] = painted.plan.crop.map(f64::from);
+        let (sx, sy) = (
+            painted.box_size.0 / (x1 - x0),
+            painted.box_size.1 / (y1 - y0),
+        );
+        assert!(
+            (whole.anchor.0 - (painted.anchor.0 + x0 * sx)).abs() < 1e-9
+                && (whole.anchor.1 - (painted.anchor.1 + y0 * sy)).abs() < 1e-9,
+            "whole-canvas anchor {:?}, crop anchor {:?}, crop {:?}",
+            whole.anchor,
+            painted.anchor,
+            painted.plan.crop
+        );
+        assert!(
+            (whole.box_size.0 - f64::from(painted.canvas.0) * sx).abs() < 1e-9
+                && (whole.box_size.1 - f64::from(painted.canvas.1) * sy).abs() < 1e-9,
+            "the box is the whole canvas's: {:?}",
+            whole.box_size
+        );
         let rgba = pm_node::present::snapshot::encode_rgba8_f32(
             &painted.pixels,
             SnapshotPixels::Premultiplied,

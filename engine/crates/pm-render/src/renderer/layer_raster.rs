@@ -230,18 +230,23 @@ impl Renderer {
                 // The quad is the ink crop `[x0, y0, x1, y1]` of a canvas
                 // stretched over its box (`TextContext::quad`): undo it.
                 let [x0, y0, x1, y1] = crop.map(f64::from);
-                let sx = if x1 > x0 { quad.w / (x1 - x0) } else { 1.0 / scale };
-                let sy = if y1 > y0 { quad.h / (y1 - y0) } else { 1.0 / scale };
+                let sx = if x1 > x0 {
+                    quad.w / (x1 - x0)
+                } else {
+                    1.0 / scale
+                };
+                let sy = if y1 > y0 {
+                    quad.h / (y1 - y0)
+                } else {
+                    1.0 / scale
+                };
                 (
                     (f64::from(canvas.0) * sx, f64::from(canvas.1) * sy),
                     (quad.ax + x0 * sx, quad.ay + y0 * sy),
                 )
             });
             return Ok(Some(LayerRaster {
-                pixels: LayerPixels::Float {
-                    pixels,
-                    crop,
-                },
+                pixels: LayerPixels::Float { pixels, crop },
                 canvas,
                 box_size,
                 anchor,
