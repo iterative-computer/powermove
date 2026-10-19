@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { documentPending, waitForDocumentReady } from './readiness';
+import { describe, expect, it, vi } from 'vitest';
+import { documentCommand, documentPending, runCommandWhenReady, waitForDocumentReady } from './readiness';
 
 describe('document readiness for async callers', () => {
   it('holds a request until the native mirror is ready', async () => {
@@ -35,6 +35,35 @@ describe('document readiness for async callers', () => {
     release(true);
     await request;
     expect(ran).toBe(true);
+  });
+
+  it('shows the named failure again when a request cannot run', async () => {
+    const showFailure = vi.fn();
+    const doc = { enabled: true, strict: true, ready: false, whenReady: Promise.resolve(false), settled: () => Promise.resolve(false), showFailure };
+    await expect(waitForDocumentReady({ EngineDoc: doc } as never)).rejects.toThrow('pm-wasm-unavailable');
+    expect(showFailure).toHaveBeenCalledOnce();
+  });
+
+  it('classifies app commands, which always run, apart from document commands, which wait', async () => {
+    for (const id of ['settings', 'palette', 'agent', 'projects', 'open', 'newProject', 'closeTab', 'nextTab', 'previousTab', 'moveTabToNewWindow']) {
+      expect(documentCommand(id)).toBe(false);
+    }
+    for (const id of ['duplicate', 'save', 'export', 'undo', 'contextPaste', 'projectSettings', 'zoomIn', 'vendor.unknown']) {
+      expect(documentCommand(id)).toBe(true);
+    }
+    // Ready or disabled: every command runs in its own tick and returns its result.
+    expect(runCommandWhenReady({ EngineDoc: { enabled: true, ready: true } } as never, 'duplicate', () => 7)).toBe(7);
+    expect(runCommandWhenReady({} as never, 'duplicate', () => 8)).toBe(8);
+    // Pending: queued (undefined), and run once the load settles.
+    let release!: (ready: boolean) => void;
+    const doc = { enabled: true, strict: true, ready: false, whenReady: new Promise<boolean>(resolve => { release = resolve; }) };
+    const run = vi.fn();
+    expect(runCommandWhenReady({ EngineDoc: doc } as never, 'duplicate', run)).toBeUndefined();
+    expect(runCommandWhenReady({ EngineDoc: doc } as never, 'settings', () => 'opened')).toBe('opened');
+    doc.ready = true;
+    release(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(run).toHaveBeenCalledOnce();
   });
 
   it('lets development modes without strict failures answer through their own fallback', async () => {
