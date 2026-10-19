@@ -10,7 +10,7 @@ use crate::{Path, Point, Transform};
 use alloc::vec::Vec;
 
 use crate::floating_point::{NonZeroPositiveF32, NormalizedF32, NormalizedF32Exclusive};
-use crate::path::{PathSegment, PathSegmentsIter};
+use crate::path::{PathSegment, PathSegmentsIter, PathVerb};
 use crate::path_builder::{PathBuilder, PathDirection};
 use crate::path_geometry;
 use crate::scalar::{Scalar, SCALAR_NEARLY_ZERO, SCALAR_ROOT_2_OVER_2};
@@ -335,6 +335,63 @@ impl Path {
     pub fn stroke(&self, stroke: &Stroke, resolution_scale: f32) -> Option<Path> {
         PathStroker::new().stroke(self, stroke, resolution_scale)
     }
+
+    /// `SkStroke::strokePath`'s `ignoreCenter` test for stroke-and-fill
+    /// (SkStroke.cpp:1460-1463): a line-only path whose last contour is
+    /// closed and which is convex. Such a path is filled by its stroke
+    /// alone; see [`Path::stroke_ignoring_center`].
+    pub fn can_ignore_center(&self) -> bool {
+        let mut lines = false;
+        let mut other = false;
+        for v in &self.verbs {
+            match v {
+                PathVerb::Line => lines = true,
+                PathVerb::Quad | PathVerb::Conic | PathVerb::Cubic => other = true,
+                PathVerb::Move | PathVerb::Close => {}
+            }
+        }
+        lines && !other && self.verbs.last() == Some(&PathVerb::Close) && self.is_convex()
+    }
+
+    /// The stroke-and-fill of a path for which [`Path::can_ignore_center`]
+    /// holds: `SkPathStroker` with `canIgnoreCenter`, which keeps only the
+    /// larger of each closed contour's outer and inner offsets
+    /// (SkStroke.cpp:362-368); the caller adds no fill.
+    pub fn stroke_ignoring_center(&self, stroke: &Stroke, resolution_scale: f32) -> Option<Path> {
+        let mut stroker = PathStroker::new();
+        stroker.can_ignore_center = true;
+        stroker.stroke(self, stroke, resolution_scale)
+    }
+}
+
+/// `SkPathBuilder::computeBounds`: `SkPathPriv::TrimmedBounds` of the
+/// points (a trailing move counts only when it is the only verb), or the
+/// empty rectangle when they are not finite.
+fn builder_bounds(b: &PathBuilder) -> [f32; 4] {
+    let mut pts = &b.points[..];
+    if b.verbs.len() > 1 && b.verbs.last() == Some(&PathVerb::Move) {
+        if !pts.last().is_some_and(|p| p.is_finite()) {
+            return [0.0; 4];
+        }
+        pts = &pts[..pts.len() - 1];
+    }
+    let Some(first) = pts.first() else {
+        return [0.0; 4];
+    };
+    let mut r = [first.x, first.y, first.x, first.y];
+    for p in pts {
+        if !p.is_finite() {
+            return [0.0; 4];
+        }
+        r = [r[0].min(p.x), r[1].min(p.y), r[2].max(p.x), r[3].max(p.y)];
+    }
+    r
+}
+
+/// `SkRect::contains(const SkRect&)`: false when either is empty.
+fn rect_contains(a: [f32; 4], b: [f32; 4]) -> bool {
+    let empty = |r: [f32; 4]| !(r[0] < r[2] && r[1] < r[3]);
+    !empty(b) && !empty(a) && a[0] <= b[0] && a[1] <= b[1] && a[2] >= b[2] && a[3] >= b[3]
 }
 
 /// A path stroker.
@@ -374,6 +431,7 @@ pub struct PathStroker {
     recursion_depth: i32, // track stack depth to abort if numerics run amok
     found_tangents: bool, // do less work until tangents meet (cubic)
     join_completed: bool, // previous join was not degenerate
+    can_ignore_center: bool,
 }
 
 impl Default for PathStroker {
@@ -417,6 +475,7 @@ impl PathStroker {
             recursion_depth: 0,
             found_tangents: false,
             join_completed: false,
+            can_ignore_center: false,
         }
     }
 
@@ -1153,11 +1212,19 @@ impl PathStroker {
                 );
                 self.outer.close();
 
-                // now add inner as its own contour
-                let pt = self.inner.last_point().unwrap_or_default();
-                self.outer.move_to(pt.x, pt.y);
-                self.outer.reverse_path_to(&self.inner);
-                self.outer.close();
+                if self.can_ignore_center {
+                    // If we can ignore the center just make sure the larger
+                    // of the two paths is preserved and don't add the smaller.
+                    if rect_contains(builder_bounds(&self.inner), builder_bounds(&self.outer)) {
+                        self.outer = self.inner.clone();
+                    }
+                } else {
+                    // now add inner as its own contour
+                    let pt = self.inner.last_point().unwrap_or_default();
+                    self.outer.move_to(pt.x, pt.y);
+                    self.outer.reverse_path_to(&self.inner);
+                    self.outer.close();
+                }
             } else {
                 // add caps to start and end
 

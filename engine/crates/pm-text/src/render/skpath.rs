@@ -301,7 +301,9 @@ fn append(dst: &mut pm_skia_path::PathBuilder, src: &pm_skia_path::Path) {
 
 /// `frame` applied to `user` (`SkStrokeRec::applyToPath`, resolution
 /// scale 1): the stroke, plus the path itself for stroke-and-fill, added
-/// so its first contour winds clockwise.
+/// so its first contour winds clockwise, except where `SkStroke::strokePath`
+/// ignores the center (convex, line-only, closed) and keeps only the
+/// larger stroke offset.
 pub fn framed(user: &pm_skia_path::Path, frame: Frame) -> Option<pm_skia_path::Path> {
     let stroke = pm_skia_path::Stroke {
         width: frame.width,
@@ -311,6 +313,10 @@ pub fn framed(user: &pm_skia_path::Path, frame: Frame) -> Option<pm_skia_path::P
     };
     if let Some(rect) = user.stroke_rect(&stroke, frame.fill) {
         return Some(rect);
+    }
+    if frame.fill && user.can_ignore_center() {
+        // The larger offset of a convex line-only contour covers the fill.
+        return user.stroke_ignoring_center(&stroke, 1.0);
     }
     let stroked = user.stroke(&stroke, 1.0)?;
     if !frame.fill {

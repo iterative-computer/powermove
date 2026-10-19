@@ -146,3 +146,75 @@ fn rectangle_frames_match_skia_152_path_records() {
         assert_eq!(record_hash(&out), expected, "rectangle {k}");
     }
 }
+
+#[test]
+fn convex_stroke_and_fill_matches_skia_152_path_records() {
+    // tests/skia-center-oracle.cpp: SkStroke ignores the center of a
+    // convex, line-only, closed contour and keeps only its larger offset.
+    let expected = [
+        (29, 9_894_305_336_873_942_857u64),
+        (23, 3_058_211_389_671_761_532),
+        (34, 18_178_562_680_614_805_173),
+        (66, 1_170_642_342_792_557_455),
+        (28, 16_412_707_246_739_295_283),
+    ];
+    let polys: [&[(f32, f32)]; 5] = [
+        &[(2.5, 3.25), (20.75, 3.25), (14.125, 30.5), (-4.125, 30.5)],
+        &[(2.5, 3.25), (-4.125, 30.5), (14.125, 30.5), (20.75, 3.25)],
+        &[(1., 1.), (17.5, 4.25), (6.375, 19.)],
+        &[(1., 1.), (6.375, 19.), (17.5, 4.25)],
+        &[
+            (10., 0.5),
+            (0.75, 7.25),
+            (4.25, 18.5),
+            (15.75, 18.5),
+            (19.25, 7.25),
+        ],
+    ];
+    let width = [3.75, 3.75, 2., 5.5, 3.];
+    let miter = [4., 4., 4., 4., 1.5];
+    let join = [
+        LineJoin::Miter,
+        LineJoin::Miter,
+        LineJoin::Bevel,
+        LineJoin::Round,
+        LineJoin::Miter,
+    ];
+    for (k, expected) in expected.into_iter().enumerate() {
+        let mut b = PathBuilder::new();
+        b.move_to(polys[k][0].0, polys[k][0].1);
+        for &(x, y) in &polys[k][1..] {
+            b.line_to(x, y);
+        }
+        b.close();
+        let p = b.finish().unwrap();
+        assert!(p.can_ignore_center(), "polygon {k}");
+        let stroke = Stroke {
+            width: width[k],
+            miter_limit: miter[k],
+            line_cap: LineCap::Butt,
+            line_join: join[k],
+        };
+        let out = p.stroke_ignoring_center(&stroke, 1.).unwrap();
+        assert_eq!(record_hash(&out), expected, "polygon {k}");
+    }
+    // Concave, open or curved paths keep the center.
+    let mut b = PathBuilder::new();
+    b.move_to(0., 0.);
+    b.line_to(10., 0.);
+    b.line_to(5., 2.);
+    b.line_to(10., 10.);
+    b.line_to(0., 10.);
+    b.close();
+    assert!(!b.finish().unwrap().can_ignore_center());
+    let mut b = PathBuilder::new();
+    b.move_to(0., 0.);
+    b.line_to(10., 0.);
+    b.line_to(10., 10.);
+    assert!(!b.finish().unwrap().can_ignore_center());
+    let mut b = PathBuilder::new();
+    b.move_to(0., 0.);
+    b.quad_to(10., 0., 10., 10.);
+    b.close();
+    assert!(!b.finish().unwrap().can_ignore_center());
+}
