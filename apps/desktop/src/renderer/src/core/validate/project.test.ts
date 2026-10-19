@@ -16,6 +16,11 @@ it('preserves explicit text compatibility on root and nested layers without addi
   expect(sanitizeProject(JSON.parse(JSON.stringify(result))).layers.map(l => l.compat)).toEqual([undefined,1,2]);
 });
 
+it('keeps compatibility levels off non-text layers', () => {
+  const result = sanitizeProject({ layers: [{ id: 'solid', type: 'solid', compat: 2, d: {} }, { id: 'image', type: 'image', compat: 1, d: {} }] });
+  expect(result.layers.map(l => l.compat)).toEqual([undefined, undefined]);
+});
+
 interface LegacyPM {
   proj?: unknown;
   mkProject(options?: Record<string, unknown>): Record<string, unknown>;
