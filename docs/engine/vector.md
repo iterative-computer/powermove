@@ -282,7 +282,33 @@ SVG cases of the canvas-ref sweep with the legacy capture (`--cases`).
 
 ### Level 1 measured
 
-(Filled in below.)
+Measured 2026-10-18 on this Mac (Electron 44, Chromium 152.0.7977.54, Apple
+M4 Max), the machine shared with other lanes.
+
+- **The rasters.** `tools/svg-rasters/run.ts --cases`: the module draws all 27
+  SVG cases of the canvas-ref sweep (solid, stroke, opacity, gradient, clip,
+  even-odd, blur, text, transform at 64², 200², 333 × 150) byte-identical to
+  the legacy capture `canvas-20261018-220349-9a95e00c` (27 of 27).
+- **The corpus** (`tests/svg_corpus.rs`, capture `v1-20261012-230504-ae47a3b3`,
+  the 6 buckets the corpus draws captured with the module into
+  `svg-rasters-20261018`): all 34 projects with a level 1 SVG image were
+  planned with the engine's fonts and the built-in definitions; 31 rendered
+  (99 frames, 9,439,743 SVG pixels; 5 frames show no SVG pixel: a solo'd-out
+  layer, transition frames). The SVG pixels are exact in 87 of the 99 frames
+  and in 28 of the 31 projects, including `layers/svg-scales` (contain at
+  25 to 400% and a zoom) and `mattes/nested-and-animated` (no text). The
+  other three projects differ by at most 1 CV where something other than the
+  raster changes the SVG's pixels, the same rasters being exact in the
+  other projects: `compositing/blend-modes-alpha` (inside the blend-mode
+  tiles over transparency; the composite lane's appendix A drift, already a
+  decision), `masks/parametric` (along the feathered mask edge only), and
+  `compositing/adjustment` (along the adjustment layer's blurred edge; its
+  non-SVG pixels differ by 1 CV too). Side by side (legacy, engine, the
+  differing pixels in red), outside the repository:
+  `~/Library/Application Support/Powermove Engine Corpus/svg-rasters-20261018/evidence/*-legacy-engine-diff.png`. Three projects do not
+  render for reasons outside SVG: `masks/path` (path masks), `space/layers-25d`
+  (2.5D layers), `effects/extension-typewriter` (no definition for the
+  `typewriter` effect).
 
 ### Parse depth (level 2)
 
