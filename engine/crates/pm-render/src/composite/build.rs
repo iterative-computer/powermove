@@ -62,19 +62,95 @@ pub enum MaskRoute {
     Unmasked,
     Parametric(Masks),
     /// Some enabled mask has a bezier path: every mask goes through the
-    /// Canvas2D coverage route (`applyPathMasks`).
-    Path,
+    /// Canvas2D coverage route (`applyPathMasks`); `masks.path` is set.
+    Path(Masks),
+}
+
+/// One enabled mask's values as `applyMasks` reads them
+/// (`Number(PM.evP(L, m.p[key], T, key))`) or `applyPathMasks` does
+/// (`Number(PM.evP(L, m.p[key], T, 'm.<id>.<key>')) || 0`, and
+/// `pathValues(PM, L, m.path, T, 'mp.<id>')`), with the evaluated shape and
+/// mode.
+fn mask_values<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    m: &'d Node,
+    time: f64,
+    with_path: bool,
+) -> JsResult<MaskValues> {
+    let p = node::member(Some(m), "p");
+    let id = node::to_js_string(node::member(Some(m), "id")).to_string_lossy();
+    let num = |scope: &mut Scope<'_, 'd>, key: &str| -> JsResult<f64> {
+        if !with_path {
+            return Ok(scope
+                .channel_p(layer, node::member(p, key), time, key)?
+                .to_number());
+        }
+        let v = scope
+            .channel_p(layer, node::member(p, key), time, &format!("m.{id}.{key}"))?
+            .to_number();
+        Ok(pm_vector::js::or0(v))
+    };
+    let x = num(scope, "x")?;
+    let y = num(scope, "y")?;
+    let mw = num(scope, "w")?;
+    let mh = num(scope, "h")?;
+    let rotation = num(scope, "rotation")?;
+    let feather = num(scope, "feather")?;
+    let shape = scope.evaluated(
+        layer,
+        node::member(Some(m), "shape"),
+        time,
+        &format!("m.{id}.shape"),
+    )?;
+    let mode = scope.evaluated(
+        layer,
+        node::member(Some(m), "mode"),
+        time,
+        &format!("m.{id}.mode"),
+    )?;
+    let path = match node::member(Some(m), "path") {
+        Some(path) if with_path && node::truthy(Some(path)) => Some(
+            scope
+                .path_values(layer, path, time, &format!("mp.{id}"))?
+                .path_values(),
+        ),
+        _ => None,
+    };
+    Ok(MaskValues {
+        x,
+        y,
+        w: mw,
+        h: mh,
+        rotation,
+        feather,
+        shape: if shape == JsValue::from("ellipse") {
+            MaskShape::Ellipse
+        } else {
+            MaskShape::Rect
+        },
+        mode: if mode == JsValue::from("subtract") {
+            MaskMode::Subtract
+        } else {
+            MaskMode::Add
+        },
+        path,
+    })
 }
 
 /// `applyMasks(L, T, src, W, H)`'s reading of the masks. `world` is the
 /// layer's `scaledWorld`; `plane` is its projected plane scaled to output
-/// pixels when the layer is 3D (`is3DLayer`).
+/// pixels when the layer is 3D (`is3DLayer`); `width × height` is the
+/// output (the path route's coverage canvas).
+#[allow(clippy::too_many_arguments)]
 pub fn masks<'d>(
     scope: &mut Scope<'_, 'd>,
     layer: &'d Node,
     time: f64,
     world: [f64; 6],
     plane: Option<[f64; 9]>,
+    width: u32,
+    height: u32,
 ) -> JsResult<MaskRoute> {
     let list = node::array(node::member(Some(layer), "masks")).unwrap_or(&[]);
     let mut enabled: Vec<&'d Node> = Vec::new();
@@ -94,7 +170,41 @@ pub fn masks<'d>(
         .iter()
         .any(|m| node::truthy(node::member(Some(m), "path")))
     {
-        return Ok(MaskRoute::Path);
+        // `applyPathMasks`: every enabled mask, in order, with no limit.
+        let mut values = Vec::with_capacity(enabled.len());
+        for m in &enabled {
+            values.push(mask_values(scope, layer, m, time, true)?);
+        }
+        let LayerMasks::Path(path) = LayerMasks::new(&values) else {
+            return Ok(MaskRoute::Unmasked);
+        };
+        // The coverage canvas is sampled at each output pixel; a 3D layer
+        // maps it through its inverse plane composed with the world
+        // matrix (`u_covTransform`, columns).
+        let mut transform = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        if let Some(h) = plane
+            && let Some(inv) = pm_eval::space3d::inverse_plane(&h)
+        {
+            for i in 0..3 {
+                let (x, y, w) = (inv[i * 3], inv[i * 3 + 1], inv[i * 3 + 2]);
+                transform[i * 3] = world[0] * x + world[2] * y + world[4] * w;
+                transform[i * 3 + 1] = world[1] * x + world[3] * y + world[5] * w;
+                transform[i * 3 + 2] = w;
+            }
+        }
+        return Ok(MaskRoute::Path(Masks {
+            inverse: transform,
+            masks: pm_vector::ParametricMasks {
+                masks: Vec::new(),
+                has_add: false,
+            },
+            path: Some(super::path_masks::PathCoverage {
+                width,
+                height,
+                world,
+                masks: path,
+            }),
+        }));
     }
     let det = world[0] * world[3] - world[1] * world[2];
     if !det.is_finite() || det.abs() < 1e-9 {
@@ -111,50 +221,7 @@ pub fn masks<'d>(
     ];
     let mut values = Vec::new();
     for m in enabled.iter().take(super::MASK_MAX) {
-        let p = node::member(Some(m), "p");
-        let num = |scope: &mut Scope<'_, 'd>, key: &str| -> JsResult<f64> {
-            Ok(scope
-                .channel_p(layer, node::member(p, key), time, key)?
-                .to_number())
-        };
-        let x = num(scope, "x")?;
-        let y = num(scope, "y")?;
-        let mw = num(scope, "w")?;
-        let mh = num(scope, "h")?;
-        let rotation = num(scope, "rotation")?;
-        let feather = num(scope, "feather")?;
-        let id = node::to_js_string(node::member(Some(m), "id")).to_string_lossy();
-        let shape = scope.evaluated(
-            layer,
-            node::member(Some(m), "shape"),
-            time,
-            &format!("m.{id}.shape"),
-        )?;
-        let mode = scope.evaluated(
-            layer,
-            node::member(Some(m), "mode"),
-            time,
-            &format!("m.{id}.mode"),
-        )?;
-        values.push(MaskValues {
-            x,
-            y,
-            w: mw,
-            h: mh,
-            rotation,
-            feather,
-            shape: if shape == JsValue::from("ellipse") {
-                MaskShape::Ellipse
-            } else {
-                MaskShape::Rect
-            },
-            mode: if mode == JsValue::from("subtract") {
-                MaskMode::Subtract
-            } else {
-                MaskMode::Add
-            },
-            path: None,
-        });
+        values.push(mask_values(scope, layer, m, time, false)?);
     }
     let LayerMasks::Parametric(parametric) = LayerMasks::new(&values) else {
         return Ok(MaskRoute::Unmasked);
@@ -170,6 +237,7 @@ pub fn masks<'d>(
     Ok(MaskRoute::Parametric(Masks {
         inverse,
         masks: parametric,
+        path: None,
     }))
 }
 

@@ -30,7 +30,7 @@
 //! `PM_ENGINE_CORPUS` picks captures (default: the newest `v1-*`, `render-*`
 //! and `text-proj-*`, plus the newest `text-iso-*`); `PM_TEXT_ONLY` limits
 //! project names by prefix; `PM_TEXT_DIFFS=<dir>` writes engine and legacy
-//! PNGs of failures.
+//! PNGs of failures (every frame with `PM_TEXT_DIFFS_ALL`).
 //!
 //! Runs without the harness (the CoreText registry needs the main thread).
 
@@ -69,6 +69,11 @@ fn main() {
         .ok()
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
+    // The built-in effects, transitions, and extension layers as the kernel
+    // snapshots them (as tests/corpus.rs sets them).
+    renderer
+        .set_definitions(&pm_render::all_builtin_definitions())
+        .expect("built-in definitions");
     let mut compared = 0;
     let mut failed = Vec::new();
     let mut skipped = Vec::new();
@@ -121,34 +126,27 @@ fn main() {
             renderer
                 .set_definitions(&set)
                 .expect("built-in definitions");
-            let with_fonts =
-                renderer.unsupported_with_media(&p.document, &p.composition, &p.resolver);
-            let issues: Vec<_> = pm_render::unsupported_with_definitions(
+            let issues = pm_render::capability::unsupported_with_definitions_and_fonts(
                 &p.document,
                 &p.composition,
                 Some(&p.resolver),
                 renderer.effects(),
-            )
-            .into_iter()
-            // Drawn: the renderer has fonts (the static check without them
-            // lists every text layer).
-            .filter(|u| !matches!(&u.feature, pm_render::Feature::Text(_)))
-            .chain(
-                with_fonts
-                    .into_iter()
-                    .filter(|u| matches!(&u.feature, pm_render::Feature::Text(_))),
-            )
-            .collect();
-            let text_refusals: Vec<String> = issues
+            );
+            // Text routing is forbidden. Preserve integration's other
+            // forbidden classes too; isolation cannot hide those routes.
+            let forbidden: Vec<String> = issues
                 .iter()
-                .filter(|u| matches!(&u.feature, pm_render::Feature::Text(_)))
+                .filter(|u| {
+                    matches!(&u.feature, pm_render::Feature::Text(_))
+                        || routing_forbidden(&u.feature)
+                })
                 .map(ToString::to_string)
                 .collect();
-            if !text_refusals.is_empty() {
+            if !forbidden.is_empty() {
                 failed.push(format!(
-                    "{}{tag}: text refused (routing is forbidden): {}",
+                    "{}{tag}: routed for {}",
                     p.name,
-                    text_refusals.join("; ")
+                    forbidden.join(", ")
                 ));
                 continue;
             }
@@ -166,8 +164,10 @@ fn main() {
             }
             let hidden = text::without_text(&p.document);
             for s in &p.samples {
-                let request =
+                // The capture's motion blur: 16 samples (opaque export).
+                let mut request =
                     RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+                request.motion_blur = pm_render::motion::MotionBlur::Samples(16);
                 let render = |r: &mut Renderer, doc: &pm_model::Document| {
                     r.render(doc, &p.composition, ticks(s.time), &request, &p.resolver)
                         .map(|f| opaque8(&r.read_rgba(&f).unwrap()))
@@ -175,8 +175,10 @@ fn main() {
                 let ours = match render(&mut renderer, &p.document) {
                     Ok(o) => o,
                     Err(pm_render::RenderError::Unsupported(u))
-                        if u.iter()
-                            .all(|u| !matches!(&u.feature, pm_render::Feature::Text(_))) =>
+                        if u.iter().all(|u| {
+                            !matches!(&u.feature, pm_render::Feature::Text(_))
+                                && !routing_forbidden(&u.feature)
+                        }) =>
                     {
                         skipped.push((
                             format!("{}{tag} t={}", p.name, s.time),
@@ -247,14 +249,35 @@ fn main() {
                     d.max
                 );
                 println!("{line}");
-                if !text_ok || !rest_ok {
+                let fails = !text_ok || !rest_ok;
+                if fails {
                     failed.push(line);
-                    if let Some(dir) = &diffs {
-                        std::fs::create_dir_all(dir).unwrap();
-                        let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
-                        write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
-                        write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
+                }
+                // `PM_TEXT_DIFFS_ALL` writes the images of passing frames too
+                // (side-by-sides for review).
+                if (fails || std::env::var("PM_TEXT_DIFFS_ALL").is_ok())
+                    && let Some(dir) = &diffs
+                {
+                    std::fs::create_dir_all(dir).unwrap();
+                    let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
+                    write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
+                    write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
+                    // Pixels the "rest" check compares that differ by
+                    // more than 1 code value, magnified in red.
+                    let mut rest_diff = vec![0u8; wu * hu * 4];
+                    for i in 0..wu * hu {
+                        let d = (0..3)
+                            .map(|c| ours[i * 4 + c].abs_diff(reference[i * 4 + c]))
+                            .max()
+                            .unwrap_or(0);
+                        rest_diff[i * 4 + 3] = 255;
+                        if rest[i] && d > 1 {
+                            rest_diff[i * 4] = d.saturating_mul(5).max(64);
+                        } else if mask[i] {
+                            rest_diff[i * 4 + 2] = 48;
+                        }
                     }
+                    write_png(&dir.join(format!("{stem}-rest.png")), w, h, &rest_diff);
                 }
             }
         }

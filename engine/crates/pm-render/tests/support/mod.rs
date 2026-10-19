@@ -38,16 +38,28 @@ pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
 /// The captures to compare against: `PM_ENGINE_CORPUS` (comma-separated),
 /// or the newest `v1-*` corpus capture, the newest `render-*` capture (the
 /// render parity cases, `engine/corpus/src/projects/render.ts`), the
-/// newest `effects-*` capture (`render-effects.ts`), and the newest
-/// `composite-*` capture (`engine/corpus/src/projects/composite.ts`).
+/// newest `effects-*` capture (`render-effects.ts`), the newest
+/// `composite-*` capture (`engine/corpus/src/projects/composite.ts`), the
+/// newest `motion-*` capture (`motion.ts`), and the compositing closure
+/// captures `compclose-*`, `compclose2-*` and `compclose3-*`
+/// (`compclose.ts`).
 pub fn corpus_dirs() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("PM_ENGINE_CORPUS") {
         return p.split(',').map(PathBuf::from).collect();
     }
-    ["v1-", "render-", "effects-", "composite-"]
-        .iter()
-        .filter_map(|p| newest_capture(p))
-        .collect()
+    [
+        "v1-",
+        "render-",
+        "effects-",
+        "composite-",
+        "motion-",
+        "compclose-",
+        "compclose2-",
+        "compclose3-",
+    ]
+    .iter()
+    .filter_map(|p| newest_capture(p))
+    .collect()
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -457,4 +469,28 @@ pub fn extension_definitions(document: &Document) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Routing reasons of the compositing and motion classes, which the
+/// renderer draws for every layer type (docs/engine/composite.md and
+/// motion.md): a corpus project routed for one of them fails the corpus
+/// tests. Bezier path masks are drawn on today's Canvas2D coverage route
+/// and no longer have a routing reason of their own.
+#[allow(dead_code)]
+pub fn routing_forbidden(feature: &pm_render::Feature) -> bool {
+    use pm_render::Feature;
+    match feature {
+        Feature::Masks
+        | Feature::MotionBlur
+        | Feature::TwoAndAHalfD
+        | Feature::CompatLevel2
+        | Feature::RequiresEngine
+        | Feature::ProjectColor => true,
+        // Level 2 text the text renderer does not lay out yet
+        // (`capability::level2_text_gap`) is compat level 2 content: it is
+        // reported as text so the text lane owns it, and it is forbidden
+        // like every other level 2 route.
+        Feature::Text(why) => why.contains("compat level 2"),
+        _ => false,
+    }
 }
