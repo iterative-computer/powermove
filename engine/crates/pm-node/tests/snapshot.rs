@@ -1371,7 +1371,11 @@ impl StandInHost {
                 self.cancels.push(job.0.clone());
                 if let Some(i) = self.held.iter().position(|(_, j)| *j == job.0) {
                     let (held, _) = self.held.remove(i);
-                    Self::reply(c, held, Err((ErrorCode::Cancelled, "Blender request cancelled")));
+                    Self::reply(
+                        c,
+                        held,
+                        Err((ErrorCode::Cancelled, "Blender request cancelled")),
+                    );
                 }
                 Self::reply(
                     c,
@@ -1381,7 +1385,11 @@ impl StandInHost {
             }
             other => {
                 eprintln!("stand-in host: unsupported {other:?}");
-                Self::reply(c, id, Err((ErrorCode::Unsupported, "not served by this test")));
+                Self::reply(
+                    c,
+                    id,
+                    Err((ErrorCode::Unsupported, "not served by this test")),
+                );
             }
         }
     }
@@ -1397,12 +1405,14 @@ impl StandInHost {
         loop {
             let actions = c.host.pump();
             c.inbox.push(actions);
-            let request = c.inbox.try_wait(Duration::ZERO, &mut |port, m| match &m.message {
-                Message::Request { id, body } if port == HOST => {
-                    Some((*id, m.session, body.clone()))
-                }
-                _ => None,
-            });
+            let request = c
+                .inbox
+                .try_wait(Duration::ZERO, &mut |port, m| match &m.message {
+                    Message::Request { id, body } if port == HOST => {
+                        Some((*id, m.session, body.clone()))
+                    }
+                    _ => None,
+                });
             if let Some((id, session, body)) = request {
                 self.serve(c, id, session, body);
                 continue;
@@ -1423,14 +1433,14 @@ impl StandInHost {
             assert!(Instant::now() < deadline, "timed out serving Blender");
             let actions = c.host.pump();
             c.inbox.push(actions);
-            let request = c.inbox.try_wait(Duration::from_millis(5), &mut |port, m| {
-                match &m.message {
-                    Message::Request { id, body } if port == HOST => {
-                        Some((*id, m.session, body.clone()))
-                    }
-                    _ => None,
-                }
-            });
+            let request =
+                c.inbox
+                    .try_wait(Duration::from_millis(5), &mut |port, m| match &m.message {
+                        Message::Request { id, body } if port == HOST => {
+                            Some((*id, m.session, body.clone()))
+                        }
+                        _ => None,
+                    });
             if let Some((id, session, body)) = request {
                 self.serve(c, id, session, body);
             }
@@ -1507,7 +1517,11 @@ fn child_blender() {
     assert!(!result.quality.draft_3d);
     assert_eq!(result.revision.get(), 1);
     let px = pixels_of(&result);
-    assert_eq!(at(&px, 320, 160, 90), MAGENTA, "Blender's surface, not native shading");
+    assert_eq!(
+        at(&px, 320, 160, 90),
+        MAGENTA,
+        "Blender's surface, not native shading"
+    );
     assert_eq!(host.renders.len(), 1);
     assert!(
         host.renders[0].starts_with(&format!("capture-{}-{}-", WINDOW.0, session.get())),
@@ -1563,7 +1577,10 @@ fn child_blender() {
     host.serve_while(&mut c, Duration::from_secs(10), |h| h.cancels.is_empty());
     assert_eq!(host.cancels.len(), 1);
     assert_eq!(host.cancels[0], host.renders[host.renders.len() - 1]);
-    assert!(host.held.is_empty(), "the held Blender request was answered as cancelled");
+    assert!(
+        host.held.is_empty(),
+        "the held Blender request was answered as cancelled"
+    );
     println!(
         "CHILD-OK blender: refused when not prepared, native with draft 3D, prepared by Blender in {} ms, prepared frame reused, failure, missing and timeout ({} ms) named",
         elapsed.as_millis(),
