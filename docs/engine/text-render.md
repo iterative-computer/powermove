@@ -715,8 +715,12 @@ source engine/env.sh
 ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set probe
 python3 engine/crates/pm-text/capture/colr-fonts.py "$HOME/Library/Application Support/Powermove Engine Corpus/fonts"   # needs fontTools
 ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set closure   # text-closure-*
+~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set paths     # text-paths-*
+# The real project's text layers as source textures (needs a text-iso-* capture and the built app)
+~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/source.ts               # text-source-*
 cd engine
-cargo test --release -p pm-render --test text_raster   # PM_TEXT_ONLY, PM_TEXT_DIFFS, PM_TEXT_DUMP, PM_TEXT_PROFILE, PM_TEXT_COVERAGE=cpu, PM_TEXT_REPORT
+cargo test --release -p pm-render --test text_residuals   # FONTS-R contract tests (no captures needed)
+cargo test --release -p pm-render --test text_raster   # newest text-raster-, text-closure-, text-paths-, text-source-; PM_TEXT_RASTER, PM_TEXT_ONLY, PM_TEXT_DIFFS, PM_TEXT_DUMP, PM_TEXT_PROFILE, PM_TEXT_COVERAGE=cpu, PM_TEXT_REPORT
 cargo test --release -p pm-render --test text_corpus   # PM_ENGINE_CORPUS, PM_TEXT_ONLY, PM_TEXT_DIFFS
 cargo test --release -p pm-render --test text_level2   # PM_TEXT_ONLY, PM_TEXT_DIFFS
 cargo test --release -p pm-render --test text_gpu
@@ -962,8 +966,10 @@ owner-rule blockers. This supersedes their earlier blocker classification.
 It does not claim byte equality or change a pixel tolerance.
 
 The explicit RATCHET is
-[`tests/fixtures/text-residuals.json`](../../engine/crates/pm-render/tests/fixtures/text-residuals.json).
-It contains exactly those 23 measurements: 19 raster checks (main, closure,
+[`tests/fixtures/text-residuals.json`](../../engine/crates/pm-render/tests/fixtures/text-residuals.json),
+bounded by the `APPROVED` table in
+[`tests/support/text_residuals.rs`](../../engine/crates/pm-render/tests/support/text_residuals.rs)
+(round 8, below). It contains exactly those 23 measurements: 19 raster checks (main, closure,
 source textures and the independent large-path capture) and four composed
 frames. Every entry records its measured number of pixels beyond the
 original bound, maximum channel delta, one-line cause boundary and review
@@ -990,7 +996,8 @@ tolerance**. The summaries retain the strict counts and print ratcheted
 counts separately. Existing residual images are still exported for review.
 Six capture-independent contract tests cover new residuals, both regression
 axes, improvements with stale budgets, lowering/removal, missing selected
-measurements, corpus identity collisions and fixture/path validation.
+measurements, corpus identity collisions and fixture/path validation
+(twelve since round 8).
 
 Round 7 image gates pass in debug and release (integration snapshot
 `a80796f9`, including dochost `f89a239e` and compclose `e9a80939`):
@@ -1036,6 +1043,95 @@ that state per snapshot request through the typed IPC/protocol and restores
 normal visibility for the next capture or viewer frame. A visibility change
 also clears draw reuse. The burn-in test now checks shown → hidden → shown,
 and transport/IPC/protocol tests cover the flag's default and forwarding.
+
+## Round 8: the ratchet cannot loosen or go unchecked
+
+Review of round 7 found two ways FONTS-R could stop holding:
+
+- **Unchecked entries.** `text_raster` only discovered the newest
+  `text-raster-*` and `text-closure-*` captures. The two large-path entries
+  (`text-paths-*`) were checked only through a hand-set `PM_TEXT_RASTER`,
+  and the three source-texture entries had their only capture in `/tmp`,
+  made by an uncommitted script. `Ratchet::missing` only flagged listed
+  cases inside a selected capture, so a deleted capture silently dropped
+  its entries.
+- **Data-only loosening.** "Never increase a budget or add cases" was only
+  the fixture's `policy` string; raising a budget or adding a 24th entry
+  passed every gate.
+
+Fixes:
+
+- The 23 approved ceilings (id, measurement identity, pixels, max CV) are
+  the `APPROVED` table in `tests/support/text_residuals.rs`. The fixture
+  loads only when every entry is in that table, names the same
+  measurement (raster id, or corpus project/isolation/time), and is at or
+  below both approved values. Lowering or removing stays a fixture edit;
+  loosening or adding needs a visible code change. Contract tests raise
+  each real entry on both axes, add a 24th case, and re-point a corpus
+  entry (all fail to load), and lower or remove each entry (all load).
+- `text_raster` gates the newest capture of four sets: `text-raster-*`,
+  `text-closure-*`, `text-paths-*` and `text-source-*`.
+  [`capture/source.ts`](../../engine/crates/pm-text/capture/source.ts) is
+  the committed generator of the source-texture set: the real project's
+  text layers (default: `real/powermove-ad` from the newest `text-iso-*`
+  capture, times 16, 18 and 24 s) rasterized by today's app at the density
+  their world transform asks for, written into the corpus directory. It is
+  the round 5 tool, unchanged in what it draws and reads back.
+- A full run (no `PM_TEXT_RASTER`/`PM_TEXT_ONLY` for `text_raster`, no
+  `PM_ENGINE_CORPUS`/`PM_TEXT_ONLY` for `text_corpus`) on a machine with
+  the private corpus directory fails for every FONTS-R entry of its gate
+  that no selected capture measured (`Ratchet::unmeasured`). A narrowed run
+  prints how many entries it did not check and that it is not the gate.
+  Without the corpus directory both tests still report and pass vacuously
+  (captures are private; see Gaps).
+
+Also in round 8, the UI font census keeps each canvas context's
+descriptions by state (font, text rendering, stretch, and for a connected
+canvas a style generation bumped by every font-relevant mutation; at most
+64 per context). Repeated `measureText`/`fillText`/`strokeText` with a known
+state no longer parse the font or read the computed style, and a
+description already recorded no longer flushes pending DOM scans; a new
+one still flushes pending DOM text first, keeping first-creator order. The
+opt-in `native-engine-font-census-perf.spec.ts` now also measures 30,000
+connected-canvas `measureText` calls cycling three fonts. Two runs, without
+and with the census: steady 46.3/59.1 ms and 47.3/64.0 ms (before this
+change: 52.7/202.2 ms); with DOM text changing every 100 calls,
+616.9/618.7 ms and 665.0/678.3 ms. Playback of the 1,000-layer timeline:
+p95 9.9 ms without and 9.7 ms with the census in the final run.
+
+The svgcompat merge (integration `c3c5f8b7`) lifted the SVG image refusal,
+so `text_corpus` now compares the corpus projects with SVG images in full
+instead of only through their text in isolation (576 frames, up from 477).
+Without an SVG source those images drew wrong and 94 frames failed on the
+background around their text; `text_corpus` now draws them from Chromium's
+rasters (`svg-rasters-*`), as `tests/corpus.rs` does.
+
+Round 8 measurements (integration `c3c5f8b7` merged; release with
+`CARGO_PROFILE_RELEASE_LTO=false`):
+
+| Gate | Total | Original strict bound | Strict | FONTS-R snapshots | Failed/refused |
+|---|---:|---:|---:|---:|---:|
+| Main raster (`text-raster-20261016-061928`) | 495 | 1 CV | 484 | 11 | 0 |
+| Closure raster (`text-closure-20261019-025637`) | 116 | 1 CV | 113 | 3 | 0 |
+| Large paths (`text-paths-20261018-round6`) | 4 | 1 CV | 2 | 2 | 0 |
+| Source textures (`text-source-20261019-092139`) | 3 | 1 CV | 0 | 3 | 0 |
+| Composed text, original and isolation | 576 | 2 CV | 572 | 4 | 0 |
+
+All four raster sets ran in one default `text_raster` run, in release and
+in debug (debug: same counts). Every measured value equals its budget. The
+new source-texture capture, made by `capture/source.ts`, is byte-identical
+to the round 5 capture (all three `.rgba` files and the cases). Before it
+existed, the default run failed with the three source-texture entries
+"not measured", as intended. A `PM_TEXT_ONLY=caption-pop` run passes and
+reports 15 entries unchecked. The twelve contract tests pass in both
+profiles. The app matrix (`canvas-text`, `captions` with burn-in,
+`document-host-boot`, `font-anchor`, font census, font seeds, typing,
+`split-text`, `text-animators`, `text-layout-resize`) passes 23/23 with
+the native engine on (the two opt-in census measurements included), one
+worker, under the Electron lock. Native typing p95 in that run:
+13.8 / 18.3 / 14.7 ms (title 96 px, paragraph, `system-ui` 24 px), zero
+missed keys; the paired comparison with legacy stays with the performance
+lane.
 
 ## Gaps
 
@@ -1101,11 +1197,28 @@ captures unchanged. The separate capture-transport fixes are described above.
 - The measured mask tables, emoji placement and SDF GPU arithmetic are
   specific to this Apple-silicon/macOS/Electron reference. Other machines
   and Chromium updates need their own captured comparisons.
+- `text_raster` and `text_corpus` still pass vacuously on a machine without
+  the private corpus directory (CI): the captures are renders of system
+  fonts and a private project and cannot be committed. On a machine with
+  the directory, a full run fails for any FONTS-R entry it did not measure.
 - The shipping LTO profile remains unverified. Test/addon builds use
   `CARGO_PROFILE_RELEASE_LTO=false` because the cached build otherwise
   reports missing bitcode.
 
 ## Changes outside the lane
+
+2026-10-19 (lane ne-fonts, round 8):
+
+- `pm-render/tests/svg_corpus.rs` (svgcompat): seeds the font cache with
+  `app_ui_font_cache_seeds(&[dpr])`, as `text_corpus` and `pm-cli parity`
+  do (the merged struct gained `cacheKey`; the old literal no longer
+  compiled).
+- `pm-cli/src/{render,scope}.rs`, `pm-node/src/jobs/mod.rs`,
+  `apps/desktop/src/renderer/src/engine-connection/{install,render-transport.test}.ts`:
+  merge resolutions keeping both the font installation/seed scope and the
+  SVG rasterizer/source; `scope.rs` sets the resvg rasterizer on the one
+  renderer that has fonts. Protocol TypeScript regenerated.
+- `pm-render/tests/support/mod.rs`: `corpus_root()`.
 
 2026-10-19 (lane ne-fonts, round 7):
 

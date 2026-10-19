@@ -175,9 +175,13 @@ was found on the corpus's real project and checked against Chromium itself
    stretch before measuring or drawing. The census wraps native
    `measureText`, `fillText` and `strokeText` on main-thread Canvas2D and
    OffscreenCanvas2D, keeps native parsing, and records the description
-   actually used by that operation at DPR 1. Repeated detached-context
-   state takes a WeakMap fast path. Pending DOM descriptions are drained
-   first; all wrappers are removed when the census stops. Pure transform
+   actually used by that operation at DPR 1. Each context keeps its
+   descriptions by state (round 8): font, text rendering and stretch, plus
+   a style generation for a connected canvas, which every font-relevant
+   mutation bumps, so its inherited style is read again only then. Pending
+   DOM descriptions are drained first, but only before a description not
+   yet recorded (one already recorded creates no cache entry); all
+   wrappers are removed when the census stops. Pure transform
    and opacity updates do not trigger a tree walk; changes to cache-key
    properties do. Aggregate scan costs remain exposed through
    `EngineDoc.stats().fontCensus`.
