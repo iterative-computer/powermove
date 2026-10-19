@@ -31,7 +31,7 @@ export async function runContractOnNativeHost(distDir: string, script: string, e
       documentScript: script, documentEnv: { POWERMOVE_PM_BRIDGE: BRIDGE, POWERMOVE_DOCUMENT_HOST_TEST_SEED: '1', POWERMOVE_NATIVE_EVALUATOR: 'audit', POWERMOVE_DOCUMENT_HOST_TEXT_REFERENCE: reference },
       browser: { call: unavailable, shader: unavailable, compat: unavailable, close: async () => {} }, log: () => {} });
     await host.start();
-    const call = (request: AgentToolRequestEvent): Promise<AgentToolResponseEvent> => new Promise((resolve, reject) => {
+    const sendTool = (request: AgentToolRequestEvent): Promise<AgentToolResponseEvent> => new Promise((resolve, reject) => {
       const timer = setTimeout(() => { ipc.off(IPC.agentToolResponse, receive); reject(new Error(`Native host timed out: ${request.tool}`)); }, 60000);
       const receive = (_event: unknown, value: unknown) => {
         const response = value as AgentToolResponseEvent;
@@ -44,7 +44,7 @@ export async function runContractOnNativeHost(distDir: string, script: string, e
     let revision = 0;
     const answers: ContractTranscript['answers'] = [], documents: string[] = [];
     for (const [index, call] of CONTRACT_SEQUENCE.entries()) {
-      const response = await call({ runId: call.runId, callId: `native-contract-${index}`, tool: call.tool, arguments: call.arguments, baseRevision: revision });
+      const response = await sendTool({ runId: call.runId, callId: `native-contract-${index}`, tool: call.tool, arguments: call.arguments, baseRevision: revision });
       revision = response.revision ?? revision; answers.push(answerOf(response));
       const stats = await host.pool.stats(CONTRACT_PROJECT_ID);
       if (!stats.testDocument) throw new Error('The contract worker did not expose its live document bytes'); documents.push(stats.testDocument);
