@@ -1,13 +1,16 @@
 /*
- * Builds the native engine's pm-node addon (engine/crates/pm-node) with the
- * pinned toolchain (engine/env.sh) and installs it as native/pm_node.node,
+ * Builds the native engine's pm-node addon (engine/crates/pm-node-addon, a
+ * cdylib over pm-node, so the release profile's thin LTO applies:
+ * docs/engine/release-build.md) with the pinned toolchain (engine/env.sh)
+ * and installs it as native/pm_node.node,
  * where development runs and electron-builder (asarUnpack: native/**) find
  * it. Then loads it once and checks that it speaks the same protocol build
  * as main's generated types: draft contracts interoperate only between
  * equal builds, so a stale addon would fail every handshake.
  *
- * Also builds main's pm-bridge addon (the frame bridge and the font
- * registry) into native/pm_bridge.node for packaging and
+ * Also builds main's pm-bridge addon (engine/crates/pm-bridge-addon: the
+ * frame bridge and the font registry) into native/pm_bridge.node for
+ * packaging and
  * engine/target/pm-bridge/pm_bridge.node, where development runs load it.
  *
  *   node scripts/build-engine-addon.mjs [--debug]
@@ -35,15 +38,17 @@ function installAddon(source, target) {
   }
 }
 
-const cargo = `. ./env.sh && cargo build ${debug ? '' : '--release '}--locked -p pm-node --features node && exec cargo build ${debug ? '' : '--release '}--locked -p pm-bridge --lib --features node`;
+// Two invocations: in one, feature unification would compile pm-bridge's
+// napi glue into pm_node.node too.
+const cargo = `. ./env.sh && cargo build ${debug ? '' : '--release '}--locked -p pm-node-addon --features node && exec cargo build ${debug ? '' : '--release '}--locked -p pm-bridge-addon --features node`;
 execFileSync('/bin/sh', ['-c', cargo], { cwd: engine, stdio: 'inherit' });
 
-const bridgeBuilt = path.join(engine, 'target', profile, 'libpm_bridge.dylib');
+const bridgeBuilt = path.join(engine, 'target', profile, 'libpm_bridge_addon.dylib');
 for (const bridgeTarget of [path.join(desktop, 'native', 'pm_bridge.node'), path.join(engine, 'target', 'pm-bridge', 'pm_bridge.node')]) {
   installAddon(bridgeBuilt, bridgeTarget);
 }
 
-const built = path.join(engine, 'target', profile, 'libpm_node.dylib');
+const built = path.join(engine, 'target', profile, 'libpm_node_addon.dylib');
 const target = path.join(desktop, 'native', 'pm_node.node');
 installAddon(built, target);
 

@@ -1040,8 +1040,10 @@ at 0.10%, 0.05%, 0.02% of pixels, max 16, 27, 85 CV (float 15.9, 26.9,
 for every input that reaches these effects; not attempted here (Gaps).
 
 Rerun 2026-10-18 after the review (same capture, `PM_RENDER_ONLY`, debug
-build: the release corpus build fails to link under kache with "failed to
-get bitcode from object file for LTO"): `render/fx-color` t = 0, 1, 2 at
+build: the release corpus build then failed its thin-LTO link with "failed
+to get bitcode from object file for LTO", caused by pm-media bundling
+CrabbyAvif's Rust staticlib into its rlib, not by kache; fixed since, see
+[release-build.md](release-build.md)): `render/fx-color` t = 0, 1, 2 at
 98.12%, 97.80%, 97.50% exact, 100% within 1 CV, max 1 CV (float 0.50,
 0.75, 0.75 CV); `render/fx-levels` at 98.35%, 97.24%, 98.49% exact, 100%
 within 1 CV, max 1 CV (float 0.25, 0.25, 0.37 CV); `render/fx-posterize`
