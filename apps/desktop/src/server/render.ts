@@ -2,6 +2,7 @@
  * agent exports this command deliberately has no output-directory restriction. */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { constants } from 'node:os';
 import path from 'node:path';
 
 export function renderInvocation(argv: string[], distDir: string, env: NodeJS.ProcessEnv = process.env): { file: string; args: string[] } {
@@ -23,7 +24,7 @@ export async function renderProject(argv: string[], distDir: string, env: NodeJS
   try {
     return await new Promise<number>((resolve, reject) => {
       child.once('error', error => reject(new Error(`native-renderer-unavailable: ${error.message}`)));
-      child.once('exit', (code, signal) => resolve(code ?? (signal === 'SIGINT' ? 130 : 143)));
+      child.once('exit', (code, signal) => resolve(code ?? 128 + (constants.signals[signal ?? 'SIGTERM'] ?? 15)));
     });
   } finally { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); }
 }
