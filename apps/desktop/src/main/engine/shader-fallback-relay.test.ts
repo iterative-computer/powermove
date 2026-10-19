@@ -79,6 +79,7 @@ describe('the shader fallback relay', () => {
     expect(await closed).toMatchObject({ ok: false, reason: 'unavailable', message: expect.stringContaining('closed') });
     expect(fallbackErrorCode('compile')).toBe('shaderCompile');
     expect(fallbackErrorCode('watchdog')).toBe('watchdogTimeout');
+    expect(fallbackErrorCode('tooLarge')).toBe('budgetExceeded');
     expect(fallbackErrorCode('contextLost')).toBe('unsupported');
   });
 });

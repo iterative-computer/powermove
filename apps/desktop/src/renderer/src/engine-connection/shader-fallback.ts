@@ -31,6 +31,11 @@
  * context on purpose, fails with `watchdog`, and its program is never run
  * again, so a runaway program never blocks the renderer in `readPixels`.
  *
+ * A target edge past the context's `MAX_TEXTURE_SIZE` fails with
+ * `tooLarge`: the GPU cannot hold it, today's compositor could not either,
+ * and asking again at that size changes nothing (the engine keeps the
+ * failure for the program at that size).
+ *
  * Only two failures are kept for a program: WebGL refusing it (`compile`)
  * and the draw deadline (`watchdog`). A context lost for any other reason
  * (a GPU-process restart, another context's loss) says nothing about the
@@ -68,7 +73,7 @@ export interface ShaderFallbackRequest {
 export interface ShaderFallbackPixels { key: string; width: number; height: number; rgba16f: Uint16Array }
 
 export class ShaderFallbackError extends Error {
-  constructor(readonly key: string, readonly reason: 'compile' | 'deadline' | 'contextLost' | 'unavailable' | 'size' | 'watchdog', message: string) {
+  constructor(readonly key: string, readonly reason: 'compile' | 'deadline' | 'contextLost' | 'unavailable' | 'size' | 'tooLarge' | 'watchdog', message: string) {
     super(message);
   }
 }
@@ -78,7 +83,11 @@ export interface RunnerOptions {
   createCanvas?: () => OffscreenCanvas | HTMLCanvasElement;
   /** How long a compile may take before the program is failed (ms). */
   compileDeadlineMs?: number;
-  /** Largest target edge (the compositor's 4,096 px cap on shader layers). */
+  /** Largest target edge (tests). By default the context's
+   *  `MAX_TEXTURE_SIZE`, the limit today's compositor draws effects and
+   *  transitions under (its `grab` buffers are textures of the
+   *  composition's size). Shader layers arrive already capped at 4,096 px
+   *  by the engine (`shader_layers::plan`, the compositor's own cap). */
   maxSize?: number;
   /** How long one pass's draw may take before it is stopped (ms): the
    *  runner's watchdog. Chromium's own GPU watchdog loses a context after
@@ -315,10 +324,9 @@ export class ShaderFallbackRunner {
   }
 
   private async run(request: ShaderFallbackRequest, textures: Uint16Array[]): Promise<ShaderFallbackPixels> {
-    const max = this.options.maxSize ?? 4096;
     const { width, height } = request;
-    if (!(Number.isInteger(width) && Number.isInteger(height) && width >= 1 && height >= 1 && width <= max && height <= max)) {
-      throw new ShaderFallbackError(request.key, 'size', `target ${width}×${height} is outside 1..${max}`);
+    if (!(Number.isInteger(width) && Number.isInteger(height) && width >= 1 && height >= 1)) {
+      throw new ShaderFallbackError(request.key, 'size', `target ${width}×${height} is not a size`);
     }
     const wanted = request.textures ?? 0;
     if (textures.length !== wanted || textures.some((t) => t.length !== width * height * 4)) {
@@ -326,6 +334,10 @@ export class ShaderFallbackRunner {
     }
     const id = `${request.vertex}\u0000${request.fragment}`;
     const gl = this.context();
+    const max = this.options.maxSize ?? Number(gl.getParameter(gl.MAX_TEXTURE_SIZE));
+    if (width > max || height > max) {
+      throw new ShaderFallbackError(request.key, 'tooLarge', `target ${width}×${height} is larger than this GPU's ${max} px WebGL texture limit`);
+    }
     const p = await this.program(gl, request);
     const created: WebGLTexture[] = [];
     const framebuffers: WebGLFramebuffer[] = [];

@@ -142,8 +142,10 @@ export function fallbackFileNameOk(name: unknown): name is string {
 }
 
 /** The host's error code for a runner failure. */
-export function fallbackErrorCode(reason: string): 'shaderCompile' | 'watchdogTimeout' | 'unsupported' {
-  return reason === 'compile' ? 'shaderCompile' : reason === 'watchdog' ? 'watchdogTimeout' : 'unsupported';
+export function fallbackErrorCode(reason: string): 'shaderCompile' | 'watchdogTimeout' | 'budgetExceeded' | 'unsupported' {
+  // `tooLarge` (a target past the GPU's WebGL texture limit) is final like
+  // `compile`; the job engine reads `budgetExceeded` back as it.
+  return reason === 'compile' ? 'shaderCompile' : reason === 'watchdog' ? 'watchdogTimeout' : reason === 'tooLarge' ? 'budgetExceeded' : 'unsupported';
 }
 
 /**

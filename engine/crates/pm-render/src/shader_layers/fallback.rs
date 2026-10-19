@@ -272,21 +272,35 @@ pub fn bands(pixels: &FallbackPixels, max_bytes: usize) -> Vec<(u32, u32, Vec<u8
 /// or the host's error).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FallbackFailure {
-    /// `compile`, `deadline`, `contextLost`, `unavailable`, `size`, or
-    /// `watchdog`.
+    /// `compile`, `deadline`, `contextLost`, `unavailable`, `size`,
+    /// `tooLarge`, or `watchdog`.
     pub reason: String,
     pub message: String,
 }
 
 impl FallbackFailure {
-    /// Whether the failure says something about the program, so it is not
-    /// asked for again until its source changes: WebGL refused it
-    /// (`compile`), or its draw passed the runner's deadline (`watchdog`).
+    /// Whether the failure is deterministic, so it is not asked for again
+    /// until the program's source changes: WebGL refused it (`compile`),
+    /// its draw passed the runner's deadline (`watchdog`), or its target
+    /// is larger than the GPU's WebGL texture limit (`tooLarge`; kept for
+    /// the program at that size only, [`FallbackFailure::sized`]).
     /// Anything else (`contextLost`, the compile `deadline`, `unavailable`,
     /// `size`) is transient and retried.
     pub fn is_final(&self) -> bool {
-        matches!(self.reason.as_str(), "compile" | "watchdog")
+        matches!(self.reason.as_str(), "compile" | "watchdog" | "tooLarge")
     }
+
+    /// Whether the failure holds only for the request's size (`tooLarge`):
+    /// the same program at a smaller size (a lower preview resolution, a
+    /// smaller export) is asked for.
+    pub fn sized(&self) -> bool {
+        self.reason == "tooLarge"
+    }
+}
+
+/// The key a size-bound failure ([`FallbackFailure::sized`]) is kept under.
+pub(crate) fn sized_program_id(program: &str, width: u32, height: u32) -> String {
+    format!("{program}@{width}x{height}")
 }
 
 /// A request with the textures it samples, for a host that runs it
@@ -405,6 +419,11 @@ pub struct FallbackStore {
     bytes: u64,
     budget: u64,
     tick: u64,
+    /// Keys kept past the budget until [`FallbackStore::unpin`]: a job's
+    /// frame keeps every result it was answered until it is delivered, so
+    /// a chain of large steps (two 8K steps are past the budget) never
+    /// drops one result for the next and asks for it again.
+    pinned: Option<std::collections::HashSet<String>>,
 }
 
 impl Default for FallbackStore {
@@ -421,23 +440,55 @@ impl FallbackStore {
             bytes: 0,
             budget,
             tick: 0,
+            pinned: None,
         }
+    }
+
+    /// From now on, results inserted are kept past the budget (and are not
+    /// dropped for later ones) until [`FallbackStore::unpin`].
+    pub fn pin(&mut self) {
+        self.pinned.get_or_insert_with(Default::default);
+    }
+
+    /// Ends [`FallbackStore::pin`]: the budget applies to every result
+    /// again.
+    pub fn unpin(&mut self) {
+        self.pinned = None;
+        self.trim(None);
     }
 
     pub fn insert(&mut self, key: String, pixels: FallbackPixels) {
         self.tick += 1;
         let size = pixels.bytes();
-        if let Some((old, _)) = self.entries.insert(key, (Arc::new(pixels), self.tick)) {
+        if let Some(pinned) = &mut self.pinned {
+            pinned.insert(key.clone());
+        }
+        if let Some((old, _)) = self
+            .entries
+            .insert(key.clone(), (Arc::new(pixels), self.tick))
+        {
             self.bytes -= old.bytes();
         }
         self.bytes += size;
-        while self.bytes > self.budget && self.entries.len() > 1 {
-            let oldest = self
+        self.trim(Some(&key));
+    }
+
+    /// Drops the least recently used results past the budget, never a
+    /// pinned one or `keep` (the result just inserted).
+    fn trim(&mut self, keep: Option<&str>) {
+        while self.bytes > self.budget {
+            let pinned = self.pinned.as_ref();
+            let Some(oldest) = self
                 .entries
                 .iter()
+                .filter(|(k, _)| {
+                    Some(k.as_str()) != keep && !pinned.is_some_and(|p| p.contains(k.as_str()))
+                })
                 .min_by_key(|(_, (_, t))| *t)
                 .map(|(k, _)| k.clone())
-                .expect("not empty");
+            else {
+                break;
+            };
             if let Some((p, _)) = self.entries.remove(&oldest) {
                 self.bytes -= p.bytes();
             }
@@ -529,6 +580,34 @@ mod tests {
         store.insert("c".into(), pixels(4));
         assert!(store.contains("a") && store.contains("c") && !store.contains("b"));
         assert_eq!(store.bytes(), 64);
+    }
+
+    #[test]
+    fn a_pinned_frame_keeps_every_result_past_the_budget_until_unpinned() {
+        // Two results larger than the budget each (two 8K steps against
+        // 512 MB): without pinning the second drops the first.
+        let mut store = FallbackStore::with_budget(40);
+        store.insert("old".into(), pixels(2));
+        store.pin();
+        store.insert("a".into(), pixels(4));
+        store.insert("b".into(), pixels(4));
+        assert!(store.contains("a") && store.contains("b"), "both kept");
+        assert!(!store.contains("old"), "unpinned results still go first");
+        store.unpin();
+        assert!(store.contains("b") && !store.contains("a"));
+        assert_eq!(store.bytes(), 32);
+    }
+
+    #[test]
+    fn size_bound_failures_are_final_and_keyed_by_size() {
+        let f = |reason: &str| FallbackFailure {
+            reason: reason.into(),
+            message: String::new(),
+        };
+        assert!(f("tooLarge").is_final() && f("tooLarge").sized());
+        assert!(f("compile").is_final() && !f("compile").sized());
+        assert!(!f("size").is_final() && !f("contextLost").is_final());
+        assert_eq!(sized_program_id("p", 8193, 4320), "p@8193x4320");
     }
 
     #[test]

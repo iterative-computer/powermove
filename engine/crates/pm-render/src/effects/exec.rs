@@ -646,7 +646,8 @@ impl<'c> Gpu<'c> {
             .map(|g| g.source.clone())
             .unwrap_or_default();
         let program = super::fallback::program_id_of(pm_glsl::VERTEX, &source);
-        if let Some(why) = self.effects.fallback.failure(&program).cloned() {
+        let (w, h) = (textures[0].width(), textures[0].height());
+        if let Some(why) = self.effects.fallback.failure(&program, w, h).cloned() {
             self.runner_failed(&span, &program, &why);
             return None;
         }
@@ -683,7 +684,6 @@ impl<'c> Gpu<'c> {
         if self.effects.fallback.blocked {
             return None;
         }
-        let (w, h) = (textures[0].width(), textures[0].height());
         // The frame so far runs now, so the textures hold this frame's
         // pixels when they are read.
         let device = self.device;
@@ -771,6 +771,13 @@ impl<'c> Gpu<'c> {
                 ErrorCode::NotHeadlessRenderable,
                 format!(
                     "{name} needs the WebGL fallback runner, which is not available here ({}).",
+                    why.message
+                ),
+            ),
+            "tooLarge" => (
+                ErrorCode::BudgetExceeded,
+                format!(
+                    "{name} needs the WebGL fallback runner, and its {} is past this GPU's WebGL limit; it is skipped at this size.",
                     why.message
                 ),
             ),

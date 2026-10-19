@@ -21,13 +21,18 @@
 //!    [`FallbackHost`](crate::shader_layers::FallbackHost) runs it at once
 //!    and renders the frame again).
 //!
-//! Only two failures say something about the program, and only they are
-//! kept until its source changes ([`FallbackFailure::is_final`]): a program
-//! WebGL refuses (`compile`) is skipped and reported, as `runEffects` skips
-//! one today; one whose draw passed the runner's deadline (`watchdog`) is
-//! turned off by the GPU watchdog like a runaway native program. Every
-//! other failure (the runner's context was lost, its compile deadline
-//! passed, no runner answered, a wrong size) is transient and the program
+//! Only deterministic failures are kept until the program's source changes
+//! ([`FallbackFailure::is_final`]): a program WebGL refuses (`compile`) is
+//! skipped and reported, as `runEffects` skips one today; one whose draw
+//! passed the runner's deadline (`watchdog`) is turned off by the GPU
+//! watchdog like a runaway native program; a target larger than the GPU's
+//! WebGL texture limit (`tooLarge`, kept for that size only) is skipped and
+//! reported in the viewer and stops a job by name. Steps are drawn at the
+//! composition's size as `runEffects` and `runTransition` draw them today,
+//! up to that limit (16,384 px on Apple GPUs, the composition's own
+//! maximum), not the shader layers' 4,096 px cap. Every other failure (the
+//! runner's context was lost, its compile deadline passed, no runner
+//! answered, a malformed request) is transient and the program
 //! is asked for again ([`Retries`]), as today's compositor draws again once
 //! its context is restored (`compositor.ts` clears `GL.errors` and
 //! `GL.progs` on `webglcontextrestored`): the first retry at once, later
@@ -139,7 +144,14 @@ impl EffectFallback {
         now: Instant,
     ) -> Option<Duration> {
         let delay = if let Some((request, _)) = self.waiting.get(key) {
-            let program = crate::shader_layers::fallback::program_id(request);
+            let mut program = crate::shader_layers::fallback::program_id(request);
+            if failure.sized() {
+                program = crate::shader_layers::fallback::sized_program_id(
+                    &program,
+                    request.width,
+                    request.height,
+                );
+            }
             self.program_failed(&program, failure, now)
         } else {
             None
@@ -165,14 +177,35 @@ impl EffectFallback {
         }
     }
 
-    /// Why the runner could not draw `program`, if it could not.
-    pub(crate) fn failure(&self, program: &str) -> Option<&FallbackFailure> {
-        self.failed.get(program)
+    /// Why the runner could not draw `program` at `width × height`, if it
+    /// could not (a failure for the program, or one bound to that size).
+    pub(crate) fn failure(
+        &self,
+        program: &str,
+        width: u32,
+        height: u32,
+    ) -> Option<&FallbackFailure> {
+        self.failed.get(program).or_else(|| {
+            self.failed
+                .get(&crate::shader_layers::fallback::sized_program_id(
+                    program, width, height,
+                ))
+        })
     }
 
     /// Whether `program`'s failure still has to be reported (once).
     pub(crate) fn report_once(&mut self, program: &str) -> bool {
         self.reported.insert(program.to_owned())
+    }
+
+    /// Keeps every result answered from now on past the budget until
+    /// [`EffectFallback::unpin_results`] (a job's frame).
+    pub(crate) fn pin_results(&mut self) {
+        self.results.pin();
+    }
+
+    pub(crate) fn unpin_results(&mut self) {
+        self.results.unpin();
     }
 
     pub(crate) fn result(&mut self, key: &str) -> Option<Arc<FallbackPixels>> {

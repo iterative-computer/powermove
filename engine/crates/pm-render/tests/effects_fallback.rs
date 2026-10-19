@@ -49,8 +49,12 @@ fn layer(id: &str, color: &str, fx: Value, transition_in: Value) -> Value {
 }
 
 fn document(layers: Vec<Value>) -> pm_model::Document {
+    document_sized(layers, 64, 32)
+}
+
+fn document_sized(layers: Vec<Value>, w: u32, h: u32) -> pm_model::Document {
     let doc = json!({
-        "id": "P", "name": "p", "w": 64, "h": 32, "fps": 30, "dur": 10, "bg": "#202020",
+        "id": "P", "name": "p", "w": w, "h": h, "fps": 30, "dur": 10, "bg": "#202020",
         "backgroundFill": { "type": "none", "angle": 0, "stops": [{ "id": "s1", "color": "#202020", "position": 0 }] },
         "compId": "P-root", "compName": "p", "markers": [], "work": [0, 10], "params": {},
         "revision": 0, "edits": [], "created": 0, "shutter": 0.5, "layers": layers, "assets": {}, "comps": {}
@@ -578,6 +582,160 @@ fn a_job_whose_runner_keeps_losing_its_context_stops_naming_the_program() {
         render(&mut job, &doc).unwrap(),
         render(&mut fresh, &doc).unwrap()
     );
+}
+
+fn render_sized(
+    r: &mut Renderer,
+    doc: &pm_model::Document,
+    w: u32,
+    h: u32,
+) -> Result<Vec<f32>, RenderError> {
+    let mut q = RenderRequest::sized(Size::new(w, h), Precision::Float16);
+    q.background = true;
+    let frame = r.render(
+        doc,
+        "P-root",
+        Ticks::new(0).unwrap(),
+        &q,
+        &MapResolver::default(),
+    )?;
+    Ok(r.read_rgba(&frame).unwrap())
+}
+
+fn job_renderer(host: Arc<Cpu>) -> Renderer {
+    let mut job = renderer();
+    job.effects_mut().watchdog.set_policy(Policy::Job);
+    job.set_fallback_host(Some(host));
+    job
+}
+
+#[test]
+fn a_job_draws_a_runner_step_wider_than_4096_px_at_the_compositions_size() {
+    // Today's `runEffects` draws at the composition's size (up to 16,384
+    // px); the 4,096 px cap is the shader layers' alone.
+    let _gpu = gpu();
+    let (w, h) = (4500, 8);
+    let doc = |fx: Value| {
+        document_sized(
+            vec![
+                layer("top", "#E83A5E", fx, Value::Null),
+                layer("bg", "#3366CC", json!([]), Value::Null),
+            ],
+            w,
+            h,
+        )
+    };
+    let host = Arc::new(Cpu::default());
+    let mut job = job_renderer(host.clone());
+    let drawn = render_sized(&mut job, &doc(fx("acme.cube-invert")), w, h).unwrap();
+    let without = render_sized(&mut job, &doc(json!([])), w, h).unwrap();
+    assert_ne!(drawn, without, "the step is drawn");
+    let seen = host.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!((seen[0].request.width, seen[0].request.height), (w, h));
+}
+
+fn too_large() -> FallbackFailure {
+    FallbackFailure {
+        reason: "tooLarge".into(),
+        message: "target 64×32 is larger than this GPU's 16 px WebGL texture limit".into(),
+    }
+}
+
+#[test]
+fn a_target_past_the_gpus_webgl_limit_is_a_final_named_failure() {
+    let _gpu = gpu();
+    let doc = stack(fx("acme.cube-invert"), Value::Null);
+    // A job: stopped at once, naming the program and the limit; never
+    // retried as a transient failure.
+    let host = Arc::new(Cpu::default());
+    *host.fail.lock().unwrap() = Some(too_large());
+    let mut job = job_renderer(host.clone());
+    match render(&mut job, &doc) {
+        Err(RenderError::Fallback(m)) => assert!(
+            m.contains("acme.cube-invert")
+                && m.contains("tooLarge")
+                && m.contains("WebGL texture limit"),
+            "{m}"
+        ),
+        other => panic!("expected a named failure, got {:?}", other.map(|_| ())),
+    }
+    assert_eq!(host.seen.lock().unwrap().len(), 1, "final: one attempt");
+    // The viewer: kept (no retry), skipped and reported once.
+    let mut r = renderer();
+    r.set_shader_fallback_runner(true);
+    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
+        panic!("expected a request")
+    };
+    assert_eq!(r.put_fallback_failure(&q[0].key, too_large()), None);
+    let without = render(&mut r, &stack(json!([]), Value::Null)).unwrap();
+    assert_eq!(render(&mut r, &doc).unwrap(), without);
+    assert_eq!(render(&mut r, &doc).unwrap(), without);
+    assert!(r.fallback_retry_at().is_none(), "not retried");
+    let reports = r.watchdog_reports(true);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].code, ErrorCode::BudgetExceeded);
+    assert!(
+        reports[0].message.contains("acme.cube-invert"),
+        "{}",
+        reports[0].message
+    );
+    // The failure is the size's: the same program at another size (a
+    // lower preview resolution) is asked for.
+    let small = document_sized(
+        vec![
+            layer("top", "#E83A5E", fx("acme.cube-invert"), Value::Null),
+            layer("bg", "#3366CC", json!([]), Value::Null),
+        ],
+        48,
+        24,
+    );
+    assert!(matches!(
+        render_sized(&mut r, &small, 48, 24),
+        Err(RenderError::ShaderFallbackPending(_))
+    ));
+}
+
+#[test]
+fn a_job_draws_more_runner_steps_than_a_fixed_round_limit() {
+    // Each runner step waits for the one before it (its request covers the
+    // textures the earlier step's pixels feed), one round each: twenty
+    // independent layers with a fallback-only effect take twenty rounds,
+    // each asking for a new request, and the frame is delivered.
+    let _gpu = gpu();
+    let mut layers: Vec<Value> = (0..20)
+        .map(|i| {
+            let mut l = layer(
+                &format!("l{i}"),
+                "#E83A5E",
+                fx("acme.cube-invert"),
+                Value::Null,
+            );
+            l["p"]["position.x"] = ch(json!(i * 2));
+            l
+        })
+        .collect();
+    layers.push(layer("bg", "#3366CC", json!([]), Value::Null));
+    let doc = document(layers);
+    let host = Arc::new(Cpu::default());
+    let mut job = job_renderer(host.clone());
+    let drawn = render(&mut job, &doc).unwrap();
+    let seen = host.seen.lock().unwrap();
+    assert_eq!(seen.len(), 20, "one request per step, none asked again");
+    let keys: std::collections::HashSet<_> = seen.iter().map(|j| j.request.key.clone()).collect();
+    assert_eq!(keys.len(), 20);
+    drop(seen);
+    // The viewer, answered round by round, draws the same frame.
+    let mut viewer = renderer();
+    viewer.set_shader_fallback_runner(true);
+    let expected = loop {
+        match render(&mut viewer, &doc) {
+            Ok(px) => break px,
+            Err(RenderError::ShaderFallbackPending(q)) => answer(&mut viewer, q),
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_eq!(drawn, expected);
 }
 
 /// Answers every request with the same pixels at once: the engine's own

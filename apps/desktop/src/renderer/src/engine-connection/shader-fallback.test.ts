@@ -178,13 +178,13 @@ describe('effect and transition requests in a session', () => {
 });
 
 /** A recording WebGL2 stand-in: enough of the API for the runner. */
-function fakeGl(active: string[], fence: () => number) {
+function fakeGl(active: string[], fence: () => number, maxTextureSize = 16384) {
   const C = {
     VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, LINK_STATUS: 3, ARRAY_BUFFER: 4, STATIC_DRAW: 5, DEPTH_TEST: 6, BLEND: 7,
     TEXTURE_2D: 8, TEXTURE0: 100, RGBA16F: 9, RGBA: 10, HALF_FLOAT: 11, FLOAT: 12, TEXTURE_MIN_FILTER: 13, TEXTURE_MAG_FILTER: 14,
     LINEAR: 15, TEXTURE_WRAP_S: 16, TEXTURE_WRAP_T: 17, CLAMP_TO_EDGE: 18, FRAMEBUFFER: 19, COLOR_ATTACHMENT0: 20,
     COLOR_BUFFER_BIT: 21, TRIANGLE_STRIP: 22, NO_ERROR: 0, UNPACK_ALIGNMENT: 23, SYNC_GPU_COMMANDS_COMPLETE: 24,
-    ALREADY_SIGNALED: 25, CONDITION_SATISFIED: 26, TIMEOUT_EXPIRED: 27, WAIT_FAILED: 28
+    ALREADY_SIGNALED: 25, CONDITION_SATISFIED: 26, TIMEOUT_EXPIRED: 27, WAIT_FAILED: 28, MAX_TEXTURE_SIZE: 29
   };
   let unit = 0;
   let next = 0;
@@ -217,7 +217,7 @@ function fakeGl(active: string[], fence: () => number) {
     drawArrays: () => { state.draws.push(Object.fromEntries([0, 1, 2].map((u) => [u, (bound.get(u) as { id: number } | null)?.id ?? null]))); },
     fenceSync: () => ({}), flush: () => {}, clientWaitSync: () => fence(), deleteSync: () => {},
     readPixels: () => {}, isContextLost: () => lost, deleteFramebuffer: () => {}, deleteTexture: () => {},
-    getParameter: () => null
+    getParameter: (p: number) => (p === C.MAX_TEXTURE_SIZE ? maxTextureSize : null)
   };
   const canvas = { addEventListener: () => {}, getContext: () => gl } as unknown as OffscreenCanvas;
   /** The context is lost under the runner (a GPU-process restart). */
@@ -250,6 +250,28 @@ describe('the runner with textures, passes, and its draw deadline', () => {
     const { canvas } = fakeGl([], () => 25);
     const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
     await expect(runner.render(effect([]), [new Uint16Array(8)])).rejects.toMatchObject({ reason: 'size' });
+  });
+
+  it("draws effect targets up to the context's MAX_TEXTURE_SIZE, past the shader layers' 4,096 px cap", async () => {
+    const { canvas, state } = fakeGl(['u_tex'], () => 25);
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    // An 8K composition: today's compositor draws its effects at this size.
+    const r: ShaderFallbackRequest = { ...request(7680, 1, '5e'.repeat(32)), textures: 1, units: [{ unit: 0, texture: 0, chain: false }] };
+    const out = await runner.render(r, [new Uint16Array(7680 * 4)]);
+    expect(out.width).toBe(7680);
+    expect(out.rgba16f).toHaveLength(7680 * 4);
+    expect(state.draws).toHaveLength(1);
+  });
+
+  it('fails a target past MAX_TEXTURE_SIZE with tooLarge, before compiling or drawing', async () => {
+    const { canvas, state } = fakeGl(['u_tex'], () => 25, 8192);
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    const r: ShaderFallbackRequest = { ...request(8193, 1, '5f'.repeat(32)), textures: 1, units: [{ unit: 0, texture: 0, chain: false }] };
+    await expect(runner.render(r, [new Uint16Array(8193 * 4)])).rejects.toMatchObject({ reason: 'tooLarge', message: expect.stringContaining('8192 px') });
+    expect(state.draws).toHaveLength(0);
+    // At the limit it draws.
+    const fits: ShaderFallbackRequest = { ...r, key: '60'.repeat(32), width: 8192 };
+    await expect(runner.render(fits, [new Uint16Array(8192 * 4)])).resolves.toMatchObject({ width: 8192 });
   });
 
   it('stops a draw past its deadline, loses the context on purpose, and never runs the program again', async () => {
@@ -405,7 +427,7 @@ describe('the runner reads its target', () => {
       const reads: number[] = [];
       gl['IMPLEMENTATION_COLOR_READ_FORMAT'] = 30;
       gl['IMPLEMENTATION_COLOR_READ_TYPE'] = 31;
-      gl['getParameter'] = (p: number) => (p === 30 ? C.RGBA : p === 31 ? (halfRead ? C.HALF_FLOAT : C.FLOAT) : null);
+      gl['getParameter'] = (p: number) => (p === 30 ? C.RGBA : p === 31 ? (halfRead ? C.HALF_FLOAT : C.FLOAT) : p === C.MAX_TEXTURE_SIZE ? 16384 : null);
       gl['readPixels'] = (_x: number, _y: number, _w: number, _h: number, _f: number, type: number, out: Float32Array | Uint16Array) => {
         reads.push(type);
         if (type === C.HALF_FLOAT) (out as Uint16Array).fill(0x3800);

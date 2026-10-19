@@ -24,12 +24,44 @@ use crate::pipelines::Pipelines;
 use crate::plan::{self, Background, CompPlan};
 use crate::request::RenderRequest;
 
-/// Rounds of a frame through a fallback host: one per chained runner step
-/// (a step's request covers the previous step's output).
-const HOST_ROUNDS: usize = 16;
+/// Rounds of a frame through a fallback host. A frame takes one round per
+/// runner step it draws: a waiting step's pixels may feed every later step
+/// (a request covers its textures' pixels), so later steps are asked for
+/// once it is answered, even on independent layers. Each round must ask
+/// for a request not asked before in the frame (answers are pinned until
+/// the frame is delivered, so one asked again means no progress); this cap
+/// only bounds a frame whose requests never repeat, far past any real
+/// project (each round renders the frame again).
+const HOST_ROUNDS: usize = 1024;
 
 /// Attempts a fallback host gets at a request that fails transiently.
 const HOST_ATTEMPTS: u32 = 3;
+
+/// Whether a frame's `rounds`-th round through a fallback host makes
+/// progress: it asks for at least one request not asked before in the
+/// frame, within [`HOST_ROUNDS`].
+fn host_progress(
+    asked: &mut std::collections::HashSet<String>,
+    requests: &[crate::shader_layers::FallbackRequest],
+    rounds: usize,
+) -> Result<(), RenderError> {
+    if rounds > HOST_ROUNDS {
+        return Err(RenderError::Fallback(format!(
+            "the frame still needed the WebGL fallback runner after {HOST_ROUNDS} rounds"
+        )));
+    }
+    let mut new = false;
+    for r in requests {
+        new |= asked.insert(r.key.clone());
+    }
+    if !new {
+        return Err(RenderError::Fallback(format!(
+            "the frame asked the WebGL fallback runner again for {} answered request(s) (round {rounds})",
+            requests.len()
+        )));
+    }
+    Ok(())
+}
 use crate::scene3d::Scene3dRenderer;
 
 /// A rendered frame.
@@ -506,12 +538,36 @@ impl Renderer {
     /// attached, else failing with [`RenderError::ShaderFallbackPending`].
     fn with_runner(
         &mut self,
+        draw: impl FnMut(&mut Self) -> (Option<Target>, Vec<Unsupported>),
+    ) -> Result<Target, RenderError> {
+        if self.fallback_host.is_none() {
+            return self.with_runner_rounds(draw);
+        }
+        self.effects.fallback.retries.clear();
+        self.pin_fallback_results(true);
+        let out = self.with_runner_rounds(draw);
+        self.pin_fallback_results(false);
+        out
+    }
+
+    /// Keeps every runner result a host answers until the frame is
+    /// delivered (`true`), or lets the stores' budgets apply again.
+    fn pin_fallback_results(&mut self, pin: bool) {
+        if pin {
+            self.effects.fallback.pin_results();
+            self.shaders.fallback.pin();
+        } else {
+            self.effects.fallback.unpin_results();
+            self.shaders.fallback.unpin();
+        }
+    }
+
+    fn with_runner_rounds(
+        &mut self,
         mut draw: impl FnMut(&mut Self) -> (Option<Target>, Vec<Unsupported>),
     ) -> Result<Target, RenderError> {
-        if self.fallback_host.is_some() {
-            self.effects.fallback.retries.clear();
-        }
         let mut rounds = 0;
+        let mut asked = std::collections::HashSet::new();
         loop {
             self.effects.fallback.pending.clear();
             self.effects.fallback.fatal = None;
@@ -537,11 +593,7 @@ impl Renderer {
                 return Err(RenderError::ShaderFallbackPending(pending));
             };
             rounds += 1;
-            if rounds > HOST_ROUNDS {
-                return Err(RenderError::Fallback(format!(
-                    "the effects still needed the WebGL fallback runner after {HOST_ROUNDS} rounds"
-                )));
-            }
+            host_progress(&mut asked, &pending, rounds)?;
             self.run_host(host.as_ref(), pending);
         }
     }
@@ -944,11 +996,22 @@ impl Renderer {
         target: &Target,
         depth_id: Option<&Target>,
     ) -> Result<Rendered, RenderError> {
-        if self.fallback_host.is_some() {
-            self.effects.fallback.retries.clear();
+        if self.fallback_host.is_none() {
+            return self.render_into_once(
+                document,
+                composition,
+                time,
+                request,
+                assets,
+                target,
+                depth_id,
+            );
         }
+        self.effects.fallback.retries.clear();
+        self.pin_fallback_results(true);
         let mut rounds = 0;
-        loop {
+        let mut asked = std::collections::HashSet::new();
+        let out = loop {
             let result = self.render_into_once(
                 document,
                 composition,
@@ -959,20 +1022,20 @@ impl Renderer {
                 depth_id,
             );
             let Some(host) = self.fallback_host.clone() else {
-                return result;
+                break result;
             };
             let requests = match result {
                 Err(RenderError::ShaderFallbackPending(requests)) => requests,
-                other => return other,
+                other => break other,
             };
             rounds += 1;
-            if rounds > HOST_ROUNDS {
-                return Err(RenderError::Fallback(format!(
-                    "the frame still needed the WebGL fallback runner after {HOST_ROUNDS} rounds"
-                )));
+            if let Err(e) = host_progress(&mut asked, &requests, rounds) {
+                break Err(e);
             }
             self.run_host(host.as_ref(), requests);
-        }
+        };
+        self.pin_fallback_results(false);
+        out
     }
 
     #[allow(clippy::too_many_arguments)]

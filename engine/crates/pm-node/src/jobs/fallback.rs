@@ -117,6 +117,7 @@ pub(crate) fn failure_of(code: ErrorCode, message: String) -> FallbackFailure {
         reason: match code {
             ErrorCode::ShaderCompile => "compile",
             ErrorCode::WatchdogTimeout => "watchdog",
+            ErrorCode::BudgetExceeded => "tooLarge",
             _ => "unavailable",
         }
         .into(),
@@ -314,6 +315,7 @@ mod tests {
         for (code, reason) in [
             (ErrorCode::ShaderCompile, "compile"),
             (ErrorCode::WatchdogTimeout, "watchdog"),
+            (ErrorCode::BudgetExceeded, "tooLarge"),
             (ErrorCode::Unsupported, "unavailable"),
         ] {
             *echo.answer.lock().unwrap() = Some(EngineError::new(
