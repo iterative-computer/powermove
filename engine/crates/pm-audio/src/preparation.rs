@@ -142,6 +142,8 @@ struct Done {
     // a start is evicted and recreated while its result is in transit.
     history: Arc<Mutex<crate::stretch::StretchRun>>,
     ready: crate::Result<bool>,
+    /// The job found its history claimed by another thread and did not run.
+    claimed: bool,
     profile: crate::profile::Profile,
 }
 pub(crate) struct Preparation {
@@ -191,7 +193,11 @@ impl Preparation {
     ) {
         self.poll(mixer);
         for (priority, &start) in starts.iter().enumerate() {
-            for work in mixer.preparation_work(start, target.unwrap_or(start)) {
+            let pending = &self.pending;
+            let jobs = mixer.preparation_work_except(start, target.unwrap_or(start), |vi| {
+                pending.contains(&(start, vi))
+            });
+            for work in jobs {
                 if !self.pending.insert((start, work.vi)) {
                     continue;
                 }
@@ -215,6 +221,20 @@ impl Preparation {
                         if cancelled() {
                             return;
                         }
+                        if !work.claim() {
+                            // The producer (or paused preparation) owns this
+                            // history now. Report only so the slot is freed.
+                            let _ = tx.send(Done {
+                                generation,
+                                start,
+                                voice,
+                                history,
+                                ready: Ok(false),
+                                claimed: true,
+                                profile: Default::default(),
+                            });
+                            return;
+                        }
                         crate::profile::reset();
                         let ready = work.run(&mut make(), static_content, cancelled);
                         let _ = tx.send(Done {
@@ -223,6 +243,7 @@ impl Preparation {
                             voice,
                             history,
                             ready,
+                            claimed: false,
                             profile: crate::profile::snapshot(),
                         });
                     },
@@ -233,6 +254,9 @@ impl Preparation {
     fn accept(&mut self, mixer: &mut Mixer, done: Done) {
         if done.generation == self.generation.load(Ordering::Relaxed) {
             self.pending.remove(&(done.start, done.voice));
+            if done.claimed {
+                return;
+            }
             if !mixer.preparation_matches(
                 done.start,
                 done.voice,

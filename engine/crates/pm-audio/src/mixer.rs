@@ -251,6 +251,16 @@ fn head_frames(rate: u32) -> usize {
         .div_ceil(48_000)
         .next_multiple_of(crate::ring::CHUNK)
 }
+/// Output a start's own job renders past its first chunk, so the producer
+/// queues the start's opening callbacks from vocoder output already in the
+/// history instead of running sixteen vocoder steps serially between the
+/// first and second ring chunks.
+const LEAD_FRAMES: usize = 1024;
+fn lead_frames(rate: u32) -> usize {
+    (LEAD_FRAMES * rate as usize)
+        .div_ceil(48_000)
+        .next_multiple_of(crate::ring::CHUNK)
+}
 struct Head {
     start: i64,
     ready_us: u64,
@@ -284,6 +294,9 @@ type SharedHead = Arc<HeadSlot>;
 struct Prefill {
     head: Arc<Head>,
     finished: Arc<AtomicBool>,
+    /// The independent history job's claim. Whoever sets it first runs
+    /// the history: a worker, or the producer at the head's end.
+    started: Arc<AtomicBool>,
 }
 
 /// Detached priming work. It never touches live histories, meters or the transport.
@@ -300,10 +313,16 @@ pub(crate) struct PrepareVoice {
     run: Arc<std::sync::Mutex<StretchRun>>,
     head: Option<SharedHead>,
     pub(crate) gate: Option<Arc<AtomicBool>>,
+    started: Arc<AtomicBool>,
 }
 impl PrepareVoice {
     pub(crate) fn history(&self) -> Arc<std::sync::Mutex<StretchRun>> {
         self.run.clone()
+    }
+    /// Claims this job for the caller. False when another thread (a worker,
+    /// or the producer at an exhausted head) already owns its history.
+    pub(crate) fn claim(&self) -> bool {
+        !self.started.swap(true, Ordering::AcqRel)
     }
     pub(crate) fn run(
         self,
@@ -425,6 +444,15 @@ impl PrepareVoice {
             let mut run = self.run.lock().unwrap_or_else(|e| e.into_inner());
             let ready =
                 run.prepare_join(a, self.target.max(first), &mut map, &mut read, &mut out)?;
+            if ready && self.target == self.start && self.head.is_none() {
+                // The same continuous output an offline render produces, kept
+                // in the run's buffer. Input still missing past the first
+                // chunk leaves a resumable request; the start stays ready.
+                let frames = lead_frames(self.rate).min((last - a) as usize);
+                if frames > crate::ring::CHUNK {
+                    run.render(a, frames, &mut map, &mut read, &mut out)?;
+                }
+            }
             if ready
                 && self.target == self.start
                 && let Some(head) = &self.head
@@ -462,6 +490,8 @@ struct Prepared {
     ready: Vec<bool>,
     heads: Vec<Option<SharedHead>>,
     finished: Vec<Arc<AtomicBool>>,
+    /// The claim of each voice's latest submitted job.
+    started: Vec<Arc<AtomicBool>>,
     installed: bool,
 }
 impl Prepared {
@@ -471,6 +501,9 @@ impl Prepared {
             ready: vec![false; voices],
             heads: vec![None; voices],
             finished: (0..voices)
+                .map(|_| Arc::new(AtomicBool::new(false)))
+                .collect(),
+            started: (0..voices)
                 .map(|_| Arc::new(AtomicBool::new(false)))
                 .collect(),
             installed: false,
@@ -677,9 +710,14 @@ impl Mixer {
                     run: run.clone(),
                     head: None,
                     gate: None,
+                    started: prepared.started[vi].clone(),
                 };
-                let result = work.run(&mut self.ev, false, || false).unwrap_or(false);
-                prepared.ready[vi] = result;
+                // A queued detached job shares this history. Run it here only
+                // if no worker has started it; that job then exits unrun.
+                if work.claim() {
+                    let result = work.run(&mut self.ev, false, || false).unwrap_or(false);
+                    prepared.ready[vi] = result;
+                }
             } else {
                 prepared.ready[vi] = self.is_ready(start, crate::ring::CHUNK);
             }
@@ -694,14 +732,26 @@ impl Mixer {
 
     /// Queue detached work for the nearest sounding voices first. Ready
     /// histories remain reusable; a job owns only its separate pending run.
+    #[cfg(test)]
     pub(crate) fn preparation_work(&mut self, start: i64, target: i64) -> Vec<PrepareVoice> {
+        self.preparation_work_except(start, target, |_| false)
+    }
+
+    /// [`Self::preparation_work`] for voices without a job in flight
+    /// (`pending`). Each returned job gets a fresh claim.
+    pub(crate) fn preparation_work_except(
+        &mut self,
+        start: i64,
+        target: i64,
+        pending: impl Fn(usize) -> bool,
+    ) -> Vec<PrepareVoice> {
         let prepared = self
             .prepared
             .entry(start)
             .or_insert_with(|| Prepared::new(self.voices.len()));
         let mut work = Vec::new();
         for (vi, voice) in self.voices.iter().enumerate() {
-            if prepared.ready[vi] || voice.stretch.is_none() {
+            if prepared.ready[vi] || voice.stretch.is_none() || pending(vi) {
                 continue;
             }
             let plan = &self.graph.voices[vi];
@@ -749,6 +799,7 @@ impl Mixer {
                 })
                 .map(|head| head.available.clone());
             prepared.finished[vi].store(false, Ordering::Release);
+            prepared.started[vi] = Arc::new(AtomicBool::new(false));
             work.push(PrepareVoice {
                 start,
                 target,
@@ -762,6 +813,7 @@ impl Mixer {
                 run: run.clone(),
                 head: prepared.heads[vi].clone(),
                 gate,
+                started: prepared.started[vi].clone(),
             });
         }
         work.sort_by_key(|w| {
@@ -836,6 +888,21 @@ impl Mixer {
             self.use_prepared(start);
             return false;
         }
+        // A3's per-voice bound: only a voice whose own first-chunk input is
+        // still missing may join late. The global readiness test that led
+        // here does not say which voice that is.
+        let missing: Vec<bool> = (0..self.voices.len())
+            .map(|i| {
+                self.voices[i].stretch.is_some()
+                    && !self
+                        .voice_spans(start, crate::ring::CHUNK, usize::MAX, Some(i))
+                        .0
+                        .iter()
+                        .all(|(source, lo, hi)| {
+                            self.cache.is_ready(source, *lo, (hi - lo) as usize)
+                        })
+            })
+            .collect();
         for (i, voice) in self.voices.iter_mut().enumerate() {
             if voice.stretch.is_none() {
                 continue;
@@ -857,10 +924,15 @@ impl Mixer {
                 voice.prefill = Some(Prefill {
                     head,
                     finished: p.finished[i].clone(),
+                    started: p.started[i].clone(),
                 });
-            } else {
+            } else if missing[i] {
                 voice.preparing = Some(start);
             }
+            // Otherwise this voice's own input is ready and only its CPU job
+            // is pending. It stays on its live history, which the ordinary
+            // render primes by the canonical pre-roll: complete from the
+            // first sample, never omitted for another voice's decoder.
         }
         true
     }
@@ -966,6 +1038,7 @@ impl Mixer {
                     voice.prefill = Some(Prefill {
                         head,
                         finished: p.finished[i].clone(),
+                        started: p.started[i].clone(),
                     });
                 }
                 complete &= p.ready[i];
@@ -988,6 +1061,33 @@ impl Mixer {
                     !p.finished.load(Ordering::Acquire) && !p.head.covers(a, (b - a) as usize)
                 })
         })
+    }
+
+    /// Takes over the independent histories that [`Self::awaiting_history`]
+    /// would wait on and that no worker has started: the producer then primes
+    /// them itself from the head's original start (`prepare_join`), so the
+    /// wait at an exhausted head is bounded by jobs already running, never by
+    /// a saturated pool's queue. Returns how many were claimed.
+    pub(crate) fn claim_histories(&mut self, at: i64, frames: usize) -> usize {
+        let rate = self.format.sample_rate as f64;
+        let mut claimed = 0;
+        for (v, plan) in self.voices.iter().zip(&self.graph.voices) {
+            let (first, last) = voice_bounds(&v.reader, plan, rate);
+            let a = at.max(first);
+            let b = (at + frames as i64).min(last);
+            if b <= a {
+                continue;
+            }
+            if let Some(p) = &v.prefill
+                && !p.finished.load(Ordering::Acquire)
+                && !p.head.covers(a, (b - a) as usize)
+                && !p.started.swap(true, Ordering::AcqRel)
+            {
+                p.finished.store(true, Ordering::Release);
+                claimed += 1;
+            }
+        }
+        claimed
     }
 
     /// Whether a retune glide is in progress.
@@ -1018,6 +1118,7 @@ impl Mixer {
             let mut ready = Vec::with_capacity(graph.voices.len());
             let mut heads = Vec::with_capacity(graph.voices.len());
             let mut finished = Vec::with_capacity(graph.voices.len());
+            let mut started = Vec::with_capacity(graph.voices.len());
             for plan in &graph.voices {
                 let previous = old.iter().position(|p| {
                     !p.animated
@@ -1035,11 +1136,17 @@ impl Mixer {
                         .map(|i| prepared.finished[i].clone())
                         .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
                 );
+                started.push(
+                    previous
+                        .map(|i| prepared.started[i].clone())
+                        .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+                );
             }
             prepared.runs = runs;
             prepared.ready = ready;
             prepared.heads = heads;
             prepared.finished = finished;
+            prepared.started = started;
             prepared.installed = false;
         }
         let p = self.format.sample_rate;
@@ -1781,6 +1888,17 @@ impl Mixer {
         frames: usize,
         budget: usize,
     ) -> (Vec<(Arc<Source>, i64, i64)>, bool) {
+        self.voice_spans(start, frames, budget, None)
+    }
+
+    /// [`Self::source_spans_within`], for one voice (`only`) or all of them.
+    fn voice_spans(
+        &mut self,
+        start: i64,
+        frames: usize,
+        budget: usize,
+        only: Option<usize>,
+    ) -> (Vec<(Arc<Source>, i64, i64)>, bool) {
         let _timing = crate::profile::timer(crate::profile::Kind::Bounds);
         let p = self.format.sample_rate as f64;
         let graph = self.graph.clone();
@@ -1790,6 +1908,9 @@ impl Mixer {
         // Time-mapped voices: (index, first and last sample heard here).
         let mut mapped: Vec<(usize, i64, i64)> = Vec::new();
         for (vi, plan) in graph.voices.iter().enumerate() {
+            if only.is_some_and(|o| o != vi) {
+                continue;
+            }
             // A primed first chunk already contains its input, including the
             // deterministic pre-roll. Do not evaluate its bounds a second time.
             if frames <= crate::ring::CHUNK && self.voices[vi].preparing.is_some() {
@@ -2520,10 +2641,13 @@ mod prepared_tests {
         );
         mix.prepared_voice(start, 0, true);
         assert!(mix.begin_prepared(start));
-        assert_eq!(
-            mix.preparing_ids(),
-            ["v2".to_string(), "v3".to_string()].into(),
-            "A3 must retain complete heads beside an unrelated missing voice"
+        assert!(
+            mix.preparing_ids().is_empty(),
+            "A3 never omits a voice whose own input is ready"
+        );
+        assert!(
+            mix.voices[1].prefill.is_some(),
+            "A3 must retain v1's complete head while its history is pending"
         );
         for job in jobs {
             let vi = job.vi;
@@ -2550,6 +2674,301 @@ mod prepared_tests {
             .render(start, 8192, &mut expected, &options)
             .unwrap();
         assert_eq!(actual, expected);
+    }
+
+    /// A3's safety net is per voice: a stalled decoder delays or omits only
+    /// its own voice. Voices whose input is ready but whose CPU job is still
+    /// queued start complete (from a head, or primed by the ordinary render).
+    #[test]
+    fn the_a3_safety_net_omits_only_voices_whose_own_input_is_missing() {
+        let f = Fixture::new();
+        let late = f.dir.join("late.wav");
+        let mut w = WavWriter::new(
+            std::fs::File::create(&late).unwrap(),
+            PcmFormat::F32,
+            2,
+            48_000,
+        )
+        .unwrap();
+        w.write(0, &vec![0.25f32; 2 * 48_000 * 10]).unwrap();
+        w.finish().unwrap();
+        let layer = |i: usize, asset: &str, trim: f64| {
+            format!(
+                r#"{{"id":"v{i}","type":"audio","from":0,"dur":10,"on":true,"d":{{"asset":"{asset}","gain":0.5,"fadeIn":0,"fadeOut":0,"trim":{trim},"speed":1.5}}}}"#
+            )
+        };
+        let build = |layers: &[String]| {
+            let doc = Arc::new(Document::new(
+                Some(
+                    parse(&format!(
+                        r#"{{"id":"P","compId":"C","fps":30,"dur":10,"layers":[{}],"comps":{{}}}}"#,
+                        layers.join(",")
+                    ))
+                    .unwrap(),
+                ),
+                1,
+            ));
+            let graph = Arc::new(
+                MixGraph::build(
+                    &doc,
+                    "C",
+                    &mut Evaluator::new(),
+                    &f.cache,
+                    &|asset: &str| {
+                        Some(if asset == "late" {
+                            late.clone()
+                        } else {
+                            f.dir.join("tone.wav")
+                        })
+                    },
+                )
+                .unwrap(),
+            );
+            Mixer::new(
+                MixFormat::stereo(48_000),
+                doc,
+                graph,
+                Evaluator::new(),
+                f.cache.clone(),
+            )
+        };
+        let all = [
+            layer(0, "s", 0.0),
+            layer(1, "s", 0.0),
+            layer(2, "s", 0.1),
+            layer(3, "late", 0.0),
+        ];
+        let mut mix = build(&all);
+        mix.standard_content(true);
+        let start = 192_000;
+        // The zero-worker cache never decodes the late source.
+        assert!(!mix.is_ready(start, crate::ring::CHUNK));
+        let mut jobs = mix.preparation_work(start, start).into_iter();
+        let first = jobs.next().unwrap();
+        assert_eq!(first.vi, 0);
+        assert!(first.run(&mut Evaluator::new(), true, || false).unwrap());
+        mix.prepared_voice(start, 0, true);
+        // v1 shares v0's head; v2's job and v3's job never ran.
+        assert!(mix.begin_prepared(start));
+        assert_eq!(mix.preparing_ids(), ["v3".to_string()].into());
+        let options = RenderOptions {
+            drop_voices: mix.preparing_ids(),
+            ..Default::default()
+        };
+        let mut reference = build(&all[..3]);
+        let mut actual = vec![vec![]; 2];
+        let mut expected = vec![vec![]; 2];
+        for offset in (0..8192).step_by(256) {
+            mix.render(start + offset, 256, &mut actual, &options)
+                .unwrap();
+            reference
+                .render(
+                    start + offset,
+                    256,
+                    &mut expected,
+                    &RenderOptions {
+                        wait: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "ready voices complete at {offset}");
+        }
+    }
+
+    /// A saturated pool must not stall the mix at an exhausted shared head:
+    /// histories no worker has started are claimed and primed by the
+    /// producer from the head's original start, bit exact; a history a
+    /// worker already runs is waited for, and only that one.
+    #[test]
+    fn an_exhausted_head_never_waits_for_an_unstarted_history() {
+        let f = Fixture::new();
+        let mut mix = f.mixer(0.7, 1.5, 10.0);
+        mix.standard_content(true);
+        let start = 192_000;
+        let mut jobs = mix.preparation_work(start, start).into_iter();
+        let first = jobs.next().unwrap();
+        assert!(first.claim());
+        assert!(first.run(&mut Evaluator::new(), true, || false).unwrap());
+        mix.prepared_voice(start, 0, true);
+        let rest: Vec<_> = jobs.collect();
+        assert_eq!(rest.len(), 3);
+        // A worker has started v1's history; v2 and v3 are still queued.
+        let running = rest.iter().position(|j| j.vi == 1).unwrap();
+        assert!(rest[running].claim());
+        mix.use_prepared(start);
+        let mut reference = f.mixer(0.7, 1.5, 10.0);
+        let options = RenderOptions {
+            wait: true,
+            ..Default::default()
+        };
+        let mut actual = vec![vec![]; 2];
+        let mut expected = vec![vec![]; 2];
+        let mut compare = |mix: &mut Mixer, from: usize, to: usize| {
+            for offset in (from..to).step_by(256) {
+                mix.render(start + offset as i64, 256, &mut actual, &options)
+                    .unwrap();
+                reference
+                    .render(start + offset as i64, 256, &mut expected, &options)
+                    .unwrap();
+                assert_eq!(actual, expected, "complete mix at {offset}");
+            }
+        };
+        compare(&mut mix, 0, HEAD_FRAMES);
+        let end = start + HEAD_FRAMES as i64;
+        assert!(mix.awaiting_history(end, 256));
+        assert_eq!(
+            mix.claim_histories(end, 256),
+            2,
+            "v2 and v3 were never started"
+        );
+        assert!(
+            mix.awaiting_history(end, 256),
+            "the running history is still awaited"
+        );
+        for job in &rest {
+            assert!(!job.claim(), "no history runs twice");
+        }
+        let vi = rest[running].vi;
+        let job = rest.into_iter().nth(running).unwrap();
+        let ready = job.run(&mut Evaluator::new(), true, || false).unwrap();
+        mix.prepared_voice(start, vi, ready);
+        assert!(!mix.awaiting_history(end, 256));
+        compare(&mut mix, HEAD_FRAMES, HEAD_FRAMES + 8192);
+    }
+
+    /// A start's own job leaves its opening output in the history: the
+    /// producer's first callbacks need no vocoder step, no map point and no
+    /// source read.
+    #[test]
+    fn a_start_job_buffers_its_opening_output() {
+        let f = Fixture::new();
+        // Cold A8 targets where the vocoder's second output step falls
+        // inside the first 512 frames (2 s at 1.6x) and where it does not.
+        for (start, speed) in [(96_000, 1.6), (144_000, 1.5), (196_480, 1.5)] {
+            let mut mix = f.mixer(0.7, speed, 10.0);
+            let job = mix.preparation_work(start, start).remove(0);
+            assert!(
+                job.head.is_none(),
+                "no shared head without standard content"
+            );
+            let history = job.history();
+            assert!(job.run(&mut Evaluator::new(), false, || false).unwrap());
+            let lead = lead_frames(48_000);
+            assert_eq!(lead, 1024);
+            let mut run = history.lock().unwrap();
+            let mut out = vec![Vec::new(); 2];
+            let mut buffered = vec![vec![]; 2];
+            for offset in (0..lead).step_by(256) {
+                assert!(
+                    run.render(
+                        start + offset as i64,
+                        256,
+                        &mut |_| panic!("no map point inside the lead"),
+                        &mut |_, _, _| panic!("no source read inside the lead"),
+                        &mut out,
+                    )
+                    .unwrap()
+                );
+                for c in 0..2 {
+                    buffered[c].extend_from_slice(&out[c]);
+                }
+            }
+            assert!(buffered[0].iter().any(|v| *v != 0.0));
+        }
+        // The PCM itself is the offline stream: every prepared start is
+        // compared bit for bit with a fresh render through the lead and
+        // beyond (detached_jobs_use_custom_channel_hooks, the playback
+        // sixteen-voice suites).
+    }
+
+    /// Nested linear-parent precompositions and a video's embedded audio:
+    /// the compiled map reproduces the full evaluator bit for bit at every
+    /// level of the stack, so playback stays identical to offline export.
+    #[test]
+    fn compiled_constant_maps_match_through_precomps_and_embedded_video() {
+        let f = Fixture::new();
+        let audio = r#"{"id":"A","type":"audio","from":0.1,"dur":9,"on":true,"d":{"asset":"s","gain":0.6,"fadeIn":0.2,"fadeOut":0.3,"trim":0.3,"speed":1.5}}"#;
+        let comps = format!(
+            r#""X":{{"id":"X","w":64,"h":64,"fps":30,"dur":10,"layers":[{audio}]}},"Y":{{"id":"Y","w":64,"h":64,"fps":30,"dur":10,"layers":[{{"id":"Q","type":"precomp","from":0.05,"dur":9.5,"on":true,"d":{{"comp":"X","trim":0.02,"audioGain":0.9}}}}]}}"#
+        );
+        let layers = [
+            r#"{"id":"P1","type":"precomp","from":0.25,"dur":9.5,"on":true,"d":{"comp":"X","trim":0.1,"audioGain":0.8}}"#,
+            r#"{"id":"P2","type":"precomp","from":0.5,"dur":9,"on":true,"d":{"comp":"Y","trim":0.07}}"#,
+            r#"{"id":"V","type":"video","from":0.1,"dur":9,"on":true,"d":{"asset":"s","embeddedAudio":true,"audioGain":0.8,"trim":0.2,"speed":1.25,"pitch":"preserve"}}"#,
+        ];
+        let doc = Arc::new(Document::new(
+            Some(
+                parse(&format!(
+                    r#"{{"id":"P","compId":"C","w":64,"h":64,"fps":30,"dur":10,"layers":[{}],"comps":{{{comps}}}}}"#,
+                    layers.join(",")
+                ))
+                .unwrap(),
+            ),
+            1,
+        ));
+        let graph = MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
+            Some(f.dir.join("tone.wav"))
+        })
+        .unwrap();
+        let ids: Vec<&str> = graph.voices.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids.len(), 3, "voices {ids:?}");
+        let mut depths: Vec<usize> = graph.voices.iter().map(|v| v.levels.len()).collect();
+        depths.sort();
+        assert_eq!(
+            depths,
+            [1, 2, 3],
+            "video, one and two precomposition levels"
+        );
+        assert!(
+            graph
+                .voices
+                .iter()
+                .any(|v| v.kind == crate::graph::VoiceKind::Embedded)
+        );
+        let comps = graph.resolve(&doc).unwrap();
+        let mut ev = Evaluator::new();
+        for plan in &graph.voices {
+            let fixed = crate::graph::StaticMap::new(plan, &comps, &mut ev, 4.0)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{} compiles to a static map", plan.id));
+            let mut retime = RetimeCache::new();
+            for sample in (-48_000..528_000).step_by(16) {
+                let t = sample as f64 / 48_000.0;
+                let full = plan
+                    .evaluate(&mut ev, &comps, &comps[0], t, &mut retime)
+                    .unwrap();
+                let actual = fixed.evaluate(plan, t);
+                assert_eq!(
+                    (actual.active, actual.in_span),
+                    (full.active, full.in_span),
+                    "{} at {t}",
+                    plan.id
+                );
+                for (a, b) in [
+                    actual.gain,
+                    actual.source_time,
+                    actual.local,
+                    actual.fade_in,
+                    actual.fade_out,
+                    actual.audible,
+                ]
+                .into_iter()
+                .zip([
+                    full.gain,
+                    full.source_time,
+                    full.local,
+                    full.fade_in,
+                    full.fade_out,
+                    full.audible,
+                ]) {
+                    assert_eq!(a.to_bits(), b.to_bits(), "{} at {t}", plan.id);
+                }
+                let fast = fixed.point(t, 48_000.0);
+                assert_eq!(fast.x.to_bits(), (full.source_time * 48_000.0).to_bits());
+                assert_eq!(fast.on, full.active && full.in_span);
+            }
+        }
     }
 
     #[test]

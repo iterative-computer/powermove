@@ -203,7 +203,15 @@ pub struct StartTiming {
     pub callback_frames: u64,
     pub preparation: crate::profile::Profile,
     pub late_voice_frames: Vec<(String, u64)>,
+    /// The run's first ring publications: frames published so far (at the
+    /// ring's rate) and the host time (µs) each push completed, recorded by
+    /// the producer itself, so a deadline check does not depend on when an
+    /// observer polled the ring.
+    pub publications: Vec<(u64, u64)>,
 }
+
+/// Publications recorded per run, enough for several device callbacks.
+const PUBLICATION_LOG: usize = 16;
 
 #[derive(Default)]
 struct StartTrace {
@@ -223,12 +231,19 @@ struct StartTrace {
     callback_frames: AtomicU64,
     preparation: Mutex<crate::profile::Profile>,
     late: Mutex<HashMap<String, u64>>,
+    published_frames: AtomicU64,
+    publications: Mutex<Vec<(u64, u64)>>,
 }
 
 impl StartTrace {
     fn begin(&self, epoch: u32, requested: u64) {
         crate::profile::reset();
         self.late.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.publications
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.published_frames.store(0, Ordering::Relaxed);
         self.voices
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -248,6 +263,24 @@ impl StartTrace {
     fn queued(&self) {
         *self.preparation.lock().unwrap_or_else(|e| e.into_inner()) = crate::profile::snapshot();
         self.queued.store(host_now_us(), Ordering::Release);
+    }
+
+    /// A push of `frames` to the ring completed (producer thread).
+    fn published(&self, frames: u64) {
+        let before = self.published_frames.load(Ordering::Relaxed);
+        if before == u64::MAX {
+            return;
+        }
+        let at = host_now_us();
+        let mut log = self.publications.lock().unwrap_or_else(|e| e.into_inner());
+        if log.len() < PUBLICATION_LOG {
+            log.push((before + frames, at));
+            self.published_frames
+                .store(before + frames, Ordering::Relaxed);
+        } else {
+            // The log is full: stop taking the lock for the rest of the run.
+            self.published_frames.store(u64::MAX, Ordering::Relaxed);
+        }
     }
 
     fn heard(&self, epoch: u32, device_host: u64, frames: usize) {
@@ -314,6 +347,11 @@ impl StartTrace {
                 .iter()
                 .map(|(id, n)| (id.clone(), *n))
                 .collect(),
+            publications: self
+                .publications
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         };
         (epoch != 0
             && heard_epoch == epoch
@@ -1827,8 +1865,14 @@ impl RenderThread {
             // so stretched voices resample there (see RenderOptions).
             let (lo, hi) = seg.media_span();
             if self.mixer.awaiting_history(lo, (hi - lo) as usize) {
-                self.pending_segment = Some(seg);
-                return;
+                // Never wait on a queued job at an exhausted head: a busy or
+                // small pool could leave it unstarted while the ring drains.
+                // Unstarted histories are primed here from the head's start.
+                self.mixer.claim_histories(lo, (hi - lo) as usize);
+                if self.mixer.awaiting_history(lo, (hi - lo) as usize) {
+                    self.pending_segment = Some(seg);
+                    return;
+                }
             }
             let track_start = self.startup.is_some() || self.late_start.is_some();
             if let Some(start) = self.late_start {
@@ -2128,6 +2172,7 @@ impl RenderThread {
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }
+            self.shared.start_timing.published(n as u64);
             // Stateful DSP can consume many input segments before emitting
             // a device frame. Keep the cold-start hold until output exists.
             self.startup = None;
@@ -2169,6 +2214,7 @@ impl RenderThread {
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }
+            self.shared.start_timing.published(u64::from(tag.frames));
             self.startup = None;
         }
     }
