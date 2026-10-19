@@ -215,7 +215,7 @@ export class DocumentWorker {
     await this.chain.bootExtensions();
     this.extensions = this.extensionState();
     // The contract tests' deterministic ids and clock (contract.ts), tests only.
-    if (process.env['POWERMOVE_DOCUMENT_HOST_TEST_SEED']) deterministicSeam();
+    if (import.meta.env.MODE === 'test' && process.env['POWERMOVE_DOCUMENT_HOST_TEST_SEED']) deterministicSeam();
     this.log(`[engine] opened ${projectId} (seq ${joined.seq}, ${restored} undo entries, extensions ${this.extensions.active.length} active)`);
     return this.opened(restored);
   }
@@ -316,7 +316,7 @@ export class DocumentWorker {
       fallbacks,
       calls,
       auditor: engine.audit ? { audits: engine.audit.audits, failures: engine.audit.failures } : null,
-      dual: engine.dual ? { compared: sum(engine.dual.compared), mismatched: sum(engine.dual.mismatched), stale: sum(engine.dual.stale), mismatchedOps: { ...engine.dual.mismatched } } : null,
+      dual: engine.dual ? { compared: sum(engine.dual.compared), mismatched: sum(engine.dual.mismatched), stale: sum(engine.dual.stale), comparedOps: { ...engine.dual.compared }, mismatchedOps: { ...engine.dual.mismatched } } : null,
       failures: (PM['EngineDoc']?.failures?.() ?? []).map((f: { code: string; message: string; retry: boolean }) => ({ code: f.code, message: f.message, retry: f.retry })),
       consistency: { checks: Number(engine.barrier?.checks ?? 0), mismatches: Number(engine.barrier?.checkMismatches ?? 0) },
       extensions: this.extensions,
@@ -406,7 +406,7 @@ export class DocumentWorker {
   private flushLocal(): Promise<void> {
     if (!this.chain || !this.projectId || this.readOnly) return this.sending;
     // A pending reconciliation sends everything the document has when it runs.
-    if (this.reconciling) return this.reconciling;
+    if (this.reconciling) return this.reconciling.then(() => this.flushLocal());
     if (this.diverged) { this.diverged = false; return this.startReconcile(); }
     const projectId = this.projectId;
     const after = JSON.stringify(this.chain.PM['proj']);
@@ -431,12 +431,13 @@ export class DocumentWorker {
    * them. Used after a refused batch, and after a remote patch that wrote a
    * path one of our unacknowledged batches also writes, where the host's
    * order (which this worker cannot see) decides the value. Until it has run,
-   * no new batch is cut (`flushLocal` answers this promise) and remote
+   * no new batch is cut (`flushLocal` chains a fresh flush behind it) and remote
    * patches advance `synced` and the document alike, so `synced` stays what
    * the host had from us.
    */
   private startReconcile(): Promise<void> {
     const projectId = this.projectId!;
+    this.diverged = false;
     const run = this.sending.then(async () => {
       try {
         const joined = await this.service<{ seq: number; doc: unknown | null }>('session.join', projectId);
@@ -449,7 +450,10 @@ export class DocumentWorker {
         if (JSON.stringify(next) !== JSON.stringify(PM['proj'])) PM['replaceProject'](next, { selection: PM['sel'] });
         const mine = diffPatches(JSON.parse(host), JSON.parse(JSON.stringify(PM['proj']))).forward;
         this.synced = JSON.stringify(PM['proj']);
-        if (mine.length) this.seq = await this.service<number>('session.patch', projectId, mine);
+        if (mine.length) {
+          this.unacked.add(mine);
+          try { this.seq = await this.service<number>('session.patch', projectId, mine); } finally { this.unacked.delete(mine); }
+        }
       } finally {
         this.reconciling = null;
       }
@@ -465,7 +469,9 @@ export class DocumentWorker {
   /** Sends what changed since the last sync; resolves once the host applied it. */
   private async syncUp(): Promise<void> {
     try {
-      await this.flushLocal();
+      do {
+        await this.flushLocal();
+      } while (this.reconciling || this.diverged || (!this.readOnly && this.chain && JSON.stringify(this.chain.PM['proj']) !== this.synced));
     } catch (error) {
       throw new DocumentHostError('service-unavailable', `The host did not take this call's edits: ${(error as Error)?.message ?? error}. They stay in the document host and are sent with the next call.`, true);
     }
@@ -486,7 +492,10 @@ export class DocumentWorker {
     PM['replaceProject'](applyPatch(PM['proj'], patch.patches), { selection: PM['sel'] });
     if (!this.reconciling) this.synced = JSON.stringify(PM['proj']);
     this.seq = patch.seq;
-    if (conflicts && !this.reconciling) void this.startReconcile().catch(() => { /* logged; retried on the next sync */ });
+    if (conflicts) {
+      if (this.reconciling) this.diverged = true;
+      else void this.startReconcile().catch(() => { /* logged; retried on the next sync */ });
+    }
   }
 }
 

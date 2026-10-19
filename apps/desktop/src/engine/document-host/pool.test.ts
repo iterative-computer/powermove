@@ -125,6 +125,22 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host poo
     expect((await second.stats('Pbeta')).historyDepth).toBe(1);
   }, 120_000);
 
+  it('imports persisted undo over a changed hash exactly as the desktop does', async () => {
+    const host = hostServices(); host.seed('Pforeign', 'Original');
+    const first = newPool(host.services);
+    await ask(first, 'Pforeign', 'run-h', 'apply_commands', { label: 'local', commands: [{ type: 'add_layer', layerType: 'solid', name: 'Local' }] });
+    await ask(first, 'Pforeign', 'run-h', '__finish_run', { commit: true });
+    await first.shutdown(); await host.sessions.flush();
+    const saved = host.values.get(INSTANCE_STATE_KEY('Pforeign')) as any;
+    const stored = host.values.get('project.Pforeign') as any;
+    stored.proj.name = 'Foreign edit';
+    const restarted = hostServices(host.values);
+    const second = newPool(restarted.services);
+    expect((await second.open('Pforeign')).restoredHistory).toBe(saved.history.entries.length);
+    expect(doc(restarted, 'Pforeign').name).toBe('Foreign edit');
+    expect(restarted.log.some(line => line.includes('undo applies on top'))).toBe(true);
+  }, 60_000);
+
   it('applies remote session edits from other members without touching its own undo history', async () => {
     const host = hostServices();
     host.seed('Palpha', 'Alpha');
@@ -219,6 +235,22 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host poo
     expect(doc(host, 'Palpha').name).toBe('Agent name');
   }, 60_000);
 
+  it('waits for an edit made during the reconciliation send before answering', async () => {
+    await reconciliationWindow(false, 0);
+  }, 60_000);
+
+  it('rechecks a same-path remote patch received during the reconciliation send', async () => {
+    await reconciliationWindow(true, 0);
+  }, 60_000);
+
+  it('preserves read-your-writes under 32 seeded reconciliation interleavings', async () => {
+    let seed = 0x5eed;
+    for (let i = 0; i < 32; i++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      await reconciliationWindow((seed & 1) === 1, (seed >>> 8) % 7);
+    }
+  }, 180_000);
+
   it('fails by name, with retry, when pm-wasm is missing and the new engine is on; never a legacy evaluator', async () => {
     const host = hostServices();
     host.seed('Palpha', 'Alpha');
@@ -276,3 +308,68 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host poo
     expect(error.code).toBe('wrong-route');
   }, 30_000);
 });
+
+/** Gate the reconcile's own join and send, not just ordinary batch sends. */
+async function reconciliationWindow(remoteDuringSend: boolean, delay: number): Promise<void> {
+  const host = hostServices();
+  host.seed('Prace', 'Race');
+  host.sessions.join(host.tab, 'Prace', null);
+  const base = host.services.session;
+  const gates: Array<() => void> = [];
+  let sends = 0;
+  let joins = 0;
+  let releaseJoin: (() => void) | undefined;
+  host.services.session = {
+    ...base,
+    join: async (id) => {
+      const snapshot = await base.join(id);
+      if (++joins === 2) await new Promise<void>(resolve => { releaseJoin = resolve; });
+      return snapshot;
+    },
+    patch: async (id, patches) => {
+      sends++;
+      await new Promise<void>(resolve => gates.push(resolve));
+      return base.patch(id, patches);
+    },
+  };
+  const until = async (what: string, ok: () => boolean | Promise<boolean>) => {
+    for (let n = 0; n < 500; n++) { if (await ok()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+    throw new Error(`timed out waiting for ${what}`);
+  };
+  const pool = newPool(host.services);
+  await pool.open('Prace');
+  const edit = async (name: string, commands: unknown[]) => pool.call('Prace', {
+    runId: name, callId: name, tool: 'apply_commands', arguments: { commands, label: name }, baseRevision: (await pool.stats('Prace')).revision,
+  });
+  let draining: ReturnType<typeof setInterval> | undefined;
+  try {
+    const t1 = edit('T1', [{ type: 'set_composition', patch: { name: 'Agent 1' } }]);
+    await until('ordinary send', () => sends === 1);
+    host.sessions.patch(host.tab, 'Prace', [{ path: ['name'], exists: true, value: 'Remote 1' }] as never);
+    await new Promise(resolve => setTimeout(resolve, 30 + delay));
+    gates.shift()!();
+    await until('reconcile join', () => !!releaseJoin);
+    const r = (await pool.stats('Prace')).revision;
+    const t2 = edit('T2', [{ type: 'set_composition', patch: { name: 'Agent 2' } }]);
+    await until('edit during join', async () => (await pool.stats('Prace')).revision > r);
+    releaseJoin!();
+    await until('reconcile send', () => sends === 2);
+    let answered = false;
+    const r2 = (await pool.stats('Prace')).revision;
+    const t3 = edit('T3', [{ type: 'add_layer', layerType: 'solid', name: 'During reconcile' }]).then(answer => { answered = true; expect(names(host, 'Prace')).toContain('During reconcile'); return answer; });
+    await until('edit during reconcile send', async () => (await pool.stats('Prace')).revision > r2);
+    await new Promise(resolve => setTimeout(resolve, 20 + delay));
+    expect(answered).toBe(false);
+    if (remoteDuringSend) host.sessions.patch(host.tab, 'Prace', [{ path: ['name'], exists: true, value: 'Remote 2' }] as never);
+    await new Promise(resolve => setTimeout(resolve, 20 + delay));
+    draining = setInterval(() => { while (gates.length) gates.shift()!(); }, 2);
+    expect((await Promise.all([t1, t2, t3])).map(a => a.ok)).toEqual([true, true, true]);
+    expect(doc(host, 'Prace').name).toBe('Agent 2');
+    expect((await pool.stats('Prace')).hash).toBe(canonicalProjectHash(doc(host, 'Prace')));
+  } finally {
+    if (draining) clearInterval(draining);
+    while (gates.length) gates.shift()!();
+    releaseJoin?.();
+    await pool.shutdown();
+  }
+}
