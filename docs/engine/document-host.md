@@ -491,3 +491,41 @@ hit the resident cache, notice mutations, evict and resync; failed/held readines
 prevents imports and activation. `e2e/engine-doc-boot.spec.ts` installs an apiVersion
 1 extension whose activate() synchronously evaluates a keyed property. Its opt-in
 measurement runs five alternating setting-off/on boot pairs in isolated profiles.
+
+### Detached scopes: exact input validation (fixups round 2)
+
+Detached scopes now get a resident handle instead of an `@json:` serialization
+on every call. `pm-model`'s `read-tracking` feature is enabled by pm-wasm only:
+immutable node access, serialization and cloning record reads. A stable boxed
+scope and a parent/address index turn those reads into paths without scanning
+all nodes on subsequent queries. Prepared evaluator memos reset before tracing,
+so a cached plan cannot hide a dependency. Native rendering builds do not enable
+this feature.
+
+The TypeScript cache keeps the last answer, each read's primitive value or object
+identity, container keys/array lengths, and the last serialized scope. It checks
+layer identity, id, parent and group in document order on every call. Adding,
+removing, replacing or reordering a layer, changing a parent/group, or replacing
+the layers array invalidates the whole scope. Otherwise only changed read paths
+cross the boundary as patches; an unchanged repeated request sends nothing.
+Another time or operation reuses the same resident scope and discovers its own
+reads. Changing a condition can reveal a stale, previously unread field: compare
+new reads against the retained serialization, hydrate those fields, and evaluate
+again before accepting the answer. Object identity alone cannot prove that a
+nested primitive stayed unchanged.
+
+Module replacement, document revision changes, definition labels and font inputs
+invalidate the answer. The Rust cache remains bounded to four scopes, and a
+renderer handle evicted there is re-created from live data. Non-JSON host objects
+with `toJSON` retain full native serialization semantics when a plain read-set
+snapshot cannot represent them; they do not route to the legacy evaluator.
+
+The real-wasm regression uses 1,200 deterministic mutations and compares 3,600
+answers with a fresh full serialization. It changes retained keyframe references,
+key arrays, expressions, composition settings, property identities, layer order,
+insertions/removals and parents. Separate checks cover newly discovered branch
+reads, no transmission on unchanged inputs, partial updates, changing query times,
+module reset, JSON host-object serialization and the facade's cached address after
+a reorder. The mandatory structural/read validation is still linear in the
+actual input set; nanosecond parity is a measured gate, not an implication of
+removing serialization (see `perf.md`).

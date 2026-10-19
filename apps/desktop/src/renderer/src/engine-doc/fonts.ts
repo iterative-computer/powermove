@@ -61,7 +61,7 @@ function loadOnce(wasm: PmWasm, provider: FontProvider, loaded: Set<string>, gen
     if (typeof parsed?.generation === 'number') {
       if (generation.value !== null && generation.value !== parsed.generation) {
         // The registry changed (project fonts): start again from empty answers.
-        wasm.call(() => wasm.x.pm_fonts_clear());
+        wasm.clearFonts();
         loaded.clear();
       }
       generation.value = parsed.generation;
@@ -104,7 +104,7 @@ export class FontLoader {
   private declareOutlines(wasm: PmWasm): void {
     if (!this.provider.whole || this.declared.has(wasm)) return;
     this.declared.add(wasm);
-    wasm.call(() => wasm.x.pm_fonts_outlines(1));
+    wasm.fontOutlines(true);
   }
 
   /**

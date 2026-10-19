@@ -82,6 +82,8 @@ export function revive(value: any): any {
 export const imports = { pm_expr: { pow: Math.pow } };
 
 export class PmWasm {
+  /** External evaluator inputs (definition labels and font registry state). */
+  contextRevision = 0;
   readonly x: PmWasmExports;
   dead = false;
   private buffer: ArrayBuffer | null = null;
@@ -235,16 +237,19 @@ export class PmWasm {
   }
 
   define(definition: { id: string; label?: string; params?: Record<string, string> }): void {
+    this.contextRevision += 1;
     this.call(() => this.x.pm_define(this.writeString(JSON.stringify(definition))));
   }
 
   addFontAnswers(json: string): void {
+    this.contextRevision += 1;
     this.call(() => {
       if (this.x.pm_fonts_answers(this.writeString(json)) !== 0) throw new Error(`pm-wasm fonts: ${this.readOut()}`);
     });
   }
 
   addFont(blob: string, index: number, data: Uint8Array): void {
+    this.contextRevision += 1;
     this.call(() => {
       const key = encoder.encode(blob);
       const bytes = new Uint8Array(8 + key.length + data.length);
@@ -255,6 +260,16 @@ export class PmWasm {
       bytes.set(data, 8 + key.length);
       if (this.x.pm_fonts_add(this.writeBytes(bytes)) !== 0) throw new Error('pm-wasm: malformed font');
     });
+  }
+
+  clearFonts(): void {
+    this.contextRevision += 1;
+    this.call(() => this.x.pm_fonts_clear());
+  }
+
+  fontOutlines(enabled: boolean): void {
+    this.contextRevision += 1;
+    this.call(() => this.x.pm_fonts_outlines(enabled ? 1 : 0));
   }
 
   fontReport(): { misses: unknown[]; pending: Array<[string, number]> } {

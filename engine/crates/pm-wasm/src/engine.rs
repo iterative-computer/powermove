@@ -228,7 +228,8 @@ pub struct Engine {
 }
 
 struct DetachedComp {
-    node: Node,
+    node: Box<Node>,
+    reads: Option<pm_model::doc::reads::Index>,
     ev: Evaluator,
     revision: u64,
     used: u64,
@@ -614,6 +615,7 @@ impl Engine {
                 return out;
             }
         };
+        let tracked = get(&request, "scopeId").and_then(Value::as_str);
         let mut body = Reply::new();
         let result = self.dispatch(&request, &mut body);
         match result {
@@ -642,6 +644,29 @@ impl Engine {
                 self.stats.unanswered += 1;
                 out.raw("{\"ink\":true}");
             }
+        }
+        if let Some(id) = tracked {
+            let reads =
+                pm_model::doc::reads::finish(self.detached.get(id).and_then(|c| c.reads.as_ref()));
+            out.text.pop();
+            out.raw(",\"reads\":[");
+            for (i, path) in reads.iter().enumerate() {
+                if i > 0 {
+                    out.raw(",");
+                }
+                out.raw("[");
+                for (j, part) in path.iter().enumerate() {
+                    if j > 0 {
+                        out.raw(",");
+                    }
+                    match part {
+                        pm_model::PathPart::Key(k) => out.js_str(k),
+                        pm_model::PathPart::Index(n) => out.num(*n),
+                    }
+                }
+                out.raw("]");
+            }
+            out.raw("]}");
         }
         out
     }
@@ -726,11 +751,16 @@ impl Engine {
         // The renderer carries detached JSON as a string so repeated queries
         // need no object parse or canonical number serialization before hashing.
         let text = get(request, "compJsonText").and_then(Value::as_str);
-        let hash = text
-            .map(|s| pm_model::hash::sha256_hex(s.as_bytes()))
-            .or_else(|| detached.map(pm_model::hash::canonical_hash));
+        let scope_id = get(request, "scopeId").and_then(Value::as_str);
+        let hash = scope_id.map(str::to_owned).or_else(|| {
+            text.map(|s| pm_model::hash::sha256_hex(s.as_bytes()))
+                .or_else(|| detached.map(pm_model::hash::canonical_hash))
+        });
         let resident = if let Some(hash) = hash {
             self.detached_tick += 1;
+            if scope_id.is_some() && (text.is_some() || detached.is_some()) {
+                self.detached.remove(&hash);
+            }
             if self.detached.contains_key(&hash) {
                 self.stats.detached_hits += 1;
             } else {
@@ -744,7 +774,7 @@ impl Engine {
                         }
                     },
                     (_, Some(v)) => v.clone(),
-                    _ => unreachable!(),
+                    _ => return Ok(Err(JsThrow::type_error("detached-scope-missing"))),
                 };
                 self.stats.detached_misses += 1;
                 if self.detached.len() >= 4
@@ -756,10 +786,13 @@ impl Engine {
                 {
                     self.detached.remove(&oldest);
                 }
+                let node = Box::new(Node::from_value(value, revision));
+                let reads = scope_id.map(|_| pm_model::doc::reads::Index::new(&node));
                 self.detached.insert(
                     hash.clone(),
                     DetachedComp {
-                        node: Node::from_value(value, revision),
+                        node,
+                        reads,
                         ev: evaluator(&self.labels),
                         revision,
                         used: self.detached_tick,
@@ -773,6 +806,31 @@ impl Engine {
                 c.revision = revision;
             }
             c.used = self.detached_tick;
+            if let Some(patches) = get(request, "scopePatches") {
+                let patches = match pm_model::patch::patches_from_value(patches) {
+                    Ok(patches) => patches,
+                    Err(e) => {
+                        return Ok(Err(JsThrow::type_error(format!(
+                            "Invalid scope patches: {e}"
+                        ))));
+                    }
+                };
+                if let Err(e) = c.node.apply_patches(&patches, revision) {
+                    return Ok(Err(JsThrow::type_error(format!(
+                        "Invalid scope update: {e}"
+                    ))));
+                }
+            }
+            if scope_id.is_some() && get(request, "scopePatches").is_some() {
+                c.reads = Some(pm_model::doc::reads::Index::new(&c.node));
+            }
+            // Dependencies must include reads otherwise hidden by prepared
+            // plans or expression memos from an earlier request.
+            if scope_id.is_some() {
+                c.ev.reset();
+                // Trace the answer, not reconciliation's bookkeeping reads.
+                pm_model::doc::reads::begin();
+            }
             Some(c)
         } else {
             None

@@ -20,6 +20,7 @@
 import type { PathPart } from '../../../shared/patch';
 import { lookup, type DocumentBarrier } from './barrier';
 import type { PmWasm } from './wasm';
+import { DetachedScopes } from './detached';
 import type { DualAnswers } from './dual';
 import { layer3DRole } from '../core/scene3d/layers';
 import { canonicalPath } from '../legacy/core/compositions';
@@ -230,7 +231,9 @@ export class NativeApi {
   private answeredNatively = false;
   /** Live channel object → interned id (validated on every use). */
   private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown; wasm: PmWasm; time?: number; number?: number }>();
-  /** Live layer → its interned transform channels (valid at `revision` with `cur` as `PM.curComp()`). */
+  /** A detached property's validated address; its inputs are rechecked by DetachedScopes. */
+  private detachedProps = new WeakMap<object, { layer: object; cur: unknown; key: unknown; path: PathPart[]; request: Record<string, unknown> }>();
+  /** Live layer → interned transform channels, valid at the current revision and scope. */
   private channels = new WeakMap<object, { comp: string; ids: Map<string, number>; revision: number; cur: unknown }>();
   private refs = new Map<number, number>();
   /**
@@ -316,11 +319,12 @@ export class NativeApi {
     // directly and give the fast path a stable scope identity.
     if (cur === proj || (cur?.layers === proj.layers && cur?.id === proj.compId)) return { comp: open, open, cur: proj, liveCur: proj };
     const comp = this.address(proj, cur);
-    if (comp === null) return cur && typeof cur === 'object' ? { comp: '@json:' + JSON.stringify(cur), open, cur, liveCur } : null;
+    if (comp === null) return cur && typeof cur === 'object' ? { comp: this.detached.address(cur), open, cur, liveCur } : null;
     return { comp, open, cur, liveCur };
   }
 
   /** Where each composition object last was: checked by walking its path, so a stale entry is never used. */
+  private detached = new DetachedScopes();
   private addresses = new WeakMap<object, PathPart[] | null>();
   private detachedAddresses = new WeakMap<object, { proj: unknown; revision: number }>();
 
@@ -418,12 +422,12 @@ export class NativeApi {
     // before answering rather than answer for another layer.
     const barrier = this.barrier();
     const mirrored = barrier ? lookup(barrier.shadow, [...this.mirrorBase(c.comp, c.cur), 'layers', i, 'id']) : null;
-    if (barrier && !c.comp.startsWith('@json:') && (!mirrored?.exists || mirrored.value !== raw.id)) {
+    if (barrier && !c.comp.startsWith('@scope:') && (!mirrored?.exists || mirrored.value !== raw.id)) {
       this.stats.repairs += 1;
       const missed = barrier.repair('structuralDiff');
       if (missed.length) this.onStale?.('context', missed);
     }
-    const first = !c.comp.startsWith('@json:') && typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
+    const first = !c.comp.startsWith('@scope:') && typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
     return { comp: c.comp, open: c.open, layer: i, raw, first, live };
   }
 
@@ -436,11 +440,15 @@ export class NativeApi {
         payload.compJsonText = request.comp.slice(6);
         payload.comp = '@detached';
       }
-      let reply = instance.query(payload);
+      const run = () => typeof request.comp === 'string' && request.comp.startsWith('@scope:')
+        && !('compJson' in payload) && !('compJsonText' in payload)
+        ? this.detached.query(request.comp, payload, instance, this.barrier()?.revision ?? -1)
+        : instance.query(payload);
+      let reply = run();
       if (reply?.fonts && this.fonts) {
         // Text layout met fonts the mirror lacks: load them (at once from a
         // synchronous registry, in the background otherwise) and ask again.
-        reply = this.fonts.resolve(instance, () => instance.query(payload), (r: any) => !!r?.fonts) ?? reply;
+        reply = this.fonts.resolve(instance, run, (r: any) => !!r?.fonts) ?? reply;
       }
       return reply;
     };
@@ -574,7 +582,7 @@ export class NativeApi {
     if (!barrier || !wasm || wasm.dead) return null;
     try { barrier.flush(); } catch { return null; }
     const c = this.comps();
-    if (!c) return null;
+    if (!c || c.comp.startsWith('@scope:')) return null;
     return { shape: barrier.shapeRevision, cur: c.cur, live: c.liveCur, comp: c.comp };
   }
 
@@ -634,6 +642,8 @@ export class NativeApi {
   reset(): void {
     this.generation += 1;
     this.props = new WeakMap();
+    this.detached = new DetachedScopes();
+    this.detachedProps = new WeakMap();
     this.channels = new WeakMap();
     this.refs.clear();
     this.indexed = new WeakMap();
@@ -745,6 +755,21 @@ export class NativeApi {
         if (value !== MISS) { this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1; return value; }
       }
     }
+    if (!this.dual && typeof T === 'number' && typeof key === 'string') {
+      const rawProp = this.unwrap(prop), entry = this.detachedProps.get(rawProp);
+      const stamp = entry && this.stamp();
+      if (stamp && entry.cur === stamp.cur && entry.request.open === (this.PM.proj?.compId ?? this.PM.proj?.id ?? '')
+        && (stamp.cur as any)?.layers?.[entry.request.layer as number] === entry.layer
+        && entry.layer === this.unwrap(L) && entry.key === key && at(entry.layer, entry.path) === rawProp) {
+        entry.request.t = T;
+        const reply = this.query<any>('evP', entry.request);
+        if ('value' in reply && (reply.value === null || typeof reply.value !== 'object')) {
+          this.count('evP');
+          this.stats.fastPath += 1;
+          return reply.value;
+        }
+      }
+    }
     return this.answer('evP', () => {
       const wasm = this.ready();
       if (!wasm) return { fallback: 'unavailable' };
@@ -760,6 +785,7 @@ export class NativeApi {
           const request = path
             ? { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, key: String(key), t: T }
             : { comp: ctx.comp, open: ctx.open, layer: ctx.layer, prop: JSON.parse(JSON.stringify(rawProp)), key: String(key), t: T };
+          if (path && stamp.cur && typeof key === 'string' && typeof ctx.layer === 'number' && ctx.comp.startsWith('@scope:')) this.detachedProps.set(rawProp, { layer: ctx.raw, cur: stamp.cur, key, path, request: { op: 'evP', ...request } });
           return this.query('evP', request);
         }
         const id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: path }, rawProp);

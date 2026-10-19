@@ -197,3 +197,34 @@ fn detached_json_text_is_parsed_once_and_mutations_are_seen() {
         .is_some()
     );
 }
+
+#[test]
+fn tracked_scope_reports_reads_and_accepts_only_changed_entries() {
+    let mut e = engine();
+    let initial = r#"{"op":"ev","scopeId":"test-scope","comp":"@detached","open":"C1","layer":0,"key":"x","t":0,"compJson":{"id":"S","fps":24,"layers":[{"id":"A","from":0,"p":{"x":{"v":8,"kf":[]}}}]}}"#;
+    let answer = q(&mut e, initial);
+    assert_eq!(answer.get("ok").and_then(Value::as_f64), Some(8.0));
+    let reads = answer.get("reads").unwrap().as_array().unwrap();
+    assert!(reads.contains(&parse(r#"["layers",0,"p","x","v"]"#).unwrap()));
+    let next = r#"{"op":"ev","scopeId":"test-scope","comp":"@detached","open":"C1","layer":0,"key":"x","t":1}"#;
+    assert_eq!(q(&mut e, next).get("ok").and_then(Value::as_f64), Some(8.0));
+    let patched = next.replace(
+        "\"t\":1",
+        r#""t":1,"scopePatches":[{"path":["layers",0,"p","x","v"],"exists":true,"value":27}]"#,
+    );
+    assert_eq!(
+        q(&mut e, &patched).get("ok").and_then(Value::as_f64),
+        Some(27.0)
+    );
+    assert_eq!(e.stats.detached_misses, 1);
+    assert_eq!(e.stats.detached_hits, 2);
+    e.resync(PROJECT.as_bytes(), 2).unwrap();
+    assert_eq!(
+        q(&mut e, next)
+            .get("throw")
+            .unwrap()
+            .get("message")
+            .and_then(Value::as_str),
+        Some("detached-scope-missing")
+    );
+}
