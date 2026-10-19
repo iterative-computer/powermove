@@ -111,3 +111,89 @@ fn nested_paths_and_replacement_scopes_are_native() {
     assert_eq!(q(&mut e, r#"{"op":"ev","comp":"@path:[\"comps\",\"outer\",\"comps\",\"same\"]","open":"main","layer":0,"key":"x","t":0}"#).get("ok").and_then(Value::as_f64), Some(7.0));
     assert_eq!(q(&mut e, r#"{"op":"ev","comp":"detached","open":"main","compJson":{"fps":24,"layers":[{"id":"L","from":0,"p":{"x":{"v":12}}}]},"layer":0,"key":"x","t":0}"#).get("ok").and_then(Value::as_f64), Some(12.0));
 }
+
+#[test]
+fn detached_scopes_are_content_addressed_and_do_not_reset_document_plans() {
+    let mut e = engine();
+    let id = e
+        .intern(&parse(r#"{"comp":"C1","layer":"A","key":"opacity","via":"channel"}"#).unwrap())
+        .unwrap();
+    let request = |v: i32| {
+        format!(
+            r#"{{"op":"ev","open":"C1","compJson":{{"fps":24,"layers":[{{"id":"A","from":0,"p":{{"opacity":{{"v":{v},"kf":[],"expr":"value + fps"}}}}}}]}},"layer":0,"key":"opacity","t":0}}"#
+        )
+    };
+    assert_eq!(
+        q(&mut e, &request(7)).get("ok").and_then(Value::as_f64),
+        Some(31.0)
+    );
+    for _ in 0..8 {
+        assert_eq!(
+            q(&mut e, &request(7)).get("ok").and_then(Value::as_f64),
+            Some(31.0)
+        );
+        // Same layer/channel id in the document must retain its own answer.
+        assert_eq!(e.ev_id(id, 0.0).1, 50.0);
+    }
+    assert_eq!(e.stats.detached_misses, 1);
+    assert_eq!(e.stats.detached_hits, 8);
+    // A mutation outside the document has no patch: the content hash catches it.
+    assert_eq!(
+        q(&mut e, &request(8)).get("ok").and_then(Value::as_f64),
+        Some(32.0)
+    );
+    assert_eq!(
+        q(&mut e, &request(7)).get("ok").and_then(Value::as_f64),
+        Some(31.0)
+    );
+    assert_eq!(e.stats.detached_misses, 2);
+    for v in 20..25 {
+        q(&mut e, &request(v));
+    }
+    let misses = e.stats.detached_misses;
+    q(&mut e, &request(7));
+    assert_eq!(
+        e.stats.detached_misses,
+        misses + 1,
+        "least recently used entry evicted"
+    );
+    e.resync(PROJECT.as_bytes(), 2).unwrap();
+    q(&mut e, &request(7));
+    assert_eq!(
+        e.stats.detached_misses,
+        misses + 2,
+        "resync drops detached state"
+    );
+}
+
+#[test]
+fn detached_json_text_is_parsed_once_and_mutations_are_seen() {
+    let mut e = engine();
+    let ask = |v: i32| {
+        serde_json::json!({
+        "op":"ev", "open":"C1", "layer":0, "key":"x", "t":0,
+        "compJsonText": format!(r#"{{"fps":24,"layers":[{{"id":"A","from":0,"p":{{"x":{{"v":{v}}}}}}}]}}"#)
+    }).to_string()
+    };
+    for _ in 0..5 {
+        assert_eq!(
+            q(&mut e, &ask(8)).get("ok").and_then(Value::as_f64),
+            Some(8.0)
+        );
+    }
+    assert_eq!(e.stats.detached_misses, 1);
+    assert_eq!(e.stats.detached_hits, 4);
+    assert_eq!(
+        q(&mut e, &ask(9)).get("ok").and_then(Value::as_f64),
+        Some(9.0)
+    );
+    assert_eq!(e.stats.detached_misses, 2);
+    assert!(
+        q(
+            &mut e,
+            r#"{"op":"ev","open":"C1","compJsonText":"{invalid"}"#
+        )
+        .get("throw")
+        .is_some()
+    );
+}

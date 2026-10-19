@@ -229,7 +229,7 @@ export class NativeApi {
   private depth = 0;
   private answeredNatively = false;
   /** Live channel object → interned id (validated on every use). */
-  private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown }>();
+  private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown; wasm: PmWasm; time?: number; number?: number }>();
   /** Live layer → its interned transform channels (valid at `revision` with `cur` as `PM.curComp()`). */
   private channels = new WeakMap<object, { comp: string; ids: Map<string, number>; revision: number; cur: unknown }>();
   private refs = new Map<number, number>();
@@ -277,7 +277,8 @@ export class NativeApi {
 
   /** The module, flushed and ready, or null (then the legacy code answers). */
   private ready(): PmWasm | null {
-    const wasm = this.wasm();
+    let wasm = this.wasm();
+    if (wasm?.dead && this.revive?.()) wasm = this.wasm();
     const barrier = this.barrier();
     if (!wasm || wasm.dead || !barrier) return null;
     try { barrier.flush(); } catch (error) { console.warn('[engine-doc] flush failed', error); return null; }
@@ -310,7 +311,10 @@ export class NativeApi {
     const open = typeof proj.compId === 'string' ? proj.compId : typeof proj.id === 'string' ? proj.id : '';
     const liveCur = this.PM.curComp?.() ?? this.PM.proj;
     const cur = this.unwrap(liveCur);
-    if (cur === proj) return { comp: open, open, cur, liveCur };
+    // Comps.get(rootId) constructs a new rootComp object on every call.
+    // Its layers are the open composition's live array, so address the mirror
+    // directly and give the fast path a stable scope identity.
+    if (cur === proj || (cur?.layers === proj.layers && cur?.id === proj.compId)) return { comp: open, open, cur: proj, liveCur: proj };
     const comp = this.address(proj, cur);
     if (comp === null) return cur && typeof cur === 'object' ? { comp: '@json:' + JSON.stringify(cur), open, cur, liveCur } : null;
     return { comp, open, cur, liveCur };
@@ -318,6 +322,7 @@ export class NativeApi {
 
   /** Where each composition object last was: checked by walking its path, so a stale entry is never used. */
   private addresses = new WeakMap<object, PathPart[] | null>();
+  private detachedAddresses = new WeakMap<object, { proj: unknown; revision: number }>();
 
   /**
    * The engine address of composition object `cur` inside `proj`: its id when
@@ -328,13 +333,16 @@ export class NativeApi {
   private address(proj: any, cur: any): string | null {
     if (!cur || typeof cur !== 'object') return null;
     if (typeof cur.id === 'string' && proj.comps && typeof proj.comps === 'object' && proj.comps[cur.id] === cur) return cur.id;
+    const revision = this.barrier()?.revision ?? -1;
+    const detached = this.detachedAddresses.get(cur);
+    if (detached && detached.proj === proj && detached.revision === revision) return null;
     const cached = this.addresses.get(cur);
     let path = cached && at(proj, cached) === cur ? cached : undefined;
     if (!path) {
       path = findPath(proj, cur, 64) ?? undefined;
       if (path) this.addresses.set(cur, path);
     }
-    if (!path) return null;
+    if (!path) { this.detachedAddresses.set(cur, { proj, revision }); return null; }
     return path.length === 2 && path[0] === 'comps' ? String(path[1]) : '@path:' + JSON.stringify(canonicalPath(path, proj.compId));
   }
 
@@ -425,7 +433,7 @@ export class NativeApi {
     const ask = (instance: PmWasm): any => {
       const payload: Record<string, unknown> = { op, ...request };
       if (typeof request.comp === 'string' && request.comp.startsWith('@json:')) {
-        payload.compJson = JSON.parse(request.comp.slice(6));
+        payload.compJsonText = request.comp.slice(6);
         payload.comp = '@detached';
       }
       let reply = instance.query(payload);
@@ -658,7 +666,9 @@ export class NativeApi {
     // flush() returns at once when nothing waits (it also notices writes a
     // plain transaction has not announced yet).
     barrier.flush();
-    return { revision: barrier.revision, cur: this.PM.scope?.length ? this.unwrap(this.PM.curComp()) : null };
+    const proj = this.unwrap(this.PM.proj);
+    const cur = this.PM.scope?.length ? this.unwrap(this.PM.curComp()) : null;
+    return { revision: barrier.revision, cur: cur === proj || (cur?.layers === proj?.layers && cur?.id === proj?.compId) ? null : cur };
   }
 
   /** `pm_ev` for an id validated at this revision; MISS when it must take the slow path. */
@@ -720,7 +730,18 @@ export class NativeApi {
       const entry = this.props.get(rawProp);
       const stamp = entry && this.stamp();
       if (stamp && entry.revision === stamp.revision && entry.cur === stamp.cur && entry.key === key && entry.layer === this.unwrap(L)) {
+        // The value was already answered by pm-wasm at this exact time and
+        // revision. Like its own last-answer memo, keep numeric answers only.
+        if (entry.time !== undefined && Object.is(entry.time, T)) {
+          // reset() drops these entries when an instance is replaced.
+          if (!entry.wasm.dead) {
+            this.stats.fastPath += 1;
+            this.stats.calls.evP = this.stats.calls.evP! + 1;
+            return entry.number;
+          }
+        }
         const value = this.fastValue(entry.id, T, rawProp);
+        if (typeof value === 'number') { entry.time = T; entry.number = value; }
         if (value !== MISS) { this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1; return value; }
       }
     }
@@ -743,12 +764,14 @@ export class NativeApi {
         }
         const id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: path }, rawProp);
         if (id < 0) return this.query('evP', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, key, t: T });
-        entry = { layer: ctx.raw, path, comp: ctx.comp, id, key, revision: stamp.revision, cur: stamp.cur };
+        entry = { layer: ctx.raw, path, comp: ctx.comp, id, key, revision: stamp.revision, cur: stamp.cur, wasm };
         this.props.set(rawProp, entry);
       }
       entry!.revision = stamp.revision;
       entry!.cur = stamp.cur;
       const got = this.evById(wasm, entry!.id, T);
+      entry!.time = 'value' in got && typeof got.value === 'number' ? T : undefined;
+      if ('value' in got && typeof got.value === 'number') entry!.number = got.value;
       this.noteError(rawProp, wasm, entry!.id);
       return got;
     }, () => this.legacy.evP(L, prop, T, key), () => ({ layer: L?.id, key, t: T }));

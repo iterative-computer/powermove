@@ -135,6 +135,39 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     expect(doc.ready).toBe(true);
   });
 
+  it('addresses fresh Comps.get root wrappers as the open composition, keeping interned values', async () => {
+    const { PM, doc } = await editor('on');
+    const { child } = content(PM);
+    PM.scope = [{}];
+    PM.curComp = () => ({ id: PM.proj.compId, fps: PM.proj.fps, layers: PM.proj.layers });
+    const query = vi.spyOn(doc.wasm!, 'query');
+    const prop = child.p['position.y'];
+    for (const t of [0, 0.5, 1, 2]) {
+      expect(doc.api!.evP(child, prop, t, 'position.y')).toBe(PM.evP(child, prop, t, 'position.y'));
+      doc.api!.worldMatrix(child, t);
+    }
+    expect(query.mock.calls.every(([r]) => !(r as any).compJson)).toBe(true);
+    expect((doc.stats() as any).native.fastPath).toBeGreaterThanOrEqual(4);
+    expect((doc.stats() as any).native.interned).toBe(1);
+    expect(fallbacks(doc)).toEqual({});
+  });
+
+  it('invalidates numeric scope answers on writes and revives a dead module before reusing them', async () => {
+    const { PM, doc } = await editor('on');
+    const { child } = content(PM);
+    const prop = child.p['position.y'];
+    expect(doc.api!.evP(child, prop, 1, 'position.y')).toBe(40);
+    expect(doc.api!.evP(child, prop, 1, 'position.y')).toBe(40);
+    prop.v = 12;
+    PM.touch();
+    expect(doc.api!.evP(child, prop, 1, 'position.y')).toBe(52);
+    const old = doc.wasm!;
+    old.dead = true;
+    expect(doc.api!.evP(child, prop, 1, 'position.y')).toBe(52);
+    expect(doc.wasm).not.toBe(old);
+    expect(doc.failures()).toEqual([]);
+  });
+
   it('answers nested composition paths and a root without compId natively', async () => {
     const { PM, doc } = await editor('audit');
     const { child } = content(PM);

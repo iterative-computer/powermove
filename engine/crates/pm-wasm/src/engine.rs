@@ -208,17 +208,36 @@ pub struct Stats {
     pub resyncs: u64,
     pub queries: u64,
     pub unanswered: u64,
+    pub detached_hits: u64,
+    pub detached_misses: u64,
 }
 
 pub struct Engine {
     doc: Document,
     ev: Evaluator,
+    // A bounded resident scope cache. Each entry has its own evaluator so an
+    // ad-hoc scope never resets the open document's interned property plans.
+    detached: HashMap<String, DetachedComp>,
+    detached_tick: u64,
     labels: Arc<Labels>,
     fonts: Fonts,
     /// The last `ev_id` answer when it was not a number (for `value_json`).
     last: JsValue,
     last_kind: ValueKind,
     pub stats: Stats,
+}
+
+struct DetachedComp {
+    node: Node,
+    ev: Evaluator,
+    revision: u64,
+    used: u64,
+}
+
+fn evaluator(labels: &Arc<Labels>) -> Evaluator {
+    Evaluator::new()
+        .with_expressions(Arc::new(PmExpressions))
+        .with_hooks(Arc::new(LabelsRef(labels.clone())))
 }
 
 impl Default for Engine {
@@ -349,9 +368,9 @@ impl Engine {
         let labels = Arc::new(Labels::default());
         Engine {
             doc: Document::new(None, 0),
-            ev: Evaluator::new()
-                .with_expressions(Arc::new(PmExpressions))
-                .with_hooks(Arc::new(LabelsRef(labels.clone()))),
+            ev: evaluator(&labels),
+            detached: HashMap::new(),
+            detached_tick: 0,
             labels,
             fonts: Fonts::new(),
             last: JsValue::Undefined,
@@ -386,6 +405,7 @@ impl Engine {
             self.doc = Document::new(root, revision);
             self.ev.reset();
         }
+        self.detached.clear();
         self.stats.resyncs += 1;
         Ok(())
     }
@@ -702,16 +722,68 @@ impl Engine {
             .and_then(Value::as_str)
             .unwrap_or(comp_id);
         let revision = self.doc.revision();
-        let detached_comp = get(request, "compJson")
-            .filter(|v| matches!(v, Value::Object(_)))
-            .map(|v| Node::from_value(v.clone(), revision));
-        if detached_comp.is_some() {
-            self.ev.reset();
-        }
-        let resolved = detached_comp.as_ref().map_or_else(
-            || Comp::in_root(root, comp_id, revision),
-            |node| Ok(Comp::at_node(root, node, comp_id, revision)),
-        );
+        let detached = get(request, "compJson").filter(|v| matches!(v, Value::Object(_)));
+        // The renderer carries detached JSON as a string so repeated queries
+        // need no object parse or canonical number serialization before hashing.
+        let text = get(request, "compJsonText").and_then(Value::as_str);
+        let hash = text
+            .map(|s| pm_model::hash::sha256_hex(s.as_bytes()))
+            .or_else(|| detached.map(pm_model::hash::canonical_hash));
+        let resident = if let Some(hash) = hash {
+            self.detached_tick += 1;
+            if self.detached.contains_key(&hash) {
+                self.stats.detached_hits += 1;
+            } else {
+                let value = match (text, detached) {
+                    (Some(json), _) => match parse_bytes(json.as_bytes()) {
+                        Ok(v) if matches!(v, Value::Object(_)) => v,
+                        _ => {
+                            return Ok(Err(JsThrow::type_error(
+                                "Invalid detached composition JSON",
+                            )));
+                        }
+                    },
+                    (_, Some(v)) => v.clone(),
+                    _ => unreachable!(),
+                };
+                self.stats.detached_misses += 1;
+                if self.detached.len() >= 4
+                    && let Some(oldest) = self
+                        .detached
+                        .iter()
+                        .min_by_key(|(_, c)| c.used)
+                        .map(|(h, _)| h.clone())
+                {
+                    self.detached.remove(&oldest);
+                }
+                self.detached.insert(
+                    hash.clone(),
+                    DetachedComp {
+                        node: Node::from_value(value, revision),
+                        ev: evaluator(&self.labels),
+                        revision,
+                        used: self.detached_tick,
+                    },
+                );
+            }
+            let c = self.detached.get_mut(&hash).unwrap();
+            // Expressions can read project members as well as their own scope.
+            if c.revision != revision {
+                c.ev.reset();
+                c.revision = revision;
+            }
+            c.used = self.detached_tick;
+            Some(c)
+        } else {
+            None
+        };
+        let (resolved, ev) = match resident {
+            Some(c) => (
+                Ok(Comp::at_node(root, &c.node, comp_id, revision)),
+                &mut c.ev,
+            ),
+            None => (Comp::in_root(root, comp_id, revision), &mut self.ev),
+        };
         let Ok(comp) = resolved else {
             return Ok(Err(JsThrow::type_error(format!(
                 "No composition {comp_id}"
@@ -765,7 +837,7 @@ impl Engine {
             }
         };
         let fonts = &mut self.fonts;
-        let mut scope = Scope::new(&mut self.ev, &comp, &open);
+        let mut scope = Scope::new(ev, &comp, &open);
         macro_rules! layer {
             () => {
                 match layer {
