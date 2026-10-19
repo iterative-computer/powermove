@@ -76,9 +76,14 @@ export class PresentationWarmup {
     this.warm();
   }
 
-  take(doc: Document, handlers: Handlers): WarmDrawing | null {
+  /** The prepared drawing for a viewer in `doc`. A viewer that draws on
+   *  the page's main thread (`allowWorker` false: the measurement harness's
+   *  `offMainThread: false`) never claims a worker drawing; it stays
+   *  prepared for the next viewer. */
+  take(doc: Document, handlers: Handlers, allowWorker = true): WarmDrawing | null {
     const prepared = this.prepared;
     if (this.disposed || doc !== this.doc || !prepared || prepared.failed || prepared.worker?.failed || prepared.worker?.lost) return null;
+    if (prepared.worker && !allowWorker) return null;
     this.prepared = null;
     prepared.claimed = true;
     prepared.handlers = handlers;

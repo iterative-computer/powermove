@@ -48,6 +48,31 @@ describe('presentation warmup', () => {
     expect(worker.terminated).toBe(true);
   });
 
+  it('leaves a worker drawing to the next viewer when this one draws on the main thread', async () => {
+    const doc = document.implementation.createHTMLDocument();
+    const create = doc.createElement.bind(doc);
+    doc.createElement = ((name: string) => {
+      const el = create(name);
+      if (name === 'canvas') (el as HTMLCanvasElement).transferControlToOffscreen = () => ({}) as OffscreenCanvas;
+      return el;
+    }) as typeof doc.createElement;
+    const worker = new Worker();
+    const warmup = new PresentationWarmup(doc, () => worker);
+    warmup.warm();
+    expect(warmup.take(doc, handlers, false)).toBeNull();
+    const canvas = doc.createElement('canvas');
+    const stage = doc.createElement('div'); stage.append(canvas); doc.body.append(stage);
+    const service: EngineViewerService = { source: { videoFrame: () => null, onSurface: () => () => {}, retire: () => 0 }, composition: () => 'C', open: () => null, onReady: () => () => {}, offMainThread: false, drawingWarmup: warmup };
+    const made = painter();
+    const view = new ViewerPresentation({ stage, service, createPainter: async () => made });
+    await flush(); await flush();
+    expect(worker.messages.map(m => m.type)).toEqual(['init']);
+    expect(view.offMainThread).toBe(false);
+    const drawing = warmup.take(doc, handlers);
+    expect(drawing?.worker).not.toBeNull();
+    view.dispose(); drawing!.worker!.dispose(); warmup.dispose();
+  });
+
   it('prepares the page painter after an unused worker fails, and forwards failures after claim', async () => {
     const doc = document.implementation.createHTMLDocument();
     const create = doc.createElement.bind(doc);

@@ -544,10 +544,12 @@ export class ViewerPresentation {
   private async createDrawing(): Promise<boolean> {
     if (this.worker || this.painter) return true;
     const token = this.backendToken;
+    // Without `createWorker` (offMainThread false) frames are drawn on the
+    // page's main thread: a prepared worker drawing is not claimed.
     const warm = this.options.service.drawingWarmup?.take(this.options.stage.ownerDocument, {
       onFailed: message => this.workerFailed(token, message),
       onLost: message => this.deviceLost(token, message)
-    });
+    }, this.options.createWorker !== undefined && !this.workerUnavailable);
     if (warm) {
       const old = this.canvasElement;
       this.canvasElement = this.makeCanvas(old.ownerDocument, warm.canvas);
