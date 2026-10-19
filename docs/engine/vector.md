@@ -213,7 +213,17 @@ the cache), uploaded on first use as the `Rgba8Unorm` texture today's canvas
 upload makes, the same format level 1 shape rasters use (exact on the corpus).
 A replaced or relinked file hashes to another content, so an old raster is
 never drawn for it; it ages out. An engine restart or a GPU loss starts empty,
-and the rasters are asked for again.
+and the rasters are asked for again (`e2e/engine-svg.spec.ts`: a replace, its
+undo and redo, and a killed engine each draw today's pixels again).
+
+A replace changes the asset's record, and the engine resolves the asset again
+through main's media bindings at once. The window used to bind 250 ms later,
+so the engine resolved the new record to the old file and kept drawing it
+(any media kind, not only SVG). `installHostMediaStore` now binds whatever a
+document batch changed before the batch reaches the engine: it subscribes to
+the mirror's batches ahead of every engine session (bootstrap installs the
+media store before the engine connection), and the bind message is sent
+before the batch is posted.
 
 **A miss** is recorded per frame (`SvgRasterNeed`: the request, the file, the
 first layer and composition that drew it):
@@ -253,7 +263,12 @@ change so a synchronous snapshot can check one), and answers:
   again naming `svg:<content>:<w>x<h>` in `uploaded`; the render thread waits
   for those bands. The rasters are shared by every session on the render
   thread, so main's own session for the window (boot, a staged resync) draws
-  with the ones the window posts on its session;
+  with the ones the window posts on its session. A snapshot in the same task as an import or a replace meets an asset whose
+  hash `prime` has not finished: the window then reads the `<img>`'s bytes
+  with a synchronous `XMLHttpRequest` of its object URL (the only synchronous
+  read a window has) and hashes them on the calling thread
+  (`sha256HexSync`, tested equal to `crypto.subtle`), so the snapshot draws
+  as today's compositor does instead of failing; the stale check still holds;
 - the job engine (`HostSvgRasters`, pm-node `jobs/svg.rs`): an export or agent
   frame asks host services for `compatFrame { source: svgImage, svg: { key,
   asset } }` naming the document (today's `documentId(PM.proj.id)`); main asks
@@ -316,6 +331,67 @@ M4 Max), the machine shared with other lanes.
   render for reasons outside SVG: `masks/path` (path masks), `space/layers-25d`
   (2.5D layers), `effects/extension-typewriter` (no definition for the
   `typewriter` effect).
+
+- **The corpus in the app** (`tools/svg-rasters/app-corpus.ts`, 2026-10-18,
+  after the bridge lane's merge): the 34 projects opened in the built app as
+  the capture opened them, "Use New Engine" on, every sample drawn by
+  `PM.EngineRender.snapshotSync` (the engine with this window's rasters) and
+  judged against the capture `v1-20261012-230504-ae47a3b3` with the SVG mask
+  above (105 frames, 9,790,300 SVG pixels; 5 frames show none). Today's
+  compositor drawing the same frames live is 100% exact in all of them, so
+  the capture still is today. The SVG pixels are exact in **28 of 34
+  projects** (including `effects/extension-typewriter`, which renders in the
+  app with its fixture extension). The rest are not the rasters:
+  - `compositing/adjustment`, `compositing/blend-modes-alpha`,
+    `masks/parametric`: the same at most 1 CV as the headless run, along the
+    adjustment layer's blurred edge, inside the blend-mode tiles over
+    transparency, and along the feathered mask edge (the composite and mask
+    paths over SVG content);
+  - `masks/path`: the snapshot fails, "path masks";
+  - `layers/extension-missing`: the snapshot fails, "no definition for layer
+    com.example.absent-layer", where today draws the project without it;
+  - `space/layers-25d`: SVG pixels exact, but the composition is routed
+    ("2.5D layers").
+  Side by side (capture, engine, differing pixels in red), outside the
+  repository: `svg-rasters-20261018/evidence/app-corpus-20261018/`.
+- **e2e** (`e2e/engine-svg.spec.ts`, flag on): the viewer and synchronous
+  snapshots equal today's compositor byte for byte at 0, 0.75, and 1.5 s
+  (three layers: contain, cover rotated at 230%, stretch with animated scale
+  and opacity); a replace draws the new bytes at once (equal to today's, and
+  its undo and redo too); a killed engine asks for the rasters again and
+  draws the same frames. `native-svg-broken.spec.ts`: corrupt documents paint
+  nothing and the four documents roxmltree rejects but Chromium paints export
+  through the job engine equal to today's (max 0). `import-svg.spec.ts`
+  passes with the flag on and off (with the flag on its high-zoom check reads
+  the engine's view instead of the legacy compositor's cropped viewport).
+- **Exported stills are not yet today's** (not the rasters): the job
+  engine's still of the e2e project differs from today's exporter's in
+  56,037 channel values by 1 CV, and a PNG control with no SVG in it differs
+  the same way (59,924 by 1 CV). The SVG still equals the interactive
+  engine's snapshot of the same frame and today's `renderFrameTo`; the job
+  engine's still alone renders at 32-bit and dithers 8-bit PNG
+  (`export.md`), which today's still does not. Side by side:
+  `svg-rasters-20261018/evidence/still-export-20261018/`. Owner: export.
+  The same control also shows the interactive engine sampling the upscaled
+  PNG 1 CV away from today in 6,484 channel values
+  (`png-control-interactive-legacy-engine-diff.png`), outside SVG.
+
+### Level 1: what remains
+
+- The hidden MCP host's on-demand Chromium: the native hidden host of
+  section 22 does not exist yet; when it does, it loads `svg-rasters.ts` in
+  its Chromium page (no Electron needed) and answers `compatFrame
+  svgImage` as an editor window does.
+- Exported stills (export lane): 32-bit rendering and 8-bit PNG dither
+  differ from today's still by 1 CV (above).
+- The non-SVG residuals of the corpus run (composite, masks, missing
+  extension layers, 2.5D routing; above), each with its lane.
+- Preview: a viewer miss shows the content's previous bucket, or nothing for
+  a new or replaced file, until the window's bands arrive (one round trip,
+  20 to 31 ms measured for the e2e project's six buckets); today's
+  asynchronous `<img>` decode likewise shows nothing until it resolves, and
+  today's synchronous canvas redraw on a bucket change has no such frame.
+  Paused frames and every snapshot and export are exact.
 
 ### Parse depth (level 2)
 
