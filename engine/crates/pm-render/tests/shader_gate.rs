@@ -445,7 +445,13 @@ fn every_shader_matches_webgl() {
                 renderer.effects().status(dkind, def.id.as_str()),
                 Some(Status::Ready)
             );
-            if !webgl_draws || !ready {
+            // A program the native pipeline cannot translate draws through
+            // the runner (decision 19), judged against WebGL like the rest.
+            let needs_runner = matches!(
+                renderer.effects().status(dkind, def.id.as_str()),
+                Some(Status::NeedsFallback(_))
+            );
+            if !webgl_draws || !(ready || needs_runner) {
                 match (
                     webgl_draws,
                     renderer.effects().status(dkind, def.id.as_str()),
@@ -454,11 +460,6 @@ fn every_shader_matches_webgl() {
                     (false, Some(Status::Ready)) if webgl_links => {
                         tally.both_refuse += variants.len()
                     }
-                    (true, Some(Status::NeedsFallback(f))) => tally.awaiting_runner.push(format!(
-                        "{shown}: effect needs the fallback runner ({}: {})",
-                        f.stage.name(),
-                        f.message.lines().next().unwrap_or_default()
-                    )),
                     (w, s) => tally.failures.push(format!(
                         "{shown}: WebGL draws {w}, engine {:?}",
                         s.map(|s| match s {
@@ -489,7 +490,8 @@ fn every_shader_matches_webgl() {
                     .map(js)
                     .collect();
                 let time = variant["time"].as_f64().unwrap();
-                let angle_only = renderer.effects().angle_only(dkind, def.id.as_str());
+                let angle_only =
+                    needs_runner || renderer.effects().angle_only(dkind, def.id.as_str());
                 let (renderer, images) = if angle_only {
                     (&mut via_runner, &runner_images)
                 } else {
@@ -667,7 +669,9 @@ fn every_shader_matches_webgl() {
         for f in &t.failures {
             eprintln!("  FAIL: {f}");
         }
-        failed += t.failures.len();
+        // A variant the runner has not answered is not judged: it fails
+        // until `fallback-runner.ts` answers it (nothing passes unverified).
+        failed += t.failures.len() + t.awaiting_runner.len();
     }
     if requests_written > 0 {
         eprintln!(
