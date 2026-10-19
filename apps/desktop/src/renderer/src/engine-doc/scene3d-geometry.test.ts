@@ -643,6 +643,8 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     doc.api!.objectBoxes3d(['ok'], 0, today);
     doc.api!.objectWorlds3d(['ok'], 0, today);
     doc.api!.camera3d(0, () => { legacy++; return runtimeCameraFacts(PM, 0); });
+    doc.api!.objectMesh3d('ok', 0, () => { legacy++; return { missing: true }; });
+    doc.api!.cursorHit3d([0, 0, 6], [0, 0, -1], 0, () => { legacy++; return null; });
     expect(legacy).toBe(0);
     expect(doc.api!.stats.fallbacks).toEqual({});
     // A model three.js holds that the engine cannot load: refused by name, never three.js.
@@ -654,9 +656,11 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     try {
       expect(() => doc.api!.pick(PM.proj.w / 2, PM.proj.h / 2, 0)).toThrow(/could not answer gl\.pick \(unsupported\)/);
       expect(() => doc.api!.objectBoxes3d(['ok'], 0, today)).toThrow(/could not answer objectBoxes3d \(unsupported\)/);
+      expect(() => doc.api!.objectMesh3d('ok', 0, () => { legacy++; return { missing: true }; })).toThrow(/could not answer objectMesh3d \(unsupported\)/);
+      expect(() => doc.api!.cursorHit3d([0, 0, 6], [0, 0, -1], 0, () => { legacy++; return null; })).toThrow(/could not answer cursorHit3d \(unsupported\)/);
     } finally { console.warn = warn; }
     expect(legacy).toBe(0);
     expect(doc.failures().map(f => f.code)).toContain('native-answer-unavailable');
-    expect(toasts.some(t => t.includes('could not answer gl.pick (unsupported)'))).toBe(true);
+    for (const op of ['gl.pick', 'objectMesh3d', 'cursorHit3d']) expect(toasts.some(t => t.includes(`could not answer ${op} (unsupported)`)), op).toBe(true);
   });
 });
