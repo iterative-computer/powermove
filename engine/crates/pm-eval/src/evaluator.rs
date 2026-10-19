@@ -285,6 +285,9 @@ impl CompiledCache {
 
 #[derive(Clone, Debug)]
 enum Plan {
+    /// A compiled source and optional static base value. Node/context reads still happen
+    /// at the requested time; edits revalidate the complete document memo.
+    Expression(ExpressionPlan),
     /// The answer does not depend on time.
     Const(JsResult<JsValue>),
     /// A temporal track read at `T - from`; `first` answers non-finite times.
@@ -297,9 +300,58 @@ enum Plan {
     Live { expression: bool },
 }
 
+#[derive(Clone)]
+struct ExpressionPlan {
+    source: Option<Arc<dyn CompiledExpression>>,
+    bound: bool,
+    compiled: Option<Arc<dyn CompiledExpression>>,
+    /// The static base (`v`) of a channel without keyframes.
+    value: Option<JsValue>,
+    /// A keyed base's numeric track, prepared once with the plan (it answers
+    /// finite local times exactly as `evalKfs` on the same keys does).
+    track: Option<Arc<TemporalTrack>>,
+}
+
+impl ExpressionPlan {
+    /// The numeric base at local time `tl` without reading any node, when
+    /// the plan has one: a static number, or a temporal track's value.
+    fn scalar_base(&self, tl: f64) -> Option<f64> {
+        match (&self.value, &self.track) {
+            (Some(JsValue::Number(n)), _) => Some(*n),
+            (None, Some(track)) if tl.is_finite() => match track.value(tl) {
+                JsValue::Number(n) => Some(n),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The answer of a bound numeric plan: only time, local time and the
+    /// base, no node, scope, channel string or context. `None` for anything
+    /// else (including non-finite answers, which record an error).
+    fn scalar(&self, from: f64, time: f64) -> Option<f64> {
+        let tl = time - from;
+        let n = self
+            .compiled
+            .as_ref()?
+            .evaluate_scalars(tl, time, self.scalar_base(tl)?)?;
+        n.is_finite().then_some(n)
+    }
+}
+
+impl std::fmt::Debug for ExpressionPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExpressionPlan")
+            .field("compiled", &self.compiled.is_some())
+            .field("value", &self.value)
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SlotState {
     validated: u64,
+    position: usize,
     /// Whether the layer's id was unique in the composition when validated.
     unique: bool,
     /// [`Comp::at_root`] when validated: a layer under another path is
@@ -475,6 +527,69 @@ impl Evaluator {
         self.stats
     }
 
+    /// After an applied patch, proven unaffected layer-local plans validated
+    /// at its exact base need no address/context revalidation. Older slots still
+    /// take the ordinary path: they may predate another edit.
+    pub fn document_patched(&mut self, doc: &Document, base: u64, ops: &[pm_model::ops::Op]) {
+        if ops.is_empty() {
+            return;
+        }
+        fn key(part: Option<&pm_model::PathPart>) -> Option<&str> {
+            match part? {
+                pm_model::PathPart::Key(key) => key.as_str(),
+                _ => None,
+            }
+        }
+        let preserves = |op: &pm_model::ops::Op, address: &PropAddress, state: &SlotState| {
+            let path = op.path();
+            if matches!(key(path.first()), Some("params" | "edits" | "revision")) {
+                return true;
+            }
+            // Only a leaf inside another layer can bypass validation. Whole
+            // layers, ordering, IDs and unknown composition paths stay slow:
+            // even another layer's ID can change the first-ID resolution.
+            if !matches!(op, pm_model::ops::Op::Leaf(_)) {
+                return false;
+            }
+            let offset = if state.at_root && key(path.first()) == Some("layers") {
+                1
+            } else if !state.at_root
+                && key(path.first()) == Some("comps")
+                && key(path.get(1))
+                    == address
+                        .comp
+                        .as_str()
+                        .map(|id| id.strip_prefix(crate::comp::ROOT_VIEW).unwrap_or(id))
+                && key(path.get(2)) == Some("layers")
+            {
+                3
+            } else {
+                return false;
+            };
+            path.len() > offset + 1
+                && key(path.get(offset + 1)) != Some("id")
+                && matches!(path.get(offset), Some(pm_model::PathPart::Index(index))
+                    if *index != state.position as f64)
+        };
+        self.observe(doc);
+        let revision = doc.revision();
+        for slot in &mut self.slots {
+            if let Some(state) = &mut slot.state
+                && state.validated == base
+                && let Plan::Expression(plan) = &state.plan
+                && plan.bound
+                && plan
+                    .compiled
+                    .as_ref()
+                    .is_some_and(|c| c.binding_is_layer_local())
+                && ops.iter().all(|op| preserves(op, &slot.address, state))
+            {
+                state.validated = revision;
+                self.stats.reused += 1;
+            }
+        }
+    }
+
     /// The spring tables built so far.
     pub fn springs(&mut self) -> &mut SpringTables {
         &mut self.springs
@@ -482,11 +597,29 @@ impl Evaluator {
 
     /// `PM.expressionErrors.get(prop)` for a channel.
     pub fn expression_error(&self, comp: &str, layer: &str, key: &str) -> Option<&str> {
+        if self.errors.is_empty() {
+            return None;
+        }
         self.errors
             .get(&ErrorKey {
                 comp: JsString::from(comp),
                 layer: JsString::from(layer),
                 key: JsString::from(key),
+            })
+            .map(String::as_str)
+    }
+
+    /// An interned address already owns the exact JS strings. Avoid round trips
+    /// through UTF-8 (and all allocation on the usual empty-error-map path).
+    pub fn expression_error_at(&self, address: &PropAddress) -> Option<&str> {
+        if self.errors.is_empty() {
+            return None;
+        }
+        self.errors
+            .get(&ErrorKey {
+                comp: address.comp.clone(),
+                layer: address.layer.clone(),
+                key: address.key.clone(),
             })
             .map(String::as_str)
     }
@@ -644,9 +777,25 @@ impl Evaluator {
             _ => None,
         }
         .and_then(|src| self.compiled.get(self.expressions.as_deref(), &src));
-        let error_key = Self::error_key(cx, layer, key);
+        self.eval_compiled(cx, layer, compiled.as_deref(), value, tl, time, key)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_compiled(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: Option<&Node>,
+        compiled: Option<&dyn CompiledExpression>,
+        value: JsValue,
+        tl: f64,
+        time: f64,
+        key: &JsString,
+    ) -> JsResult<JsValue> {
         let Some(compiled) = compiled else {
-            self.errors.insert(error_key, messages::INVALID.to_owned());
+            self.errors.insert(
+                Self::error_key(cx, layer, key),
+                messages::INVALID.to_owned(),
+            );
             return Ok(value);
         };
         let fps = cx.expression_fps();
@@ -659,7 +808,11 @@ impl Evaluator {
             t: tl,
             time,
             fps: &fps,
-            frame: cx.frame_at(time),
+            frame: if compiled.needs_frame() {
+                cx.frame_at(time)
+            } else {
+                None
+            },
             value: &value,
             layer,
             comp: cx,
@@ -668,17 +821,19 @@ impl Evaluator {
         };
         match compiled.evaluate(&context) {
             Ok(r) if r.is_finite_number() || matches!(r, JsValue::String(_) | JsValue::Bool(_)) => {
-                self.errors.remove(&error_key);
+                self.clear_error(cx, layer, key);
                 Ok(r)
             }
             Ok(_) => {
-                self.errors
-                    .insert(error_key, messages::NOT_FINITE.to_owned());
+                self.errors.insert(
+                    Self::error_key(cx, layer, key),
+                    messages::NOT_FINITE.to_owned(),
+                );
                 Ok(value)
             }
             Err(e) => {
                 self.errors.insert(
-                    error_key,
+                    Self::error_key(cx, layer, key),
                     e.message.unwrap_or_else(|| messages::FAILED.to_owned()),
                 );
                 Ok(value)
@@ -946,6 +1101,41 @@ impl Evaluator {
                     state.memo = Some((time_bits, value.clone()));
                     return value;
                 }
+                Plan::Expression(plan) => {
+                    // A bound numeric plan reads only time/local time/base.
+                    // With no outstanding errors, it needs no layer, scope,
+                    // channel string or context construction on a warm frame.
+                    if self.errors.is_empty()
+                        && let Some(n) = plan.scalar(state.from, time)
+                    {
+                        let value = Ok(JsValue::Number(n));
+                        self.slots[index].state.as_mut().expect("state").memo =
+                            Some((time_bits, value.clone()));
+                        return value;
+                    }
+                    // At the same document revision, the slot's resolved layer
+                    // position and compiled plan are already proven. Resolve the
+                    // composition once for the batch, without revalidating every
+                    // channel's node paths, id strings and source again.
+                    let plan = plan.clone();
+                    let position = state.position;
+                    let from = state.from;
+                    let address = self.slots[index].address.clone();
+                    let entry = self.resolve_batch_comp(doc, &address.comp, resolved);
+                    let value = match &resolved.0[entry].1 {
+                        Some((cx, _)) => cx.layers().get(position).map(|layer| {
+                            self.eval_expression_plan(cx, layer, &address, plan, from, time)
+                        }),
+                        None => Some(Ok(JsValue::Undefined)),
+                    };
+                    // The revision proves the position; should it not hold,
+                    // revalidate below instead of trusting it.
+                    if let Some(value) = value {
+                        self.slots[index].state.as_mut().expect("state").memo =
+                            Some((time_bits, value.clone()));
+                        return value;
+                    }
+                }
                 Plan::Live { .. } => {}
             }
         }
@@ -1008,6 +1198,25 @@ impl Evaluator {
         }
     }
 
+    fn resolve_batch_comp<'d>(
+        &mut self,
+        doc: &'d Document,
+        comp: &JsString,
+        resolved: &mut Resolved<'d>,
+    ) -> usize {
+        match resolved.0.iter().position(|(id, _)| id == comp) {
+            Some(i) => i,
+            None => {
+                let resolved_comp = Comp::resolve(doc, &comp.to_string_lossy()).ok().map(|cx| {
+                    let index = self.layer_index(&cx);
+                    (cx, index)
+                });
+                resolved.0.push((comp.clone(), resolved_comp));
+                resolved.0.len() - 1
+            }
+        }
+    }
+
     /// Revalidates (or plans) a slot at the current revision and evaluates.
     fn ev_slot_slow<'d>(
         &mut self,
@@ -1018,32 +1227,44 @@ impl Evaluator {
     ) -> JsResult<JsValue> {
         let revision = doc.revision();
         let address = self.slots[index].address.clone();
-        let entry = match resolved.0.iter().position(|(id, _)| *id == address.comp) {
-            Some(i) => i,
-            None => {
-                let comp = Comp::resolve(doc, &address.comp.to_string_lossy())
-                    .ok()
-                    .map(|cx| {
-                        let index = self.layer_index(&cx);
-                        (cx, index)
-                    });
-                resolved.0.push((address.comp.clone(), comp));
-                resolved.0.len() - 1
-            }
-        };
+        let entry = self.resolve_batch_comp(doc, &address.comp, resolved);
         let Some((cx, layer_index)) = &resolved.0[entry].1 else {
             self.slots[index].state = None;
             return Ok(JsValue::Undefined);
         };
-        let mut found = layer_index.strings.get(&address.layer).copied();
         let mut layers = cx.layers();
-        // The layer's `id` node, read once: checked here and reused below.
-        let mut id_node = found.and_then(|(pos, _)| node::member(layers.get(pos), "id"));
+        // An edit outside the layer list preserves every validated address,
+        // owner, base and local-time offset in that list. No id/property walk
+        // is needed just to revise a parameter at the project root.
+        let stable_layers = self.slots[index].state.as_ref().is_some_and(|state| {
+            state.unique
+                && state.at_root == cx.at_root()
+                && state.validated <= revision
+                && state.position < layers.len()
+                && cx.layers_node().is_some_and(|n| n.rev() <= state.validated)
+        });
+        let mut found = if stable_layers {
+            Some((
+                self.slots[index].state.as_ref().expect("stable").position,
+                false,
+            ))
+        } else {
+            layer_index.strings.get(&address.layer).copied()
+        };
+        // A changed list uses the shared current index and verifies its id.
+        let mut id_node = if stable_layers {
+            None
+        } else {
+            found.and_then(|(pos, _)| node::member(layers.get(pos), "id"))
+        };
         // The index belongs to this `layers` node (see `layer_index`), so the
         // layer at `pos` has the addressed id. Check anyway: a caller that
         // breaks the one-document contract gets a rebuilt index, not another
         // layer's answer.
-        if found.is_some() && node::string(id_node).is_none_or(|s| *s != address.layer) {
+        if !stable_layers
+            && found.is_some()
+            && node::string(id_node).is_none_or(|s| *s != address.layer)
+        {
             self.stats.stale_indexes += 1;
             let rebuilt = self.build_layer_index(cx);
             found = rebuilt.strings.get(&address.layer).copied();
@@ -1075,7 +1296,9 @@ impl Evaluator {
                 let same_layer = unique
                     && state.unique
                     && state.at_root == at_root
-                    && id_node.is_some_and(|n| n.rev() <= state.validated);
+                    && (stable_layers
+                        || layer.rev() <= state.validated
+                        || id_node.is_some_and(|n| n.rev() <= state.validated));
                 let unchanged = same_layer
                     && (layer.rev() <= state.validated
                         || match &address.via {
@@ -1088,15 +1311,80 @@ impl Evaluator {
                             }
                             Via::Find => false,
                         });
-                let expression = matches!(state.plan, Plan::Live { expression: true });
+                let expression = matches!(
+                    state.plan,
+                    Plan::Live { expression: true } | Plan::Expression(_)
+                );
                 if unchanged {
-                    let from = node::to_number(node::member(Some(layer), "from"));
-                    let memo_ok = if expression {
-                        cx.root().rev() <= state.validated
+                    let from = if layer.rev() <= state.validated {
+                        state.from
                     } else {
-                        from.to_bits() == state.from.to_bits()
+                        node::to_number(node::member(Some(layer), "from"))
                     };
-                    Some((memo_ok, from))
+                    let same_from = from.to_bits() == state.from.to_bits();
+                    match &state.plan {
+                        Plan::Expression(plan) if cx.root().rev() > state.validated => {
+                            if plan.bound
+                                && layer.rev() <= state.validated
+                                && pos == state.position
+                                && plan
+                                    .compiled
+                                    .as_ref()
+                                    .is_some_and(|c| c.binding_is_layer_local())
+                            {
+                                Some((same_from, from, None))
+                            } else if plan.bound {
+                                let fps = cx.expression_fps();
+                                let value = JsValue::Undefined;
+                                let context = ExprContext {
+                                    t: 0.0,
+                                    time: 0.0,
+                                    fps: &fps,
+                                    frame: None,
+                                    value: &value,
+                                    layer: Some(layer),
+                                    comp: cx,
+                                    channel: &address.key,
+                                    idx: if plan.source.as_ref().is_some_and(|s| s.needs_idx()) {
+                                        pos as f64
+                                    } else {
+                                        0.0
+                                    },
+                                };
+                                if plan
+                                    .compiled
+                                    .as_ref()
+                                    .and_then(|c| c.binding_matches(&context))
+                                    == Some(true)
+                                {
+                                    Some((same_from, from, None))
+                                } else {
+                                    let bound = plan.source.as_ref().and_then(|s| s.bind(&context));
+                                    let rebound = ExpressionPlan {
+                                        compiled: bound.clone().or_else(|| plan.source.clone()),
+                                        source: plan.source.clone(),
+                                        bound: bound.is_some(),
+                                        value: plan.value.clone(),
+                                        track: plan.track.clone(),
+                                    };
+                                    Some((false, from, Some(rebound)))
+                                }
+                            } else {
+                                // No fixed binding exists. Keep the immutable source;
+                                // unknown document reads invalidate its last answer.
+                                Some((false, from, None))
+                            }
+                        }
+                        Plan::Live { expression: true } if cx.root().rev() > state.validated => {
+                            None
+                        }
+                        _ => Some((
+                            !expression || cx.root().rev() <= state.validated,
+                            from,
+                            None,
+                        ))
+                        .map(|(memo, from, plan)| (memo && same_from, from, plan)),
+                    }
                 } else {
                     None
                 }
@@ -1104,21 +1392,29 @@ impl Evaluator {
             _ => None,
         };
         match keep {
-            Some((memo_ok, from)) => {
+            Some((memo_ok, from, rebound)) => {
+                if rebound.is_some() {
+                    self.stats.plans += 1;
+                }
                 self.stats.reused += 1;
                 let state = self.slots[index].state.as_mut().expect("state");
                 state.validated = revision;
+                state.position = pos;
                 state.unique = unique;
                 state.from = from;
+                if let Some(plan) = rebound {
+                    state.plan = Plan::Expression(plan);
+                }
                 if !memo_ok {
                     state.memo = None;
                 }
             }
             None => {
                 self.stats.plans += 1;
-                let (plan, from) = self.plan(cx, layer, &address);
+                let (plan, from) = self.plan(cx, layer, &address, pos);
                 self.slots[index].state = Some(SlotState {
                     validated: revision,
+                    position: pos,
                     unique,
                     at_root,
                     plan,
@@ -1144,8 +1440,71 @@ impl Evaluator {
                     first.clone()
                 })
             }
+            Plan::Expression(plan) => {
+                // Revalidation must retain the numeric execution path too:
+                // a drag revises the document on every evaluated frame.
+                if self.errors.is_empty()
+                    && let Some(n) = plan.scalar(state.from, time)
+                {
+                    return Ok(JsValue::Number(n));
+                }
+                let plan = plan.clone();
+                let from = state.from;
+                self.eval_expression_plan(cx, layer, &address, plan, from, time)
+            }
             Plan::Live { .. } => self.ev_address(cx, layer, &address, time),
         }
+    }
+
+    fn eval_expression_plan(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        address: &PropAddress,
+        plan: ExpressionPlan,
+        from: f64,
+        time: f64,
+    ) -> JsResult<JsValue> {
+        let tl = time - from;
+        // A keyed base's prepared track answers finite times; the scalar plan
+        // then needs no node either. Errors elsewhere in the document only
+        // mean this channel's own entry must be cleared like `evaluate` does.
+        if let Some(n) = plan.scalar(from, time) {
+            self.clear_error(cx, Some(layer), &address.key);
+            return Ok(JsValue::Number(n));
+        }
+        let track = plan
+            .track
+            .as_ref()
+            .filter(|_| tl.is_finite())
+            .map(|track| track.value(tl));
+        let value = match (plan.value, track) {
+            (Some(value), _) => value,
+            (None, Some(value)) => value,
+            (None, None) => {
+                let prop = match &address.via {
+                    Via::Channel => {
+                        node::member(node::member(Some(layer), "p"), &key_str(&address.key))
+                    }
+                    Via::Member(path) => member_path(layer, path),
+                    Via::Find => address::find_prop(layer, &address.key)?.node(),
+                };
+                self.eval_keyframes(
+                    node::member(prop, "kf"),
+                    tl,
+                    interpolates_color(address.key.as_bytes()),
+                )?
+            }
+        };
+        self.eval_compiled(
+            cx,
+            Some(layer),
+            plan.compiled.as_deref(),
+            value,
+            tl,
+            time,
+            &address.key,
+        )
     }
 
     /// Evaluates an address on its nodes, uncached.
@@ -1170,7 +1529,13 @@ impl Evaluator {
     }
 
     /// Decides how an address evaluates at this revision.
-    fn plan(&mut self, cx: &Comp<'_>, layer: &Node, address: &PropAddress) -> (Plan, f64) {
+    fn plan(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        address: &PropAddress,
+        position: usize,
+    ) -> (Plan, f64) {
         let from = node::to_number(node::member(Some(layer), "from"));
         if self.hooks.overrides_channels() {
             return (Plan::Live { expression: true }, from);
@@ -1211,8 +1576,58 @@ impl Evaluator {
         let Some(p) = prop.node() else {
             return (Plan::Const(Ok(JsValue::Undefined)), from);
         };
-        if node::get(p, b"expr").truthy() {
-            return (Plan::Live { expression: true }, from);
+        let expr = node::get(p, b"expr");
+        if expr.truthy() {
+            // Retain the compiled source in the slot, including keyed bases:
+            // a document with >256 unique sources must not churn the shared
+            // source cache on every frame. The original keyframe evaluator
+            // still answers nonempty tracks at the exact requested local time.
+            let kf = node::member(Some(p), "kf");
+            let keyed = node::array(kf).is_some_and(|keys| !keys.is_empty());
+            // The same preparation `evalKfs` makes on every call; only a
+            // temporal (numeric) track is kept. Other keys read their nodes.
+            let track = if keyed {
+                match PreparedTrack::prepare(kf, &mut self.springs) {
+                    PreparedTrack::Temporal(track) => Some(track),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let source = expr
+                .node()
+                .and_then(|n| node::string(Some(n)))
+                .and_then(|source| self.compiled.get(self.expressions.as_deref(), source));
+            let bound = source.as_ref().and_then(|compiled| {
+                let fps = cx.expression_fps();
+                let value = JsValue::Undefined;
+                let context = ExprContext {
+                    t: 0.0,
+                    time: 0.0,
+                    fps: &fps,
+                    frame: None,
+                    value: &value,
+                    layer: Some(layer),
+                    comp: cx,
+                    channel: &address.key,
+                    idx: if compiled.needs_idx() {
+                        position as f64
+                    } else {
+                        0.0
+                    },
+                };
+                compiled.bind(&context)
+            });
+            return (
+                Plan::Expression(ExpressionPlan {
+                    compiled: bound.clone().or_else(|| source.clone()),
+                    bound: bound.is_some(),
+                    source,
+                    value: (!keyed).then(|| node::get(p, b"v").to_js()),
+                    track,
+                }),
+                from,
+            );
         }
         self.clear_error(cx, Some(layer), &address.key);
         if !kf_length_truthy(&prop) {

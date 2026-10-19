@@ -23,6 +23,28 @@ function harnessEditor(): PMRegistry {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('agent harness oracle', () => {
+  it('queues an arriving native agent evaluation until EngineDoc is ready', async () => {
+    let release!: (ready: boolean) => void;
+    const PM = harnessEditor();
+    const layer = PM.mkLayer('solid');
+    layer.p.opacity = PM.P(10, { kf: [{ t: 0, v: 10, hold: true }, { t: 1, v: 80 }] });
+    PM.proj.layers = [layer];
+    PM.time = 0.5;
+    const answer = vi.fn(PM.evP);
+    PM.evP = answer;
+    PM.EngineDoc = { enabled: true, ready: false, api: { evP: answer }, whenReady: new Promise<boolean>(resolve => { release = resolve; }) };
+    const request = PM.AgentHarness.test.answerLiveAgentTool({ runId: 'boot-agent', callId: 'boot-state', tool: 'get_project_state', arguments: {}, baseRevision: 0 });
+    await Promise.resolve();
+    expect(answer).not.toHaveBeenCalled();
+    PM.EngineDoc.ready = true;
+    release(true);
+    const response = await request;
+    expect(response.ok).toBe(true);
+    expect(answer).toHaveBeenCalled();
+    const state = JSON.parse(response.content[0].text);
+    expect(state.layers[0].properties.find((prop: any) => prop.path === 'opacity').value).toBe(10);
+  });
+
   it('keeps oversized review context valid and directs discovery to complete live pages', async () => {
     const PM = harnessEditor();
     PM.proj.layers = [PM.mkLayer('text', { d: { text: 'Long content '.repeat(20_000) } })];

@@ -163,7 +163,7 @@ Shared with the editor (docs/engine/write-path.md has the details):
 | `detached-prop`, `detached-parent`, `detached-path` | Gone: the channel, parent layer, or path goes to pm-wasm as JSON and is evaluated ad hoc (`hasKeyAt`, `transformParentMatrix`, `parent3D`, `pathValues`, `groupMatrix`); dual answers equal the legacy ones |
 | a non-object where a channel or path belongs | Native: the legacy TypeError and message (`p.kf`, `path.id`, `path.p`, `Object.entries`) thrown before the layer is read, as today |
 | `error:*` | Still counted; `pm-wasm-error` named failure with the new engine on |
-| `unavailable` | Workers never answer before the module is ready (open fails by name). In the editor, the boot window before `whenReady` remains (below) |
+| `unavailable` | Workers never answer before the module is ready (open fails by name). Editor async entry points queue until `whenReady` (B3, below) |
 | `fonts` | Synchronous registry answers and whole faces in workers and the editor; missing faces/services are named failures with Retry |
 | `ink` | Whole faces supply outlines in both hosts |
 | `legacy` (pm-edit `LEGACY_ONLY`, the self-space camera reparent) | Gone: pm-edit answers it natively, reproducing the legacy stale-cache read (docs/engine/pm-edit.md) |
@@ -548,12 +548,12 @@ and activates in its planned order when `EngineDoc.onReady` fires after a
 successful retry (`kernel/loader.ts`, `loader.test.ts`; `strict.test.ts` checks
 `onReady`). Answers never route to the legacy evaluator.
 
-**The remaining boot window.** Only extension activation waits for `whenReady`.
-A kernel or evaluator call from anything else that runs between the UI install and
-module readiness (renderer code, an agent or IPC kernel call) is still a named
-`unavailable` failure under strict. Module compilation overlaps preload, so the
-window is short: every measured launch (rounds 1 to 3, and this round's e2e) had
-zero such failures. It is not proven empty.
+**The boot window (B3).** Async project opens, agent/MCP/CLI renderer
+requests, scripts and IPC/kernel input wait for `whenReady` before evaluating
+the document. File parsing and media restoration overlap module loading. Blank
+project creation and the first scheduled editor frame also wait. A failed load
+keeps its named failure. The B3 follow-up below describes the boundaries and
+verification; synchronous compatibility signatures remain unchanged.
 
 Regression coverage: fresh root wrappers never send compJson and keep one interned
 channel; numeric answers invalidate on a write or dead module; detached scopes
@@ -600,3 +600,170 @@ module reset, JSON host-object serialization and the facade's cached address aft
 a reorder. The mandatory structural/read validation is still linear in the
 actual input set; nanosecond parity is a measured gate, not an implication of
 removing serialization (see `perf.md`).
+
+## B3: async document entries wait for readiness (2026-10-19)
+
+`engine-doc/readiness.ts` is the common async boundary. Live agent tool requests
+(including MCP/CLI renderer calls), project thread requests, script preparation,
+native menu commands and kernel input wait until the first mirror is attached.
+Project file parsing and media restoration happen before this await, retaining
+the overlap. Project tab open, blank-project creation and the first scheduled
+editor frame wait before publishing/evaluating a new document. Queued browser
+key commands are discarded if their kernel is uninstalled before readiness.
+A genuine failed module load keeps the named `pm-wasm-unavailable` error.
+
+Deterministic unit tests hold readiness, require that no evaluation/command runs,
+then release it and verify the existing keyed answer (10) and command. The boot
+e2e holds the actual preload wasm response over a renderer reload, sends a real
+agent IPC request while readiness is false, checks it stays pending, releases
+loading and requires the native answer with no fallback. The five-pair UI/editor
+harness alternates launch order and refuses timing under load above 8; results
+are in `perf.md`.
+
+Compatibility APIs such as `PM.ev` and `api.anim.evP` retain synchronous return
+types. Arbitrary third-party synchronous install code outside these async
+boundaries must still respect readiness; the patch does not claim those direct
+calls can await a promise. Extension activation already waits through its loader.
+
+### Round 4: awaits only while pending, Retry/revival queuing
+
+An unconditional `await waitForDocumentReady(PM)` yields a microtask even when
+the engine is ready or off. A project switch in the same tick as an assistant
+submit then cancelled or rebound the request (the spatial-assistant test
+"keeps the request bound to its original project when switching during send"
+failed). Every entry point now awaits only while `documentPending(PM)` holds
+(engine enabled and not ready): `openProjectFile`, `openFiles`, the New project
+dialog, `openProjectHere`, `newBlankProject`, `pm-open-project`, the first
+scheduled frame, live agent tools (`answerLiveAgentTool`), project thread
+commands, assistant requests (`sendRequest`), script preparation and native
+menu commands. A ready or disabled engine runs them in their original tick, as
+before B3.
+
+`waitForDocumentReady` now waits for `EngineDoc.settled()`: the load attempt in
+flight, whether the boot load, a `retry()` or a revival after a trap. Before,
+it awaited `whenReady`, which had already resolved `false` after a failed boot
+load, so a request arriving during a Retry failed as `pm-wasm-unavailable`
+instead of queuing. Outside strict mode (development modes where the module's
+own fallback answers) a failed load lets the request proceed; with "Use New
+Engine" (strict) it keeps the named failure. `readiness.test.ts` covers the
+pending, failed, Retry-in-flight, non-strict, ready and disabled cases.
+
+The disk-space guard (`requireEngineDiskSpace`) is limited to the opt-in
+measurement tests again; the ordinary boot tests (extension activation, agent
+at launch) no longer fail on a machine with less than 40 GiB free.
+
+### Round 4 review fixes: first-frame recovery, app commands, keys during a Retry
+
+**First frame.** The first scheduled editor frame used to wait for the
+document and return for good when the load failed, so a later successful
+Retry left an editor that was never laid out and had no agent assistant. It
+now runs in two parts. `viewerService.layout()` and
+`timelineService.frameView()` read only the panels' measured sizes and always
+run in the frame, as before B3. The part that reads the document (the
+`layers`/`sel` announcements, the inspector refresh, `invalidate('all')` and
+`('status')`, `SpatialAssistant.init()` and the first `persistCurrent` and
+`projects:open`) runs once: in the frame when the document can answer, when
+the pending load settles ready, or, after a failed load, from
+`EngineDoc.onReady` when a Retry or a revival succeeds. `onReady` now also
+fires after an asynchronous revival (and the timer's synchronous revival),
+not only after `retry()`; the extension loader's listener disposes itself
+after its first call, so it is unaffected.
+
+**Keys and menu commands.** Keys, trusted keys from sandboxed panels and
+native menu commands go through `runCommandWhenReady` (`readiness.ts`).
+App commands never read or write the document and always run:
+`settings` (where "Use New Engine" is switched off), `palette`, `agent`,
+`projects`, `open`, `newProject`, `closeTab`, `nextTab`, `previousTab` and
+`moveTabToNewWindow`. The opening commands reach their own open paths, which
+wait for the document. Every other command, including any extension command,
+is a document command (the safe default). It runs at once when the document
+can answer. While a load is in flight (boot, Retry or revival) it is queued on
+`EngineDoc.settled()` and runs in order once that settles. Before, the kernel
+waited on `whenReady`, which had already resolved during a Retry, so keys
+pressed then were dropped. If the load failed under strict, the command does
+not run and the named failure is shown again. The kernel's no-op `.then` and
+the shim's `.catch(() => {})` used to drop these silently. Window roles,
+Hide and Quit are native menu roles and never reach the renderer.
+
+**Named failure, never silent.** `EngineDoc.showFailure()` shows the newest
+`pm-wasm-unavailable` notice again, with Retry. It uses the same toast key, so
+it replaces the notice rather than stacking, and it does not add to
+`failures()`. `waitForDocumentReady` calls it whenever it rejects under
+strict. So every async entry point that used to rely on the first notice now
+shows it again: project open, New project, blank project, `pm-open-project`,
+`openProjectHere`, agent tools and scripts.
+
+Tests: `legacy/app.test.ts` covers the ready first frame, then a failed load
+followed by Retry: layout in the frame, then `SpatialAssistant.init`, the
+inspector refresh and `layers`/`sel`/`projects:open` exactly once after the
+Retry, and not again on a second readiness. `kernel/install.test.ts` covers
+Settings by shortcut after a failed load, a document key showing the named
+failure, a key pressed during a Retry that runs after it, and trusted panel
+keys. `legacy/host/electron-shim.test.ts` covers Settings by menu after a
+failed load, document menu commands showing the failure, and a menu command
+during a Retry. `engine-doc/strict.test.ts` covers the real EngineDoc: a
+failed load, the repeated named notice with Retry, and a command queued
+during a real `retry()` that runs once it is ready. `readiness.test.ts`
+covers the classification and the queue.
+
+### Round 5 review fix: field editing and save after a failed load
+
+Round 4 left the field-editing commands classed as document commands. After
+a failed strict load `documentPending()` stays true, so they were queued, the
+queue rejected, and they never ran, for as long as the load stayed failed
+(not only during the load window, as round 4 stated). The default keymap
+binds Cmd/Ctrl+V to `contextPaste` and Escape to `blurField`, both with
+`inFields: true`. The key listener took the queued `undefined` as handled and
+called `preventDefault`, so Cmd+V in every text field (Settings, the agent
+composer, rename, extension panels through trusted keys) and Escape-to-blur
+stopped working, each press showing the failure notice. The Edit menu's
+Copy/Cut/Paste/Undo/Redo/Select All were blocked the same way, and Cmd+S and
+File > Save could no longer save.
+
+Now `blurField`, the six `context*` Edit commands, `save` and `saveAs` are
+app commands as well. `blurField` only blurs. Each `context*` command runs
+its native field edit (`nativeEdit`) at once when a text field or text
+selection owns it, exactly as before, and wraps only its document fallback
+(`undo`, `redo`, `cutLayers`, `copyLayers`, `selectAll`, `pasteLayers`, and
+the media paste, which imports into the project) in `runWhenDocumentReady`,
+so that fallback waits for a load in flight and shows the named failure
+after a failed one. Save writes the JavaScript project, which needs no
+module (`EngineDoc.check` returns null until it is ready), so the shortcut
+and menu now save like the toolbar does. An app command id counts only while
+its built-in (`legacy`-owned) definition is active: an extension that
+overrides one of these ids gets the document-command default, since a
+command carries no metadata saying whether it reads the document. A deferred
+command that returns a rejecting promise is now logged rather than left
+unhandled.
+
+Tests: `legacy/__tests__/failed-load-field-keys.test.ts` drives the real key
+listener, built-in commands and default keymap after a failed strict load:
+Cmd+V in a focused input reaches the native paste and Escape blurs it with no
+failure notice; the six Edit-menu items edit the field natively; without a
+field, Cmd+V and Undo do not paste media or layers and show the failure;
+Cmd+S and Save As save; an extension override of `contextPaste` waits. It
+fails on the round 4 code (3 of 4 cases). `electron-shim.test.ts` and
+`readiness.test.ts` cover the menu path and the classification.
+
+Still open: while a document command is queued, the kernel's key listener
+treats the key as handled, so an `inFields` or contextual document binding
+cannot decline while a load is in flight or after it failed. The built-in
+field bindings no longer reach that path; an extension's own `inFields`
+binding to a document command still does.
+
+What remains:
+
+- Direct synchronous compatibility calls outside these async boundaries
+  (third-party install code calling `PM.ev` before readiness) still need a
+  ready host; their signatures stay synchronous.
+- Two agent-context reads still call legacy `PM.evP` with the setting on:
+  the `get_3d_scene` channel digest (`legacy/assistant/harness.ts`) and the
+  spatial assistant's control-type probe (`legacy/assistant/spatial.ts`,
+  `properties.*` paths). `propertyDigest` already reads through
+  `PM.EngineDoc.api`. Routing these two needs strict-mode coverage for 3D and
+  modeling layers' channels (a strict fallback throws instead of answering),
+  so this lane records them for the derouter lane rather than changing them
+  untested.
+- The final-code boot e2e (agent at launch, evaluation at once) and the five
+  alternating time-to-UI/editor-open pairs run under pm-electron-lock in the
+  orchestrator's measurement window; see `perf.md`.
