@@ -281,6 +281,8 @@ export interface LockedIntentEntry {
 }
 
 interface LayerBase<T extends LayerType, D extends object> {
+  /** Absent/1 preserves the shipped engine; 2 opts into native semantics. */
+  compat?: 1 | 2;
   id: string;
   type: T;
   name: string;

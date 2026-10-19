@@ -16,8 +16,10 @@ import { textProjects } from './text';
 import { timeProjects } from './time';
 
 export type { CorpusProject } from './common';
+export { textLevel2Projects } from './text-level2';
 
-/** Every synthetic corpus project, in a stable order. */
+/** Every legacy-reference synthetic corpus project, in a stable order.
+ * Native-only text has a CoreText/semantic reference (`textLevel2Projects`). */
 export function allProjects(): CorpusProject[] {
   const projects = [
     ...layerProjects(), ...shapeProjects(), ...textProjects(), ...animationProjects(),

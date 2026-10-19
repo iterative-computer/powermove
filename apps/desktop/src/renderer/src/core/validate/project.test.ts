@@ -7,6 +7,15 @@ import { describe, expect, it } from 'vitest';
 import { TYPE_META, type Channel, type Layer, type Project } from '../types/project';
 import { sanitizeProject } from './project';
 
+it('preserves explicit text compatibility on root and nested layers without adding it to existing layers', () => {
+  const layer = (id: string, compat?: number) => ({ id, type: 'text', ...(compat === undefined ? {} : { compat }), d: { text: 'Native typography' } });
+  const result = sanitizeProject({ layers: [layer('old'), layer('one', 1), layer('two', 2)],
+    comps: { child: { id: 'child', layers: [layer('nested', 2)] } } });
+  expect(result.layers.map(l => l.compat)).toEqual([undefined, 1, 2]);
+  expect(result.comps.child?.layers[0]?.compat).toBe(2);
+  expect(sanitizeProject(JSON.parse(JSON.stringify(result))).layers.map(l => l.compat)).toEqual([undefined,1,2]);
+});
+
 interface LegacyPM {
   proj?: unknown;
   mkProject(options?: Record<string, unknown>): Record<string, unknown>;

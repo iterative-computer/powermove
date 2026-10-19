@@ -10,7 +10,7 @@ import { LEGACY_GLOBAL, RETIMING_MODULE, TEXT_ANIMATION_MODULE, legacyScript } f
 import { FIXTURE_FILES, GENERATED_MEDIA, mediaRefs, MISSING_MEDIA, resolveMedia } from '../src/media';
 import { readFloat, straightTopDown, writeFile, writeFloat, writePng } from '../src/output';
 import { decodePng, encodePng } from '../src/png';
-import { allProjects } from '../src/projects';
+import { allProjects, textLevel2Projects } from '../src/projects';
 import { validateDocument } from '../src/validate';
 import { verifyCapture } from '../src/verify';
 
@@ -41,6 +41,26 @@ const channelValues = (value: any): unknown[] => value && typeof value === 'obje
 const isLayer = (node: any) => typeof node.type === 'string' && typeof node.id === 'string' && 'p' in node && 'fx' in node;
 
 describe('synthetic documents', () => {
+  test('level 2 text cases retain their native semantics in the generated corpus', () => {
+    const native = textLevel2Projects();
+    expect(native).toHaveLength(8);
+    expect(validateAll(native)).toEqual([]);
+    for (const item of native) {
+      expect(item.doc.layers[0].compat).toBe(2);
+      expect(item.samples).toEqual([0, .25, .75, 2.5]);
+    }
+    expect(native.some(item => item.doc.layers[0].d.animators?.length)).toBe(true);
+    expect(native.some(item => item.doc.layers[0].d.styles?.length)).toBe(true);
+    expect(native.some(item => item.doc.layers[0].d.fontAnchorBounds)).toBe(true);
+    const dir = temp('native-text');
+    try {
+      expect(generateCorpus(dir,native).projects).toHaveLength(8);
+      for (const item of native) {
+        const document = JSON.parse(readFileSync(path.join(dir,'projects',item.id,'document.json'),'utf8'));
+        expect(document.layers[0].compat).toBe(2);
+      }
+    } finally { rmSync(dir,{ recursive:true, force:true }); }
+  });
   test('every document is a fixed point of sanitizeProject', () => {
     expect(validateAll(projects)).toEqual([]);
   });

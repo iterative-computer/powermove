@@ -19,7 +19,7 @@ anchors are `pm-eval`'s (`docs/engine/pm-eval-layers.md`).
 | Apple Color Emoji (`sbix`), drawn by CoreGraphics and placed as Canvas2D places it | Drawn, pixel-identical | `emoji` group (6 to 160 px) |
 | Caption boxes, 4× multisampled as the GPU canvas fills paths | Drawn (3 to 9 pixels per case still differ at the corners) | `caption-boxed`, `caption-paper` |
 | RTL and complex scripts the level 1 layout shapes (Arabic, Hebrew, Devanagari, Thai, CJK) | Drawn | `scripts` group |
-| `compat` level 2 text and captions, at output resolution | Simple content draws with level 2 fonts; animated/ranged/typography semantics remain assigned to textl2 (below) | `tests/text_level2.rs` |
+| `compat` level 2 text and captions, at output resolution | Drawn; text includes range typography, animators and typography anchoring through the shared evaluated frame | `tests/text_level2.rs`, `tests/text_level2_semantics.rs` |
 | Text and caption colors: hex, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `hwb()`, named colors, `transparent`; rejected strings keep the style `save()` restored, as the canvas does | Drawn | `pm_text::render::color` tests (values checked against Chromium's `fillStyle`), `tests/text_colors.rs` |
 | CSS Color 4/5 (`lab`, `lch`, `oklab`, `oklch`, `color`, `color-mix`, relative colors, `calc`, `currentcolor`) and detached-canvas system colors | Drawn; invalid `light-dark()` retains the restored paint, as today | `tests/text_colors.rs`, closure capture (74 colors) |
 | Color vector glyphs (`COLR` v0 and v1) | Fontations paint graph rasterized natively; 12 captured glyph runs draw, two still fail exactness | `render/colr.rs`, `tests/text_raster.rs` |
@@ -73,11 +73,12 @@ whole canvas pixels); the quad shrinks to that crop, which samples
 identically because the rest of the canvas is transparent.
 
 **Level 2** (`compat ≥ 2`) draws without a raster: level 2 layout (Parley,
-`TextFonts::level2`) through the layer's world matrix (size anchor
+`pm_eval::text_level2`) through the layer's world matrix (size anchor
 included) straight into output pixels, with the CoreText profile and exact
 positions (`Quad::Device`). Level 2 captions use the same caption frame at
-output resolution. Animated or range-styled text and typography anchoring
-at level 2 are refused.
+output resolution. Range typography participates in layout before selectors
+and glyph transforms. The same frame supplies bounds and picks. The
+compatibility raster API paints that frame at the requested density too.
 
 ## Rendering
 
@@ -362,10 +363,11 @@ viewer presenter (`ViewDocument::set_fonts`), the job engine
 (`StillRouting::with_fonts`, `plan_export_with_fonts`), and `pm-cli` use the
 check with fonts when their renderers have them, so text and captions no
 longer route there.
-After the compclose integration merge, simple level 2 text can draw, but
-animated/range-styled and typography-anchored level 2 content remains
-refused (a `Feature::Text` compat-level-2 reason). Semantic closure belongs
-to textl2. This lane does not implement level 2 bounds, picks or anchors.
+The textl2 lane removes the animated/range-styled and typography-anchored
+level 2 refusal after implementing them in the shared evaluated frame.
+`text_level2_semantics` exercises eight native-only corpus projects and
+fails actual forbidden routing; renderer and geometry failures remain named
+failures. Production served fonts supply their Parley layouts lazily.
 `Renderer::set_captions_hidden` is `PM.captionsHidden`
 (exports with `captionsBurn: false`).
 
@@ -1133,6 +1135,49 @@ worker, under the Electron lock. Native typing p95 in that run:
 missed keys; the paired comparison with legacy stays with the performance
 lane.
 
+## Level 2 semantic closure (textl2)
+
+The shared `pm-eval` frame now shapes range typography before wrapping,
+poses glyphs for range/stagger/wave animators, and anchors the resting styled
+ink. Native painting, compatibility raster output, bounds, picks and caret
+queries use this frame. The level 2 text capability refusals are removed.
+Level 1 paths and all approved FONTS-R limits are unchanged.
+
+Verification on macOS, 2026-10-19:
+
+- `text_level2_semantics`: all eight shared synthetic projects, four times
+  each (32 frames), actual forbidden-routing assertion, no rendering or
+  geometry failure. Sixteen CoreText comparisons have minimum ink SSIM
+  **0.9931**, above the existing **0.98** requirement. Exact translation
+  invariants and resting-anchor movement pass. The compatibility raster API
+  paints all eight projects too.
+- The unchanged release text gates pass **618 raster cases** and **576
+  composed frames**, with all **23 FONTS-R measurements identical** and all
+  **12 ratchet contract tests passing**. GPU text, emoji, blur, captions,
+  colors and the original level 2 smoke gate pass. No tolerance, residual
+  fixture or reference capture was changed.
+- Range layout/UTF-16/subset tests: **10 passing** in debug and release.
+  Cold-font/query tests: **5 passing** in debug and release. The evaluation
+  corpus reports no mismatched text layouts (**6162**), bounds (**2157**) or
+  raster metrics (**2157**); layer parity and all **11** layer-unit tests pass.
+- With the new-engine and native-font flags on, the app matrix passes
+  **17/17**: canvas editing, captions/burn-in, font anchoring, split text,
+  animators, resizing, and the new native level 2 test. The latter takes
+  **24 snapshots** across all eight projects and checks native bounds,
+  glyph/caret layout and picks with **zero geometry fallback increments**.
+- Corpus validation/generation tests: **22 passing**; corpus typecheck
+  passes. Project sanitizer tests: **14 passing**. Svelte check reports
+  **0 errors**, with its existing IconCropper warning.
+- Both native addons load after the release build, and the WASM build
+  succeeds. These release checks use `CARGO_PROFILE_RELEASE_LTO=false`;
+  the shipping LTO profile was not verified by this lane.
+
+The new native corpus is generated with `--native-text` (see `text.md`). It
+runs unconditionally against CoreText and semantic invariants. Existing
+Canvas2D level 1 references remain the legacy-reference catalog. Range
+indices are UTF-16 and snap to grapheme starts; a shaped ligature follows
+its first logical grapheme's pose. Those are deliberate level 2 semantics.
+
 ## Gaps
 
 FONTS-R governs the 23 nonzero Round 6 residual checks. They pass only at
@@ -1179,11 +1224,9 @@ captures unchanged. The separate capture-transport fixes are described above.
   although every native scenario remains under 33 ms. The performance lane
   owns the full engine's no-regression typing requirement. The paired
   measurement exposes the gap alongside the absolute budget.
-- Level 2 anchoring, animated/ranged semantics, bounds and picks are
-  explicitly assigned to **textl2** by decision C. This lane adds no level 2
-  semantics or routing removal. The final compclose integration merge
-  classifies its remaining animated/ranged/typography-anchor refusals as
-  `Feature::Text` with a compat-level-2 reason; those remain failing routes.
+- Level 2 semantics are implemented by **textl2** (see `text.md`). Its
+  native-only corpus and app checks are separate from the level 1 captures;
+  existing projects retain their compatibility level and FONTS-R budgets.
 - `Feature::Text` remains for a renderer without fonts, unparsed styles or
   an unanswered registry query; the derouter owns retiring that machinery.
 - Font-cache entries from pseudo-element text and cache purges under
@@ -1206,6 +1249,20 @@ captures unchanged. The separate capture-transport fixes are described above.
   reports missing bitcode.
 
 ## Changes outside the lane
+
+2026-10-19 (lane ne-textl2):
+
+- `apps/desktop/src/renderer/src/core/{types,validate}/project.ts`:
+  retain explicit layer compatibility through project sanitizing and save
+  round trips; absent compatibility stays absent for existing projects.
+- `engine/corpus/src/{generate,projects/index}.ts`: expose the separate
+  native text catalog and its generation switch, preserving the legacy
+  capture list.
+- `apps/desktop/scripts/build-engine-addon.mjs`: install each built addon
+  through a same-directory temporary file and atomic rename. An overlapping
+  app run exposed in-place binary replacement; addon verification and the
+  complete 17-test app rerun pass with atomic installation.
+
 
 2026-10-19 (lane ne-fonts, round 8):
 

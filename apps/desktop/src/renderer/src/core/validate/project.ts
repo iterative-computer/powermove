@@ -501,6 +501,7 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
   const layer = {
     id,
     type,
+    ...(source.compat === 1 || source.compat === 2 ? { compat: source.compat } : {}),
     name: nonEmptyStringOr(source.name, `Layer ${index + 1}`),
     from: Math.max(type === 'group' ? -Infinity : 0, finite(source.from)),
     dur: Math.max(0.01, finite(source.dur, 5)),

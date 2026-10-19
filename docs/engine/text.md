@@ -435,6 +435,47 @@ symbols) appended to every script, the emoji family, and every face those
 families need with the name to add it under (hidden system families have no
 public name). In `pm-wasm` the bytes are subsets.
 
+### Level 2 text semantics (textl2)
+
+`pm_eval::text_level2` evaluates range typography, Parley layout, selector
+weights, shaped glyph poses and typography anchors as one frame. Rendering,
+`textRaster`, bounds, picks, glyph units and the editor's caret layout all
+consume it. Level 1 retains its original measurement and raster paths.
+
+`TextMeasure::level2` resolves base and range typography through the existing
+registry/replay boundary and resolves the needed script fallback faces before
+building a Parley collection. Collections split into single-face files once
+per font identity. A missing named family uses the registry's system UI
+fallback, as the original level 2 manifest does. Explicit variable sources
+are retained. Production served fonts use this path; it does not require the
+test-only eager `Level2Fonts` collection. Existing host font-generation
+rebuilds invalidate the split-face cache.
+
+Ranges retain UTF-16 indices and authored overlap order, snap to grapheme
+starts, and affect shaping, wrapping and metric baselines (including spaces).
+Parley records each shaped glyph's source. Ligatures remain shaped; their
+glyphs follow the first logical grapheme's pose. Selectors retain stagger,
+range and wave modes, character/word/line units, ordering, easing and split
+offsets. Equal poses share one paint operation. Typography anchoring uses
+resting styled bounds, so it never cancels animator movement. Bounds and
+picks follow posed glyphs and blur reach.
+
+Cold WASM queries return `fonts` before reporting a failed level 2 shape,
+allowing the normal font handshake to converge. No provisional geometry is
+returned. Carets use Parley's UTF-16 boundaries and metric baselines. The
+sanitizer preserves explicit layer `compat` 1/2 without adding it to old layers.
+
+Eight `text-level2/*` corpus projects share a synthetic fixture with the
+native semantic gate and native-on app e2e. The semantic gate invokes the
+actual `support::routing_forbidden` predicate and refuses any escape. Level 2
+uses its CoreText comparison and semantic invariants; the level 1 Canvas2D
+references and FONTS-R fixture remain unchanged.
+Generate their standalone corpus with
+`bun engine/corpus/src/generate.ts --native-text --out <outside-repo-dir>`.
+`textLevel2Projects` is the native-reference catalog; `allProjects` is the
+legacy-reference catalog. All eight native projects run unconditionally in
+`text_level2_semantics`, without private captures or a routing exemption.
+
 ## Gates and how to run them
 
 `engine/crates/pm-text/scripts/check.sh` runs everything:
