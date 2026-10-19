@@ -34,6 +34,8 @@ async function project(page: Page): Promise<void> {
     project.layers = [box, disc];
     PM.replaceProject(project);
     PM.Projects?.put?.(PM.proj);
+    PM.Kernel.services.get('viewer')?.returnToComposition();
+    PM.setTime(.5, { force: true });
   });
 }
 
@@ -129,6 +131,11 @@ test.describe('Use New Engine: the compatibility context', () => {
       };
       out.mechanism = compare(flipped, onScreenPixels);
       out.readback = compare(engine, today);
+      out.content = { engine: 0, today: 0 };
+      for (let i = 0; i < engine.length; i += 4) {
+        if (engine[i + 1]! > 150 && engine[i]! < 100) (out.content as any).engine++;
+        if (today[i + 1]! > 150 && today[i]! < 100) (out.content as any).today++;
+      }
       // Where the engine's frame and today's canvas differ by more than 4.
       const rows = new Map<number, number>();
       for (let i = 0; i < engine.length; i += 4) {
@@ -172,6 +179,8 @@ test.describe('Use New Engine: the compatibility context', () => {
     // Reading back gives the frame on screen exactly (bottom row first, opaque).
     expect((result.mechanism as any).max).toBe(0);
     expect(result.alphaOpaque).toBe(true);
+    expect((result.content as any).today, 'reference contains the green project shape').toBeGreaterThan(100);
+    expect((result.content as any).engine, 'engine readback contains project pixels').toBeGreaterThan(100);
     // Drawing: shown over the engine's canvas, at the bound canvas's place, as today's canvas would show it.
     const layer = result.layer as any;
     expect(layer.shown).toBe(true);
