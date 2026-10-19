@@ -55,6 +55,8 @@ pub const MAX_QUEUED_PER_SESSION: usize = 16;
 /// Most pixels one snapshot renders (an 8K UHD frame is 33.2 million). The
 /// render target (binary16) and its readback take 12 bytes a pixel.
 pub const MAX_PIXELS: u64 = 40_000_000;
+/// Today's layer bitmap cap, independent of a full-frame capture's 40 MP.
+pub const MAX_LAYER_PIXELS: u64 = 8192 * 8192;
 /// Most bytes of results queued or published in shared memory and not yet
 /// taken by main.
 pub const MAX_PENDING_BYTES: u64 = 1 << 30;
@@ -219,15 +221,15 @@ pub enum Ready {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refused {
     Full,
-    TooLarge(u64),
+    TooLarge { pixels: u64, limit: u64 },
 }
 
 impl Refused {
     pub fn message(&self) -> String {
         match self {
             Refused::Full => "Too many snapshots are waiting; try again when they finish.".into(),
-            Refused::TooLarge(pixels) => {
-                format!("A {pixels}-pixel snapshot is over the engine's {MAX_PIXELS}-pixel limit.")
+            Refused::TooLarge { pixels, limit } => {
+                format!("A {pixels}-pixel snapshot is over the engine's {limit}-pixel limit.")
             }
         }
     }
@@ -288,8 +290,16 @@ impl SnapshotQueue {
     pub fn push(&mut self, job: SnapshotJob) -> Result<(), Box<(SnapshotJob, Refused)>> {
         let size = job.request.output_size;
         let pixels = u64::from(size.width) * u64::from(size.height);
-        if pixels > MAX_PIXELS {
-            return Err(Box::new((job, Refused::TooLarge(pixels))));
+        let limit = if matches!(
+            job.request.target,
+            pm_protocol::snapshot::SnapshotTarget::Layer { .. }
+        ) {
+            MAX_LAYER_PIXELS
+        } else {
+            MAX_PIXELS
+        };
+        if pixels > limit {
+            return Err(Box::new((job, Refused::TooLarge { pixels, limit })));
         }
         self.reclaim_published();
         let per_session = self.jobs.iter().filter(|j| j.key == job.key).count();
@@ -693,7 +703,10 @@ mod tests {
             .unwrap();
         let mut big = job(SnapshotClass::Sync, key(4, 1), None, 0);
         big.request.output_size = Size::new(16_000, 16_000);
-        assert!(matches!(q.push(big).unwrap_err().1, Refused::TooLarge(_)));
+        assert!(matches!(
+            q.push(big).unwrap_err().1,
+            Refused::TooLarge { .. }
+        ));
         // Memory: outstanding results retain the same hard cap. Main taking
         // a result releases its charge immediately, without waiting 60 s.
         let mut m = SnapshotQueue::default();
@@ -709,6 +722,37 @@ mod tests {
         );
         assert_eq!(pm_bridge::shm::take(&name, 16).unwrap(), vec![7; 16]);
         assert!(m.push(job(SnapshotClass::Sync, key(3, 1), None, 0)).is_ok());
+    }
+
+    #[test]
+    fn layer_bitmaps_retain_todays_8192_square_cap_without_raising_frame_limits() {
+        let mut q = SnapshotQueue::default();
+        let mut frame = job(SnapshotClass::Sync, key(9, 1), None, 0);
+        frame.request.output_size = Size::new(8192, 8192);
+        assert!(matches!(
+            q.push(frame).unwrap_err().1,
+            Refused::TooLarge {
+                limit: MAX_PIXELS,
+                ..
+            }
+        ));
+        let mut layer = job(SnapshotClass::Sync, key(9, 1), None, 0);
+        layer.request.output_size = Size::new(8192, 8192);
+        layer.request.target = pm_protocol::snapshot::SnapshotTarget::Layer {
+            layer: "label".into(),
+            scale: 32.0,
+            crop: None,
+            content: None,
+        };
+        q.push(layer.clone()).unwrap();
+        layer.request.output_size = Size::new(8193, 8192);
+        assert!(matches!(
+            q.push(layer).unwrap_err().1,
+            Refused::TooLarge {
+                limit: MAX_LAYER_PIXELS,
+                ..
+            }
+        ));
     }
 
     #[test]

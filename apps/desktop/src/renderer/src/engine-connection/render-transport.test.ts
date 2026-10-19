@@ -294,7 +294,7 @@ describe('EngineRenderTransport', () => {
     const { transport, asked } = setup([raster, { status: 'empty', revision: 12 }, { status: 'failed', code: 'unsupported', message: 'not text' }]);
     const surface = transport.rasterSync('T1', 2, 0.5, { x: 0, y: 0, width: 3, height: 2 });
     expect(surface).toMatchObject({ width: 3, height: 2, origin: [4, 5], layerBox: [3, 2] });
-    expect(asked[0]!.snapshot).toMatchObject({ target: { kind: 'layer', layer: 'T1', scale: 2, crop: { x: 0, y: 0, width: 3, height: 2 } }, pixels: 'premultiplied', outputSize: { width: 6000, height: 6000 } });
+    expect(asked[0]!.snapshot).toMatchObject({ target: { kind: 'layer', layer: 'T1', scale: 2, crop: { x: 0, y: 0, width: 3, height: 2 } }, pixels: 'premultiplied', outputSize: { width: 8192, height: 8192 } });
     expect(transport.rasterSync('T1', 1, 0.5)).toBeNull();
     expect(() => transport.rasterSync('S1', 1, 0.5)).toThrow(EngineSnapshotError);
     // An empty raster is not a failure.
