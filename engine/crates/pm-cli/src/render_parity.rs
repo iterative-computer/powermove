@@ -56,6 +56,11 @@ pub struct Options {
     /// caches and require bit-identical float buffers (section 2,
     /// "Determinism").
     pub determinism: bool,
+    /// Chromium's level 1 SVG rasters captured to a directory
+    /// (`--svg-rasters`, decision S1): drawn from there, and the ones not
+    /// captured are listed in its `needs.json`. Without it SVG images are
+    /// resvg's approximation, reported as such.
+    pub svg_rasters: Option<PathBuf>,
 }
 
 #[derive(Serialize, Default)]
@@ -70,6 +75,10 @@ pub struct Report {
     /// Samples rendered twice (`--determinism`) and how many differed.
     pub determinism_checked: usize,
     pub determinism_failed: usize,
+    /// Projects whose level 1 SVG images resvg approximated (no
+    /// `--svg-rasters`), and Chromium rasters still to capture.
+    pub approximate_svg: Vec<String>,
+    pub svg_rasters_missing: usize,
 }
 
 #[derive(Serialize)]
@@ -559,6 +568,17 @@ pub fn run(options: &Options) -> Result<Report, String> {
         );
     }
     let mut renderer = Renderer::headless().map_err(|e| e.to_string())?;
+    // Level 1 SVG images (decision S1): Chromium's captured rasters, or
+    // resvg's approximation; never a frame drawn without one.
+    renderer.set_svg_wait(true);
+    let svg_dir = options
+        .svg_rasters
+        .as_ref()
+        .map(|d| std::sync::Arc::new(pm_render::vector::svg_rasters::RasterDir::new(d)));
+    match &svg_dir {
+        Some(dir) => renderer.set_svg_source(Some(dir.clone())),
+        None => renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg),
+    }
     let mut report = Report {
         captures: options
             .captures
@@ -671,6 +691,7 @@ pub fn run(options: &Options) -> Result<Report, String> {
                 continue;
             }
             interpret_videos(&mut renderer, &p);
+            let approximated = renderer.svg_approximated();
             for s in &p.samples {
                 for r in compare_sample(
                     &mut renderer,
@@ -694,6 +715,9 @@ pub fn run(options: &Options) -> Result<Report, String> {
                     }
                     report.frames.push(r);
                 }
+            }
+            if renderer.svg_approximated() > approximated {
+                report.approximate_svg.push(p.name.clone());
             }
             renderer.trim(256 << 20);
         }
@@ -722,6 +746,24 @@ pub fn run(options: &Options) -> Result<Report, String> {
             "determinism: {} samples rendered twice (caches dropped), {} differed",
             report.determinism_checked, report.determinism_failed
         );
+    }
+    if !report.approximate_svg.is_empty() {
+        eprintln!(
+            "{} ({} projects; pass --svg-rasters with Chromium's captured rasters to compare them)",
+            crate::render::approximate_svg_notice(renderer.svg_approximated()),
+            report.approximate_svg.len()
+        );
+    }
+    if let Some(dir) = &svg_dir {
+        report.svg_rasters_missing = dir.missing().len();
+        if report.svg_rasters_missing > 0 {
+            let listed = dir.write_needs().map_err(|e| format!("needs.json: {e}"))?;
+            eprintln!(
+                "svg rasters: {} not captured; {listed} listed in {}/needs.json",
+                report.svg_rasters_missing,
+                options.svg_rasters.as_ref().expect("set").display()
+            );
+        }
     }
     if let Some(path) = &options.json {
         let text = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;

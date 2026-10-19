@@ -48,6 +48,7 @@ pub mod scene;
 pub mod shader_fallback;
 pub mod slicing;
 pub mod snapshot;
+pub mod svg_raster;
 pub mod validate;
 pub mod version;
 

@@ -250,6 +250,11 @@ export type EngineSnapshotRequest = {
   /** Shader fallback pixels drawn for an earlier `needsRenderer` answer of
    *  a `document` snapshot (a window's own session gets them on its port). */
   fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];
+  /** Level 1 SVG rasters (premultiplied RGBA8, top-down) drawn for an
+   *  earlier `needsRenderer` answer of a `document` snapshot: main posts
+   *  them on its session for the window before asking again (the window
+   *  may have no session of its own yet; decision S1). */
+  svgPixels?: { key: import('./engine-protocol').SvgRasterKey; data: Uint8Array }[];
 };
 
 export type EngineSnapshotDocument = { id: string; revision: number; hash?: string | null; json?: Uint8Array | null };
@@ -291,6 +296,8 @@ export type EngineSnapshotReply =
        *  texture, as the engine sent them to main ahead of the answer
        *  (main/engine/fallback-inputs.ts). */
       fallbackTextures?: { key: string; textures: Uint8Array[] }[];
+      /** Level 1 SVG rasters to draw and post before asking again (decision S1). */
+      svg?: import('./engine-protocol').SvgRasterRequest[];
     }
   | { status: 'empty'; revision: number }
   | { status: 'failed'; code: string; message: string };
@@ -298,6 +305,11 @@ export type EngineSnapshotReply =
 /** main → renderer: compatibility pixels the job engine needs for an export
  *  frame (contract 14 `compatFrame`). */
 export type EngineCompatAsk = { ask: number; request: import('./engine-protocol').CompatFrameRequest };
+
+/** A window's `unavailable` answer when another document is open there:
+ *  main keeps the more useful reason (the named S1 message, or another
+ *  window's) when every window says no. */
+export const OTHER_DOCUMENT_OPEN = 'This window has another document open.';
 
 /** renderer → main: the answer to an `EngineCompatAsk`. */
 export type EngineCompatAnswer =

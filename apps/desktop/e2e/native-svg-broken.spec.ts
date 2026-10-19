@@ -1,8 +1,8 @@
 /* Broken persisted SVG assets have the same empty paint as today's <img>.
    Documents roxmltree rejects but Chromium's libxml2 paints (DTD external
    subsets, parameter and external entities) must not be mistaken for broken
-   ones: they stay an explicit unsupported SVG image on level 1 until valid
-   SVG paint parity lands. This does not establish that parity. */
+   ones: Chromium draws level 1 SVG images for the engine (decision S1,
+   docs/engine/vector.md), so they paint as today, through the engine. */
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -60,10 +60,8 @@ test('corrupt persisted level 1 SVGs paint an empty image through the engine', a
           const status = () => app.page.evaluate(() => {
             const s = (window as any).PM.EngineConnection.status(); return { route: s.route, reason: s.routeReason };
           });
-          // A valid level 1 SVG is an explicit unsupported reason, never an
-          // empty paint.
-          if (native && !valid) await expect.poll(status).toEqual({ route: 'engine', reason: null });
-          if (native && valid) await expect.poll(async () => (await status()).reason ?? '').toMatch(/SVG images/);
+          // Broken or valid, the engine draws it: nothing is routed.
+          if (native) await expect.poll(status).toEqual({ route: 'engine', reason: null });
           await app.page.evaluate(() => {
             const w = window as any; w.__brokenJobs = [];
             w.__brokenOff = w.__powermoveTestBridge.nativeEngine.onExportStatus((s: any) => w.__brokenJobs.push(s));
@@ -73,9 +71,9 @@ test('corrupt persisted level 1 SVGs paint an empty image through the engine', a
           const result = await app.page.evaluate(async () => (window as any).PM.Export.run({ format: 'still', w: 64, h: 64, alpha: true, mblur: false }));
           const jobs = await app.page.evaluate(() => { const w = window as any; w.__brokenOff(); return w.__brokenJobs; });
           await writeFile(path.join(out, `${native ? 'native' : 'legacy'}-${name}.json`), JSON.stringify({ facts, result, jobs, diagnostics: app.diagnostics }, null, 2));
-          // Valid documents name the gate; the export shows today's paint.
-          if (native && valid) expect(jobs.some((j: any) => j.routed && /SVG images/.test(j.error ?? '')), name).toBe(true);
-          if (native && !valid) {
+          // The job engine exports it (valid ones with the window's
+          // rasters), never today's exporter; the export shows today's paint.
+          if (native) {
             expect(jobs.some((j: any) => j.state === 'done' && !j.routed), name).toBe(true);
             expect(jobs.some((j: any) => j.routed), name).toBe(false);
           }

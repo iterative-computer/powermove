@@ -2,8 +2,12 @@
 import type { CompatPixels } from "./CompatPixels";
 import type { CompositionId } from "./CompositionId";
 import type { LayerId } from "./LayerId";
+import type { SvgRasterKey } from "./SvgRasterKey";
+import type { SvgRasterPixels } from "./SvgRasterPixels";
+import type { SvgRasterRequest } from "./SvgRasterRequest";
 
 /**
- * Renderer → interactive engine (session-bound, the viewer's port).
+ * Renderer ↔ interactive engine (session-bound, the viewer's port):
+ * every variant travels from the renderer except `SvgRequests`.
  */
-export type CompatMessage = { "compat": "pixels" } & CompatPixels | { "compat": "forget", composition: CompositionId, layer: LayerId, };
+export type CompatMessage = { "compat": "pixels" } & CompatPixels | { "compat": "forget", composition: CompositionId, layer: LayerId, } | { "compat": "svgRequests", requests: Array<SvgRasterRequest>, } | { "compat": "svgPixels" } & SvgRasterPixels | { "compat": "svgFailed", key: SvgRasterKey, reason: string, message: string, };

@@ -622,6 +622,9 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     };
     install_interrupt();
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+    // No Chromium here: level 1 SVG images are drawn by resvg (decision S1),
+    // an approximation of the app's, reported below.
+    renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
     let (definitions, source) = definitions(options)?;
     if options.definitions.is_none() {
         warn_built_in(&job.document, &job.composition);
@@ -681,8 +684,13 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         })?;
     let r = &delivered.report;
     let seconds = started.elapsed().as_secs_f64();
+    let approximate = renderer.svg_approximated();
+    if approximate > 0 {
+        eprintln!("{}", approximate_svg_notice(approximate));
+    }
     Ok(serde_json::json!({
         "path": delivered.path,
+        "approximateSvg": approximate,
         "codec": r.codec,
         "profile": r.profile,
         "pixelFormat": r.pixel_format,
@@ -755,6 +763,17 @@ fn definitions(
             .map_err(|e| usage(format!("{}: {}: {e}", path.display(), d.id.as_str())))?;
     }
     Ok((set, path.display().to_string()))
+}
+
+/// The named notice for level 1 SVG images pm-cli drew with resvg: the app
+/// draws them with Chromium (decision S1), so these pixels are close to,
+/// not the same as, the app's.
+pub fn approximate_svg_notice(draws: u64) -> String {
+    format!(
+        "pm-cli: notice (approximate SVG): {draws} level 1 SVG image draw(s) were rasterized by \
+         resvg, not Chromium; the app draws SVG images with Chromium, so these pixels approximate \
+         an export from the app"
+    )
 }
 
 fn absolute(p: &Path) -> Result<PathBuf, Failure> {

@@ -146,6 +146,16 @@ fn the_host_snapshots_sessions_it_opened_for_a_window() {
     run_child("child_host_session");
 }
 
+#[test]
+fn level1_svg_snapshots_draw_the_windows_rasters() {
+    run_child("child_svg");
+}
+
+#[test]
+fn a_snapshot_that_fails_on_fonts_leaves_the_viewer_asking_for_svg_rasters() {
+    run_child("child_svg_font_failure");
+}
+
 /// Every message the engine sent, by port.
 #[derive(Default)]
 struct Inbox {
@@ -1000,9 +1010,11 @@ fn child_fallback() {
             revision,
             fallback,
             compat,
+            svg,
         }) => {
             assert_eq!(revision.get(), 1);
             assert!(compat.is_empty());
+            assert!(svg.is_empty());
             fallback
         }
         other => panic!("expected needsRenderer, got {other:?}"),
@@ -1501,7 +1513,11 @@ impl StandInHost {
                 self.cancels.push(job.0.clone());
                 if let Some(i) = self.held.iter().position(|(_, j)| *j == job.0) {
                     let (held, _) = self.held.remove(i);
-                    Self::reply(c, held, Err((ErrorCode::Cancelled, "Blender request cancelled")));
+                    Self::reply(
+                        c,
+                        held,
+                        Err((ErrorCode::Cancelled, "Blender request cancelled")),
+                    );
                 }
                 Self::reply(
                     c,
@@ -1511,7 +1527,11 @@ impl StandInHost {
             }
             other => {
                 eprintln!("stand-in host: unsupported {other:?}");
-                Self::reply(c, id, Err((ErrorCode::Unsupported, "not served by this test")));
+                Self::reply(
+                    c,
+                    id,
+                    Err((ErrorCode::Unsupported, "not served by this test")),
+                );
             }
         }
     }
@@ -1527,12 +1547,14 @@ impl StandInHost {
         loop {
             let actions = c.host.pump();
             c.inbox.push(actions);
-            let request = c.inbox.try_wait(Duration::ZERO, &mut |port, m| match &m.message {
-                Message::Request { id, body } if port == HOST => {
-                    Some((*id, m.session, body.clone()))
-                }
-                _ => None,
-            });
+            let request = c
+                .inbox
+                .try_wait(Duration::ZERO, &mut |port, m| match &m.message {
+                    Message::Request { id, body } if port == HOST => {
+                        Some((*id, m.session, body.clone()))
+                    }
+                    _ => None,
+                });
             if let Some((id, session, body)) = request {
                 self.serve(c, id, session, body);
                 continue;
@@ -1553,14 +1575,14 @@ impl StandInHost {
             assert!(Instant::now() < deadline, "timed out serving Blender");
             let actions = c.host.pump();
             c.inbox.push(actions);
-            let request = c.inbox.try_wait(Duration::from_millis(5), &mut |port, m| {
-                match &m.message {
-                    Message::Request { id, body } if port == HOST => {
-                        Some((*id, m.session, body.clone()))
-                    }
-                    _ => None,
-                }
-            });
+            let request =
+                c.inbox
+                    .try_wait(Duration::from_millis(5), &mut |port, m| match &m.message {
+                        Message::Request { id, body } if port == HOST => {
+                            Some((*id, m.session, body.clone()))
+                        }
+                        _ => None,
+                    });
             if let Some((id, session, body)) = request {
                 self.serve(c, id, session, body);
             }
@@ -1637,7 +1659,11 @@ fn child_blender() {
     assert!(!result.quality.draft_3d);
     assert_eq!(result.revision.get(), 1);
     let px = pixels_of(&result);
-    assert_eq!(at(&px, 320, 160, 90), MAGENTA, "Blender's surface, not native shading");
+    assert_eq!(
+        at(&px, 320, 160, 90),
+        MAGENTA,
+        "Blender's surface, not native shading"
+    );
     assert_eq!(host.renders.len(), 1);
     assert!(
         host.renders[0].starts_with(&format!("capture-{}-{}-", WINDOW.0, session.get())),
@@ -1693,7 +1719,10 @@ fn child_blender() {
     host.serve_while(&mut c, Duration::from_secs(10), |h| h.cancels.is_empty());
     assert_eq!(host.cancels.len(), 1);
     assert_eq!(host.cancels[0], host.renders[host.renders.len() - 1]);
-    assert!(host.held.is_empty(), "the held Blender request was answered as cancelled");
+    assert!(
+        host.held.is_empty(),
+        "the held Blender request was answered as cancelled"
+    );
     println!(
         "CHILD-OK blender: refused when not prepared, native with draft 3D, prepared by Blender in {} ms, prepared frame reused, failure, missing and timeout ({} ms) named",
         elapsed.as_millis(),
@@ -1791,4 +1820,294 @@ fn child_host_session() {
         Err(ErrorCode::UnknownSession)
     );
     println!("CHILD-OK host session");
+}
+
+/// A 320 × 180 project with one level 1 SVG image layer (`art`, 64 × 36,
+/// `contain` in an 80 × 45 box at (160, 90)) over the background.
+fn svg_project() -> Value {
+    let mut doc = project(100.0);
+    doc["layers"] = json!([{
+        "id": "art", "type": "image", "name": "art", "from": 0, "dur": 2, "on": true, "lock": false,
+        "shy": false, "collapsed": true, "threeD": false, "solo": false, "color": "#4C8DFF",
+        "blend": "normal", "mblur": false, "parent": null, "group": null, "matteSource": null,
+        "p": {
+            "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(160)),
+            "position.y": ch(json!(90)), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
+            "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
+        },
+        "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
+        "d": { "asset": "svg1", "fit": "contain", "w": 80, "h": 45 }, "locked_intent": {}
+    }]);
+    doc["assets"] = json!({ "svg1": { "id": "svg1", "name": "art.svg", "kind": "image", "format": "svg", "w": 64, "h": 36, "dur": 0, "persisted": true } });
+    doc
+}
+
+/// Answers the engine's media requests with `path` until `done` holds.
+fn serve_media<T>(
+    c: &mut Child,
+    path: &std::path::Path,
+    timeout: Duration,
+    mut done: impl FnMut(PortId, &Envelope) -> Option<T>,
+) -> T {
+    use pm_protocol::error::{EngineError, ErrorScope};
+    use pm_protocol::host::{CapabilityHandle, HandleAccess, HandleGrant, HandleResolved};
+    let deadline = Instant::now() + timeout;
+    loop {
+        let actions = c.host.pump();
+        c.inbox.push(actions);
+        let request = c
+            .inbox
+            .try_wait(Duration::ZERO, &mut |port, m| match &m.message {
+                Message::Request { id, body } if port == HOST => Some((*id, body.clone())),
+                _ => None,
+            });
+        if let Some((id, body)) = request {
+            let message = match body {
+                Request::MintHandle(mint) => Message::Response {
+                    id,
+                    body: Response::Handle(HandleGrant {
+                        handle: CapabilityHandle::from_random_bytes([7; 16]),
+                        kind: mint.kind,
+                        content_hash: None,
+                    }),
+                },
+                Request::ResolveHandle(r) => Message::Response {
+                    id,
+                    body: Response::HandleResolved(HandleResolved {
+                        handle: r.handle,
+                        kind: pm_protocol::host::CapabilityKind::MediaRead {
+                            asset: "svg1".into(),
+                        },
+                        access: HandleAccess::Read,
+                        path: path.to_string_lossy().into_owned(),
+                    }),
+                },
+                other => Message::Error {
+                    id,
+                    error: EngineError::new(
+                        ErrorCode::Unsupported,
+                        ErrorScope::Request { id },
+                        format!("not served here: {other:?}"),
+                    ),
+                },
+            };
+            c.host_sends(Envelope::new(message));
+            continue;
+        }
+        if let Some(found) = c.inbox.try_wait(Duration::from_millis(5), &mut done) {
+            return found;
+        }
+        assert!(Instant::now() < deadline, "timed out serving media");
+    }
+}
+
+#[test]
+#[ignore = "run by level1_svg_snapshots_draw_the_windows_rasters"]
+fn child_svg() {
+    use pm_protocol::snapshot::CompatMessage;
+    use pm_protocol::svg_raster::SvgRasterPixels;
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("pm-snapshot-svg-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("art.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/></svg>"##,
+    )
+    .unwrap();
+    let mut c = Child::start();
+    let session = c.session;
+    c.resync(2, 1, &svg_project());
+    let small = Size::new(320, 180);
+    // The engine never waits on the renderer: it names the bucket.
+    c.snapshot(
+        40,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    let svg = match serve_media(&mut c, &path, Duration::from_secs(20), answer(40)) {
+        Ok(SnapshotOutcome::NeedsRenderer {
+            fallback,
+            compat,
+            svg,
+            ..
+        }) => {
+            assert!(fallback.is_empty() && compat.is_empty());
+            svg
+        }
+        other => panic!("expected needsRenderer, got {other:?}"),
+    };
+    assert_eq!(svg.len(), 1);
+    let key = svg[0].key.clone();
+    assert_eq!(
+        (key.width, key.height, svg[0].asset.as_str()),
+        (80, 45, "svg1")
+    );
+    assert_eq!(
+        key.content,
+        pm_render::vector::svg::content_hash(&path).unwrap()
+    );
+    // The window draws it, posts it in two bands, and asks again naming it.
+    let fill = [0x4C, 0x8D, 0xFF, 0xFF];
+    for (row, rows) in [(0, 20), (20, 25)] {
+        c.event(Event::Compat(CompatMessage::SvgPixels(SvgRasterPixels {
+            key: key.clone(),
+            row,
+            rows,
+            data: Bytes(fill.repeat((key.width * rows) as usize)),
+        })));
+    }
+    let mut again = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
+    again.uploaded = vec![key.upload_key()];
+    c.snapshot(41, again, Some(1), WINDOW, session);
+    let px = pixels_of(&rendered(serve_media(
+        &mut c,
+        &path,
+        Duration::from_secs(20),
+        answer(41),
+    )));
+    assert_eq!(at(&px, 320, 160, 90), fill, "the window's raster");
+    assert_eq!(at(&px, 320, 10, 10), BACKGROUND);
+    // Kept: the next snapshot of that bucket draws at once.
+    c.snapshot(
+        42,
+        frame_request(SnapshotClass::Async, small, SnapshotPixels::Opaque, 5_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    let px = pixels_of(&rendered(serve_media(
+        &mut c,
+        &path,
+        Duration::from_secs(20),
+        answer(42),
+    )));
+    assert_eq!(at(&px, 320, 160, 90), fill);
+
+    // Posted bands that reach the engine after the request (two ports
+    // race): the job waits for them instead of naming them again.
+    let mut moved = svg_project();
+    moved["layers"][0]["p"]["scale.x"] = ch(json!(200));
+    moved["layers"][0]["p"]["scale.y"] = ch(json!(200));
+    c.resync(3, 2, &moved);
+    c.snapshot(
+        43,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(2),
+        WINDOW,
+        session,
+    );
+    let key2 = match serve_media(&mut c, &path, Duration::from_secs(20), answer(43)) {
+        Ok(SnapshotOutcome::NeedsRenderer { svg, .. }) => svg[0].key.clone(),
+        other => panic!("expected needsRenderer, got {other:?}"),
+    };
+    assert_eq!((key2.width, key2.height), (160, 90));
+    let mut again = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
+    again.uploaded = vec![key2.upload_key()];
+    c.snapshot(44, again, Some(2), WINDOW, session);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(200), &mut answer(44))
+            .is_none(),
+        "answered before the raster arrived"
+    );
+    let green = [0x20, 0xC0, 0x40, 0xFF];
+    c.event(Event::Compat(CompatMessage::SvgPixels(SvgRasterPixels {
+        key: key2.clone(),
+        row: 0,
+        rows: key2.height,
+        data: Bytes(green.repeat((key2.width * key2.height) as usize)),
+    })));
+    let px = pixels_of(&rendered(serve_media(
+        &mut c,
+        &path,
+        Duration::from_secs(20),
+        answer(44),
+    )));
+    assert_eq!(at(&px, 320, 160, 90), green);
+    println!("CHILD-OK");
+}
+
+#[test]
+#[ignore = "run by a_snapshot_that_fails_on_fonts_leaves_the_viewer_asking_for_svg_rasters"]
+fn child_svg_font_failure() {
+    use pm_protocol::snapshot::CompatMessage;
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("pm-snapshot-svg-fonts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("art.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/></svg>"##,
+    )
+    .unwrap();
+    let mut c = Child::start();
+    let session = c.session;
+    // A text layer over the SVG: this engine has no font service, so the
+    // snapshot's render meets a font failure and returns early.
+    let mut doc = svg_project();
+    doc["layers"].as_array_mut().unwrap().push(json!({
+        "id": "title", "type": "text", "name": "title", "from": 0, "dur": 2, "on": true,
+        "lock": false, "shy": false, "collapsed": true, "threeD": false, "solo": false,
+        "color": "#4C8DFF", "blend": "normal", "mblur": false, "parent": null, "group": null,
+        "matteSource": null,
+        "p": {
+            "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(160)),
+            "position.y": ch(json!(40)), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
+            "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
+        },
+        "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
+        "d": {
+            "text": "Fonts", "boxWidth": ch(json!(0)), "boxHeight": ch(json!(0)),
+            "font": "Helvetica", "weight": 700, "size": 24, "tracking": 0, "leading": 1.2,
+            "color": "#F2E8D0", "align": "center", "italic": false
+        },
+        "locked_intent": {}
+    }));
+    c.resync(2, 1, &doc);
+    let small = Size::new(320, 180);
+    c.snapshot(
+        50,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 20_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    let outcome = serve_media(&mut c, &path, Duration::from_secs(40), answer(50));
+    assert_eq!(
+        outcome.err(),
+        Some(ErrorCode::Timeout),
+        "the snapshot fails on its fonts"
+    );
+    // The viewer shares the snapshot's renderer: its misses still ask the
+    // window for rasters (a renderer left waiting fails them silently).
+    c.resync(3, 2, &svg_project());
+    c.event(Event::Viewer(viewer_state()));
+    let asked = serve_media(&mut c, &path, Duration::from_secs(20), |port, m| {
+        if port != WINDOW {
+            return None;
+        }
+        match &m.message {
+            Message::Event {
+                body: Event::Compat(CompatMessage::SvgRequests { requests }),
+            } => Some(requests.clone()),
+            _ => None,
+        }
+    });
+    assert!(
+        asked.iter().any(|r| r.asset == "svg1"),
+        "the viewer asked for the SVG's raster: {asked:?}"
+    );
+    let presenter: Value = serde_json::from_str(&c.host.status_json()).unwrap();
+    println!(
+        "CHILD-OK svg font failure ({} raster requests; presenter {})",
+        asked.len(),
+        presenter["presenter"]
+    );
 }

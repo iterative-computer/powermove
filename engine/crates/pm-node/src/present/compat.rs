@@ -58,6 +58,8 @@ pub enum Applied {
     /// format under the same key): the partial raster starts over.
     Restarted,
     Forgot(usize),
+    /// Not a layer raster (the SVG raster messages, `super::svg`).
+    Ignored,
 }
 
 /// The rasters of every session on this thread.
@@ -99,6 +101,9 @@ impl CompatStore {
             CompatMessage::Forget { composition, layer } => {
                 Applied::Forgot(self.forget_layer(key, &composition, &layer))
             }
+            CompatMessage::SvgRequests { .. }
+            | CompatMessage::SvgPixels(_)
+            | CompatMessage::SvgFailed { .. } => Applied::Ignored,
             CompatMessage::Pixels(band) => {
                 let id = (key, band.id.clone());
                 let bytes = size(band.width, band.height, band.format);
