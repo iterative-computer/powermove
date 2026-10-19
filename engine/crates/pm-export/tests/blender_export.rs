@@ -1,8 +1,8 @@
 //! Exports with Blender layers end to end (plan section 17's Blender stage,
 //! contract 11) on the installed Blender: the job plans each frame, builds
 //! its snapshots, renders the surfaces once through the pinned worker
-//! (16-bit RGBA PNG through AgX, stamps off), decodes them, and composites
-//! them; the exported pixels equal the f64 composite of the stored surfaces
+//! (level 1 PNG8/dither 1; level 2 PNG16/dither 0; AgX, stamps off), decodes
+//! and composites them; the exported pixels equal the f64 composite of the stored surfaces
 //! (section 25's Blender surfaces class); a second export finds every
 //! surface in the cache; batching a frame's layers gives the same pixels
 //! as one invocation per layer; cancel stops Blender; a missing Blender or
@@ -240,7 +240,7 @@ fn png_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn an_export_with_blender_layers_composites_its_surfaces_exactly() {
+fn an_export_with_blender_layers_composites_todays_level1_upload_exactly() {
     let dir = scratch("e2e");
     let Some(backend) = local(&dir) else { return };
     let mut renderer = Renderer::headless().unwrap();
@@ -337,7 +337,21 @@ fn an_export_with_blender_layers_composites_its_surfaces_exactly() {
             for x in 0..W {
                 let mut c: [f64; 4] = bg;
                 for id in &order {
-                    let p = frame[id].pixel(x, y);
+                    let surface = &frame[id];
+                    // This existing-project export must retain the old
+                    // straight ImageBitmap upload, even under alpha zero.
+                    let crop = surface.crop;
+                    let p: [f32; 4] =
+                        if x >= crop.x
+                            && y >= crop.y
+                            && x < crop.x + crop.width
+                            && y < crop.y + crop.height
+                        {
+                            let i = (((y - crop.y) * crop.width + x - crop.x) * 4) as usize;
+                            surface.straight[i..i + 4].try_into().unwrap()
+                        } else {
+                            [0.0; 4]
+                        };
                     if p[3] > 0.0 {
                         covered += 1;
                     }
@@ -414,7 +428,7 @@ fn batched_and_per_layer_surfaces_are_equal_and_byte_stable() {
     for layer in snapshot.layers() {
         let a = decode_surface(&bytes(&batched, &layer)).unwrap();
         let b = decode_surface(&bytes(&single, &layer)).unwrap();
-        assert_eq!(a.bit_depth, 16);
+        assert_eq!(a.bit_depth, 8);
         assert_eq!(a, b, "{layer}: batched and per-layer surfaces differ");
         assert_eq!(
             bytes(&batched, &layer),

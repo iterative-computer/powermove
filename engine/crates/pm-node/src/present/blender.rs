@@ -1264,8 +1264,9 @@ mod tests {
 
     #[test]
     fn surfaces_stay_within_the_budget_least_recently_drawn_first_out() {
-        // One 12 × 8 f32 surface is 1,536 bytes: room for two frames.
-        let r = rig(Mode::Render, None, 3_500);
+        // One 12 × 8 surface keeps straight and premultiplied f32 RGBA
+        // (3,072 bytes): room for two frames, accounting for both.
+        let r = rig(Mode::Render, None, 7_000);
         let frames: Vec<Snapshot> = (0..3).map(|i| snapshot(&["box"], f64::from(i))).collect();
         for (i, f) in frames.iter().enumerate() {
             paint(&r, &material(), std::slice::from_ref(f));
@@ -1277,7 +1278,7 @@ mod tests {
         }
         let stats = r.stats.lock().unwrap().blender_preview.clone();
         assert_eq!(stats.surfaces, 2);
-        assert!(stats.bytes <= 3_500);
+        assert!(stats.bytes <= 7_000);
         let host = r.blender.host(&material());
         assert!(host.lookup(&frames[0], "box").is_some());
         assert!(host.lookup(&frames[1], "box").is_none());
