@@ -152,6 +152,10 @@ struct Session {
     definitions: DefinitionSet,
     /// Patch batches could not be applied; the mirror is behind until a resync.
     stale: bool,
+    /// The revision and canonical hash the mirror was resynced at, checked
+    /// then; with no batch applied since, another session resyncing to the
+    /// same hash shares this mirror instead of reading and parsing it again.
+    verified: Option<(u64, ContentHash)>,
     /// The document's media as the host resolved it for this session
     /// (interactive sessions whose presenter renders documents).
     media: MediaTable,
@@ -1122,6 +1126,7 @@ impl Engine {
                 role: open.role,
                 revisions: RevisionTracker::new(Revision::ZERO),
                 mirror: None,
+                verified: None,
                 definitions: DefinitionSet::default(),
                 stale: false,
                 media: MediaTable::default(),
@@ -1194,6 +1199,14 @@ impl Engine {
             self.send_error(port, id, error, out);
             return;
         }
+        // Main's snapshot session for a window and the window's own session
+        // carry the same document: one checked mirror serves both (pm-model
+        // shares the tree), and the second body is neither read nor parsed.
+        if let Some(mirror) = self.verified_mirror(sid, &resync) {
+            let result = self.install_document(sid, &resync, mirror);
+            self.finish_resync(port, id, sid, &resync, result, out);
+            return;
+        }
         match &resync.source {
             ResyncSource::Inline { body } => {
                 let body = body.0.clone();
@@ -1255,10 +1268,15 @@ impl Engine {
                 ));
             }
         };
-        let shared = self
-            .presents_documents()
-            .then(|| std::sync::Arc::new(value.clone()));
-        let mirror = pm_model::Document::new(Some(value), resync.revision.get());
+        // The parsed value becomes the tree; the presenter and audio threads
+        // get the same tree, shared. Reconciled against a mirror this engine
+        // already holds for the document (this session's own, or another
+        // session's: main's snapshot session for the window), the new tree
+        // shares every unchanged subtree with it instead of doubling.
+        let mirror = match self.base_mirror(sid, resync) {
+            Some(base) => pm_model::Document::reconciled(base, Some(value), resync.revision.get()),
+            None => pm_model::Document::new(Some(value), resync.revision.get()),
+        };
         let digest = mirror_digest(&mirror);
         if ContentHash(digest) != resync.hash {
             return Err((
@@ -1266,18 +1284,69 @@ impl Engine {
                 "The resync body does not match its canonical hash; send it again.".into(),
             ));
         }
+        self.install_document(sid, resync, mirror)
+    }
+
+    /// Another session's mirror that was resynced to this resync's hash, at
+    /// or before its revision, with nothing applied since: the same content,
+    /// every node stamped no later than this revision.
+    fn verified_mirror(&self, sid: SessionId, resync: &Resync) -> Option<pm_model::Document> {
+        if resync.encoding != DocumentEncoding::CanonicalJsonV1 {
+            return None;
+        }
+        self.sessions.iter().find_map(|(other, s)| {
+            let (revision, hash) = s.verified.as_ref()?;
+            let mirror = s.mirror.as_ref()?;
+            (*other != sid
+                && !s.stale
+                && *hash == resync.hash
+                && *revision <= resync.revision.get()
+                && s.revisions.applied().get() == *revision
+                && mirror.revision() == *revision)
+                .then(|| {
+                    pm_model::Document::from_root(mirror.root().cloned(), resync.revision.get())
+                })
+        })
+    }
+
+    /// A mirror of the resync's document to reconcile against: this
+    /// session's own, else another session's, at or before the resync's
+    /// revision (so no node is stamped later than the new revision).
+    fn base_mirror(&self, sid: SessionId, resync: &Resync) -> Option<&pm_model::Document> {
+        let usable = |s: &Session| {
+            s.document == resync.document
+                && !s.stale
+                && s.mirror
+                    .as_ref()
+                    .is_some_and(|m| m.revision() <= resync.revision.get())
+        };
+        let own = self.sessions.get(&sid).filter(|s| usable(s));
+        own.or_else(|| self.sessions.values().find(|s| usable(s)))
+            .and_then(|s| s.mirror.as_ref())
+    }
+
+    /// Installs a checked mirror and tells the presenter.
+    fn install_document(
+        &mut self,
+        sid: SessionId,
+        resync: &Resync,
+        mirror: pm_model::Document,
+    ) -> Result<(), (ErrorCode, String)> {
+        let presents = self.presents_documents();
         let session = self.sessions.get_mut(&sid).ok_or((
             ErrorCode::UnknownSession,
             "The session closed during the resync.".into(),
         ))?;
         session.revisions.resynced(resync);
+        let root = presents.then(|| mirror.root().cloned());
         session.mirror = Some(mirror);
+        session.verified = Some((resync.revision.get(), resync.hash));
         session.stale = false;
-        if let Some(root) = shared {
+        if let Some(root) = root {
             self.pending_updates.push((
                 sid,
                 DocumentUpdate::Replace {
-                    root: Some(root),
+                    root,
                     revision: resync.revision,
                 },
             ));

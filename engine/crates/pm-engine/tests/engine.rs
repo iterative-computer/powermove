@@ -431,6 +431,83 @@ fn a_file_resync_resolves_its_handle_with_the_host_only() {
 }
 
 #[test]
+fn a_second_session_resyncing_to_a_checked_hash_shares_the_mirror_without_reading_it() {
+    // Main's snapshot session for a window and the window's own session
+    // carry the same document. With a 180 MB document each parse is about
+    // 1.8 GB (C1): the second session takes the checked mirror instead.
+    let mut engine = connected(EngineProcess::Interactive);
+    let window = open_session(&mut engine, WINDOW, 1);
+    let (body, hash) = document(r#"{"comps":{},"layers":[{"id":"a","v":1}],"name":"Big"}"#);
+    let out = engine.receive(
+        WINDOW,
+        &request(
+            2,
+            resync(5, ResyncSource::Inline { body: Bytes(body) }, hash),
+            Some(window),
+        ),
+        at(2),
+    );
+    assert!(matches!(
+        only_answer(&out, WINDOW),
+        Message::Response {
+            body: Response::PatchesApplied(_),
+            ..
+        }
+    ));
+    // The host's session for the window: a file resync of the same hash at
+    // a later revision is answered at once, with no handle to resolve.
+    let host_session = open_session(&mut engine, HOST, 3);
+    let source = ResyncSource::CacheFile {
+        handle: handle_for(0x31),
+        length: ByteSize::new(1).unwrap(),
+    };
+    let out = engine.receive(
+        HOST,
+        &request(4, resync(6, source.clone(), hash), Some(host_session)),
+        at(3),
+    );
+    assert!(
+        !sent(&out, HOST).iter().any(|e| matches!(
+            e.message,
+            Message::Request {
+                body: Request::ResolveHandle(_),
+                ..
+            }
+        )),
+        "{out:?}"
+    );
+    assert!(matches!(
+        only_answer(&out, HOST),
+        Message::Response { id, body: Response::PatchesApplied(ref applied) } if id == rid(4) && applied.revision.get() == 6
+    ));
+    let status = engine.status();
+    let shared = status
+        .sessions
+        .iter()
+        .find(|s| s.session == host_session.get())
+        .unwrap();
+    assert_eq!(shared.revision, 6);
+    assert_eq!(
+        shared.hash.as_deref(),
+        Some(pm_model::hash::hex(&hash.0).as_str())
+    );
+    // A different hash still reads its body.
+    let (_, other) = document(r#"{"comps":{},"layers":[],"name":"Other"}"#);
+    let out = engine.receive(
+        HOST,
+        &request(5, resync(7, source, other), Some(host_session)),
+        at(4),
+    );
+    assert!(sent(&out, HOST).iter().any(|e| matches!(
+        e.message,
+        Message::Request {
+            body: Request::ResolveHandle(_),
+            ..
+        }
+    )));
+}
+
+#[test]
 fn only_the_host_grants_leases() {
     let mut engine = connected(EngineProcess::Job);
     let lease = Lease {

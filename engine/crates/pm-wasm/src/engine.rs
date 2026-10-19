@@ -312,7 +312,7 @@ fn path_of(root: &Node, target: &Node, path: &mut Vec<Value>) -> bool {
     }
     match root.kind() {
         pm_model::NodeKind::Object(map) => {
-            for (k, child) in map {
+            for (k, child) in map.iter() {
                 path.push(Value::String(k.clone()));
                 if path_of(child, target, path) {
                     return true;

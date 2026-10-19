@@ -351,7 +351,10 @@ mod tests {
 
     fn replace(json: &str, revision: u64) -> DocumentUpdate {
         DocumentUpdate::Replace {
-            root: Some(Arc::new(pm_model::json::parse(json).unwrap())),
+            root: Some(pm_model::Node::from_value(
+                pm_model::json::parse(json).unwrap(),
+                revision,
+            )),
             revision: Revision::new(revision).unwrap(),
         }
     }

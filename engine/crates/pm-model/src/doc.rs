@@ -33,8 +33,20 @@
 //!
 //! The JSON-visible result is exactly what `applyPatch` produces; only the
 //! revisions depend on reconciliation.
+//!
+//! # Shared subtrees
+//!
+//! Arrays and objects hold their children behind an [`Arc`], so cloning a
+//! node or a [`Document`] is cheap and the copies share every subtree until
+//! one of them changes it: a patch copies only the containers on its path
+//! (copy on write, `Arc::make_mut`). The interactive engine keeps one mirror
+//! per session, its presenter another, and every snapshot job a third at its
+//! revision; for a 180 MB document (1.2 million keyframes) these used to be
+//! full copies of about 1.8 GB each (docs/engine/host-processes.md, "Large
+//! documents"). A tree that is never cloned (pm-wasm) never copies.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use crate::hash::{canonical_digest, canonical_hash};
 use crate::json::write::{JsonTree, View};
@@ -56,8 +68,8 @@ pub enum NodeKind {
     Bool(bool),
     Number(f64),
     String(JsString),
-    Array(Vec<Node>),
-    Object(BTreeMap<JsString, Node>),
+    Array(Arc<Vec<Node>>),
+    Object(Arc<BTreeMap<JsString, Node>>),
 }
 
 impl Clone for Node {
@@ -92,17 +104,17 @@ impl Node {
             Value::Bool(b) => NodeKind::Bool(b),
             Value::Number(n) => NodeKind::Number(n),
             Value::String(s) => NodeKind::String(s),
-            Value::Array(items) => NodeKind::Array(
+            Value::Array(items) => NodeKind::Array(Arc::new(
                 items
                     .into_iter()
                     .map(|v| Node::from_value(v, rev))
                     .collect(),
-            ),
-            Value::Object(map) => NodeKind::Object(
+            )),
+            Value::Object(map) => NodeKind::Object(Arc::new(
                 map.into_iter()
                     .map(|(k, v)| (k, Node::from_value(v, rev)))
                     .collect(),
-            ),
+            )),
         };
         Node { rev, kind }
     }
@@ -204,8 +216,24 @@ impl Node {
                 *a = b;
                 changed
             }
-            (NodeKind::Object(old), Value::Object(new)) => reconcile_object(old, new, rev),
-            (NodeKind::Array(old), Value::Array(new)) => reconcile_array(old, new, rev),
+            // A container another tree shares is copied only when its
+            // content differs: reconciling a clone against the same document
+            // (a resync, a structural diff) keeps every unchanged subtree
+            // shared. A container this tree owns alone is reconciled in place.
+            (NodeKind::Object(old), Value::Object(new)) => {
+                if Arc::get_mut(old).is_none() && same_object(old, &new) {
+                    false
+                } else {
+                    reconcile_object(Arc::make_mut(old), new, rev)
+                }
+            }
+            (NodeKind::Array(old), Value::Array(new)) => {
+                if Arc::get_mut(old).is_none() && same_array(old, &new) {
+                    false
+                } else {
+                    reconcile_array(Arc::make_mut(old), new, rev)
+                }
+            }
             (_, value) => {
                 *self = Node::from_value(value, rev);
                 return true;
@@ -216,6 +244,32 @@ impl Node {
         }
         changed
     }
+}
+
+/// Whether `node` holds exactly `value` as reconciliation compares it
+/// (numbers by bit pattern).
+fn same(node: &Node, value: &Value) -> bool {
+    match (&node.kind, value) {
+        (NodeKind::Null, Value::Null) => true,
+        (NodeKind::Bool(a), Value::Bool(b)) => a == b,
+        (NodeKind::Number(a), Value::Number(b)) => a.to_bits() == b.to_bits(),
+        (NodeKind::String(a), Value::String(b)) => a == b,
+        (NodeKind::Object(a), Value::Object(b)) => same_object(a, b),
+        (NodeKind::Array(a), Value::Array(b)) => same_array(a, b),
+        _ => false,
+    }
+}
+
+fn same_object(old: &BTreeMap<JsString, Node>, new: &Map) -> bool {
+    old.len() == new.len()
+        && old
+            .iter()
+            .zip(new.iter())
+            .all(|((k, n), (key, v))| k == key && same(n, v))
+}
+
+fn same_array(old: &[Node], new: &[Value]) -> bool {
+    old.len() == new.len() && old.iter().zip(new).all(|(n, v)| same(n, v))
 }
 
 fn reconcile_object(old: &mut BTreeMap<JsString, Node>, new: Map, rev: u64) -> bool {
@@ -285,8 +339,8 @@ impl Tree for Node {
             NodeKind::Bool(b) => NodeMut::Bool(*b),
             NodeKind::Number(n) => NodeMut::Number(*n),
             NodeKind::String(s) => NodeMut::String(s),
-            NodeKind::Array(items) => NodeMut::Array(items),
-            NodeKind::Object(map) => NodeMut::Object(map),
+            NodeKind::Array(items) => NodeMut::Array(Arc::make_mut(items)),
+            NodeKind::Object(map) => NodeMut::Object(Arc::make_mut(map)),
         }
     }
 
@@ -345,6 +399,12 @@ impl Document {
             root: root.map(|v| Node::from_value(v, revision)),
             revision,
         }
+    }
+
+    /// A document at revision `revision` holding an existing tree (shared
+    /// with wherever it came from until either changes it).
+    pub fn from_root(root: Option<Node>, revision: u64) -> Document {
+        Document { root, revision }
     }
 
     pub fn revision(&self) -> u64 {
@@ -422,6 +482,28 @@ impl Document {
         Ok(ApplyOutcome { revision, changed })
     }
 
+    /// `root` at `revision`, reconciled against `base` (another mirror of the
+    /// same document, at or before `revision`): unchanged subtrees keep their
+    /// revisions and stay shared with `base`, so two sessions or two
+    /// consecutive resyncs of one large document hold one tree plus what
+    /// differs.
+    pub fn reconciled(base: &Document, root: Option<Value>, revision: u64) -> Document {
+        assert!(
+            revision >= base.revision,
+            "revision {revision} must not precede {}",
+            base.revision
+        );
+        let mut document = base.clone();
+        document.revision = revision;
+        match (document.root.as_mut(), root) {
+            (Some(node), Some(value)) => {
+                node.reconcile(value, revision);
+            }
+            (_, value) => document.root = value.map(|v| Node::from_value(v, revision)),
+        }
+        document
+    }
+
     /// Replaces the whole document (a resync), reconciling against the current
     /// tree so unchanged subtrees keep their revisions.
     pub fn resync(&mut self, root: Option<Value>, revision: u64) -> ApplyOutcome {
@@ -495,7 +577,7 @@ pub mod reads {
                         }
                     }
                     NodeKind::Object(o) => {
-                        for (k, child) in o {
+                        for (k, child) in o.iter() {
                             parents
                                 .insert(child as *const Node as usize, (parent, k.clone().into()));
                             walk(child, parents);

@@ -811,7 +811,7 @@ fn settle_times(edit: &mut Edit<'_>, placed: &HashMap<String, f64>) -> JsResult<
                 {
                     out.push(Patch::set(join(path, &[key("t")]), Value::Number(t)));
                 }
-                for (k, child) in map {
+                for (k, child) in map.iter() {
                     path.push(pm_model::PathPart::Key(k.clone()));
                     walk(child, path, placed, out);
                     path.pop();

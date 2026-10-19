@@ -308,3 +308,95 @@ fn revisions_are_monotone_over_the_vectors() {
         }
     }
 }
+
+#[test]
+fn clones_share_subtrees_until_one_changes_them() {
+    // The interactive engine keeps a mirror per session, its presenter and
+    // audio threads one each, and every snapshot job one at its revision:
+    // clones must not copy a large document (C1, 1.2 million keyframes).
+    let original = doc(PROJECT);
+    let mut edited = original.clone();
+    let a = path!["comps", "C1", "layers", 0];
+    let b = path!["comps", "C1", "layers", 1];
+    assert!(std::ptr::eq(
+        original.lookup(&a).unwrap(),
+        edited.lookup(&a).unwrap()
+    ));
+    edited
+        .apply(&[Patch::set(
+            path!["comps", "C1", "layers", 0, "name"],
+            v(r#""A2""#),
+        )])
+        .unwrap();
+    // The edit copied the containers on its path only.
+    assert!(
+        to_canonical_string(&original.lookup(&a).unwrap().to_value()).contains(r#""name":"A""#)
+    );
+    assert!(to_canonical_string(&edited.lookup(&a).unwrap().to_value()).contains(r#""name":"A2""#));
+    assert!(!std::ptr::eq(
+        original.lookup(&a).unwrap(),
+        edited.lookup(&a).unwrap()
+    ));
+    let b_original = original.lookup(&b).unwrap();
+    let b_edited = edited.lookup(&b).unwrap();
+    let NodeKind::Object(left) = b_original.kind() else {
+        panic!()
+    };
+    let NodeKind::Object(right) = b_edited.kind() else {
+        panic!()
+    };
+    assert!(
+        std::ptr::eq(&**left, &**right),
+        "an untouched layer stays shared"
+    );
+    assert_eq!(rev(&original, &a), 1);
+    assert_eq!(rev(&edited, &a), 2);
+    assert_eq!(
+        hash::canonical_hash(original.root().unwrap()),
+        hash::canonical_hash(&parse(PROJECT).unwrap())
+    );
+    // A tree from an existing root keeps sharing it.
+    let rebuilt = Document::from_root(edited.root().cloned(), 9);
+    assert_eq!(rebuilt.revision(), 9);
+    assert!(std::ptr::eq(
+        match rebuilt.lookup(&b).unwrap().kind() {
+            NodeKind::Object(m) => &**m,
+            _ => panic!(),
+        },
+        &**right
+    ));
+}
+
+#[test]
+fn a_resync_reconciled_against_another_mirror_shares_what_did_not_change() {
+    // Two sessions (or two resyncs) of one large document hold one tree
+    // plus what differs, with unchanged nodes keeping their revisions.
+    let base = doc(PROJECT);
+    let same = Document::reconciled(&base, Some(v(PROJECT)), 4);
+    assert_eq!(same.revision(), 4);
+    let shared = |a: &Document, b: &Document, at: &[PathPart]| match (
+        a.lookup(at).unwrap().kind(),
+        b.lookup(at).unwrap().kind(),
+    ) {
+        (NodeKind::Object(x), NodeKind::Object(y)) => std::ptr::eq(&**x, &**y),
+        (NodeKind::Array(x), NodeKind::Array(y)) => std::ptr::eq(&**x, &**y),
+        _ => panic!("not a container"),
+    };
+    assert!(shared(&base, &same, &[]));
+    assert_eq!(rev(&same, layers()), 1);
+    let edited = PROJECT.replace(r#""name": "B""#, r#""name": "B2""#);
+    let next = Document::reconciled(&same, Some(v(&edited)), 5);
+    assert!(shared(&same, &next, &path!["comps", "C1", "layers", 0]));
+    assert!(shared(&same, &next, &path!["comps", "C1", "layers", 2]));
+    assert!(!shared(&same, &next, &path!["comps", "C1", "layers", 1]));
+    assert_eq!(rev(&next, path!["comps", "C1", "layers", 1]), 5);
+    assert_eq!(rev(&next, path!["comps", "C1", "layers", 0]), 1);
+    assert_eq!(
+        hash::canonical_hash(next.root().unwrap()),
+        hash::canonical_hash(&v(&edited))
+    );
+    assert_eq!(
+        hash::canonical_hash(same.root().unwrap()),
+        hash::canonical_hash(&v(PROJECT))
+    );
+}
