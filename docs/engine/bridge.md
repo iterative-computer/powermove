@@ -1614,6 +1614,68 @@ status line cleared, and a stale picture stayed up with the reason hidden.
 The viewer-mount playhead stall and the J/K/L 2x reverse sawtooth (issue
 P5) now belong to the perf3 lane.
 
+### Round 8: the viewer's version lock, the held-frame knob, 0x0 canvases (2026-10-19)
+
+- **The viewer's version lock.** Round 7 changed `engine-present`
+  (presentation.ts, protocol.ts, presentation.test.ts) after the lock was
+  last refreshed, so `check:builtins` reported `viewer: tree changed
+  without a version bump`. 1.2.2 is unreleased (main has 1.0.8, the
+  integration branch 1.2.1), so only the viewer's entry is refreshed to the
+  merged tree; the version stays 1.2.2. The check now fails only for
+  inspector, keymap-default and timeline (other lanes).
+- **The held-frame knob is test-only in the build.**
+  `POWERMOVE_BRIDGE_TEST_SEND_DELAY_MS` is read only with pm-node's new
+  `test-hooks` feature, which the crate's own tests turn on through a
+  dev-dependency on itself (pm-audio's pattern). The addon
+  (`build:engine`: `--features node`) compiles the other `send_delay`, which
+  answers `None`, so a stray variable can no longer hold a paused frame in
+  a shipped build. `the_send_delay_knob_is_read_only_with_test_hooks` covers
+  the parse and the 5 s cap; `tests/document.rs` still holds its frame.
+- **A 0x0 canvas that leaves the document.** The binding's default watch
+  (`watchRemoval`, canvas-binding.ts) keeps the ResizeObserver and adds a
+  MutationObserver on the document's child lists that reports once the
+  canvas is disconnected: a ResizeObserver never fires for a canvas whose
+  box was already 0x0, so such a canvas stayed bound until the caller's
+  next `render.gl.resize`. Two happy-dom tests (the watch on its own, and a
+  bound 0x0 canvas whose stage is removed) fail without the
+  MutationObserver.
+- **Sync snapshots that need the fallback runner (a regression from the
+  merge).** After merging feat/native-engine, `engine-render-transport`'s
+  real-WebGL case failed: `failed` 1, `internal: its draw did not finish
+  within 10 s`. The defs lane's runner (shader-fallback.ts, not this lane's
+  file; the edit is minimal) made `renderSync` poll each pass's fence on
+  the calling thread, but WebGL lets a fence signal only once the event
+  loop runs again, so every synchronous snapshot needing a fallback program
+  spun to the 10 s draw deadline and failed with `watchdog`. `finishedSync`
+  now waits with `finish` (it blocks until the GPU ran the pass) and judges
+  the deadline when it returns: a pass over it still fails with `watchdog`,
+  loses the context, and its program is never run again; a hang the GPU
+  process cuts surfaces as `contextLost`. The calling thread cannot stop a
+  draw part way, which the asynchronous path still can. A unit test models
+  WebGL's rule (every poll answers `TIMEOUT_EXPIRED`) and fails without the
+  fix; the e2e now names `lastFailure` when it fails. The async path
+  (viewer, job exports) is unchanged.
+- **Wording.** Commit 73b2b2a2's message states the ghost-presenter path
+  as fact; it is inferred from the session's state, as round 6 above says.
+  The fixes stand either way; history is not rewritten.
+- **Merged feat/native-engine** (69 commits: defs, svgcompat and others).
+  The only conflict was the generated `PROTOCOL_BUILD`; regenerating
+  (`pm-protocol-gen`) gives `protocol-6fa9b179042f4a70`, and both addons
+  were rebuilt with `bun run build:engine` (development runs load
+  `engine/target/pm-bridge/pm_bridge.node`; without it, flag-on routes stay
+  `pending`). `cargo fmt --check` over the whole workspace now reports
+  drift in pm-eval, pm-export, pm-geom3d, pm-render and pm-vector files
+  from merged lanes; this lane's crates are clean.
+- **Runs.** pm-node: 96 library tests, document 5 of 5; pm-protocol: 93
+  library, wire 11 (1 ignored); clippy `-D warnings` clean for pm-node and
+  pm-protocol with tests and for pm-node `--features node`; vitest
+  (engine-connection, extensions/viewer, main/engine, preload) 42 files,
+  466 passed; svelte-check 0 errors. E2E under the lock with the rebuilt
+  addon (`engine-render-transport`, `engine-headless-playback`,
+  `native-engine-tracer`): 22 of 22 after the fallback fix (before it, 21
+  of 22). Join in that run: engine 35.6 ms against today's 22.1 ms (issue
+  P5, perf3).
+
 ### What remains
 
 - **The job engine's fonts.** Export and agent frames still refuse text:
