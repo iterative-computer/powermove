@@ -552,6 +552,25 @@ describe('compatibility answers during playback', () => {
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 
+  it('retires a paused warm-up whose slow preparations outlive its deadline', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked } = rig(false);
+    const pending: Array<() => void> = [];
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, () => new Promise(resolve => pending.push(resolve)));
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(51);
+      pending.forEach(resolve => resolve());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([0]);
+      expect(pending).toHaveLength(2);
+      expect(t.lookaheadStats.inFlight).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
   it('bounds async preparations, presents ready answers independently, and drops obsolete completions', async () => {
     vi.useFakeTimers();
     const { t, session, asked, state } = rig(true);
