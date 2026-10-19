@@ -114,6 +114,24 @@ pub fn evaluate_case(source: &[u16], spec: &Json, dialect: Dialect) -> Json {
             (Err(a), Err(b)) => assert_eq!(a, b, "untracked exception"),
             _ => panic!("tracked and untracked disagree"),
         }
+        if let Some(bound) = expr.bind_numeric(&JsonHost::new(), &ctx) {
+            for alternate in [false, true] {
+                let mut at = ctx.clone();
+                if alternate {
+                    at.time = -1.25;
+                    at.t = 3.5;
+                    at.frame = 72.0;
+                    at.value = Value::Number(3.25);
+                }
+                let original = expr.evaluate_untracked(&JsonHost::new(), &at);
+                let prepared = bound.evaluate_untracked(&JsonHost::new(), &at);
+                match (&original, &prepared) {
+                    (Ok(a), Ok(b)) => assert_eq!(encode(a), encode(b), "bound numeric result"),
+                    (Err(a), Err(b)) => assert_eq!(a, b, "bound numeric exception"),
+                    _ => panic!("bound numeric plan differs"),
+                }
+            }
+        }
         fields.push((
             "result",
             match &out.result {

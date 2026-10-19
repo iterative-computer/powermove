@@ -67,6 +67,12 @@ pub trait CompiledExpression: Send + Sync {
         ExprDeps::ALL
     }
 
+    /// Optional revision-local binding of document inputs. The evaluator drops
+    /// it on every root revision. Time and the keyed base must remain dynamic.
+    fn bind(&self, _cx: &ExprContext<'_>) -> Option<Arc<dyn CompiledExpression>> {
+        None
+    }
+
     /// Runs the expression. An `Err` is a thrown error; its text becomes the
     /// channel's expression error (`e.message`, or `Expression failed.` when
     /// the engine has none).

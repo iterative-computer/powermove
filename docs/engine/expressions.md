@@ -237,3 +237,14 @@ that four frames compile exactly 400 times.
 Renderer batching and paired timing evidence are documented in `perf.md` under
 P6/B3. The parity fixture additionally compares tracked and untracked outcomes,
 including encoded number bits and exception messages, for every compiled case.
+
+The second P6 pass adds a typed numeric plan ahead of the complete bytecode.
+Runtime types that need coercion decline that plan and use the complete native
+bytecode. Document fields, params, fps and idx can be bound at an interned slot's
+revision; time, local time, frame and keyed values stay dynamic. Every root
+revision discards bindings, including unrelated edits, so no document read is
+assumed constant across a write. Bound plans retain the original bytecode for
+runtime type changes. Parity now compares unbound and bound numeric results,
+including changed time/frame/keyed-value inputs, against the same exact V8
+vectors. The same-revision slot also reuses its validated layer position; it
+resolves the composition once per batch and revalidates after any revision.

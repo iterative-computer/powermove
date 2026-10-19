@@ -10,8 +10,7 @@ use crate::jsmath;
 use crate::parser::{BinaryOp, Literal, OBJECT_PROTOTYPE, UnaryOp};
 use crate::string::JsStr;
 use crate::value::{
-    Helper, MATH_CONSTANTS, MathFunction, Object, Value, number_to_string,
-    string_to_number,
+    Helper, MATH_CONSTANTS, MathFunction, Object, Value, number_to_string, string_to_number,
 };
 use crate::{Context, Dialect};
 
@@ -402,7 +401,11 @@ impl<'a, H: Host> Evaluator<'a, H> {
     }
 
     fn property(&mut self, object: &Tracked<H::Obj>, key: &JsStr) -> Option<V<H::Obj>> {
-        let path = self.record(object, Step::Key(key.clone()));
+        let path = if self.tracking {
+            self.record(object, Step::Key(key.clone()))
+        } else {
+            None
+        };
         self.host
             .property(&object.obj, key)
             .map(|v| v.map_doc(|obj| Tracked { obj, path }))
@@ -1031,7 +1034,7 @@ fn strict_equal_opt(a: Option<f64>, b: Option<f64>) -> bool {
     }
 }
 
-fn apply_math(f: MathFunction, n: &[f64]) -> f64 {
+pub(crate) fn apply_math(f: MathFunction, n: &[f64]) -> f64 {
     let a = n.first().copied().unwrap_or(f64::NAN);
     let b = n.get(1).copied().unwrap_or(f64::NAN);
     match f {

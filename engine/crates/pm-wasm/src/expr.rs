@@ -35,6 +35,7 @@ impl ExpressionEngine for PmExpressions {
                 channel,
                 keys,
                 empty: JsStr::default(),
+                index: None,
             }) as Arc<dyn CompiledExpression>
         })
     }
@@ -45,6 +46,7 @@ struct Compiled {
     channel: bool,
     keys: Vec<(JsStr, JsString)>,
     empty: JsStr,
+    index: Option<f64>,
 }
 
 /// A document object as an expression sees it.
@@ -170,11 +172,33 @@ impl<'a> Host for NodeHost<'a> {
 
 impl CompiledExpression for Compiled {
     fn needs_idx(&self) -> bool {
-        self.expression.needs_idx()
+        self.index.is_none() && self.expression.needs_idx()
     }
 
     fn needs_frame(&self) -> bool {
         false
+    }
+
+    fn bind(&self, cx: &ExprContext<'_>) -> Option<Arc<dyn CompiledExpression>> {
+        let host = NodeHost(&self.keys);
+        let ctx = Context {
+            t: 0.0,
+            time: 0.0,
+            fps: cx.fps.to_number(),
+            frame: f64::NAN,
+            value: Value::Undefined,
+            layer: cx.layer.map_or(Value::Undefined, NodeHost::node),
+            comp: Value::Object(Object::Doc(Obj::Comp(cx.comp))),
+            channel: self.empty.clone(),
+            idx: self.index.unwrap_or(cx.idx),
+        };
+        Some(Arc::new(Self {
+            expression: self.expression.bind_numeric(&host, &ctx)?,
+            channel: self.channel,
+            keys: self.keys.clone(),
+            empty: self.empty.clone(),
+            index: Some(cx.idx),
+        }))
     }
 
     fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
@@ -192,7 +216,7 @@ impl CompiledExpression for Compiled {
             } else {
                 self.empty.clone()
             },
-            idx: cx.idx,
+            idx: self.index.unwrap_or(cx.idx),
         };
         let out = self.expression.evaluate_untracked(&host, &ctx);
         match out {

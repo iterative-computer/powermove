@@ -51,6 +51,7 @@ mod eval;
 mod host;
 pub mod jsmath;
 mod lexer;
+mod numeric;
 mod parser;
 mod string;
 mod value;
@@ -114,6 +115,7 @@ pub struct Context<O> {
 #[derive(Clone, Debug)]
 pub struct Expression {
     program: Program,
+    numeric: Option<numeric::Numeric>,
     needs_idx: bool,
     dialect: Dialect,
 }
@@ -202,6 +204,7 @@ impl Expression {
         let tree = parser::parse(units).map_err(CompileError::Syntax)?;
         Ok(Expression {
             program: Program::compile(&tree),
+            numeric: numeric::Numeric::compile(&tree, dialect),
             needs_idx: needs_idx(units),
             dialect,
         })
@@ -239,6 +242,16 @@ impl Expression {
         self.dialect
     }
 
+    /// Binds only document/fps/index inputs of the typed numeric plan. The
+    /// embedding must discard this binding on every document revision. Time,
+    /// local time, frame and the keyframed value remain dynamic. The complete
+    /// bytecode remains available for any runtime type requiring coercion.
+    pub fn bind_numeric<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Option<Self> {
+        let mut out = self.clone();
+        out.numeric = Some(self.numeric.as_ref()?.bind(host, ctx));
+        Some(out)
+    }
+
     /// Runs without allocating a dependency trace. Callers must invalidate on
     /// every document revision (or track reads in the host itself).
     pub fn evaluate_untracked<H: Host>(
@@ -246,6 +259,11 @@ impl Expression {
         host: &H,
         ctx: &Context<H::Obj>,
     ) -> Result<Value<H::Obj>, EvalError> {
+        if let Some(plan) = &self.numeric
+            && let Some(n) = plan.evaluate(host, ctx)
+        {
+            return Ok(Value::Number(n));
+        }
         Evaluator::untracked(host, ctx, self.dialect)
             .run(&self.program)
             .map(|v| v.map_doc(|t| t.into_obj()))
