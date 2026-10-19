@@ -11,15 +11,29 @@ fn record_hash(path: &Path) -> (u32, u64) {
         hash = (hash ^ u64::from(v)).wrapping_mul(1_099_511_628_211);
     };
     let mut last = Point::zero();
+    let mut first = Point::zero();
 
     for segment in path.segments() {
         let (verb, points, weight): (_, Vec<_>, _) = match segment {
-            PathSegment::MoveTo(p) => (0, vec![p], None),
+            PathSegment::MoveTo(p) => {
+                first = p;
+                (0, vec![p], None)
+            }
             PathSegment::LineTo(p) => (1, vec![last, p], None),
             PathSegment::QuadTo(c, p) => (2, vec![last, c, p], None),
             PathSegment::ConicTo(c, p, w) => (3, vec![last, c, p], Some(w)),
             PathSegment::CubicTo(a, b, p) => (4, vec![last, a, b, p], None),
-            PathSegment::Close => (5, vec![], None),
+            PathSegment::Close => {
+                // SkPath::Iter exposes the implicit closing line as well.
+                if last != first {
+                    add(1);
+                    for p in [last, first] {
+                        add(p.x.to_bits());
+                        add(p.y.to_bits());
+                    }
+                }
+                (5, vec![], None)
+            }
         };
         add(verb);
         for p in &points {
@@ -80,5 +94,55 @@ fn rational_strokes_match_skia_152_path_records() {
         };
         let p = b.finish().unwrap().stroke(&stroke, 1.).unwrap();
         assert_eq!(record_hash(&p), expected, "case {k}");
+    }
+}
+
+#[test]
+fn rectangle_frames_match_skia_152_path_records() {
+    let expected = [
+        (56, 18262213083876283474u64),
+        (80, 739897739276918341u64),
+        (68, 479402714892600777u64),
+        (44, 11904902325730817774u64),
+        (80, 4452492057560981061u64),
+    ];
+    for (k, expected) in expected.into_iter().enumerate() {
+        let mut b = PathBuilder::new();
+        b.move_to(2.125, 3.75);
+        if k == 4 {
+            b.line_to(2.125, 45.125);
+            b.line_to(14.375, 45.125);
+            b.line_to(14.375, 3.75);
+        } else {
+            b.line_to(14.375, 3.75);
+            b.line_to(14.375, 45.125);
+            b.line_to(2.125, 45.125);
+        }
+        b.close();
+        let p = b.finish().unwrap();
+        let stroke = Stroke {
+            width: if k == 0 {
+                14.
+            } else if k == 1 {
+                2.
+            } else {
+                3.75
+            },
+            miter_limit: if k == 2 { 0.5 } else { 4. },
+            line_cap: LineCap::Butt,
+            line_join: if k == 2 {
+                LineJoin::Miter
+            } else if k == 3 {
+                LineJoin::Bevel
+            } else {
+                LineJoin::Round
+            },
+        };
+        let out = if k == 3 {
+            p.stroke_rect(&stroke, true).unwrap()
+        } else {
+            p.stroke(&stroke, 1.).unwrap()
+        };
+        assert_eq!(record_hash(&out), expected, "rectangle {k}");
     }
 }

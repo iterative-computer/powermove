@@ -8,8 +8,8 @@
 //! `SkEdgeBuilder.cpp` (analytic edges, no clipping), `SkTSort.h` and the
 //! Y-extrema chops of `SkGeometry.cpp` from Skia m149, in the same 16.16
 //! fixed-point and `f32` arithmetic. Only what non-inverse winding fills of
-//! non-convex paths contained in the mask need (glyph frames are never
-//! convex: a stroke of a closed contour has two contours).
+//! paths contained in the mask need. Convex paths (including a collapsed
+//! rectangle stroke and COLR layers) use Skia's separate convex edge walk.
 //!
 //! Skia is Copyright 2006-2016 The Android Open Source Project and Google
 //! LLC, used under its BSD-3-Clause license:
@@ -46,6 +46,9 @@
     clippy::field_reassign_with_default,
     clippy::manual_range_contains
 )]
+
+#[path = "skaaa_convex.rs"]
+mod convex;
 
 type Fixed = i32;
 type FDot6 = i32;
@@ -1275,6 +1278,8 @@ struct Device {
     w: i32,
     h: i32,
     data: Vec<u8>,
+    // Premultiplied N32 paint, or an A8 white coverage destination.
+    color: Option<[u32; 4]>,
 }
 
 #[inline]
@@ -1301,6 +1306,17 @@ impl Device {
         if aa == 0 {
             return;
         }
+        if let Some(color) = self.color {
+            if let Some(i) = self.rgba_index(x, y) {
+                let src = color.map(|v| v * (u32::from(aa) + 1) >> 8);
+                for c in 0..4 {
+                    self.data[i + c] = (src[c]
+                        + (u32::from(self.data[i + c]) * (256 - src[3]) >> 8))
+                        .min(255) as u8;
+                }
+            }
+            return;
+        }
         if let Some(d) = self.px(x, y) {
             // canFoldAA: src = div255(255 × aa) = aa; srcover.
             let src = if aa == 0xFF {
@@ -1309,6 +1325,42 @@ impl Device {
                 div255(255 * u32::from(aa))
             };
             *d = srcover(src, *d);
+        }
+    }
+    fn rgba_index(&self, x: i32, y: i32) -> Option<usize> {
+        (x >= 0 && y >= 0 && x < self.w && y < self.h).then_some(((y * self.w + x) * 4) as usize)
+    }
+    // SkARGB32_Blitter::blitAntiH2 has a single combined multiply/add,
+    // rather than quantizing the source before SkPMSrcOver.
+    fn aa_two(&mut self, x: i32, y: i32, aa: u8) {
+        let Some(color) = self.color else {
+            self.aa(x, y, aa);
+            return;
+        };
+        if let Some(i) = self.rgba_index(x, y) {
+            let scale = if color[3] == 255 {
+                u32::from(aa) + (u32::from(aa) >> 7)
+            } else {
+                u32::from(aa) + 1
+            };
+            let keep = if color[3] == 255 {
+                256 - scale
+            } else {
+                let prod = 0xffff - color[3] * scale;
+                (prod + (prod >> 8)) >> 8
+            };
+            for c in 0..4 {
+                self.data[i + c] =
+                    ((color[c] * scale + u32::from(self.data[i + c]) * keep) >> 8) as u8;
+            }
+        }
+    }
+    fn mask_pixel(&mut self, x: i32, y: i32, m: u8) {
+        if self.color.is_some() {
+            self.aa(x, y, m);
+        } else if let Some(d) = self.px(x, y) {
+            let one = srcover(255, *d);
+            *d = div255((255 - u32::from(m)) * u32::from(*d) + u32::from(m) * u32::from(one));
         }
     }
     fn blit_v(&mut self, x: i32, y: i32, height: i32, aa: u8) {
@@ -1503,13 +1555,7 @@ impl Additive {
                 for yy in 0..*height {
                     for xx in 0..*width {
                         let m = buf[(1 + yy * *width + xx) as usize];
-                        if let Some(d) = dev.px(*left + xx, *top + yy) {
-                            let one = srcover(0xFF, *d);
-                            *d = div255(
-                                (255 - u32::from(m)) * u32::from(*d)
-                                    + u32::from(m) * u32::from(one),
-                            );
-                        }
+                        dev.mask_pixel(*left + xx, *top + yy, m);
                     }
                 }
             }
@@ -1652,8 +1698,8 @@ impl Ctx<'_> {
             self.add.mask_add(row, x + 1, a2);
         } else if full_alpha == 0xFF && !no_real {
             // blitAntiH2: two one-pixel runs.
-            self.dev.aa(x, y, a1);
-            self.dev.aa(x + 1, y, a2);
+            self.dev.aa_two(x, y, a1);
+            self.dev.aa_two(x + 1, y, a2);
         } else {
             self.add.blit_anti_h1(x, y, a1, self.dev);
             self.add.blit_anti_h1(x + 1, y, a2, self.dev);
@@ -2157,12 +2203,53 @@ fn aaa_walk_edges(
 /// fill) as `SkDraw::drawPath` with an anti-aliased paint into a cleared A8
 /// pixmap: Skia's analytic coverage, exactly.
 pub fn fill_path_a8(path: &pm_skia_path::Path, width: u32, height: u32) -> Vec<u8> {
+    fill_path(
+        path,
+        width,
+        height,
+        Device {
+            w: width as i32,
+            h: height as i32,
+            data: vec![0; (width * height) as usize],
+            color: None,
+        },
+    )
+}
+
+/// Skia's solid N32 span blitter over an existing premultiplied RGBA target.
+/// Keep the analytic fill's span order: collapsing it to one A8 mask loses
+/// the two-pixel blitter's combined multiply/add and intermediate rounding.
+pub fn fill_path_solid(
+    path: &pm_skia_path::Path,
+    width: u32,
+    height: u32,
+    color: [f32; 4],
+    pixels: &mut Vec<u8>,
+) {
+    assert_eq!(pixels.len(), (width * height * 4) as usize);
+    let a = (color[3] * 255.).round().clamp(0., 255.) as u32;
+    let paint = std::array::from_fn(|c| {
+        if c == 3 {
+            a
+        } else {
+            u32::from(div255((color[c] * 255.).round().clamp(0., 255.) as u32 * a))
+        }
+    });
+    *pixels = fill_path(
+        path,
+        width,
+        height,
+        Device {
+            w: width as i32,
+            h: height as i32,
+            data: std::mem::take(pixels),
+            color: Some(paint),
+        },
+    );
+}
+
+fn fill_path(path: &pm_skia_path::Path, width: u32, height: u32, mut dev: Device) -> Vec<u8> {
     let (w, h) = (width as i32, height as i32);
-    let mut dev = Device {
-        w,
-        h,
-        data: vec![0; (width * height) as usize],
-    };
     let b = path.bounds();
     // safeRoundOut of the path bounds; the clip is the mask.
     let ir = (
@@ -2193,6 +2280,9 @@ pub fn fill_path_a8(path: &pm_skia_path::Path, width: u32, height: u32) -> Vec<u
     let ir_w = ir.2 - ir.0;
     let ir_h = ir.3 - ir.1;
     let can_mask = ir_w <= 32 && i64::from((ir_w + 3) & !3) * i64::from(ir_h) <= 1024;
+    if can_mask && convex::fat_rect(path, &mut dev) {
+        return dev.data;
+    }
     let mut add = if can_mask {
         Additive::Mask {
             left: ir.0,
@@ -2255,16 +2345,27 @@ pub fn fill_path_a8(path: &pm_skia_path::Path, width: u32, height: u32) -> Vec<u
             dev: &mut dev,
             add: &mut add,
         };
-        aaa_walk_edges(
-            &mut edges,
-            &mut ctx,
-            start_y,
-            stop_y,
-            left_bound,
-            right_bound,
-            can_mask,
-            skip_intersect,
-        );
+        if path.is_convex() && n >= 2 {
+            convex::walk(
+                &mut edges,
+                &mut ctx,
+                stop_y,
+                left_bound,
+                right_bound,
+                can_mask,
+            );
+        } else {
+            aaa_walk_edges(
+                &mut edges,
+                &mut ctx,
+                start_y,
+                stop_y,
+                left_bound,
+                right_bound,
+                can_mask,
+                skip_intersect,
+            );
+        }
     }
     add.finish(&mut dev);
     dev.data

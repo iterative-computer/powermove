@@ -38,6 +38,7 @@ extern crate std;
 
 extern crate alloc;
 
+mod convex;
 mod f32x2_t;
 mod f32x4_t;
 mod floating_point;

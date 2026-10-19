@@ -88,33 +88,53 @@ pub const fn corpus(
     }
 }
 
-/// The 23 approved FONTS-R ceilings. Never raise a value or add a row here
+/// Remaining FONTS-R ceilings. Closed entries are retired here as well as
+/// in the fixture, so a data-only edit cannot bring them back. Never raise
+/// a value or add a row here
 /// without a new orchestrator decision; lower or remove rows (and the
 /// fixture's entries) as residuals improve.
-pub const APPROVED: [Approved; 23] = [
+pub const APPROVED: [Approved; 13] = [
     raster("caption-paper-0460", 1, 2),
     raster("caption-paper-0461", 1, 2),
     raster("caption-paper-0462", 1, 2),
-    raster("caption-pop-0455", 2, 2),
-    raster("caption-pop-0456", 5, 2),
-    raster("caption-pop-0458", 7, 13),
-    raster("caption-pop-0459", 74, 13),
-    raster("caption-stroke-0491", 5, 4),
-    raster("caption-whisper-0442", 1, 2),
-    raster("caption-whisper-0443", 1, 2),
-    raster("caption-whisper-0444", 1, 2),
-    raster("colr-0033", 1, 2),
-    raster("colr-0034", 5, 2),
     raster("sdf-sizes-0004", 4, 2),
     raster("path-stroke-0000", 154, 4),
     raster("path-stroke-0001", 1, 64),
     raster("real-16-Lkkauewe", 6, 64),
     raster("real-18-Lkkauewe", 6, 64),
     raster("real-24-L3app4ie", 2, 5),
-    corpus("real_powermove-ad-16", "real/powermove-ad", false, 16.0, 2, 39),
-    corpus("real_powermove-ad-18", "real/powermove-ad", false, 18.0, 6, 34),
-    corpus("real_powermove-ad-text-only-16", "real/powermove-ad", true, 16.0, 3, 44),
-    corpus("real_powermove-ad-text-only-18", "real/powermove-ad", true, 18.0, 6, 44),
+    corpus(
+        "real_powermove-ad-16",
+        "real/powermove-ad",
+        false,
+        16.0,
+        2,
+        39,
+    ),
+    corpus(
+        "real_powermove-ad-18",
+        "real/powermove-ad",
+        false,
+        18.0,
+        6,
+        34,
+    ),
+    corpus(
+        "real_powermove-ad-text-only-16",
+        "real/powermove-ad",
+        true,
+        16.0,
+        3,
+        44,
+    ),
+    corpus(
+        "real_powermove-ad-text-only-18",
+        "real/powermove-ad",
+        true,
+        18.0,
+        6,
+        44,
+    ),
 ];
 
 impl Approved {

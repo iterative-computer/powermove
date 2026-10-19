@@ -7,6 +7,7 @@
 // Based on SkStroke.cpp
 
 use crate::{Path, Point, Transform};
+use alloc::vec::Vec;
 
 use crate::floating_point::{NonZeroPositiveF32, NormalizedF32, NormalizedF32Exclusive};
 use crate::path::{PathSegment, PathSegmentsIter};
@@ -16,6 +17,149 @@ use crate::scalar::{Scalar, SCALAR_NEARLY_ZERO, SCALAR_ROOT_2_OVER_2};
 
 #[cfg(all(not(feature = "std"), feature = "no-std-float"))]
 use crate::NoStdFloat;
+
+/// SkStroke::strokeRect, for closed axis-aligned rectangles.
+fn stroke_rect(path: &Path, width: f32, miter: f32, join: LineJoin, fill: bool) -> Option<Path> {
+    let mut pts = Vec::new();
+    let mut closed = false;
+    for seg in path.segments() {
+        match seg {
+            PathSegment::MoveTo(p) if pts.is_empty() => pts.push(p),
+            PathSegment::LineTo(p) if !closed => pts.push(p),
+            PathSegment::Close => closed = true,
+            _ => return None,
+        }
+    }
+    if !closed {
+        return None;
+    }
+    if pts.first() == pts.last() {
+        pts.pop();
+    }
+    // SkPath's rectangle recognizer permits collinear edge subdivisions.
+    loop {
+        if pts.len() < 4 {
+            return None;
+        }
+        let redundant = (0..pts.len()).find(|&i| {
+            let (a, b, c) = (
+                pts[(i + pts.len() - 1) % pts.len()],
+                pts[i],
+                pts[(i + 1) % pts.len()],
+            );
+            ((a.x == b.x && b.x == c.x) && (b.y - a.y) * (c.y - b.y) >= 0.0)
+                || ((a.y == b.y && b.y == c.y) && (b.x - a.x) * (c.x - b.x) >= 0.0)
+        });
+        if let Some(i) = redundant {
+            pts.remove(i);
+        } else {
+            break;
+        }
+    }
+    if pts.len() != 4
+        || (0..4).any(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            a.x != b.x && a.y != b.y
+        })
+    {
+        return None;
+    }
+    let (a, b) = (pts[1] - pts[0], pts[2] - pts[1]);
+    let cw = a.x * b.y - a.y * b.x > 0.0;
+    let rect = path.bounds();
+    let radius = width / 2.0;
+    let (l, t, r, b) = (
+        rect.left() - radius,
+        rect.top() - radius,
+        rect.right() + radius,
+        rect.bottom() + radius,
+    );
+    let join = if join == LineJoin::Miter && miter < core::f32::consts::SQRT_2 {
+        LineJoin::Bevel
+    } else {
+        join
+    };
+    let mut out = PathBuilder::new();
+    let add_rect = |out: &mut PathBuilder, l, t, r, b, cw| {
+        out.move_to(l, t);
+        if cw {
+            out.line_to(r, t);
+            out.line_to(r, b);
+            out.line_to(l, b);
+        } else {
+            out.line_to(l, b);
+            out.line_to(r, b);
+            out.line_to(r, t);
+        }
+        out.close();
+    };
+    match join {
+        LineJoin::Miter => add_rect(&mut out, l, t, r, b, cw),
+        LineJoin::Round => {
+            // SkRRect::MakeRectXY and SkPath_RRectPointIterator: start
+            // index 6 clockwise, 7 counterclockwise, four exact conics.
+            let points = [
+                [l + radius, t],
+                [r - radius, t],
+                [r, t + radius],
+                [r, b - radius],
+                [r - radius, b],
+                [l + radius, b],
+                [l, b - radius],
+                [l, t + radius],
+            ];
+            let corners = [[l, t], [r, t], [r, b], [l, b]];
+            let mut i = if cw { 6 } else { 7 };
+            out.move_to(points[i][0], points[i][1]);
+            for _ in 0..4 {
+                i = if cw { (i + 1) % 8 } else { (i + 7) % 8 };
+                out.line_to(points[i][0], points[i][1]);
+                let corner = if cw { ((i + 1) / 2) % 4 } else { i / 2 };
+                i = if cw { (i + 1) % 8 } else { (i + 7) % 8 };
+                out.conic_to(
+                    corners[corner][0],
+                    corners[corner][1],
+                    points[i][0],
+                    points[i][1],
+                    SCALAR_ROOT_2_OVER_2,
+                );
+            }
+            out.close();
+        }
+        LineJoin::Bevel => {
+            let mut points = [
+                [rect.left(), t],
+                [rect.right(), t],
+                [r, rect.top()],
+                [r, rect.bottom()],
+                [rect.right(), b],
+                [rect.left(), b],
+                [l, rect.bottom()],
+                [l, rect.top()],
+            ];
+            if !cw {
+                points.reverse();
+            }
+            out.move_to(points[0][0], points[0][1]);
+            for p in &points[1..] {
+                out.line_to(p[0], p[1]);
+            }
+            out.close();
+        }
+        LineJoin::MiterClip => return None,
+    }
+    if !fill && width < rect.width().min(rect.height()) {
+        add_rect(
+            &mut out,
+            rect.left() + radius,
+            rect.top() + radius,
+            rect.right() - radius,
+            rect.bottom() - radius,
+            !cw,
+        );
+    }
+    out.finish()
+}
 
 struct SwappableBuilders<'a> {
     inner: &'a mut PathBuilder,
@@ -165,6 +309,21 @@ enum IntersectRayType {
 }
 
 impl Path {
+    /// Skia's closed-rectangle stroke fast path, optionally with the fill.
+    /// Returns `None` when this is not a closed axis-aligned rectangle.
+    pub fn stroke_rect(&self, stroke: &Stroke, fill: bool) -> Option<Path> {
+        if !stroke.width.is_finite() || stroke.width <= 0.0 {
+            return None;
+        }
+        stroke_rect(
+            self,
+            stroke.width,
+            stroke.miter_limit,
+            stroke.line_join,
+            fill,
+        )
+    }
+
     /// Returns a stoked path.
     ///
     /// `resolution_scale` can be obtained via
@@ -310,7 +469,9 @@ impl PathStroker {
         mut line_join: LineJoin,
         res_scale: f32,
     ) -> Option<Path> {
-        // TODO: stroke_rect optimization
+        if let Some(rect) = stroke_rect(path, width.get(), miter_limit, line_join, false) {
+            return Some(rect);
+        }
 
         let mut inv_miter_limit = 0.0;
 

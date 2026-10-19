@@ -309,6 +309,9 @@ pub fn framed(user: &pm_skia_path::Path, frame: Frame) -> Option<pm_skia_path::P
         line_cap: pm_skia_path::LineCap::Butt,
         line_join: frame.join,
     };
+    if let Some(rect) = user.stroke_rect(&stroke, frame.fill) {
+        return Some(rect);
+    }
     let stroked = user.stroke(&stroke, 1.0)?;
     if !frame.fill {
         return Some(stroked);

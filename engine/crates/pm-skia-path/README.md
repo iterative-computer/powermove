@@ -22,3 +22,9 @@ is removed. `tests/skia_conics.rs` compares five complete stroke records
 bitwise (verbs, point bits and weights); `tests/skia-conic-oracle.cpp`
 regenerates their hashes against the pinned Skia library with
 `-ffp-contract=off`.
+
+Closed rectangles use that revision's `SkStroke::strokeRect` fast path,
+including collapsed interiors and stroke-and-fill framing. Five additional
+stroke records and `tests/skia-rect-oracle.cpp` cover its joins and winding.
+`Path::is_convex` ports Skia's control-polygon classifier so pm-text's
+analytic scan converter can select the same convex edge walk.
