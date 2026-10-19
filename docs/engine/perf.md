@@ -1017,3 +1017,51 @@ showing a window because the Electron evaluation context lacks `require`; it now
 loads the existing harness through `process.getBuiltinModule('module').createRequire`.
 All failed/interrupted evidence remains outside Git. There is no claim that the
 editor, steady-generation, or UHD common-clock gate passes.
+
+
+## fixups2 round 3: owner decisions and steady display configuration
+
+The owner's round-3 decision accepts exact detached read-set validation at the
+round-2 measured median **10.07 µs** (native samples 11.564, 10.633, 10.066,
+9.821, 9.828 µs; legacy median 40.67 ns). This supersedes the earlier strict
+nanosecond verdict. Exact validation stays in place; no further detached scope
+optimization is required.
+
+The owner also ruled that round-2 editor-open deltas (-26.30 to +150.10 ms) on
+this shared machine cannot decide the performance gate. Keep preload/module
+load overlap and deferred speculative font warmup. The five-pair boot harness
+is committed in `e2e/engine-doc-boot.spec.ts`; its isolated CPU profile test stays
+outside the timing pairs. The historical numbers above remain recorded, but
+are not a current pass/fail verdict for editor opening.
+
+### Phase 3c gate handoff: engine against today
+
+| Row | Evidence / rerun | Status |
+|---|---|---|
+| Detached repeated queries, 100 layers × 40 properties × five keys | 10.07 µs with exact arbitrary-reference validation; round-2 `scope.json` | Accepted by owner, round 3 |
+| Installed UI / opened editor | Five alternating off/on pairs, p50 and maximum, `e2e/engine-doc-boot.spec.ts` | Deferred by owner to the Phase 3c quiet-machine performance table; no new shared-machine timing claim |
+
+For the quiet-machine row, run the committed boot spec under `pm-electron-lock`
+with `PM_FIXUPS2_MEASURE=1`, an outside-repository `PM_FIXUPS2_EVIDENCE` directory,
+and `--workers=1`. Record load and all pair deltas; enable `PM_FIXUPS2_PROFILE=1`
+only for its separate profiling test. Reserve at least 40 GiB before build and
+every app launch.
+
+### Today's canvas on a gamut/EDR change
+
+`legacy/gl/compositor.ts:731` creates its WebGL2 context with alpha, antialias,
+premultiplication, preserve-buffer, power preference and desynchronization
+options. It does not set `drawingBufferColorSpace` or subscribe to
+`(color-gamut: p3)` / `(dynamic-range: high)`. Its context listeners at lines
+747–762 handle GPU context loss/restoration. The viewer initializes this context
+once (`extensions/viewer/viewer.ts:979`) and its resize observer updates size;
+there is no gamut/EDR canvas reconfiguration. Existing legacy canvases therefore
+retain their color configuration when those media queries change.
+
+Native presentation now follows that behavior: sample the host's color
+configuration at initial setup, retain it for capability-only changes and later
+geometry updates, and log the newly observed capabilities. A media-query flip
+alone neither sends a changed view nor retires the surface pool. Genuine size,
+DPR, zoom and host-window changes retain their existing behavior. This is the
+owner's explicit round-3 compatibility policy, superseding round 2's unresolved
+question about whether a frozen canvas configuration was appropriate.
