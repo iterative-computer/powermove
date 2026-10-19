@@ -28,7 +28,13 @@ const shallow = (a: any, b: any): boolean => {
 };
 const unchanged = (root: any, input: Input): boolean => {
   const value = at(root, input.path);
-  if (!Object.is(value, input.value) || (object(value) && typeof value.toJSON === 'function')) return false;
+  // The scope object itself may be a fresh copy (`copyOf`): like any
+  // container whose identity holds, its own read is its shape, and every
+  // member read below it is an input of its own, checked on the new object.
+  const same = input.path.length === 0
+    ? object(value) && object(input.value) && Array.isArray(value) === Array.isArray(input.value)
+    : Object.is(value, input.value);
+  if (!same || (object(value) && typeof value.toJSON === 'function')) return false;
   if (input.length !== undefined) return value.length === input.length;
   if (!input.keys) return true;
   const ks = keys(value)!;
@@ -42,19 +48,46 @@ function write(root: any, path: PathPart[], value: any): any {
   return root;
 }
 
+/**
+ * Whether `comp` looks like a copy of `prev` (`{ ...prev }`, a wrapper made
+ * anew on every `PM.curComp()` call): the same prototype, the same member
+ * names in the same order, and the same `layers` array. Only a hint for
+ * sharing a scope: every answer is still validated against `comp`'s own
+ * reads, so a wrong guess costs a re-evaluation, never an answer.
+ */
+export function copyOf(comp: any, prev: any): boolean {
+  if (Object.getPrototypeOf(comp) !== Object.getPrototypeOf(prev) || comp.layers !== prev.layers || !Array.isArray(comp.layers)) return false;
+  const a = Object.keys(comp), b = Object.keys(prev);
+  return a.length === b.length && a.every((k, i) => k === b[i]);
+}
+
 export class DetachedScopes {
   private scopes = new WeakMap<object, Scope>();
   private addresses = new Map<string, WeakRef<object>>();
-  private collected = new FinalizationRegistry<string>(address => this.addresses.delete(address));
+  /** A scope can move to a newer object (see `address`): forget it only when its current object is gone. */
+  private collected = new FinalizationRegistry<string>(address => { if (!this.addresses.get(address)?.deref()) this.addresses.delete(address); });
+  /** The object last addressed. */
+  private last: WeakRef<object> | null = null;
 
+  /**
+   * The scope address of `comp`. An object that is a fresh copy of the last
+   * one addressed (`copyOf`) shares its scope, which then validates and
+   * answers for the new object: a caller that builds its scope object anew
+   * for every query keeps one resident scope (its reads checked each time)
+   * instead of a full serialization and a new pm-wasm entry per query.
+   */
   address(comp: object): string {
     let scope = this.scopes.get(comp);
     if (!scope) {
-      scope = { id: '@scope:' + ++serial, layers: null, structure: [] };
+      const prev = this.last?.deref();
+      scope = (prev && prev !== comp && copyOf(comp, prev) ? this.scopes.get(prev) : undefined)
+        ?? { id: '@scope:' + ++serial, layers: null, structure: [] };
       this.scopes.set(comp, scope);
-      this.addresses.set(scope.id, new WeakRef(comp));
       this.collected.register(comp, scope.id);
     }
+    let ref = this.addresses.get(scope.id);
+    if (ref?.deref() !== comp) this.addresses.set(scope.id, ref = new WeakRef(comp));
+    this.last = ref!;
     return scope.id;
   }
 
@@ -137,7 +170,10 @@ export class DetachedScopes {
       answer.inputs = reply.reads.map((p: PathPart[]) => snapshot(comp, p));
       answer.reply = reply;
       answer.key = key;
-      if ('ok' in reply || reply.throw) scope.answer = answer;
+      // A throw that read nothing came before evaluation began (a scope
+      // update pm-wasm refused): it depends on no input, so it is not kept.
+      if ('ok' in reply || (reply.throw && reply.reads.length)) scope.answer = answer;
+      else scope.answer = undefined;
       return this.copy(reply);
     }
   }

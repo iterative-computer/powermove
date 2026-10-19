@@ -96,6 +96,25 @@ describe('detached input reads through real pm-wasm', () => {
     }
   }, 120_000);
 
+  it('does not keep a throw that read nothing (a refused scope update) as the answer', async () => {
+    const { PM, doc, comp, cache } = await fixture();
+    const address = cache.address(comp), wasm = doc.wasm!;
+    const request = {op:'ev',comp:address,open:PM.proj.compId,layer:0,key:'opacity',t:0.5};
+    const first = cache.query(address,request,wasm,doc.barrier!.revision);
+    expect(first.ok).toBe(0 + 0.5 * 10 / 2);
+    const real = wasm.query.bind(wasm);
+    let refuse = true;
+    const query = vi.spyOn(wasm,'query').mockImplementation(r => refuse && (r as any).scopePatches
+      ? { throw: { kind: 'TypeError', message: 'Invalid scope update: refused' }, reads: [] } as any : real(r));
+    comp.layers[0].p.opacity.kf[1].v = 20;
+    expect(cache.query(address,request,wasm,doc.barrier!.revision).throw.message).toMatch(/Invalid scope update/);
+    refuse = false;
+    query.mockClear();
+    const again = cache.query(address,request,wasm,doc.barrier!.revision);
+    expect(again.ok).toBe(0 + 0.5 * 20 / 2);
+    expect(query).toHaveBeenCalled();
+  });
+
   it('reuses the scope across times and operations without full serialization', async () => {
     const { PM, doc, comp, cache }=await fixture();
     const address=cache.address(comp), wasm=doc.wasm!;
