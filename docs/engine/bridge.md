@@ -1423,3 +1423,20 @@ when the display rate is initially unknown; pending timers are cancelled on
 retarget/dispose. The prediction is two refreshes plus the existing panel
 offset. See `perf.md`, "Worker commit deadlines (P4)": targeted unit tests pass,
 but final paired cadence and A/V feedback on an awake display remain required.
+
+#### perf3: prepare the viewer drawing before mount
+
+The native connection owns `PresentationWarmup`, a single detached drawing for
+its document. It starts before registering the viewer service. The drawing has
+no engine session or animation loop; the worker initializes its WebGPU device
+and compiles SDR/EDR pipelines asynchronously. `ViewerPresentation` claims the
+canvas and worker together and transfers failure/loss callbacks to the current
+backend token. A popout cannot claim a drawing from a different document. If
+worker WebGPU fails before claim, a detached page painter is prepared instead.
+Closing a viewer prepares the next spare; removing the connection disposes the
+unused spare, including painters that finish initialization after disposal.
+
+This removes worker construction and first-pipeline compilation from a warmed
+mid-play mount. It does not remove the viewer extension's own DOM work. See
+`perf.md` P5 for the deterministic reverse scheduling result and remaining paired
+mount/A/V gates; neither physical-display gate is claimed from unit tests.

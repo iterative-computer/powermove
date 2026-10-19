@@ -33,6 +33,7 @@
 import { createWebGpuPainter, type FramePainter } from './gpu';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type Presenter, type PresenterStats, type TraceRecord } from './presenter';
 import { PresentWorker, type WorkerLike } from './worker-presenter';
+import type { PresentationWarmup } from './prewarm';
 import type { EngineFrameMessage, EngineRouteMessage, OverlayGeometry, PathCommand, Quad, ViewerState, VsyncHint } from './protocol';
 import { canvasColorSpace, displayIsEdr, ViewSequencer, type ViewInput } from './view-state';
 
@@ -90,6 +91,8 @@ export interface EngineViewerService {
   /** `false`: draw engine frames on the page's main thread rather than in
    *  a presentation worker (the measurement harness compares the two). */
   readonly offMainThread?: boolean;
+  /** One detached drawing prepared by the native connection before mount. */
+  readonly drawingWarmup?: PresentationWarmup;
   /**
    * "Use New Engine" is on (the kernel's connection): engine frames are the
    * only frames this viewer shows. Until the first frame, while the engine
@@ -182,6 +185,7 @@ export class ViewerPresentation {
   /** Draws on this thread (`painter`) or in a presentation worker (`worker`). */
   private painter: FramePainter | null = null;
   private painterFailed = false;
+  private drawingPending: { token: number; promise: Promise<boolean> } | null = null;
   private worker: PresentWorker | null = null;
   /** The worker could not present (no WebGPU in workers): stay on this thread. */
   private workerUnavailable = false;
@@ -265,8 +269,7 @@ export class ViewerPresentation {
     return this.worker !== null;
   }
 
-  private makeCanvas(doc: Document): HTMLCanvasElement {
-    const canvas = doc.createElement('canvas');
+  private makeCanvas(doc: Document, canvas = doc.createElement('canvas')): HTMLCanvasElement {
     canvas.id = 'engine-present';
     canvas.setAttribute('aria-hidden', 'true');
     canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;visibility:hidden';
@@ -527,8 +530,37 @@ export class ViewerPresentation {
    * start one and the canvas can hand its drawing over, otherwise a WebGPU
    * painter on this thread. False when neither works.
    */
-  private async makeDrawing(): Promise<boolean> {
+  private makeDrawing(): Promise<boolean> {
+    if (this.worker || this.painter) return Promise.resolve(true);
+    if (this.drawingPending?.token === this.backendToken) return this.drawingPending.promise;
+    const token = this.backendToken;
+    const promise = this.createDrawing();
+    this.drawingPending = { token, promise };
+    const clear = (): void => { if (this.drawingPending?.promise === promise) this.drawingPending = null; };
+    void promise.then(clear, clear);
+    return promise;
+  }
+
+  private async createDrawing(): Promise<boolean> {
     if (this.worker || this.painter) return true;
+    const token = this.backendToken;
+    const warm = this.options.service.drawingWarmup?.take(this.options.stage.ownerDocument, {
+      onFailed: message => this.workerFailed(token, message),
+      onLost: message => this.deviceLost(token, message)
+    });
+    if (warm) {
+      const old = this.canvasElement;
+      this.canvasElement = this.makeCanvas(old.ownerDocument, warm.canvas);
+      old.replaceWith(this.canvasElement);
+      this.worker = warm.worker;
+      if (this.worker) return true;
+      const painter = await warm.painter;
+      if (this.disposed || token !== this.backendToken) {
+        painter?.dispose();
+        return false;
+      }
+      if (painter) { this.painter = painter; return true; }
+    }
     const canvas = this.canvasElement;
     const createWorker = this.options.createWorker;
     if (createWorker && !this.workerUnavailable && typeof canvas.transferControlToOffscreen === 'function') {
@@ -553,7 +585,6 @@ export class ViewerPresentation {
       }
     }
     if (this.painterFailed) return false;
-    const token = this.backendToken;
     let painter: FramePainter;
     try {
       painter = await (this.options.createPainter ?? createWebGpuPainter)(this.canvasElement);

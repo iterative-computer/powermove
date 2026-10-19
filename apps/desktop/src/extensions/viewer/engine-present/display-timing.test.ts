@@ -27,11 +27,23 @@ describe('VsyncEstimator', () => {
     expect(Math.min(residual, fit!.periodMs - residual)).toBeLessThan(0.3);
   });
 
-  it('uses the median interval without a nominal rate', () => {
+  it('estimates the period across jittered refreshes without a nominal rate', () => {
     const estimator = new VsyncEstimator(null);
     for (const t of rafs(200, 0)) estimator.sample(t);
     expect(estimator.fit().periodMs).toBeGreaterThan(8.0);
     expect(estimator.fit().periodMs).toBeLessThan(8.7);
+  });
+
+  it('preserves fractional refresh periods despite 0.1 ms timestamp rounding and skipped refreshes', () => {
+    for (const hz of [60, 120, 119.88, 144]) {
+      const estimator = new VsyncEstimator();
+      const period = 1000 / hz;
+      for (let i = 0; i < 800; i++) {
+        if (i % 13 === 5) continue;
+        estimator.sample(Math.round((1000 + i * period) * 10) / 10);
+      }
+      expect(Math.abs(estimator.fit().periodMs - period)).toBeLessThan(0.0001);
+    }
   });
 
   it('follows a half-period phase jump within a dozen refreshes', () => {
@@ -45,6 +57,15 @@ describe('VsyncEstimator', () => {
     const target = last + 50 + 4.2;
     const residual = ((fit!.vsyncMs - target) % fit!.periodMs + fit!.periodMs) % fit!.periodMs;
     expect(Math.min(residual, fit!.periodMs - residual)).toBeLessThan(0.5);
+  });
+
+  it('keeps an inferred fractional period when the display link changes phase', () => {
+    const estimator = new VsyncEstimator();
+    const period = 1000 / 120;
+    for (let i = 0; i < 320; i++) estimator.sample(Math.round((1000 + i * period + (i >= 280 ? 4.2 : 0)) * 10) / 10);
+    expect(Math.abs(estimator.fit().periodMs - period)).toBeLessThan(0.001);
+    const phase = ((estimator.fit().vsyncMs - 1004.2) % period + period) % period;
+    expect(Math.min(phase, period - phase)).toBeLessThan(0.1);
   });
 
   it('places the next vsync on the grid', () => {

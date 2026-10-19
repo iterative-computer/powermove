@@ -786,3 +786,40 @@ refresh period was known. The next paired run lost its awake display during the
 today row, so it is invalid and produced no native timing comparison. There is
 no valid final paired p50/p95/p99/max result at 30, 25 or 23.976 fps, or a final
 A/V-under-load result. Do not treat the changed phase or prediction as a P4 pass.
+
+### perf3 P5: mount preparation and the reverse shuttle sawtooth
+
+The native connection now prepares one detached canvas and presentation worker
+before a viewer opens. The worker initializes its GPU painter and asynchronously
+compiles both SDR and EDR pipelines before processing sessions. A viewer claims
+that canvas and worker without constructing another worker on its mount path.
+The main-thread painter is prepared instead when workers cannot draw. The spare
+has no session, surface imports, or animation loop. It belongs to one document;
+popouts create their own drawing. Closing a viewer prepares the next drawing,
+and disposing the connection disposes any unused drawing. Device-loss and worker
+failure callbacks transfer with a claimed drawing. No transport restart is used.
+
+The inferred refresh period also had a systematic quantization error. Chromium's
+0.1 ms rAF timestamps at 120 Hz have mostly 8.3 ms adjacent intervals, interspersed
+with 8.4 ms. The old median selected 8.3 ms. At 2× reverse this produces about
+0.133 ms of media-time phase drift per frame, then resets at the 500 ms refit:
+the reported sawtooth. The estimator now infers skipped refresh counts from the
+median and fits the fractional period across the window. Phase discontinuities
+are removed from the slope calculation while the phase fit still follows them.
+Known nominal display rates retain their existing path.
+
+A deterministic comparison uses identical 0.1 ms rounded 120 Hz timestamps,
+30 fps, 2× reverse, and 34 starting phases over three seconds each. Old estimator
+outside-frame-interval error (6,154 drawn frames), p50/p95/p99/max:
+1.033/11.767/14.167/16.267 ms. Fixed estimator (6,150 drawn frames):
+0/7.533/8.034/8.035 ms. The old implementation fails the unchanged tighter
+half-refresh bound; the new implementation passes. This is a clock simulation,
+not a paired app or physical display measurement. Warmup ownership, late
+initialization disposal, window isolation, both pipeline formats, and reverse
+scheduling have targeted regression tests.
+
+**P5 gates remain open:** the session was locked during the performance attempts.
+Neither equal-to-today mount stalls nor repeated J/K/L A/V performance is claimed
+from the simulation. Re-run paired mount, cadence, and A/V probes on an awake,
+unlocked display with load at most 8. The between-deadline worker submission
+change above also still needs its common-compositor-clock validation.

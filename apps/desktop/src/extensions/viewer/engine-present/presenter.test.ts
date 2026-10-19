@@ -392,6 +392,46 @@ describe('EnginePresenter', () => {
       expect(displayMs - f.rafMs).toBeCloseTo(1.5 * P + 3.2, 6);
     }
   });
+  it('keeps 2× reverse on the audio line across rounded 120 Hz timestamps and refits', () => {
+    const period = 1000 / 120;
+    const frameTicks = TICKS_PER_SECOND / 30;
+    const outsideValues: number[] = [];
+    for (let phase = 0; phase < period; phase += 0.25) {
+      const painter = new Painter();
+      let now = 0;
+      const presenter = new EnginePresenter({
+        link: new Link(), source: new Source(), painter, now: () => now,
+        hostOffsetUs: () => 900_000, latencyRefreshes: 2,
+        presentOffsetMs: 3.2, nearestRefresh: true
+      });
+      for (let i = 0; i < 260; i++) {
+        now = Math.round(i * period * 10) / 10;
+        presenter.refresh(now);
+      }
+      const sample: ClockSample = { seq: 1, epoch: 2, state: 'playing', hostTime: 900_000 + (now + phase) * 1000, mediaTime: 8 * TICKS_PER_SECOND, rate: { num: -2, den: 1 }, outputLatencyUs: 0, sampleRate: 48_000, loopRange: null };
+      presenter.receive({ type: 'clock', sample }, now);
+      for (let k = 239; k >= 0; k--) presenter.present(desc(240 - k, { pts: k * frameTicks, duration: frameTicks }), new FakeFrame(`${k}`) as unknown as VideoFrame);
+      const shown: PresentedFrame[] = [];
+      presenter.onPresented(f => shown.push(f));
+      for (let i = 260; i < 620; i++) {
+        now = Math.round(i * period * 10) / 10;
+        presenter.refresh(now);
+        painter.finishGpu();
+      }
+      expect(shown.length).toBeGreaterThan(170);
+      for (const frame of shown) {
+        const heard = sample.mediaTime + (frame.displayUs! - sample.hostTime) * TICKS_PER_SECOND * -2 / 1e6;
+        const outside = Math.max(frame.pts - heard, heard - (frame.pts + frameTicks), 0) / TICKS_PER_SECOND * 1000;
+        outsideValues.push(outside);
+      }
+      presenter.dispose();
+    }
+    outsideValues.sort((a, b) => a - b);
+    const percentile = (q: number) => outsideValues[Math.ceil(q * outsideValues.length) - 1]!;
+    console.log('synthetic reverse outside interval ms', JSON.stringify({ samples: outsideValues.length, p50: percentile(0.5), p95: percentile(0.95), p99: percentile(0.99), max: percentile(1) }));
+    expect(percentile(1)).toBeLessThanOrEqual(1000 / 120 + 0.05);
+  });
+
   it('picks frames for a later display while the window resizes, then returns (resizeLatencyRefreshes)', () => {
     const source = new Source();
     const painter = new Painter();
