@@ -48,6 +48,7 @@ mod bytecode;
 mod deps;
 mod diagnostic;
 mod eval;
+mod general;
 mod host;
 pub mod jsmath;
 mod lexer;
@@ -61,6 +62,7 @@ pub use diagnostic::{
     LENGTH_MESSAGE, expression_diagnostic, expression_diagnostic_utf16, expression_names,
 };
 pub use eval::EvalError;
+pub use general::GeneralBinding;
 pub use host::{Host, JsonHost, JsonRef, Shape};
 pub use lexer::SyntaxError;
 pub use parser::{MAX_CALL_ARGS, MAX_DEPTH, MAX_NODES, MAX_SOURCE_CHARS};
@@ -117,6 +119,8 @@ pub struct Context<O> {
 pub struct Expression {
     program: Arc<Program>,
     numeric: Option<Arc<numeric::Numeric>>,
+    /// Partial evaluation for sources the numeric plan does not cover.
+    general: Option<Arc<general::General>>,
     needs_idx: bool,
     dialect: Dialect,
 }
@@ -203,9 +207,14 @@ impl Expression {
             return Err(CompileError::Length);
         }
         let tree = parser::parse(units).map_err(CompileError::Syntax)?;
+        let numeric = numeric::Numeric::compile(&tree, dialect).map(Arc::new);
         Ok(Expression {
             program: Arc::new(Program::compile(&tree)),
-            numeric: numeric::Numeric::compile(&tree, dialect).map(Arc::new),
+            general: numeric
+                .is_none()
+                .then(|| general::General::compile(&tree, dialect).map(Arc::new))
+                .flatten(),
+            numeric,
             needs_idx: needs_idx(units),
             dialect,
         })
@@ -235,6 +244,7 @@ impl Expression {
     pub fn literal_strings(&self) -> impl Iterator<Item = &JsStr> {
         self.program.code.iter().filter_map(|op| match op {
             bytecode::Op::Literal(parser::Literal::String(s)) => Some(s),
+            bytecode::Op::MemberKey(key) => Some(&key.string),
             _ => None,
         })
     }
@@ -251,6 +261,67 @@ impl Expression {
         let mut out = self.clone();
         out.numeric = Some(Arc::new(self.numeric.as_ref()?.bind(host, ctx)));
         Some(out)
+    }
+
+    /// Whether [`bind_general`](Expression::bind_general) applies: the source
+    /// has no numeric plan but has subexpressions that read no time, value or
+    /// channel input.
+    pub fn has_general_binding(&self) -> bool {
+        self.general.is_some()
+    }
+
+    /// Evaluates each subexpression that reads only `layer`, `comp`, `fps`,
+    /// `idx` and literals once and substitutes its primitive answer (see
+    /// `general.rs`). The result answers [`evaluate_untracked`] and
+    /// [`evaluate_scalars`] exactly as this expression does for every input
+    /// with which [`general_binding_matches`] holds. The embedding must check
+    /// that on every document revision. It is not for tracked evaluation (its
+    /// reads are the remaining ones only).
+    ///
+    /// [`evaluate_untracked`]: Expression::evaluate_untracked
+    /// [`evaluate_scalars`]: Expression::evaluate_scalars
+    /// [`general_binding_matches`]: Expression::general_binding_matches
+    pub fn bind_general<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+    ) -> Option<(Self, GeneralBinding)> {
+        let (tree, binding) = self.general.as_ref()?.bind(host, ctx, self.dialect)?;
+        Some((
+            Expression {
+                program: Arc::new(Program::compile(&tree)),
+                numeric: numeric::Numeric::compile(&tree, self.dialect).map(Arc::new),
+                general: None,
+                needs_idx: self.needs_idx,
+                dialect: self.dialect,
+            },
+            binding,
+        ))
+    }
+
+    /// Whether a binding from [`bind_general`](Expression::bind_general) on
+    /// this (source) expression still holds: every substituted subexpression
+    /// answers the same primitive (numbers by bits).
+    pub fn general_binding_matches<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+        binding: &GeneralBinding,
+    ) -> bool {
+        self.general
+            .as_ref()
+            .is_some_and(|general| binding.matches(general, host, ctx, self.dialect))
+    }
+
+    /// Whether the general binding's subexpressions read the layer object.
+    pub fn general_uses_layer(&self) -> bool {
+        self.general.as_ref().is_some_and(|g| g.uses_layer())
+    }
+
+    /// Whether they read only the layer and its index (not `comp`, `fps` or
+    /// parameters).
+    pub fn general_is_layer_local(&self) -> bool {
+        self.general.as_ref().is_some_and(|g| g.layer_local())
     }
 
     /// Whether the fixed numeric inputs read the current layer object.

@@ -1,8 +1,8 @@
 //! Compiled once per source. Calls retain the language's syntactic callee
 //! lookup: arguments run left to right, and the callee is never evaluated.
-use crate::eval::{MathLookup, math_lookup};
+use crate::eval::{MathLookup, is_safe_integer, math_lookup};
 use crate::parser::{BinaryOp, Literal, Node, UnaryOp};
-use crate::value::{Callable, Helper, MathFunction};
+use crate::value::{Callable, Helper, MATH_CONSTANTS, MathFunction, string_to_number};
 use crate::{JsStr, number_to_string};
 
 #[derive(Clone, Debug)]
@@ -52,6 +52,66 @@ impl Input {
     }
 }
 
+/// A member access whose key is a literal (`a.b`, `a["b"]`, `a[0]`): the
+/// conversions and checks `member` makes on the key, made once at compile
+/// time. The evaluator answers exactly as `member` on the same key would.
+#[derive(Clone, Debug)]
+pub(crate) struct LiteralKey {
+    /// A number literal is looked up as a number (by its string form).
+    pub number: bool,
+    /// `String(key)`.
+    pub string: JsStr,
+    /// `__proto__`, `prototype`, `constructor` (string keys only).
+    pub forbidden: bool,
+    /// `"length"` (string keys only).
+    pub length: bool,
+    /// `"callable"`.
+    pub callable: bool,
+    /// The element an array answers: a safe non-negative integer key.
+    pub index: Option<u64>,
+    /// `Math[key]` for a string key.
+    pub math: MathMember,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MathMember {
+    Constant(f64),
+    Function(MathFunction),
+    Undefined,
+}
+
+impl LiteralKey {
+    fn new(literal: &Literal) -> Self {
+        let (number, string) = match literal {
+            Literal::Number(n) => (Some(*n), number_to_string(*n)),
+            Literal::String(s) => (None, s.clone()),
+            Literal::Bool(b) => (None, JsStr::from(if *b { "true" } else { "false" })),
+            Literal::Null => (None, JsStr::from("null")),
+        };
+        let is = |name: &str| number.is_none() && string.eq_str(name);
+        let n = number.unwrap_or_else(|| string_to_number(&string));
+        let math = if let Some((_, v)) = MATH_CONSTANTS.iter().find(|(name, _)| string.eq_str(name))
+        {
+            MathMember::Constant(*v)
+        } else if let Some(&f) = MathFunction::ALL.iter().find(|f| string.eq_str(f.name())) {
+            MathMember::Function(f)
+        } else {
+            MathMember::Undefined
+        };
+        LiteralKey {
+            number: number.is_some(),
+            forbidden: ["__proto__", "prototype", "constructor"]
+                .iter()
+                .any(|name| is(name)),
+            length: is("length"),
+            callable: string.eq_str("callable"),
+            index: (is_safe_integer(n) && n >= 0.0).then_some(n as u64),
+            math,
+            string,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Op {
     Literal(Literal),
@@ -59,6 +119,8 @@ pub(crate) enum Op {
     Unary(UnaryOp),
     Binary(BinaryOp),
     Member,
+    /// `Member` with its literal key compiled in.
+    MemberKey(Box<LiteralKey>),
     Call(Call, usize),
     /// Keep the left value on the short circuit; otherwise pop it.
     Short(bool, usize),
@@ -131,8 +193,12 @@ impl Program {
             }
             Node::Member(o, k) => {
                 Self::emit(o, out);
-                Self::emit(k, out);
-                out.push(Op::Member);
+                if let Node::Literal(key) = &**k {
+                    out.push(Op::MemberKey(Box::new(LiteralKey::new(key))));
+                } else {
+                    Self::emit(k, out);
+                    out.push(Op::Member);
+                }
             }
             Node::Call(callee, args) => {
                 for arg in args {

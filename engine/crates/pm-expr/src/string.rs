@@ -19,6 +19,12 @@ impl JsStr {
         &self.0
     }
 
+    /// Whether both are the same string object (a cheap first check before
+    /// comparing code units, for embedders that intern literal keys).
+    pub fn same(&self, other: &JsStr) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// `string.length`: the number of UTF-16 code units.
     pub fn len(&self) -> usize {
         self.0.len()

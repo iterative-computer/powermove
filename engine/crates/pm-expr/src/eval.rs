@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 
-use crate::bytecode::{Call, Input, Op, Program};
+use crate::bytecode::{Call, Input, LiteralKey, MathMember, Op, Program};
 use crate::deps::{ContextReads, Dependencies, FieldRead, Root, Step};
 use crate::host::{Host, Shape};
 use crate::jsmath;
@@ -265,7 +265,7 @@ fn in_list(key: &JsStr, list: &[&str]) -> bool {
 }
 
 /// `Number.isSafeInteger(n)`.
-fn is_safe_integer(n: f64) -> bool {
+pub(crate) fn is_safe_integer(n: f64) -> bool {
     n.is_finite() && n.trunc() == n && n.abs() <= 9_007_199_254_740_991.0
 }
 
@@ -554,9 +554,11 @@ impl<'a, H: Host> Evaluator<'a, H> {
 
     pub fn run(&mut self, program: &Program) -> R<V<H::Obj>> {
         // The compiler computes the maximum active stack, bounded by the parser.
-        let mut stack: smallvec::SmallVec<[V<H::Obj>; 8]> = smallvec::SmallVec::new();
-        stack.resize(program.stack, Value::Undefined);
-        let mut len = 0;
+        let mut stack: smallvec::SmallVec<[V<H::Obj>; 8]> =
+            smallvec::SmallVec::with_capacity(program.stack);
+        let pop = |stack: &mut smallvec::SmallVec<[V<H::Obj>; 8]>| {
+            stack.pop().expect("the compiler balances the stack")
+        };
         let mut pc = 0;
         while let Some(op) = program.code.get(pc) {
             pc += 1;
@@ -569,8 +571,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
                 },
                 Op::Identifier(name) => self.identifier(*name),
                 Op::Unary(op) => {
-                    len -= 1;
-                    let v = std::mem::replace(&mut stack[len], Value::Undefined);
+                    let v = pop(&mut stack);
                     match op {
                         UnaryOp::Not => Value::Bool(!v.truthy()),
                         UnaryOp::Minus => Value::Number(-self.js_number(&v)?),
@@ -578,45 +579,42 @@ impl<'a, H: Host> Evaluator<'a, H> {
                     }
                 }
                 Op::Binary(op) => {
-                    len -= 2;
-                    let l = std::mem::replace(&mut stack[len], Value::Undefined);
-                    let r = std::mem::replace(&mut stack[len + 1], Value::Undefined);
+                    let r = pop(&mut stack);
+                    let l = pop(&mut stack);
                     self.binary(*op, &l, &r)?
                 }
                 Op::Member => {
-                    len -= 2;
-                    let o = std::mem::replace(&mut stack[len], Value::Undefined);
-                    let k = std::mem::replace(&mut stack[len + 1], Value::Undefined);
+                    let k = pop(&mut stack);
+                    let o = pop(&mut stack);
                     self.member(&o, &k)?
                 }
+                Op::MemberKey(key) => {
+                    let o = pop(&mut stack);
+                    self.member_key(&o, key)
+                }
                 Op::Call(call, count) => {
-                    len -= count;
-                    let args = &stack[len..len + count];
+                    let start = stack.len() - count;
+                    let args = &stack[start..];
                     let result = match call {
                         Call::Helper(h) => self.helper(*h, args),
                         Call::Math(m) => self.call_math(*m, args),
                         Call::Missing => Ok(Value::Undefined),
                     };
-                    for v in &mut stack[len..len + count] {
-                        *v = Value::Undefined;
-                    }
+                    stack.truncate(start);
                     result?
                 }
                 Op::Short(truthy, target) => {
-                    if stack[len - 1].truthy() == *truthy {
+                    if stack.last().expect("operand").truthy() == *truthy {
                         pc = *target;
                     } else {
-                        len -= 1;
-                        stack[len] = Value::Undefined;
+                        stack.pop();
                     }
                     continue;
                 }
                 Op::Branch(target) => {
-                    len -= 1;
-                    if !stack[len].truthy() {
+                    if !pop(&mut stack).truthy() {
                         pc = *target;
                     }
-                    stack[len] = Value::Undefined;
                     continue;
                 }
                 Op::Jump(target) => {
@@ -624,11 +622,10 @@ impl<'a, H: Host> Evaluator<'a, H> {
                     continue;
                 }
             };
-            stack[len] = value;
-            len += 1;
+            stack.push(value);
         }
-        debug_assert_eq!(len, 1);
-        Ok(std::mem::replace(&mut stack[0], Value::Undefined))
+        debug_assert_eq!(stack.len(), 1);
+        Ok(pop(&mut stack))
     }
 
     fn identifier(&mut self, name: Input) -> V<H::Obj> {
@@ -767,6 +764,47 @@ impl<'a, H: Host> Evaluator<'a, H> {
         })
     }
 
+    /// `member(object, key)` for a literal key: the same answers and reads as
+    /// [`member`](Self::member), with the key's conversions made at compile
+    /// time (a literal key never throws).
+    fn member_key(&mut self, object: &V<H::Obj>, key: &LiteralKey) -> V<H::Obj> {
+        if !key.number {
+            if key.forbidden {
+                return Value::Undefined;
+            }
+            if matches!(object, Value::Object(Object::Math)) {
+                return match key.math {
+                    MathMember::Constant(n) => Value::Number(n),
+                    MathMember::Function(f) => Value::Object(Object::MathFunction(f)),
+                    MathMember::Undefined => Value::Undefined,
+                };
+            }
+        }
+        if let Value::Object(Object::Doc(t)) = object
+            && self.is_array(t).is_some()
+        {
+            if key.length {
+                return Value::Number(self.length(t) as f64);
+            }
+            // Negative indices are ordinary properties no JSON array has.
+            return key.index.map_or(Value::Undefined, |i| self.element(t, i));
+        }
+        if let Value::String(s) = object
+            && key.length
+        {
+            return Value::Number(s.len() as f64);
+        }
+        match object {
+            Value::Object(Object::Doc(t)) => {
+                self.property(t, &key.string).unwrap_or(Value::Undefined)
+            }
+            Value::Object(Object::Callable(c)) if key.callable => {
+                Value::String(JsStr::from(c.name()))
+            }
+            _ => Value::Undefined,
+        }
+    }
+
     fn call_math(&mut self, lookup: MathLookup, args: &[V<H::Obj>]) -> R<V<H::Obj>> {
         if matches!(lookup, MathLookup::Missing) {
             return Ok(Value::Undefined);
@@ -794,107 +832,22 @@ impl<'a, H: Host> Evaluator<'a, H> {
         }
     }
 
-    // `6.2831` is the literal `expression.ts` uses, not τ.
-    #[allow(clippy::approx_constant)]
     fn helper(&mut self, helper: Helper, args: &[V<H::Obj>]) -> R<V<H::Obj>> {
         let mut numbers: smallvec::SmallVec<[f64; 12]> = smallvec::SmallVec::new();
         for arg in args {
             numbers.push(self.js_number(arg)?);
         }
-        let n = |i: usize| numbers.get(i).copied();
-        // An absent argument is `undefined`: NaN in arithmetic and comparisons,
-        // but returned as `undefined` where the helper returns it unchanged.
-        let nan = |v: Option<f64>| v.unwrap_or(f64::NAN);
-        let opt = |v: Option<f64>| v.map_or(Value::Undefined, Value::Number);
-        Ok(match helper {
-            Helper::Clamp => opt(clamp_opt(n(0), nan(n(1)), nan(n(2)))),
-            Helper::Lerp => Value::Number(nan(n(0)) + (nan(n(1)) - nan(n(0))) * nan(n(2))),
-            Helper::Linear => {
-                let (x, x0, x1, y0, y1) = (nan(n(0)), n(1), n(2), n(3), nan(n(4)));
-                if strict_equal_opt(x1, x0) {
-                    opt(y0)
-                } else {
-                    let (x0, x1, y0) = (nan(x0), nan(x1), nan(y0));
-                    Value::Number(y0 + (y1 - y0) * clamp((x - x0) / (x1 - x0), 0.0, 1.0))
-                }
-            }
-            Helper::Ease => {
-                let (x, x0, x1, y0, y1) = (nan(n(0)), n(1), n(2), nan(n(3)), nan(n(4)));
-                let ratio = if strict_equal_opt(x1, x0) {
-                    0.0
-                } else {
-                    (x - nan(x0)) / (nan(x1) - nan(x0))
-                };
-                let amount = clamp(ratio, 0.0, 1.0);
-                Value::Number(y0 + (y1 - y0) * amount * amount * (3.0 - 2.0 * amount))
-            }
-            Helper::Random => {
-                let seed = n(0).unwrap_or(1.0) * 127.1;
-                let value = jsmath::sin(seed) * 43758.5453;
-                Value::Number(value - jsmath::floor(value))
-            }
-            Helper::Wiggle => {
-                self.context.insert(ContextReads::LOCAL_TIME);
-                let t = self.ctx.t;
-                let frequency = n(0).unwrap_or(0.0);
-                let mut amplitude = n(1).unwrap_or(0.0);
-                let seed = n(2).unwrap_or(0.0) * 17.3;
-                let mut value = 0.0;
-                let mut current = frequency;
-                for index in 0..3 {
-                    let i = f64::from(index);
-                    value += amplitude
-                        * (jsmath::sin(t * current * 6.2831 + seed + i * 2.4)
-                            + jsmath::sin(t * current * 3.94 + seed * 1.7 + i))
-                        * 0.5;
-                    amplitude *= 0.5;
-                    current *= 2.03;
-                }
-                Value::Number(value)
-            }
-            Helper::Bounce => {
-                let mut x = clamp(n(0).unwrap_or(0.0), 0.0, 1.0);
-                Value::Number(if x < 1.0 / 2.75 {
-                    7.5625 * x * x
-                } else if x < 2.0 / 2.75 {
-                    x -= 1.5 / 2.75;
-                    7.5625 * x * x + 0.75
-                } else if x < 2.5 / 2.75 {
-                    x -= 2.25 / 2.75;
-                    7.5625 * x * x + 0.9375
-                } else {
-                    x -= 2.625 / 2.75;
-                    7.5625 * x * x + 0.984375
-                })
-            }
-            Helper::Loop => {
-                if nan(n(0)) <= 0.0 {
-                    opt(n(1))
-                } else {
-                    Value::Number(nan(n(1)) % nan(n(0)))
-                }
-            }
-            Helper::Pingpong => {
-                let duration = n(0).unwrap_or(0.0);
-                if duration <= 0.0 {
-                    opt(n(1))
-                } else {
-                    let position = nan(n(1)) % (duration * 2.0);
-                    Value::Number(if position < duration {
-                        position
-                    } else {
-                        duration * 2.0 - position
-                    })
-                }
-            }
-            Helper::Param => {
-                let name = match args.first() {
-                    None | Some(Value::Undefined | Value::Null) => JsStr::default(),
-                    Some(v) => self.js_string(v)?,
-                };
-                self.param(&name)?
-            }
-        })
+        if helper == Helper::Param {
+            let name = match args.first() {
+                None | Some(Value::Undefined | Value::Null) => JsStr::default(),
+                Some(v) => self.js_string(v)?,
+            };
+            return self.param(&name);
+        }
+        if helper == Helper::Wiggle {
+            self.context.insert(ContextReads::LOCAL_TIME);
+        }
+        Ok(apply_helper(helper, &numbers, self.ctx.t).map_or(Value::Undefined, Value::Number))
     }
 
     /// `paramGet(name)` in `anim.ts`: `comp.params && comp.params[name]`, then
@@ -1032,6 +985,99 @@ fn strict_equal_opt(a: Option<f64>, b: Option<f64>) -> bool {
         (Some(x), Some(y)) => x == y,
         _ => false,
     }
+}
+
+/// The numeric helpers of `expression.ts` (every helper except `param`), on
+/// arguments already converted with `Number()`. `t` is the layer-local time
+/// `wiggle` reads. `None` is `undefined`: an absent argument returned
+/// unchanged. The bytecode evaluator and the typed numeric plan share this one
+/// implementation.
+// `6.2831` is the literal `expression.ts` uses, not τ.
+#[allow(clippy::approx_constant)]
+pub(crate) fn apply_helper(helper: Helper, numbers: &[f64], t: f64) -> Option<f64> {
+    let n = |i: usize| numbers.get(i).copied();
+    // An absent argument is `undefined`: NaN in arithmetic and comparisons,
+    // but returned as `undefined` where the helper returns it unchanged.
+    let nan = |v: Option<f64>| v.unwrap_or(f64::NAN);
+    Some(match helper {
+        Helper::Clamp => return clamp_opt(n(0), nan(n(1)), nan(n(2))),
+        Helper::Lerp => nan(n(0)) + (nan(n(1)) - nan(n(0))) * nan(n(2)),
+        Helper::Linear => {
+            let (x, x0, x1, y0, y1) = (nan(n(0)), n(1), n(2), n(3), nan(n(4)));
+            if strict_equal_opt(x1, x0) {
+                return y0;
+            }
+            let (x0, x1, y0) = (nan(x0), nan(x1), nan(y0));
+            y0 + (y1 - y0) * clamp((x - x0) / (x1 - x0), 0.0, 1.0)
+        }
+        Helper::Ease => {
+            let (x, x0, x1, y0, y1) = (nan(n(0)), n(1), n(2), nan(n(3)), nan(n(4)));
+            let ratio = if strict_equal_opt(x1, x0) {
+                0.0
+            } else {
+                (x - nan(x0)) / (nan(x1) - nan(x0))
+            };
+            let amount = clamp(ratio, 0.0, 1.0);
+            y0 + (y1 - y0) * amount * amount * (3.0 - 2.0 * amount)
+        }
+        Helper::Random => {
+            let seed = n(0).unwrap_or(1.0) * 127.1;
+            let value = jsmath::sin(seed) * 43758.5453;
+            value - jsmath::floor(value)
+        }
+        Helper::Wiggle => {
+            let frequency = n(0).unwrap_or(0.0);
+            let mut amplitude = n(1).unwrap_or(0.0);
+            let seed = n(2).unwrap_or(0.0) * 17.3;
+            let mut value = 0.0;
+            let mut current = frequency;
+            for index in 0..3 {
+                let i = f64::from(index);
+                value += amplitude
+                    * (jsmath::sin(t * current * 6.2831 + seed + i * 2.4)
+                        + jsmath::sin(t * current * 3.94 + seed * 1.7 + i))
+                    * 0.5;
+                amplitude *= 0.5;
+                current *= 2.03;
+            }
+            value
+        }
+        Helper::Bounce => {
+            let mut x = clamp(n(0).unwrap_or(0.0), 0.0, 1.0);
+            if x < 1.0 / 2.75 {
+                7.5625 * x * x
+            } else if x < 2.0 / 2.75 {
+                x -= 1.5 / 2.75;
+                7.5625 * x * x + 0.75
+            } else if x < 2.5 / 2.75 {
+                x -= 2.25 / 2.75;
+                7.5625 * x * x + 0.9375
+            } else {
+                x -= 2.625 / 2.75;
+                7.5625 * x * x + 0.984375
+            }
+        }
+        Helper::Loop => {
+            if nan(n(0)) <= 0.0 {
+                return n(1);
+            }
+            nan(n(1)) % nan(n(0))
+        }
+        Helper::Pingpong => {
+            let duration = n(0).unwrap_or(0.0);
+            if duration <= 0.0 {
+                return n(1);
+            }
+            let position = nan(n(1)) % (duration * 2.0);
+            if position < duration {
+                position
+            } else {
+                duration * 2.0 - position
+            }
+        }
+        // `param` reads the document; the evaluators handle it themselves.
+        Helper::Param => return None,
+    })
 }
 
 pub(crate) fn apply_math(f: MathFunction, n: &[f64]) -> f64 {

@@ -160,6 +160,43 @@ pub fn evaluate_case(source: &[u16], spec: &Json, dialect: Dialect) -> Json {
                 }
             }
         }
+        // The general binding (sources outside the numeric plan): at this
+        // document, at other times/values, against the unbound evaluator.
+        if let Some((bound, binding)) = expr.bind_general(&JsonHost::new(), &ctx) {
+            assert!(
+                expr.general_binding_matches(&JsonHost::new(), &ctx, &binding),
+                "a general binding must match its own document"
+            );
+            for alternate in [false, true] {
+                let mut at = ctx.clone();
+                if alternate {
+                    at.time = -1.25;
+                    at.t = 3.5;
+                    at.frame = 72.0;
+                    at.value = Value::Number(3.25);
+                }
+                assert!(expr.general_binding_matches(&JsonHost::new(), &at, &binding));
+                let original = expr.evaluate(&JsonHost::new(), &at).result;
+                let prepared = bound.evaluate_untracked(&JsonHost::new(), &at);
+                match (&original, &prepared) {
+                    (Ok(a), Ok(b)) => assert_eq!(encode(a), encode(b), "general binding result"),
+                    (Err(a), Err(b)) => assert_eq!(a, b, "general binding exception"),
+                    _ => panic!("general binding differs"),
+                }
+                if let Some(base) = at.value.as_number()
+                    && let Some(n) = bound.evaluate_scalars(at.t, at.time, base)
+                {
+                    let Ok(expected) = &original else {
+                        panic!("general scalar plan swallowed an error")
+                    };
+                    assert_eq!(
+                        encode(&Value::<JsonRef<'_>>::Number(n)),
+                        encode(expected),
+                        "general scalar result"
+                    );
+                }
+            }
+        }
         fields.push((
             "result",
             match &out.result {
