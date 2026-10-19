@@ -123,6 +123,24 @@ impl CanvasPath {
         self.path.cubic_to([v[0], v[1]], [v[2], v[3]], [v[4], v[5]]);
     }
 
+    /// `rect(x, y, w, h)`: `Path::AddRect` of the float corners
+    /// `(x, y)` and `(x + w, y + h)` (`SkPath::addRect`: a move, three lines,
+    /// and a close, clockwise from the top left as given, so a negative size
+    /// keeps its sign).
+    pub fn rect(&mut self, x: f64, y: f64, w: f64, h: f64) {
+        self.flush_line();
+        if ![x, y, w, h].iter().all(|v| v.is_finite()) {
+            return;
+        }
+        let (x, y, w, h) = (sat_f32(x), sat_f32(y), sat_f32(w), sat_f32(h));
+        let (r, b) = (x + w, y + h);
+        self.path.move_to([x, y]);
+        self.path.line_to([r, y]);
+        self.path.line_to([r, b]);
+        self.path.line_to([x, b]);
+        self.path.close();
+    }
+
     /// `arcTo`; `Err` for a negative radius (an `IndexSizeError`).
     pub fn arc_to(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, r: f64) -> Result<(), NegativeRadius> {
         let (x1, y1, x2, y2, r) = (sat_f32(x1), sat_f32(y1), sat_f32(x2), sat_f32(y2), sat_f32(r));
