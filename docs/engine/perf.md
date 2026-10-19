@@ -1701,6 +1701,13 @@ and the cold bound pass; the scalar one-off and the three discrete edit rows
 remain in the owner-accepted EXPR-1/EXPR-2 categories (the runner's overall
 `pass` stays false because of those rows and is not overridden).
 
+A second complete run (load 6.37 before / 6.53 after,
+`/tmp/ne-w5/fixups3-r4/node-full-run2.json`) repeats the outcome: all 16
+suite rows pass median and p95; warm frames 46.154 / 47.492 against 76.391 /
+76.993; drag 82.916 / 98.125 against 87.291 / 105.667; cold maximum 4.739 ms;
+scalar 0.144 against 0.112; source edit 473.6 against 421.5; layer add/remove
+4255 / 4227 against 3687 / 3687 (medians, µs).
+
 Native Rust alone (`ev_batch` over 400 ids, no JS) for orientation: numeric
 9.4 µs, helpers 12.4 µs, general 11.7 µs (was 119.4), keyed numeric 10.3 µs
 (was 186.1) per frame.
