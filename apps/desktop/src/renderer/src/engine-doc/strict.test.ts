@@ -14,6 +14,7 @@ import { installEngineDoc, type EngineDoc } from './install';
 import { COMP_FIELDS, rootComp } from '../legacy/core/compositions';
 import { ROOT_WRAPPER_FIELDS } from './native';
 import { parseMode, profileOverride, workerMode } from './flags';
+import { runCommandWhenReady } from './readiness';
 import type { FontProvider } from './fonts';
 import { PmWasm } from './wasm';
 import { installBridgeForTests, resetBridgeForTests } from '../kernel/bridge';
@@ -169,6 +170,36 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     // The extension loader activates what waited (kernel/loader.ts).
     expect(readied).toEqual([true]);
     stop();
+  });
+
+  it('shows the named failure again for a request that cannot run, and runs a key held during a Retry after it', async () => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing', 'gl/compositor');
+    const toasts: Array<[string, any]> = [];
+    PM.toast = (message: string, _ms: number, options: any) => { toasts.push([message, options]); };
+    let available = false;
+    const doc = installEngineDoc(PM, { mode: parseMode('on'), strict: true, sink: () => {}, loadModule: () => available ? loadModule() : Promise.reject(new Error('404 fetching the module')) });
+    PM.proj = PM.mkProject({ dur: 10 });
+    expect(await doc.whenReady).toBe(false);
+    expect(toasts).toHaveLength(1);
+    const ran: string[] = [];
+    // An app command runs; a document command shows the same named notice, with Retry.
+    expect(runCommandWhenReady(PM, 'settings', () => ran.push('settings'))).toBe(1);
+    runCommandWhenReady(PM, 'duplicate', () => ran.push('duplicate'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(ran).toEqual(['settings']);
+    expect(toasts).toHaveLength(2);
+    expect(toasts[1]![0]).toBe(toasts[0]![0]);
+    expect(toasts[1]![1]).toMatchObject({ error: true, key: 'engine-failure-pm-wasm-unavailable', action: { label: 'Retry' } });
+    expect(doc.failures()).toHaveLength(1);
+    // A key pressed while the Retry loads runs once it is ready.
+    available = true;
+    const retry = doc.retry();
+    runCommandWhenReady(PM, 'duplicate', () => ran.push(`duplicate:${doc.ready}`));
+    expect(ran).toEqual(['settings']);
+    expect(await retry).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(ran).toEqual(['settings', 'duplicate:true']);
+    expect(toasts).toHaveLength(2);
   });
 
   it('addresses fresh Comps.get root wrappers through the wrapper view, keeping interned values', async () => {

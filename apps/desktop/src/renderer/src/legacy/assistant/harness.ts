@@ -1,5 +1,6 @@
 import { setPanelLayout } from './workspace-layout';
 import { mcpProjectTool } from './mcp-project-tools';
+import { documentPending, waitForDocumentReady } from '../../engine-doc/readiness';
 import { createAgentCheckpoint } from './checkpoint';
 import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } from './panel-tools';
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
@@ -89,13 +90,14 @@ function defaultTimes() {
 }
 
 function propertyDigest(layer: any, options: any = {}) {
+  const evaluator = PM.EngineDoc?.enabled ? PM.EngineDoc.api : PM;
   const offset = Math.max(0, Math.trunc(Number(options.propertyOffset) || 0));
   const limit = Math.max(1, Math.trunc(Number(options.propertyLimit) || 100));
   const keys = options.keyframeLimit === undefined ? 8 : Math.max(0, Math.trunc(Number(options.keyframeLimit) || 0));
   const keyOffset = Math.max(0, Math.trunc(Number(options.keyframeOffset) || 0));
   return PM.allProps(layer).slice(offset, offset + limit).map((item: any) => ({
     path: item.key,
-    value: PM.evP(layer, item.prop, PM.time, item.key),
+    value: evaluator.evP(layer, item.prop, PM.time, item.key),
     keyframeCount: item.prop.kf.length,
     nextKeyframeOffset: keyOffset + keys < item.prop.kf.length && keys > 0 ? keyOffset + keys : null,
     keyframes: item.prop.kf.slice(keyOffset, keyOffset + keys).map((key: any) => ({
@@ -909,7 +911,8 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
 const nativeAgentTools = typeof window === 'undefined' ? undefined : hostBridge()?.agentTools;
 /** A live tool call as the host receives its answer, errors included. */
 function answerLiveAgentTool(request: AgentToolRequestEvent): Promise<AgentToolResponseEvent> {
-  return handleLiveAgentTool(request).then(
+  const answer = documentPending(PM) ? waitForDocumentReady(PM).then(() => handleLiveAgentTool(request)) : handleLiveAgentTool(request);
+  return answer.then(
     (result) => ({ runId: request.runId, callId: request.callId, ...result }),
     (error) => ({
       runId: request.runId,

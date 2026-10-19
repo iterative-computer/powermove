@@ -11,3 +11,20 @@ pm-text frames glyph outlines with its stroker (synthesized bold,
 conics in user space, subdivided only in device space where the glyph mask
 is filled (`docs/engine/text-render.md`, "Glyph frames"). Dashing is
 removed. See `LICENSE`.
+
+The stroker also retains incoming rational conics until stroking:
+`SkPathStroker::conicTo`, `conicPerpRay`, `compareQuadConic`, and
+`conicStroke` follow Skia chrome/m152 at
+`747cf654ed6f864f4402e7d6eb54a6ede60141e5`. Its curve evaluation,
+tangent vectors, recursion limits and terminal-line behavior use that
+source's operation order. The old pre-stroke conic-to-quad approximation
+is removed. `tests/skia_conics.rs` compares five complete stroke records
+bitwise (verbs, point bits and weights); `tests/skia-conic-oracle.cpp`
+regenerates their hashes against the pinned Skia library with
+`-ffp-contract=off`.
+
+Closed rectangles use that revision's `SkStroke::strokeRect` fast path,
+including collapsed interiors and stroke-and-fill framing. Five additional
+stroke records and `tests/skia-rect-oracle.cpp` cover its joins and winding.
+`Path::is_convex` ports Skia's control-polygon classifier so pm-text's
+analytic scan converter can select the same convex edge walk.

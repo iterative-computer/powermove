@@ -89,6 +89,7 @@ enum Op {
     Clip(Option<pm_skia_path::Path>),
     Unclip,
     Fill(Fill, Affine),
+    SolidGlyph(pm_skia_path::Path, [f32; 4]),
     Layer(CompositeMode),
     Unlayer,
 }
@@ -250,6 +251,36 @@ impl ColorPainter for Recorder<'_> {
             ),
         };
         self.ops.push(Op::Fill(fill, self.matrix.inverse()));
+    }
+    fn fill_glyph(&mut self, id: GlyphId, transform: Option<Transform>, brush: Brush<'_>) {
+        if let Brush::Solid {
+            palette_index,
+            alpha,
+        } = brush
+        {
+            if let Some(path) = self.glyph(id) {
+                let b = path.bounds();
+                let r = Rect::new(
+                    b.left() as f64,
+                    b.top() as f64,
+                    b.right() as f64,
+                    b.bottom() as f64,
+                );
+                self.bounds = Some(self.bounds.map_or(r, |old| old.union(r)));
+                self.ops
+                    .push(Op::SolidGlyph(path, self.color(palette_index, alpha)));
+            }
+        } else {
+            self.push_clip_glyph(id);
+            if let Some(t) = transform {
+                self.push_transform(t);
+                self.fill(brush);
+                self.pop_transform();
+            } else {
+                self.fill(brush);
+            }
+            self.pop_clip();
+        }
     }
     fn push_layer(&mut self, mode: CompositeMode) {
         self.ops.push(Op::Layer(mode));
@@ -606,6 +637,24 @@ pub fn glyph(
                     match &fill {
                         Fill::Solid(color) => solid_over(pixel, *color, coverage),
                         _ => over(pixel, fill.at(point), coverage),
+                    }
+                }
+            }
+            Op::SolidGlyph(path, color) => {
+                let Some(path) = path.transform(pm_skia_path::Transform::from_translate(
+                    -left as f32,
+                    -top as f32,
+                )) else {
+                    continue;
+                };
+                if clips.is_empty() {
+                    super::skaaa::fill_path_solid(&path, width, height, color, &mut image);
+                } else {
+                    let mask = super::skaaa::fill_path_a8(&path, width, height);
+                    for (i, pixel) in image.chunks_exact_mut(4).enumerate() {
+                        let cov =
+                            ((mask[i] as u32 * clips.last().unwrap()[i] as u32 + 127) / 255) as u8;
+                        solid_over(pixel, color, cov);
                     }
                 }
             }

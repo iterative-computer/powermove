@@ -204,3 +204,123 @@ fn hooks_extend_ev_active_and_content() {
         Some(&JsValue::Number(10.0))
     );
 }
+
+#[test]
+fn resident_expression_plans_do_not_recompile_more_than_256_unique_sources_each_frame() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting(Arc<AtomicUsize>);
+    struct Identity;
+    impl ExpressionEngine for Counting {
+        fn compile(&self, _: &JsString) -> Option<Arc<dyn CompiledExpression>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Some(Arc::new(Identity))
+        }
+    }
+    impl CompiledExpression for Identity {
+        fn needs_idx(&self) -> bool {
+            false
+        }
+        fn needs_frame(&self) -> bool {
+            false
+        }
+        fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
+            Ok(cx.value.clone())
+        }
+    }
+    let layers = (0..400).map(|i| format!(r#"{{"id":"L{i}","from":0,"p":{{"opacity":{{"v":4,"kf":[{{"t":0,"v":0}},{{"t":2,"v":20}}],"expr":"source-{i}"}}}}}}"#)).collect::<Vec<_>>().join(",");
+    let json = format!(
+        r#"{{"id":"P","compId":"C","comps":{{"C":{{"id":"C","fps":30,"layers":[{layers}]}}}}}}"#
+    );
+    let doc = Document::new(Some(parse(&json).unwrap()), 1);
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut ev = Evaluator::new().with_expressions(Arc::new(Counting(count.clone())));
+    let ids = (0..400)
+        .map(|i| ev.intern(PropAddress::channel("C", &format!("L{i}"), "opacity")))
+        .collect::<Vec<_>>();
+    let mut values = vec![0.0; ids.len()];
+    let mut kinds = vec![pm_eval::ValueKind::Number; ids.len()];
+    for time in [0.0, 1.0, 2.0, 1.0] {
+        ev.ev_batch(&doc, &ids, time, &mut values, &mut kinds);
+        assert!(values.iter().all(|n| *n == time * 10.0));
+        assert_eq!(count.load(Ordering::Relaxed), 400);
+    }
+}
+
+#[test]
+fn root_edits_keep_sources_and_only_refresh_changed_bindings() {
+    use pm_model::{Patch, Value};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Source(Arc<AtomicUsize>);
+    struct Fixed {
+        gain: f64,
+    }
+    impl ExpressionEngine for Source {
+        fn compile(&self, _: &JsString) -> Option<Arc<dyn CompiledExpression>> {
+            Some(Arc::new(Source(self.0.clone())))
+        }
+    }
+    impl CompiledExpression for Source {
+        fn needs_idx(&self) -> bool {
+            false
+        }
+        fn bind(&self, cx: &ExprContext<'_>) -> Option<Arc<dyn CompiledExpression>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Some(Arc::new(Fixed {
+                gain: cx.param(&"gain".into()).unwrap().to_number(),
+            }))
+        }
+        fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
+            Ok(cx.value.clone())
+        }
+    }
+    impl CompiledExpression for Fixed {
+        fn needs_idx(&self) -> bool {
+            false
+        }
+        fn binding_matches(&self, cx: &ExprContext<'_>) -> Option<bool> {
+            Some(self.gain.to_bits() == cx.param(&"gain".into()).unwrap().to_number().to_bits())
+        }
+        fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
+            Ok(JsValue::Number(self.gain + cx.t))
+        }
+    }
+    let mut doc = Document::new(Some(parse(DOC).unwrap()), 1);
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut ev = Evaluator::new().with_expressions(Arc::new(Source(count.clone())));
+    let id = ev.intern(PropAddress::channel("C", "A", "scale.x"));
+    assert_eq!(ev.ev_id(&doc, id, 2.0).unwrap(), JsValue::Number(5.0));
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+    let plans = ev.cache_stats().plans;
+    let set = |path: Vec<pm_model::PathPart>, value| Patch {
+        path,
+        exists: true,
+        value: Some(value),
+    };
+    doc.apply(&[set(vec!["name".into()], Value::from("Unrelated"))])
+        .unwrap();
+    assert_eq!(ev.ev_id(&doc, id, 2.0).unwrap(), JsValue::Number(5.0));
+    assert_eq!(ev.cache_stats().plans, plans);
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+    doc.apply(&[set(
+        vec!["params".into(), "gain".into(), "value".into()],
+        Value::Number(9.0),
+    )])
+    .unwrap();
+    assert_eq!(ev.ev_id(&doc, id, 2.0).unwrap(), JsValue::Number(10.0));
+    assert_eq!(ev.cache_stats().plans, plans + 1);
+    assert_eq!(count.load(Ordering::Relaxed), 2);
+    // The binding remains valid while local time changes independently.
+    doc.apply(&[set(
+        vec![
+            "comps".into(),
+            "C".into(),
+            "layers".into(),
+            0usize.into(),
+            "from".into(),
+        ],
+        Value::Number(3.0),
+    )])
+    .unwrap();
+    assert_eq!(ev.ev_id(&doc, id, 2.0).unwrap(), JsValue::Number(8.0));
+    assert_eq!(count.load(Ordering::Relaxed), 2);
+}

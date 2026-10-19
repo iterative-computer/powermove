@@ -56,9 +56,39 @@ pub trait CompiledExpression: Send + Sync {
     /// `needsIdx`: whether `idx` must be computed (`/\bidx\b/` on the source).
     fn needs_idx(&self) -> bool;
 
+    /// Whether the embedding language can read the native `frame` input.
+    /// The default preserves existing engines; the legacy dialect has no frame.
+    fn needs_frame(&self) -> bool {
+        true
+    }
+
     /// See [`ExprDeps`].
     fn dependencies(&self) -> ExprDeps {
         ExprDeps::ALL
+    }
+
+    /// Optional revision-local binding of document inputs. The evaluator drops
+    /// it on every root revision. Time and the keyed base must remain dynamic.
+    fn bind(&self, _cx: &ExprContext<'_>) -> Option<Arc<dyn CompiledExpression>> {
+        None
+    }
+
+    /// Whether a bound plan's fixed inputs still equal this context exactly.
+    /// `None` cannot prove a binding valid; callers rebind via the source.
+    fn binding_matches(&self, _cx: &ExprContext<'_>) -> Option<bool> {
+        None
+    }
+
+    /// All bound inputs are in the layer or its index. Only used when the
+    /// caller has proved both unchanged; custom engines default conservative.
+    fn binding_is_layer_local(&self) -> bool {
+        false
+    }
+
+    /// Optional revision-bound numeric plan needing no document context.
+    /// The caller uses only finite answers; all other cases keep `evaluate`.
+    fn evaluate_scalars(&self, _t: f64, _time: f64, _value: f64) -> Option<f64> {
+        None
     }
 
     /// Runs the expression. An `Err` is a thrown error; its text becomes the

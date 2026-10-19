@@ -22,7 +22,7 @@ anchors are `pm-eval`'s (`docs/engine/pm-eval-layers.md`).
 | `compat` level 2 text and captions, at output resolution | Drawn; text includes range typography, animators and typography anchoring through the shared evaluated frame | `tests/text_level2.rs`, `tests/text_level2_semantics.rs` |
 | Text and caption colors: hex, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `hwb()`, named colors, `transparent`; rejected strings keep the style `save()` restored, as the canvas does | Drawn | `pm_text::render::color` tests (values checked against Chromium's `fillStyle`), `tests/text_colors.rs` |
 | CSS Color 4/5 (`lab`, `lch`, `oklab`, `oklch`, `color`, `color-mix`, relative colors, `calc`, `currentcolor`) and detached-canvas system colors | Drawn; invalid `light-dark()` retains the restored paint, as today | `tests/text_colors.rs`, closure capture (74 colors) |
-| Color vector glyphs (`COLR` v0 and v1) | Fontations paint graph rasterized natively; 12 captured glyph runs draw, two still fail exactness | `render/colr.rs`, `tests/text_raster.rs` |
+| Color vector glyphs (`COLR` v0 and v1) | Fontations paint graph rasterized natively; all 12 captured runs meet 1 CV, v0 is byte-identical at all five captured sizes | `render/colr.rs`, `tests/text_raster.rs` |
 | Text and captions without configured fonts | Refused (`Feature::Text`). The interactive engine, the job engine, and `pm-cli` give their renderers fonts (`docs/engine/text.md`, "Fonts on render threads") | `tests/text_gpu.rs`, `pm-node/tests/fonts.rs` |
 | A registry question the host's font service left unanswered | Refused (`Feature::Text`, "the font registry did not answer"), never drawn in another font | `pm_text::served` tests |
 
@@ -1348,38 +1348,161 @@ is an open TEXTL2-2 performance gap even though its combined engine cost is
 lower. These timings exclude browser events, IPC and presentation; they do
 not replace the deferred legacy/native app typing pair.
 
+## Textexact: source ports and ten retired residuals
+
+The textexact pass ports Skia chrome/m152 at
+`747cf654ed6f864f4402e7d6eb54a6ede60141e5`, retaining the source's
+floating-point operation order and Chromium's
+`SK_SUPPORT_LEGACY_CONIC_CHOP` configuration. It changes no fitted profile,
+pixel bound, capture, route or allowed-difference list.
+
+- `pm-skia-path` now strokes incoming rational conics directly, using
+  `conicPerpRay`, `compareQuadConic`, recursion limits and terminal-line
+  behavior from that source. The earlier pre-stroke conversion to quads
+  is removed; device-space scan conversion still chops conics as Skia does.
+- Closed rectangular glyphs use `SkStroke::strokeRect`, including round,
+  bevel and miter joins, winding, collapsed interiors and stroke-and-fill.
+  The analytic mask filler uses Skia's control-polygon convexity test,
+  convex edge walk and small fat-rectangle path. Against the independently
+  built source, all 25 framed glyph records and masks of the captured
+  caption-pop case agree exactly. The two rectangle glyphs had previously
+  taken the general stroker.
+- Solid COLR glyph layers draw into N32 through the analytic fill's ordered
+  spans. In particular, `SkARGB32_Blitter::blitAntiH2` combines multiplication
+  and addition before quantization; flattening those spans into an A8 mask
+  first loses its rounding. The existing clipped-mask route remains for
+  outer clips. Nine captured COLR glyph images agree byte-for-byte with
+  the independently built source. All five v0 capture sizes now have
+  maximum channel delta zero; the captured v1 linear gradients meet 1 CV.
+
+Public synthetic source-oracle tests need no private fonts or captures:
+ten bitwise stroke records (five rational conics, five rectangle frames)
+and eight shapes checked as A8 masks and as two-layer N32 images.
+`pm-skia-path/tests/skia-{conic,rect}-oracle.cpp` and
+`pm-text/tools/skia-{mask,color}-oracle.cpp` regenerate their reference
+hashes with the pinned Skia source and `-ffp-contract=off`.
+
+Ten ratchet entries are removed: four caption-pop, one colored caption
+stroke, three whisper and both COLR cases. Their rows are also removed
+from the immutable `APPROVED` ceiling; a contract test prevents restoring
+them through a fixture-only edit. Thirteen snapshots remain, down from
+23. Full debug and release measurements with
+`CARGO_PROFILE_RELEASE_LTO=false` for release:
+
+| Gate | Total | Original strict bound | Strict | FONTS-R snapshots | Text failures/refusals |
+|---|---:|---:|---:|---:|---:|
+| Main raster | 495 | 1 CV | 492 | 3 | 0 |
+| Closure raster | 116 | 1 CV | 115 | 1 | 0 |
+| Large paths | 4 | 1 CV | 2 | 2 | 0 |
+| Source textures | 3 | 1 CV | 0 | 3 | 0 |
+| Composed text, original and isolation | 576 | 2 CV | 572 | 4 | 0 |
+
+`text_colors`, `path_masks`, the 13 ratchet contracts and the source-oracle
+tests pass in both debug and release. Canvas2D passes in both profiles:
+503 bit-identical, 22 within 1 CV and four pre-existing exceptions (529
+total). Those four exceptions are unchanged by this pass. `text_corpus`
+still reports the non-text `effects/extension-typewriter` refusal (no
+definition for effect `typewriter`), comparing its text in isolation as
+before. The zero-failure counts above qualify the text class, not that
+missing effect definition. The refreshed 23-test app matrix has 20 passing
+checks; the three typing cases did not produce valid measurements.
+Diagnostics are in the private lane report. This pass adds no new typing
+latency qualification; the round 8 values above remain historical.
+
+### Textexact round 2: review fixes
+
+Four further line-for-line corrections against the same pinned source:
+
+- Black COLR layers. `SkBlitter::Choose` (SkBlitter.cpp:750-756) gives an
+  `SK_ColorBLACK` paint `SkARGB32_Black_Blitter`, whose `blitAntiH2`
+  (SkBlitter_ARGB32.cpp:1724-1730) is `(a << 24) + SkAlphaMulQ(dst,
+  256 - a)`, not the opaque `SkFastFourByteInterp`. The two-pixel span of
+  the RLE route (glyph images wider than the 32-px mask, so most caption-size
+  COLR glyphs) now takes that branch for a paint of exactly (0, 0, 0, 255):
+  a palette `#000000FF` or foreground index `0xFFFF` with black text.
+  `blitAntiH`, `blitV` and the A8 `blitMask` (`blit_mask_d32_a8_black` on
+  NEON) already agreed with the black blitter's arithmetic, and
+  `blitAntiV2` is not reached by the analytic filler. The analytic-mask
+  fixture's `solidLayers` now draws red then translucent blue, black alone
+  and black over translucent blue; each of the eight shapes has one
+  `rgbaHashes` entry per set from the C++ oracle
+  (`pm-text/tools/skia-color-oracle-hashes.py` regenerates them). The red and
+  blue hashes are unchanged; the previous code fails the black sets
+  (`convex-quad` first).
+- Convexity. `pm-skia-path`'s classification is now
+  `SkPathPriv::ComputeConvexity` (SkPathPriv.cpp:422-648): trailing moves
+  are trimmed, every point is sign-checked and `Convexicator::addPt` keeps
+  the first vector only while `fLastVec` is still zero. A contour that
+  doubles back to its start before its first turn is now concave, as in
+  Skia; the earlier code followed the older `SkPath::computeConvexity`.
+  21 classifications come from `pm-skia-path/tests/skia-convex-oracle.cpp`.
+  The previous code fails three of them.
+- `ignoreCenter`. For stroke-and-fill (fake bold) of a convex, line-only,
+  closed path, `SkStroke::strokePath` (SkStroke.cpp:1460-1516) sets
+  `canIgnoreCenter`. Then `finishContour` (SkStroke.cpp:362-368) keeps
+  only the larger of the outer and inner offsets, and the source path is
+  not added. `framed()` previously emitted outer, reversed inner and source.
+  Coverage under winding is the same, but edge accumulation differs (for
+  example `/` in sans fonts under synthetic bold). Five path records
+  (both windings, miter, bevel and round joins, a miter limit that bevels)
+  match `pm-skia-path/tests/skia-center-oracle.cpp` bitwise.
+- One rectangle recognizer. `Path::is_rect` ports
+  `SkPathPriv::IsRectContour` with `allowPartial == false`
+  (SkPathPriv.cpp:80-253). That function is behind both `SkPath::isRect`
+  (strokeRect's closed-rectangle test) and `SkPathRaw::isRect`
+  (`try_blit_fat_anti_rect`). It replaces the two hand-rolled near-duplicates
+  in `pm-skia-path` and `pm-text`. It also accepts what they rejected: a
+  trailing move, an open three-sided contour (fat rectangles only), and the
+  rectangle given by the recognized corners. 20 results come from
+  `pm-skia-path/tests/skia-rect-contour-oracle.cpp`.
+
+The oracles were rebuilt from a fresh checkout of the pinned revision with
+the same `-ffp-contract=off` and `SK_SUPPORT_LEGACY_CONIC_CHOP` flags (CPU
+only, `skia_use_partition_alloc = false`). The rebuilt library reproduces
+every earlier rectangle, conic and N32 hash exactly.
+
+The full text gates were re-run in debug and release (release with
+`CARGO_PROFILE_RELEASE_LTO=false`). Every per-case line of `text_raster`,
+`text_corpus`, Canvas2D and `path_masks` is identical to the round above,
+so no captured case reaches the black blitter or the ignored center: main
+raster 495 (492 within 1 CV, 3 FONTS-R), closure 116 (115, 1), large paths
+4 (2, 2), source textures 3 (0, 3), composed 576 (572 within 2 CV, 4),
+zero failures or text refusals. Canvas2D is 529 (503 bit-identical, 22
+within 1 CV, 4 pre-existing exceptions), and `text_colors` and the 13
+ratchet contracts pass. The ratchet is unchanged: these fixes close no
+residual and raise no budget. The new synthetic oracles cover black COLR
+spans, the center-ignoring stroker and the convexity and rectangle
+classifications.
+
 ## Gaps
 
-FONTS-R governs the 23 nonzero Round 6 residual checks. They pass only at
-their exact recorded snapshot budgets and are not owner-rule blockers.
+FONTS-R now governs 13 nonzero residual checks, after ten closures above.
+They pass only at their exact recorded snapshot budgets and are not
+owner-rule blockers.
 Every unlisted case keeps its original strict bound; any regression, new
 residual or improvement with a stale budget still fails. The Round 4–6
 strict-failure counts above are historical; Round 7 adds the explicit
 orchestrator-approved ratchet while keeping glyph rasterization and reference
 captures unchanged. The separate capture-transport fixes are described above.
 
-- Caption-pop, colored caption stroke, whisper and paper remain nonexact.
-  Counts and review filenames are in the ratchet; the lane report resolves
-  their side-by-side paths.
-  Round joins, miter limits, fake-bold interpolation, descriptor relaxation,
-  inverse/forward scale order, normalization precision and tangent storage
-  were checked against Chromium's configured Skia. No tolerance or profile
-  parameter was changed. The larger caption-pop cause is still unresolved
-  and assigned to textexact under FONTS-R.
+- Three paper-caption captures remain nonexact: each has one pixel by
+  2 CV. Caption-pop, colored caption stroke and whisper now meet their
+  original bound. Counts and review filenames are in the ratchet; the lane
+  report resolves full-resolution legacy/native/difference sheets for all
+  13 remaining cases. The exact stage producing the paper pixel is not
+  established; no profile parameter was changed to hide it.
 - The closure distance-field residual `sdf-sizes-0004` remains (4 pixels by
   2 CV). The three stroke/bold SDF failures are closed by the tangent fix.
   The row-local backward distance walk still works with debug overflow
   checks; it never subtracts beyond the first row.
-- COLR v0 at 96 and 200 px still differs at a few pixels by 2 CV. The
-  CoreGraphics approximation is gone. Fontations supplies unhinted paths,
-  all layer bounds, transforms, clips, palettes and gradient geometry; the
-  existing Skia analytic filler supplies coverage, with N32 integer solid
-  alpha blending. Whole-pixel placement uses the text blob's 1/8-pixel x
-  bias, not a 1/2-pixel bias. A direct-span-blitter experiment did not fix
-  the residual and was discarded. Radial/sweep paints, composite modes,
+- COLR v0's two residuals are closed by ordered N32 span blending above.
+  Whole-pixel placement uses the text blob's 1/8-pixel x bias.
+  Radial/sweep paints, composite modes,
   rotations and clipping have implementation coverage but no captured
   pixel-parity evidence beyond the linear-gradient and v0 captures; do not
-  treat them as a closed parity class.
+  treat them as a closed parity class. Black solid layers (palette black or
+  black foreground) match Skia's black blitter in the synthetic N32
+  oracle, but none of the captured COLR glyphs has a black layer.
 - The real project is compared in full and in isolation. Shared Canvas2D
   pass decisions reduce its actual t16/18/24 source-texture residuals to
   6/6/2 pixels beyond 1 CV, max 64/64/5. Sparse curved-edge/MSAA sample
@@ -1481,6 +1604,12 @@ captures unchanged. The separate capture-transport fixes are described above.
   app run exposed in-place binary replacement; addon verification and the
   complete 17-test app rerun pass with atomic installation.
 
+2026-10-19 (lane ne-textexact):
+
+- `apps/desktop/e2e/native-engine-text-typing.spec.ts`: pass `mode` into
+  the browser-side result callback. Playwright callbacks do not retain the
+  test runner's closure; trace collection must use the explicit argument.
+  This changes only the measurement harness.
 
 2026-10-19 (lane ne-fonts, round 8):
 

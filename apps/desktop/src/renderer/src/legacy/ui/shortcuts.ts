@@ -21,6 +21,7 @@ import { hasTextSelection, isFieldTarget, selectableTextRoot, selectTextContents
 import { ensureKernel, registryView } from '../kernel-view';
 import type { PMRegistry } from '../registry';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { runWhenDocumentReady } from '../../engine-doc/readiness';
 import { compositionSettingsDialog, deleteCompositionPrompt, precomposeDialog } from './compositions';
 
 export const LEGACY_OWNER = 'legacy';
@@ -319,27 +320,34 @@ def('pasteKeyframes', 'Paste keyframes', null, (target?: KeyframePasteTarget) =>
   if (!keyClip) { PM.toast?.('Copy keyframes first'); return false; }
   return pasteKeyframes(PM, keyClip, target);
 }, 'Keyframes');
-def('contextUndo', 'Undo', null, () => activeTextField() ? nativeEdit('undo') : readingText() ? false : PM.cmd('undo'), 'Edit', hidden);
-def('contextRedo', 'Redo', null, () => activeTextField() ? nativeEdit('redo') : readingText() ? false : PM.cmd('redo'), 'Edit', hidden);
-def('contextCut', 'Cut', null, () => activeTextField() ? nativeEdit('cut') : readingText() ? false : PM.cmd('cutLayers'), 'Edit', hidden);
-def('contextCopy', 'Copy', null, () => activeTextField() || readingText() || hasTextSelection() ? nativeEdit('copy') : PM.cmd('copyLayers'), 'Edit', hidden);
+/* The field-editing commands run at once even while the document module is
+   loading or after it failed: their native field edit never touches the
+   document. Only the document fallback waits (engine-doc/readiness.ts). */
+const documentCmd = (id: string): unknown => runWhenDocumentReady(PM, id, () => PM.cmd(id));
+def('contextUndo', 'Undo', null, () => activeTextField() ? nativeEdit('undo') : readingText() ? false : documentCmd('undo'), 'Edit', hidden);
+def('contextRedo', 'Redo', null, () => activeTextField() ? nativeEdit('redo') : readingText() ? false : documentCmd('redo'), 'Edit', hidden);
+def('contextCut', 'Cut', null, () => activeTextField() ? nativeEdit('cut') : readingText() ? false : documentCmd('cutLayers'), 'Edit', hidden);
+def('contextCopy', 'Copy', null, () => activeTextField() || readingText() || hasTextSelection() ? nativeEdit('copy') : documentCmd('copyLayers'), 'Edit', hidden);
 def('contextPaste', 'Paste', null, () => {
   if (activeTextField()) return nativeEdit('paste');
   if (readingText()) return false;
   const paste = hostBridge()?.pasteMedia;
   if (paste) {
-    const project = PM.proj;
-    return localClipboardWrite.then(paste).then(handled => {
-      if (!handled && PM.proj === project && !activeTextField() && !readingText()) PM.cmd('pasteLayers');
-    }).catch(() => {
-      if (PM.proj === project && !activeTextField() && !readingText()) PM.cmd('pasteLayers');
+    // Media paste imports into the project, so it waits for the document too.
+    return runWhenDocumentReady(PM, 'contextPaste', () => {
+      const project = PM.proj;
+      return localClipboardWrite.then(paste).then(handled => {
+        if (!handled && PM.proj === project && !activeTextField() && !readingText()) PM.cmd('pasteLayers');
+      }).catch(() => {
+        if (PM.proj === project && !activeTextField() && !readingText()) PM.cmd('pasteLayers');
+      });
     });
   }
   // In browsers, let the user's shortcut produce the clipboard event.
   if (typeof document !== 'undefined' && typeof ClipboardEvent !== 'undefined') return false;
-  return PM.cmd('pasteLayers');
+  return documentCmd('pasteLayers');
 }, 'Edit', { ...hidden, preserveFalse: true });
-def('contextSelectAll', 'Select all', null, () => { const root = readingText(); return activeTextField() ? nativeEdit('selectAll') : root ? selectTextContents(root) : PM.cmd('selectAll'); }, 'Edit', hidden);
+def('contextSelectAll', 'Select all', null, () => { const root = readingText(); return activeTextField() ? nativeEdit('selectAll') : root ? selectTextContents(root) : documentCmd('selectAll'); }, 'Edit', hidden);
 def('toggleVisibility', 'Hide/show selected layers', null, () => toggleVisibility(PM), 'Edit');
 def('toggleLayerControls', 'Show/hide layer controls', '⌘⇧H', () => toggleLayerControls(PM), 'View', preserveFalse);
 def('lockSelectedLayers', 'Lock selected layers', '⌘L', () => setLayerLocks(PM, true), 'Edit');

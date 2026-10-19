@@ -209,6 +209,43 @@ describe('legacy Electron shim install', () => {
     expect(PM.cmd).toHaveBeenNthCalledWith(2, 'copyLayers');
     expect(PM.cmd).toHaveBeenNthCalledWith(3, 'pasteLayers');
   });
+  it('runs Settings from the native menu after a failed document load and names the failure for a document command', async () => {
+    const { PM, bridge } = loadShim();
+    const showFailure = vi.fn();
+    PM.EngineDoc = { enabled: true, strict: true, ready: false, whenReady: Promise.resolve(false), settled: () => Promise.resolve(false), showFailure };
+    PM.cmd = vi.fn();
+    const menu = bridge.onMenuCommand.mock.calls[0][0];
+    menu('settings');
+    expect(PM.cmd).toHaveBeenCalledWith('settings');
+    // Save and the field-editing Edit items need no module (the built-in
+    // contextPaste gates only its document fallback).
+    menu('save');
+    menu('contextPaste');
+    expect(PM.cmd).toHaveBeenCalledWith('save');
+    expect(PM.cmd).toHaveBeenCalledWith('contextPaste');
+    menu('duplicate');
+    menu('paste');
+    await flush();
+    expect(PM.cmd).toHaveBeenCalledTimes(3);
+    expect(showFailure).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs a native menu document command once a Retry in flight succeeds', async () => {
+    const { PM, bridge } = loadShim();
+    let finish!: (ready: boolean) => void;
+    const loading = new Promise<boolean>(resolve => { finish = resolve; });
+    PM.EngineDoc = { enabled: true, strict: true, ready: false, whenReady: Promise.resolve(false), settled: () => loading, showFailure: vi.fn() };
+    PM.cmd = vi.fn();
+    bridge.onMenuCommand.mock.calls[0][0]('duplicate');
+    await flush();
+    expect(PM.cmd).not.toHaveBeenCalled();
+    PM.EngineDoc.ready = true;
+    finish(true);
+    await flush();
+    expect(PM.cmd).toHaveBeenCalledWith('duplicate');
+    expect(PM.EngineDoc.showFailure).not.toHaveBeenCalled();
+  });
+
   it('maps Codex authority and effort and emits plain UTF-8 progress/result payloads', async () => {
     const { PM, bridge, window } = loadShim();
     bridge.codex.run.mockImplementation(async (

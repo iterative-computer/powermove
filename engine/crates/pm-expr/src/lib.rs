@@ -44,12 +44,15 @@
 // `js-pow`), a declaration of a pure function.
 #![deny(unsafe_code)]
 
+mod bytecode;
 mod deps;
 mod diagnostic;
 mod eval;
+mod general;
 mod host;
 pub mod jsmath;
 mod lexer;
+mod numeric;
 mod parser;
 mod string;
 mod value;
@@ -59,6 +62,7 @@ pub use diagnostic::{
     LENGTH_MESSAGE, expression_diagnostic, expression_diagnostic_utf16, expression_names,
 };
 pub use eval::EvalError;
+pub use general::GeneralBinding;
 pub use host::{Host, JsonHost, JsonRef, Shape};
 pub use lexer::SyntaxError;
 pub use parser::{MAX_CALL_ARGS, MAX_DEPTH, MAX_NODES, MAX_SOURCE_CHARS};
@@ -68,8 +72,9 @@ pub use value::{
     string_to_number,
 };
 
+use bytecode::Program;
 use eval::Evaluator;
-use parser::Node;
+use std::sync::Arc;
 
 /// Which names exist.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -112,7 +117,10 @@ pub struct Context<O> {
 /// cheap to evaluate many times.
 #[derive(Clone, Debug)]
 pub struct Expression {
-    tree: Node,
+    program: Arc<Program>,
+    numeric: Option<Arc<numeric::Numeric>>,
+    /// Partial evaluation for sources the numeric plan does not cover.
+    general: Option<Arc<general::General>>,
     needs_idx: bool,
     dialect: Dialect,
 }
@@ -199,8 +207,14 @@ impl Expression {
             return Err(CompileError::Length);
         }
         let tree = parser::parse(units).map_err(CompileError::Syntax)?;
+        let numeric = numeric::Numeric::compile(&tree, dialect).map(Arc::new);
         Ok(Expression {
-            tree,
+            program: Arc::new(Program::compile(&tree)),
+            general: numeric
+                .is_none()
+                .then(|| general::General::compile(&tree, dialect).map(Arc::new))
+                .flatten(),
+            numeric,
             needs_idx: needs_idx(units),
             dialect,
         })
@@ -217,15 +231,164 @@ impl Expression {
         self.needs_idx
     }
 
+    /// Whether a caller needs to prepare the channel string at evaluation.
+    pub fn needs_channel(&self) -> bool {
+        self.program
+            .code
+            .iter()
+            .any(|op| matches!(op, bytecode::Op::Identifier(bytecode::Input::Channel)))
+    }
+
+    /// Literal property/parameter names for embedders that intern host keys.
+    /// Dynamic keys still go through the host's ordinary conversion.
+    pub fn literal_strings(&self) -> impl Iterator<Item = &JsStr> {
+        self.program.code.iter().filter_map(|op| match op {
+            bytecode::Op::Literal(parser::Literal::String(s)) => Some(s),
+            bytecode::Op::MemberKey(key) => Some(&key.string),
+            _ => None,
+        })
+    }
+
     pub fn dialect(&self) -> Dialect {
         self.dialect
+    }
+
+    /// Binds only document/fps/index inputs of the typed numeric plan. The
+    /// embedding must discard this binding on every document revision. Time,
+    /// local time, frame and the keyframed value remain dynamic. The complete
+    /// bytecode remains available for any runtime type requiring coercion.
+    pub fn bind_numeric<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Option<Self> {
+        let mut out = self.clone();
+        out.numeric = Some(Arc::new(self.numeric.as_ref()?.bind(host, ctx)));
+        Some(out)
+    }
+
+    /// Whether [`bind_general`](Expression::bind_general) applies: the source
+    /// has no numeric plan but has subexpressions that read no time, value or
+    /// channel input.
+    pub fn has_general_binding(&self) -> bool {
+        self.general.is_some()
+    }
+
+    /// Evaluates each subexpression that reads only `layer`, `comp`, `fps`,
+    /// `idx` and literals once and substitutes its primitive answer (see
+    /// `general.rs`). The result answers [`evaluate_untracked`] and
+    /// [`evaluate_scalars`] exactly as this expression does for every input
+    /// with which [`general_binding_matches`] holds. The embedding must check
+    /// that on every document revision. It is not for tracked evaluation (its
+    /// reads are the remaining ones only).
+    ///
+    /// [`evaluate_untracked`]: Expression::evaluate_untracked
+    /// [`evaluate_scalars`]: Expression::evaluate_scalars
+    /// [`general_binding_matches`]: Expression::general_binding_matches
+    pub fn bind_general<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+    ) -> Option<(Self, GeneralBinding)> {
+        let (tree, binding) = self.general.as_ref()?.bind(host, ctx, self.dialect)?;
+        Some((
+            Expression {
+                program: Arc::new(Program::compile(&tree)),
+                numeric: numeric::Numeric::compile(&tree, self.dialect).map(Arc::new),
+                general: None,
+                needs_idx: self.needs_idx,
+                dialect: self.dialect,
+            },
+            binding,
+        ))
+    }
+
+    /// Whether a binding from [`bind_general`](Expression::bind_general) on
+    /// this (source) expression still holds: every substituted subexpression
+    /// answers the same primitive (numbers by bits).
+    pub fn general_binding_matches<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+        binding: &GeneralBinding,
+    ) -> bool {
+        self.general
+            .as_ref()
+            .is_some_and(|general| binding.matches(general, host, ctx, self.dialect))
+    }
+
+    /// Whether the general binding's subexpressions read the layer object.
+    pub fn general_uses_layer(&self) -> bool {
+        self.general.as_ref().is_some_and(|g| g.uses_layer())
+    }
+
+    /// Whether they read only the layer and its index (not `comp`, `fps` or
+    /// parameters).
+    pub fn general_is_layer_local(&self) -> bool {
+        self.general.as_ref().is_some_and(|g| g.layer_local())
+    }
+
+    /// Whether the fixed numeric inputs read the current layer object.
+    pub fn numeric_fixed_uses_layer(&self) -> bool {
+        self.numeric.as_ref().is_some_and(|n| n.fixed_uses_layer())
+    }
+
+    /// Fixed inputs depend only on the layer and its index, not composition
+    /// fields, fps or project parameters. Dynamic inputs are still evaluated.
+    pub fn numeric_fixed_is_layer_local(&self) -> bool {
+        self.numeric
+            .as_ref()
+            .is_some_and(|n| n.fixed_is_layer_local())
+    }
+
+    /// Exact bits of every fixed numeric input in the original typed plan.
+    /// `None` means a field or parameter is not numeric, so a document-bound
+    /// plan cannot be safely reused. Dynamic time, frame and value are omitted.
+    pub fn numeric_fixed_bits<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Option<Vec<u64>> {
+        let mut bits = Vec::new();
+        self.numeric.as_ref()?.fixed_bits(host, ctx, &mut bits)?;
+        Some(bits)
+    }
+
+    /// Allocation-free comparison with the original plan's fixed inputs.
+    /// This must be called on the source expression, never on a folded binding.
+    pub fn numeric_fixed_matches<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+        bits: &[u64],
+    ) -> bool {
+        let Some(numeric) = &self.numeric else {
+            return false;
+        };
+        let mut position = 0;
+        numeric.fixed_matches(host, ctx, bits, &mut position) && position == bits.len()
+    }
+
+    /// A revision-bound numeric plan with no remaining document/context reads.
+    /// `None` retains the complete evaluator, including all coercion and errors.
+    pub fn evaluate_scalars(&self, t: f64, time: f64, value: f64) -> Option<f64> {
+        self.numeric.as_ref()?.scalars(t, time, value)
+    }
+
+    /// Runs without allocating a dependency trace. Callers must invalidate on
+    /// every document revision (or track reads in the host itself).
+    pub fn evaluate_untracked<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+    ) -> Result<Value<H::Obj>, EvalError> {
+        if let Some(plan) = &self.numeric
+            && let Some(n) = plan.evaluate(host, ctx)
+        {
+            return Ok(Value::Number(n));
+        }
+        Evaluator::untracked(host, ctx, self.dialect)
+            .run(&self.program)
+            .map(|v| v.map_doc(|t| t.into_obj()))
     }
 
     /// Evaluates against raw project values supplied by `host`.
     pub fn evaluate<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Evaluation<H::Obj> {
         let mut evaluator = Evaluator::new(host, ctx, self.dialect);
         let result = evaluator
-            .evaluate(&self.tree)
+            .run(&self.program)
             .map(|v| v.map_doc(|t| t.into_obj()));
         Evaluation {
             result,
