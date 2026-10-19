@@ -239,8 +239,8 @@ pub struct SnapshotQueue {
     jobs: VecDeque<SnapshotJob>,
     /// Exponential average of a snapshot's render time (µs).
     cost_us: Option<f64>,
-    /// Bytes of results published to shared memory and not reaped yet.
-    published: VecDeque<(i64, u64)>,
+    /// Names and bytes of results main has not taken (or the reaper unlinked).
+    published: VecDeque<(String, u64)>,
 }
 
 impl SnapshotQueue {
@@ -270,11 +270,17 @@ impl SnapshotQueue {
             + self.published.iter().map(|(_, b)| b).sum::<u64>()
     }
 
-    /// Records a result published to shared memory at `now`, and forgets
-    /// those older than `orphan_us` (taken or reaped by then).
-    pub fn published(&mut self, now: i64, bytes: u64, orphan_us: i64) {
-        self.published.retain(|(at, _)| now - at < orphan_us);
-        self.published.push_back((now, bytes));
+    /// Records a result until main takes it or orphan cleanup unlinks it.
+    pub fn published(&mut self, name: String, bytes: u64) {
+        self.published.push_back((name, bytes));
+    }
+
+    /// Main unlinks a result before reading it. Count only actual outstanding
+    /// results, rather than keeping already-consumed pixels charged for 60 s.
+    /// An OS error retains the charge conservatively.
+    fn reclaim_published(&mut self) {
+        self.published
+            .retain(|(name, _)| pm_bridge::shm::exists(name).unwrap_or(true));
     }
 
     /// Adds a job, or refuses it (too large, or the queue or its memory is
@@ -285,6 +291,7 @@ impl SnapshotQueue {
         if pixels > MAX_PIXELS {
             return Err(Box::new((job, Refused::TooLarge(pixels))));
         }
+        self.reclaim_published();
         let per_session = self.jobs.iter().filter(|j| j.key == job.key).count();
         if self.jobs.len() >= MAX_QUEUED
             || per_session >= MAX_QUEUED_PER_SESSION
@@ -687,16 +694,20 @@ mod tests {
         let mut big = job(SnapshotClass::Sync, key(4, 1), None, 0);
         big.request.output_size = Size::new(16_000, 16_000);
         assert!(matches!(q.push(big).unwrap_err().1, Refused::TooLarge(_)));
-        // Memory: published results count until they are reaped.
+        // Memory: outstanding results retain the same hard cap. Main taking
+        // a result releases its charge immediately, without waiting 60 s.
         let mut m = SnapshotQueue::default();
-        m.published(0, MAX_PENDING_BYTES, 60_000_000);
+        let name = pm_bridge::shm::publish(&[7; 16]).unwrap();
+        let mut segments = pm_bridge::shm::Segments::default();
+        segments.add(name.clone());
+        m.published(name.clone(), MAX_PENDING_BYTES);
         assert_eq!(
             m.push(job(SnapshotClass::Sync, key(3, 1), None, 0))
                 .unwrap_err()
                 .1,
             Refused::Full
         );
-        m.published(60_000_001, 16, 60_000_000);
+        assert_eq!(pm_bridge::shm::take(&name, 16).unwrap(), vec![7; 16]);
         assert!(m.push(job(SnapshotClass::Sync, key(3, 1), None, 0)).is_ok());
     }
 

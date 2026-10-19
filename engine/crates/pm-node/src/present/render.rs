@@ -4618,11 +4618,7 @@ impl Thread {
         match pm_bridge::shm::publish(&pixels) {
             Ok(name) => {
                 self.segments.add(name.clone());
-                self.snapshots.published(
-                    now(),
-                    length as u64,
-                    pm_bridge::shm::ORPHAN_AFTER.as_micros() as i64,
-                );
+                self.snapshots.published(name.clone(), length as u64);
                 self.stats().snapshot_shared += 1;
                 Some(PixelPayload::SharedMemory {
                     name,
