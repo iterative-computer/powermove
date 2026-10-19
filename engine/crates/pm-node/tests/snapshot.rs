@@ -680,11 +680,19 @@ fn child_snapshots() {
         assert_eq!(at_scale.origin, [4.0, 4.0], "scale {scale}");
         assert_eq!(at_scale.layer_box, Some([48.0, 28.0]), "scale {scale}");
         let g = at_scale.raster.clone().expect("raster geometry");
-        assert_eq!(g.selection, Some([-20.0, -10.0, 20.0, 10.0]), "scale {scale}");
+        assert_eq!(
+            g.selection,
+            Some([-20.0, -10.0, 20.0, 10.0]),
+            "scale {scale}"
+        );
         let px = pixels_of(&at_scale);
         if canvas.0 > 2 {
             let (cx, cy) = (canvas.0 / 2, canvas.1 / 2);
-            assert_eq!(at(&px, canvas.0, cx, cy), BOX, "scale {scale}: the box inside");
+            assert_eq!(
+                at(&px, canvas.0, cx, cy),
+                BOX,
+                "scale {scale}: the box inside"
+            );
         } else if scale < 1e-6 {
             assert!(
                 px.chunks_exact(4).all(|p| p[3] == 0),

@@ -618,7 +618,10 @@ mod child {
                 let inked = pixels(&at_scale).chunks_exact(4).any(|p| p[3] > 0);
                 assert!(inked, "scale {scale}: ink");
             }
-            println!("layer raster at scale {scale}: {}x{}", at_scale.width, at_scale.height);
+            println!(
+                "layer raster at scale {scale}: {}x{}",
+                at_scale.width, at_scale.height
+            );
         }
         // Today's placement: the selection of the text geometry; with
         // typography anchoring, the shift as `fontOffset` and in the anchor.
