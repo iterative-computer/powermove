@@ -42,7 +42,9 @@ CPU snapshots from `pm-node` over authenticated binary HTTP requests.
 
 The desktop writes `desktop-environment.json` beside `Engine Cache/Shader Cache`.
 Hidden engines and CLI renders read this namespace and the same `angle-parity`
-pins. A profile without desktop probes uses a fresh namespace: user programs
+pins. A hidden profile with its own desktop probe copy uses it; otherwise the
+host reads this machine’s desktop store. `POWERMOVE_ENGINE_SHADER_CACHE` selects
+an explicit cache for isolated hosts. A profile without desktop probes uses a fresh namespace: user programs
 must pass through ANGLE before native verification. The browser module uses
 `ShaderFallbackRunner`, with the desktop's F16 texture, uniform and watchdog
 contract. `powermove render` starts an authenticated loopback service; direct

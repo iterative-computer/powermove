@@ -1,6 +1,6 @@
 /** The desktop's browser/driver probe namespace, shared by native CLI hosts.
  * Unknown installations get a separate namespace and must use ANGLE. */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -20,4 +20,15 @@ export function readShaderEnvironment(directory: string): string {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`shader-probe-store-unreadable: ${String(error)}`);
   }
   return JSON.stringify({ host: 'native-without-desktop-probes', os: os.version() });
+}
+
+/** A hidden profile may supply its own desktop probe copy; otherwise it reads
+ * this machine's desktop store. An explicit cache is useful for isolated hosts. */
+export function shaderCacheDirectory(userData: string, env: NodeJS.ProcessEnv = process.env,
+  desktopProfile = path.join(os.homedir(), 'Library', 'Application Support', 'Powermove')): string {
+  if (env['POWERMOVE_ENGINE_SHADER_CACHE']) return path.resolve(env['POWERMOVE_ENGINE_SHADER_CACHE']);
+  const local = path.join(userData, 'Engine Cache', 'Shader Cache');
+  if (existsSync(path.join(local, FILE))) return local;
+  const desktop = path.join(desktopProfile, 'Engine Cache', 'Shader Cache');
+  return existsSync(path.join(desktop, FILE)) ? desktop : local;
 }

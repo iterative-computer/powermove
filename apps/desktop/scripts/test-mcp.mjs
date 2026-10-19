@@ -64,7 +64,7 @@ if (desktop) {
   child = spawn(electron, ['.', '--powermove-mcp'], { cwd: desktopDir, stdio: ['pipe', 'pipe', 'pipe'], env });
 } else {
   const cli = process.env.POWERMOVE_TEST_CLI || path.join(repository, 'packages/cli/bin/powermove.mjs');
-  child = spawn(process.execPath, [cli, 'mcp', '--user-data', profile, '--exports', exportsDir], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...(native ? { POWERMOVE_NEW_ENGINE: '1' } : {}), ...(missingBrowser ? { POWERMOVE_CHROMIUM: path.join(root, 'missing-chromium') } : {}) } });
+  child = spawn(process.execPath, [cli, 'mcp', '--user-data', profile, '--exports', exportsDir], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...(native ? { POWERMOVE_NEW_ENGINE: '1', POWERMOVE_ENGINE_SHADER_CACHE: path.join(profile, 'Engine Cache', 'Shader Cache') } : {}), ...(missingBrowser ? { POWERMOVE_CHROMIUM: path.join(root, 'missing-chromium') } : {}) } });
 }
 let diagnostics = '', output = '', nextId = 0;
 const pending = new Map();

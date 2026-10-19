@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { SnapshotService } from '../../main/engine/snapshots';
 import { WindowSnapshotSessions } from '../../main/engine/window-sessions';
 import type { EngineSnapshotRequest, EngineSnapshotReply } from '../../shared/engine-ipc';
-import { readShaderEnvironment } from '../../main/engine/shader-environment';
+import { readShaderEnvironment, shaderCacheDirectory } from '../../main/engine/shader-environment';
 /** macOS hidden host: in-process host services, supervised native engines and
  * one production document worker per project. Chromium is a lazy DOM service. */
 import { existsSync } from 'node:fs';
@@ -91,12 +91,13 @@ export class NativeHiddenHost {
     const loaded = createRequire(path.join(distDir, 'server.mjs'))(bridge) as { takePixels(name: string, length: number): Uint8Array; nowUs(): number; publishPixels(bytes: Uint8Array): string; unlinkPixels(name: string): void };
     this.nowUs = () => loaded.nowUs();
     this.unlinkPixels = name => loaded.unlinkPixels(name);
+    const probeDirectory = shaderCacheDirectory(userData);
     const transport = new NodeEngineTransport();
     this.hashes = new WorkerPool(path.join(distDir, 'native-media-hash.cjs'), 1);
     this.media = new MediaStoreService({ root: path.join(userData, STORE_DIRECTORY), userData, executor: this.hashes, enabled: true });
     this.engine = new NativeEngine({ spawn: transport.spawn(path.join(distDir, 'native-engine-child.cjs'), addon, log, {
-      POWERMOVE_ENGINE_PARITY_ENV: process.env['POWERMOVE_ENGINE_PARITY_ENV'] ?? readShaderEnvironment(path.join(userData, 'Engine Cache', 'Shader Cache')),
-      POWERMOVE_ENGINE_SHADER_CACHE: path.join(userData, 'Engine Cache', 'Shader Cache')
+      POWERMOVE_ENGINE_PARITY_ENV: process.env['POWERMOVE_ENGINE_PARITY_ENV'] ?? readShaderEnvironment(probeDirectory),
+      POWERMOVE_ENGINE_SHADER_CACHE: probeDirectory
     }), channel: transport.channel,
       cacheDirectory: path.join(userData, 'Engine Cache'), automaticOutputDirectory: options.exportsDir,
       physicalMemory: os.totalmem(), hostNow: this.nowUs,
