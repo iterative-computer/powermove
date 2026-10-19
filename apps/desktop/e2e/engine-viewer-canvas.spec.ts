@@ -1,5 +1,5 @@
 /*
- * Decision V1: with "Use New Engine" on, the viewer looks like today's.
+ * Decision V1: with "Use New Engine" on, the viewer must look like today's.
  * Today's viewer draws a view into a WebGL canvas it sizes itself
  * (`previewRenderSize`: `min(1, zoom × min(2, DPR)) × quality` of the
  * composition below fit; the explicit preview resolution; the cropped
@@ -10,10 +10,11 @@
  * The two viewers are compared by what the window shows: `capturePage` of
  * the stage (the engine's presentation canvas is composited by Chromium
  * like today's WebGL canvas), for a project with text, shapes, a blurred
- * shape, a video, and a level 1 SVG image, at 25%, 50%, 61% and 100% on a
- * 2x display, with the preview resolution at Auto, Full and Half. Each
+ * shape, a video, and a level 1 SVG image, at 25%, 50%, 61%, 100% and 237%
+ * on a 2x display, with the preview resolution at Auto, Full and Half. Each
  * case must hold the corpus bound (section 25's render class: every
- * channel within 1 code value for 99.9% of pixels, none beyond 4).
+ * channel within 1 code value for 99.9% of pixels, none beyond 4), unless
+ * it is a known difference listed in KNOWN.
  *
  * Both windows run with `--force-color-profile=srgb` (set
  * PM_VIEWER_CANVAS_PROFILE=display to keep the display's profile): on a
