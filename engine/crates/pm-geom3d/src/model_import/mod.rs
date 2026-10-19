@@ -358,12 +358,10 @@ pub fn json_of(bytes: &[u8]) -> Result<Value> {
 
 /// Decodes a GLB, or a self-contained glTF with data URIs.
 pub fn load(bytes: &[u8]) -> Result<Model> {
-    let gltf::Gltf { document, blob } = gltf::Gltf::from_slice_without_validation(bytes)
-        .map_err(|e| Error(format!("glTF: {e}")))?;
-    let raw = json_of(bytes)?;
-    if document.nodes().len() != raw["nodes"].as_array().map_or(0, |a| a.len()) {
-        return err("glTF node count mismatch");
-    }
+    // The document as raw JSON, as GLTFLoader reads it (a typed schema
+    // refuses files GLTFLoader loads: a 15-value matrix, an animation
+    // channel without a node).
+    let (raw, blob) = crate::gltf::container(bytes).map_err(|e| Error(e.0))?;
     let used: Vec<String> = raw["extensionsUsed"]
         .as_array()
         .map(|a| {
@@ -372,12 +370,9 @@ pub fn load(bytes: &[u8]) -> Result<Model> {
                 .collect()
         })
         .unwrap_or_default();
-    for required in raw["extensionsRequired"].as_array().into_iter().flatten() {
-        let name = required.as_str().unwrap_or("");
-        if !SUPPORTED.contains(&name) {
-            return err(format!("required extension {name} is not supported"));
-        }
-    }
+    // GLTFLoader warns about an unknown required extension and loads the
+    // file; the ones it refuses (Draco without a decoder, KTX2, meshopt)
+    // are refused by the acceptance check (`scene::import`).
     let mut owned: Vec<Vec<u8>> = Vec::new();
     for (i, b) in raw["buffers"].as_array().into_iter().flatten().enumerate() {
         match b["uri"].as_str() {
@@ -546,26 +541,27 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                 return err("Draco-compressed meshes are not supported");
             }
             let attrs = &p["attributes"];
+            // An attribute accessor of a type GLTFLoader has no size for has
+            // no elements: the attribute is absent (`crate::gltf`'s reader).
+            let attr = |name: &str| -> Option<u64> {
+                attrs[name].as_u64().filter(|&i| {
+                    !matches!(data.layout(i as usize), Err(e) if e.0.starts_with("accessor type"))
+                })
+            };
             let Some(pos_index) = attrs["POSITION"].as_u64() else {
                 return err(format!("mesh {mi}: primitive without POSITION"));
             };
             let positions = data.read_n::<3>(pos_index as usize)?;
             let opt3 = |name: &str| -> Result<Option<Vec<[f32; 3]>>> {
-                attrs[name]
-                    .as_u64()
-                    .map(|i| data.read_n::<3>(i as usize))
-                    .transpose()
+                attr(name).map(|i| data.read_n::<3>(i as usize)).transpose()
             };
             let opt2 = |name: &str| -> Result<Option<Vec<[f32; 2]>>> {
-                attrs[name]
-                    .as_u64()
-                    .map(|i| data.read_n::<2>(i as usize))
-                    .transpose()
+                attr(name).map(|i| data.read_n::<2>(i as usize)).transpose()
             };
             let normals = opt3("NORMAL")?;
             let uv = opt2("TEXCOORD_0")?;
             let uv1 = opt2("TEXCOORD_1")?;
-            let (colors, color_components) = match attrs["COLOR_0"].as_u64() {
+            let (colors, color_components) = match attr("COLOR_0") {
                 Some(i) => {
                     let (v, c) = data.read(i as usize)?;
                     let list = match c {
@@ -583,8 +579,7 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                 }
                 None => (None, 0),
             };
-            let tangents = attrs["TANGENT"]
-                .as_u64()
+            let tangents = attr("TANGENT")
                 .map(|i| data.read_n::<4>(i as usize))
                 .transpose()?;
             let mut indices = match p["indices"].as_u64() {
@@ -645,7 +640,7 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                     undrawable.get_or_insert(format!("mesh {mi}: {name} is shorter than POSITION"));
                 }
             }
-            let joints = match attrs["JOINTS_0"].as_u64() {
+            let joints = match attr("JOINTS_0") {
                 Some(i) => {
                     let (v, c) = data.read(i as usize)?;
                     if c != 4 {
@@ -659,11 +654,10 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                 }
                 None => None,
             };
-            let weights = attrs["WEIGHTS_0"]
-                .as_u64()
+            let weights = attr("WEIGHTS_0")
                 .map(|i| data.read_n::<4>(i as usize))
                 .transpose()?;
-            let weights_type = match attrs["WEIGHTS_0"].as_u64() {
+            let weights_type = match attr("WEIGHTS_0") {
                 Some(i) => data.layout(i as usize)?.component_type,
                 None => 5126,
             };
@@ -749,9 +743,10 @@ fn load_nodes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
     }
     for (ni, n) in nodes.iter().enumerate() {
         let (translation, rotation, scale) = if let Some(m) = n["matrix"].as_array() {
-            let mut cols = [0.0; 16];
-            for (i, c) in cols.iter_mut().enumerate() {
-                *c = f(m, i);
+            // `Matrix4.fromArray`: a missing entry is `undefined` (NaN).
+            let mut cols = [f64::NAN; 16];
+            for (c, v) in cols.iter_mut().zip(m) {
+                *c = crate::gltf::js_number(v);
             }
             math::decompose(&cols)
         } else {
@@ -868,15 +863,18 @@ fn load_skins(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                 if c != 16 {
                     return err("inverseBindMatrices must be MAT4");
                 }
-                v.chunks_exact(16)
-                    .map(|m| std::array::from_fn(|k| m[k] as f32 as f64))
+                // `mat.fromArray(array, i * 16)` per joint: entries past the
+                // array are `undefined` (NaN).
+                (0..joints.len())
+                    .map(|j| {
+                        std::array::from_fn(|k| {
+                            v.get(j * 16 + k).map_or(f64::NAN, |x| *x as f32 as f64)
+                        })
+                    })
                     .collect()
             }
             None => vec![math::IDENTITY; joints.len()],
         };
-        if inverse_bind.len() < joints.len() {
-            return err("too few inverse bind matrices");
-        }
         model.skins.push(Skin {
             joints,
             inverse_bind,

@@ -26,6 +26,7 @@ pub mod pick;
 pub mod pose;
 
 pub use load::{Limits, load, load_with};
+pub(crate) use load::{container, js_number};
 
 use math::{Mat4, Quat, Vec3};
 
@@ -129,6 +130,10 @@ pub struct Geometry {
     /// largest morph displacement (`None` without min and max).
     pub bounding_box: Option<(Vec3, Vec3)>,
     pub mode: Mode,
+    /// Why WebGL refuses to draw this primitive, when it does (a vertex
+    /// attribute shorter than POSITION): three.js loads it, counts it in
+    /// the import facts and bounds, picks it, and draws nothing for it.
+    pub undrawable: Option<String>,
 }
 
 impl Geometry {

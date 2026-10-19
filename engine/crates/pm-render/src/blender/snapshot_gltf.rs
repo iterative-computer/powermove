@@ -238,6 +238,17 @@ pub(super) fn meshes(
         let mut uvs = Vec::with_capacity(count * 2);
         for k in 0..count {
             let v = g.index.as_ref().map_or(k, |ix| ix[k] as usize);
+            if v >= g.vertex_count() {
+                // `getVertexPosition` and `fromBufferAttribute` past the
+                // last vertex read `undefined`, which the snapshot's JSON
+                // writes as null (NaN here); `uv?.getX(index) || 0` is 0.
+                positions.extend([f64::NAN; 3]);
+                if g.normal.is_some() {
+                    normals.extend([f64::NAN; 3]);
+                }
+                uvs.extend([0.0, 0.0]);
+                continue;
+            }
             let point = poser.vertex(v);
             positions.extend(point);
             if let Some(normal) = &g.normal {

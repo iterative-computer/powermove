@@ -52,7 +52,7 @@ const CHUNK_JSON: u32 = 0x4e4f_534a;
 
 /// The JSON document and the GLB `BIN` chunk, with `loadGltf`'s container
 /// checks.
-fn container(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>)> {
+pub(crate) fn container(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>)> {
     if bytes.len() >= 20 && u32_at(bytes, 0) == GLB_MAGIC {
         if u32_at(bytes, 4) != 2 || u32_at(bytes, 8) as usize != bytes.len() {
             return err("Invalid GLB container");
@@ -141,6 +141,30 @@ fn f(a: &Value, i: usize) -> f64 {
 
 fn index(v: &Value) -> Option<usize> {
     v.as_u64().map(|i| i as usize)
+}
+
+/// The prefix of the error for an accessor type GLTFLoader has no size for.
+const UNKNOWN_TYPE: &str = "accessor type";
+
+/// JavaScript's `ToNumber` of a JSON value, as typed-array and matrix
+/// stores apply it.
+pub(crate) fn js_number(v: &Value) -> f64 {
+    match v {
+        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
+        Value::Null => 0.0,
+        Value::Bool(b) => f64::from(u8::from(*b)),
+        Value::String(t) => {
+            let t = t.trim();
+            if t.is_empty() {
+                0.0
+            } else {
+                t.parse().unwrap_or(f64::NAN)
+            }
+        }
+        Value::Array(a) if a.is_empty() => 0.0,
+        Value::Array(a) if a.len() == 1 => js_number(&a[0]),
+        _ => f64::NAN,
+    }
 }
 
 /// `PropertyBinding.sanitizeNodeName`.
@@ -240,11 +264,14 @@ impl Doc<'_> {
             .buffers
             .get(b)
             .ok_or_else(|| Error(format!("buffer {b} missing")))?;
-        let start = v["byteOffset"].as_u64().unwrap_or(0) as usize;
+        // `loadBufferView`: `buffer.slice(byteOffset, byteOffset +
+        // byteLength)`, which clamps both ends to the buffer; an accessor
+        // reading past the shorter view fails below, as its typed array
+        // constructor does.
+        let start = (v["byteOffset"].as_u64().unwrap_or(0) as usize).min(buffer.len());
         let len = v["byteLength"].as_u64().unwrap_or(0) as usize;
-        buffer
-            .get(start..start + len)
-            .ok_or_else(|| Error(format!("buffer view {i} is out of range")))
+        let end = start.saturating_add(len).min(buffer.len());
+        Ok(&buffer[start..end])
     }
 
     /// `loadAccessor`.
@@ -262,7 +289,7 @@ impl Doc<'_> {
             .iter()
             .find(|(n, _)| *n == ty)
             .map(|(_, s)| *s)
-            .ok_or_else(|| Error(format!("accessor type {ty}")))?;
+            .ok_or_else(|| Error(format!("{UNKNOWN_TYPE} {ty}")))?;
         let component = a["componentType"].as_u64().unwrap_or(0);
         let normalized = a["normalized"].as_bool() == Some(true);
         let csize = match component {
@@ -346,8 +373,9 @@ impl Doc<'_> {
                     2 => u16::from_le_bytes([ib[2 * k], ib[2 * k + 1]]) as usize,
                     _ => u32_at(ib, 4 * k) as usize,
                 };
+                // `setX` past the end of the typed array writes nothing.
                 if target >= count {
-                    return err("sparse index out of range");
+                    continue;
                 }
                 for c in 0..size.min(4) {
                     values[target * size + c] = decode(&vb[(k * size + c) * csize..]);
@@ -851,9 +879,18 @@ impl Loader<'_> {
         {
             return err("Draco-compressed glTF is not supported");
         }
+        // An accessor of a type GLTFLoader has no size for
+        // (`WEBGL_TYPE_SIZES[type]` undefined) becomes an attribute with no
+        // elements, which no vertex reads: the attribute is absent here. A
+        // POSITION without elements leaves the model with no vertices,
+        // which `loadGltf` refuses.
         let read = |name: &str| -> Result<Option<Raw>> {
             match index(&attrs[name]) {
-                Some(i) => Ok(Some(self.doc.accessor(i)?)),
+                Some(i) => match self.doc.accessor(i) {
+                    Ok(a) => Ok(Some(a)),
+                    Err(e) if e.0.starts_with(UNKNOWN_TYPE) && name != "POSITION" => Ok(None),
+                    Err(e) => Err(e),
+                },
                 None => Ok(None),
             }
         };
@@ -868,28 +905,47 @@ impl Loader<'_> {
                 if !sizes.contains(&a.size) {
                     return err(format!("{name} has {} components", a.size));
                 }
-                if a.count() < count {
-                    return err(format!("{name} has fewer elements than POSITION"));
-                }
             }
             Ok(())
         };
-        let normal = read("NORMAL")?;
+        // A vertex attribute with fewer elements than POSITION loads today
+        // (`BufferAttribute` keeps its own count; the import facts and
+        // bounds read positions only), and WebGL refuses to draw the
+        // primitive (`model_import`'s `undrawable`): it is padded here so
+        // every reader indexes it safely, and never drawn. Shorter skin
+        // attributes throw in `setFromObject` (below).
+        let mut short: Vec<&str> = Vec::new();
+        let mut pad = |a: Option<Raw>, name: &'static str| -> Option<Raw> {
+            a.map(|mut a| {
+                if a.count() < count {
+                    short.push(name);
+                    a.values.resize(count * a.size, 0.0);
+                }
+                a
+            })
+        };
+        let normal = pad(read("NORMAL")?, "NORMAL");
         check(&normal, "NORMAL", &[3])?;
-        let tangent = read("TANGENT")?;
+        let tangent = pad(read("TANGENT")?, "TANGENT");
         check(&tangent, "TANGENT", &[4])?;
         let mut uv: [Option<Attribute>; 4] = Default::default();
         for (k, slot) in uv.iter_mut().enumerate() {
-            let a = read(&format!("TEXCOORD_{k}"))?;
+            let a = pad(read(&format!("TEXCOORD_{k}"))?, "TEXCOORD");
             check(&a, "TEXCOORD", &[2])?;
             *slot = a.map(|a| a.attribute());
         }
-        let color = read("COLOR_0")?;
+        let color = pad(read("COLOR_0")?, "COLOR_0");
         check(&color, "COLOR_0", &[3, 4])?;
         let joints = read("JOINTS_0")?;
         check(&joints, "JOINTS_0", &[4])?;
+        if joints.as_ref().is_some_and(|a| a.count() < count) {
+            return err("JOINTS_0 has fewer elements than POSITION");
+        }
         let weights = read("WEIGHTS_0")?;
         check(&weights, "WEIGHTS_0", &[4])?;
+        if weights.as_ref().is_some_and(|a| a.count() < count) {
+            return err("WEIGHTS_0 has fewer elements than POSITION");
+        }
         let mut indices = match index(&p["indices"]) {
             Some(i) => {
                 let a = self.doc.accessor(i)?;
@@ -928,10 +984,12 @@ impl Loader<'_> {
             }
             Some(m) => return err(format!("Primitive mode unsupported: {m}")),
         };
+        // An index past the last vertex loads today (the import facts and
+        // bounds read positions only); WebGL refuses to draw the primitive.
         if let Some(ix) = &indices
             && ix.iter().any(|&i| i as usize >= count)
         {
-            return err("a primitive index is out of range");
+            short.insert(0, "an index past the last vertex");
         }
         // `computeBounds`.
         let bounding_box = {
@@ -1025,6 +1083,19 @@ impl Loader<'_> {
                 morph.color = Some(list("COLOR_0", color.as_ref())?);
             }
         }
+        // A morph target shorter than POSITION: as a short attribute.
+        for (name, targets) in [
+            ("a POSITION morph target", &mut morph.position),
+            ("a NORMAL morph target", &mut morph.normal),
+            ("a COLOR_0 morph target", &mut morph.color),
+        ] {
+            for t in targets.iter_mut().flatten() {
+                if t.data.len() < count * t.size {
+                    short.push(name);
+                    t.data.resize(count * t.size, 0.0);
+                }
+            }
+        }
         let g = Geometry {
             position: position.attribute(),
             normal: normal.map(|a| a.attribute()),
@@ -1041,6 +1112,13 @@ impl Loader<'_> {
             morph,
             bounding_box,
             mode,
+            undrawable: short.first().map(|&name| {
+                if name.starts_with("an index") {
+                    name.to_owned()
+                } else {
+                    format!("{name} is shorter than POSITION")
+                }
+            }),
         };
         self.geometries.push(g);
         let i = self.geometries.len() - 1;
@@ -1305,6 +1383,11 @@ impl Loader<'_> {
             }
         }
         if let Some(ci) = index(&def["camera"]) {
+            // `loadCamera` reads `json.cameras[index]`'s type: a missing
+            // camera throws.
+            if self.doc.json["cameras"].get(ci).is_none() {
+                return err(format!("node {ni}: camera {ci} missing"));
+            }
             let cname = self.doc.json["cameras"][ci]["name"]
                 .as_str()
                 .filter(|n| !n.is_empty())
@@ -1365,12 +1448,11 @@ impl Loader<'_> {
             self.objects[o].name = name;
         }
         if let Some(m) = def["matrix"].as_array() {
-            if m.len() != 16 {
-                return err(format!("node {ni}: matrix must have 16 values"));
-            }
-            let mut mat: Mat4 = [0.0; 16];
-            for (k, v) in m.iter().enumerate() {
-                mat[k] = v.as_f64().unwrap_or(0.0);
+            // `Matrix4.fromArray`: the first 16 entries; a missing one is
+            // `undefined`, NaN in the arithmetic below.
+            let mut mat: Mat4 = [f64::NAN; 16];
+            for (k, v) in m.iter().take(16).enumerate() {
+                mat[k] = js_number(v);
             }
             // `applyMatrix4` on an identity transform: decompose.
             let (t, r, s) = math::decompose(&mat);
@@ -1495,11 +1577,18 @@ impl Loader<'_> {
         for (k, &j) in joints.iter().enumerate() {
             let o = self.node(j, 0)?;
             bones.push(o);
+            // `mat.fromArray(inverseBindMatrices.array, i * 16)`: entries
+            // past the array are `undefined` (NaN).
             let m: Mat4 = match &inverses {
-                Some(a) if (k + 1) * 16 <= a.values.len() => {
-                    std::array::from_fn(|e| math::f32_of(a.get(k * 16 + e)))
-                }
-                _ => math::IDENTITY,
+                Some(a) => std::array::from_fn(|e| {
+                    let at = k * 16 + e;
+                    if at < a.values.len() {
+                        math::f32_of(a.get(at))
+                    } else {
+                        f64::NAN
+                    }
+                }),
+                None => math::IDENTITY,
             };
             inv.push(m);
         }
@@ -1720,10 +1809,10 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
         let n = index(n).ok_or_else(|| Error("a scene node is not an index".into()))?;
         roots.push(loader.node(n, 0)?);
     }
+    // `loadScene`: `scene.add(node)` for each scene node once every one
+    // has loaded, so a scene node another node also lists moves to the
+    // scene (and one listed twice moves to the end).
     for r in roots {
-        if loader.objects[r].parent.is_some() {
-            return err("a scene node has a parent");
-        }
         loader.attach(root, r);
     }
     let clips = clips(&mut loader)?;
@@ -1795,6 +1884,29 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
     }
     if vertices == 0 || triangles > limits.triangles as f64 {
         return err("GLB has no supported geometry or exceeds 500,000 triangles");
+    }
+    // `Box3.setFromObject` poses every skinned vertex
+    // (`applyBoneTransform`): a weight other than 0 on a joint the skin
+    // does not have reads `bones[index].matrixWorld` of `undefined`.
+    for i in model.traversal() {
+        if let ObjectKind::Drawable(d) = &model.objects[i].kind
+            && d.skinned
+            && let Some(s) = d.skin
+        {
+            let g = &model.geometries[d.geometry];
+            let bones = model.skins[s].bones.len();
+            if let (Some(si), Some(sw)) = (&g.skin_index, &g.skin_weight) {
+                for v in 0..g.vertex_count() {
+                    for k in 0..4 {
+                        let w = sw.data.get(v * 4 + k).copied().unwrap_or(f32::NAN);
+                        let j = si.data.get(v * 4 + k).copied().unwrap_or(f32::NAN);
+                        if w != 0.0 && !(j >= 0.0 && (j as usize) < bones && j.fract() == 0.0) {
+                            return err("a skinned vertex weights a joint its skin does not have");
+                        }
+                    }
+                }
+            }
+        }
     }
     let rest = super::pose::Pose::rest(&model);
     // A directional or spot light's `target` on the runtime's clone is a

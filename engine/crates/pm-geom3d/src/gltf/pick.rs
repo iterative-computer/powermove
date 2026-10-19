@@ -458,8 +458,14 @@ impl Picker {
                     return None;
                 }
                 let n = g.vertex_count() as u32;
+                // A triangle with an index past the last vertex reads
+                // `undefined` positions in `Mesh.raycast`: never a hit.
                 let t: Vec<[u32; 3]> = match &g.index {
-                    Some(ix) => ix.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+                    Some(ix) => ix
+                        .chunks_exact(3)
+                        .map(|c| [c[0], c[1], c[2]])
+                        .filter(|c| c.iter().all(|&v| v < n))
+                        .collect(),
                     None => (0..n / 3).map(|i| [3 * i, 3 * i + 1, 3 * i + 2]).collect(),
                 };
                 let p: Vec<Vec3> = g
@@ -765,7 +771,10 @@ fn points_hit(
     let count = indices.map_or(pos.len(), <[u32]>::len);
     for i in 0..count {
         let vi = indices.map_or(i, |ix| ix[i] as usize);
-        let p = pos[vi];
+        // An index past the last vertex reads NaN: never within range.
+        let Some(&p) = pos.get(vi) else {
+            continue;
+        };
         let along = dot(sub(p, r.origin), r.direction);
         let closest = if along < 0.0 { r.origin } else { r.at(along) };
         if distance_sq(closest, p) < threshold_sq {
@@ -788,7 +797,12 @@ fn line_hit(
     world: &Mat4,
     world_ray: &Ray,
 ) -> Option<(Vec3, u32)> {
-    let v = |i: usize| pos[indices.map_or(i, |ix| ix[i] as usize)];
+    // An index past the last vertex reads `undefined`: NaN coordinates.
+    let v = |i: usize| {
+        pos.get(indices.map_or(i, |ix| ix[i] as usize))
+            .copied()
+            .unwrap_or([f64::NAN; 3])
+    };
     let count = indices.map_or(pos.len(), <[u32]>::len);
     if count < 2 {
         return None;

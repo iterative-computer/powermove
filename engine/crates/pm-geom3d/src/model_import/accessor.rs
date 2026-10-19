@@ -177,8 +177,9 @@ impl<'a> Data<'a> {
                             as usize
                     }
                 };
+                // `setX` past the end of the typed array writes nothing.
                 if target >= count {
-                    return err("sparse index out of range");
+                    continue;
                 }
                 for c in 0..comps {
                     out[target * comps + c] = decode(&vb[(k * comps + c) * csize..]);

@@ -626,6 +626,11 @@ pub fn instantiate(
         match &o.kind {
             ObjectKind::Drawable(d) => {
                 let gm = &model.geometries[d.geometry];
+                // WebGL draws nothing for a primitive whose attributes are
+                // shorter than its positions (`Geometry::undrawable`).
+                if gm.undrawable.is_some() {
+                    continue;
+                }
                 let geometry = geometry(asset, d.geometry);
                 let order = base | n as u64;
                 let loaded = source_material(asset, &model.materials[d.material], order);

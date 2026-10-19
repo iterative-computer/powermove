@@ -899,6 +899,11 @@ pub fn check(bytes: &[u8]) -> Result<Value> {
 /// the object graph, and the facts.
 pub fn import(bytes: &[u8]) -> Result<(Model, Scene, ImportFacts)> {
     check(bytes)?;
+    // Which files load is decided once, by the reader the renderer and the
+    // picks use (`crate::gltf::load`: GLTFLoader's acceptance and
+    // `loadGltf`'s checks), so `assets.get().object3d` exists exactly when
+    // the engine draws the model.
+    crate::gltf::load(bytes).map_err(|e| super::Error(e.0))?;
     let model = super::load(bytes)?;
     let scene = build(&model);
     let facts = facts(&model, &scene)?;

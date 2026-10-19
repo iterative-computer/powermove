@@ -228,11 +228,20 @@ fn expand_box(b: &mut (Vec3, Vec3), lo: Vec3, hi: Vec3, m: &Mat4) {
     }
 }
 
-/// `Box3.expandByPoint`.
+/// `Box3.expandByPoint` (`Math.min` and `Math.max`: a NaN coordinate
+/// makes the box NaN, which `loadGltf` refuses as a model without a
+/// measurable size).
 fn grow(b: &mut (Vec3, Vec3), p: Vec3) {
+    let js = |a: f64, v: f64, f: fn(f64, f64) -> f64| {
+        if a.is_nan() || v.is_nan() {
+            f64::NAN
+        } else {
+            f(a, v)
+        }
+    };
     for ((lo, hi), v) in b.0.iter_mut().zip(b.1.iter_mut()).zip(p) {
-        *lo = lo.min(v);
-        *hi = hi.max(v);
+        *lo = js(*lo, v, f64::min);
+        *hi = js(*hi, v, f64::max);
     }
 }
 
