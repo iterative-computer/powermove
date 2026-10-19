@@ -8,6 +8,23 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+const QOS_USER_INTERACTIVE: u32 = 0x21;
+#[cfg(target_os = "macos")]
+const QOS_UTILITY: u32 = 0x11;
+/// Sets the calling thread's Darwin QoS class and relative priority.
+#[cfg(target_os = "macos")]
+fn set_qos(class: u32, priority: i32) {
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(class: u32, priority: i32) -> i32;
+    }
+    // SAFETY: affects only the calling thread; both arguments are valid
+    // Darwin QoS values.
+    unsafe {
+        pthread_set_qos_class_self_np(class, priority);
+    }
+}
+
 pub(crate) type Evaluators = Arc<dyn Fn() -> Evaluator + Send + Sync>;
 type Job = (
     usize,
@@ -44,15 +61,16 @@ impl Executor {
                     .spawn(move || {
                         // Darwin's thread-specific priority leaves the renderer and
                         // real-time callback unchanged. Linux uses the calling TID.
+                        //
+                        // An idle worker waits at user-interactive QoS: the class a
+                        // thread holds when it is woken decides how soon it runs,
+                        // and a worker woken at utility QoS was starved by default
+                        // class load for longer than a start's shared head lasts
+                        // (the producer then primed every unstarted history itself,
+                        // serially, and the ring ran dry). Boundary refill lowers
+                        // itself to utility QoS for the length of its job.
                         #[cfg(target_os = "macos")]
-                        unsafe {
-                            // Utility QoS with reduced priority: background mode
-                            // additionally throttles I/O and delays urgent starts.
-                            unsafe extern "C" {
-                                fn pthread_set_qos_class_self_np(class: u32, priority: i32) -> i32;
-                            }
-                            pthread_set_qos_class_self_np(0x11, -5);
-                        }
+                        set_qos(QOS_USER_INTERACTIVE, 0);
                         #[cfg(target_os = "linux")]
                         unsafe {
                             libc::setpriority(libc::PRIO_PROCESS, 0, 15);
@@ -83,29 +101,16 @@ impl Executor {
                             };
                             // Playhead preparation is latency-sensitive even at
                             // edit time, before Play arrives. Boundary refill
-                            // keeps utility QoS and its single-job limit.
+                            // runs at utility QoS (background mode would also
+                            // throttle I/O) and keeps its single-job limit.
                             #[cfg(target_os = "macos")]
-                            unsafe {
-                                unsafe extern "C" {
-                                    fn pthread_set_qos_class_self_np(
-                                        class: u32,
-                                        priority: i32,
-                                    ) -> i32;
-                                }
-                                if !background {
-                                    pthread_set_qos_class_self_np(0x21, 0);
-                                }
+                            if background {
+                                set_qos(QOS_UTILITY, -5);
                             }
                             job();
                             #[cfg(target_os = "macos")]
-                            unsafe {
-                                unsafe extern "C" {
-                                    fn pthread_set_qos_class_self_np(
-                                        class: u32,
-                                        priority: i32,
-                                    ) -> i32;
-                                }
-                                pthread_set_qos_class_self_np(0x11, -5);
+                            if background {
+                                set_qos(QOS_USER_INTERACTIVE, 0);
                             }
                             if background {
                                 p.jobs.lock().unwrap_or_else(|e| e.into_inner()).background -= 1;
@@ -313,5 +318,69 @@ impl Preparation {
 impl Drop for Preparation {
     fn drop(&mut self) {
         self.invalidate();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    fn own_qos() -> u32 {
+        let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+        let mut relative = 0;
+        // SAFETY: queries the calling thread into valid out-parameters.
+        unsafe {
+            libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative);
+        }
+        class as u32
+    }
+
+    fn observe(priority: usize) -> u32 {
+        let (tx, rx) = channel();
+        Executor::shared().submit(
+            priority,
+            || true,
+            move || {
+                let _ = tx.send(own_qos());
+            },
+        );
+        rx.recv_timeout(Duration::from_secs(30)).unwrap()
+    }
+
+    /// An idle worker waits at user-interactive QoS, so a playhead job is not
+    /// starved behind default-class load before it can start (the class a
+    /// thread holds when woken decides when it runs). Only boundary refill
+    /// runs at utility QoS, and only for its own job.
+    #[test]
+    fn idle_workers_wait_at_user_interactive_qos() {
+        assert_eq!(observe(0), QOS_USER_INTERACTIVE);
+        assert_eq!(observe(1), QOS_UTILITY);
+        assert_eq!(observe(0), QOS_USER_INTERACTIVE, "restored after refill");
+        // The idle class itself, read from outside the worker while it waits.
+        // Other tests share the pool: a sample may land on a refill job.
+        let (tx, rx) = channel();
+        Executor::shared().submit(
+            1,
+            || true,
+            move || {
+                let _ = tx.send(unsafe { libc::pthread_self() } as usize);
+            },
+        );
+        let worker = rx.recv_timeout(Duration::from_secs(30)).unwrap() as libc::pthread_t;
+        std::thread::sleep(Duration::from_millis(20));
+        let idle = (0..20)
+            .filter(|_| {
+                std::thread::sleep(Duration::from_millis(2));
+                let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+                let mut relative = 0;
+                // SAFETY: pool workers never exit, so the handle stays valid.
+                unsafe { libc::pthread_get_qos_class_np(worker, &mut class, &mut relative) };
+                class as u32 == QOS_USER_INTERACTIVE
+            })
+            .count();
+        assert!(
+            idle >= 15,
+            "idle worker at user-interactive QoS in {idle} of 20 samples"
+        );
     }
 }
