@@ -82,8 +82,15 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
 
   const visit = (el: Element, dpr: number, out: UiFontUse[]): void => {
     stats.visited++;
-    if (!hasOwnText(el) || el.getClientRects().length === 0) return;
-    const use = useOf(view.getComputedStyle(el));
+    if (!hasOwnText(el)) return;
+    // The panel pool parks live panels at -9999px. They have layout boxes
+    // but never paint their DPR-scaled font strike. Counting those boxes
+    // poisons keys the first visible canvas actually creates later.
+    if (!Array.from(el.getClientRects()).some(r => r.width > 0 && r.height > 0
+      && r.x < view.innerWidth && r.y < view.innerHeight && r.x + r.width > 0 && r.y + r.height > 0)) return;
+    const style = view.getComputedStyle(el);
+    if (style.visibility !== 'visible' && style.visibility !== '') return;
+    const use = useOf(style);
     if (!use) return;
     const key = `${dpr}|${use.families.join(',')}|${use.size}|${use.weight}|${use.italic}`;
     if (seen.has(key)) return;

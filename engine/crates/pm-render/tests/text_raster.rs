@@ -40,18 +40,11 @@ fn main() {
     use std::path::PathBuf;
     // `PM_TEXT_RASTER` names one capture (either set); otherwise the newest
     // main capture and the newest closure capture are both gated.
-    let sets: Vec<(PathBuf, &str)> = match std::env::var("PM_TEXT_RASTER") {
-        Ok(p) => {
-            let dir = PathBuf::from(p);
-            let closure = dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("text-closure-"));
-            vec![(dir, if closure { CLOSURE_PINS } else { MAIN_PINS })]
-        }
+    let sets: Vec<PathBuf> = match std::env::var("PM_TEXT_RASTER") {
+        Ok(p) => vec![PathBuf::from(p)],
         Err(_) => [
-            support::newest_capture("text-raster-").map(|d| (d, MAIN_PINS)),
-            support::newest_capture("text-closure-").map(|d| (d, CLOSURE_PINS)),
+            support::newest_capture("text-raster-"),
+            support::newest_capture("text-closure-"),
         ]
         .into_iter()
         .flatten()
@@ -64,7 +57,7 @@ fn main() {
         return;
     }
     let mut failed = 0;
-    for (dir, _) in &sets {
+    for dir in &sets {
         println!("\n== {}", dir.display());
         failed += gate(dir);
     }
@@ -73,11 +66,6 @@ fn main() {
         "{failed} cases differ from today (within 1 code value required)"
     );
 }
-
-#[cfg(target_os = "macos")]
-const MAIN_PINS: &str = "main";
-#[cfg(target_os = "macos")]
-const CLOSURE_PINS: &str = "closure";
 
 /// Every capture is compared with the same bound; no accepted differences.
 #[cfg(target_os = "macos")]
@@ -100,9 +88,17 @@ fn gate(dir: &std::path::Path) -> usize {
     }))
     .unwrap();
     let registry = pm_text::corpus::native_registry(&corpus).expect("registry");
+    let mut measure = pm_eval::text_measure::CompatMeasure::new(registry);
+    // App captures can carry the exact window's seed table, including a
+    // census model under investigation. Never substitute startup seeds.
+    if let Some(seeds) = cases.get("seeds") {
+        measure.compat().set_font_cache_seeds(
+            serde_json::from_value(seeds.clone()).expect("capture font seeds"),
+        );
+    }
     let mut renderer = Renderer::headless().expect("a Metal device");
     renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
-        pm_eval::text_measure::CompatMeasure::new(registry),
+        measure,
         None,
     ))));
     if let Ok(p) = std::env::var("PM_TEXT_PROFILE") {

@@ -105,10 +105,11 @@ export class FontLoader {
       const wasm = this.seedsTarget?.();
       if (wasm) this.applySeeds(wasm);
     };
-    this.provider.onSeedsChanged?.(take);
+    let changes = 0;
+    this.provider.onSeedsChanged?.((json) => { changes++; take(json); });
     try {
       const value = this.provider.seeds?.();
-      if (value instanceof Promise) value.then(take, (error) => console.warn('[engine-doc] font cache seeds unavailable', error));
+      if (value instanceof Promise) value.then((json) => { if (changes === 0) take(json); }, (error) => console.warn('[engine-doc] font cache seeds unavailable', error));
       else take(value);
     } catch (error) {
       console.warn('[engine-doc] font cache seeds unavailable', error);

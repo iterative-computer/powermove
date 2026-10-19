@@ -85,6 +85,10 @@ function safeRendererMode(): ReturnType<typeof rendererMode> {
 
 // Engine dependency order — do not reorder.
 const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
+  /* Observe creators before any engine or extension can measure canvas
+     text. Waiting until after raster/engine installation loses startup
+     entries that the later UI census must not overwrite. */
+  ['engine/ui-font-census', () => void installUiFontCensus(hostBridge() as never)],
   ['core/diag', installDiag],
   ['core/util', installUtil],
   /* The kernel registries must exist before anything registers into them:
@@ -126,9 +130,6 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   /* The kernel's engine connection (behind "Use New Engine"): the viewer's
      engine frames, the patch stream, and the transport (section 18). */
   ['engine/connection', (PM) => void installEngineConnection(PM, hostBridge() as never)],
-  /* The UI text this renderer lays out, for its font cache seeds (with
-     "Use New Engine" on; docs/engine/text.md). */
-  ['engine/ui-font-census', () => void installUiFontCensus(hostBridge() as never)],
   ['ui/controls', installControls],
   ['ui/layout', installLayout],
   ['ui/library', installLibraryUi],

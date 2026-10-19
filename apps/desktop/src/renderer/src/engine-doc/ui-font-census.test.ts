@@ -60,6 +60,19 @@ describe('the UI font census', () => {
     stop();
   });
 
+  it('does not seed the DPR-scaled strikes of parked offscreen panels', () => {
+    const parked = document.createElement('b');
+    parked.style.font = '560 12px system-ui'; parked.textContent = 'Parked panel';
+    parked.getClientRects = () => [{ x: -9999, y: 0, width: 200, height: 20 }] as any;
+    document.body.append(parked);
+    const reports: UiFontCensus[] = [];
+    const queue: Array<() => void> = [];
+    const stop = startUiFontCensus(document, { report: async json => { reports.push(JSON.parse(json)); } }, cb => queue.push(cb));
+    queue.splice(0).forEach(cb => cb());
+    expect(reports).toEqual([]);
+    stop();
+  });
+
   it('does not walk a timeline for playback transform and opacity updates', async () => {
     const timeline = document.createElement('div');
     timeline.style.font = '400 13px system-ui';

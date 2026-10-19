@@ -63,6 +63,21 @@ describe('FontLoader', () => {
     expect(revived.setFontSeeds).toHaveBeenCalledWith('{"seeds":[2]}');
   });
 
+  it('does not replace an observed seed change with an older startup reply', async () => {
+    let startup!: (json: string) => void;
+    let changed!: (json: string) => void;
+    const loader = new FontLoader({ sync: false, answer: async () => '{}', subset: async () => new Uint8Array(),
+      seeds: () => new Promise<string>(resolve => { startup = resolve; }),
+      onSeedsChanged: listener => { changed = listener; },
+    });
+    const wasm: any = { setFontSeeds: vi.fn(() => true) };
+    loader.watchSeeds(() => wasm);
+    changed('{"seeds":[2]}');
+    startup('{"seeds":[1]}');
+    await Promise.resolve();
+    expect(wasm.setFontSeeds.mock.calls).toEqual([['{"seeds":[2]}']]);
+  });
+
   it('keeps working when the module or the host has no seeds', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const loader = new FontLoader({ sync: true, answer: () => '{}', subset: () => new Uint8Array(), seeds: () => '{"seeds":[]}' });
