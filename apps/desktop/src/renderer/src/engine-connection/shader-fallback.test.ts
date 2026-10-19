@@ -463,3 +463,79 @@ describe('a program WebGL takes long to compile', () => {
     expect(programs).toBe(1);
   });
 });
+
+describe('the runner on the calling thread (the synchronous snapshot path)', () => {
+  const effect = (): ShaderFallbackRequest => ({
+    ...request(2, 1, '7b'.repeat(32)), calls: [{ fn: '1i', name: 'u_tex', v: [0] }], textures: 2,
+    units: [{ unit: 0, texture: 0, chain: true }, { unit: 2, texture: 1, chain: false }],
+    morePasses: [[{ fn: '1i', name: 'u_pass', v: [1] }]]
+  });
+
+  it('draws an effect with its textures and passes, as render does', async () => {
+    const { canvas, state } = fakeGl(['u_tex', 'u_pass'], () => 25);
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    const input = new Uint16Array(8).fill(0x3c00);
+    const backdrop = new Uint16Array(8).fill(0x3800);
+    const out = runner.renderSync(effect(), [input, backdrop]);
+    expect(out).toMatchObject({ key: '7b'.repeat(32), width: 2, height: 1 });
+    expect(state.uploads.slice(0, 2).map((u) => u.data)).toEqual([input, backdrop]);
+    expect(state.draws).toEqual([{ 0: 0, 1: null, 2: 1 }, { 0: 2, 1: null, 2: 1 }]);
+    // The same program is linked once for both paths.
+    await expect(runner.render(effect(), [input, backdrop])).resolves.toMatchObject({ width: 2 });
+  });
+
+  it('refuses a request without its textures rather than drawing it unsampled', () => {
+    const { canvas, state } = fakeGl([], () => 25);
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    expect(() => runner.renderSync(effect())).toThrow(expect.objectContaining({ reason: 'size' }));
+    expect(state.draws).toHaveLength(0);
+  });
+
+  it('keeps the watchdog: a draw past its deadline loses the context and the program is never run again', () => {
+    let clock = 0;
+    // The fence never signals; the clock moves each poll.
+    const { canvas, state } = fakeGl([], () => { clock += 100; return 27; });
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas, drawDeadlineMs: 2000, now: () => clock });
+    const r = effect();
+    const textures = [new Uint16Array(8), new Uint16Array(8)];
+    expect(() => runner.renderSync(r, textures)).toThrow(expect.objectContaining({ reason: 'watchdog' }));
+    expect(state.lostBy).toBe(1);
+    expect(state.draws).toHaveLength(1);
+    expect(() => runner.renderSync(r, textures)).toThrow(expect.objectContaining({ reason: 'watchdog' }));
+    expect(state.draws).toHaveLength(1);
+  });
+
+  it('fails a target past MAX_TEXTURE_SIZE with tooLarge', () => {
+    const { canvas, state } = fakeGl([], () => 25, 4096);
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    const r: ShaderFallbackRequest = { ...request(4097, 1, '7c'.repeat(32)), textures: 1, units: [{ unit: 0, texture: 0, chain: false }] };
+    expect(() => runner.renderSync(r, [new Uint16Array(4097 * 4)])).toThrow(expect.objectContaining({ reason: 'tooLarge' }));
+    expect(state.draws).toHaveLength(0);
+  });
+
+  it('links a program an asynchronous request is still compiling, without a second compile', async () => {
+    let clock = 0;
+    const { canvas } = fakeGl([], () => 25);
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    let programs = 0;
+    const COMPLETION_STATUS_KHR = 40;
+    const getExtension = gl['getExtension'] as (name: string) => unknown;
+    gl['getExtension'] = (name: string) => (name === 'KHR_parallel_shader_compile' ? { COMPLETION_STATUS_KHR } : getExtension(name));
+    gl['createProgram'] = () => { programs++; return {}; };
+    // Never complete for the poll: only the blocking LINK_STATUS read finishes it.
+    gl['getProgramParameter'] = (_p: unknown, what: number) => (what === COMPLETION_STATUS_KHR ? false : true);
+    let wake: () => void = () => {};
+    const runner = new ShaderFallbackRunner({
+      createCanvas: () => canvas, compileDeadlineMs: 10_000, now: () => clock,
+      sleep: () => new Promise<void>((resolve) => { wake = () => { clock += 16; resolve(); }; })
+    });
+    const r = request(2, 1, '7d'.repeat(32));
+    const pending = runner.render(r);
+    await flush();
+    // A snapshot needs the same program meanwhile.
+    expect(runner.renderSync({ ...r, key: '7e'.repeat(32) })).toMatchObject({ width: 2 });
+    wake();
+    await expect(pending).resolves.toMatchObject({ key: '7d'.repeat(32) });
+    expect(programs).toBe(1);
+  });
+});
