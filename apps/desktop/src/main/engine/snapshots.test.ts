@@ -5,6 +5,7 @@ import type { Request, Response } from '../../shared/engine-protocol';
 import { RemoteError } from './protocol';
 import { MAX_BLENDER_WAIT_MS, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, validSnapshotRequest, type SnapshotEngine } from './snapshots';
 import { FallbackInputs } from './fallback-inputs';
+import { decode, encode } from './msgpack';
 
 const request = (over: Partial<EngineSnapshotRequest['snapshot']> = {}, top: Partial<EngineSnapshotRequest> = {}): EngineSnapshotRequest => ({
   generation: 2,
@@ -58,6 +59,11 @@ describe('snapshot requests', () => {
     for (const scale of [1e-9, 0.005, 16.25, 24, 32, 33, 50, 1000, Number.MAX_VALUE, 0, -1, NaN, Infinity, -Infinity]) {
       expect(validSnapshotRequest(request({ target: { kind: 'layer', layer: 'L1', scale, crop: null } })), String(scale)).toBe(Number.isFinite(scale) && scale > 0);
     }
+    // The renderer sends scales above 2^53 as the largest safe integer
+    // (`layerRasterScale`): every number above it is an integer the wire's
+    // encoder refuses, which left such a request unanswered for 15 s.
+    expect(decode(encode({ scale: Number.MAX_SAFE_INTEGER }))).toEqual({ scale: Number.MAX_SAFE_INTEGER });
+    expect(() => encode({ scale: Number.MAX_VALUE })).toThrow(/safe range/);
   });
 
   it('accept the shapes the renderer sends and refuse the rest', () => {
