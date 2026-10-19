@@ -6,7 +6,7 @@ import type { FramePainter } from './gpu';
 import { servePresenter, type FromWorker, type ToWorker } from './present-worker';
 import type { WorkerLike } from './worker-presenter';
 import type { FrameSource } from './presenter';
-import { overlayToCss, ViewerPresentation, type EngineViewerChannel, type EngineViewerHandlers, type EngineViewerService, type ViewParams } from './presentation';
+import { overlayToCss, PRESENTATION_STATUS, ViewerPresentation, type EngineViewerChannel, type EngineViewerHandlers, type EngineViewerService, type ViewParams } from './presentation';
 import type { FrameDescriptor, FrameRelease, OverlayGeometry, ViewerState } from './protocol';
 
 class FakeFrame {
@@ -74,6 +74,8 @@ class Channel implements EngineViewerChannel {
 
 class Service implements EngineViewerService {
   readonly source = new Source();
+  /** Frames run by hand: a shown frame counts at once (the reveal is tested on its own). */
+  revealFrames = 0;
   connected = true;
   channels: Channel[] = [];
   private ready = new Set<() => void>();
@@ -256,6 +258,82 @@ describe('ViewerPresentation', () => {
     expect(stage.contains(presentation.canvas)).toBe(false);
   });
 
+  it('a canvas that was hidden counts its first frame as on screen only after the display shows it', async () => {
+    const service = new Service();
+    service.revealFrames = 2;
+    const painter = new Painter();
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => painter });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    const presented: number[] = [];
+    presentation.onPresented((frame) => presented.push(frame.seq));
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    // Drawn and shown, but not on screen yet: no events, no `latest`.
+    expect(painter.draws).toBe(1);
+    expect(presentation.canvas.style.visibility).toBe('visible');
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.latest).toBeNull();
+    expect(presented).toEqual([]);
+    // The GPU finishes it; a newer frame drawn meanwhile is the one that
+    // counts, two display frames after the finish.
+    await settle();
+    channel.handlers.message({ type: 'frame', frame: desc(2, 1) }, performance.now());
+    runFrames(rafs, performance.now() + 16);
+    expect(presented).toEqual([]);
+    runFrames(rafs, performance.now() + 33);
+    expect(presented).toEqual([]);
+    runFrames(rafs, performance.now() + 50);
+    expect(presented).toEqual([2]);
+    expect(presentation.canvas.style.visibility).toBe('visible');
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.latest).toMatchObject({ seq: 2 });
+    // While shown, later frames count at once.
+    channel.handlers.message({ type: 'frame', frame: desc(3, 1) }, performance.now());
+    runFrames(rafs, performance.now() + 50);
+    expect(presented).toEqual([2, 3]);
+    presentation.dispose();
+  });
+
+  it('a worker’s first frame counts once its GPU work finished and the display took it', async () => {
+    const service = new Service();
+    service.revealFrames = 2;
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    offscreenCanvases(window as unknown as Window);
+    const painter = new Painter();
+    let finish: () => void = () => {};
+    painter.workDone = () => new Promise<void>((resolve) => { finish = resolve; });
+    const worker = inProcessWorker(painter);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter(), createWorker: () => worker });
+    await settleLong();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    const presented: number[] = [];
+    presentation.onPresented((frame) => presented.push(frame.seq));
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    await settleLong();
+    expect(painter.draws).toBe(1);
+    // Animation frames pass while the GPU has not finished the frame.
+    for (let i = 0; i < 4; i++) runFrames(rafs, 100 + i * 16);
+    expect(presented).toEqual([]);
+    expect(presentation.presenting).toBe(false);
+    // It finishes: two display frames later it counts.
+    finish();
+    await settleLong();
+    runFrames(rafs, 200);
+    expect(presented).toEqual([]);
+    runFrames(rafs, 216);
+    runFrames(rafs, 233);
+    expect(presented).toEqual([1]);
+    expect(presentation.presenting).toBe(true);
+    presentation.dispose();
+    delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+  });
+
   it('re-sends the current view with the vsync hint (same viewSeq) and keeps the hint on later states', async () => {
     const service = new Service();
     Object.assign(service, { hostOffsetUs: () => 2_000_000, displayHz: () => 120 });
@@ -324,6 +402,49 @@ describe('ViewerPresentation', () => {
     expect(second.states).toEqual([first.states[0]]);
     expect(presentation.stats()?.sessions).toBe(2);
     presentation.dispose();
+  });
+
+  it('exclusive ("Use New Engine" on): shows its state until the first frame, keeps the last frame through a restart, never hands back', async () => {
+    const service = new Service();
+    const presented: Array<{ seq: number; quality: number }> = [];
+    Object.assign(service, { exclusive: true, presented: (frame: { seq: number }, quality: number) => presented.push({ seq: frame.seq, quality }) });
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    const hidden: number[] = [];
+    presentation.onHidden(() => hidden.push(1));
+    expect(presentation.exclusive).toBe(true);
+    expect(presentation.status).toBe(PRESENTATION_STATUS.starting);
+    expect(stage.querySelector('[data-engine-status]')?.textContent).toBe(PRESENTATION_STATUS.starting);
+    await settle();
+    presentation.update({ ...PARAMS, resolution: 'half' });
+    const first = service.channels[0]!;
+    first.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.status).toBeNull();
+    // Each new frame once, with the quality its view asked for.
+    expect(presented).toEqual([{ seq: 1, quality: 0.5 }]);
+    runFrames(rafs, performance.now() + 20);
+    expect(presented).toHaveLength(1);
+    // The engine restarts: the last frame stays, with its tags, and says so.
+    service.connected = false;
+    first.handlers.closed('the interactive engine restarted');
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.latest?.seq).toBe(1);
+    expect(presentation.status).toBe(PRESENTATION_STATUS.reconnecting);
+    expect(hidden).toEqual([]);
+    service.connected = true;
+    service.fireReady();
+    await settle();
+    const second = service.channels[1]!;
+    second.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    runFrames(rafs, performance.now() + 40);
+    expect(presentation.status).toBeNull();
+    // Capability routing (scaffolding until it is removed) still hands back.
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: 'x', revision: 9 } as never, performance.now());
+    expect(hidden).toEqual([1]);
+    presentation.dispose();
+    expect(stage.querySelector('[data-engine-status]')).toBeNull();
   });
 
   it('follows the stage into a popout: the loop runs on its frames and its display sets the state', async () => {
@@ -574,6 +695,16 @@ describe('ViewerPresentation', () => {
     presentation.dispose();
     await (popout as unknown as HappyWindow).happyDOM.close();
     delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+  });
+
+  it('exclusive: a viewer that cannot draw says so instead of showing another engine', async () => {
+    const service = new Service();
+    Object.assign(service, { exclusive: true });
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => { throw new Error('WebGPU is not available'); } });
+    await settle();
+    expect(presentation.status).toBe(`${PRESENTATION_STATUS.unavailable} WebGPU is not available`);
+    presentation.dispose();
   });
 
   it('does nothing without WebGPU and says why', async () => {

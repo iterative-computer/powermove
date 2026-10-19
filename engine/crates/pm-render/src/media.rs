@@ -56,7 +56,7 @@ pub struct SourceColor {
     pub tone_map: Option<ToneMap>,
 }
 
-fn stamp(path: &Path) -> Option<(u64, u128)> {
+pub(crate) fn stamp(path: &Path) -> Option<(u64, u128)> {
     let m = std::fs::metadata(path).ok()?;
     let modified = m
         .modified()

@@ -115,6 +115,7 @@ describe('viewer engine presentation hook', () => {
       const service: EngineViewerService = {
         source: { videoFrame: () => ({ codedWidth: 1000, codedHeight: 700, close() {} }) as unknown as VideoFrame, onSurface: () => () => {}, retire: () => 0 },
         composition: () => 'comp-1',
+        revealFrames: 0,
         offMainThread: false,
         open: (h) => {
           handlers = h;

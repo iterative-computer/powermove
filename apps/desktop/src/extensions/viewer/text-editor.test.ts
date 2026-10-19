@@ -146,6 +146,44 @@ describe('text editing session', () => {
     expect(V.canvasTextEditing).toBe('text-1');
   });
 
+  it('follows font anchoring with one raster per revision and time, not one per draw or hit test', () => {
+    const { api, V, layer } = fixture('Hello brave world');
+    layer.d.fontAnchorBounds = { x0: 0, y0: 0, x1: 170, y1: 48 };
+    let revision = 1;
+    const raster = vi.fn(() => ({ fontOffset: { x: 5, y: 0 } }));
+    (api as any).render.raster = raster;
+    (api as any).project = { revision: () => revision };
+    // The glyphs are shifted 5 px right: a click 31 px past the shifted
+    // origin is still before the fourth character.
+    const session = beginTextEdit(api, V, layer, { caretAt: { x: 100 + 5 + 31, y: 200 + 20 } })!;
+    expect(V.textSelection).toEqual({ layer: 'text-1', start: 3, end: 3 });
+    expect(session.contains({ x: 100 + 5 + 50, y: 210 })).toBe(true);
+    expect(session.contains({ x: 100 + 5 + 400, y: 210 })).toBe(false);
+    expect(raster).toHaveBeenCalledTimes(1);
+    // An edit (a new revision) measures again, once.
+    revision = 2;
+    session.contains({ x: 150, y: 210 });
+    session.contains({ x: 160, y: 210 });
+    expect(raster).toHaveBeenCalledTimes(2);
+    // Without recorded font bounds there is no offset and no raster at all.
+    delete layer.d.fontAnchorBounds;
+    revision = 3;
+    session.contains({ x: 150, y: 210 });
+    expect(raster).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a blank font raster at the same revision and time after loading', () => {
+    const { api, V, layer } = fixture('Hello brave world');
+    layer.d.fontAnchorBounds = { x0: 0, y0: 0, x1: 170, y1: 48 };
+    (api as any).project = { revision: () => 1 };
+    const raster = vi.fn().mockReturnValueOnce({ blank: true }).mockReturnValue({ fontOffset: { x: 5, y: 0 } });
+    (api as any).render.raster = raster;
+    const session = beginTextEdit(api, V, layer)!;
+    session.contains({ x: 150, y: 210 });
+    session.contains({ x: 160, y: 210 });
+    expect(raster).toHaveBeenCalledTimes(2);
+  });
+
   it('selects everything on entry when asked and mirrors external text changes', () => {
     const { api, V, layer } = fixture('Hello');
     const session = beginTextEdit(api, V, layer, { selectAll: true })!;

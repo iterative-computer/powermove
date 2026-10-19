@@ -21,6 +21,14 @@ export interface FontProvider {
   answer(queries: string): string | Promise<string>;
   /** A face's metrics-and-shaping subset. */
   subset(blob: string, index: number): Uint8Array | Promise<Uint8Array>;
+  /**
+   * The whole face, outlines included (the fonts lane's service, when it
+   * provides one). With it every face is loaded whole and pm-wasm is told
+   * its faces carry outlines (`pm_fonts_outlines(1)`), so answers that need
+   * glyph ink (text bounds, picks over text, raster placement) are native
+   * instead of `{ink}` (docs/engine/document-host.md, "Interfaces").
+   */
+  whole?(blob: string, index: number): Uint8Array | Promise<Uint8Array>;
   /** Whether both calls return values directly (no promises). */
   readonly sync: boolean;
 }
@@ -38,15 +46,15 @@ function loadOnce(wasm: PmWasm, provider: FontProvider, loaded: Set<string>, gen
   const addSubsets = (): boolean | Promise<boolean> => {
     const todo = [...pending.entries()].filter(([key]) => !loaded.has(key));
     if (!todo.length) return false;
+    const load = provider.whole ? provider.whole.bind(provider) : provider.subset.bind(provider);
     const results = todo.map(([key, [blob, index]]) => {
-      loaded.add(key);
-      return [blob, index, provider.subset(blob, index)] as const;
+      return [blob, index, load(blob, index)] as const;
     });
     if (provider.sync) {
-      for (const [blob, index, bytes] of results) wasm.addFont(blob, index, bytes as Uint8Array);
+      for (const [blob, index, bytes] of results) { wasm.addFont(blob, index, bytes as Uint8Array); loaded.add(`${blob}.${index}`); }
       return true;
     }
-    return Promise.all(results.map(async ([blob, index, bytes]) => wasm.addFont(blob, index, await bytes))).then(() => true);
+    return Promise.all(results.map(async ([blob, index, bytes]) => { wasm.addFont(blob, index, await bytes); loaded.add(`${blob}.${index}`); })).then(() => true);
   };
   const addAnswers = (json: string): boolean | Promise<boolean> => {
     const parsed = JSON.parse(json);
@@ -71,8 +79,14 @@ function loadOnce(wasm: PmWasm, provider: FontProvider, loaded: Set<string>, gen
 }
 
 export class FontLoader {
-  private loaded = new Set<string>();
-  private generation = { value: null as number | null };
+  /** Faces and answers each module instance holds: a trapped instance's
+   *  replacement starts empty and loads again. */
+  private perInstance = new WeakMap<object, { loaded: Set<string>; generation: { value: number | null } }>();
+  private state(wasm: PmWasm) {
+    let s = this.perInstance.get(wasm);
+    if (!s) { s = { loaded: new Set(), generation: { value: null } }; this.perInstance.set(wasm, s); }
+    return s;
+  }
   private busy: Promise<void> | null = null;
   rounds = 0;
   failures = 0;
@@ -82,6 +96,17 @@ export class FontLoader {
 
   constructor(readonly provider: FontProvider) {}
 
+  /** Resolves when no background load is running (an asynchronous provider). */
+  whenIdle(): Promise<void> { return this.busy ?? Promise.resolve(); }
+
+  /** Declares whole faces to a module instance once (a replaced instance asks again). */
+  private declared = new WeakSet<object>();
+  private declareOutlines(wasm: PmWasm): void {
+    if (!this.provider.whole || this.declared.has(wasm)) return;
+    this.declared.add(wasm);
+    wasm.call(() => wasm.x.pm_fonts_outlines(1));
+  }
+
   /**
    * After a `{fonts}` reply: with a synchronous provider, loads until `retry`
    * stops asking (returns its last reply); with an asynchronous one, starts
@@ -89,12 +114,13 @@ export class FontLoader {
    */
   resolve<T>(wasm: PmWasm, retry: () => T, needsFonts: (reply: T) => boolean): T | null {
     if (this.disabled) return null;
+    this.declareOutlines(wasm);
     if (!this.provider.sync) {
       this.busy ??= (async () => {
         try {
           for (let i = 0; i < MAX_ROUNDS; i++) {
             this.rounds += 1;
-            if (!(await loadOnce(wasm, this.provider, this.loaded, this.generation))) break;
+            if (!(await loadOnce(wasm, this.provider, this.state(wasm).loaded, this.state(wasm).generation))) break;
           }
           this.failedInARow = 0;
         } catch (error) {
@@ -106,7 +132,7 @@ export class FontLoader {
     try {
       for (let i = 0; i < MAX_ROUNDS; i++) {
         this.rounds += 1;
-        if (!(loadOnce(wasm, this.provider, this.loaded, this.generation) as boolean)) return null;
+        if (!(loadOnce(wasm, this.provider, this.state(wasm).loaded, this.state(wasm).generation) as boolean)) return null;
         const reply = retry();
         if (!needsFonts(reply)) { this.failedInARow = 0; return reply; }
       }
@@ -116,12 +142,14 @@ export class FontLoader {
     return null;
   }
 
+  retry(): void { this.disabled = false; this.failedInARow = 0; this.perInstance = new WeakMap(); }
+
   private failed(error: unknown) {
     this.failures += 1;
     this.failedInARow += 1;
     if (this.failedInARow >= MAX_FAILURES) {
       this.disabled = true;
-      console.warn('[engine-doc] the font provider failed repeatedly; text layout stays with the legacy code', error);
+      console.warn('[engine-doc] the font provider failed repeatedly; text layout requires a retry', error);
     } else console.warn('[engine-doc] font loading failed', error);
   }
 }

@@ -26,6 +26,7 @@ freezes, and what is still open.
 | 13 | GPU time slicing and deadline signals | `slicing` | [13](13-gpu-time-slicing.md) | Phase 2 | Phase 2 start |
 | 14 | Host services | `host` | [14](14-host-services.md) | Phase 2 | Phase 2 start |
 | 15 | The headless document host interface | `document_host` | [15](15-document-host.md) | Phase 2 | Phase 3c start |
+| 16 | The render transport (extends 2 and 14) | `snapshot` | [16](16-render-transport.md) | Phase 3c | Phase 3c (TypeScript interfaces frozen for the 3c lanes) |
 
 "Gates" is from section 26 ("contracts 1, 5, 9 gate Phase 1"; the rest gate
 Phase 2). A contract freezes when its first consumer phase starts.

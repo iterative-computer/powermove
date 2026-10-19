@@ -65,6 +65,12 @@ export type PresentedFrame = {
    *  it with the audio clock); null for frames drawn on arrival or before
    *  the host clock is known. */
   displayUs: number | null;
+  /** The frame's depth and object-id surface (`FrameDescriptor.depthId`),
+   *  when the viewer asked for it and its pool arrived. */
+  depthId?: { poolIndex: number; seq: number; poolGeneration: number } | null;
+  /** The frame's size in pixels (the canvas takes it when the frame lands). */
+  width?: number;
+  height?: number;
 };
 
 export type PresenterOptions = {
@@ -75,6 +81,13 @@ export type PresenterOptions = {
   displayHz?: number | null;
   /** Predicted rAF to display time, in refreshes (S1: one or two at 120 Hz). */
   latencyRefreshes?: number;
+  /**
+   * Added to `latencyRefreshes` while the window is being resized and for
+   * `RESIZE_HOLD_MS` after its last step (`noteResize`): a live resize
+   * holds the panel's presentation one to three refreshes longer
+   * (docs/engine/perf.md, "A/V sync under load").
+   */
+  resizeLatencyRefreshes?: number;
   /** Added to `latencyRefreshes`: where in its refresh a frame's
    *  presentation lands after the BeginFrame (ms; measured, see
    *  present-worker.ts). */
@@ -143,6 +156,8 @@ export type TraceRecord = {
 };
 
 const PARK_TIMEOUT_MS = 1000;
+/** How long after a live resize step its presentation delay is assumed. */
+export const RESIZE_HOLD_MS = 150;
 
 /**
  * What the viewer's presentation needs from a presenter: `EnginePresenter`
@@ -154,11 +169,15 @@ export interface Presenter {
   setViewerState(state: ViewerState): void;
   receive(message: EngineFrameMessage, arrivedMs?: number): void;
   onPresented(listener: (frame: PresentedFrame) => void): () => void;
+  /** A drawn frame's GPU work finished (its canvas frame is ready to show). */
+  onDone?(listener: (seq: number) => void): () => void;
   /** Moves the loop to another window's animation frames (main thread only). */
   retarget(requestFrame: (cb: (t: number) => void) => number, cancelFrame: (id: number) => void, displayHz?: number | null): void;
   start(): void;
   /** The per-frame trace recorded since the last call (S1 harness), emptied. */
   takeTrace(): Promise<TraceRecord | null>;
+  /** The viewer's window is being resized now (a live resize step). */
+  noteResize?(): void;
   dispose(): void;
 }
 
@@ -177,6 +196,8 @@ export class EnginePresenter implements Presenter {
   private parked: { desc: FrameDescriptor; since: number }[] = [];
   private offsetUs = 0;
   private offsetKey = '';
+  /** performance.now() of the last live resize step (`noteResize`). */
+  private resizedAtMs: number | null = null;
   /** The last timed frame's duration (ticks), for the decision phase. */
   private lastFrameTicks: number | null = null;
   private listeners = new Set<(frame: PresentedFrame) => void>();
@@ -250,7 +271,19 @@ export class EnginePresenter implements Presenter {
     return () => this.listeners.delete(listener);
   }
 
-  /** Sends a viewer state (the caller numbers it, see `ViewSequencer`). */
+  private readonly doneListeners = new Set<(seq: number) => void>();
+
+  onDone(listener: (seq: number) => void): () => void {
+    this.doneListeners.add(listener);
+    return () => this.doneListeners.delete(listener);
+  }
+
+  private done(seq: number): void {
+    if (this.disposed) return;
+    for (const listener of this.doneListeners) listener(seq);
+  }
+
+  /** Sends a viewer state (the caller numbers it, see `ViewerSequencer`). */
   setViewerState(state: ViewerState): void {
     this.options.link.sendViewerState(state);
   }
@@ -298,7 +331,19 @@ export class EnginePresenter implements Presenter {
     return offset === null ? null : ms * 1000 + offset;
   }
 
+  /** The depth and object-id pool's generation (`role: depthId`). */
+  private depthGeneration = 0;
+
   private onPool(pool: SurfacePool): void {
+    if (pool.role === 'depthId') {
+      // A depth pool never replaces the frames' pool: its surfaces are read
+      // by the 3D chrome for the frame on screen.
+      if (pool.generation <= this.depthGeneration) return;
+      const previous = this.depthGeneration;
+      this.depthGeneration = pool.generation;
+      if (previous) this.options.source.retire(previous);
+      return;
+    }
     if (pool.generation <= this.generation) return;
     const previous = this.generation;
     this.generation = pool.generation;
@@ -390,6 +435,11 @@ export class EnginePresenter implements Presenter {
     if (show) this.draw(show, rafMs, this.hostUs(displayMs));
   }
 
+  /** A live resize step of the viewer's window (`resizeLatencyRefreshes`). */
+  noteResize(): void {
+    this.resizedAtMs = this.now();
+  }
+
   takeTrace(): Promise<TraceRecord | null> {
     const t = this.trace;
     return Promise.resolve(t && { arrivals: t.arrivals.splice(0), draws: t.draws.splice(0), drops: t.drops.splice(0), releases: t.releases.splice(0), rafs: t.rafs.splice(0) });
@@ -418,14 +468,15 @@ export class EnginePresenter implements Presenter {
    *  halfway between decisions. */
   private decision(rafMs: number, fit: VsyncFit | null): { decisionMs: number; displayMs: number } {
     const periodMs = fit?.periodMs ?? 1000 / 60;
-    const latency = (this.options.latencyRefreshes ?? 1) * periodMs + (this.options.presentOffsetMs ?? 0);
+    const resizing = this.resizedAtMs !== null && rafMs - this.resizedAtMs < RESIZE_HOLD_MS ? (this.options.resizeLatencyRefreshes ?? 0) : 0;
+    const latency = ((this.options.latencyRefreshes ?? 1) + resizing) * periodMs + (this.options.presentOffsetMs ?? 0);
     const vsync = fit ? nextVsync(fit, rafMs - periodMs / 2) : rafMs;
     const displayMs = vsync + latency;
     const decision = displayMs + (this.options.nearestRefresh ? periodMs / 2 : 0);
     const clock = this.clock;
     const head = this.buffer.frameTicks() ?? this.lastFrameTicks;
     if (fit && clock && head) {
-      const key = `${clock.epoch}:${fit.periodMs.toFixed(4)}:${fit.vsyncMs.toFixed(1)}:${fit.jumped}`;
+      const key = `${clock.epoch}:${fit.periodMs.toFixed(4)}:${fit.vsyncMs.toFixed(1)}:${fit.jumped}:${resizing}`;
       const host = this.hostUs(decision);
       if (key !== this.offsetKey && host !== null) {
         this.offsetKey = key;
@@ -453,6 +504,7 @@ export class EnginePresenter implements Presenter {
       throw error;
     }
     const submitMs = this.now();
+    const width = frame.codedWidth, height = frame.codedHeight;
     frame.close();
     this.stats.drawn++;
     this.trace?.draws.push([rafMs, desc.seq, desc.revision, desc.pts, item.arrivedMs, submitMs, desc.viewSeq, desc.duration === null ? 0 : 1]);
@@ -460,8 +512,12 @@ export class EnginePresenter implements Presenter {
       () => {
         this.trace?.releases.push([desc.seq, submitMs, this.now()]);
         this.release(desc);
+        this.done(desc.seq);
       },
-      () => this.release(desc)
+      () => {
+        this.release(desc);
+        this.done(desc.seq);
+      }
     );
     const presented: PresentedFrame = {
       seq: desc.seq,
@@ -472,7 +528,10 @@ export class EnginePresenter implements Presenter {
       rafMs,
       timed: desc.duration !== null,
       standIn: desc.quality.standIn === true,
-      displayUs
+      displayUs,
+      depthId: desc.depthId && desc.depthId.poolGeneration === this.depthGeneration ? { ...desc.depthId } : null,
+      width,
+      height
     };
     for (const listener of this.listeners) listener(presented);
   }

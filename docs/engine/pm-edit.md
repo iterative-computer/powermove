@@ -56,7 +56,7 @@ the operations. `IdSource { base, next }` makes ids `prefix + base + n`.
 `{"ok":{"ops":[…],"next":n,…answers}}`, `{"throw":{kind,message}}`, or the
 query fallbacks `{"host"}` (three.js geometry: 3D objects and model groups until
 Phase 3c), `{"fonts"}` (fonts not served yet), `{"ink"}` (glyph ink without
-outlines), `{"legacy"}` (an edit left to the legacy code, below). Answers: `ids` (ungroup), `bounds` (groupPlacement, anchorReference),
+outlines). Answers: `ids` (ungroup), `bounds` (groupPlacement, anchorReference),
 `moves` (align, distribute), `plans` (splitText), `w h ax ay` (leaveAttributes),
 `count` (syncPeers).
 
@@ -107,24 +107,47 @@ dual-mode reference:
   to their times on the tick grid (found by their created ids). The values are
   therefore the legacy values; only the times snap.
 
-## Edits left to the legacy code
+## A camera or light reparented into a space that moves with it
 
 A camera or light reparented onto a member of a group that is itself parented to
 the camera (or onto anything whose `parent3D` walk reaches the camera through a
-group's parent chain) is answered `{"legacy"}` (`pm_edit::LEGACY_ONLY`), and the
-renderer runs `preserveParentPose`. The app allows this: `PM.wouldCycle` checks
-group ancestors only when the reparented layer is itself a group. In that space
-the camera's new parent matrix contains the camera's own transform, so no pose
-can be preserved, and the legacy aim is computed from a matrix that reads the
-camera's keyframed channels through the evaluation cache the pose write left
-stale (`preserveParentPose` writes the pose and reads `parent3D` without
-`PM.touch()`; `temporalEvaluate` keeps prepared keys per `PM.touch` version).
-That mix of old and new values is not a function of the document, so the kernel
-declines before writing anything. The generator computes the same predicate with
-its own walk of `parent3D` and marks such cases `selfSpace`; the replay requires
-the kernel to decline exactly those (the committed set has 36, from documents
-built for it; seed 12345 also draws 3 at random). Fixing `PM.wouldCycle` to
-refuse the loop is a renderer change outside this lane.
+group's parent chain) is allowed by the app: `PM.wouldCycle` checks group
+ancestors only when the reparented layer is itself a group. There the camera's
+new parent matrix contains the camera's own transform. `preserveParentPose`
+writes the pose and then reads `parent3D` for the aim without `PM.touch()`, so
+that read sees the camera's channels through `anim.ts`'s evaluation cache of the
+current touch version. The result is still a function of the document before
+the edit:
+
+- `applyPoseValues` evaluates each channel it writes at `time` just before
+  writing it, so `temporalEvaluate`'s state for that touch version holds the
+  value at `time` (`evaluatedTime`/`evaluatedValue`), and its `values` copy was
+  taken when the version first evaluated the keys, before any write of that
+  version (every edit ends with `PM.touch()`).
+- So a keyed channel that `PM.ev` evaluates with `evalKfs` (no expression, a
+  non-empty `kf` whose first and last keys hold numbers, a finite layer-local
+  time) answers its value from before the pose write. A static value, a
+  rewritten expression, and keys with other values read the written document.
+  `local3D` reads the camera through `PM.ev` only (it is `threeD` once the pose is
+  written), and space-3d keeps no matrix memo.
+
+`pose::reparent` reproduces that read: when the generator's predicate holds
+(`space_reads_layer`), it puts those channels' keys from before the write back
+for the one `parent3d` read of the aim (`stale_keyed_channels`), and then
+restores the written keys. Until wave 5 this case was answered `{"legacy"}`
+(`pm_edit::LEGACY_ONLY`) and the renderer ran the legacy edit; that reply, the
+constant, and the renderer's `legacy` reason are gone. The generator still marks
+these cases `selfSpace`; the replay compares them like every other case and
+counts them apart: the committed set's 36 match, and a fresh
+`PM_EDIT_SCALE=6 PM_EDIT_SEED=4242` set matched all 216 (14,914 cases, max
+relative error 9.98e-10 overall). Without the stale read the same 36 fail (the
+aim's `targetX` keys differ by up to thousands of pixels).
+
+One case is not modelled: an expression elsewhere in the new parent chain that
+samples the camera's keyed transform at another time during that read
+(`valueAtTime`) would see `anim.ts`'s mixed cache (its `values` copy from before
+the write, a segment curve from after if that segment was first evaluated
+then). Nothing in the generated or corpus sets does this.
 
 ## Ids and keys
 
@@ -229,12 +252,13 @@ All measured on 2026-10-14 and 2026-10-15 at this branch (the vectors, seeds, co
   kernel answered natively.
 - **pm-wasm** (`crates/pm-wasm/tests/edit.rs`): replies, id sources, throws, and
   the world pose kept through reparent and an animated ungroup applied back to the
-  mirror; the `{legacy}` reply for a self-space camera (and an answer without the
-  loop); baked keys of an off-grid start on 29.97 settled on the tick grid.
+  mirror; a self-space camera answered natively (with and without the loop);
+  baked keys of an off-grid start on 29.97 settled on the tick grid.
 - **Pipeline, self-space** (`engine-doc/edits.test.ts`): `set_layer` puts a
-  keyframed camera under a member of a group parented to it with the flag `on`:
-  the kernel answers `{legacy}`, `reparent:legacy` is counted, nothing is
-  applied natively, and the document equals the flag-off one.
+  camera with keyed, static and expression channels under a member of a group
+  parented to it, at three times, with the flag `on`: the kernel answers
+  natively (no fallback), the document equals the flag-off one, and `audit`
+  records 0 `edit.reparent` mismatches.
 - **e2e** (`--workers=1 --retries=0`, one Electron at a time,
   `POWERMOVE_ENGINE_FONTS=1` with the pm-bridge addon built): 23 specs (64 tests)
   covering groups, 2.5D groups and layers, alignment, font and size anchors, split

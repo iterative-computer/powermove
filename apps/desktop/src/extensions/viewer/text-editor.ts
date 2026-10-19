@@ -96,10 +96,27 @@ export function beginTextEdit(api: PowermoveAPI, V: TextEditorHost, layer: any, 
   const content = () => api.anim.resolveContent(current(), time()) as any;
   const sourceText = () => String(content()?.text ?? '');
   const layout = (): TextCaretLayout | null => api.render.textLayout(current(), time());
-  /* Font anchoring shifts the painted glyphs; the caret follows that shift. */
+  /* Font anchoring shifts the painted glyphs; the caret follows that shift.
+     Only a layer with recorded font bounds has one (today's raster returns
+     no `fontOffset` otherwise), and it changes only with the document or
+     the time: the raster (a synchronous engine request with Use New Engine
+     on) runs once per revision and time, not on every overlay draw and
+     pointer hit test. */
+  let anchored: { key: string; offset: { x?: number; y?: number } | undefined } | null = null;
+  const fontOffset = (): { x?: number; y?: number } | undefined => {
+    const L = current();
+    if (!L?.d?.fontAnchorBounds) return undefined;
+    const key = `${api.project.revision()}|${time()}`;
+    if (anchored?.key === key) return anchored.offset;
+    const offset = api.render.raster(L, 1, time())?.fontOffset as { x?: number; y?: number } | undefined;
+    // A font still loading returns a blank raster. Retry it on the next
+    // draw/hit test, even when neither the time nor the document changed.
+    if (offset) anchored = { key, offset };
+    return offset;
+  };
   const matrix = (): AffineMatrix => {
     const m = [...api.anim.worldMatrix(current(), time())] as AffineMatrix;
-    const offset = api.render.raster(current(), 1, time())?.fontOffset as { x?: number; y?: number } | undefined;
+    const offset = fontOffset();
     if (offset) { const x = offset.x ?? 0, y = offset.y ?? 0; m[4] += m[0] * x + m[2] * y; m[5] += m[1] * x + m[3] * y; }
     return m;
   };
