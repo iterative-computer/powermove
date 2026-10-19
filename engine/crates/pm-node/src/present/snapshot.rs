@@ -174,6 +174,11 @@ impl SnapshotJob {
     /// counted afresh from now (the Blender stage does not count against
     /// it).
     pub fn blender_done(&mut self, frames: Arc<Vec<PreparedFrame>>, now: i64) {
+        // A late worker reply cannot revive an expired capture. Leave its
+        // running deadline in place for the queue to expire and answer it.
+        if self.blender_until.is_some_and(|until| now >= until) {
+            return;
+        }
         self.blender = Some(BlenderPrep::Ready(frames));
         self.deadline = self
             .deadline
@@ -758,6 +763,9 @@ mod tests {
             j.expires_at() < 2_200_000,
             "a third attempt has no fresh budget"
         );
+        j.blender_done(Arc::new(Vec::new()), 2_300_000);
+        assert_eq!(j.preparing(), Some(3), "a late reply stays expired");
+        assert_eq!(j.expires_at(), until);
     }
 
     #[test]
