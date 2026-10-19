@@ -40,6 +40,8 @@ export const MAX_SVG_BAND_BYTES = 8 * 1024 * 1024;
 export const MAX_SVG_EDGE = 8192;
 /** Rasters drawn at once for the viewer's asks (each holds a canvas). */
 export const MAX_CONCURRENT = 4;
+/** Viewer asks `SvgRasters.asks` keeps. */
+export const MAX_ASK_LOG = 256;
 
 export type SvgFailureReason = 'missing' | 'stale' | 'decode' | 'size' | 'unavailable';
 
@@ -261,6 +263,10 @@ export class SvgRasters {
    *  calling thread), and the slowest viewer ask answered (ms from the ask
    *  to its last band). */
   readonly stats = { drawn: 0, posted: 0, produced: 0, failed: 0, stale: 0, hashedSync: 0, slowestMs: 0 };
+  /** The latest viewer asks, oldest first (at most `MAX_ASK_LOG`): which
+   *  buckets the engine's viewer frames wanted, for comparison with the
+   *  buckets today's viewer rasterizes. */
+  readonly asks: { asset: string; width: number; height: number }[] = [];
 
   constructor(private readonly options: SvgRastersOptions) {
     this.canvas = options.canvas ?? new SvgRasterCanvas();
@@ -398,6 +404,8 @@ export class SvgRasters {
   answer(target: SvgPostTarget, requests: readonly SvgRasterRequest[]): Promise<void> {
     const all: Promise<void>[] = [];
     for (const request of requests) {
+      this.asks.push({ asset: request.asset, width: request.key.width, height: request.key.height });
+      if (this.asks.length > MAX_ASK_LOG) this.asks.splice(0, this.asks.length - MAX_ASK_LOG);
       const id = keyText(request.key);
       let running = this.inFlight.get(id);
       if (!running) {

@@ -11,7 +11,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { SvgRasterRequest } from '../../../shared/engine-protocol';
-import { MAX_SVG_BAND_BYTES, SvgRasterCanvas, SvgRasters, sha256Hex, sha256HexSync, type SvgAsset } from './svg-rasters';
+import { MAX_ASK_LOG, MAX_SVG_BAND_BYTES, SvgRasterCanvas, SvgRasters, sha256Hex, sha256HexSync, type SvgAsset } from './svg-rasters';
 
 const text = new TextEncoder();
 const svgA = text.encode('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"/>');
@@ -52,6 +52,7 @@ describe('SvgRasters', () => {
     await rasters.answer(target, [request(contentA, 6, 3)]);
     expect(draw).toHaveBeenCalledOnce();
     expect(draw.mock.calls[0]!.slice(1)).toEqual([6, 3]);
+    expect(rasters.asks).toEqual([{ asset: 'a1', width: 6, height: 3 }]);
     expect(posted).toHaveLength(1);
     expect(posted[0]).toMatchObject({ type: 'compat', compat: 'svgPixels', key: { content: contentA, width: 6, height: 3 }, row: 0, rows: 3 });
     expect((posted[0]!['data'] as Uint8Array).byteLength).toBe(6 * 3 * 4);
@@ -79,6 +80,14 @@ describe('SvgRasters', () => {
     const { rasters, draw, target, contentA } = await setup();
     await Promise.all([rasters.answer(target, [request(contentA)]), rasters.answer(target, [request(contentA)])]);
     expect(draw).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the latest viewer asks, bounded', async () => {
+    const { rasters, target, contentA } = await setup();
+    for (let i = 1; i <= MAX_ASK_LOG + 3; i++) await rasters.answer(target, [request(contentA, i, 1)]);
+    expect(rasters.asks).toHaveLength(MAX_ASK_LOG);
+    expect(rasters.asks[0]).toEqual({ asset: 'a1', width: 4, height: 1 });
+    expect(rasters.asks.at(-1)).toEqual({ asset: 'a1', width: MAX_ASK_LOG + 3, height: 1 });
   });
 
   it('posts large rasters in bands that fit a message', async () => {
