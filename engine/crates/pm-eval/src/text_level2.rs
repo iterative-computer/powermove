@@ -140,16 +140,33 @@ fn spans(d: &Content, styles: &[StyleState]) -> Vec<StyleSpan> {
     }
     let text = text_content(d).text;
     let units: Vec<_> = text.encode_utf16().collect();
+    let ranges: Vec<(f64, f64)> = styles
+        .iter()
+        .map(|s| {
+            (
+                get(&s.item, "start").to_number(),
+                get(&s.item, "end").to_number(),
+            )
+        })
+        .collect();
     let mut spans: Vec<StyleSpan> = Vec::new();
+    // Graphemes under the same styles share one resolved content: it is
+    // built once per change of the covering styles, not per grapheme.
+    let mut covering: Option<Vec<bool>> = None;
     for r in pm_text::compat::graphemes(&units) {
-        let mut content = d.clone();
-        for style in styles {
-            let start = get(&style.item, "start").to_number();
-            let end = get(&style.item, "end").to_number();
-            if r.start as f64 >= start && (r.start as f64) < end {
-                content.extend(style.p.clone());
-            }
+        let at = r.start as f64;
+        let now: Vec<bool> = ranges.iter().map(|(s, e)| at >= *s && at < *e).collect();
+        if covering.as_ref() == Some(&now)
+            && let Some(last) = spans.last_mut()
+        {
+            last.end = r.end;
+            continue;
         }
+        let mut content = d.clone();
+        for (style, _) in styles.iter().zip(&now).filter(|(_, on)| **on) {
+            content.extend(style.p.clone());
+        }
+        covering = Some(now);
         let content = text_content(&content);
         if let Some(last) = spans.last_mut()
             && last.content == content
@@ -440,9 +457,14 @@ fn bounds(
 /// Both padded by `clamp(size × 0.055, 3, 12)`.
 fn resting_selection(d: &TextContent, layout: &Level2Layout, ink: Option<Selection>) -> Selection {
     let pad = (d.size() * 0.055).clamp(3.0, 12.0);
+    // Today's paragraph box (`raster.ts` textGeometry): any finite box
+    // width counts, at least 1 px, and alignment anchors on the canvas the
+    // box and its widest line span, rounded up to whole pixels.
     if d.paragraph.unwrap_or(false)
-        && let Some(width) = d.box_width.filter(|w| w.is_finite() && *w > 0.0)
+        && let Some(width) = d.box_width.filter(|w| w.is_finite()).map(|w| w.max(1.0))
     {
+        let widest = layout.lines.iter().map(|l| l.width).fold(1.0, f64::max);
+        let span = width.max(widest).ceil();
         let height = d
             .box_height
             .filter(|h| h.is_finite() && *h > 0.0)
@@ -451,8 +473,8 @@ fn resting_selection(d: &TextContent, layout: &Level2Layout, ink: Option<Selecti
             });
         let x = match d.align() {
             pm_text::compat::Align::Left => 0.0,
-            pm_text::compat::Align::Center => -width / 2.0,
-            pm_text::compat::Align::Right => -width,
+            pm_text::compat::Align::Center => -span / 2.0,
+            pm_text::compat::Align::Right => -span,
         };
         return rect([x - pad, -pad, x + width + pad, height + pad]);
     }
@@ -530,6 +552,98 @@ mod tests {
         assert_eq!(found, ["a", "e"]);
         assert!(level2_text_layers(&doc(r#"{"layers":[{"id":"b","type":"text"}]}"#)).is_empty());
         assert!(level2_text_layers(&pm_model::Document::new(None, 1)).is_empty());
+    }
+
+    #[test]
+    fn paragraph_selection_keeps_todays_degenerate_and_fractional_boxes() {
+        let line = |width| pm_text::level2::Line {
+            width,
+            ..Default::default()
+        };
+        let layout = |widths: &[f64]| Level2Layout {
+            lines: widths.iter().copied().map(line).collect(),
+            ..Default::default()
+        };
+        // (align, box width, line widths) -> (x0, x1), as raster.ts computes
+        // them with interaction padding 3 (size 12).
+        for (align, box_width, lines, x0, x1) in [
+            // A zero or negative box is still a 1 px paragraph.
+            ("left", 0.0, vec![], -3.0, 4.0),
+            ("left", -20.0, vec![], -3.0, 4.0),
+            ("center", 0.0, vec![], -3.5, 3.5),
+            // Fractional boxes anchor on the whole-pixel canvas.
+            ("center", 100.5, vec![40.0], -53.5, 53.0),
+            ("right", 100.5, vec![40.0], -104.0, 2.5),
+            // A line wider than its box widens the canvas it anchors on.
+            ("right", 50.0, vec![80.25], -84.0, -28.0),
+            ("left", 50.0, vec![80.25], -3.0, 53.0),
+        ] {
+            let d = TextContent {
+                size: Some(12.0),
+                leading: Some(1.25),
+                align: Some(align.into()),
+                paragraph: Some(true),
+                box_width: Some(box_width),
+                ..Default::default()
+            };
+            let selection = resting_selection(&d, &layout(&lines), None);
+            assert_eq!(
+                (selection.x0, selection.x1),
+                (x0, x1),
+                "{align} {box_width} {lines:?}"
+            );
+        }
+        // A non-finite box width is point text.
+        let d = TextContent {
+            size: Some(12.0),
+            paragraph: Some(true),
+            box_width: Some(f64::NAN),
+            ..Default::default()
+        };
+        assert_eq!(resting_selection(&d, &layout(&[]), None).x0, -3.5);
+    }
+
+    #[test]
+    fn style_spans_follow_the_covering_styles() {
+        let content = |pairs: &[(&str, JsValue)]| -> Content {
+            pairs
+                .iter()
+                .map(|(k, v)| (JsString::from(*k), v.clone()))
+                .collect()
+        };
+        let style = |start: f64, end: f64, key: &str, value: JsValue| StyleState {
+            item: content(&[("start", start.into()), ("end", end.into())]),
+            p: content(&[(key, value)]),
+        };
+        // "ab\u{301}cd efgh": a combining mark keeps its grapheme whole.
+        let d = content(&[
+            ("text", "ab\u{301}cd efgh".into()),
+            ("size", 40.0.into()),
+        ]);
+        let styles = [
+            style(1.0, 6.0, "size", 50.0.into()),
+            style(4.0, 9.0, "tracking", 4.0.into()),
+            // Restates the base inside the first style's range: no new span.
+            style(2.0, 3.0, "size", 50.0.into()),
+            // The last authored style wins.
+            style(8.0, 20.0, "size", 30.0.into()),
+        ];
+        let got: Vec<(usize, usize, Option<f64>, Option<f64>)> = spans(&d, &styles)
+            .iter()
+            .map(|s| (s.start, s.end, s.content.size, s.content.tracking))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0, 1, Some(40.0), None),
+                (1, 4, Some(50.0), None),
+                (4, 6, Some(50.0), Some(4.0)),
+                (6, 8, Some(40.0), Some(4.0)),
+                (8, 9, Some(30.0), Some(4.0)),
+                (9, 10, Some(30.0), None),
+            ]
+        );
+        assert!(spans(&d, &[]).is_empty());
     }
 
     #[test]
