@@ -166,8 +166,8 @@ depends on the window could differ there.
 ### `PM.raster` assigned through `host.pm`
 
 Before the services registry, extensions wrapped the raster by assigning
-`PM.raster` (the C1 corpus's `private-extension-38` shifts the anchors of text
-with animated font axes that way). Today the compositor calls whatever
+`PM.raster` (an external setup shifts text anchors with animated font axes
+that way). Today the compositor calls whatever
 `PM.raster` holds, so such a wrapper is outermost, above the registered ones.
 `PM.raster` is now an accessor (reads and writes behave as the data
 property did). An assigned function is the outermost link of the producer's
@@ -462,23 +462,24 @@ The context gate independently checks legacy compositor pixels, drawing and
 canvas mirroring, with 59,037 green project pixels on each side and max 0.
 A later read of the cleared WebGPU swapchain is no longer its reference.
 
-C1 is `e2e/engine-private-setup-compat.spec.ts`. It reads the external corpus
-in place, installs the 39 original extension folders into disposable profiles,
-then opens the original project off and on. Its result ledger is
+C1 is `e2e/engine-private-setup-compat.spec.ts`. Set `PM_PRIVATE_SETUP_DIR`
+to an external corpus containing `compat-manifest.json`, `extensions/`, and the
+project file named by the manifest. The manifest holds the expected extension
+IDs, project metadata, reference times, recovery state, and private probes.
+The test installs those extension folders into disposable profiles, then opens
+the project off and on. Its result ledger is
 `$TMPDIR/powermove-private-setup-compat/results.json`, outside Git. It records
 per-extension activation, health, contribution ids, winners, panels, safe
 open/read commands, the workspace theme and tools, wrapper presence and
-project frames. It uses the real-project corpus schedule (every two seconds
-plus the last frame), adding each typewriter interval's midpoint, at full
-project size with the corpus's motion-blur settings and unchanged section-25
-bounds. The omitted TensorFlow runtime's private-extension-32 build failure is reported
-on both paths; no other failure or runtime auto-disable is excused.
+project frames. It uses the manifest's exact reference times at full project
+size with the corpus's motion-blur settings and unchanged section-25 bounds.
+Any declared build failure is checked by name on both paths; no other failure
+or runtime auto-disable is excused.
 
-The isolated profile acknowledges the workspace theme's explicit one-time
-appearance recovery before activation, so the requested theme can be exercised
-without modifying the private source. The activation barrier waits for actual loader activations,
+The isolated profile applies the manifest's recovery state before activation,
+so the private source remains untouched. The activation barrier waits for actual loader activations,
 not main's successful compilation records. No live profile is read or written.
-A missing corpus yields a named notice. With the corpus present, run its
+A missing `PM_PRIVATE_SETUP_DIR` yields a named skip. With the corpus present, run its
 external-artifact configuration so Playwright's traces and DOM snapshots
 cannot copy private data into the worktree:
 
@@ -525,8 +526,8 @@ unchanged. Tests cover synchronous, asynchronous and main-owned snapshot
 sessions plus a repeatedly unanswered raster. The focused renderer/bridge/kernel tests
 pass: 272 tests across eighteen files.
 
-The private schedule uses full composition size, each typewriter midpoint,
-the corpus interval and the original project's final frame. Reused baseline
+The private schedule lives in the external manifest and uses full composition
+size. Reused baseline
 PNGs must decode byte-for-byte to their original RGBA hashes. The external
 reference ledger records the source commit/tree hash, project hash and each
 frame's hash. The harness's thirty-minute overall budget accommodates large

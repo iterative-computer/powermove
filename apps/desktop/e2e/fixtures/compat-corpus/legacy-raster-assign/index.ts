@@ -1,7 +1,7 @@
 import type { PowermoveAPI } from 'powermove';
 
 // The pattern of user extensions written before the services registry
-// (the C1 corpus's private-extension-38 shifts anchors this way): capture
+// (an extension can shift anchors this way): capture
 // PM.raster, assign a wrapper, restore it on dispose.
 export default function activate(api: PowermoveAPI): void {
   const PM = api.host.pm as any;

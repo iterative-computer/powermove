@@ -6,9 +6,41 @@ import path from 'node:path';
 import type { Page } from 'playwright';
 import { expect, launchApp, test } from './helpers/app';
 
-const CORPUS = process.env.PM_PRIVATE_SETUP_DIR ?? path.join(os.homedir(), 'Library/Application Support/Powermove Engine Corpus/private-setup');
 const EVIDENCE = path.join(os.tmpdir(), 'powermove-private-setup-compat');
 const REGISTRIES = ['effects', 'transitions', 'layerTypes', 'commands', 'panels', 'themes', 'keybindings', 'inspectorSections'] as const;
+
+test.skip(!process.env.PM_PRIVATE_SETUP_DIR, 'C1 private setup skipped: set PM_PRIVATE_SETUP_DIR to an external corpus');
+
+interface PrivateSetupManifest {
+  schemaVersion: 1;
+  expectedExtensionIds: string[];
+  projectFile: string;
+  expectedProject: { layers: number; duration: number; fps: number; width: number; height: number };
+  referenceTimes: number[];
+  wrapperTimes: number[];
+  healthExceptions: Record<string, string>;
+  recovery: { extensionId: string; storageKey: string; value: boolean };
+  ui: { applyCommandId: string; toolstripSelector: string; minimumTools: number; stageSelector: string; timelineSelector: string; contributionId: string; expectedOwnerId: string; legacyHostExtensionId: string };
+  wrappers: { counterEffectId: string; counterValueParam: string; counterDecimalsParam: string; counterKeyPrefix: string; textEffectId: string; textProgressParam: string; textKeyContains: string; curveDataKey: string; curveKeyPrefix: string };
+}
+
+function privateFile(root: string, relative: string): string {
+  const resolved = path.resolve(root, relative);
+  if (path.isAbsolute(relative) || !relative || resolved === root || !resolved.startsWith(`${root}${path.sep}`)) throw new Error('Private setup manifest has a path outside its corpus');
+  return resolved;
+}
+
+async function loadManifest(root: string): Promise<PrivateSetupManifest> {
+  const manifest = JSON.parse(await readFile(path.join(root, 'compat-manifest.json'), 'utf8')) as PrivateSetupManifest;
+  if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.expectedExtensionIds) || !manifest.expectedExtensionIds.length || new Set(manifest.expectedExtensionIds).size !== manifest.expectedExtensionIds.length
+    || !manifest.expectedExtensionIds.every((id) => typeof id === 'string' && id.length > 0 && !id.includes('/'))
+    || !Array.isArray(manifest.referenceTimes) || !manifest.referenceTimes.length || !manifest.referenceTimes.every((t) => Number.isFinite(t) && t >= 0)
+    || !Array.isArray(manifest.wrapperTimes) || !manifest.wrapperTimes.length || !manifest.wrapperTimes.every((t) => Number.isFinite(t) && t >= 0)
+    || !manifest.expectedProject || !manifest.recovery || !manifest.ui || !manifest.wrappers || !manifest.healthExceptions
+    || Object.keys(manifest.healthExceptions).some((id) => !manifest.expectedExtensionIds.includes(id))) throw new Error('Invalid private setup manifest');
+  privateFile(root, manifest.projectFile);
+  return manifest;
+}
 
 async function facts(page: Page, ids: string[]) {
   return page.evaluate(({ ids, registries }) => {
@@ -21,8 +53,8 @@ async function facts(page: Page, ids: string[]) {
   }, { ids, registries: [...REGISTRIES] });
 }
 
-async function exercise(page: Page, ids: string[]) {
-  return page.evaluate(async (ids) => {
+async function exercise(page: Page, ids: string[], ui: PrivateSetupManifest['ui']) {
+  return page.evaluate(async ({ ids, ui }) => {
     const PM = (window as any).PM, kernel = PM.Kernel, api = kernel.api('corpus');
     const panels = [];
     for (const entry of kernel.panels.entries().filter((e: any) => ids.includes(e.ownerId))) {
@@ -42,18 +74,18 @@ async function exercise(page: Page, ids: string[]) {
       try { await api.commands.run(entry.id); commands.push({ owner: entry.ownerId, id: entry.id, ok: true }); }
       catch (error) { commands.push({ owner: entry.ownerId, id: entry.id, ok: false, error: String(error) }); }
     }
-    await api.commands.run('private-extension-01.apply');
+    await api.commands.run(ui.applyCommandId);
     await new Promise((r) => setTimeout(r, 150));
-    const theme = { active: api.theme.active(), classes: document.body.className, tools: document.querySelectorAll('.ae-toolstrip button').length, stage: !!document.querySelector('#stage'), timeline: !!document.querySelector('#panel-timeline') };
+    const theme = { active: api.theme.active(), classes: document.body.className, tools: document.querySelectorAll(ui.toolstripSelector).length, stage: !!document.querySelector(ui.stageSelector), timeline: !!document.querySelector(ui.timelineSelector) };
     const tool = kernel.services.get('tool');
     const tools = [];
     for (const id of ['toolHand', 'toolZoom', 'toolSelect']) {
       if (!api.commands.has(id)) { tools.push([id, 'missing']); continue; }
       await api.commands.run(id); tools.push([id, tool?.tool]);
     }
-    const gradient = kernel.effects.entries().find((e: any) => e.id === 'gradient')?.ownerId ?? null;
-    return { panels, commands, theme, tools, gradient, rasterWrapped: !!PM.RasterCompat?.wrapped(), legacyPm: kernel.api('private-extension-38').host.pm === PM };
-  }, ids);
+    const contributionOwner = kernel.effects.entries().find((e: any) => e.id === ui.contributionId)?.ownerId ?? null;
+    return { panels, commands, theme, tools, contributionOwner, rasterWrapped: !!PM.RasterCompat?.wrapped(), legacyPm: kernel.api(ui.legacyHostExtensionId).host.pm === PM };
+  }, { ids, ui });
 }
 
 async function frame(page: Page, time: number, width: number, height: number) {
@@ -75,29 +107,29 @@ async function frame(page: Page, time: number, width: number, height: number) {
   }, { time, width, height });
 }
 
-async function wrapperProject(page: Page) {
-  return page.evaluate(() => {
+async function wrapperProject(page: Page, wrappers: PrivateSetupManifest['wrappers']) {
+  return page.evaluate((wrappers) => {
     const PM = (window as any).PM, api = PM.Kernel.api('corpus');
     const p = PM.mkProject({ name: 'C1 raster wrappers', w: 480, h: 270, fps: 30, dur: 2, bg: '#203040' });
     const counter = PM.mkLayer('text', { from: 0, dur: 2, d: { text: 'Count', font: 'Helvetica', size: 36, color: '#FFFFFF' } }, p);
     counter.id = 'counter'; counter.p['position.x'].v = 160; counter.p['position.y'].v = 60;
-    const count = PM.mkEffect('private-extension-25'); count.p.value = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(2, 100)] }); count.p.decimals.v = 0; counter.fx = [count];
+    const count = PM.mkEffect(wrappers.counterEffectId); count.p[wrappers.counterValueParam] = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(2, 100)] }); count.p[wrappers.counterDecimalsParam].v = 0; counter.fx = [count];
     const typed = PM.mkLayer('text', { from: 0, dur: 2, d: { text: 'Wrapper contract', font: 'Helvetica', size: 32, color: '#FFFFFF' } }, p);
     typed.id = 'typed'; typed.p['position.x'].v = 240; typed.p['position.y'].v = 120;
-    const fx = PM.mkEffect('typewriter'); fx.p.progress = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(2, 100)] }); typed.fx = [fx];
+    const fx = PM.mkEffect(wrappers.textEffectId); fx.p[wrappers.textProgressParam] = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(2, 100)] }); typed.fx = [fx];
     const points = [[80, 220], [140, 150], [340, 270], [400, 200]].map(([x, y], i) => {
       const l = PM.mkLayer('shape', { from: 0, dur: 2, d: { shape: 'ellipse', w: 4, h: 4, color: '#FF641E', stroke: 0 } }, p);
       l.id = `point-${i}`; l.p['position.x'].v = x; l.p['position.y'].v = y; return l;
     });
     const linked = PM.mkLayer('shape', { from: 0, dur: 2, d: { shape: 'rect', w: 440, h: 140, color: '#00000000', stroke: 8, strokeColor: '#FF641E' } }, p);
     linked.id = 'linked'; linked.p['position.x'].v = 240; linked.p['position.y'].v = 200;
-    linked.d.linkedSceneBezier = { version: 1, kind: 'curve', points: points.map((l: any) => l.id) };
+    linked.d[wrappers.curveDataKey] = { version: 1, kind: 'curve', points: points.map((l: any) => l.id) };
     p.layers = [counter, typed, linked, ...points]; PM.replaceProject(p); PM.Projects.put(PM.proj);
     return [counter, typed, linked].map((layer: any) => {
       const r = api.render.raster(layer, 1, .5);
-      return { id: layer.id, sync: !!r && !(r instanceof Promise), wrapper: layer.id === 'counter' ? String(r?.key).startsWith('private-extension-25:') : layer.id === 'typed' ? String(r?.key).includes('typewriter') : String(r?.key).startsWith('private-extension-18:'), geometry: r && [r.w, r.h, r.anchorX, r.anchorY, r.cv.width, r.cv.height] };
+      return { id: layer.id, sync: !!r && !(r instanceof Promise), wrapper: layer.id === 'counter' ? String(r?.key).startsWith(wrappers.counterKeyPrefix) : layer.id === 'typed' ? String(r?.key).includes(wrappers.textKeyContains) : String(r?.key).startsWith(wrappers.curveKeyPrefix), geometry: r && [r.w, r.h, r.anchorX, r.anchorY, r.cv.width, r.cv.height] };
     });
-  });
+  }, wrappers);
 }
 
 function measure(a: Buffer, b: Buffer) {
@@ -109,35 +141,37 @@ function measure(a: Buffer, b: Buffer) {
 
 test('C1 private setup: all extensions, contribution winners, host UI, wrappers and real project frames', async ({ session }, testInfo) => {
   test.setTimeout(1_800_000);
-  const project = path.join(CORPUS, 'projects/private-project.pmv');
-  const present = await stat(project).then(() => true, () => false);
-  test.skip(!present, 'C1 private setup corpus absent: set PM_PRIVATE_SETUP_DIR or install the external private-setup corpus');
-  const relativeOutput = path.relative(path.resolve(__dirname, '../../..'), testInfo.outputDir);
+  const setupDir = process.env.PM_PRIVATE_SETUP_DIR;
+  test.skip(!setupDir, 'C1 private setup skipped: set PM_PRIVATE_SETUP_DIR to an external corpus');
+  const corpus = path.resolve(setupDir!);
+  const repo = path.resolve(__dirname, '../../..');
+  if (corpus === repo || corpus.startsWith(`${repo}${path.sep}`)) throw new Error('PM_PRIVATE_SETUP_DIR must point outside the public repository');
+  const manifest = await loadManifest(corpus);
+  const project = privateFile(corpus, manifest.projectFile);
+  await stat(project);
+  const relativeOutput = path.relative(repo, testInfo.outputDir);
   if (relativeOutput !== '..' && !relativeOutput.startsWith(`..${path.sep}`) && !path.isAbsolute(relativeOutput)) {
     throw new Error('C1 private artifacts must stay outside the public repository. Run with --config playwright.private-corpus.config.ts.');
   }
 
   await session.close();
   await mkdir(EVIDENCE, { recursive: true });
-  const ids = [];
-  for (const entry of await readdir(path.join(CORPUS, 'extensions'), { withFileTypes: true })) if (entry.isDirectory() && await stat(path.join(CORPUS, 'extensions', entry.name, 'manifest.json')).then(() => true, () => false)) ids.push(entry.name);
-  ids.sort(); expect(ids).toHaveLength(39);
+  const ids: string[] = [];
+  for (const entry of await readdir(path.join(corpus, 'extensions'), { withFileTypes: true })) if (entry.isDirectory() && await stat(path.join(corpus, 'extensions', entry.name, 'manifest.json')).then(() => true, () => false)) ids.push(entry.name);
+  ids.sort(); expect(ids).toEqual([...manifest.expectedExtensionIds].sort());
   const results: Record<string, any> = {};
   const captures: Array<{ time: number; baseline: string; png: string; width: number; height: number }> = [];
   const profiles: string[] = [];
   try {
     for (const engine of [false, true]) {
       const profile = await mkdtemp(path.join(os.tmpdir(), 'powermove-c1-')); profiles.push(profile);
-      // Prime only the test's desired appearance state. The corpus omits
-      // saved settings, and the source has an explicit one-time "restore
-      // and disable" recovery. Acknowledge that request in this isolated
-      // profile before activation; never alter its source or error policy.
+      // Prime the external manifest's recovery state in this disposable profile.
       const prime = await launchApp({ userData: profile, env: {} });
       try {
         await prime.openEditor();
-        await prime.page.evaluate(async () => { const PM = (window as any).PM; PM.Kernel.api('private-extension-01').storage.set('restore-request-1.0.4', true); await (window as any).__powermoveTestBridge.store.flush(); });
+        await prime.page.evaluate(async (recovery) => { const PM = (window as any).PM; PM.Kernel.api(recovery.extensionId).storage.set(recovery.storageKey, recovery.value); await (window as any).__powermoveTestBridge.store.flush(); }, manifest.recovery);
       } finally { await prime.close(); }
-      for (const id of ids) await cp(path.join(CORPUS, 'extensions', id), path.join(profile, 'extensions', id), { recursive: true });
+      for (const id of ids) await cp(path.join(corpus, 'extensions', id), path.join(profile, 'extensions', id), { recursive: true });
       const app = await launchApp({ userData: profile, env: { POWERMOVE_NEW_ENGINE: engine ? '1' : '0' } });
       const mode = engine ? 'engine' : 'today';
       const runtimeSamples: unknown[] = [];
@@ -162,21 +196,21 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
           }, 1000);
         });
         console.log(`C1 ${mode}: waiting for all extension activations`);
-        await app.page.waitForFunction((ids) => {
+        await app.page.waitForFunction(({ ids, healthExceptions }) => {
           const PM = (window as any).PM;
           if (!PM?.Kernel?.loader) return false;
           const active = PM.Kernel.loader.activeIds();
           const records = PM.Kernel.api('corpus').extensions.list();
-          return ids.every((id) => id === 'private-extension-32'
-            ? records.find((r: any) => r.id === id)?.health?.state === 'build-error'
+          return ids.every((id) => healthExceptions[id]
+            ? records.find((r: any) => r.id === id)?.health?.state === healthExceptions[id]
             : active.includes(id));
-        }, ids, { timeout: 90_000, polling: 100 });
+        }, { ids, healthExceptions: manifest.healthExceptions }, { timeout: 90_000, polling: 100 });
         results[mode] = { extensions: await facts(app.page, ids), frames: [] };
         await writeFile(path.join(EVIDENCE, 'results.json'), JSON.stringify(results, null, 2));
-        results[mode].ui = await exercise(app.page, ids);
+        results[mode].ui = await exercise(app.page, ids, manifest.ui);
         console.log(`C1 ${mode}: UI exercised; checking private raster wrappers`);
-        results[mode].wrappers = { surfaces: await wrapperProject(app.page), frames: [] };
-        for (const time of [.2, 1.2]) {
+        results[mode].wrappers = { surfaces: await wrapperProject(app.page, manifest.wrappers), frames: [] };
+        for (const time of manifest.wrapperTimes) {
           const rendered = await frame(app.page, time, 480, 270);
           const png = path.join(EVIDENCE, `${mode}-wrappers-${time}.png`);
           await writeFile(png, Buffer.from(rendered.png.split(',')[1]!, 'base64'));
@@ -196,13 +230,13 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
           void w.PM.openProject().then(() => { w.__c1OpenDone = true; });
         });
         try {
-          await expect.poll(() => app.page.evaluate(() => (window as any).PM.proj.layers.length), { timeout: 180_000, message: 'C1: original private project must load all 258 layers' }).toBe(258);
+          await expect.poll(() => app.page.evaluate(() => (window as any).PM.proj.layers.length), { timeout: 180_000, message: 'C1: private project must load the expected layers' }).toBe(manifest.expectedProject.layers);
         } catch (error) {
           results[mode].openWaitError = String(error);
           // A busy renderer can finish the import after the test's deadline.
           // Keep the timeout as a failed gate, but collect its real pixels if
           // the original document is now available rather than losing evidence.
-          if (await app.page.evaluate(() => (window as any).PM.proj.layers.length) !== 258) throw error;
+          if (await app.page.evaluate(() => (window as any).PM.proj.layers.length) !== manifest.expectedProject.layers) throw error;
         }
         // Layer installation precedes the file fingerprint and workspace
         // restore. Wait for the real open operation before exercising the
@@ -211,17 +245,17 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
           await expect.poll(() => app.page.evaluate(() => (window as any).__c1OpenDone), { timeout: 600_000, message: 'C1: original project open must finish before captures' }).toBe(true);
         } catch (error) { results[mode].openCompletionError = String(error); throw error; }
         if (engine) expect(await app.page.evaluate(() => !!(window as any).PM.EngineRender), 'C1: engine facade remains installed').toBe(true);
-        const setup = await app.page.evaluate(() => { const PM = (window as any).PM; return { dur: PM.proj.dur, fps: PM.proj.fps, w: PM.proj.w, h: PM.proj.h, typewriters: PM.proj.layers.filter((l: any) => l.fx?.some((f: any) => f.type === 'typewriter')).map((l: any) => ({ from: l.from, dur: l.dur })) }; });
+        const setup = await app.page.evaluate(() => { const PM = (window as any).PM; return { dur: PM.proj.dur, fps: PM.proj.fps, w: PM.proj.w, h: PM.proj.h, layers: PM.proj.layers.length }; });
+        expect(setup).toEqual({ dur: manifest.expectedProject.duration, fps: manifest.expectedProject.fps, w: manifest.expectedProject.width, h: manifest.expectedProject.height, layers: manifest.expectedProject.layers });
         console.log(`C1 ${mode}: project layers loaded`);
         const extensions = await facts(app.page, ids);
         const ui = results[mode].ui;
         const after = await facts(app.page, ids);
         results[mode] = { ...results[mode], extensions, ui, after, setup, errors: app.diagnostics.pageErrors, frames: [], openDone: await app.page.evaluate(() => (window as any).__c1OpenDone) };
         console.log(`C1 ${mode}: UI exercised; capturing corpus frames`);
-        // Same real-project corpus schedule: each 2 s plus last frame.
-        // Add midpoints inside each typewriter interval so it cannot pass
-        // by checking only times when the custom text is absent.
-        const times = [...new Set([0, ...Array.from({ length: Math.ceil(setup.dur / 2) }, (_, i) => i * 2), Math.max(0, setup.dur - 1 / setup.fps), ...setup.typewriters.map((l: any) => Math.min(setup.dur - 1 / setup.fps, l.from + l.dur / 2))])].sort((a, b) => a - b);
+        const times = manifest.referenceTimes;
+        expect(times).toEqual([...new Set(times)].sort((a, b) => a - b));
+        expect(times.every((time) => time <= setup.dur - 1 / setup.fps + 1e-9)).toBe(true);
         for (let i = 0; i < times.length; i++) {
           const time = times[i]!;
           results[mode].pendingFrame = time;
@@ -243,7 +277,7 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
         }
         results[mode].status = await app.page.evaluate(() => (window as any).PM.EngineConnection?.status?.() ?? null);
 
-        results[mode].uiAfter = await exercise(app.page, ids);
+        results[mode].uiAfter = await exercise(app.page, ids, manifest.ui);
         results[mode].after = await facts(app.page, ids);
         results[mode].openDone = await app.page.evaluate(() => (window as any).__c1OpenDone);
 
@@ -271,23 +305,22 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
     console.log(`C1 private per-extension results: ${path.join(EVIDENCE, 'results.json')}`);
     expect(results.today?.failure).toBeUndefined(); expect(results.engine?.failure).toBeUndefined();
     expect(comparison.filter((r) => !r.same)).toEqual([]);
-    // The corpus deliberately excludes private-extension-32's TensorFlow runtime:
-    // preserve/report its same compile failure, never mask any other one.
+    // Preserve only health exceptions declared by the external manifest.
     for (const mode of ['today', 'engine']) {
       expect(results[mode].openWaitError, `${mode}: project-open deadline`).toBeUndefined();
       expect(results[mode].openCompletionError, `${mode}: project-open completion deadline`).toBeUndefined();
       expect(results[mode].openDone, `${mode}: original project open completed`).toBe(true);
-      for (const records of [results[mode].extensions, results[mode].after]) expect(records.filter((r: any) => r.id !== 'private-extension-32' && (!r.active || !r.enabled || r.health !== 'ok'))).toEqual([]);
+      for (const records of [results[mode].extensions, results[mode].after]) expect(records.filter((r: any) => manifest.healthExceptions[r.id] ? r.health !== manifest.healthExceptions[r.id] : (!r.active || !r.enabled || r.health !== 'ok'))).toEqual([]);
       for (const ui of [results[mode].ui, results[mode].uiAfter]) {
         expect(ui.panels.filter((p: any) => !p.mounted || p.error)).toEqual([]);
         expect(ui.commands.filter((c: any) => !c.ok)).toEqual([]);
-        expect(ui.theme.tools).toBeGreaterThanOrEqual(8);
+        expect(ui.theme.tools).toBeGreaterThanOrEqual(manifest.ui.minimumTools);
         expect(ui.theme.stage && ui.theme.timeline).toBe(true);
       }
     }
     expect(results.engine.ui).toEqual(results.today.ui);
     expect(results.engine.uiAfter).toEqual(results.today.uiAfter);
-    expect(results.engine.ui.gradient).toBe('private-extension-15');
+    expect(results.engine.ui.contributionOwner).toBe(manifest.ui.expectedOwnerId);
     expect(results.engine.ui.rasterWrapped && results.engine.ui.legacyPm).toBe(true);
     expect(results.engine.frames.length).toBe(captures.length);
     expect(results.engine.frames.filter((f: any) => !f.pass)).toEqual([]);
@@ -297,6 +330,6 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
   } finally {
     for (const profile of profiles) await rm(profile, { recursive: true, force: true });
     for (const capture of captures) await rm(capture.baseline, { force: true });
-    for (const time of [.2, 1.2]) await rm(path.join(EVIDENCE, `today-wrappers-${time}.rgba`), { force: true });
+    for (const time of manifest.wrapperTimes) await rm(path.join(EVIDENCE, `today-wrappers-${time}.rgba`), { force: true });
   }
 });

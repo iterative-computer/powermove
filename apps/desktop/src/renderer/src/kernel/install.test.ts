@@ -126,7 +126,7 @@ describe('installKernel', () => {
       quality: {}, waitedUs: 0, renderUs: 0, mainMs: 0 };
     PM.EngineRender = { rasterSync: vi.fn(() => snapshot), answerCompat: vi.fn(() => () => {}), toCanvas: (s: any) => Object.assign(document.createElement('canvas'), { width: s.width, height: s.height }) };
     installed = installKernel(PM);
-    const api = installed.api('private-extension-38');
+    const api = installed.api('raster-assignment-probe');
     const compat = PM.RasterCompat;
     const need = { composition: 'P-root', layer: 'T1', time: 0, source: 'rasterOverride' as const, scale: 1 };
     expect(compat.wrapped()).toBe(false);
@@ -134,7 +134,7 @@ describe('installKernel', () => {
     const order: string[] = [];
     const original = api.services.get<(...args: any[]) => any>('raster')!;
     const service = api.services.register('raster', (...args: any[]) => { order.push('service'); return original(...args); });
-    // The C1 corpus pattern (private-extension-38): capture, then assign.
+    // The public compatibility pattern: capture, then assign.
     const host = (api as any).host.pm;
     const raster = host.raster;
     const anchored = (L: any, scale = 1, time = 0) => {
