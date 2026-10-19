@@ -148,6 +148,9 @@ export function at(root: any, path: readonly PathPart[]): any {
 /** A detached input as the JSON the mirror would hold (evaluated ad hoc). */
 const asJson = (value: any): any => JSON.parse(JSON.stringify(value));
 
+/** Whether canonicalProject moves this root into `comps[compId]` (shared/canonical-json.ts). */
+const canonicalRoot = (proj: any): boolean => typeof proj?.compId === 'string' && !!proj.compId
+  && !(Object.prototype.hasOwnProperty.call(proj, 'comps') && !(proj.comps && typeof proj.comps === 'object' && !Array.isArray(proj.comps)));
 /** V8's TypeError for `value[key]` on a nullish `value`. */
 const readThrows = (value: unknown, key: string): TypeError => new TypeError(`Cannot read properties of ${value === null ? 'null' : 'undefined'} (reading '${key}')`);
 /** V8's TypeError for `Object.entries(undefined)`. */
@@ -327,7 +330,11 @@ export class NativeApi {
     // what it holds). If not, a structural write bypassed the barrier: repair
     // before answering rather than answer for another layer.
     const barrier = this.barrier();
-    const mirrored = barrier ? lookup(barrier.shadow, [...(c.comp.startsWith('@path:') ? JSON.parse(c.comp.slice(6)) : ['comps', c.comp]), 'layers', i, 'id']) : null;
+    const base: PathPart[] = c.comp.startsWith('@path:') ? JSON.parse(c.comp.slice(6))
+      // A root canonicalProject leaves as it is (no compId): the mirror holds its layers at the top.
+      : c.cur === this.unwrap(this.PM.proj) && !canonicalRoot(c.cur) ? []
+        : ['comps', c.comp];
+    const mirrored = barrier ? lookup(barrier.shadow, [...base, 'layers', i, 'id']) : null;
     if (barrier && !c.comp.startsWith('@json:') && (!mirrored?.exists || mirrored.value !== raw.id)) {
       this.stats.repairs += 1;
       const missed = barrier.repair('structuralDiff');

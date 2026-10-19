@@ -152,6 +152,10 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     delete PM.proj.compId;
     PM.touch();
     doc.api!.worldMatrix(child, 1);
+    const repairs = (doc.stats() as any).native.repairs;
+    for (let i = 0; i < 5; i++) doc.api!.worldMatrix(child, 1 + i / 10);
+    // The mirror holds the root under its id: no query of it needs a repair.
+    expect((doc.stats() as any).native.repairs).toBe(repairs);
     expect(fallbacks(doc)).toEqual({});
     expect(doc.dual!.total().mismatched).toBe(0);
   });
