@@ -118,6 +118,31 @@ describe('detached input reads through real pm-wasm', () => {
     }
   });
 
+  it('observes custom serializers and rejects non-composition roots without retrying forever', async () => {
+    const { PM, doc, comp, cache }=await fixture();
+    const address=cache.address(comp), wasm=doc.wasm!;
+    const req={op:'ev',comp:address,open:PM.proj.compId,layer:0,key:'opacity',t:0.5};
+    cache.query(address,req,wasm,doc.barrier!.revision);
+    const p=comp.layers[0].p.opacity;
+    p.toJSON=()=>({v:77,kf:[]});
+    expect(body(cache.query(address,req,wasm,doc.barrier!.revision))).toEqual({ok:77});
+    p.toJSON=()=>({v:88,kf:[]});
+    expect(body(cache.query(address,req,wasm,doc.barrier!.revision))).toEqual({ok:88});
+    // A cold full query invokes a custom serializer once, including its effects.
+    let calls=0;
+    p.toJSON=()=>({v:++calls,kf:[]});
+    expect(body(cache.query(address,req,wasm,doc.barrier!.revision))).toEqual({ok:1});
+    expect(calls).toBe(1);
+    expect(body(cache.query(address,req,wasm,doc.barrier!.revision))).toEqual({ok:2});
+    expect(calls).toBe(2);
+    (comp as any).toJSON=()=>[];
+    expect(cache.query(address,req,wasm,doc.barrier!.revision).throw.message).toBe('Invalid detached composition JSON');
+    for (const invalid of [[], new Number(3)]) {
+      const id=cache.address(invalid);
+      expect(cache.query(id,{...req,comp:id},wasm,doc.barrier!.revision).throw.message).toBe('Invalid detached composition JSON');
+    }
+  });
+
   it('keeps the facade exact after reorder, retained keyframe writes, and module reset', async () => {
     const { PM, doc, comp }=await fixture();
     PM.scope=[{}]; PM.curComp=()=>comp;

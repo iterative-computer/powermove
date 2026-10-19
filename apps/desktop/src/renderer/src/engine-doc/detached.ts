@@ -28,7 +28,7 @@ const shallow = (a: any, b: any): boolean => {
 };
 const unchanged = (root: any, input: Input): boolean => {
   const value = at(root, input.path);
-  if (!Object.is(value, input.value)) return false;
+  if (!Object.is(value, input.value) || (object(value) && typeof value.toJSON === 'function')) return false;
   if (input.length !== undefined) return value.length === input.length;
   if (!input.keys) return true;
   const ks = keys(value)!;
@@ -64,6 +64,8 @@ export class DetachedScopes {
     const comp: any = this.addresses.get(address)?.deref();
     if (!comp) throw new Error('Detached scope was collected');
     const scope = this.scopes.get(comp)!;
+    const serialized = () => wasm.query({...request, comp:'@detached', compJsonText:JSON.stringify(comp) ?? 'undefined'});
+    if (typeof comp.toJSON === 'function') { scope.answer=undefined; return this.copy(serialized()); }
     const layers = Array.isArray(comp.layers) ? comp.layers : [];
     // Structural edits invalidate the entire scope even when this answer did
     // not traverse the changed layer (parent/index lookup plans depend on it).
@@ -85,13 +87,20 @@ export class DetachedScopes {
     let answer = scope.answer;
     if (answer && (answer.wasm !== wasm || answer.revision !== revision || answer.context !== wasm.contextRevision)) { scope.answer = undefined; answer = undefined; }
     const changed = answer?.inputs.filter(input => !unchanged(comp, input));
+    if (changed?.some(input => { const value=at(comp,input.path); return object(value) && typeof value.toJSON === 'function'; })) {
+      scope.answer=undefined;
+      return this.copy(serialized());
+    }
     if (answer && answer.key === key && !changed!.length) return this.copy(answer.reply);
     if (!answer) {
-      answer = { id: 'scope-' + ++serial, wasm, revision, context: wasm.contextRevision, mirror: json(comp), inputs: [], reply: null, key };
+      const mirror=json(comp);
+      if (!object(mirror) || Array.isArray(mirror)) return this.copy(wasm.query({...request,comp:'@detached',compJsonText:JSON.stringify(mirror) ?? 'undefined'}));
+      answer = { id: 'scope-' + ++serial, wasm, revision, context: wasm.contextRevision, mirror, inputs: [], reply: null, key };
     }
     const payload: Record<string, unknown> = { ...request, comp: '@detached', scopeId: answer.id };
     if (!answer.reply) payload.compJson = answer.mirror;
     else if (changed!.length) payload.scopePatches = this.patches(comp, answer, changed!.map(i => i.path));
+    let fresh = !answer.reply;
     const repaired = new Set<string>();
     for (;;) {
       const reply = wasm.query(payload);
@@ -99,10 +108,16 @@ export class DetachedScopes {
       delete payload.scopePatches;
       if (reply.throw?.message === 'detached-scope-missing') {
         answer.mirror = json(comp);
+        fresh = true;
         payload.compJson = answer.mirror;
         continue;
       }
       if (!Array.isArray(reply.reads)) throw new Error('Detached scope reply omitted input reads');
+      if (reply.reads.some((p: PathPart[]) => { const value=at(comp,p); return object(value) && typeof value.toJSON === 'function'; })) {
+        scope.answer=undefined;
+        return this.copy(fresh ? reply : serialized());
+      }
+      fresh = false;
       // A changed condition can reveal previously unread data. Hydrate those
       // inputs from the live scope and re-evaluate until every actual read is
       // consistent with it. Snapshot identities alone cannot establish this.
