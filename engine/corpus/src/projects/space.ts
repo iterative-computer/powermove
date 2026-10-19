@@ -277,6 +277,81 @@ function modelGroups(): CorpusProject {
     blender: { engine: 'eevee', samples: 16, previewSamples: 8, previewScale: .5 } });
 }
 
+/**
+ * 3D object, light, and camera layers placed through groups: plain 3D
+ * groups with anchors, non-uniform and animated scale, X/Z rotation and
+ * orientation, a nested 3D group, a light and a camera inside 3D groups,
+ * layer parenting through a grouped object, and a flat (2D) group holding
+ * 3D layers. The engine places them with `world3D` (no route reason).
+ */
+function groupRoles(): CorpusProject {
+  const b = newProject('3d/group-roles', { name: '3D layers in 3D groups', backgroundFill: BLACK });
+  b.add(b.object3d({ source: { primitive: 'plane', parameters: { width: 14, height: 10 } }, material: material('#2E3140', { roughness: .9 }), castShadow: false }, { name: 'Floor', position: [0, -1.4, 0], rotation: [-90, 0, 0] }));
+  const rig = b.layer('group', { name: 'Rig (anchor, scale, X/Z rotation)', threeD: true, p: {
+    'position.x': -1.2, 'position.y': .2, 'position.z': b.ch(0, [[0, 0], [3, -1]]),
+    'anchor.x': .5, 'anchor.y': -.25, 'anchor.z': .3,
+    'scale.x': b.ch(100, [[0, 100], [3, 140]]), 'scale.y': 80, 'scale.z': 120,
+    'rotation.x': b.ch(10, [[0, 10], [3, -25]]), rotation: b.ch(0, [[0, 0], [3, 40]]), 'orientation.y': 15,
+  } });
+  b.add(b.object3d({ source: { primitive: 'box' }, material: material('#FF6B1A', { metalness: .3 }) }, { id: 'rig-box', name: 'Box in rig', group: rig.id, position: [0, 0, 0], rotation: [0, 20, 0] }));
+  b.add(b.object3d({ source: { primitive: 'cone', parameters: { radius: .3, height: .7 } }, material: material('#F2C14E') }, { name: 'Cone parented to the grouped box', parent: 'rig-box', position: [0, .9, 0], scale: [100, 100, 100] }));
+  b.add(b.light3d({ type: 'spot', p: { intensity: 35, color: '#7DD3FC', angle: 35, penumbra: .4, targetX: 0, targetY: -1, targetZ: 0 } }, { name: 'Spot in rig', group: rig.id, position: [.5, 2.5, 1] }));
+  const inner = b.layer('group', { name: 'Nested 3D group', threeD: true, group: rig.id, p: {
+    'position.x': 1.6, 'position.y': .3, 'rotation.y': b.ch(0, [[0, 0], [3, 120]]), 'scale.x': 60, 'scale.y': 60, 'scale.z': 60,
+  } });
+  b.add(b.object3d({ source: { primitive: 'sphere', parameters: { radius: .7, segments: 32 } }, material: material('#4C8DFF', { roughness: .3 }) }, { name: 'Sphere in nested group', group: inner.id, position: [.8, 0, 0] }));
+  b.add(b.light3d({ type: 'point', p: { intensity: 12, color: '#FB7185', distance: 8, decay: 2 } }, { name: 'Point in nested group', group: inner.id, position: [-.6, 1, .6] }));
+  b.add(inner);
+  b.add(rig);
+  const flat = b.layer('group', { name: 'Flat group', p: { 'position.x': 1.5, 'position.y': -.5, rotation: 12, 'scale.x': 90, 'scale.y': 90 } });
+  b.add(b.object3d({ source: { primitive: 'torus', parameters: { radius: .45, tube: .16, segments: 32 } }, material: material('#3FCF8E', { metalness: .5 }) }, { name: 'Torus in a flat group', group: flat.id, position: [1.2, 0, .5], p: { 'rotation.x': b.ch(0, [[0, 0], [3, 90]]) } }));
+  b.add(flat);
+  b.add(b.light3d({ type: 'sun', p: { intensity: 1.6, color: '#FFF4E0' } }, { name: 'Sun', position: [-4, 6, 4] }));
+  const dolly = b.layer('group', { name: 'Camera dolly', threeD: true, p: { 'rotation.y': b.ch(-10, [[0, -10], [3, 25]]), 'position.y': .3 } });
+  b.add(b.camera3d({ camera: { p: { targetX: 0, targetY: 0, targetZ: 0 } }, environment: {} }, { name: 'Camera in a 3D group', group: dolly.id, position: [0, 1.2, 7.5] }));
+  b.add(dolly);
+  return project(b, { group: '3D', title: '3D objects, lights, and a camera in 3D groups',
+    covers: ['3D group anchor', '3D group non-uniform animated scale', '3D group X and Z rotation and orientation', 'nested 3D groups', 'lights in 3D groups', 'camera in a 3D group', 'parenting to a grouped 3D object', '3D layers in a flat group'],
+    samples: [0, 1.5, 3] });
+}
+
+/**
+ * 3D material maps of the still classes today's app draws through Chromium's
+ * bitmap (the 2D layers' level 1 classes): PQ/HLG/cHRM/cICP PNG, CMYK JPEG,
+ * lossless and arithmetic JPEG, TIFF structures, AVIF transfer and
+ * primaries classes, with and without alpha, as color maps (sRGB) and as
+ * roughness and normal maps (linear). The engine reads them as level 1
+ * still-compatibility bitmaps.
+ */
+function mapsLevel1(): CorpusProject {
+  const b = newProject('3d/maps-level1', { name: '3D maps of every level 1 still class', backgroundFill: BLACK });
+  const colorMaps = [
+    'pq8.png', 'hlg8.png', 'chrm8.png', 'png-chrm-p3-nogama-8.png', 'png-cicp-12-16-8.png', 'png-cicp-9-18-8.png',
+    'cmyk-noicc.jpg', 'lossless8.jpg', 'lossless12.jpg', 'arithmetic8.jpg',
+    'tiff-planar16.tiff', 'tiff-tiled.tiff', 'tiff-ycbcr-jpeg.tiff', 'tiff-f16-pred3.tiff', 'tiff-f32-lzw-pred3.tiff',
+    'hdr-pq.avif', 'hdr-hlg.avif', 'bt2020-sdr.avif', 'avif-cicp-12-14-10.avif',
+    'pq16-alpha.png', 'hlg8-alpha.png', 'chrm8-alpha.png', 'png-cicp-1-13-16-alpha.png', 'tiff-cmyka.tiff', 'avif-alpha-9-16-10.avif',
+  ];
+  const columns = 7, size = 1.05, gap = .15;
+  colorMaps.forEach((file, index) => {
+    const col = index % columns, row = Math.floor(index / columns);
+    const x = (col - (columns - 1) / 2) * (size + gap), y = (1.5 - row) * (size + gap);
+    // The last plane of each alpha map is translucent, so the map's alpha blends.
+    const translucent = index >= colorMaps.length - 6 && index % 2 === 0;
+    b.add(b.object3d({ source: { primitive: 'plane', parameters: { width: size, height: size } },
+      material: { p: { color: '#FFFFFF', roughness: 1, metalness: 0, ...(translucent ? { opacity: .98 } : {}) }, maps: { color: ref(file) } } },
+    { name: `Color map ${file}`, position: [x, y, 0] }));
+  });
+  // Linear maps: roughness and normal maps of HDR and wide-gamut classes on lit spheres.
+  const linear: Array<[string, string]> = [['roughness', 'pq8.png'], ['normal', 'hlg8.png'], ['roughness', 'hdr-pq.avif'], ['normal', 'tiff-planar16.tiff'], ['metalness', 'cmyk-noicc.jpg']];
+  linear.forEach(([slot, file], index) => b.add(b.object3d({ source: { primitive: 'sphere', parameters: { radius: .42, segments: 32 } },
+    material: { p: { color: '#C8C8D0', roughness: .4, metalness: .2 }, maps: { [slot]: ref(file) } } },
+  { name: `${slot} map ${file}`, position: [(index - 2) * 1.2, -2.35, .2], p: { 'rotation.y': b.ch(0, [[0, 0], [2, 60]]) } })));
+  b.add(b.light3d({ type: 'sun', p: { intensity: 2, color: '#FFFFFF' } }, { name: 'Sun', position: [-2, 3, 5] }));
+  b.add(camera(b, { environment: { p: { ambient: 1, ambientColor: '#FFFFFF' } } }, [0, 0, 7.2]));
+  return project(b, { group: '3D', title: '3D maps of every level 1 still class', covers: ['3D maps: PQ, HLG, cHRM, cICP PNG', '3D maps: CMYK, lossless and arithmetic JPEG', '3D maps: TIFF structures', '3D maps: AVIF transfers and primaries', '3D maps with transparency', 'linear roughness, normal, metalness maps'], samples: [0, 2] });
+}
+
 export function spaceProjects(): CorpusProject[] {
-  return [...layers25d(), primitives(), latheExtrude(), lights(), ...cameras(), motionBlur(), transparency(), depthSets(), studioDefaults(), gltf(), gltfMaterials(), meshSlots(), ...special(), modelGroups()];
+  return [...layers25d(), primitives(), latheExtrude(), lights(), ...cameras(), motionBlur(), transparency(), depthSets(), studioDefaults(), gltf(), gltfMaterials(), meshSlots(), ...special(), modelGroups(), groupRoles(), mapsLevel1()];
 }
