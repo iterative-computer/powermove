@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import {compositionRuntime} from './service';
+import {targetScene} from './engine-targets';
 import {renderCamera} from './render-camera';
 import {layer3DRole,isModelGroup} from './layers';
 import {viewportCamera,viewportState,viewLabel,getViewportMode,activeCameraLayer,viewportPose,setViewAxis,setViewportMode,toggleViewProjection,onViewportChange,applyViewportPose,localViewIds,OPPOSITE_VIEW,type ViewAxis} from './viewport';
@@ -89,7 +90,7 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
   const viewCamera=()=>fitCamera(viewportCamera(PM,renderCamera(PM)),rect);
   const excluded=()=>getViewportMode(PM)==='camera'?activeCameraLayer(PM)?.id??null:null;
   /** In Edit Mode transforms act on the selected points; otherwise on the selected layers. */
-  const targets=()=>editModeLayer(PM)?[pointsTarget(PM)].filter(t=>!!t) as ReturnType<typeof resolveTargets>:resolveTargets(PM,selected3D(PM),compositionRuntime(PM),{excludeCamera:excluded()});
+  const targets=()=>editModeLayer(PM)?[pointsTarget(PM)].filter(t=>!!t) as ReturnType<typeof resolveTargets>:resolveTargets(PM,selected3D(PM),targetScene(PM),{excludeCamera:excluded()});
 
   const navigation:SceneNavigation=createSceneNavigation(PM,stage,{
     height:()=>rect.height,panComposition:host.panComposition,zoomComposition:host.zoomComposition

@@ -887,6 +887,19 @@ export class NativeApi {
   }
 
   /**
+   * `runtime.objects.get(id).matrixWorld` for 3D object layers `ids` of the
+   * composition being viewed (core/scene3d/engine-targets.ts), from pm-wasm.
+   * `legacy` is today's runtime answer (counted fallbacks, dual mode).
+   */
+  objectWorlds3d(ids: readonly string[], T: number, legacy: () => Record<string, number[] | null>): Record<string, number[] | null> {
+    return this.answer('objectWorlds3d', () => {
+      const c = this.comps();
+      if (!c) return { fallback: 'context' };
+      return this.query<Record<string, number[] | null>>('objectWorlds3d', { comp: c.comp, open: c.open, ids: [...ids], t: T, ...geometryRequest(this.PM) });
+    }, legacy, () => ({ ids: [...ids], t: T }));
+  }
+
+  /**
    * `compositionRuntime(PM, T).camera` of the composition being viewed
    * (core/scene3d/render-camera.ts): lens and `matrixWorld` from pm-wasm.
    * `legacy` is today's runtime camera, run only where every legacy

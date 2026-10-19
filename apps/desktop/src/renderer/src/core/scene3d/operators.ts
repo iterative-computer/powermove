@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import {compositionRuntime} from './service';
+import {targetScene} from './engine-targets';
 import {layer3DRole} from './layers';
 import {editScene} from './operations';
 import {activeObject,setActiveObject,selected3D,isViewportItem,cursorLocation,setCursorLocation} from './editor-state';
@@ -19,7 +20,7 @@ const fail=(message:string)=>{throw new Error(message);};
 const select=(PM:any,ids:string[],active?:string|null)=>{
   PM.selectLayers?.(ids);setActiveObject(PM,active===undefined?ids.at(-1)??null:active);PM.bus?.emit?.('scene3d:selection');PM.invalidate?.();
 };
-const transformTargets=(PM:any,ids=selected3D(PM))=>resolveTargets(PM,ids,compositionRuntime(PM),{excludeCamera:getViewportMode(PM)==='camera'?activeCameraLayer(PM)?.id:null});
+const transformTargets=(PM:any,ids=selected3D(PM))=>resolveTargets(PM,ids,targetScene(PM),{excludeCamera:getViewportMode(PM)==='camera'?activeCameraLayer(PM)?.id:null});
 
 /* ── selection ───────────────────────────────────────── */
 export type SelectAction='select'|'deselect'|'invert'|'toggle';

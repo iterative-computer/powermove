@@ -823,6 +823,32 @@ impl<'d> Scope<'_, 'd> {
             .collect())
     }
 
+    /// `runtime.objects.get(id).matrixWorld` for 3D object layers `ids` (a
+    /// model's asset root sits under it): what transform targets and the
+    /// gizmo place themselves with. `None` for an id without an object.
+    pub fn object_worlds3d(
+        &mut self,
+        ids: &[String],
+        time: f64,
+        host: &mut dyn LayerHost,
+    ) -> JsResult<Vec<Option<pm_geom3d::gltf::math::Mat4>>> {
+        let Some(g) = host.geometry() else {
+            return Err(host_only("3D object placements"));
+        };
+        let scene = self.composition_scene3d(time, g)?;
+        Ok(ids
+            .iter()
+            .map(|id| {
+                scene
+                    .scene
+                    .objects
+                    .iter()
+                    .find(|o| &o.id == id)
+                    .map(|o| o.world)
+            })
+            .collect())
+    }
+
     /// `compositionRuntime(PM, time).camera`: the composition's render
     /// camera after `sync` (lens and `matrixWorld`; the viewport's camera
     /// view, framing, and transform gizmos read it).

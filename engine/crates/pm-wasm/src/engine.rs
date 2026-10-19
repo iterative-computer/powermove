@@ -1160,6 +1160,36 @@ impl Engine {
                 }
                 out.raw("}");
             }
+            "objectWorlds3d" => {
+                // `runtime.objects.get(id).matrixWorld` per object layer.
+                let ids: Vec<String> = get(request, "ids")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let worlds = scope.object_worlds3d(&ids, t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                let worlds = try_js!(worlds);
+                out.raw("{");
+                for (i, (id, w)) in ids.iter().zip(&worlds).enumerate() {
+                    if i > 0 {
+                        out.raw(",");
+                    }
+                    out.str(id);
+                    out.raw(":");
+                    match w {
+                        Some(w) => out.nums(w),
+                        None => out.raw("null"),
+                    }
+                }
+                out.raw("}");
+            }
             "camera3d" => {
                 // `compositionRuntime(PM, t).camera`: lens and `matrixWorld`.
                 let mut host = crate::geometry::GeomHost::new(models, request);

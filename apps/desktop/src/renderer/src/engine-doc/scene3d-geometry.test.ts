@@ -26,6 +26,8 @@ import { loadGltf } from '../core/scene3d/import-model';
 import { compositionRuntime } from '../core/scene3d/service';
 import { runtimeBoxes } from '../core/scene3d/navigation';
 import { renderCamera, runtimeCameraFacts } from '../core/scene3d/render-camera';
+import { targetScene } from '../core/scene3d/engine-targets';
+import { resolveTargets, deltaCommands } from '../core/scene3d/targets';
 import * as THREE from 'three';
 import { parseObj } from '../kernel/obj';
 
@@ -447,6 +449,65 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     exercise(PM, doc, rng(9), 40);
     expect(mismatches(doc)).toEqual([]);
     expect(fellBack(doc)).toEqual([]);
+  });
+
+  it('places transform targets where the three.js runtime does, and gestures write the same edits', async () => {
+    let compared = 0, commands = 0, worst = 0, inexact = 0;
+    for (const seed of [31, 32, 33]) {
+      const { PM, doc } = await editor();
+      const random = rng(seed);
+      const models = await addModels(PM);
+      populate(PM, random, ['cube', 'wedge', ...models]);
+      for (const name of models.slice(0, 3)) editScene(PM, { operation: 'add_object', object: { source: { assetId: name }, p: { x: random() * 3 - 1.5 } } });
+      if (seed === 33) addModelGroups(PM);
+      // A flat group of 3D objects: its pivot is its members' box center.
+      const objects = PM.proj.layers.filter((l: any) => l.d?.data?.object && !l.group).map((l: any) => l.id);
+      if (objects.length > 2) PM.groupLayers(objects.slice(0, 2), 'Flat');
+      PM.touch();
+      const all = PM.proj.layers.filter((l: any) => l.d?.definition?.startsWith('powermove.3d.') || l.type === 'group').map((l: any) => l.id);
+      const facts = (list: any[]) => list.map(t => ({ id: t.id, role: t.role, modes: t.modes, world: Array.from(t.world.elements), position: t.position.toArray(), rotation: t.rotation.toArray(), target: t.target?.toArray() ?? null, parentInverse: Array.from(t.parentInverse.elements), orientation: t.orientation.toArray() }));
+      for (const t of [0, 1.1, 2.4]) {
+        PM.time = t;
+        const engineTargets = resolveTargets(PM, all, targetScene(PM)), todayTargets = resolveTargets(PM, all, compositionRuntime(PM, t));
+        const engine = facts(engineTargets), today = facts(todayTargets);
+        // The same targets, roles, and modes; every number within the
+        // evaluation class (pm-eval's world3D can differ from the
+        // TypeScript product by an ulp: worst recorded below).
+        expect(engine.map(f => [f.id, f.role, f.modes]), `seed ${seed} t ${t}`).toEqual(today.map(f => [f.id, f.role, f.modes]));
+        engine.forEach((f: any, i) => {
+          for (const k of ['world', 'position', 'rotation', 'target', 'parentInverse', 'orientation'] as const) {
+            const a: number[] = f[k] ?? [], b: number[] = (today[i] as any)[k] ?? [];
+            expect(a.length).toBe(b.length);
+            a.forEach((v, j) => {
+              const d = Math.abs(v - b[j]!);
+              worst = Math.max(worst, d / Math.max(1, Math.abs(b[j]!)));
+              if (d !== 0) inexact++;
+              expect(d, `seed ${seed} t ${t} ${f.id} ${k}[${j}]`).toBeLessThanOrEqual(1e-12 * Math.max(1, Math.abs(b[j]!)));
+            });
+          }
+        });
+        // What a gesture writes: every target's edits for a move, a turn, and
+        // a scale are the same commands (document values are tidied to 1e-9).
+        const deltas: Array<[THREE.Matrix4, 'translate' | 'rotate' | 'scale']> = [
+          [new THREE.Matrix4().makeTranslation(0.37, -0.21, 0.5), 'translate'],
+          [new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(0.3, 1, 0.2).normalize(), 0.61), 'rotate'],
+          [new THREE.Matrix4().makeScale(1.3, 0.8, 1.1), 'scale']
+        ];
+        for (const [delta, mode] of deltas) {
+          engineTargets.forEach((target, i) => {
+            if (!target.modes.includes(mode)) return;
+            expect(deltaCommands(PM, target, delta, mode), `seed ${seed} t ${t} ${target.id} ${mode}`).toEqual(deltaCommands(PM, todayTargets[i]!, delta, mode));
+            commands++;
+          });
+        }
+        compared += today.length;
+      }
+      expect(mismatches(doc)).toEqual([]);
+      expect(Object.keys(doc.api!.stats.fallbacks).filter(k => /^(objectWorlds3d|objectBoxes3d):/.test(k))).toEqual([]);
+    }
+    expect(compared).toBeGreaterThan(30);
+    expect(commands).toBeGreaterThan(60);
+    console.log(`transform targets: ${compared} compared, ${inexact} inexact numbers, worst relative difference ${worst}; ${commands} gesture edits equal`);
   });
 
   it('gives the viewport the render camera three.js holds, exactly', async () => {
