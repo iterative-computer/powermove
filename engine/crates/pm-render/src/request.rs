@@ -79,12 +79,6 @@ pub struct RenderRequest {
     pub sampling: Sampling,
     /// The end-of-clip padding of video sources ([`VideoEnd`]).
     pub video_end: VideoEnd,
-    /// Today's output scale for level 1 SVG image buckets, per axis
-    /// (`ViewerState::svg_scale`: the legacy compositor's `outputScale` of
-    /// the canvas today's viewer would draw this view into). `None`: the
-    /// request's own scale, which is today's for snapshots and exports
-    /// (`W / comp.w`, `H / comp.h`).
-    pub svg_scale: Option<(f64, f64)>,
 }
 
 impl RenderRequest {
@@ -105,7 +99,6 @@ impl RenderRequest {
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
             video_end: VideoEnd::Preview,
-            svg_scale: None,
         }
     }
 
@@ -125,7 +118,6 @@ impl RenderRequest {
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
             video_end: VideoEnd::Preview,
-            svg_scale: None,
         }
     }
 
@@ -162,7 +154,6 @@ impl RenderRequest {
             },
             sampling,
             video_end: VideoEnd::of(request.purpose),
-            svg_scale: None,
         })
     }
 
@@ -190,16 +181,6 @@ impl RenderRequest {
             for v in [sx, sy] {
                 if !(v.is_finite() && (MIN_SCALE * 0.999..=MAX_SCALE * 1.001).contains(&v)) {
                     return Err(RenderError::Request(format!("scale {v} outside 0.01..16")));
-                }
-            }
-        }
-        if let Some((sx, sy)) = self.svg_scale {
-            for v in [sx, sy] {
-                if !(v.is_finite() && v > 0.0 && v <= MAX_SCALE * 4.0) {
-                    return Err(RenderError::Request(format!(
-                        "svg scale {v} outside 0..{}",
-                        MAX_SCALE * 4.0
-                    )));
                 }
             }
         }

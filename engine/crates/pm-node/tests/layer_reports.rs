@@ -199,7 +199,7 @@ fn state(view_seq: u64) -> ViewerState {
         view_seq: Seq::new(view_seq).unwrap(),
         vsync: None,
         depth_id: None,
-        svg_scale: None,
+        canvas: None,
     }
 }
 

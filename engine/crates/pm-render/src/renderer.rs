@@ -213,7 +213,6 @@ fn build_options(
         sampling: request.sampling,
         shader_fallback,
         video_end: request.video_end,
-        svg_scale: request.svg_scale,
     }
 }
 

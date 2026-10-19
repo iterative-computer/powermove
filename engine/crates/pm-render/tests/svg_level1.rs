@@ -682,12 +682,22 @@ fn planned_buckets(plan: &pm_render::plan::CompPlan, out: &mut Vec<(u32, u32)>) 
     }
 }
 
-/// The engine's viewer request for a view (`pm_node::present::compose`'s
-/// `placement`: the whole composition at zoom × DPR (capped at 2 by the
-/// presentation) × the preview resolution), with today's output scale for
-/// SVG buckets when the viewer sends one.
-fn viewer_request(cw: u32, ch: u32, row: &Value, svg_scale: bool) -> RenderRequest {
+/// The engine's viewer request for a view. On today's canvas (decision V1,
+/// `pm_node::present::compose::canvas_placement`): the output at today's
+/// output scale (the canvas over the composition part it holds). Without
+/// it, the composition at zoom × DPR (capped at 2 by the presentation) ×
+/// the preview resolution, as the engine drew before.
+fn viewer_request(cw: u32, ch: u32, row: &Value, todays_canvas: bool) -> RenderRequest {
     let f = |k: &str| row[k].as_f64().unwrap();
+    if todays_canvas {
+        let a = row["outputScale"].as_array().unwrap();
+        let (sx, sy) = (a[0].as_f64().unwrap(), a[1].as_f64().unwrap());
+        let px = |v: u32, s: f64| (f64::from(v) * s).ceil() as u32;
+        return RenderRequest {
+            scale: Some((sx, sy)),
+            ..RenderRequest::sized(Size::new(px(cw, sx), px(ch, sy)), Precision::Float16)
+        };
+    }
     let res = if row["resolution"] == "auto" {
         1.0
     } else {
@@ -695,12 +705,7 @@ fn viewer_request(cw: u32, ch: u32, row: &Value, svg_scale: bool) -> RenderReque
     };
     let s = f("zoom") * f("dpr").min(2.0) * res;
     let px = |v: u32| ((f64::from(v) * s).round()).clamp(1.0, 16384.0) as u32;
-    let mut r = RenderRequest::sized(Size::new(px(cw), px(ch)), Precision::Float16);
-    if svg_scale {
-        let a = row["svgScale"].as_array().unwrap();
-        r.svg_scale = Some((a[0].as_f64().unwrap(), a[1].as_f64().unwrap()));
-    }
-    r
+    RenderRequest::sized(Size::new(px(cw), px(ch)), Precision::Float16)
 }
 
 /// Today's viewer buckets over zoom 0.1 to 8 × DPR 1, 2, 3 × layer scale
@@ -709,7 +714,7 @@ fn viewer_request(cw: u32, ch: u32, row: &Value, svg_scale: bool) -> RenderReque
 /// `previewRenderSize`, `previewRenderViewport`, `outputScale`;
 /// apps/desktop/src/extensions/viewer/svg-buckets.test.ts keeps the
 /// fixture equal to them): the engine's viewer frames plan exactly those
-/// buckets with the scale the viewer sends (`ViewerState::svg_scale`).
+/// buckets when they render at today's canvas (`ViewerState::canvas`).
 #[test]
 fn viewer_frames_pick_todays_buckets_at_todays_viewer_scale() {
     let fixture: Value =
@@ -776,13 +781,13 @@ fn viewer_frames_pick_todays_buckets_at_todays_viewer_scale() {
         };
         asset(&mut doc, "art", "image", "svg", sw, sh, 0.0);
         let doc = load(&doc);
-        let bucket = |renderer: &mut Renderer, svg_scale: bool| {
+        let bucket = |renderer: &mut Renderer, todays_canvas: bool| {
             let (plan, failures) = renderer
                 .plan(
                     &doc,
                     "Ptest-root",
                     ticks(0.0),
-                    &viewer_request(cw, ch, row, svg_scale),
+                    &viewer_request(cw, ch, row, todays_canvas),
                     &resolver,
                 )
                 .unwrap();
@@ -852,13 +857,14 @@ fn below_fit_the_viewer_bucket_is_capped_as_today_and_exports_keep_their_scale()
         out[0]
     };
     // The engine's viewer at 61% × DPR 2: 156 × 117 output.
-    let mut viewer = RenderRequest::sized(Size::new(156, 117), Precision::Float16);
+    let viewer = RenderRequest::sized(Size::new(156, 117), Precision::Float16);
     assert_eq!(
         key(&mut renderer, &viewer),
         (50, 25),
         "ceil4(1.22) = 1.25 at the engine's scale"
     );
-    viewer.svg_scale = Some((1.0, 1.0));
+    // Today's canvas (decision V1): the composition's size.
+    let viewer = RenderRequest::sized(Size::new(128, 96), Precision::Float16);
     assert_eq!(
         key(&mut renderer, &viewer),
         (40, 20),
@@ -870,12 +876,4 @@ fn below_fit_the_viewer_bucket_is_capped_as_today_and_exports_keep_their_scale()
         ..RenderRequest::sized(Size::new(256, 192), Precision::Float16)
     };
     assert_eq!(key(&mut renderer, &export), (80, 40));
-    assert!(
-        RenderRequest {
-            svg_scale: Some((f64::NAN, 1.0)),
-            ..viewer.clone()
-        }
-        .validate()
-        .is_err()
-    );
 }

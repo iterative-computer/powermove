@@ -904,7 +904,6 @@ fn plan_export_checked(
         sampling: pm_render::sampling::Sampling::Final,
         // `prepareFrame`'s end padding: the last frame of a clip is kept.
         video_end: VideoEnd::Final,
-        svg_scale: None,
     };
     Ok(ExportPlan {
         spec,

@@ -88,9 +88,6 @@ pub(crate) struct BuildKey {
     pub blur: Option<crate::motion::Blur>,
     pub video_padding: u64,
     pub view_override: bool,
-    /// Today's output scale for level 1 SVG buckets (bits), when the
-    /// request has one: it changes the buckets without changing the pass.
-    pub svg_scale: Option<(u64, u64)>,
 }
 
 /// Which document the entries belong to.

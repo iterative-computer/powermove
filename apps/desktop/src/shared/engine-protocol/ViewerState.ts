@@ -5,6 +5,7 @@ import type { PreviewResolution } from "./PreviewResolution";
 import type { Seq } from "./Seq";
 import type { Size } from "./Size";
 import type { ViewOverride } from "./ViewOverride";
+import type { ViewerCanvas } from "./ViewerCanvas";
 import type { ViewerColorSpace } from "./ViewerColorSpace";
 import type { VsyncHint } from "./VsyncHint";
 
@@ -52,14 +53,12 @@ vsync?: VsyncHint | null,
  */
 depthId?: boolean | null, 
 /**
- * Today's output scale for this view, per axis: the legacy
- * compositor's `outputScale` over the canvas today's viewer sizes for
- * it (`previewRenderSize` or the cropped `previewRenderViewport`), in
- * canvas pixels per composition pixel. Level 1 SVG images pick their
- * raster bucket at it (decision S1, docs/engine/vector.md): today's
- * viewer draws below fit at most one pixel per composition pixel,
- * where the engine draws at zoom × DPR. Absent: the bucket follows
- * the engine's output scale. Added as an optional field (RFC 02
- * version notes); a change of it is a new view.
+ * The canvas today's viewer draws this view into (decision V1,
+ * docs/engine/bridge.md "Today's viewer canvas"). With it, the engine
+ * renders the frame at that canvas's size and scales it into its CSS
+ * box as Chromium scales today's WebGL canvas; without it, the
+ * composition is drawn at zoom × DPR × the preview resolution. Added
+ * as an optional field (RFC 02 version notes); a change of it is a
+ * new view.
  */
-svgScale?: [number, number] | null, };
+canvas?: ViewerCanvas | null, };

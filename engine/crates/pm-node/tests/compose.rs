@@ -12,8 +12,9 @@ use pm_gpu::bridge_out::pool::SurfacePool;
 use pm_node::present::compose::{Composer, placement};
 use pm_node::present::document::MediaMap;
 use pm_protocol::color::{ViewerColorSpace, WorkingEncoding};
+use pm_protocol::common::Rect;
 use pm_protocol::common::{Seq, Size, Ticks};
-use pm_protocol::frame::{MediaPreference, PreviewResolution, ViewerState};
+use pm_protocol::frame::{MediaPreference, PreviewResolution, ViewerCanvas, ViewerState};
 use pm_protocol::interop::SurfaceFormat;
 use serde_json::json;
 
@@ -71,7 +72,7 @@ fn state(resolution: PreviewResolution) -> ViewerState {
         view_seq: Seq::new(1).unwrap(),
         vsync: None,
         depth_id: None,
-        svg_scale: None,
+        canvas: None,
     }
 }
 
@@ -84,6 +85,14 @@ fn bgra(bytes: &[u8], bpr: usize, x: u32, y: u32) -> [u8; 4] {
 fn draw(
     background: &str,
     resolution: PreviewResolution,
+) -> (Vec<u8>, usize, pm_node::present::compose::Placement) {
+    draw_state(background, &state(resolution), true)
+}
+
+fn draw_state(
+    background: &str,
+    s: &ViewerState,
+    check_overlay: bool,
 ) -> (Vec<u8>, usize, pm_node::present::compose::Placement) {
     let gpu = pm_gpu::Gpu::new("compose test").unwrap();
     let transform = DisplayTransform::new(&gpu.device, &gpu.queue);
@@ -98,14 +107,13 @@ fn draw(
     .unwrap();
     let mut composer = Composer::new(&gpu.device, &gpu.queue);
     let document = doc(background);
-    let s = state(resolution);
     let composed = composer
         .compose(
             &document,
             "P-root",
             &MediaMap::default(),
             Ticks::ZERO,
-            &s,
+            s,
             &working,
         )
         .unwrap();
@@ -133,17 +141,17 @@ fn draw(
         })
         .unwrap();
     let surface = &pool.surfaces[0];
-    let place = placement(&s, 160.0, 90.0);
+    let place = placement(s, 160.0, 90.0);
     // The overlay geometry names the layer where it is drawn.
     let layer = &composed.overlay.layers[0];
     assert_eq!(layer.layer.as_str(), "box");
     let scale = 1.5 * 2.0;
     assert!(
-        (layer.bounds[0][0] - (place.x + 40.0 * scale)).abs() < 1e-6,
+        !check_overlay || (layer.bounds[0][0] - (place.x + 40.0 * scale)).abs() < 1e-6,
         "{layer:?}"
     );
     assert!(
-        (layer.bounds[0][1] - (place.y + 30.0 * scale)).abs() < 1e-6,
+        !check_overlay || (layer.bounds[0][1] - (place.y + 30.0 * scale)).abs() < 1e-6,
         "{layer:?}"
     );
     (
@@ -190,4 +198,89 @@ fn a_transparent_background_shows_black_and_half_resolution_fills_the_same_recta
     // The layer, upscaled from half resolution, is red inside its interior.
     let (lx, ly) = (180 + 40 * 3, 165 + 30 * 3);
     assert_eq!(bgra(&bytes, bpr, lx + 20, ly + 10), [0, 0, 255, 255]);
+}
+
+/// Today's viewer canvas (decision V1): at 150% on a 2x display today's
+/// canvas is the composition's size (`min(1, zoom × DPR)`), and the browser
+/// scales it into its CSS box (here 3×), bilinearly, from its 8-bit pixels.
+/// The engine renders the 160 × 90 canvas and scales it the same way.
+#[test]
+fn todays_canvas_is_rendered_at_its_size_and_scaled_bilinearly_into_its_box() {
+    let mut s = state(PreviewResolution::Automatic);
+    // Stage 400 × 300 CSS: the frame at ((400 − 240) / 2 + 10, (300 − 135) / 2).
+    s.canvas = Some(ViewerCanvas {
+        width: 160,
+        height: 90,
+        crop: Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 160.0,
+            height: 90.0,
+        },
+        css: Rect {
+            x: 90.0,
+            y: 82.5,
+            width: 240.0,
+            height: 135.0,
+        },
+    });
+    let (bytes, bpr, place) = draw_state("#3366CC", &s, false);
+    assert_eq!(place.output, Size::new(160, 90));
+    assert!(place.canvas);
+    assert_eq!((place.fx, place.fy), (3.0, 3.0));
+    assert_eq!((place.x, place.y), (180.0, 165.0));
+    // Outside the snapped box: transparent; inside its edges: the background.
+    assert_eq!(bgra(&bytes, bpr, 179, 300), [0, 0, 0, 0]);
+    assert_eq!(bgra(&bytes, bpr, 660, 300), [0, 0, 0, 0]);
+    assert_eq!(bgra(&bytes, bpr, 180, 165), [0xCC, 0x66, 0x33, 255]);
+    assert_eq!(bgra(&bytes, bpr, 659, 434), [0xCC, 0x66, 0x33, 255]);
+    // The box's left edge at canvas texel 40 (frame 300): frame pixels sample
+    // `u = (i + 0.5 − 180) / 3 − 0.5` between the background and red.
+    for i in 297..304u32 {
+        let u = (f64::from(i) + 0.5 - 180.0) / 3.0 - 0.5;
+        let t = (u - 39.0).clamp(0.0, 1.0);
+        let expect = |bg: f64, fg: f64| (bg * (1.0 - t) + fg * t).round() as i32;
+        let px = bgra(&bytes, bpr, i, 165 + 40 * 3);
+        let want = [expect(204.0, 0.0), expect(102.0, 0.0), expect(51.0, 255.0)];
+        for c in 0..3 {
+            assert!(
+                (i32::from(px[c]) - want[c]).abs() <= 1,
+                "frame x {i}: {px:?} against {want:?}"
+            );
+        }
+    }
+}
+
+/// A fractional box (61% on a 2x display, panned): each edge snaps to the
+/// nearest device pixel as Blink snaps a canvas's content box, and only the
+/// canvas texels the visible pixels read are rendered.
+#[test]
+fn todays_canvas_box_snaps_each_edge_and_renders_what_is_visible() {
+    let mut s = state(PreviewResolution::Automatic);
+    s.zoom = 0.61;
+    s.canvas = Some(ViewerCanvas {
+        width: 160,
+        height: 90,
+        crop: Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 160.0,
+            height: 90.0,
+        },
+        css: Rect {
+            x: -10.3,
+            y: 20.26,
+            width: 97.6,
+            height: 54.9,
+        },
+    });
+    let p = placement(&s, 160.0, 90.0);
+    // −20.6 → −21, 174.6 → 175; 40.52 → 41, 150.32 → 150.
+    assert_eq!((p.x, p.y), (-21.0, 41.0));
+    assert!((p.fx - 196.0 / 160.0).abs() < 1e-12 && (p.fy - 109.0 / 90.0).abs() < 1e-12);
+    let clip = p.clip.unwrap();
+    assert_eq!((clip.x, clip.y, clip.width, clip.height), (0, 41, 175, 109));
+    // Frame pixel 0 reads texels 16 and 17 (u = 21.5 / 1.225 − 0.5 = 17.05).
+    let r = p.region.unwrap();
+    assert_eq!((r.x, r.y, r.width, r.height), (17, 0, 143, 90));
 }

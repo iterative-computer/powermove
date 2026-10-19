@@ -535,18 +535,34 @@ pub struct ViewerState {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub depth_id: Option<bool>,
-    /// Today's output scale for this view, per axis: the legacy
-    /// compositor's `outputScale` over the canvas today's viewer sizes for
-    /// it (`previewRenderSize` or the cropped `previewRenderViewport`), in
-    /// canvas pixels per composition pixel. Level 1 SVG images pick their
-    /// raster bucket at it (decision S1, docs/engine/vector.md): today's
-    /// viewer draws below fit at most one pixel per composition pixel,
-    /// where the engine draws at zoom × DPR. Absent: the bucket follows
-    /// the engine's output scale. Added as an optional field (RFC 02
-    /// version notes); a change of it is a new view.
+    /// The canvas today's viewer draws this view into (decision V1,
+    /// docs/engine/bridge.md "Today's viewer canvas"). With it, the engine
+    /// renders the frame at that canvas's size and scales it into its CSS
+    /// box as Chromium scales today's WebGL canvas; without it, the
+    /// composition is drawn at zoom × DPR × the preview resolution. Added
+    /// as an optional field (RFC 02 version notes); a change of it is a
+    /// new view.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
-    pub svg_scale: Option<[f64; 2]>,
+    pub canvas: Option<ViewerCanvas>,
+}
+
+/// Today's viewer canvas for a view: the WebGL canvas the legacy viewer
+/// sizes (`previewRenderSize`, the explicit preview resolution, or the
+/// cropped `previewRenderViewport`) and the CSS box the browser scales it
+/// into.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerCanvas {
+    /// Backing size in pixels (`canvas.width` × `canvas.height`).
+    pub width: u32,
+    pub height: u32,
+    /// The part of the composition it holds, in composition pixels: the
+    /// whole composition, or the cropped preview viewport.
+    pub crop: Rect,
+    /// Its CSS box in stage CSS pixels.
+    pub css: Rect,
 }
 
 /// A display's refresh grid on the host clock: refreshes (BeginFrame times)
@@ -602,18 +618,19 @@ impl Validate for ViewerState {
         ensure(self.pan.iter().all(|v| v.is_finite()), C, || {
             "pan must be finite".into()
         })?;
-        if let Some(scale) = &self.svg_scale {
+        if let Some(canvas) = &self.canvas {
+            let positive = |r: &Rect| {
+                [r.x, r.y, r.width, r.height].iter().all(|v| v.is_finite())
+                    && r.width > 0.0
+                    && r.height > 0.0
+            };
             ensure(
-                scale
-                    .iter()
-                    .all(|v| v.is_finite() && *v > 0.0 && *v <= MAX_SCALE * 4.0),
+                (1..=MAX_OUTPUT_DIMENSION).contains(&canvas.width)
+                    && (1..=MAX_OUTPUT_DIMENSION).contains(&canvas.height)
+                    && positive(&canvas.crop)
+                    && positive(&canvas.css),
                 C,
-                || {
-                    format!(
-                        "svg scale {scale:?} must be positive and at most {}",
-                        MAX_SCALE * 4.0
-                    )
-                },
+                || format!("viewer canvas {canvas:?} is empty, too large, or not finite"),
             )?;
         }
         if let Some(vsync) = &self.vsync {
@@ -748,7 +765,7 @@ mod tests {
                 period_us: 8_333.333,
             }),
             depth_id: Some(true),
-            svg_scale: None,
+            canvas: None,
         }
     }
 

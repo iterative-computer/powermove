@@ -112,7 +112,7 @@ mod tests {
             view_seq: Seq::new(1).unwrap(),
             vsync: None,
             depth_id: None,
-            svg_scale: None,
+            canvas: None,
         }
     }
 

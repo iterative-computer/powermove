@@ -469,7 +469,6 @@ mod child {
             motion_blur: pm_render::motion::MotionBlur::Off,
             sampling: pm_render::sampling::Sampling::Final,
             video_end: pm_render::VideoEnd::of(pm_protocol::frame::FramePurpose::Export),
-            svg_scale: None,
         };
         let frame_out = direct
             .render(
