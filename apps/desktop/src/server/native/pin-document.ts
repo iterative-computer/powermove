@@ -1,7 +1,6 @@
 /** Serialized into the DOM tab by Playwright. Keep this function self-contained. */
 export async function pinNativeDocument(doc: Record<string, any>): Promise<void> {
   const PM = (globalThis as any).PM;
-  PM.store.set(`project.${doc.id}`, { v: PM.version, proj: doc });
   if (!await PM.openProjectHere(doc.id)) throw new Error('The pinned project could not be opened.');
   await PM.EngineDoc?.whenReady;
   await PM.RemoteSync.refresh();

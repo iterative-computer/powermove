@@ -23,9 +23,11 @@ it('keeps a newer joined document rather than rolling it back to the earlier wor
   await pinNativeDocument({ id: 'Pone', revision: 2, layers: [{ id: 'Lone' }] });
   expect(PM.proj).toEqual(joined);
   expect(PM.replaceProject).not.toHaveBeenCalled();
+  expect(PM.store.set).not.toHaveBeenCalled();
 });
 it('rejects an unavailable pinned project before dispatching tools', async () => {
   const PM = fixture({ id: 'Pone', revision: 0, layers: [] }); PM.openProjectHere.mockResolvedValue(false);
   await expect(pinNativeDocument({ id: 'Pone', revision: 2, layers: [] })).rejects.toThrow('The pinned project could not be opened.');
   expect(PM.RemoteSync.refresh).not.toHaveBeenCalled();
+  expect(PM.store.set).not.toHaveBeenCalled();
 });
