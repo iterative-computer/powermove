@@ -22,6 +22,7 @@ import type { ElectronApplication, Page } from 'playwright';
 
 import { expect, launchApp, test } from './helpers/app';
 import { ffmpegBinary } from './helpers/ffmpeg';
+import { previewTextRaster } from '../src/renderer/src/legacy/gl/shape-raster-window';
 
 const ON = { POWERMOVE_NEW_ENGINE: '1' };
 /** Side-by-sides go outside the repository (no screenshots in Git). */
@@ -98,7 +99,11 @@ async function bigTypewriterProject(page: Page): Promise<void> {
     fx.p.progress = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(2, 100)] });
     fx.p.cursor.v = true;
     typed.fx = [fx];
-    project.layers = [typed];
+    const plain = PM.mkLayer('text', { name: 'Plain', from: 0, dur: 3, d: { ...typed.d, text: 'Plain sample', color: '#3366CC' } }, project);
+    plain.id = 'plain';
+    delete plain.d.fontAnchorBounds; delete plain.d.sizeAnchorBounds;
+    for (const key of ['position.x', 'position.y', 'scale.x', 'scale.y']) plain.p[key].v = typed.p[key].v;
+    project.layers = [typed, plain];
     PM.replaceProject(project);
     PM.Projects?.put?.(PM.proj);
   });
@@ -114,8 +119,16 @@ async function zoomViewer(page: Page, zoom: number, x: number, y: number, time: 
     V.setZoom(zoom);
     V.pan = [(PM.proj.w / 2 - x) * zoom, (PM.proj.h / 2 - y) * zoom];
     V.layout();
+    // The current built-in UI clamps its menu to 8x. Exercise the engine's
+    // 16x view contract explicitly as well (custom viewers may request it).
+    if (zoom > 8 && V.enginePresentation) {
+      // Keep the custom-viewer request through subsequent playhead updates.
+      const update = V.enginePresentation.update.bind(V.enginePresentation);
+      V.enginePresentation.update = (params: any, stage: any) => update({ ...params, zoom, pan: V.pan, playEveryFrame: false }, stage);
+      V.enginePresentation.update({ zoom, pan: V.pan, resolution: 'full', media: 'originals', playEveryFrame: false });
+    }
     PM.invalidate?.('render');
-    return { stage: [V._sw, V._sh], shown: V.shown };
+    return { stage: [V._sw, V._sh], shown: V.enginePresentation?.state?.zoom ?? V.shown };
   }, { zoom, x, y, time });
 }
 
@@ -221,63 +234,104 @@ test.describe('Use New Engine: the customization moat, round two', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('a raster override at a deep viewer zoom gets today\'s crop window, and the viewer shows today\'s frame', async ({ session }, testInfo) => {
-    test.setTimeout(240_000);
+  test('a raster override advances at zoom 8 and 16 and receives today\'s planned crop windows', async ({ session }) => {
+    test.setTimeout(180_000);
     const ids = ['typewriter-effect', 'crop-recorder'];
-    const ZOOM = 16, TIME = 1.2;
-    const run = async (page: Page, engine: boolean) => {
-      await waitActive(page, ids);
-      await bigTypewriterProject(page);
-      await page.evaluate(() => (window as any).__installCropRecorder());
-      if (engine) await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
-      // The calls of the zoomed viewer's frames only (a raster density
-      // above the fitted view's).
-      await page.evaluate(() => { (window as any).__crops.length = 0; });
-      const view = await zoomViewer(page, ZOOM, 200, 120, TIME);
-      const frame = await viewerPixels(page, engine);
-      const crops = await page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 4));
-      const state = await page.evaluate(() => {
-        const PM = (window as any).PM, V = PM.Kernel.services.get('viewer');
-        const all = (window as any).__crops as Array<{ layer: string; scale: number; crop: unknown }>;
-        return { zoom: V.zoom, fit: V.fit, shown: V.shown, viewport: PM.GL?.previewViewport ?? null, quality: PM.quality, scales: [...new Set(all.map((c) => `${c.layer}@${c.scale}${c.crop ? '+crop' : ''}`))], time: PM.time, presenting: !!V.enginePresentation?.presenting };
-      });
-      console.log(JSON.stringify({ engine, state }));
-      const errors = await page.evaluate(() => (window as any).PM.EngineRender?.compatStats ?? null);
-      return { view, frame, crops, errors };
-    };
     await install(session.userData, ids);
     await session.relaunch();
     await session.openEditor();
-    const engine = await run(session.page, true);
-    expect(session.diagnostics.pageErrors).toEqual([]);
-    await session.close();
-    const off = await todayApp(ids);
-    let today: Awaited<ReturnType<typeof run>>;
-    try {
-      today = await run(off.page, false);
-      expect(off.diagnostics.pageErrors).toEqual([]);
-    } finally {
-      await off.close();
-      await rm(off.userData, { recursive: true, force: true });
+    const page = session.page;
+    await waitActive(page, ids);
+    await bigTypewriterProject(page);
+    await page.evaluate(() => (window as any).__installCropRecorder());
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    // A hidden legacy window does not enter preview-viewport mode. Gate
+    // the engine on its own against the legacy crop function (the same
+    // function ported by pm_render::compat_crop), without showing/focusing
+    // an ordinary window on the owner's desktop.
+    for (const zoom of [8, 16]) {
+      const before = await page.evaluate(() => (window as any).PM.EngineConnection.status().frames);
+      await page.evaluate(() => { (window as any).__crops.length = 0; });
+      await zoomViewer(page, zoom, 200, 120, .6);
+      await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().frames), { timeout: 20_000 }).toBeGreaterThan(before);
+      await expect.poll(() => page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 16).length)).toBeGreaterThan(0);
+      await viewerPixels(page, true); // let setZoom's intermediate pan state settle
+      await page.evaluate(() => { (window as any).__crops.length = 0; const PM = (window as any).PM; PM.setTime(.7, { force: true }); });
+      await expect.poll(() => page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'plain' && c.scale > 16).length)).toBeGreaterThan(0);
+      const first = await viewerPixels(page, true);
+      const plan = await page.evaluate(() => {
+        const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+        const state = viewer.enginePresentation.state;
+        const crops = (window as any).__crops.filter((c: any) => c.layer === 'plain' && c.scale > 16);
+        const typed = (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 16);
+        return { state, crops, typed, world: PM.worldMatrix(PM.L('plain'), PM.time),
+          geometry: PM.textRasterGeometry(PM.L('plain'), crops[crops.length - 1].scale, PM.time),
+          size: [PM.proj.w, PM.proj.h], failures: PM.EngineConnection.status().failures };
+      });
+      console.log(JSON.stringify({ zoomPlan: plan }));
+      const { state, size, world } = plan;
+      expect(state.zoom, 'the requested engine zoom was reached').toBe(zoom);
+      expect(plan.crops.every((c: any) => c.scale === Math.min(32, zoom * 3))).toBe(true);
+      const resolution = state.resolution === 'half' ? .5 : state.resolution === 'quarter' ? .25 : 1;
+      const full = size.map((n: number) => Math.max(1, n * state.zoom * state.devicePixelRatio));
+      // Rust f64::round (unlike Math.round for negative half-integers).
+      const round = (n: number) => Math.sign(n) * Math.floor(Math.abs(n) + .5);
+      const output = full.map((n: number) => Math.min(16384, Math.max(1, round(n * resolution))));
+      const origin = full.map((n: number, i: number) => round(((i ? state.size.height : state.size.width) - n) / 2 + state.pan[i] * state.devicePixelRatio));
+      const lo = origin.map((n: number, i: number) => Math.min(output[i]!, Math.max(0, Math.floor(-n * resolution))));
+      const hi = origin.map((n: number, i: number) => Math.min(output[i]!, Math.max(0, Math.ceil(((i ? state.size.height : state.size.width) - n) * resolution))));
+      const sx = output[0]! / size[0], sy = output[1]! / size[1];
+      const visible = [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy, world[4] * sx - lo[0]!, world[5] * sy - lo[1]!];
+      const crop = previewTextRaster(plan.geometry, visible, hi[0]! - lo[0]!, hi[1]! - lo[1]!) ?? null;
+      expect(crop, `zoom ${zoom}: a cropped source is exercised`).not.toBeNull();
+      for (const called of plan.crops) expect(called.crop, `zoom ${zoom}, density ${called.scale}`).toEqual(crop);
+      // Today's typewriter definition is a renderable effect, so it keeps the full source.
+      for (const called of plan.typed) expect(called.crop).toBeNull();
+      expect(plan.failures).toEqual([]);
+      const frameBeforeSeek = await page.evaluate(() => (window as any).PM.EngineConnection.status().frames);
+      await page.evaluate(() => { const PM = (window as any).PM; PM.setTime(1.2, { force: true }); });
+      await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().frames)).toBeGreaterThan(frameBeforeSeek);
+      const second = await viewerPixels(page, true);
+      expect(first.data.some((v, i) => v !== second.data[i]), `zoom ${zoom}: the typewriter advances after seeking`).toBe(true);
+      console.log(JSON.stringify({ zoom, frames: [before, frameBeforeSeek, await page.evaluate(() => (window as any).PM.EngineConnection.status().frames)], scales: [...new Set(plan.crops.map((c: any) => c.scale))], crop }));
     }
-    const key = (c: any) => JSON.stringify([c.scale, c.crop]);
-    const engineCrops = [...new Set(engine.crops.map(key))].sort();
-    const todayCrops = [...new Set(today.crops.map(key))].sort();
-    await mkdir(EVIDENCE, { recursive: true });
-    const evidence = { engine: path.join(EVIDENCE, 'typewriter-zoom16-engine.png'), today: path.join(EVIDENCE, 'typewriter-zoom16-today.png') };
-    await writeFile(evidence.engine, Buffer.from(engine.frame.png.split(',')[1]!, 'base64'));
-    await writeFile(evidence.today, Buffer.from(today.frame.png.split(',')[1]!, 'base64'));
-    await testInfo.attach('engine', { path: evidence.engine, contentType: 'image/png' });
-    await testInfo.attach('today', { path: evidence.today, contentType: 'image/png' });
-    const m = measure(engine.frame.data, today.frame.data);
-    console.log(JSON.stringify({ view: [engine.view, today.view], size: [[engine.frame.width, engine.frame.height], [today.frame.width, today.frame.height]], engineCrops, todayCrops, measure: m, evidence }));
-    // Today's compositor asked for a window of the typed layer's raster at this zoom.
-    expect(todayCrops.some((k) => !k.endsWith(',null]'))).toBe(true);
-    // The engine called the override with the same density and windows.
-    expect(engineCrops).toEqual(todayCrops);
-    // And the viewer shows today's frame.
-    expect([engine.frame.width, engine.frame.height]).toEqual([today.frame.width, today.frame.height]);
-    expect(withinSection25(m), `viewer frame vs today (${evidence.engine} / ${evidence.today})`).toBe(true);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('render.raster above scale 16 returns today\'s surface and pixels synchronously', async ({ session }) => {
+    await session.openEditor();
+    await assignProject(session.page);
+    await expect.poll(() => session.page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    const results = await session.page.evaluate(() => {
+      const PM = (window as any).PM, api = PM.Kernel.api('corpus');
+      const layer = PM.mkLayer('shape', { d: { shape: 'rect', w: 16, h: 12, color: '#33CC66', stroke: 0 } }, PM.proj);
+      const result = [];
+      for (const scale of [16.25, 24, 32]) {
+        const today = PM.__rasterBase(layer, scale, 0);
+        const engine = api.render.raster(layer, scale, 0);
+        const fields = (r: any) => r && [r.w, r.h, r.anchorX, r.anchorY, r.cv.width, r.cv.height, r.selection];
+        const bytes = (r: any) => r.cv.getContext('2d').getImageData(0, 0, r.cv.width, r.cv.height).data;
+        let max = 0;
+        if (today?.cv && engine?.cv && today.cv.width === engine.cv.width && today.cv.height === engine.cv.height) {
+          const a = bytes(today), b = bytes(engine);
+          for (let i = 0; i < a.length; i++) max = Math.max(max, Math.abs(a[i] - b[i]));
+        } else max = Infinity;
+        result.push({ scale, sync: !!engine && !(engine instanceof Promise), today: fields(today), engine: fields(engine), max });
+      }
+      const invalid = api.render.raster(layer, 33, 0);
+      result.push({ invalid: invalid === null, failures: PM.EngineConnection.status().failures });
+      return result;
+    });
+    const invalid = results.pop() as any;
+    expect(invalid.invalid).toBe(true);
+    expect(invalid.failures.some((s: string) => s.includes('Raster scale 33') && s.includes('0.01..32'))).toBe(true);
+    expect(await session.page.locator('[data-engine-status]').textContent()).toContain('Raster scale 33');
+    console.log(JSON.stringify({ highDensityRasters: results }));
+    for (const result of results) {
+      expect(result.sync).toBe(true);
+      expect(result.engine).toEqual(result.today);
+      expect(result.max).toBe(0);
+    }
   });
 
   test('a drawing into render.gl.context is in a WebM export as today, not in an MP4 one, and context.canvas reads it', async ({ session }) => {

@@ -69,8 +69,8 @@ async function textProject(page: Page): Promise<void> {
   });
 }
 
-/** The commit `api.extensions.fork` first shipped in (2026-09-13): the oldest fork shape. */
-const OLDEST_FORK_COMMIT = '155481d0';
+/** Oldest viewer source tree that still renders in today’s app (history bisection below). */
+const OLDEST_FORK_COMMIT = 'c2139713';
 /** `main` before the native engine: today's shipped built-ins. */
 const SHIPPED_COMMIT = '470eeaf3';
 const REPO = path.resolve(__dirname, '../../..');
@@ -101,7 +101,8 @@ const EVENTS = ['scene3d:selection', 'inspector:changed', 'project:changed', 'se
  *  engine, its presentation is up and the frame reads back through the old
  *  viewer's own `render.gl.context`; today, the compositor's canvas is in the
  *  document and holds the frame. */
-async function viewerShows(page: Page, id: string, engine: boolean): Promise<{ works: boolean; detail: unknown }> {
+type ViewerCheck = { works: boolean; detail: unknown; rgba?: string; png?: string; width?: number; height?: number };
+async function viewerShows(page: Page, id: string, engine: boolean, capture = false): Promise<ViewerCheck> {
   await page.waitForFunction(() => Boolean((window as any).PM?.Kernel?.loader), undefined, { timeout: 60_000 });
   await expect.poll(() => page.evaluate((id) => (window as any).PM.Kernel.api('corpus').extensions.list().find((r: any) => r.id === id)?.health?.state ?? 'missing', id), { timeout: 60_000 }).toBe('ok');
   const active = await page.evaluate(() => (window as any).PM.Kernel.loader.activeIds());
@@ -110,22 +111,41 @@ async function viewerShows(page: Page, id: string, engine: boolean): Promise<{ w
   await textProject(page);
   if (engine) await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
   await page.waitForTimeout(1500);
-  return page.evaluate((engine) => {
+  return page.evaluate(({ engine, capture }) => {
     const PM = (window as any).PM;
     const api = PM.Kernel.api('corpus');
     const gl: WebGL2RenderingContext | null = engine ? api.render.gl.context : PM.GL?.gl ?? null;
     const canvas = gl?.canvas as HTMLCanvasElement | undefined;
     let white = 0;
+    const image: { rgba?: string; png?: string; width?: number; height?: number } = {};
     if (gl) {
       const px = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, px);
       for (let i = 0; i < px.length; i += 4) if (px[i]! > 200 && px[i + 1]! > 200 && px[i + 2]! > 200) white++;
+      if (capture) {
+        const width = gl.drawingBufferWidth, height = gl.drawingBufferHeight, rows = new Uint8ClampedArray(px.length);
+        for (let y = 0; y < height; y++) rows.set(px.subarray((height - 1 - y) * width * 4, (height - y) * width * 4), y * width * 4);
+        const c = document.createElement('canvas'); c.width = width; c.height = height;
+        c.getContext('2d')!.putImageData(new ImageData(rows, width, height), 0, 0);
+        let raw = ''; for (let at = 0; at < rows.length; at += 32768) raw += String.fromCharCode(...rows.subarray(at, at + 32768));
+        Object.assign(image, { width, height, rgba: btoa(raw), png: c.toDataURL('image/png') });
+      }
     }
+    const source = document.querySelector('canvas#engine-present') as HTMLCanvasElement | null;
+    let sourceWhite = 0;
+    if (source) { const copy = document.createElement('canvas'); copy.width = source.width; copy.height = source.height;
+      const ctx = copy.getContext('2d')!; ctx.drawImage(source, 0, 0);
+      const bytes = ctx.getImageData(0, 0, copy.width, copy.height).data;
+      for (let i = 0; i < bytes.length; i += 4) if (bytes[i]! > 200 && bytes[i + 1]! > 200 && bytes[i + 2]! > 200) sourceWhite++;
+    }
+    const latest = engine ? PM.EngineCanvas?.latest : null;
+    const imported = latest ? PM.Kernel.services.get('engine.viewer')?.source.videoFrame(latest.poolGeneration, latest.poolIndex) : null;
+    const importColorSpace = imported?.colorSpace?.toJSON?.() ?? null; imported?.close();
     const presenting = engine ? !!PM.EngineCanvas?.presenting : true;
     const connected = !!canvas?.isConnected;
-    return { works: !!gl && connected && presenting && white > 50, detail: { context: !!gl, connected, presenting, white, bound: !!PM.EngineCanvas?.bound, canvases: [...document.querySelectorAll('#stage canvas')].map((c) => c.id) } };
-  }, engine);
+    return { ...image, works: !!gl && connected && presenting && white > 50, detail: { importColorSpace, context: !!gl, connected, presenting, white, sourceWhite, error: gl?.getError(), buffers: [gl?.drawingBufferWidth, gl?.drawingBufferHeight], bound: !!PM.EngineCanvas?.bound, stats: PM.CompatContext?.stats, boxes: [...document.querySelectorAll('#stage canvas')].map((c: any) => ({ id: c.id, width: c.width, height: c.height, visible: c.style.visibility, box: c.getBoundingClientRect().toJSON() })), canvases: [...document.querySelectorAll('#stage canvas')].map((c) => c.id) } };
+  }, { engine, capture });
 }
 
 /** The probe's project: a keyed text, a shape, a group with a child, image,
@@ -379,25 +399,63 @@ test.describe('Use New Engine: the customization corpus', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('the oldest fork shapes the loader accepts work on the engine as on today\'s app: a fork made by the first fork tool, and a replaces-only override', async ({ session }) => {
+  test('bisect the historical viewer boundary on today’s app', async ({ session }) => {
+    test.setTimeout(540_000);
+    await session.close();
+    const commits = ['155481d0', ...execFileSync('git', ['-C', REPO, 'log', '--first-parent', '--reverse', '--format=%h', '155481d0..470eeaf3', '--', 'apps/desktop/src/extensions/viewer']).toString().trim().split('\n')];
+    const observed = new Map<number, boolean>();
+    const probe = async (index: number) => {
+      if (observed.has(index)) return observed.get(index)!;
+      const profile = await mkdtemp(path.join(os.tmpdir(), 'powermove-viewer-history-'));
+      const target = path.join(profile, 'extensions/viewer-fork');
+      await materialize(commits[index]!, 'viewer', target);
+      const manifest = JSON.parse(await readFile(path.join(target, 'manifest.json'), 'utf8'));
+      await writeFile(path.join(target, 'manifest.json'), JSON.stringify({ ...manifest, id: 'viewer-fork', replaces: ['viewer'], forkedFrom: `viewer@${manifest.version}` }));
+      const app = await launchApp({ userData: profile, env: {} });
+      try {
+        await app.openEditor();
+        const result = await viewerShows(app.page, 'viewer-fork', false);
+        observed.set(index, result.works);
+        console.log(JSON.stringify({ viewerHistory: commits[index], version: manifest.version, ...result }));
+        return result.works;
+      } finally { await app.close(); await rm(profile, { recursive: true, force: true }); }
+    };
+    let low = 0, high = commits.length - 1;
+    expect(await probe(low)).toBe(false);
+    expect(await probe(high)).toBe(true);
+    while (high - low > 1) {
+      const mid = Math.floor((low + high) / 2);
+      if (await probe(mid)) high = mid; else low = mid;
+    }
+    // Certify earlier trees too rather than assuming monotonic behavior.
+    for (let i = 0; i < high; i++) expect(await probe(i), `earlier viewer ${commits[i]}`).toBe(false);
+    expect(commits[high]).toBe(OLDEST_FORK_COMMIT);
+  });
+
+  test('the oldest working viewer fork and replaces-only shape render unchanged on the engine', async ({ session }) => {
     test.setTimeout(300_000);
-    // The viewer as it shipped when api.extensions.fork first existed (155481d0,
-    // viewer@1.0.0), written as that fork tool wrote it; and the shape before
-    // the fork tool: a folder that only declares `replaces`.
+    // Bisection of shipped main-history trees found c2139713 (viewer 1.0.6).
+    // The checked-in source is unchanged; only fork identity fields differ.
+    // Gate both the fork tool's shape and a replaces-only folder.
     const shapes = async (extensions: string, shape: 'fork' | 'replaces'): Promise<string> => {
       const id = shape === 'fork' ? 'viewer-fork' : 'my-viewer';
       const target = path.join(extensions, id);
-      await materialize(OLDEST_FORK_COMMIT, 'viewer', target);
+      await cp(path.join(__dirname, 'fixtures/compat-corpus/oldest-viewer'), target, { recursive: true });
       const manifest = JSON.parse(await readFile(path.join(target, 'manifest.json'), 'utf8'));
-      expect(manifest.version).toBe('1.0.0');
+      expect(manifest.version).toBe('1.0.6');
       if (shape === 'fork') {
-        await materialize(OLDEST_FORK_COMMIT, 'viewer', path.join(target, '.forked-from'));
-        await writeFile(path.join(target, 'manifest.json'), `${JSON.stringify({ ...manifest, id, name: `${manifest.name} (fork)`, replaces: ['viewer'], forkedFrom: 'viewer@1.0.0', author: 'user' }, null, 2)}\n`);
+        await cp(path.join(__dirname, 'fixtures/compat-corpus/oldest-viewer'), path.join(target, '.forked-from'), { recursive: true });
+        await writeFile(path.join(target, 'manifest.json'), `${JSON.stringify({ ...manifest, id, name: `${manifest.name} (fork)`, replaces: ['viewer'], forkedFrom: `viewer@${manifest.version}`, author: 'user' }, null, 2)}\n`);
       } else {
         await writeFile(path.join(target, 'manifest.json'), `${JSON.stringify({ ...manifest, id, name: 'My viewer', replaces: ['viewer'], author: 'user' }, null, 2)}\n`);
       }
       return id;
     };
+    const historical = path.join(__dirname, 'fixtures/compat-corpus/oldest-viewer');
+    for (const file of await import('node:fs/promises').then((fs) => fs.readdir(historical))) {
+      const original = execFileSync('git', ['-C', REPO, 'show', `${OLDEST_FORK_COMMIT}:apps/desktop/src/extensions/viewer/${file}`]);
+      expect(await readFile(path.join(historical, file)), `unchanged historical ${file}`).toEqual(original);
+    }
     const results: Record<string, { engine: unknown; today: unknown }> = {};
     for (const shape of ['fork', 'replaces'] as const) {
       const extensions = path.join(session.userData, 'extensions');
@@ -406,26 +464,37 @@ test.describe('Use New Engine: the customization corpus', () => {
       const id = await shapes(extensions, shape);
       await session.relaunch();
       await session.openEditor();
-      const engine = await viewerShows(session.page, id, true);
+      const engine = await viewerShows(session.page, id, true, true);
       // Today's app, the same folder, "Use New Engine" off.
       const profile = await mkdtemp(path.join(os.tmpdir(), 'powermove-today-viewer-'));
       await shapes(path.join(profile, 'extensions'), shape);
       const off = await launchApp({ userData: profile, env: {} });
-      let today: { works: boolean; detail: unknown };
+      let today: ViewerCheck;
       try {
         await off.openEditor();
-        today = await viewerShows(off.page, id, false);
+        today = await viewerShows(off.page, id, false, true);
       } finally {
         await off.close();
         await rm(profile, { recursive: true, force: true });
       }
       results[shape] = { engine, today };
-      console.log(shape, JSON.stringify(results[shape]));
+      console.log(shape, JSON.stringify({ engine: { works: engine.works, detail: engine.detail }, today: { works: today.works, detail: today.detail } }));
     }
     for (const shape of ['fork', 'replaces']) {
       const { engine, today } = results[shape] as any;
-      // Works on the engine whenever it works on today's app.
-      expect(engine.works, `${shape}: engine ${JSON.stringify(engine.detail)} / today ${JSON.stringify(today.detail)}`).toBe(today.works);
+      expect(today.works, `${shape}: today's reference must work: ${JSON.stringify(today.detail)}`).toBe(true);
+      expect(engine.works, `${shape}: engine ${JSON.stringify(engine.detail)} / today ${JSON.stringify(today.detail)}`).toBe(true);
+      const evidence = path.join(os.tmpdir(), 'ne-extcompat-evidence');
+      await mkdir(evidence, { recursive: true });
+      const left = path.join(evidence, `oldest-${shape}-engine.png`), right = path.join(evidence, `oldest-${shape}-today.png`);
+      await writeFile(left, Buffer.from(engine.png.split(',')[1], 'base64'));
+      await writeFile(right, Buffer.from(today.png.split(',')[1], 'base64'));
+      const a = Buffer.from(engine.rgba, 'base64'), b = Buffer.from(today.rgba, 'base64');
+      let max = 0, over1 = 0, values = 0;
+      expect([engine.width, engine.height]).toEqual([today.width, today.height]);
+      for (let i = 0; i < a.length; i++) if (i % 4 !== 3) { const d = Math.abs(a[i]! - b[i]!); max = Math.max(max, d); over1 += Number(d > 1); values++; }
+      console.log(JSON.stringify({ oldestViewerPixels: shape, max, over1, values, left, right }));
+      expect.soft(max <= 4 && over1 <= values * .001, `${shape}: whole bound canvas vs today; ${left} / ${right}`).toBe(true);
     }
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
