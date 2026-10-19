@@ -1336,15 +1336,20 @@ export class NativeApi {
       for (let index = 0; index < layers.length; index++) {
         const L = layers[index];
         if (L?.type !== 'text') continue;
-        // Visit every keyed time, including content/range font changes. The
-        // on-demand synchronous provider covers interpolated and expression faces.
+        // Visit every time the layer's text content keys a change, including
+        // content and range font changes. The on-demand synchronous provider
+        // covers interpolated and expression faces. Only the text's own
+        // members can change which faces it needs: transform properties
+        // (`p`), effects, and masks cannot, and a project baked to a key per
+        // frame (C1: 650 keys on seven properties of 62 text layers) made
+        // this ask pm-wasm for 50,000 layouts and their replies.
         const times = new Set<number>([Number(L.from) || 0]);
         const scan = (value: any) => {
           if (!value || typeof value !== 'object') return;
           if (Array.isArray(value.kf)) for (const key of value.kf) if (Number.isFinite(key.t)) times.add((Number(L.from) || 0) + key.t);
           for (const child of Object.values(value)) scan(child);
         };
-        scan(L);
+        for (const [key, value] of Object.entries(L)) if (key !== 'p' && key !== 'fx' && key !== 'masks') scan(value);
         for (const t of times) for (let round = 0; round < 6; round++) {
           const wasm = this.ready();
           if (!wasm) return;
