@@ -169,12 +169,35 @@ test("Blender models, editable materials, regeneration and engine renders work i
           0,
         );
         const snapshot = await PM.Export.snapshotAsync(0, 192);
-        const exported = [
-          ...PM.GL.renderToPixels(0, 192, 128, {
-            transparent: true,
-            mblur: false,
-          }),
-        ];
+        // Today the capture prepares the Blender frame for the compositor,
+        // which then draws it. With "Use New Engine" on, the engine's capture
+        // is the frame (its Blender stage prepared it); the WebGL compositor
+        // has no prepared frame, so the capture's own pixels are read.
+        const exported = PM.EngineCaptures
+          ? await (async () => {
+              const image = new Image();
+              image.src = snapshot;
+              await image.decode();
+              const canvas = document.createElement("canvas");
+              canvas.width = image.width;
+              canvas.height = image.height;
+              const ctx = canvas.getContext("2d")!;
+              ctx.drawImage(image, 0, 0);
+              // The JPEG has no alpha: a pixel is drawn where it is not black.
+              const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+              const drawn: number[] = [];
+              for (let i = 0; i < data.length; i += 4) {
+                const covered = data[i]! + data[i + 1]! + data[i + 2]! > 24;
+                drawn.push(data[i]!, data[i + 1]!, data[i + 2]!, covered ? 255 : 0);
+              }
+              return drawn;
+            })()
+          : [
+              ...PM.GL.renderToPixels(0, 192, 128, {
+                transparent: true,
+                mblur: false,
+              }),
+            ];
         return {
           difference,
           snapshot: snapshot.startsWith("data:image/jpeg"),

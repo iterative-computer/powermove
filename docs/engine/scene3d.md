@@ -81,19 +81,21 @@ pass") into the full pass. The plan stays the authority.
   program in those cases; the pixels cannot differ.
 - **Shadow maps** are recorded in the prepass, as `shadowMap.autoUpdate`
   is on only there: a layer's color pass sees its own set's casters.
-- **Textures** decode through `pm-media` in the still classes the 2D
-  renderer draws, upload top row first (WebGL ignores `UNPACK_FLIP_Y` for
-  an `ImageBitmap`), sRGB maps as `Rgba8UnormSrgb`, and generate mipmaps
-  as box filters (in linear light for sRGB). Maps with transparency (any
-  alpha below 255) are routed: the premultiplication Chromium applies to an
-  `ImageBitmap` in WebGL has not been measured. `Textures::probe` decides
-  this statically (decoded once per file version: path, size, modification
-  time), so the capability check lists `3D texture maps with transparency`
-  before a frame renders. A map that changes after the check is met when
-  the scene's maps load at render time (`Scene3dRenderer::resolve_maps`,
-  before any draw); it returns `Error3d::Unsupported`, which `exec` turns
-  into `MediaFailure::Unsupported`, so the frame is routed
-  (`RenderError::Unsupported`) and never draws with the model missing.
+- **Textures** are today's level 1 content: the runtime's texture getter
+  hands three.js the asset's `ImageBitmap`, the bitmap image layers draw,
+  and WebGL ignores every unpack flag for an `ImageBitmap`. Maps therefore
+  decode through pm-render's level 1 still-compatibility bitmap
+  (`media::level1_bitmap`: PQ/HLG/cHRM/cICP PNG, CMYK JPEG, the TIFF
+  structures, the AVIF classes, Chromium's gamma and ICC readings) and
+  keep Chromium's premultiplied bytes, which three.js samples as straight
+  alpha. Deep and arithmetic JPEGs have no 8-bit bitmap: the importer keeps
+  an image element whose `texSubImage2D` fails, so the storage stays zeroed
+  (transparent black). Rows upload top row first, sRGB maps as
+  `Rgba8UnormSrgb`, and mipmaps are box filters (in linear light for sRGB),
+  equal to Chromium's `generateMipmap` (Phase 3c round 2, below). Probes
+  are cached per file version (`Textures::probe`). Nothing a level 1 image
+  layer draws is an unsupported map; SVG maps (an image element rasterized
+  by Chromium) are the one map class still listed.
 - **Missing textures** draw without the map and add `Missing texture: <id>`
   to `Scene3d::warnings`, as today's texture getter returns nothing for an
   image without a bitmap. That covers an image asset that is offline (the
@@ -221,12 +223,12 @@ ANGLE on Metal and three.js 0.180.0 for references, 2026-10-15.
   delivers them (the built-in OBJ model layer needs none).
 - (Done in Phase 3c, see the last section.) 3D picks and bounds came from
   the host's three.js runtime; pm-eval answers them now.
-- Corpus projects `3d/transparency` (a mask) and `3d/motion-blur` are
-  routed by 2D features other lanes own; their 3D behavior is covered by
-  the sweep and the document tests.
-- Texture maps with transparency, and maps outside the drawn still classes,
-  are routed (statically, and at render time if a file changes after the
-  check).
+- Corpus projects `3d/transparency` (a mask) and `3d/motion-blur` draw
+  since the compositing and motion closure merged (wave 5): 35 of 35 `3d/`
+  corpus frames compare, none skipped (2026-10-19).
+- (Done in Phase 3c round 2.) Texture maps with transparency and maps of
+  every level 1 still class draw; SVG maps stay listed until Chromium's
+  SVG raster reaches the engine (the svgcompat lane's decision S1).
 - Scene warnings (`Missing texture`, `Missing model`) are kept in
   `Scene3d::warnings` but have no channel to the host yet.
 - 3D output stays 8-bit as today's canvas, renders at the full output size
@@ -420,29 +422,124 @@ Apple M4 Max, macOS 27, 2026-10-18, load average about 9 to 12.
 - Stored legacy scenes that fail `parseScene` (today every question about
   them throws a `ZodError`) answer instead of throwing; scenes are
   validated when written, so this needs a corrupted document.
-- An imported model this engine cannot load but three.js can is picked as
-  the missing box (logged); the glTF lane's static check lists such files.
-- Third-party mesh definitions are not known to the mirror (only the
-  built-in OBJ model layer); their layers are bounded as rectangles until
-  the definition snapshots reach pm-wasm.
+
+These three need Jude's sign-off (amendment 22); they are listed for the
+orchestrator with the evidence above.
+
+### Phase 3c round 2 (review fixes, 2026-10-19)
+
+- **Models the engine cannot load fail by name.** A model three.js holds
+  that `pm_geom3d::gltf::load` rejects, or an `object3d` without the bytes
+  it was loaded from, is `ModelAsset::Unloadable`: every question about its
+  scene replies `{unsupported: why}` (`MODEL_UNLOADABLE`), which the
+  renderer counts as `<op>:unsupported`, warns with the reason, and strict
+  hosts refuse. It is never answered with the missing-model box.
+- **Third-party mesh definitions and overrides by id.** Geometry requests
+  carry `meshFields` (definition id to `renderer.assetField`, from the
+  host's `PM.layerDefinition`, as `sceneForLayer` reads it), so a user's
+  own mesh definition, and an override of the built-in OBJ model layer,
+  are scenes picked and bounded like today, not rectangles. Without a
+  registry (no `meshFields`), only the built-in OBJ model layer is a mesh
+  layer.
+- **Viewport boxes go through the answer path.** `viewportBounds` asks
+  `objectBoxes3d` through `NativeApi.answer` (counted fallbacks, dual
+  compared, refused by strict hosts) with the composition being viewed; it
+  no longer builds the three.js runtime itself when the engine is on.
+- **3D maps on level 1 bitmaps** (Textures, above). Measured through the
+  app (`e2e/tools/threed-maps-capture.ts`, the uploads three.js r180 makes,
+  read back texel for texel; hashes in
+  `pm-render/tests/fixtures/stills2/three-maps.json`).
+- **Blender textures** converted from the level 1 bitmap
+  (docs/engine/blender.md).
+- **Proof for 3D layers in 3D groups.** Corpus `3d/group-roles`: plain 3D
+  groups with anchors, animated non-uniform scale, X/Z rotation and
+  orientation, a nested 3D group, a spot and a point light inside groups, a
+  camera inside a 3D group, parenting to a grouped object, and 3D layers
+  in a flat group. (The integration branch's compositing closure lists no
+  3D group reason for 3D object, light, or camera layers; this corpus case
+  is the evidence for that.)
+- **The viewport's render camera from pm-wasm.** The camera view, view
+  framing, the view's field of view, and the gizmo's camera read
+  `renderCamera(PM)` (core/scene3d/render-camera.ts): pm-wasm's `camera3d`
+  (the composition scene's render camera, lens and `matrixWorld`) through
+  the answer path, not `compositionRuntime(PM).camera`.
+- **Transform targets from pm-wasm.** The gizmo, modal G/R/S, and the snap
+  and pivot operators resolve targets from each object's `matrixWorld`
+  (`objectWorlds3d`) and a flat group's members' boxes (`objectBoxes3d`)
+  through `targetScene(PM)` (core/scene3d/engine-targets.ts).
+- **Unknown primitives draw nothing.** A 3D object layer's scene is synced
+  unvalidated today, so `primitiveGeometry` returns nothing for a primitive
+  it does not know and the object draws nothing; the pass now does the
+  same instead of listing it. A legacy scene layer's `parseScene` refuses
+  such a scene, so it stays listed there (the layer fails today too).
+- **Blender assets named by content** (docs/engine/blender.md): media-store
+  files without an extension no longer fail the engine's Blender stage.
+- **e2e with "Use New Engine" on.** `scene3d.spec.ts` reads what the
+  viewport shows from the window (`capturePage`) when the engine presents,
+  and compares the engine's own frames (`snapshotAsync`, after they
+  settle) and the project's layers before and after its gestures and their
+  Undo. `blender-motion.spec.ts` reads the engine capture's own pixels where
+  it read today's compositor after a capture (the WebGL compositor has no
+  prepared Blender frame when the engine captured).
+- **The 3D orbit row** is measured (`scripts/frame-bridge-measure.mjs`
+  runs `p3c-orbit-*`, an orbit input mode in the app measurement; below).
+
+| Test | What | Result |
+|---|---|---|
+| `pm-render` `tests/threed_maps.rs` | `decode` of 128 fixture files (stills2 classes and the e2e still fixtures) against the texels the app stored | 112 classes texel-exact at level 0, 14 failed uploads zeroed, 2 rejected imports |
+| same, `map_mip_levels_against_todays_generate_mipmap` | The pass's level 1 mip, sRGB and linear, against Chromium's `generateMipmap` | 224 of 224 equal |
+| `pm-render` `tests/corpus.rs`, capture `threed-20261019-roles-maps` (through the app) | `3d/group-roles` (3 frames), `3d/maps-level1` (25 color maps and 5 linear maps of every class, 2 frames), `3d/model-group` (3 frames) | 8 frames, none skipped: 100% exact outside 3D, 3D bar ≤ 2 CV 100%, max 1 CV, SSIM ≥ 0.99998 |
+| `pm-render` `tests/corpus.rs`, `PM_RENDER_ONLY=3d/` (v1 and render captures) | Regression after the merges and the map change | 35 frames, 0 failed, none skipped (`3d/transparency` and `3d/motion-blur` included) |
+| `pm-render` `tests/blender_snapshots.rs`, v1 | Regression | 158 compared, 135 equal, 23 not built (imported glTF), as before |
+| same, capture `threed-20261019-roles-maps` | `3d/group-roles`, `3d/model-group` snapshots; `3d/maps-level1` snapshots | 18 of 24 equal; the 6 `3d/maps-level1` snapshots differ in converted textures (docs/engine/blender.md, Gaps) |
+| `engine-doc/scene3d-geometry.test.ts` (real pm-wasm) | The dual suite with a third-party mesh definition (`acme.turntable`, asset in its own field); viewport boxes through `answer`; an unloadable model | 0 mismatches, 0 fallbacks, third-party hits counted; boxes exact; the unloadable model reports `gl.pick:unsupported` and `gl.bounds:unsupported` with the reason |
+| `pm-wasm` `tests/geometry.rs` | A rejected glTF and an unloadable model: picks, bounds, and `objectBoxes3d` reply `unsupported`; a loadable model answers again | Pass |
+| `engine-doc/scene3d-geometry.test.ts`, render camera | 12 cameras (perspective and orthographic, animated, inside a turned 3D group) from `camera3d` against `compositionRuntime(PM).camera` | Exactly equal (lens and `matrixWorld`); no fallback |
+| same, transform targets | 108 targets (primitives, OBJ and glTF models, model groups, a flat group), 3 seeds, 3 times; then every target's edits for a move, a turn, and a scale | 6 numbers 1 ulp apart (relative 1.1e-16, pm-eval's `world3D` product), the rest exact; 303 gesture edits identical |
+| `pm-render` `tests/scene3d_resources.rs` | An unknown primitive on a 3D object layer | Nothing listed; the frame equals the frame without the object |
+| e2e with `POWERMOVE_NEW_ENGINE=1` (Electron lock), after the fixes below | `scene3d` (8), `viewport3d` (4), `comp-thumbnails` (1), `blender-motion` (3), `engine-blender` (2) | Run 2: 17 of 18 (`blender-motion` model and render spec failed on the unbound `.blend` source, fixed in `27ffb184`); run 3 (`blender-motion`, `scene3d`): 10 of 11, the one failure being the import defect below (the gizmo spec's first engine frame after the OBJ import is the missing-model box; the same spec passed in run 2). Gestures, cancels, and Undo leave the project's layers and the engine's frame identical wherever the model was drawn before them. `engine-blender`: the job engine's still 100% within 2 CV of today's (max 0), the paused viewer's Material Preview max 1 CV from the Blender surfaces |
+| same with `POWERMOVE_NEW_ENGINE=0` | `scene3d`, `blender-motion`, `viewport3d` with the adapted specs | 15 of 15 |
+| `scripts/frame-bridge-measure.mjs` `p3c-orbit-*` r1 (`docs/engine/phase3c-measurements/`): MMB orbit in the editor view of the primitives scene with a sun casting shadows, 1920 × 1080, 120 Hz panel, 2,401 events; load average 25 to 68 from other lanes during the runs | Pointer-to-pixel p50 / p95 / p99 | Today idle 25.7 / 38.5 / 42.6 ms (56 unpresented); engine idle 28.2 / 44.9 / 53.3 ms; today under the gate load 26.0 / 88.2 / 113.3 ms; engine under load 26.6 / 84.9 / 101.6 ms. The p95 ≤ 33 ms row is not met by either path; idle the engine is 2.5 ms worse at p50 and 10.7 ms at p99 (amendment 5's comparison fails idle, passes under load) |
 
 ### What remains (3D lane, Phase 3c)
 
-- Viewport framing (`viewportBounds`: View Selected, View All) reads the
-  engine's boxes with the native evaluator on; Edit Mode and the other
-  controller code below still read three.js.
+- Viewport framing, the render camera, and transform targets read pm-wasm
+  with the native evaluator on. Edit Mode (`editmode.ts`: the edited
+  mesh's points), the 3D cursor (`operators.ts` `placeCursor`: a raycast
+  for the hit point), and the chrome below still read the three.js
+  `compositionRuntime`, so the runtime is still synced while the 3D
+  viewport is open.
 - The 3D viewport chrome (`core/scene3d/overlay.ts`) still renders the
-  scene with three.js for occlusion and selection masks; it does not yet
-  read the engine's depth and id surface.
-- Edit Mode, modal transforms, the 3D cursor, navigation framing, snapping,
-  and box select still read the three.js `compositionRuntime`
-  (`controller.ts`, `operators.ts`, `editmode.ts`, `navigation.ts`).
+  scene with three.js for grid occlusion and selection outlines. Drawing it
+  over the bridge's depth and id surface as specified would change what the
+  chrome shows, which amendment 22 forbids without Jude's decision:
+  - the surface's depth is view-space depth in `rgbaf16` (about 11 bits
+    of mantissa: 0.008 world units at 10 units away), where today's grid
+    is depth-tested against a 24-bit depth buffer of the same scene, so the
+    grid's occlusion near surfaces at the floor (y = 0) would differ;
+  - the id channel names the topmost covering layer per pixel, where
+    today's outline mask draws every selected mesh whole (its occluded
+    parts included, `drawOutlines`), so outlines of partly hidden objects
+    would differ;
+  - the frame descriptor carries no id-to-layer legend (pm-render's
+    `Frame` has it), and the surface covers the composition, not the stage
+    the overlay draws over.
+  Matching today needs a selection-mask surface (selected objects' coverage
+  without depth against others) and a full-precision depth surface from the
+  engine (a contract 2 change, the bridge's), or keeping the three.js
+  chrome; escalated.
+- A 3D model imported with the engine on is drawn as the missing-model box
+  by a snapshot taken right after the import (176 ms after it in a probe;
+  the model 486 ms after), where today draws the model at once: the
+  engine's media answer for a new model asset arrives after its first
+  frames. Found by `scene3d.spec.ts`; not fixed here.
 - The `scene3d` API members are still assembled by `makeScene3DAPI` over
   today's modeling, rendering, and controller code; `assets.get().object3d`
   is still the importer's three.js object.
-- Blender: imported glTF models and recipe parts are not built into
-  snapshots (`blender/snapshot.rs` still refuses recipe parts), the editor
-  camera, `previewState`, and agent stills are as in docs/engine/blender.md.
-- 3D layers with masks (`3d/transparency`), 3D motion blur, 3D texture maps
-  outside the drawn still classes and with transparency, and the 3D orbit
-  pointer-to-pixel row are not done here.
+- Blender: snapshots of imported glTF models are not built (23 v1
+  snapshots); converted 16-bit TIFF, CMYK-alpha TIFF, and HDR AVIF
+  textures differ from today's (docs/engine/blender.md); `previewState`,
+  cancel and restart, and agent stills are as in docs/engine/blender.md.
+  Recipe parts are built into snapshots (Phase 3c, above).
+- SVG maps stay listed (`SVG texture maps`).
+- The 3D orbit row misses p95 ≤ 33 ms on both paths (measured above).

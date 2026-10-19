@@ -122,8 +122,9 @@ per frame: plan without drawing → snapshots (per nested composition)
   invariant 7). Cancelling the export stops Blender.
 - Routing: `plan_export_with(job, true)` drops `Feature::Blender` from the
   static check when the lane has a Blender stage; everything else the
-  static check lists still routes (imported models, recipe parts, and the
-  native pass's own limits such as texture maps with transparency).
+  static check lists still routes (imported glTF models, which are not
+  built into snapshots yet, and SVG texture maps). Recipe parts are built
+  since Phase 3c, and texture maps of every level 1 still class draw.
 
 ## Host services (contract 11 over the host port)
 
@@ -319,9 +320,26 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
   once the plan visits them, and the frame-list port covers them.
 - **Leases**: the job lane's decoded surfaces use a fixed 512 MiB budget,
   not the `blenderSurfaces` lease category; the disk area's bound is 8 GiB.
+- **Converted textures** (images the worker does not load as they are:
+  TIFF, AVIF, HEIC, and others) are made from the level 1 bitmap read back
+  unpremultiplied, as today's canvas `toBlob` reads it (Phase 3c round 2).
+  On capture `threed-20261019-roles-maps` the 8-bit TIFF renditions equal
+  today's pixels, but three classes still differ: 16-bit TIFF renditions
+  (today passes the stored FFmpeg PNG rendition itself, 16-bit), the
+  CMYK-alpha TIFF (up to 180 CV), and HDR AVIF (today's canvas `drawImage`
+  tone maps the bitmap differently from the WebGL upload: up to 210 CV for
+  PQ and HLG, 1 CV on 29 to 66 pixels for BT.2020 and P3 SDR). The
+  snapshot test compares converted PNGs by decoded pixels and names each
+  differing asset. Matching them needs the importer's rendition bytes for
+  TIFF and a measurement of Chromium's canvas draw of HDR bitmaps.
 - **Native-pass limits on Blender compositions**: the static check still
-  routes Blender compositions for limits only the native pass has (texture
-  maps with transparency, image formats the native pass cannot draw).
+  routes Blender compositions with SVG texture maps.
+- **Fixed in Phase 3c round 2: media-store assets.** Media-store files are
+  content-addressed and may have no extension; main's Blender stage refused
+  them ("Unsupported Blender asset format"), so a texture imported into the
+  store failed every engine Blender job (`blender-motion.spec.ts`'s agent
+  spec with the engine on). Their extension now comes from the file's
+  first bytes (`assetExtension`, `main/engine/blender.ts`).
 - **Level 2 surfaces stay 16-bit PNG** (decision 15); level 1 retains
   PNG8/dither 1 for existing-project parity. RFC 11 open question 1 (raw
   or EXR for level 2) is unchanged.

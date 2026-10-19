@@ -156,8 +156,11 @@ repository.
   pm-wasm with the editor camera, measured against today's runtime in
   dual-answer mode on skinned, morphed, and instanced Khronos models. The S7 lazy skinned pick (joint-bounded BVH
   nodes) is not ported; the full re-pose meets the targets natively.
-  `pm-geom3d` with the glTF code builds for wasm32-unknown-unknown; picks
-  in wasm are not measured.
+  `pm-geom3d` with the glTF code builds for wasm32-unknown-unknown. Picks
+  in wasm (V8) on 7 Khronos models plus a random composition, a new time
+  per pick, editor view: p50 2.15 ms, p95 2.27 ms, max 3.73 ms
+  (docs/engine/scene3d.md, "Phase 3c"). A model `pm_geom3d::gltf::load`
+  rejects is a named failure for every 3D question, not the missing box.
 - Skinned meshes are not culled and sort transparent items by the
   geometry's sphere (see Fidelity notes); three.js's history-dependent
   programs are generated fresh.

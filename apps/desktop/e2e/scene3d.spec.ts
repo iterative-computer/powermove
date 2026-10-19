@@ -1,6 +1,36 @@
 import { createServer } from 'node:http';
 import { chromium } from 'playwright';
 import { expect,test } from './helpers/app';
+import type { LaunchedApp } from './helpers/app';
+
+/* "Use New Engine" on (POWERMOVE_NEW_ENGINE=1), the viewer shows the
+   engine's frames and the WebGL canvas stays hidden: what the viewport shows
+   is read from the window (capturePage of the hidden window, never the
+   screen), and the engine's own frames are compared after gestures. Off,
+   these read today's WebGL canvas as before. */
+const engineOn=(session:LaunchedApp)=>session.page.evaluate(()=>!!(window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting);
+/** The RGB sum the viewport shows over a rectangle centered on the stage (CSS px). */
+async function shownSum(session:LaunchedApp,width:number,height:number):Promise<number> {
+  if(!(await engineOn(session)))return session.page.evaluate(({width,height})=>{
+    const gl=(window as any).PM.GL.gl,pixels=new Uint8Array(width*height*4);gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+    gl.readPixels(Math.max(0,Math.floor(gl.drawingBufferWidth/2)-(width>>1)),Math.max(0,Math.floor(gl.drawingBufferHeight/2)-(height>>1)),width,height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    return pixels.reduce((sum,v,i)=>sum+(i%4===3?0:v),0);
+  },{width,height});
+  const rect=await session.page.evaluate(()=>{const r=(window as any).PM.Kernel.services.get('viewer').stage.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};});
+  return session.app.evaluate(async({BrowserWindow},{x,y,width,height})=>{
+    const window=BrowserWindow.getAllWindows().find(w=>!w.isDestroyed()&&w.webContents.getURL().startsWith('app:'))!;
+    const bitmap=(await window.webContents.capturePage({x:Math.round(x-width/2),y:Math.round(y-height/2),width,height})).toBitmap();
+    let sum=0;for(let i=0;i<bitmap.length;i++)if(i%4!==3)sum+=bitmap[i]!;return sum;
+  },{...rect,width,height});
+}
+/** The engine's frame at `t` (a JPEG data URL of its pixels), or null with the engine off. */
+const engineFrame=(session:LaunchedApp,t=0)=>session.page.evaluate(t=>(window as any).PM.EngineCaptures?(window as any).PM.Export.snapshotAsync(t,160):null,t);
+/** The engine's frame once two captures 250 ms apart agree (media just imported has arrived). */
+async function settledEngineFrame(session:LaunchedApp,t=0):Promise<string|null> {
+  let last=await engineFrame(session,t);if(last===null)return null;
+  for(let i=0;i<20;i++){await session.page.waitForTimeout(250);const next=await engineFrame(session,t);if(next===last)return next;last=next;}
+  throw new Error('the engine frame did not settle');
+}
 
 test('3D groups rotate with one gizmo and preserve their members and Undo',async({session})=>{
   await session.openEditor();const {page}=session;
@@ -14,6 +44,8 @@ test('3D groups rotate with one gizmo and preserve their members and Undo',async
     return {id:group.id,pixels,groupedPixels:render(),members:['left','right'].map(id=>JSON.stringify(PM.L(id).p)),count:PM.hist.list().length};
   });
   expect(initial.groupedPixels).toEqual(initial.pixels);
+  // The engine's frame of the grouped scene, compared after the gesture's Undo.
+  const engineGrouped=await settledEngineFrame(session);
   await expect(page.locator('#composition-3d-controls')).toBeVisible();
   await page.getByRole('radio',{name:'Rotate',exact:true}).click();
   const handle=await page.evaluate(()=>{
@@ -26,15 +58,16 @@ test('3D groups rotate with one gizmo and preserve their members and Undo',async
   const rotated=await page.evaluate(id=>{const PM=(window as any).PM;return {rotation:PM.L(id).p.rotation.v,count:PM.hist.list().length,members:['left','right'].map(id=>JSON.stringify(PM.L(id).p)),pixels:[...PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false})]};},initial.id);
   expect(Math.abs(rotated.rotation)).toBeGreaterThan(45);expect(rotated.rotation/5).toBeCloseTo(Math.round(rotated.rotation/5));
   expect(rotated.members).toEqual(initial.members);expect(rotated.count).toBe(initial.count+1);expect(rotated.pixels).not.toEqual(initial.pixels);
+  const engineRotated=await engineFrame(session);
   await page.evaluate(()=>(window as any).PM.hist.undo());
   expect(await page.evaluate(()=>[...(window as any).PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false})])).toEqual(initial.pixels);
+  if(engineGrouped!==null){
+    expect(engineRotated).not.toEqual(engineGrouped);
+    expect(await engineFrame(session)).toEqual(engineGrouped);
+  }
   for(const theme of ['dark','light']){
     await page.evaluate(theme=>{const PM=(window as any).PM;PM.theme.apply(theme);PM.invalidate();},theme);
-    await expect.poll(()=>page.evaluate(()=>{
-      const gl=(window as any).PM.GL.gl,pixels=new Uint8Array(400*200*4);gl.bindFramebuffer(gl.FRAMEBUFFER,null);
-      gl.readPixels(Math.max(0,Math.floor(gl.drawingBufferWidth/2)-200),Math.max(0,Math.floor(gl.drawingBufferHeight/2)-100),400,200,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
-      return pixels.reduce((sum,v,i)=>sum+(i%4===3?0:v),0);
-    })).toBeGreaterThan(100000);
+    await expect.poll(()=>shownSum(session,400,200)).toBeGreaterThan(100000);
     await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve()))));
     // Flush the retained WebGL surface into Chromium's compositor before capture.
     await page.locator('#gl').evaluate((canvas:HTMLCanvasElement)=>{canvas.toDataURL();});
@@ -163,6 +196,7 @@ test('selecting an imported model shows composition gizmos; drag, cancel and und
     const target=imported.data.result.id;PM.selectLayers([target]);PM.invalidate();return {target,count:PM.hist.list().length};
   });
   await expect(page.locator('#composition-3d-controls')).toBeVisible();
+  const engineBefore=await settledEngineFrame(session),documentBefore=await page.evaluate(()=>JSON.stringify((window as any).PM.proj.layers));
   await page.getByRole('radio',{name:'Move',exact:true}).click();
   const findHandle=(axis:string)=>page.evaluate((axis)=>{
     const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),stage=document.querySelector('#stage')!,rect=stage.getBoundingClientRect();
@@ -193,6 +227,9 @@ test('selecting an imported model shows composition gizmos; drag, cancel and und
   await page.evaluate(()=>{const PM=(window as any).PM;PM.Kernel.services.get('viewer').setZoom(1);PM.invalidate();});
   const zoomed=await findHandle('X');await page.mouse.move(zoomed.x,zoomed.y);await page.mouse.down();await page.mouse.move(zoomed.x+30,zoomed.y,{steps:5});await page.mouse.up();expect(await position()).not.toBe(0);await page.evaluate(()=>(window as any).PM.hist.undo());
   await page.evaluate(()=>(window as any).PM.Kernel.services.get('viewer').returnToComposition());
+  // Every gesture was undone or cancelled: the layer and the engine's frame are as before.
+  expect(await page.evaluate(()=>JSON.stringify((window as any).PM.proj.layers))).toBe(documentBefore);
+  if(engineBefore!==null)expect(await engineFrame(session)).toEqual(engineBefore);
 
   await page.evaluate(()=>(window as any).PM.Kernel.api('gizmo-state').scene3d.viewport.run('orientation','local'));
   expect(await page.evaluate(()=>(window as any).PM.Kernel.api('gizmo-state').scene3d.viewport.state().orientation)).toBe('local');
@@ -204,11 +241,7 @@ test('selecting an imported model shows composition gizmos; drag, cancel and und
   });expect(repeated).toEqual([255,255,255]);
   for(const theme of ['dark','light']){
     await page.evaluate(theme=>(window as any).PM.theme.apply(theme),theme);
-    await expect.poll(()=>page.evaluate(()=>{
-      const PM=(window as any).PM,gl=PM.GL.gl,pixel=new Uint8Array(4);
-      gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.readPixels(Math.floor(PM.GL.canvas.width/2),Math.floor(PM.GL.canvas.height/2),1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
-      return pixel[0]+pixel[1]+pixel[2];
-    })).toBeGreaterThan(100);
+    await expect.poll(()=>shownSum(session,1,1)).toBeGreaterThan(100);
     await page.screenshot({path:`/tmp/powermove-3d-layers-${theme}.png`});
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
