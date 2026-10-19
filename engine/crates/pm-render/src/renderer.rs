@@ -4,6 +4,7 @@
 //! evaluator's caches across frames.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 mod chrome;
 mod layer_raster;
@@ -27,6 +28,54 @@ use crate::pipelines::Pipelines;
 use crate::plan::{self, Background, CompPlan};
 use crate::request::RenderRequest;
 use crate::scene3d::Scene3dRenderer;
+
+/// Rounds of a frame through a fallback host. A frame takes one round per
+/// runner step it draws: a waiting step's pixels may feed every later step
+/// (a request covers its textures' pixels), so later steps are asked for
+/// once it is answered, even on independent layers. Each round must ask
+/// for a request not asked before in the frame (answers are pinned until
+/// the frame is delivered, so one asked again means no progress); this cap
+/// only bounds a frame whose requests never repeat, far past any real
+/// project (each round renders the frame again).
+const HOST_ROUNDS: usize = 1024;
+
+/// Attempts a fallback host gets at a request that fails transiently.
+const HOST_ATTEMPTS: u32 = 3;
+
+/// Answers a fallback host may give that the program is still compiling
+/// (`deadline`: the runner keeps the compile going, and the request waits
+/// for the same compile again) before they count as attempts. Each answer
+/// waits the runner's compile deadline (10 s), so a job waits about ten
+/// minutes for a program WebGL takes long to compile, as today's exporter
+/// waits for its compile; one the driver never finishes still stops the
+/// job with an error naming the program.
+pub const HOST_COMPILE_WAITS: u32 = 60;
+
+/// Whether a frame's `rounds`-th round through a fallback host makes
+/// progress: it asks for at least one request not asked before in the
+/// frame, within [`HOST_ROUNDS`].
+fn host_progress(
+    asked: &mut std::collections::HashSet<String>,
+    requests: &[crate::shader_layers::FallbackRequest],
+    rounds: usize,
+) -> Result<(), RenderError> {
+    if rounds > HOST_ROUNDS {
+        return Err(RenderError::Fallback(format!(
+            "the frame still needed the WebGL fallback runner after {HOST_ROUNDS} rounds"
+        )));
+    }
+    let mut new = false;
+    for r in requests {
+        new |= asked.insert(r.key.clone());
+    }
+    if !new {
+        return Err(RenderError::Fallback(format!(
+            "the frame asked the WebGL fallback runner again for {} answered request(s) (round {rounds})",
+            requests.len()
+        )));
+    }
+    Ok(())
+}
 
 /// A rendered frame.
 pub struct Frame {
@@ -184,6 +233,8 @@ pub struct Renderer {
     pyramids: crate::sampling::gpu::PyramidCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
+    /// A fallback runner the renderer waits on ([`Renderer::set_fallback_host`]).
+    fallback_host: Option<Arc<dyn crate::shader_layers::FallbackHost>>,
     /// Effect, transition, and layer definitions and their programs
     /// (`crate::effects`, contract 10): the renderer's own effect host.
     effects: Effects,
@@ -239,6 +290,7 @@ impl Renderer {
             effects: Effects::new(format!("{}; wgpu 30", std::env::consts::OS)),
             effect_host: None,
             shaders: Default::default(),
+            fallback_host: None,
             explicit_meshes: Default::default(),
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
@@ -409,9 +461,20 @@ impl Renderer {
     /// `Feature::ShaderFallback`.
     pub fn set_shader_fallback_runner(&mut self, attached: bool) {
         self.shaders.fallback_runner = attached;
+        self.effects.fallback.runner = attached;
         if !attached {
             self.shaders.clear_fallback();
+            self.fallback_host = None;
         }
+    }
+
+    /// A runner the renderer waits on (the job engine's: the host runs each
+    /// request in a window's runner, contract 14): frames needing it render
+    /// to completion instead of failing with
+    /// [`RenderError::ShaderFallbackPending`]. `None` detaches it.
+    pub fn set_fallback_host(&mut self, host: Option<Arc<dyn crate::shader_layers::FallbackHost>>) {
+        self.set_shader_fallback_runner(host.is_some());
+        self.fallback_host = host;
     }
 
     /// Stores the runner's pixels for a request key
@@ -421,7 +484,64 @@ impl Renderer {
         key: String,
         pixels: crate::shader_layers::FallbackPixels,
     ) {
-        self.shaders.fallback.insert(key, pixels);
+        if self.effects.fallback.expects(&key) {
+            self.effects.fallback.put_pixels(key, pixels);
+        } else {
+            if let Some(program) = self.shaders.waiting.remove(&key) {
+                self.effects.fallback.retries.succeeded(&program);
+            }
+            self.shaders.fallback.insert(key, pixels);
+        }
+    }
+
+    /// The runner could not draw a request.
+    ///
+    /// A final failure ([`FallbackFailure::is_final`]: WebGL refused the
+    /// program, or its draw passed the runner's deadline) is kept until the
+    /// program's source changes: it draws nothing (a shader layer) or is
+    /// skipped (an effect or transition) and is reported, and a draw past
+    /// the deadline is turned off by the watchdog. Any other failure is
+    /// transient (the runner's context was lost, its compile deadline
+    /// passed, no runner answered): the program is asked for again after
+    /// the returned delay (`Some(ZERO)` at the next frame), as today's
+    /// compositor draws again once its context is restored. A host draws
+    /// the view again then.
+    ///
+    /// [`FallbackFailure::is_final`]: crate::shader_layers::FallbackFailure::is_final
+    pub fn put_fallback_failure(
+        &mut self,
+        key: &str,
+        failure: crate::shader_layers::FallbackFailure,
+    ) -> Option<std::time::Duration> {
+        let now = self.effects.watchdog.now();
+        if self.effects.fallback.expects(key) {
+            self.effects.fallback.put_failure(key, failure, now)
+        } else if let Some(program) = self.shaders.waiting.remove(key) {
+            if failure.is_final() {
+                self.effects.fallback.retries.succeeded(&program);
+                self.shaders.failed.insert(program, (failure, false));
+                None
+            } else {
+                Some(self.effects.fallback.retries.failed(&program, failure, now))
+            }
+        } else {
+            None
+        }
+    }
+
+    /// When the earliest program whose request failed transiently is asked
+    /// for again (a host draws its views again then).
+    pub fn fallback_retry_at(&self) -> Option<Instant> {
+        self.effects.fallback.retries.next_at()
+    }
+
+    /// The textures a waiting effect or transition request samples (sent to
+    /// the runner after the request, `ShaderFallbackMessage::Input`).
+    pub fn fallback_textures(
+        &self,
+        key: &str,
+    ) -> Option<Vec<Arc<crate::shader_layers::FallbackPixels>>> {
+        self.effects.fallback.textures(key)
     }
 
     /// What the shader UI is told about the shader and extension layers of
@@ -467,8 +587,11 @@ impl Renderer {
 
     /// Swaps in another definition set (one per view of a shared renderer:
     /// each keeps its programs and watchdog state); returns the previous.
+    /// Whether a fallback runner is attached belongs to the renderer, not
+    /// to a definition set: the set swapped in draws with it.
     pub fn swap_effects(&mut self, effects: &mut Effects) {
         std::mem::swap(&mut self.effects, effects);
+        self.effects.fallback.runner = self.shaders.fallback_runner;
     }
 
     /// Runs `f` with an effect context over the renderer's own definitions,
@@ -537,22 +660,150 @@ impl Renderer {
             height: h,
         });
         let coordinates = crate::effects::exec::effect_coordinates(region, full, (w, h));
-        let (out, unsupported) = self.with_gpu("pm effects", precision, full, |gpu| {
-            gpu.chain(
-                "",
-                steps,
-                time,
-                input,
-                backdrop,
-                coordinates,
-                pm_protocol::color::WorkingEncoding::Standard,
-            )
-            .unwrap_or_else(|| gpu.copy_of(input))
-        });
-        if !unsupported.is_empty() {
-            return Err(RenderError::Unsupported(unsupported));
+        self.with_runner(|r| {
+            r.with_gpu("pm effects", precision, full, |gpu| {
+                Some(
+                    gpu.chain(
+                        "",
+                        steps,
+                        time,
+                        input,
+                        backdrop,
+                        coordinates,
+                        pm_protocol::color::WorkingEncoding::Standard,
+                    )
+                    .unwrap_or_else(|| gpu.copy_of(input)),
+                )
+            })
+        })
+    }
+
+    /// Runs `draw` (a harness's effects or transition, `with_gpu`) until
+    /// no fallback request waits: through the fallback host when one is
+    /// attached, else failing with [`RenderError::ShaderFallbackPending`].
+    fn with_runner(
+        &mut self,
+        draw: impl FnMut(&mut Self) -> (Option<Target>, Vec<Unsupported>),
+    ) -> Result<Target, RenderError> {
+        if self.fallback_host.is_none() {
+            return self.with_runner_rounds(draw);
         }
-        Ok(out)
+        self.effects.fallback.retries.clear();
+        self.pin_fallback_results(true);
+        let out = self.with_runner_rounds(draw);
+        self.pin_fallback_results(false);
+        out
+    }
+
+    /// Keeps every runner result a host answers until the frame is
+    /// delivered (`true`), or lets the stores' budgets apply again.
+    fn pin_fallback_results(&mut self, pin: bool) {
+        if pin {
+            self.effects.fallback.pin_results();
+            self.shaders.fallback.pin();
+        } else {
+            self.effects.fallback.unpin_results();
+            self.shaders.fallback.unpin();
+        }
+    }
+
+    fn with_runner_rounds(
+        &mut self,
+        mut draw: impl FnMut(&mut Self) -> (Option<Target>, Vec<Unsupported>),
+    ) -> Result<Target, RenderError> {
+        let mut rounds = 0;
+        let mut asked = std::collections::HashSet::new();
+        loop {
+            self.effects.fallback.pending.clear();
+            self.effects.fallback.fatal = None;
+            self.effects.fallback.blocked = false;
+            let (out, unsupported) = draw(self);
+            if let Some(why) = self.effects.fallback.fatal.take() {
+                return Err(RenderError::Fallback(why));
+            }
+            if !unsupported.is_empty() {
+                return Err(RenderError::Unsupported(unsupported));
+            }
+            let pending: Vec<_> = self
+                .effects
+                .fallback
+                .pending
+                .drain(..)
+                .map(|r| (*r).clone())
+                .collect();
+            if pending.is_empty() {
+                return out.ok_or_else(|| RenderError::Unsupported(vec![]));
+            }
+            let Some(host) = self.fallback_host.clone() else {
+                return Err(RenderError::ShaderFallbackPending(pending));
+            };
+            rounds += 1;
+            host_progress(&mut asked, &pending, rounds)?;
+            self.run_host(host.as_ref(), pending);
+        }
+    }
+
+    /// Runs requests through a fallback host and stores what it answers.
+    /// A transient failure (the runner's context was lost, no runner
+    /// answered) is tried again in place, up to [`HOST_ATTEMPTS`] times; a
+    /// program still compiling (`deadline`) is waited for again first, up to
+    /// [`HOST_COMPILE_WAITS`] times. Then the failure is stored
+    /// ([`Renderer::put_fallback_failure`]); the frame drawn again then
+    /// stops a job with an error naming the program, so nothing is
+    /// delivered without a program WebGL draws today. Each frame of a job
+    /// starts with fresh attempts.
+    fn run_host(
+        &mut self,
+        host: &dyn crate::shader_layers::FallbackHost,
+        requests: Vec<crate::shader_layers::FallbackRequest>,
+    ) {
+        for r in requests {
+            let textures = self.fallback_textures(&r.key).unwrap_or_default();
+            let key = r.key.clone();
+            let job = crate::shader_layers::FallbackJob {
+                request: r,
+                textures,
+            };
+            let mut attempt = 0;
+            let mut waits = 0;
+            let failure = loop {
+                let failure = match host.run(&job) {
+                    Ok(pixels) if pixels.fits(&job.request) => {
+                        self.put_fallback_pixels(key.clone(), pixels);
+                        break None;
+                    }
+                    Ok(pixels) => crate::shader_layers::FallbackFailure {
+                        reason: "size".into(),
+                        message: format!(
+                            "the runner answered {}×{} for a {}×{} target",
+                            pixels.width, pixels.height, job.request.width, job.request.height
+                        ),
+                    },
+                    Err(failure) => failure,
+                };
+                if failure.reason == "deadline" && waits < HOST_COMPILE_WAITS {
+                    waits += 1;
+                    continue;
+                }
+                attempt += 1;
+                if failure.is_final() || attempt >= HOST_ATTEMPTS {
+                    break Some(failure);
+                }
+            };
+            if let Some(mut failure) = failure {
+                if !failure.is_final() {
+                    failure.message = if waits > 0 {
+                        format!(
+                            "{} (after {attempt} attempts and {waits} waits for its compile)",
+                            failure.message
+                        )
+                    } else {
+                        format!("{} (after {attempt} attempts)", failure.message)
+                    };
+                }
+                self.put_fallback_failure(&key, failure);
+            }
+        }
     }
 
     /// Runs a transition node from `from` to `to` (`runTransition`).
@@ -567,13 +818,11 @@ impl Renderer {
         let mut step = step.clone();
         step.edge_in = true;
         let full = (from.width(), from.height());
-        let (out, unsupported) = self.with_gpu("pm transition", precision, full, |gpu| {
-            gpu.run_transition("", &step, from, to, time)
-        });
-        match out {
-            Some(t) if unsupported.is_empty() => Ok(t),
-            _ => Err(RenderError::Unsupported(unsupported)),
-        }
+        self.with_runner(|r| {
+            r.with_gpu("pm transition", precision, full, |gpu| {
+                gpu.run_transition("", &step, from, to, time)
+            })
+        })
     }
 
     /// Reads finished watchdog timestamps (`wait`: every submitted frame)
@@ -585,6 +834,51 @@ impl Renderer {
         self.effects.watchdog.take_reports()
     }
 
+    /// Looks at the frames the watchdog follows without waiting (a host
+    /// calls it between renders, every few tens of milliseconds while
+    /// frames are in flight): completions are seen promptly, a frame seen
+    /// running past the hang budget is suspected, and ended frames are
+    /// judged.
+    pub fn watchdog_watch(&mut self) {
+        if self.effects.watchdog.frames_in_flight() > 0 {
+            self.effects
+                .watchdog
+                .collect(&self.device, &self.queue, false);
+        }
+    }
+
+    /// Whether a frame the hang guard suspects has not been judged yet
+    /// (frames drawing its user programs fail with
+    /// [`RenderError::WatchdogPending`] until it is).
+    pub fn watchdog_holding(&self) -> bool {
+        self.effects.watchdog.holding()
+    }
+
+    /// Why a job renderer's watchdog stopped every frame, if it did.
+    pub fn watchdog_stopped(&self) -> Option<&str> {
+        self.effects.watchdog.stopped()
+    }
+
+    /// Waits until every submitted command has completed, looking at the
+    /// watchdog's frames every 100 ms meanwhile (so a frame that runs away
+    /// is seen running), then judges them. Job hosts wait here after each
+    /// frame, so a runaway is judged before its pixels are read.
+    pub fn wait_idle(&mut self) {
+        loop {
+            let done = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_millis(100)),
+            });
+            match done {
+                Err(wgpu::PollError::Timeout) => self.watchdog_watch(),
+                _ => break,
+            }
+        }
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, true);
+    }
+
     /// Records `bracket` around every following frame's commands (`None`:
     /// nothing).
     pub fn set_bracket(&mut self, bracket: Option<Arc<dyn CommandBracket>>) {
@@ -592,18 +886,29 @@ impl Renderer {
     }
 
     /// The capability check for this renderer: `unsupported_with_media`,
-    /// with text and captions drawn when fonts are configured.
+    /// with text and captions drawn when fonts are configured, and effects,
+    /// transitions, and extension layers checked against the renderer's
+    /// own definitions when it holds them (contract 10: an export job's,
+    /// a still batch's, `pm-cli`'s; `capability::unsupported_for`).
     pub fn unsupported_with_media(
         &self,
         document: &Document,
         composition: &str,
         assets: &dyn AssetResolver,
     ) -> Vec<Unsupported> {
-        if self.text.has_fonts() {
-            capability::unsupported_with_fonts(document, composition, Some(assets))
-        } else {
-            capability::unsupported_with_media(document, composition, assets)
+        let effects = self.effect_host.is_none().then_some(&self.effects);
+        let mut list = capability::unsupported_for(
+            document,
+            composition,
+            Some(assets),
+            effects,
+            self.text.has_fonts(),
+        );
+        // A runner the renderer waits on draws what only WebGL can.
+        if self.fallback_host.is_some() {
+            list.retain(|u| !matches!(u.feature, Feature::ShaderFallback(_)));
         }
+        list
     }
 
     /// The fonts text and captions layers lay out with (`None`: those
@@ -834,6 +1139,11 @@ impl Renderer {
     /// (`rgba16float`, `rgba32float`), drawable. `depth_id` receives the
     /// depth and id surface when given (`rgba16float`, the same size).
     /// On [`RenderError::Unsupported`] the targets are left untouched.
+    ///
+    /// With a fallback host ([`Renderer::set_fallback_host`]), programs only
+    /// the runner draws are run through it and the frame is rendered again
+    /// with their pixels (a step's request covers its inputs, so a chain of
+    /// them takes one round per step).
     #[allow(clippy::too_many_arguments)]
     pub fn render_into(
         &mut self,
@@ -845,9 +1155,63 @@ impl Renderer {
         target: &Target,
         depth_id: Option<&Target>,
     ) -> Result<Rendered, RenderError> {
-        // A frame that waits for level 1 SVG rasters with a source attached
-        // fetches them and draws again (each round can only meet rasters
-        // the last did not draw, as more layers resolve).
+        if self.fallback_host.is_none() {
+            return self.render_into_svg(
+                document,
+                composition,
+                time,
+                request,
+                assets,
+                target,
+                depth_id,
+            );
+        }
+        self.effects.fallback.retries.clear();
+        self.pin_fallback_results(true);
+        let mut rounds = 0;
+        let mut asked = std::collections::HashSet::new();
+        let out = loop {
+            let result = self.render_into_svg(
+                document,
+                composition,
+                time,
+                request,
+                assets,
+                target,
+                depth_id,
+            );
+            let Some(host) = self.fallback_host.clone() else {
+                break result;
+            };
+            let requests = match result {
+                Err(RenderError::ShaderFallbackPending(requests)) => requests,
+                other => break other,
+            };
+            rounds += 1;
+            if let Err(e) = host_progress(&mut asked, &requests, rounds) {
+                break Err(e);
+            }
+            self.run_host(host.as_ref(), requests);
+        };
+        self.pin_fallback_results(false);
+        out
+    }
+
+    /// [`Renderer::render_into`]'s frame with its level 1 SVG rasters: a
+    /// frame that waits for them with a source attached fetches them and
+    /// draws again (each round can only meet rasters the last did not
+    /// draw, as more layers resolve).
+    #[allow(clippy::too_many_arguments)]
+    fn render_into_svg(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        depth_id: Option<&Target>,
+    ) -> Result<Rendered, RenderError> {
         for _ in 0..3 {
             match self.render_into_once(
                 document,
@@ -935,10 +1299,15 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        // Overruns measured on earlier frames disable their effects now.
+        // Overruns measured on earlier frames disable their programs now.
         self.effects
             .watchdog
             .collect(&self.device, &self.queue, false);
+        // A job renderer stops after a runaway program: nothing is drawn
+        // without a program the project asks for (watchdog policy).
+        if let Some(why) = self.effects.watchdog.stopped() {
+            return Err(RenderError::Watchdog(why.to_owned()));
+        }
         let options3d = self.options3d.for_request(request);
         let blender = crate::blender::PlanState::new(options3d.blender.clone());
         let (mut plan, build) = plan::build_blender(
@@ -997,12 +1366,17 @@ impl Renderer {
         self.media.stand_ins.clear();
         let scrub = self.media.scrub;
         self.media.scrub = scrub && !request.export;
-        // Only renderers drawing their own definitions time effects.
-        let timer = if self.effects.configured() && self.effect_host.is_none() {
-            self.effects.watchdog.frame_timer(&self.device)
-        } else {
-            None
-        };
+        // Renderers drawing their own definitions time effects,
+        // transitions, and shader and fragment layers (the budget and the
+        // hang guard; `effects::watchdog`).
+        let timer = self
+            .effect_host
+            .is_none()
+            .then(|| self.effects.watchdog.frame_timer(&self.device));
+        self.effects.watchdog.take_held();
+        self.effects.fallback.pending.clear();
+        self.effects.fallback.fatal = None;
+        self.effects.fallback.blocked = false;
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
             let mut exec = Exec {
@@ -1077,10 +1451,15 @@ impl Renderer {
             // plan could not see): the frame fails, and the caller's
             // targets keep their previous contents. The commands still run,
             // so media caches filled by this encoder stay valid.
+            let held = exec.effects.watchdog.take_held();
             let svg_waits = exec.svg_policy == crate::vector::svg_rasters::SvgMissPolicy::Wait
                 && exec.vector.svg.missed();
-            let complete =
-                exec.unsupported.is_empty() && exec.fallback_pending.is_empty() && !svg_waits;
+            let complete = exec.unsupported.is_empty()
+                && exec.fallback_pending.is_empty()
+                && exec.effects.fallback.pending.is_empty()
+                && exec.effects.fallback.fatal.is_none()
+                && !held
+                && !svg_waits;
             if complete {
                 exec.flip_color(&mut encoder, &gl_rows, target);
             }
@@ -1108,16 +1487,18 @@ impl Renderer {
                 .chain(resolved.iter().map(|r| r.layer.clone()))
                 .collect();
             let timer = exec.timer.take();
-            let pending = std::mem::take(&mut exec.fallback_pending);
+            let mut pending = std::mem::take(&mut exec.fallback_pending);
+            pending.append(&mut exec.effects.fallback.pending);
             (
                 legend,
                 exec.taken,
                 exec.unsupported,
                 exec.failures,
                 timer,
-                pending,
+                (pending, held),
             )
         };
+        let (pending, held) = pending;
         if let Some(timer) = timer {
             self.effects.watchdog.finish(&mut encoder, timer);
         }
@@ -1142,6 +1523,23 @@ impl Renderer {
         if !unsupported.is_empty() {
             self.vector.svg.take_misses();
             return Err(RenderError::Unsupported(unsupported));
+        }
+        if let Some(why) = self.effects.fallback.fatal.take() {
+            return Err(RenderError::Fallback(why));
+        }
+        if let Some(why) = self.effects.watchdog.stopped() {
+            return Err(RenderError::Watchdog(why.to_owned()));
+        }
+        if held {
+            return Err(RenderError::WatchdogPending);
+        }
+        for request in &pending {
+            if !self.effects.fallback.expects(&request.key) {
+                self.shaders.waiting.insert(
+                    request.key.clone(),
+                    crate::shader_layers::fallback::program_id(request),
+                );
+            }
         }
         if !pending.is_empty() {
             self.vector.svg.take_misses();

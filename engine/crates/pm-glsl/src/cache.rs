@@ -42,9 +42,15 @@ pub struct Key(pub [u8; 32]);
 
 impl Key {
     pub fn new(fragment: &str, line_offset: u32, context: &str) -> Key {
+        Key::at_revision(fragment, line_offset, context, PIPELINE_REVISION)
+    }
+
+    /// The key a pipeline at `revision` gives the program (entries an
+    /// earlier engine build wrote are under their own revision's keys).
+    pub fn at_revision(fragment: &str, line_offset: u32, context: &str, revision: u32) -> Key {
         let mut h = Sha256::new();
         h.update(b"pm-glsl\0");
-        h.update(PIPELINE_REVISION.to_le_bytes());
+        h.update(revision.to_le_bytes());
         h.update(b"glslang 0.8.1; naga 30\0");
         h.update(context.as_bytes());
         h.update([0]);
@@ -264,6 +270,90 @@ mod tests {
         assert!(second.prepare(SRC, 5).is_ok());
         assert!(second.disk_get(key).is_some());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What `Cache::disk_put` writes, under any revision.
+    fn plant(dir: &Path, key: Key, revision: u32, prepared: &Prepared) {
+        let entry = DiskEntry {
+            key: key.hex(),
+            revision,
+            prepared: prepared.clone(),
+        };
+        write_atomic(
+            &dir.join(format!("{}.json", key.hex())),
+            &serde_json::to_vec(&entry).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_entry_written_under_an_earlier_revision_is_not_reused() {
+        // A machine that ran an earlier engine build keeps its prepared
+        // programs on disk (POWERMOVE_ENGINE_SHADER_CACHE). Revision 1's
+        // `round` was `roundEven` (ties to even); a program that calls it
+        // must be translated again, not loaded from revision 1's entry.
+        const ROUND: &str = "#version 300 es\nprecision highp float;\nuniform float u_x;\nout vec4 o;\nvoid main(){ o = vec4(round(u_x)); }\n";
+        let dir = std::env::temp_dir().join(format!("pm-glsl-cache-rev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let current = pipeline::prepare(ROUND, 3).unwrap();
+        // What the earlier revision kept: another program's output, so a
+        // reuse is visible.
+        let stale = pipeline::prepare(SRC, 3).unwrap();
+        assert_ne!(stale, current);
+        for revision in 1..PIPELINE_REVISION {
+            let old = Key::at_revision(ROUND, 3, "test", revision);
+            assert_ne!(old, Key::new(ROUND, 3, "test"), "revision {revision}");
+            // Under the key that revision gave the program...
+            plant(&dir, old, revision, &stale);
+        }
+        // ...and, as a damaged or hand-copied entry would be, under the
+        // current key with an earlier revision recorded.
+        let cache = Cache::new("test", Some(dir.clone()));
+        plant(&dir, cache.key(ROUND, 3), PIPELINE_REVISION - 1, &stale);
+        assert!(cache.disk_get(cache.key(ROUND, 3)).is_none());
+        let entry = cache.prepare(ROUND, 3);
+        assert_eq!(entry.as_ref().as_ref().ok(), Some(&current));
+        // The fresh translation replaced the stale entry.
+        let again = Cache::new("test", Some(dir.clone()));
+        assert_eq!(again.disk_get(again.key(ROUND, 3)).as_ref(), Some(&current));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Programs over every stage and polyfill: what the disk cache keeps.
+    const EMITTED_PROGRAMS: &[&str] = &[
+        SRC,
+        "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform float u_x;\nuniform vec4 u_v;\nout vec4 o;\nvoid main(){ o = vec4(round(u_x), round(v_uv), radians(u_x)) + degrees(u_v) + round(u_v) + vec4(radians(v_uv), degrees(v_uv)); }\n",
+        "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform float u_x;\nout vec4 o;\nvoid main(){ float i; vec2 j; o = vec4(normalize(u_x), faceforward(u_x, v_uv.x, v_uv.y), reflect(u_x, v_uv.x), refract(u_x, v_uv.y, 0.5)) + vec4(modf(u_x, i), modf(v_uv, j), i); }\n",
+        "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform mat3 u_m;\nout vec4 o;\nvoid main(){ mat3 m = inverse(u_m) * outerProduct(vec3(v_uv, 1.0), vec3(1.0, v_uv)); mat2 n = inverse(mat2(m)); o = vec4(m[0] + vec3(n[1], 0.0), tanh(v_uv.x)) + vec4(pow(v_uv.x, 2.2)); }\n",
+        "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\nuniform sampler2D u_backdrop;\nuniform float u_p0;\nout vec4 o;\nvoid main(){ vec4 a = texture(u_tex, v_uv); vec4 b = texture(u_backdrop, v_uv + vec2(u_p0)); o = mix(a, b, smoothstep(0.0, 1.0, u_p0)); }\n",
+    ];
+
+    /// The revision and the SHA-256 of what [`EMITTED_PROGRAMS`] prepare to.
+    const EMITTED: (u32, &str) = (
+        2,
+        "981e3be32ecc0f78f4c9bbf902a177afe0859b0fa0b84f3cdaae2c072583aa28",
+    );
+
+    #[test]
+    fn emitted_programs_match_the_pipeline_revision() {
+        // A change to what the pipeline emits (a stage, a polyfill, glslang
+        // or naga) changes the prepared programs the disk cache keeps across
+        // engine builds; reusing one written before the change brings back
+        // the old output. Bump `PIPELINE_REVISION` (and the versions in
+        // `Key::at_revision` when glslang or naga changed), then record the
+        // new hash here.
+        let mut h = Sha256::new();
+        for (i, src) in EMITTED_PROGRAMS.iter().enumerate() {
+            let prepared = pipeline::prepare(src, 3)
+                .unwrap_or_else(|f| panic!("program {i} does not prepare: {f}"));
+            h.update(serde_json::to_vec(&prepared).unwrap());
+        }
+        let hash: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert!(
+            EMITTED == (PIPELINE_REVISION, hash.as_str()),
+            "prepared output is {hash} at PIPELINE_REVISION {PIPELINE_REVISION}; EMITTED records {EMITTED:?}. \
+             If the output changed, bump PIPELINE_REVISION and set EMITTED to (the new revision, {hash:?})."
+        );
     }
 
     #[test]

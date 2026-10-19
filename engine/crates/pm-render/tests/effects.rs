@@ -16,6 +16,7 @@ use pm_protocol::definitions::{
     DefinitionsUpdate, UpdateError,
 };
 use pm_protocol::error::{ErrorCode, ErrorScope};
+use pm_render::effects::watchdog::{FnTiming, Span, Subject, TimingSource};
 use pm_render::{
     Feature, MapResolver, RenderError, RenderRequest, Renderer, builtin_definitions, unsupported,
     unsupported_with_definitions,
@@ -144,6 +145,44 @@ fn update(
         full,
         upserts,
         removals,
+    }
+}
+
+/// GLSL built-ins whose Metal call the engine takes from ANGLE
+/// (`pm_render::glsl`): `round` rounds ties away from zero as WebGL does
+/// today (ANGLE's `metal::round`), `roundEven` to even (`metal::rint`).
+#[test]
+fn round_ties_away_from_zero_as_in_webgl() {
+    let _gpu = gpu();
+    const ROUND: &str = "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nuniform float u_x;\nout vec4 o;\nvoid main(){ o = vec4(round(u_x) * 0.25, roundEven(u_x) * 0.25, round(-u_x - 1.0) * -0.125, 1.0); }\n";
+    let params = json!([{ "type": "number", "key": "x", "default": 0.5, "min": 0, "max": 10, "step": null }]);
+    let mut set = builtin_definitions();
+    set.definitions
+        .push(raw_effect("acme.round", ROUND, params, false));
+    let mut r = Renderer::headless().unwrap();
+    let failures = r.set_definitions(&set).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    for (x, want) in [
+        (0.5, [0.25, 0.0, 0.25]),
+        (2.5, [0.75, 0.5, 0.5]),
+        (1.25, [0.25, 0.25, 0.25]),
+    ] {
+        let (doc, res) = document(
+            vec![fx("f1", "acme.round", json!({ "x": ch(json!(x)) }))],
+            None,
+        );
+        let px = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+        // The effect writes every pixel of the layer's buffer; the image
+        // layer is opaque where its alpha is, so read the composite where
+        // nothing else is drawn over it: the frame's first pixel.
+        let i = 0;
+        let got = [px[i], px[i + 1], px[i + 2]];
+        for c in 0..3 {
+            assert!(
+                (got[c] - want[c]).abs() < 1e-3,
+                "x = {x}: {got:?}, want {want:?}"
+            );
+        }
     }
 }
 
@@ -768,46 +807,70 @@ fn translated_programs_are_kept_in_the_program_cache_folder() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The watchdog's test hook (issue A2): the blur takes `blur_ms` of GPU
+/// time per frame, everything else 1 ms; frames take 16 ms of wall time.
+/// Every frame is judged at its completion, on any device, under any load.
+fn blur_takes(
+    ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> std::sync::Arc<dyn TimingSource> {
+    std::sync::Arc::new(FnTiming(
+        move |span: &Span| {
+            Some(match &span.subject {
+                Subject::Definition { id, .. } if id.as_str() == "blur" => {
+                    Duration::from_millis(ms.load(std::sync::atomic::Ordering::Relaxed))
+                }
+                _ => Duration::from_millis(1),
+            })
+        },
+        |_: &[Span]| Duration::from_millis(16),
+    ))
+}
+
 #[test]
-fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
+fn an_enforced_watchdog_budget_disables_an_overrunning_user_effect_from_the_next_frame() {
+    // The budget records only unless a renderer opts in (today's
+    // compositor never turns a program off, amendment 22), and an enforced
+    // budget never applies to built-ins: Blur here is the user's override
+    // of `blur` by id.
     let _gpu = gpu();
     let mut r = builtins();
-    if !r
-        .device()
-        .features()
-        .contains(wgpu::Features::TIMESTAMP_QUERY)
-    {
-        eprintln!("no TIMESTAMP_QUERY on this device; the watchdog times nothing");
-        return;
-    }
+    let user_set = || {
+        let mut set: DefinitionSetSnapshot = builtin_definitions();
+        for d in set
+            .definitions
+            .iter_mut()
+            .filter(|d| d.id.as_str() == "blur")
+        {
+            d.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+        }
+        set
+    };
+    assert!(r.set_definitions(&user_set()).unwrap().is_empty());
+    r.effects_mut()
+        .watchdog
+        .set_budget(Duration::from_millis(250));
     let (doc, res) = document(
         vec![fx("f1", "blur", json!({ "amount": ch(json!(40)) }))],
         None,
     );
     let (plain, _) = document(vec![], None);
-    r.effects_mut().watchdog.set_budget(Duration::from_nanos(1));
-    // Metal can leave a pass-boundary sample empty while other devices are
-    // busy; such a frame is not judged, so allow a few frames.
-    let mut first = Vec::new();
-    let mut reports = Vec::new();
-    for _ in 0..20 {
-        first = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
-        reports = r.watchdog_reports(true);
-        if !reports.is_empty() {
-            break;
-        }
-    }
+    let blur_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(300));
+    r.effects_mut()
+        .watchdog
+        .set_timing_source(Some(blur_takes(blur_ms.clone())));
+    // Judged at the first frame's completion: 300 ms against 250.
+    let first = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+    let reports = r.watchdog_reports(true);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].code, ErrorCode::WatchdogTimeout);
     assert!(
         matches!(&reports[0].scope, ErrorScope::Effect { definition, .. } if definition.as_str() == "blur")
     );
-    assert!(
+    assert_eq!(
         r.effects()
             .watchdog
-            .measured_ms(DefinitionKind::Effect, "blur")
-            .unwrap()
-            > 0.0
+            .measured_ms(DefinitionKind::Effect, "blur"),
+        Some(300.0)
     );
     let next = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     let base = render(&mut r, &plain, &res, 0.5, &request()).unwrap();
@@ -818,9 +881,9 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     );
     // The same definitions pushed again (any unrelated registration, a
     // second view's set) keep it off: its program and record are kept.
-    let mut set: DefinitionSetSnapshot = builtin_definitions();
+    let mut set: DefinitionSetSnapshot = user_set();
     assert!(r.set_definitions(&set).unwrap().is_empty());
-    r.effects_mut().watchdog.set_budget(Duration::from_secs(5));
+    blur_ms.store(5, std::sync::atomic::Ordering::Relaxed);
     let kept = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert!(max_diff(&kept, &base) <= 1.0 / 1024.0, "still disabled");
     assert!(r.watchdog_reports(true).is_empty(), "not reported again");
@@ -840,22 +903,16 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     );
     let reloaded = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert_eq!(reloaded, first, "a delta re-registration re-enables it");
+    assert!(r.watchdog_reports(true).is_empty(), "5 ms is within budget");
     // Over budget again: off again from the next frame.
-    r.effects_mut().watchdog.set_budget(Duration::from_nanos(1));
-    let mut off = false;
-    for _ in 0..20 {
-        render(&mut r, &doc, &res, 0.5, &request()).unwrap();
-        if !r.watchdog_reports(true).is_empty() {
-            off = true;
-            break;
-        }
-    }
-    assert!(off, "overran again");
-    r.effects_mut().watchdog.set_budget(Duration::from_secs(5));
+    blur_ms.store(300, std::sync::atomic::Ordering::Relaxed);
+    render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+    assert_eq!(r.watchdog_reports(true).len(), 1, "overran again");
     let off_again = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert!(max_diff(&off_again, &base) <= 1.0 / 1024.0);
     // A changed source in a full set (a hot reload, a new registration)
     // re-enables it too.
+    blur_ms.store(5, std::sync::atomic::Ordering::Relaxed);
     let blur = set
         .definitions
         .iter_mut()
@@ -869,6 +926,7 @@ fn the_watchdog_disables_an_overrunning_effect_from_the_next_frame() {
     assert!(r.set_definitions(&set).unwrap().is_empty());
     let again = render(&mut r, &doc, &res, 0.5, &request()).unwrap();
     assert_eq!(again, first);
+    assert!(r.watchdog_reports(true).is_empty());
 }
 
 #[test]
@@ -892,9 +950,9 @@ fn the_watchdog_judges_every_timed_frame_not_only_the_first() {
         vec![fx("f1", "blur", json!({ "amount": ch(json!(40)) }))],
         None,
     );
-    r.effects_mut().watchdog.set_budget(Duration::from_nanos(1));
     let mut judged = 0;
     for frame in 0..8 {
+        let before = r.effects().watchdog.measurements();
         render(
             &mut r,
             &doc,
@@ -903,15 +961,19 @@ fn the_watchdog_judges_every_timed_frame_not_only_the_first() {
             &request(),
         )
         .unwrap();
-        let reports = r.watchdog_reports(true);
-        if reports.len() == 1 {
+        // Waits for the frame to be judged; the budget records only, so
+        // nothing is reported or turned off.
+        assert!(r.watchdog_reports(true).is_empty());
+        if r.effects().watchdog.measurements() > before {
             judged += 1;
         }
-        // Registered again: on for the next frame.
-        r.effects_mut()
-            .watchdog
-            .forget(DefinitionKind::Effect, &"blur".into());
     }
+    assert!(
+        r.effects()
+            .watchdog
+            .measured_ms(DefinitionKind::Effect, "blur")
+            .is_some_and(|ms| ms > 0.0)
+    );
     // Metal can leave a sample empty while other devices are busy in this
     // process; nearly every frame must still be judged.
     assert!(judged >= 6, "{judged} of 8 frames judged");

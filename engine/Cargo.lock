@@ -2352,6 +2352,7 @@ version = "0.1.0"
 name = "pm-render"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "flate2",
  "kurbo",
  "libm",

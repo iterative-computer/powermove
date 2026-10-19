@@ -629,7 +629,25 @@ const bridge: PowermoveBridge = {
       ipcRenderer.on(ENGINE_IPC.compatAsk, handler);
       return () => { ipcRenderer.removeListener(ENGINE_IPC.compatAsk, handler); };
     },
-    answerCompat: (answer) => ipcRenderer.send(ENGINE_IPC.compatAnswer, answer)
+    answerCompat: (answer) => ipcRenderer.send(ENGINE_IPC.compatAnswer, answer),
+    // The job engine's fallback requests, run in this window's runner
+    // (main/engine/shader-fallback-relay.ts).
+    onShaderFallback: (run) => {
+      const handler = (_event: Electron.IpcRendererEvent, job: { id: number; request: never; textures: Uint16Array[] }) => {
+        // Acknowledged at once: main passes over a window that does not.
+        ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, received: true });
+        void Promise.resolve()
+          .then(() => run({ request: job.request, textures: job.textures }))
+          .then(
+            (rgba16f) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, ok: true, rgba16f }),
+            (error: { reason?: unknown; message?: unknown }) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, {
+              id: job.id, ok: false, reason: String(error?.reason ?? 'unavailable'), message: String(error?.message ?? error)
+            })
+          );
+      };
+      ipcRenderer.on(ENGINE_IPC.shaderFallback, handler);
+      return () => { ipcRenderer.removeListener(ENGINE_IPC.shaderFallback, handler); };
+    }
   },
   /* pm-wasm's font registry channels (docs/engine/text.md): main or the
      interactive engine answers, depending on "Use New Engine". */

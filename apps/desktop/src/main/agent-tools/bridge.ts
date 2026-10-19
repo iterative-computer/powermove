@@ -13,6 +13,7 @@ import {
   type AgentToolRequestEvent,
   type AgentToolResponseEvent
 } from '../../shared/ipc';
+import type { DefinitionSnapshot, EngineError } from '../../shared/engine-protocol';
 import { isRecord, isString } from '../../shared/guards';
 import { EXTENSION_ID } from '../../shared/extensions';
 import { forkBuiltinExtension } from '../extensions/fork';
@@ -54,6 +55,8 @@ export interface AgentEngineJobs {
   renderFrames(owner: number, run: string, plan: FramesPlan): Promise<AgentFramesResult>;
   status(owner: number, jobId: string): RenderStatus;
   cancelRun(run: string): Promise<number>;
+  /** Compiles definition snapshots through the engine's pipeline (`validate_effect`). */
+  compileDefinitions?(snapshots: DefinitionSnapshot[]): Promise<EngineError[]>;
 }
 
 /** `export_video` formats: today's `mp4` (H.264) and `prores` (ProRes 4444),
@@ -611,7 +614,9 @@ export class PowermoveAgentToolBridge {
         ? await this.computerUsePanel(session, args)
         : tool === 'render_frames'
           ? await this.renderFrames(session, args)
-          : await this.callRenderer(session, tool, args);
+          : tool === 'validate_effect' && this.options.engineJobs?.available && this.options.engineJobs.compileDefinitions
+            ? await this.validateEffect(session, args)
+            : await this.callRenderer(session, tool, args);
     session.noteResponse(response);
     return response;
   }
@@ -787,6 +792,35 @@ export class PowermoveAgentToolBridge {
       console.info(`[engine] render_frames routed to the current engine: ${result.reason}`);
     }
     return this.callRenderer(session, 'render_frames', args);
+  }
+
+  /**
+   * `validate_effect` with the new engine: the kernel's registration
+   * validator (in the renderer, as before), then a real compile of the
+   * wrapped program through the engine's GLSL pipeline and GPU pipeline
+   * creation. A program WebGL refuses too is reported with its errors in
+   * the author's lines; one only the app's WebGL fallback runner draws is
+   * valid, with a warning that it draws through the app window's runner
+   * (the viewer and the app's exports) and that headless renders without
+   * the app (pm-cli) cannot draw it (acceptance never narrower than WebGL's).
+   */
+  private async validateEffect(session: PowermoveAgentToolSession, args: Record<string, unknown>): Promise<AgentToolResponseEvent> {
+    const checked = await this.rendererValue(session, '__validate_effect_snapshot', args);
+    const failures = await this.options.engineJobs!.compileDefinitions!([checked.snapshot]);
+    const lines = (e: EngineError) => e.detail?.kind === 'shaderCompile'
+      ? e.detail.diagnostics.map((d) => ({ line: d.line, message: d.message }))
+      : [];
+    const refused = failures.find((e) => e.code === 'shaderCompile');
+    const headless = failures.find((e) => e.code === 'notHeadlessRenderable');
+    const value = refused
+      ? { valid: false, id: checked.id, parameterCount: checked.parameterCount, compiled: false, error: refused.message, errors: lines(refused),
+        note: 'The definition passes the registration validator, but its shader does not compile (WebGL refuses it too, so nothing would draw it). Line numbers are in the frag you wrote; 0 means generated code.' }
+      : {
+        valid: true, id: checked.id, parameterCount: checked.parameterCount, compiled: true,
+        ...(headless ? { warnings: [`${headless.message} It draws in the app (the viewer and exports) through the app window's WebGL fallback runner, more slowly than a natively translated effect; renders without the app window (pm-cli, headless renders) cannot draw it.`] } : {}),
+        note: 'Validated with the kernel registration validator and compiled through the engine pipeline. Does not register the effect or change the project; after loading, verify with render_frames.'
+      };
+    return { runId: session.runId, callId: `main-${randomUUID()}`, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }] };
   }
 
   private dispatchStoreTool(store: StoreAgentGateway, tool: string, args: Record<string, unknown>): Promise<unknown> {

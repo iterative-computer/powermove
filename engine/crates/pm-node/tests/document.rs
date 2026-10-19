@@ -774,10 +774,15 @@ fn child_engine() {
         })
         .with_session(session),
     );
-    let code = inbox.wait(Duration::from_secs(10), |m| {
-        failure(m).filter(|c| *c == ErrorCode::ShaderCompile)
+    // Reported at the definitions generation it was translated at (the
+    // kernel drops one older than its latest push of that definition).
+    let at = inbox.wait(Duration::from_secs(10), |m| match &m.message {
+        Message::Event {
+            body: Event::Failure(report),
+        } if report.error.code == ErrorCode::ShaderCompile => Some(report.revision),
+        _ => None,
     });
-    assert_eq!(code, ErrorCode::ShaderCompile);
+    assert_eq!(at.get(), 2, "the generation of the push that broke it");
 
     // Playback on the host clock at 30 fps.
     send(
