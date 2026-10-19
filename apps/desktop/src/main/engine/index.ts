@@ -426,7 +426,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // viewer's presentation) from the round trip with the least delay.
   options.ipc.on(ENGINE_IPC.requestPorts, (event) => {
     if (!options.isTrustedSender(event)) return;
-    engine!.reconnectClient(event.sender.id);
+    engine!.refreshPorts(event.sender.id);
   });
   options.ipc.handle(ENGINE_IPC.hostTime, (event) => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');

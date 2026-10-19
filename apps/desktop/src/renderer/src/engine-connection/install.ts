@@ -27,6 +27,7 @@ import type { EngineViewerChannel, EngineViewerHandlers, EngineViewerService } f
 import type { ClockSample, FrameDescriptor } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
+import { PortReconnector } from './reconnect';
 import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
 import { EngineRenderTransport, EngineSnapshotError } from './render-transport';
@@ -417,16 +418,30 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     wasPlaying = playing;
   });
 
+  // A connection that closes while its launch lives gets no new port from
+  // main (reconnect.ts): ask for one, with the supervisor's backoff, so the
+  // window's sessions reopen and resync.
+  const reconnector = new PortReconnector(() => {
+    log('info', 'asking main for a new interactive engine port');
+    native.requestPorts?.();
+  }, () => !!connection && !connection.closed);
+
   async function connect(nextGeneration: number, port: PortLike): Promise<void> {
     pendingCompatFrames.clear();
-    connection?.close('a new interactive engine launch');
+    // The old connection is replaced, not lost: its close asks for nothing.
+    const replaced = connection;
+    connection = null;
+    replaced?.close('a new interactive engine launch');
+    reconnector.portArrived();
     const next = new EngineConnection(nextGeneration, port, log);
     connection = next;
     generation = nextGeneration;
     next.onClose((reason) => {
-      if (connection === next) connection = null;
-      log('info', `the interactive engine connection closed (${reason})`);
+      const current = connection === next;
+      if (current) connection = null;
+      log(current ? 'warn' : 'info', `the interactive engine connection closed (${reason})`);
       transport.refresh();
+      if (current) reconnector.closed();
     });
     try {
       await next.open();
@@ -437,6 +452,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     }
     if (connection !== next) return;
     connections++;
+    reconnector.opened();
     if (connections === 1) performance.mark?.('powermove:engine-connected');
     void hostClock.measure();
     log('info', `connected to the interactive engine (launch ${nextGeneration})`);
@@ -571,6 +587,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       clock: current?.clock ?? null
     }),
     dispose: () => {
+      reconnector.dispose();
       offCompatSurface();
       pendingCompatFrames.clear();
       drawingWarmup.dispose();

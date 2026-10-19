@@ -297,6 +297,21 @@ export class NativeEngine {
     if (client) this.addClient(id, client.deliver, client.kind);
   }
 
+  /**
+   * The same page asks for fresh ports (it booted after main posted them,
+   * or its connection to a running engine closed while that launch lives):
+   * new ports to every running launch, replacing the old ones. Unlike a
+   * reload, the page keeps its state, so main keeps its definitions.
+   */
+  refreshPorts(id: number): void {
+    const client = this.clients.get(id);
+    if (!client) return;
+    for (const process of client.kind.processes) {
+      const launch = this.supervisors[process].current;
+      if (launch) this.connectClient(client, launch);
+    }
+  }
+
   removeClient(id: number): void {
     const client = this.clients.get(id);
     if (!client) return;

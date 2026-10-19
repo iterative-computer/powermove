@@ -282,6 +282,27 @@ describe('NativeEngine with fake engines', () => {
     expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(0);
   });
 
+  it('gives a page whose connection closed fresh ports to the same launches, replacing the old ones', async () => {
+    // The engine closed the window's connection (a message it refused) while
+    // its launch lives: the window asks again (`requestPorts`) and gets new
+    // ports of the same generation; the engines drop the old ones.
+    const delivered: ClientPortInfo[] = [];
+    host.addClient(1, (info) => delivered.push(info));
+    await settle();
+    const first = delivered.find((d) => d.process === 'interactive')!;
+    host.refreshPorts(1);
+    await settle();
+    const again = delivered.filter((d) => d.process === 'interactive');
+    expect(again.map((d) => d.generation)).toEqual([1, 1]);
+    expect(again[1]!.port).not.toBe(first.port);
+    expect(live('interactive').controls).toContainEqual({ type: 'disconnect', port: first.port });
+    expect([...live('interactive').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(1);
+    // A window main does not know gets nothing.
+    host.refreshPorts(99);
+    await settle();
+    expect(delivered.filter((d) => d.process === 'interactive')).toHaveLength(2);
+  });
+
   it('gives main\'s font client one font port to each interactive launch, and none to the job engine', async () => {
     const delivered: ClientPortInfo[] = [];
     host.addClient(-1, (info) => delivered.push(info), { peer: 'fonts', processes: ['interactive'] });
