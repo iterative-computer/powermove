@@ -11,7 +11,8 @@
 //! * the reply buffer (`pm_out_ptr`, `pm_out_len`): JSON replies, hashes,
 //!   messages;
 //! * the batch buffers (`pm_batch_ids`, `pm_batch_out`, `pm_batch_kinds`):
-//!   ids in, numbers and kinds out, as typed-array views (the S5 fast path).
+//!   ids in, numbers and kinds out, as typed-array views (the S5 fast path);
+//!   `pm_ev_batch` evaluates a prefix and `pm_ev_batch_range` any run of them.
 //!
 //! JavaScript re-acquires every view when `memory.buffer` changes. No export
 //! panics on any input: errors are return codes with a message in the reply
@@ -74,6 +75,7 @@ static ALLOCATOR: Counting = Counting;
 #[derive(Default)]
 struct State {
     engine: Engine,
+    status: u32,
     input: Vec<u8>,
     out: Vec<u8>,
     out_special: bool,
@@ -243,8 +245,21 @@ pub extern "C" fn pm_ev(id: u32, t: f64) -> f64 {
     with(|s| {
         let (kind, n) = s.engine.ev_id(PropId::from_index(id), t);
         s.last_kind = kind as u32;
+        s.status = s.last_kind
+            | if s.engine.expression_error(PropId::from_index(id)).is_some() {
+                0x80
+            } else {
+                0
+            };
         n
     })
+}
+
+/// Stable status word for the last scalar call: low bits are ValueKind;
+/// bit 7 flags an expression error. JS reads it without another wasm call.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_status_ptr() -> *const u32 {
+    with(|s| &s.status as *const u32)
 }
 
 #[unsafe(no_mangle)]
@@ -277,7 +292,7 @@ pub extern "C" fn pm_batch_kinds(n: usize) -> *mut u8 {
 }
 
 /// `ids[..n]` at `t` into `out[..n]` and `kinds[..n]` (0 number, 1 other,
-/// 2 threw). 0 on success; 1 when a buffer is smaller than `n`.
+/// 2 threw; bit 7 flags an expression error). 0 on success; 1 when a buffer is smaller than `n`.
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_ev_batch(n: usize, t: f64) -> u32 {
     with(|s| {
@@ -292,6 +307,36 @@ pub extern "C" fn pm_ev_batch(n: usize, t: f64) -> u32 {
             ..
         } = s;
         engine.ev_batch(&ids[..n], t, &mut values[..n], &mut kinds[..n]);
+        0
+    })
+}
+
+/// `ids[start..start + n]` at `t` into the same positions of `out` and
+/// `kinds`, leaving the rest of the buffers untouched: the renderer keeps one
+/// set of resident ids and evaluates only the runs a frame reads. 0 on
+/// success; 1 when the range is outside a buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_ev_batch_range(start: usize, n: usize, t: f64) -> u32 {
+    with(|s| {
+        let Some(end) = start.checked_add(n) else {
+            return 1;
+        };
+        if end > s.ids.len() || end > s.values.len() || end > s.kinds.len() {
+            return 1;
+        }
+        let State {
+            engine,
+            ids,
+            values,
+            kinds,
+            ..
+        } = s;
+        engine.ev_batch(
+            &ids[start..end],
+            t,
+            &mut values[start..end],
+            &mut kinds[start..end],
+        );
         0
     })
 }
@@ -435,8 +480,9 @@ pub extern "C" fn pm_heap_reset_peak() {
 pub extern "C" fn pm_stats() -> usize {
     with(|s| {
         let st = s.engine.stats;
+        let cache = s.engine.evaluation_cache_stats();
         let text = format!(
-            "{{\"batches\":{},\"ops\":{},\"resyncs\":{},\"queries\":{},\"unanswered\":{},\"detachedHits\":{},\"detachedMisses\":{},\"revision\":{}}}",
+            "{{\"batches\":{},\"ops\":{},\"resyncs\":{},\"queries\":{},\"unanswered\":{},\"detachedHits\":{},\"detachedMisses\":{},\"revision\":{},\"evalPlans\":{},\"evalReused\":{},\"evalMemoHits\":{}}}",
             st.batches,
             st.ops,
             st.resyncs,
@@ -444,7 +490,10 @@ pub extern "C" fn pm_stats() -> usize {
             st.unanswered,
             st.detached_hits,
             st.detached_misses,
-            s.engine.revision()
+            s.engine.revision(),
+            cache.plans,
+            cache.reused,
+            cache.memo_hits,
         );
         reply(s, &text, false)
     })

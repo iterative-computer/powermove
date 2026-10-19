@@ -23,6 +23,7 @@ import { inspectorService, shaderHooks, timelineService, viewerService } from '.
 import { bridge as hostBridge } from '../kernel/bridge';
 import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requiredReaderVersion } from '../../../shared/reader-version';
 import { touchedDocument, writeDocument } from '../engine-doc/write';
+import { documentPending, waitForDocumentReady } from '../engine-doc/readiness';
 import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../../shared/engine-stamp';
 
 export function install(PM: PMRegistry): void {
@@ -942,6 +943,9 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     source.id = association?.projectId || PM.uid('project');
     const project = hydrate(source);
     if (!mediaRestored) { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
+    // Parsing and restoring media have already overlapped module loading.
+    // Do not publish the new document to renderer readers before its mirror can answer.
+    if (documentPending(PM)) await waitForDocumentReady(PM);
     // File opens receive a fresh document ID to keep independent copies safe.
     // Recover the most recent layout for this file, rather than reverting to
     // the older workspace embedded the last time its content was saved.
@@ -1006,6 +1010,7 @@ PM.openFiles = () => {
   inp.click();
 };
 async function openFiles(files: File[]) {
+  if (documentPending(PM)) await waitForDocumentReady(PM);
   const projectFile = files.find(f => PROJECT_FILE.test(f.name));
   const media = files.filter(f => !PROJECT_FILE.test(f.name));
   if (projectFile) {
@@ -1037,7 +1042,8 @@ PM.newProject = () => {
     });
   PM.modal({ title: 'New project', body: form.element, width: 420, actions: [
     { label: 'Cancel' },
-    { label: 'Create', pri: true, run: () => {
+    { label: 'Create', pri: true, run: async () => {
+      if (documentPending(PM)) await waitForDocumentReady(PM);
       const values = form.values();
       switchProject(PM.mkProject({
         ...values,
@@ -1051,6 +1057,10 @@ PM.newProject = () => {
 /** A default-format project without the New project dialog. Onboarding opens
  * one so an imported workspace is arranged around a real composition. */
 PM.newBlankProject = (options: any = {}) => {
+  if (documentPending(PM)) {
+    void waitForDocumentReady(PM).then(() => PM.newBlankProject(options)).catch(() => {});
+    return;
+  }
   switchProject(PM.mkProject(options));
   PM.ProjectsScreen?.hide?.();
 };
@@ -1628,7 +1638,11 @@ window.addEventListener('beforeunload', () => {
 
 window.addEventListener('pm-open-project', (e: any) => {
   const p = e.detail;
-  if (p && typeof p === 'object' && !refusedByEngine(p)) switchProject(p);
+  if (p && typeof p === 'object' && !refusedByEngine(p)) {
+    if (documentPending(PM)) {
+      void waitForDocumentReady(PM).then(() => switchProject(p)).catch(() => {});
+    } else switchProject(p);
+  }
   else if (p && typeof p === 'object') PM.toast(REQUIRES_NATIVE_MESSAGE, 6000, { key: 'project-engine', error: true });
 });
 
@@ -1638,7 +1652,12 @@ window.addEventListener('pm-open-project', (e: any) => {
  * has been brought forward; this window keeps what it had.
  */
 PM.openProjectHere = async (id: string) => {
-  if (!id || id === PM.proj.id) return true;
+  if (!id) return true;
+  if (documentPending(PM)) {
+    try { await waitForDocumentReady(PM); }
+    catch { return false; } // EngineDoc has already reported the named load failure.
+  }
+  if (id === PM.proj.id) return true;
   if (!parkedTabs.has(id) && !PM.Projects.list().some((meta: any) => meta.id === id)) {
     PM.toast('Could not open this project because its local data is missing.');
     return false;
@@ -1721,10 +1740,13 @@ PM.bus.on('store:external', (keys: string[]) => {
   if (shared) PM.bus.emit('projects:open');
 });
 
-/* first full frame after persistent panels have measured */
-window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-  viewerService(PM)?.layout();
-  timelineService(PM)?.frameView();
+/* The part of the first full frame that reads the document: panels, the
+   inspector, the first render, the agent assistant and the projects screen.
+   It runs once, when the document can answer. */
+let documentFrameDone = false;
+function firstDocumentFrame() {
+  if (documentFrameDone) return;
+  documentFrameDone = true;
   PM.bus.emit('layers');
   PM.bus.emit('sel');
   inspectorService(PM)?.refresh();
@@ -1739,5 +1761,18 @@ window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
     persistCurrent(true);
     PM.bus.emit('projects:open');
   });
+}
+
+/* first full frame after persistent panels have measured */
+window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+  // Layout reads only the panels' measured sizes and always runs now.
+  viewerService(PM)?.layout();
+  timelineService(PM)?.frameView();
+  if (!documentPending(PM)) { firstDocumentFrame(); return; }
+  /* The document module is still loading. Finish when it is ready. If the
+     load fails, EngineDoc shows its named failure with Retry, and a Retry (or
+     a revival) that succeeds later finishes the frame instead. */
+  const stop = PM.EngineDoc?.onReady?.(() => { stop?.(); firstDocumentFrame(); });
+  void waitForDocumentReady(PM).then(() => { stop?.(); firstDocumentFrame(); }, () => {});
 }));
 }
