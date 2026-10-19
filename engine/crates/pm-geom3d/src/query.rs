@@ -27,9 +27,8 @@
 //! not every material at opacity 0) wins.
 //!
 //! Known differences from today's runtime, all history-dependent there:
-//! hits at exactly equal distances keep scene order rather than the
-//! runtime's insertion history; a skinned model's bounding volumes are
-//! those of the current pose (three.js caches the first pose it saw); an
+//! a skinned model's bounding volumes are those of the current pose
+//! (three.js caches the first pose it saw); an
 //! unindexed bounding box is always present (three.js computes it on the
 //! first bounds question; the test only prunes).
 
@@ -736,7 +735,8 @@ impl Scene {
 
     /// `runtime.pick(x, y, ids, camera)`: the id of the closest object hit
     /// along the camera ray through `(x, y)` in normalized device
-    /// coordinates, among `ids` when given.
+    /// coordinates, among `ids` when given. The caller supplies objects in
+    /// the runtime Map's insertion order so exact ties keep its first hit.
     pub fn pick(
         &self,
         camera: &Camera,
@@ -780,8 +780,8 @@ impl Scene {
     /// hit) and an imported model's meshes count by their own visibility
     /// (the loader's nodes are visible whatever the layer object is). Points
     /// and lines are hit by the raycaster but are not meshes, so they never
-    /// answer. Equal distances keep the first object in scene order (the
-    /// sort is stable).
+    /// answer. Equal distances keep the first object in runtime insertion
+    /// order (the sort is stable).
     pub fn cursor_hit(&self, ray: &Ray) -> Result<Option<Vec3>, QueryError> {
         let mut best: Option<(f64, Vec3)> = None;
         let mut consider = |d: f64, p: Vec3| {

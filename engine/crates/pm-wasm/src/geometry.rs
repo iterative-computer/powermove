@@ -19,7 +19,7 @@ use pm_eval::bounds::LayerHost;
 use pm_eval::query3d::{Geometry3d, ModelAsset, SceneCache};
 use pm_geom3d::gltf::math::Mat4;
 use pm_geom3d::gltf::pick::{Picker, Posed};
-use pm_geom3d::query::{Camera, Lens, TriangleMesh};
+use pm_geom3d::query::{Camera, Lens, Scene, TriangleMesh};
 use pm_model::Value;
 
 /// How a model asset arrives.
@@ -62,6 +62,11 @@ pub struct Models {
     meshes: HashMap<u64, Arc<TriangleMesh>>,
     /// Recent poses: (picker, world matrix bits, time bits).
     poses: Vec<(PoseKey, Arc<Posed>)>,
+    /// `SceneRuntime.objects` keeps insertion order across syncs, including
+    /// removal and reinsertion after a source edit or asset relink.
+    histories: HashMap<String, Vec<(String, u64)>>,
+    asset_versions: HashMap<String, u64>,
+    next_asset_version: u64,
 }
 
 impl Models {
@@ -120,6 +125,9 @@ impl Models {
     }
 
     pub fn forget(&mut self, id: &str) {
+        self.next_asset_version = self.next_asset_version.wrapping_add(1);
+        self.asset_versions
+            .insert(id.to_owned(), self.next_asset_version);
         if let Some(ModelAsset::Gltf(old)) = self.assets.remove(id) {
             let ptr = Arc::as_ptr(&old) as usize;
             self.poses.retain(|((p, _, _), _)| *p != ptr);
@@ -129,6 +137,8 @@ impl Models {
     pub fn clear(&mut self) {
         self.assets.clear();
         self.poses.clear();
+        self.histories.clear();
+        self.asset_versions.clear();
     }
 
     /// The ids of the models held.
@@ -151,6 +161,7 @@ pub struct GeomHost<'m> {
     /// when the request carries no registry (then only the built-in OBJ
     /// model layer is a mesh layer).
     pub mesh_fields: Option<HashMap<String, String>>,
+    invalid_scenes: Vec<String>,
     scenes: SceneCache,
 }
 
@@ -161,6 +172,17 @@ impl<'m> GeomHost<'m> {
             camera: request_camera(request),
             wanted: Vec::new(),
             mesh_fields: request_mesh_fields(request),
+            invalid_scenes: request
+                .as_object()
+                .and_then(|r| r.get("invalidSceneIds"))
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             scenes: SceneCache::default(),
         }
     }
@@ -192,6 +214,9 @@ pub fn request_mesh_fields(request: &Value) -> Option<HashMap<String, String>> {
 }
 
 impl Geometry3d for GeomHost<'_> {
+    fn invalid_scene(&self, id: &str) -> bool {
+        self.invalid_scenes.iter().any(|invalid| invalid == id)
+    }
     fn model(&mut self, id: &str) -> ModelAsset {
         match self.models.assets.get(id) {
             Some(a) => a.clone(),
@@ -247,6 +272,36 @@ impl Geometry3d for GeomHost<'_> {
     fn scenes(&mut self) -> &mut SceneCache {
         &mut self.scenes
     }
+
+    fn model_version(&self, id: &str) -> u64 {
+        self.models.asset_versions.get(id).copied().unwrap_or(0)
+    }
+
+    fn order_scene(&mut self, key: &str, versions: &[(String, u64)], scene: &mut Scene) {
+        // An unanswered model request has not completed a runtime sync yet.
+        if !self.wanted.is_empty() {
+            return;
+        }
+        let history = self.models.histories.entry(key.to_owned()).or_default();
+        history.retain(|(id, version)| {
+            versions
+                .iter()
+                .any(|(now_id, now_version)| now_id == id && now_version == version)
+        });
+        for (id, version) in versions {
+            if !history.iter().any(|(old, _)| old == id) {
+                history.push((id.clone(), *version));
+            }
+        }
+        let mut by_id: HashMap<_, _> = std::mem::take(&mut scene.objects)
+            .into_iter()
+            .map(|object| (object.id.clone(), object))
+            .collect();
+        scene.objects = history
+            .iter()
+            .filter_map(|(id, _)| by_id.remove(id))
+            .collect();
+    }
 }
 
 fn mat(v: Option<&Value>) -> Option<Mat4> {
@@ -292,4 +347,91 @@ pub fn request_camera(request: &Value) -> Option<Camera> {
         camera.projection_inverse = pi;
     }
     Some(camera)
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use pm_geom3d::query::{Facing, Materials, Object, Shape};
+
+    fn scene(ids: &[&str]) -> Scene {
+        Scene {
+            objects: ids
+                .iter()
+                .map(|id| Object {
+                    id: (*id).to_owned(),
+                    visible: true,
+                    world: pm_geom3d::gltf::math::IDENTITY,
+                    shape: Shape::Mesh {
+                        mesh: pm_geom3d::query::missing_box(),
+                        materials: Materials::Single(Facing::DEFAULT),
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn equal_distance_picks_follow_persistent_runtime_insertion_history() {
+        let mut models = Models::default();
+        let request = pm_model::json::parse("{}").unwrap();
+        let camera = Camera::new(
+            Lens::Perspective {
+                fov: 45.0,
+                zoom: 1.0,
+                near: 0.01,
+                far: 1000.0,
+            },
+            pm_geom3d::query::camera_world([0.0, 0.0, 5.0], [0.0; 3], [0.0, 1.0, 0.0]),
+            1.0,
+        );
+        let mut host = GeomHost::new(&mut models, &request);
+        let mut objects = scene(&["a", "b"]);
+        host.order_scene(
+            "composition:C",
+            &[("a".into(), 1), ("b".into(), 1)],
+            &mut objects,
+        );
+        assert_eq!(objects.pick(&camera, 0.0, 0.0, None).unwrap(), Some("a"));
+
+        // Document reorder alone does not change Map insertion order.
+        let mut objects = scene(&["b", "a"]);
+        host.order_scene(
+            "composition:C",
+            &[("b".into(), 1), ("a".into(), 1)],
+            &mut objects,
+        );
+        assert_eq!(objects.pick(&camera, 0.0, 0.0, None).unwrap(), Some("a"));
+
+        // Replacing a's source removes and reinserts it after b.
+        let mut objects = scene(&["b", "a"]);
+        host.order_scene(
+            "composition:C",
+            &[("b".into(), 1), ("a".into(), 2)],
+            &mut objects,
+        );
+        assert_eq!(objects.pick(&camera, 0.0, 0.0, None).unwrap(), Some("b"));
+
+        // The next presented frame sees a restored source. Because the
+        // previous frame synchronized version 2, restoring version 1
+        // recreates a after b even though the document has its old value.
+        let mut objects = scene(&["a", "b"]);
+        host.order_scene(
+            "composition:C",
+            &[("a".into(), 1), ("b".into(), 1)],
+            &mut objects,
+        );
+        assert_eq!(objects.pick(&camera, 0.0, 0.0, None).unwrap(), Some("b"));
+
+        // Removing and then re-adding b moves it to the back.
+        let mut objects = scene(&["a"]);
+        host.order_scene("composition:C", &[("a".into(), 2)], &mut objects);
+        let mut objects = scene(&["b", "a"]);
+        host.order_scene(
+            "composition:C",
+            &[("b".into(), 1), ("a".into(), 2)],
+            &mut objects,
+        );
+        assert_eq!(objects.pick(&camera, 0.0, 0.0, None).unwrap(), Some("a"));
+    }
 }

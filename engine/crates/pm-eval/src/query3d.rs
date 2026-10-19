@@ -21,6 +21,8 @@
 //! renderer's asset store holds them.
 
 use std::collections::HashMap;
+use std::fmt::Write;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use pm_geom3d::gltf::math::{self as m3, Mat4, Vec3};
@@ -107,6 +109,18 @@ pub trait Geometry3d {
     }
     /// Scenes built during one question.
     fn scenes(&mut self) -> &mut SceneCache;
+    /// Preserve `SceneRuntime.objects` insertion order across scene syncs.
+    /// Replacing a source or asset removes and reinserts that object.
+    fn order_scene(&mut self, _key: &str, _versions: &[(String, u64)], _scene: &mut Scene) {}
+    /// The asset store's record identity changes on a relink even if its bytes do not.
+    fn model_version(&self, _id: &str) -> u64 {
+        0
+    }
+    /// A renderer-side `parseScene` error, retained until this scene is
+    /// actually reached by the native query.
+    fn invalid_scene(&self, _id: &str) -> bool {
+        false
+    }
 }
 
 /// What `runtime.objects.get(id)` is for Edit Mode.
@@ -404,6 +418,7 @@ fn facing<'d>(
 /// One object as `sync` makes it.
 struct Spec {
     id: String,
+    version: u64,
     visible: bool,
     parent: Option<String>,
     local: Mat4,
@@ -413,6 +428,23 @@ struct Spec {
 enum ShapeSpec {
     Source(Option<Source>, Materials),
     Model(ModelAsset, ModelMaterials, Materials),
+}
+
+/// Stream the source's structural representation into a compact version key;
+/// source meshes can contain hundreds of thousands of values, so retaining
+/// their formatted text per object would duplicate the scene in memory.
+struct VersionWriter(std::collections::hash_map::DefaultHasher);
+impl Write for VersionWriter {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        text.hash(&mut self.0);
+        Ok(())
+    }
+}
+
+fn source_version(source: &Map, use_source: bool, asset_version: u64) -> u64 {
+    let mut writer = VersionWriter(std::collections::hash_map::DefaultHasher::new());
+    let _ = write!(&mut writer, "{source:?}:{use_source}:{asset_version}");
+    writer.0.finish()
 }
 
 /// `sync`'s objects of a scene description.
@@ -454,6 +486,10 @@ fn objects<'d>(
             [sx.to_number(), sy.to_number(), sz.to_number()],
         );
         let source = obj(o, "source").cloned().unwrap_or_default();
+        let asset_version = text(&source, "assetId")
+            .map(|id| g.model_version(&id))
+            .unwrap_or(0);
+        let version = source_version(&source, truthy(o.get("useSourceMaterials")), asset_version);
         let slots: Vec<&Map> = o
             .get("slots")
             .and_then(Value::as_array)
@@ -522,6 +558,7 @@ fn objects<'d>(
         };
         out.push(Spec {
             id,
+            version,
             visible,
             parent: text(o, "parent"),
             local,
@@ -760,8 +797,18 @@ impl<'d> Scope<'_, 'd> {
             }
         }
         let specs = objects(scene, None, &mut Stored, g)?;
+        let versions: Vec<_> = specs.iter().map(|s| (s.id.clone(), s.version)).collect();
         let mixer = |id: &str| starts.get(id).copied().unwrap_or(time);
-        let objects = place(specs, Some(&worlds), &mixer, g)?;
+        let mut objects = place(specs, Some(&worlds), &mixer, g)?;
+        g.order_scene(
+            &format!(
+                "project:{}:composition:{}",
+                self.project.id().to_string_lossy(),
+                self.comp.id().to_string_lossy()
+            ),
+            &versions,
+            &mut objects,
+        );
         let (lens, position, target) = lens(obj(scene, "camera"), None, &mut Stored)?;
         let world = match camera_layer {
             Some(l) => {
@@ -1056,6 +1103,18 @@ impl<'d> Scope<'_, 'd> {
         field: Option<String>,
     ) -> JsResult<Option<(Scene, Lens, Mat4)>> {
         let d = node::member(Some(layer), "d");
+        let layer_id = node::to_js_string(node::member(Some(layer), "id")).to_string_lossy();
+        let history_key = format!(
+            "project:{}:layer:{}",
+            self.project.id().to_string_lossy(),
+            layer_id
+        );
+        if g.invalid_scene(&layer_id) {
+            return Err(JsThrow {
+                kind: "SceneValidation",
+                message: layer_id,
+            });
+        }
         let from = node::to_number(node::member(Some(layer), "from"));
         let mixer_time = time - from;
         if node::is_str(node::member(d, "definition"), "powermove.3d.scene") {
@@ -1072,7 +1131,9 @@ impl<'d> Scope<'_, 'd> {
                 time,
             };
             let specs = objects(&scene, Some(scene_node), &mut ch, g)?;
-            let placed = place(specs, None, &|_| mixer_time, g)?;
+            let versions: Vec<_> = specs.iter().map(|s| (s.id.clone(), s.version)).collect();
+            let mut placed = place(specs, None, &|_| mixer_time, g)?;
+            g.order_scene(&history_key, &versions, &mut placed);
             let (lens, position, target) = lens(
                 obj(&scene, "camera"),
                 node::member(Some(scene_node), "camera"),
@@ -1146,6 +1207,12 @@ impl<'d> Scope<'_, 'd> {
         );
         let specs = vec![Spec {
             id: "model".into(),
+            version: {
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                asset_id.hash(&mut hash);
+                g.model_version(&asset_id).hash(&mut hash);
+                hash.finish()
+            },
             visible: true,
             parent: None,
             local,
@@ -1188,6 +1255,24 @@ impl<'d> Scope<'_, 'd> {
             }
         };
         (pick("w", pw), pick("h", ph))
+    }
+
+    /// Advance an extension scene's retained runtime objects when the
+    /// viewer synchronizes a frame. This does the same source/asset and
+    /// insertion-order work as a pick or bounds query, without projecting
+    /// geometry or constructing a three.js runtime in the host.
+    pub fn sync_scene3d(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        host: &mut dyn LayerHost,
+    ) -> JsResult<()> {
+        let field = mesh_field(layer, host);
+        let Some(g) = host.geometry() else {
+            return Err(host_only("extension scene synchronization"));
+        };
+        self.layer_scene3d(layer, time, g, field)?;
+        Ok(())
     }
 
     /// `sceneRuntime(PM, L, T).bounds(L.d.w || PM.proj.w, L.d.h || PM.proj.h)`.

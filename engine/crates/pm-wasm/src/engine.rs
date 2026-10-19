@@ -1238,6 +1238,16 @@ impl Engine {
                     None => out.raw("null"),
                 }
             }
+            "syncScene3d" => {
+                let l = layer!();
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let result = scope.sync_scene3d(l, t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                try_js!(result);
+                out.raw("null");
+            }
             "objectMesh3d" => {
                 // `runtime.objects.get(id)` for Edit Mode: `{missing}`,
                 // `{notMesh}`, or the geometry's buffers (positions and uvs as
