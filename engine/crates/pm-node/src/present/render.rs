@@ -358,6 +358,11 @@ pub struct Stats {
     pub stalls: u64,
     pub stall_us_max: i64,
     pub last_stall: Option<String>,
+    /// Every render-thread turn of at least 50, 100, 250 ms and 1 s, by
+    /// band ([`SLOW_TURN_BANDS_US`]), and the longest of them: hitches
+    /// shorter than a stall show here.
+    pub slow_turns: [u64; 4],
+    pub turn_us_max: i64,
     pub checked_in: bool,
     pub check_in_us: i64,
     pub bridge_error: Option<String>,
@@ -726,6 +731,14 @@ pub fn run(
 /// status report and a warning in the engine log).
 pub const STALL_US: i64 = 250_000;
 
+/// The lower bounds of the slow-turn bands in [`Stats::slow_turns`].
+pub const SLOW_TURN_BANDS_US: [i64; 4] = [50_000, 100_000, STALL_US, 1_000_000];
+
+/// The band of [`SLOW_TURN_BANDS_US`] a turn of `took` µs falls in.
+pub fn slow_turn_band(took: i64) -> Option<usize> {
+    SLOW_TURN_BANDS_US.iter().rposition(|&low| took >= low)
+}
+
 /// What a command is, for stall diagnostics.
 fn command_name(command: &Command) -> &'static str {
     match command {
@@ -763,11 +776,19 @@ impl Thread {
     /// Records a turn that stalled the thread (see [`STALL_US`]).
     fn note_turn(&self, what: &'static str, started: i64) {
         let took = now() - started;
-        if took < STALL_US {
+        let band = slow_turn_band(took);
+        if band.is_none() {
             return;
         }
         {
             let mut stats = self.stats();
+            stats.turn_us_max = stats.turn_us_max.max(took);
+            if let Some(band) = band {
+                stats.slow_turns[band] += 1;
+            }
+            if took < STALL_US {
+                return;
+            }
             stats.stalls += 1;
             stats.stall_us_max = stats.stall_us_max.max(took);
             stats.last_stall = Some(format!("{what}: {} ms", took / 1000));
@@ -2522,6 +2543,20 @@ impl Thread {
             }
         }
         if takes_transport(Some(&route)) {
+            // Paused exact seeks while the route was undecided moved only
+            // the line (a load, a composition switch, media resolving): the
+            // audio a paused session already has prepares its next start
+            // at the line again.
+            if changed
+                && !self.config.host_clock
+                && let Some(view) = self.views.get(&key)
+                && !view.clock.is_playing()
+                && view.awaiting.is_none()
+                && view.deferred_transport.is_none()
+                && let Some(link) = self.audio.get(&key)
+            {
+                link.send(AudioCtl::Seek(view.clock.media_at(t)));
+            }
             let deferred = self
                 .views
                 .get_mut(&key)
@@ -2589,10 +2624,15 @@ impl Thread {
                 view.sample_due = false;
                 view.last_sample = Some(t);
                 let sample = view.clock.sample(t);
+                // A headless clock carries the document revision only while
+                // the engine draws the composition: the renderer has no
+                // frame to learn the route from, so a tagged clock after an
+                // `unsupported` report is how it hears the composition is
+                // drawable again (an edit, a composition switch).
                 let revision = view
                     .state
                     .headless
-                    .filter(|h| *h)
+                    .filter(|h| *h && draws)
                     .and_then(|_| self.docs.get(&key))
                     .and_then(|doc| Revision::new(doc.revision()).ok());
                 self.event(key, Event::Clock(sample), revision);
@@ -3927,8 +3967,6 @@ enum BlenderFrames {
     Fail(ErrorCode, String),
 }
 
-/// Snapshot build failures the static check routes for exports
-/// (`pm_export::blender`): the engine cannot build these frames.
 /// Whether a view's route takes transport: the engine runs the clock and
 /// audio for every decided route, drawn or not (amendment 21: nothing hands
 /// playback to the legacy engine). Only an undecided route defers it.
@@ -3936,6 +3974,8 @@ fn takes_transport(route: Option<&Route>) -> bool {
     matches!(route, Some(Route::Engine | Route::Legacy(_)))
 }
 
+/// Snapshot build failures the static check routes for exports
+/// (`pm_export::blender`): the engine cannot build these frames.
 fn blender_routed(why: &str) -> bool {
     matches!(why, "imported models" | "model-group recipe parts")
 }
@@ -4051,6 +4091,17 @@ fn blender_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_turns_fall_in_their_bands() {
+        assert_eq!(slow_turn_band(0), None);
+        assert_eq!(slow_turn_band(49_999), None);
+        assert_eq!(slow_turn_band(50_000), Some(0));
+        assert_eq!(slow_turn_band(120_000), Some(1));
+        assert_eq!(slow_turn_band(STALL_US), Some(2));
+        assert_eq!(slow_turn_band(999_999), Some(2));
+        assert_eq!(slow_turn_band(4_000_000), Some(3));
+    }
 
     fn spec() -> PoolSpec {
         PoolSpec {

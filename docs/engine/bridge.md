@@ -1333,6 +1333,186 @@ Final validation (including a serialized native rerun under the Electron lock):
   2× reverse A/V check recorded 14 samples above 10 ms, max 11.8 ms, the
   previously documented sawtooth. Neither gate was relaxed or marked passing.
 
+### Round 5: unsupported compositions, composition switches, the headless gate (2026-10-18)
+
+Review of round 4 found three blockers; all are fixed.
+
+**A composition the engine cannot draw is no longer silent.** Round 4 kept
+the current engine's canvas hidden (amendment 21) but still cleared the
+status line and dropped Play on the `legacy` route, so a path-mask project
+showed an empty stage and Play did nothing. Now the engine runs Play, play
+around, paused seeks, scrub grains and audio for that route exactly as for
+a drawn one (`takes_transport` in `pm-node/src/present/render.rs`), a
+headless view publishes its clock for it, and the route change no longer
+stops a run (only `pending` defers and resumes). The failure reads `The new
+engine cannot draw this composition yet: <reasons>.`, is repeated when a
+viewer attaches to a viewerless session, and the kernel connection replays
+it to a viewer that replaces another (`missedRoute`). The exclusive
+presentation shows it as the stage's status line (wrapping to three lines so
+the named reasons fit), never hands the stage back, and clears it at the
+next engine frame. The renderer's `EngineTransport` takes commands for every
+decided route. `native-engine-tracer.spec.ts` now asserts this contract
+with a project color setting this engine does not know (path masks are drawn
+since the compclose merge; a separate case checks that): the legacy canvas
+stays hidden, the line names the setting, Play runs on the engine clock
+(state `playing`, `PM.time` advancing), the line clears when the setting
+goes and returns when it comes back, and no console errors.
+
+**A viewerless session follows the open composition.** Switching
+compositions inside a project is a document batch, not a load, so nothing
+told the headless session; Play then followed the previous composition's
+clock and audio. The kernel connection now sends the headless state on
+`comps`/`project` and before every transport command (`prepare`), so Play
+right after a switch plays the composition just opened. The headless e2e
+creates and opens a silent second composition with the viewer closed: Play
+plays it (session composition is the new id, the engine counts one more
+silent run, peak 0), and switching back plays the first composition's tone.
+
+**The headless gate.** The review's failing runs had a viewer attached
+(`headless:false`, 3 pools) and a run whose clock samples, device callbacks
+and levels all stopped while the transport said `playing`. Neither
+reproduced here: 3 runs of the review's procedure on the round-4 head,
+8 runs of two variants of its scenario (a viewer present at a cold Play with
+media still resolving, and a viewer enabled 60 ms after Play), and 4 + 1
+runs of the new spec (including after the Blender captures spec, the
+review's batch order) passed without a stall. The premise is now checked
+(the relaunched app's extension list must have the viewer off, and Play
+throws a named error if a viewer is attached), so a setup race fails as
+such instead of as a freeze. For the freeze itself the presenter now counts
+render-thread turns over 250 ms (`stalls`, `stallUsMax`, `lastStall` in
+the status report, and a warning naming the command or the view pass), and
+the spec takes a native stack sample of the interactive engine on failure
+with `PM_SAMPLE_ON_FAIL=1`. The symptom pattern (levels from the audio
+thread stopping as well as the render thread's clock samples) points at the
+audio thread rather than the transport; the next occurrence will name it.
+
+**The join.** The join probe now measures two things separately: the
+engine's line (how far `transport.now()` strays from wall time across the
+mount: at most 0.1 ms) and `PM.time` (how far the playhead strays: the
+page's main thread mounting the viewer). The playhead is back on the line
+within two animation frames (at most 0.4 ms off). The same probe on the
+current engine (flag off) is the baseline, run in the same invocation of
+the suite. Playhead error, engine against today, per invocation: 21.6 to
+34.1 ms against 22.3 to 23.7 ms (4 runs), 70.3 against 56.3 ms (the loaded
+batch run), and 33.2 to 38.2 ms against 27.3 to 44.8 ms (3 runs after the
+compclose merge). The engine viewer's mount (its presentation worker and
+painter) is at times about 10 to 14 ms longer than today's and at times
+shorter; this is recorded, not bounded, and listed as an open difference.
+The engine's line itself does not move (at most 0.1 ms), and no
+render-thread stall was recorded (`stalls` 0 in every run).
+
+**Paused audio after an undecided route.** `native-engine-transport.spec.ts`
+"paused exact and silent scrub seeks prepare audio before Play" failed 1 in 3
+to 2 in 4 runs this round, with round 4's TypeScript too (prepared starts
+`[0, 384000]`: the work-area edges, not the 0.4 s playhead). A paused exact
+seek while the view's route was undecided (right after the test's project
+load) moved only the line, and the audio link the session already had kept
+its old position. When the route becomes decided, a paused link now seeks
+to the line (`document_step`). After the fix: 5 of 5 isolated runs and the
+suite run pass.
+
+**Final run (after the compclose merge, one lock).** pm-node document (4)
+and snapshot (7) integrations, 87 library tests; e2e
+`native-engine-transport`, `native-engine-tracer`, `engine-headless-playback`,
+`engine-render-transport`, `engine-present-recovery`: 27 of 27 pass,
+including the J/K/L A/V gate this time (it failed in an earlier batch this
+round on 2x reverse, 20 samples over 10 ms, the documented sawtooth; audio
+and performance owners). Headless: 706 device callbacks, no host-clock run,
+no stall, join playhead error 31.5 ms against today's 30.4 ms.
+
+After merging the dochost lane as well (its sync font IPC touches
+`preload/index.ts`), with pm-wasm and the addon rebuilt, the same five e2e
+specs pass 27 of 27 again.
+
+Smaller items: rustfmt is clean on pm-node; the viewer's version lock entry
+matches 1.2.2 (inspector, keymap-default and timeline remain stale on the
+base, other lanes).
+
+### Round 6: composition switches with the viewer attached (2026-10-19)
+
+Review of round 5 found one blocker; it is fixed.
+
+**A switch to a drawable composition left the failure on the stage.** With
+the viewer attached, opening a composition the engine can draw after one it
+cannot (composition A with an effect that has no definition, then an empty
+composition B) kept `The new engine cannot draw this composition yet: …`
+on the stage, the route `legacy` with A's reason, and the canvas hidden,
+until the next edit. The switch reaches the engine as a document batch
+(revision N) before the viewer state for B, so the engine re-decides A at N
+and reports it, then draws B at N. The session (`legacyRevision`) and the
+presentation (`routedRevision`) both dropped frames at or below the
+reported revision, so B's frame never showed, and nothing else was dirty.
+
+A session's events arrive in the engine's order on one port, and a
+session's frame `seq` only increases (a view lives as long as its session),
+so a frame after the report is a later decision at any revision. The
+session now drops only frames with `seq` at or below the newest it had when
+the report came, and the presentation drops only presented frames with
+`seq` at or below the newest its channel had delivered then: frames still
+in the presenter's queue. RFC 16 states the contract.
+
+`native-engine-tracer.spec.ts` "switching between a composition the engine
+cannot draw and one it can, with the viewer attached" switches A, B, A, B
+with `PM.Comps.create(…, { open: true })` and `PM.Comps.open`: on A the
+route is `legacy`, the line names the effect, and the canvas is hidden; on
+B the route is `engine`, the reason and line are gone, the canvas presents,
+and the frame on screen is at the mirror's revision (5, then 7: the
+revision the engine reported A at). The engine counted `routedLegacy` 1 to
+5 over the switches, the same-revision case of the review. The test fails
+on round 5's gating (A/B with the old `session.ts` and `presentation.ts`:
+the B expectation times out) and passes with the fix. Unit tests cover the
+same A, B, A, B sequence at one revision in the session and the
+presentation.
+
+**A viewerless route no longer sticks at `legacy`.** A headless session has
+no frames to learn its route from, and its clock carried the document
+revision for every decided route, so once reported unsupported it stayed
+so (`status().route`, `routeReason`, `engineDrawsViewer`, and the audio
+prefs that `audio.sync()` sends on `engine`). The engine now tags a
+headless clock with the revision only while it draws the composition, and
+the session takes `engine` from any route on a tagged clock at or past the
+revision it applied. The native unsupported test checks an untagged clock
+for an unsupported headless composition and a tagged one after a resync
+makes it drawable; the headless e2e turns the project unsupported (an
+unknown project color setting) and back without a viewer and sees the route
+and reason follow. A limit of the engine, not of this change: a missing
+effect definition is found only by drawing (`decide` skips definition
+reasons when definitions are present; the render routes with
+`force_legacy`), so a viewerless session of such a composition reports
+`engine` until a viewer draws it. Nothing is drawn or heard differently
+either way.
+
+**Smaller items.** `takes_transport`'s doc comment is on it again (it had
+been inserted between `blender_routed` and its comment). install.ts's
+composition follower moved to `composition-follow.ts`
+(`followOpenComposition`), and the unit test drives the real follower and
+its `comps`/`project` subscriptions instead of a copy. The presenter counts
+render-thread turns of at least 50, 100, 250 ms and 1 s (`slowTurns`) with
+the longest (`turnUsMax`), so hitches below the 250 ms stall show; the
+headless e2e prints them (every run this round: `stalls` 0, `slowTurns` at
+most one turn of 50 to 100 ms, the longest 85 ms). The headless spec's
+premise check threw `a viewer is attached` when no engine session existed
+yet before Play (Play opens one, viewerless); it now fails only on a viewer
+service or a session with presentation, and says which. That false failure
+happened once this round, in the first full suite run.
+
+**Final run (one lock, after every change).** pm-node: 88 library tests,
+document 4 of 4, snapshot 7 of 7. Vitest (main/engine, preload,
+engine-connection, kernel, extensions/viewer, engine-doc): 823 passed, 1
+skipped. E2E `native-engine-transport`, `native-engine-tracer`,
+`engine-headless-playback`, `engine-render-transport`,
+`engine-present-recovery`: 28 of 28 (the J/K/L gate passed: 2x reverse one
+sample over 10 ms, worst 10.1 ms). Then `engine-headless-playback` three
+times: 6 of 6.
+
+**The join, for the orchestrator's decision.** Playhead (`PM.time`) error
+while the viewer mounts mid-play, engine against today (flag off), same
+invocation: 39.3 against 26.9 ms (the suite), then 36.9 against 25.2, 32.2
+against 24.1, and 32.1 against 34.7 ms (the repeats). The engine's line
+stays within 0.1 ms and the playhead is back on it within two animation
+frames. The stall is the page's main thread mounting the engine viewer
+(its presentation worker and painter); it is still recorded, not bounded.
+
 ### What remains
 
 - **The job engine's fonts.** Export and agent frames still refuse text:
@@ -1352,13 +1532,15 @@ Final validation (including a serialized native rerun under the Electron lock):
   recipe parts: the snapshot builder's refusals that exports route) fail
   an async capture with `unsupported`, where today's capture has Blender
   convert and render them (3D lane).
-- **What the engine still refuses** (masks the renderer cannot draw yet,
-  and the other `pm_render::unsupported` reasons) fails a snapshot with
-  the engine's reasons. The `legacy` routing label remains development
-  scaffolding, but an exclusive viewer keeps the legacy canvas hidden and
-  shows failure instead of falling back. L1 must implement the remaining
-  features and the derouter lane must remove that scaffolding; these projects
-  remain cutover blockers.
+- **What the engine still refuses** (the remaining
+  `pm_render::unsupported` reasons: SVG images with text, animated images
+  without a rendition, unknown project color settings, missing
+  definitions, and the rest) fails a snapshot with the engine's
+  reasons, and the viewer shows `The new engine cannot draw this
+  composition yet: <reasons>.` on an empty stage while the transport and
+  audio run on the engine. That is a visible difference from today, so these
+  projects remain cutover blockers until L1 draws the features; the
+  derouter lane removes the `legacy` route name and the `routed` message.
 - **Performance panel.** `FX passes` reads 0 (the engine counts no effect
   passes) and `GL draws` shows the layers the engine drew (not WebGL draw
   calls).

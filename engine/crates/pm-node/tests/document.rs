@@ -294,10 +294,17 @@ fn child_silent_play() {
         );
     }
     if headless {
+        // A headless clock carries the revision only while the engine draws
+        // the composition: the renderer learns the route from it.
+        let tag = if unsupported_test {
+            None
+        } else {
+            Revision::new(1).ok()
+        };
         inbox.wait(Duration::from_secs(5), |m| match &m.message {
             Message::Event {
                 body: Event::Clock(_),
-            } if m.revision == Revision::new(1).ok() => Some(()),
+            } if m.revision == tag => Some(()),
             _ => None,
         });
         let status: Value = serde_json::from_str(&host.status_json()).unwrap();
@@ -383,6 +390,40 @@ fn child_silent_play() {
     }
     assert_eq!(presenter["silentRuns"], 1, "{presenter}");
     assert_eq!(presenter["hostClockRuns"], 0, "{presenter}");
+    if unsupported_test && headless {
+        // Viewerless again, and an edit makes the composition drawable: the
+        // clock comes tagged with the new revision (no frame says so).
+        let mut away = state(3);
+        away.headless = Some(true);
+        send(&mut host, event(Event::Viewer(away)));
+        let drawable = project(solid(100.0, json!([])));
+        inbox.take();
+        send(
+            &mut host,
+            Envelope::new(Message::Request {
+                id: RequestId::new(3).unwrap(),
+                body: Request::Resync(Resync {
+                    document: "Ptracer".into(),
+                    revision: Revision::new(2).unwrap(),
+                    encoding: DocumentEncoding::CanonicalJsonV1,
+                    source: ResyncSource::Inline {
+                        body: Bytes(drawable.to_string().into_bytes()),
+                    },
+                    hash: ContentHash(pm_model::hash::canonical_digest(&model(&drawable))),
+                }),
+            })
+            .with_session(session),
+        );
+        inbox.wait(Duration::from_secs(10), |m| match &m.message {
+            Message::Event {
+                body: Event::Clock(_),
+            } if m.revision == Revision::new(2).ok() => Some(()),
+            Message::Event {
+                body: Event::Clock(_),
+            } if m.revision.is_some() => panic!("a clock tagged {:?}", m.revision),
+            _ => None,
+        });
+    }
     // The view's audio thread never opened a device.
     for audio in presenter["audio"]
         .as_object()

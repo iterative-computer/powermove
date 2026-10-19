@@ -178,9 +178,14 @@ export class DocumentSession {
   /** Definitions pushes the engine refused in a row, and the pending retry. */
   private definitionRefusals = 0;
   private definitionRetry: ReturnType<typeof setTimeout> | null = null;
-  /** The revision the engine routed the composition to the legacy viewer at:
-   *  frames of that revision or older, still in flight, are stale. */
-  private legacyRevision: number | null = null;
+  /** The newest frame `seq` this session received when the engine last said
+   *  it cannot draw the view's composition. The session's events arrive in
+   *  the engine's order and a session's frame seqs only increase, so a
+   *  frame after that report is a later decision: a composition switch
+   *  draws the new composition at the very revision the old one was
+   *  reported at (the document batch reaches the engine before the viewer
+   *  state), so the revision alone cannot tell them apart. */
+  private routedSeq: number | null = null;
 
   constructor(private readonly options: SessionOptions) {}
 
@@ -367,8 +372,9 @@ export class DocumentSession {
       case 'frame': {
         const { type: _t, ...frame } = event;
         const revision = Number((frame as { revision?: unknown }).revision) || 0;
-        if (this.legacyRevision !== null && revision <= this.legacyRevision) return;
-        this.legacyRevision = null;
+        const seq = Number((frame as { seq?: unknown }).seq) || 0;
+        if (this.routedSeq !== null && seq <= this.routedSeq) return;
+        this.routedSeq = null;
         this.frames++;
         this.lastFrame = frame as unknown as FrameDescriptor;
         this.setRoute('engine', null);
@@ -385,16 +391,14 @@ export class DocumentSession {
       case 'clock': {
         const { type: _t, ...sample } = event;
         this.clock = sample as unknown as ClockSample;
-        if (this.headless && message.revision !== null && Number(message.revision) >= this.applied) {
-          // Headless clocks are published only once the engine has the
-          // document/media and accepts transport, tagged with that revision.
-          // A composition the engine cannot draw keeps its route (and
-          // reason): its clock runs all the same.
-          const revision = Number(message.revision) || 0;
-          if (this.route === 'pending' && (this.legacyRevision === null || revision > this.legacyRevision)) {
-            this.legacyRevision = null;
-            this.setRoute('engine', null);
-          }
+        if (this.headless && message.revision !== null && Number(message.revision) >= this.applied && this.route !== 'engine') {
+          // A headless clock carries the document revision only while the
+          // engine draws the composition (it runs untagged for one the
+          // engine cannot draw): with no frames to learn the route from, a
+          // tagged clock is the engine's word that it draws this one, after
+          // a load or after an edit or switch made it drawable again.
+          this.routedSeq = null;
+          this.setRoute('engine', null);
         }
         this.options.onClock?.(this.clock);
         this.options.handlers.message({ type: 'clock', sample: this.clock }, arrivedMs);
@@ -422,7 +426,7 @@ export class DocumentSession {
         const error = (event as unknown as { error: { code: string; message: string; retry: { kind: string } } }).error;
         if (error.code === 'unsupported') {
           const revision = Number(event['revision']) || 0;
-          this.legacyRevision = revision;
+          this.routedSeq = Number(this.lastFrame?.seq) || 0;
           this.setRoute('legacy', error.message);
           this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision }, arrivedMs);
           return;
