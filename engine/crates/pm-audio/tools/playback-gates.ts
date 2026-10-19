@@ -4,6 +4,10 @@
  * measures edit-then-play rather than a simultaneous cold seek. Set
  * PM_AUDIO_START_EDIT=gain|speed|none, PM_AUDIO_LOOP_SECONDS (default 60),
  * PM_AUDIO_LOAD_THREADS (default 0), PM_AUDIO_START_VOICES (default 16).
+ * PM_AUDIO_START_DISTINCT=trim gives every voice its own trim (61.3 ms
+ * apart), so no two voices share a stretched signal: each needs its own
+ * vocoder pre-roll and native starts cannot reuse an immutable shared head
+ * (asserted per sample through prefillReadyUs).
  * PM_AUDIO_START_WAIT_MS=0 alternates 2 s / 3 s same-task cold seeks.
  * Each run continues 120 ms after its first clock so late-voice omission
  * spans include re-entry; PM_AUDIO_START_OBSERVE_MS overrides this window.
@@ -27,7 +31,10 @@ const loopSeconds = Number(process.env.PM_AUDIO_LOOP_SECONDS ?? 60);
 const stressThreads = Number(process.env.PM_AUDIO_LOAD_THREADS ?? 0);
 const waitMs = Number(process.env.PM_AUDIO_START_WAIT_MS ?? 250);
 const observeMs = Number(process.env.PM_AUDIO_START_OBSERVE_MS ?? 120);
-const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs, observeMs, voices, speed: 1.5, edit, loopSeconds, stressThreads, targets: waitMs === 0 ? [2, 3] : [4] };
+const distinct = process.env.PM_AUDIO_START_DISTINCT ?? 'none';
+if (distinct !== 'none' && distinct !== 'trim') throw new Error('PM_AUDIO_START_DISTINCT must be none or trim');
+const trimStep = distinct === 'trim' ? 0.0613 : 0;
+const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs, observeMs, voices, speed: 1.5, edit, loopSeconds, stressThreads, distinct, trims: Array.from({ length: voices }, (_, i) => i * trimStep), targets: waitMs === 0 ? [2, 3] : [4] };
 const modes = process.env.PM_AUDIO_START_MODE === 'today' ? [false] : process.env.PM_AUDIO_START_MODE === 'native' ? [true] : [false, true];
 for (const native of modes) {
   process.env.POWERMOVE_NEW_ENGINE = native ? '1' : '0';
@@ -60,19 +67,19 @@ for (const native of modes) {
       document.body.appendChild(input);
     });
     await session.setInputFiles('#a6-media', [file]);
-    await page.evaluate(async voices => {
+    await page.evaluate(async ({ voices, trimStep }) => {
       const PM = (window as any).PM;
       const input = document.getElementById('a6-media') as HTMLInputElement;
       const asset = await PM.assets.add(input.files![0], { newAsset: true, silent: true });
       for (let i = 0; i < voices; i++) {
-        const layer = PM.mkLayer('audio', { from: 0, dur: 10, d: { asset: asset.id, gain: 1 / voices, trim: 0, fadeIn: 0, fadeOut: 0, speed: 1.5 } }, PM.proj);
+        const layer = PM.mkLayer('audio', { from: 0, dur: 10, d: { asset: asset.id, gain: 1 / voices, trim: i * trimStep, fadeIn: 0, fadeOut: 0, speed: 1.5 } }, PM.proj);
         PM.proj.layers.push(layer);
       }
       PM.proj.work = [4, 6];
       PM.touch();
       PM.bus.emit('layers'); PM.bus.emit('project');
       PM.invalidate();
-    }, voices);
+    }, { voices, trimStep });
     if (native) {
       await page.waitForFunction(() => (window as any).PM.EngineConnection.status().driving);
       await page.waitForFunction(() => Boolean((window as any).PM.EngineConnection.status().hostOffsetUs));
@@ -173,6 +180,10 @@ for (const native of modes) {
               if (timing.omittedPrefixFrames !== 0 || timing.startSpreadFrames !== 0 || timing.safetyNetFires !== 0 || timing.programUnderruns !== 0
                 || timing.voiceStartSamples.length !== voices) {
                 throw new Error(`ordinary start must be complete and simultaneous: ${JSON.stringify(timing)}`);
+              }
+              // Distinct signals must not be served by a shared immutable head.
+              if (distinct !== 'none' && timing.prefillReadyUs !== 0) {
+                throw new Error(`distinct voices used a shared head: ${JSON.stringify(timing)}`);
               }
               Object.assign(sample, { timing });
               break;
