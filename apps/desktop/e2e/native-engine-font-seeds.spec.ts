@@ -23,8 +23,8 @@ test('census and canvas-first font seeds match this renderer’s Canvas2D advanc
       menu.textContent = 'Menu that appears after a canvas';
       document.body.append(menu);
       menu.getBoundingClientRect();
-      // Also verify UI-first keys: these descriptions were parked offscreen
-      // at startup, and only now create their visible 2x strike.
+      // Also verify UI-first keys: these new descriptions create a visible
+      // 2x strike before any canvas measures them.
       // Use distinct weights so the startup 30/500 and 30/600 probes below
       // still test the formerly poisoned optimizeLegibility entries.
       for (const weight of [450, 650]) {

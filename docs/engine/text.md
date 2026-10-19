@@ -165,9 +165,10 @@ was found on the corpus's real project and checked against Chromium itself
    and session-owner assignment. Startup replies cannot overwrite a newer
    seeds-changed notification. Both engines' font services get
    every window's seeds (`Op::Seeds` as `{ seeds, owners: [{ owner, seeds
-   }] }`, replayed last on every port). The typing measurement in the app
-   (2026-10-18) shows the census at work: 11 and 12 seeds in a fresh editor
-   window, where the static model had 2.
+   }] }`, replayed last on every port). The round 4 typing measurement observed
+   11 and 12 seeds in a fresh editor window, where the static model had 2. With complete identity,
+   round 5 typing reports 18–19 distinct entries; the live comparison below
+   checks their effective sizes, weights and creation orders.
 
    **Canvas creators (round 5).** Platform data is lazy: setting `font`
    alone need not realize it, and a context can change `textRendering` or

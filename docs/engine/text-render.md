@@ -731,27 +731,121 @@ The capture pages draw with today's code: `createCaptionRasterizer` from
 `rasterText` copied from `raster.ts` (private to its `install`); each canvas
 is read back through a WebGL texture uploaded as `texFor` uploads it.
 
+## Round 5: scaled glyphs, stroke precision and live cache identity
+
+The scaled real-project trace uses the production `legacy/gl/raster.ts`
+and compositor. At 16/18 seconds the roughly 105 px layer has world scale
+3.39832, quarter-step raster density 3.5 and a 5688×991 backing canvas.
+At 24 seconds the 73.813 px layer has scale 6.92835, density 7 and a
+2366×1540 canvas. Legacy caps density by 8192 divided by each logical
+geometry dimension; it rasterizes at that density, then bilinearly samples
+that texture over the logical box. It uses LINEAR min/mag filtering and no
+mipmaps. World-scale changes select `ceil(scale*4 - 1e-9)/4`, clamped
+to 0.25–32. The effective density is part of the raster key: a new bucket
+rerasterizes; movement within a bucket reuses the bitmap. There is no extra
+temporal hysteresis. Above the 8192 cap, equal effective densities share
+the raster even when requested scale changes. Content, geometry, variation,
+text-animator state and preview cropping also participate in that key.
+The native engine already has this raster-then-composite order;
+changing to layout-size or final-device-size glyph rendering would be wrong.
+
+The large crisp-versus-soft stem mismatch instead came from
+[`Device::drawPath`](https://github.com/google/skia/blob/chrome/m152/src/gpu/graphite/Device.cpp): Skia recognizes a rectangular glyph contour and selects
+[`AnalyticRRectRenderStep`](https://github.com/google/skia/blob/chrome/m152/src/gpu/graphite/render/AnalyticRRectRenderStep.cpp), whose continuous edge coverage differs from the
+four-sample path renderer. Native text now recognizes the same rectangular
+contours and uses analytic edge distances and half coverage. Curved contours
+retain Graphite's tessellation, including its full-canvas viewport round
+trip. CPU quadratic-to-cubic conversion and shader interpolation retain
+their different arithmetic (`PatchWriter::mix` versus shader `mix`).
+The 18/24-second original-frame differences shrink from 727/1550 pixels to
+single-digit counts; unresolved single-sample curved-edge differences still
+fail the gate. Captured source textures independently reduce from 636/636
+and 1114 differing pixels to 7/7/3 pixels beyond 1 CV.
+
+Two source-level differences in the stroke port are corrected:
+[`SkPoint::setLength`](https://github.com/google/skia/blob/chrome/m152/src/core/SkPoint.cpp) multiplies each coordinate by its double scale before
+rounding, and [`SkPathStroker`](https://github.com/google/skia/blob/chrome/m152/src/core/SkStroke.cpp) keeps tangent vectors directly instead of
+adding/subtracting endpoints. The endpoint round trip lost precision and
+changed stroke control points. Together they close the captured
+`sdf-synthetic-0016`, `sdf-caption-0027` and `sdf-caption-0028` failures,
+plus classic, fade, spotlight and several other small caption residuals.
+The main raster gate improves from 468/495 to 484/495; closure improves
+from 110/116 to 113/116, at the existing 1 CV bound. Chromium explicitly
+sets `SK_SUPPORT_LEGACY_CONIC_CHOP` in its
+[SkUserConfig](https://chromium.googlesource.com/chromium/src/+/HEAD/skia/config/SkUserConfig.h),
+so the modern upstream conic chop experiment was discarded and Chromium's
+configured order is retained. Caption-pop remains unresolved.
+
+The live font-cache correction is documented in `text.md`: full platform
+identity distinguishes DOM optimizeLegibility from canvas auto while
+preserving valid 24/26 sharing. The seed e2e's 23 rows match the page's
+Canvas2D advances within 0.00001526 px, including the previously wrong
+20/400 and 30/500/600 entries. The typing harness additionally supports
+`PM_TEXT_TYPING_PAIRED=1`, running legacy and native for each scenario with
+the same input/RAF sampling. Legacy completion requires a successful draw
+of the changed resolved text; animated property objects are not compared
+by reference.
+
+The final app matrix passes **21/21**, including caption burn-in export,
+engine-drew checks, live seeds, the 1000-layer playback benchmark and typing.
+Native typing p95 in that run is 19.2/19.6/14.0 ms for title/paragraph/system
+text (60 keys each, no misses). The paired run passes **6/6** and measures:
+
+| Scenario | Legacy p95 | Native p95 | Native minus legacy |
+|---|---:|---:|---:|
+| Title, 96 px | 8.4 ms | 18.8 ms | +10.4 ms |
+| Paragraph, 48 px | 7.8 ms | 13.5 ms | +5.7 ms |
+| System UI, 24 px | 7.9 ms | 13.2 ms | +5.3 ms |
+
+Each run has 60 samples and zero misses; display scan-out is excluded.
+The scenarios use the same harness and project load on the shared machine.
+Background one-minute load varies from 12.0 to 25.4 across the paired run;
+this is a measured comparison, not a controlled idle-machine claim.
+Native meets the 33 ms budget but does **not** meet no regression versus
+legacy. The asynchronous engine/layout/frame-bridge path needs profiling;
+this measurement does not attribute the difference specifically to census
+work. In 10 seconds of 1000-layer playback, legacy/native RAF p95 is
+9.9/9.8 ms, with 1190/1202 callbacks and 1/0 long intervals. The census adds
+300 scans, 301 visited nodes and 17.9 ms aggregate scan time; startup's
+maximum individual scan is 2.3 ms. Playback shows no measured regression.
+
+Both debug and release run all 611 raster cases and all 477 corpus frames.
+The raster results agree (597 pass, 14 fail); the corpus results agree
+(467 within 2 CV, 10 fail, no comparison escapes). The font checks pass:
+77 pm-text unit tests, 5200 layout cases, 26 registry checks, and 9 level 2
+layout tests in each profile; pm-node's 65 library tests also pass in each.
+CLI tests use its binary target: 28 unit tests and 5 render tests pass in
+both profiles, including decoded text-ink validation. Native/wasm evaluation
+has zero mismatches over 6162 layouts and 74032 units, and all 1,815,420
+native/wasm replies agree. TypeScript checks pass 102 tests; Svelte reports
+zero errors and one existing IconCropper warning. These are non-LTO builds.
+
+Review evidence stays outside Git in the private corpus review directory,
+`review/text-round5-20261018/index.html`: before/after sheets for every
+changed captured raster and all remaining failures, a corrected-stem
+magnification, and contact pages reviewed after generation. Per-case
+counts, maximum deltas and image paths are in the round 5 JSON report;
+visible (`max >3 CV` or `>10` pixels) and sub-visible entries are listed
+separately. Both classes still fail their original gates.
+
 ## Gaps
 
-The round 4 gates accept no pinned level 1 differences. Any remaining
+The round 5 gates accept no pinned level 1 differences. Any remaining
 difference or refusal fails the same unchanged bound (1 CV for raster
 captures, 2 CV for composed text pixels). A failing comparison is a blocker,
-not an accepted difference. The earlier measurements above are historical.
+not an accepted difference. Earlier round 4 measurements are historical;
+the round 5 results above supersede them.
 
-- Caption pop, synthesized bold, caption strokes and some caption presets
-  still differ. The exact case counts and per-case pixel counts are in the
-  round 4 report and review sheets. The stroker's round joins, miter limit,
-  fake-bold interpolation, descriptor relaxation and inverse/forward scale
-  order were checked against Skia m149 (`SkScalerContext::internalGetPath`,
-  `SkStroke`, `SkStrokerPriv`). A change to an RGBA8 intermediate target
-  left the caption failure counts unchanged and increased the animator blur
-  residual; it was discarded. The remaining cause is unresolved; no
-  parameter fitting or tolerance change was used.
-- The four closure distance-field residuals remain: `sdf-sizes-0004`,
-  `sdf-synthetic-0016`, `sdf-caption-0027` and `sdf-caption-0028`.
-  The backward distance walk now recomputes each row's starting index and
-  never decrements beyond the first row. It works with overflow checks on,
-  fixing the debug panic; it does not close the shader/stroker residuals.
+- Caption-pop, colored caption stroke, whisper and paper retain failures.
+  The remaining counts and side-by-side paths are in the round 5 report.
+  Round joins, miter limits, fake-bold interpolation, descriptor relaxation,
+  inverse/forward scale order, normalization precision and tangent storage
+  were checked against Chromium's configured Skia. No tolerance or profile
+  parameter was changed. The larger caption-pop cause is still unresolved.
+- The closure distance-field residual `sdf-sizes-0004` remains (4 pixels by
+  2 CV). The three stroke/bold SDF failures are closed by the tangent fix.
+  The row-local backward distance walk still works with debug overflow
+  checks; it never subtracts beyond the first row.
 - COLR v0 at 96 and 200 px still differs at a few pixels by 2 CV. The
   CoreGraphics approximation is gone. Fontations supplies unhinted paths,
   all layer bounds, transforms, clips, palettes and gradient geometry; the
@@ -762,21 +856,20 @@ not an accepted difference. The earlier measurements above are historical.
   rotations and clipping have implementation coverage but no captured
   pixel-parity evidence beyond the linear-gradient and v0 captures; do not
   treat them as a closed parity class.
-- The real project is now compared both in its original form and through
-  text in isolation.
-  Its very large, scaled text reveals additional failures at 16, 18 and
-  24 seconds. They sit on the large path glyph edges, including a layer
-  at roughly 105 px scaled to 340%. Investigation checked the canonical
-  64 px path transform, quarter-step raster density, tessellation and
-  pixel sampling; the exact remaining cause is unresolved. The original
-  full project now draws after the compclose integration merge and has the
-  same three failing times; its non-text pixels meet their Standard bound.
-  Isolation itself remains a gate on the reduced project only.
+- The real project is compared in full and in isolation. After the analytic
+  rectangle fix, original t16/18/24 retain 2/7/5 pixels beyond 2 CV, max
+  38/33/15; isolation retains 3/8/5 pixels, max 44/43/15. These sparse
+  curved-edge/MSAA disagreements still fail. The original non-text pixels
+  meet their Standard bound; isolation is a gate on its reduced project.
 - Animator blur retains differences. The renderer currently uses a
   separable discrete Gaussian in float, whereas the Chromium/Skia filter
   pipeline can quantize and choose different Gaussian implementations.
   This is an open root-cause boundary, not a claim that changing sigma
   closes it.
+- Paired typing is slower than today's renderer by 5.3–10.4 ms at p95,
+  although every native scenario remains under 33 ms. The full engine's
+  no-regression typing requirement remains open; the measurement now
+  exposes the gap instead of comparing only against an absolute budget.
 - Level 2 anchoring, animated/ranged semantics, bounds and picks are
   explicitly assigned to **textl2** by decision C. This lane adds no level 2
   semantics or routing removal. The final compclose integration merge
@@ -785,13 +878,11 @@ not an accepted difference. The earlier measurements above are historical.
 - `Feature::Text` remains for a renderer without fonts, unparsed styles or
   an unanswered registry query; the derouter owns retiring that machinery.
 - Font-cache entries from pseudo-element text and cache purges under
-  memory pressure are not modelled. The census now records main-thread
-  Canvas2D and OffscreenCanvas2D font assignments too, including on-grid
-  canvas-first entries; it does not observe canvas operations in workers.
-  The live-seed validation still fails; `text.md` records the 6.45–40.26 px
-  advance errors and the reduced-key/culling limitations. The final test
-  checks 16 rows; six fail, representing three unique descriptions. The
-  passing static-seed parity runner is not evidence that this census is correct.
+  memory pressure remain unmodelled. Canvas operations in workers and
+  offscreen text scrolling into view without a DOM mutation are also
+  unobserved. Arbitrary custom CSS needs further independent captures.
+  The previous live-seed mismatch is closed; the current e2e validates
+  23 rows, including equal-key DOM and canvas creation orders.
 - A page-only web font (for example a font loaded by onboarding) need not
   be present in the engine's registry. Project fonts remain fully served.
 - The measured mask tables, emoji placement and SDF GPU arithmetic are
@@ -802,6 +893,18 @@ not an accepted difference. The earlier measurements above are historical.
   reports missing bitcode.
 
 ## Changes outside the lane
+
+2026-10-18 (lane ne-fonts, round 5):
+
+- `pm-skia-path/src/{lib,stroker}.rs`: Skia normalization and tangent-vector
+  arithmetic used by text glyph frames; its upstream unit suite passes.
+- `pm-render/examples/text_review.rs`, `pm-render/tests/text_level2.rs` and
+  `pm-vector/src/canvas2d/svg_text.rs`: initialize the painter's optional
+  backing-canvas viewport. The SVG consumer has no supplied canvas size.
+- `pm-eval/tests/corpus.rs` and `pm-node/src/fonts/hub.rs`: legacy/static
+  seed literals initialize the optional complete cache identity.
+- `apps/desktop/e2e/native-engine-text-typing.spec.ts`: paired legacy/native
+  measurement using the same harness and scenarios.
 
 2026-10-18 (lane ne-fonts, round 4):
 

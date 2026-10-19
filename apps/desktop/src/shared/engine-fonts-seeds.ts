@@ -3,9 +3,10 @@
  * docs/engine/text.md, "The renderer's font cache").
  *
  * Chromium's renderer-wide font cache keys platform data by family,
- * effective size, and weight/width/slope, not by specified size, and the
- * first description that creates an entry fixes its optical size. The app's
- * own UI text is laid out in the system font (`--f-ui`: "SF Pro Text" when
+ * effective size, weight/width/slope, and FontCacheStyle identity (below),
+ * not by specified size. The first creator of a key fixes its optical size.
+ * UI text with the same identity can seed later canvas measurements. The
+ * UI uses the system font (`--f-ui`: "SF Pro Text" when
  * installed, else -apple-system) at its CSS size times the window's device
  * pixel ratio, so on a 2x display 12 px UI text creates the 24 px entry with
  * opsz 12, and every later canvas that measures 24 px system-ui text at that
@@ -190,8 +191,8 @@ export function uiFontSeed(use: UiFontUse, dpr: number, installed: (family: stri
 const seedKey = (s: FontCacheSeed) => `${s.size}|${s.weight}|${s.italic}|${s.cacheKey ?? CANVAS_FONT_CACHE_KEY}`;
 
 /**
- * Each window's renderer font cache, as its UI text created it (main tracks
- * its editor windows; Electron-free so it is testable). Censuses are kept
+ * Each window's renderer font cache, as DOM and canvas text created it.
+ * Main tracks its editor windows; this tracker is Electron-free. Censuses are kept
  * raw, in order, so the seeds follow a change of installed fonts.
  */
 export class FontSeedTracker {

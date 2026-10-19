@@ -3,8 +3,8 @@
  * "The renderer's font cache").
  *
  * Chromium's font cache is per renderer, and the first description to
- * create an entry (family, effective size, weight, slope) fixes its optical
- * size for every later canvas that measures text at that size. Which
+ * create an entry (family, effective size, selection and platform options)
+ * fixes its optical size for every later canvas with the same key. Which
  * entries this window's renderer has depends on the UI text it has laid
  * out: the density setting (`--fs-md`), the panels and menus shown, page
  * zoom, and the displays the window has been on. This module watches the

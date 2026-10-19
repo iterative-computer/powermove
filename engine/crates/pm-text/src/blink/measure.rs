@@ -37,7 +37,8 @@ pub fn generic_family(name: &str) -> &'static str {
 /// canvas asks for a font.
 ///
 /// `FontPlatformDataCache` keys platform data by family, effective size, and
-/// selection request (weight, width, slope), but not by specified size, and
+/// selection request (weight, width, slope), plus the complete platform
+/// identity carried by `cache_key`, but not by specified size, and
 /// `FontPlatformDataFromCTFont` sets `opsz` from the specified size of the
 /// description that created the entry. Whoever creates an entry first fixes
 /// its optical size for every later user of the key in that renderer. DOM
@@ -45,8 +46,8 @@ pub fn generic_family(name: &str) -> &'static str {
 /// scale factor applies as zoom), so UI text at 12 px on a 2x display
 /// creates the 24 px entry with `opsz` 12 (clamped to the axis minimum, 17,
 /// for the system font), and a canvas measuring 24 px text in the same
-/// family, weight, and style afterwards gets SF's text-size advances (about
-/// 3.7% wider than at `opsz` 24).
+/// family and identical platform key afterwards gets SF's text-size advances
+/// (about 3.7% wider than at `opsz` 24).
 ///
 /// A seed declares one such entry, so level 1 can reproduce a renderer whose
 /// cache is in that state. Without seeds, every entry is the canvas's own
