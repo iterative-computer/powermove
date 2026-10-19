@@ -17,6 +17,7 @@
 //! section 25; docs/engine/phase1-gate.md) keeps its own statuses, listed in
 //! `pm-cli parity eval --help`.
 
+mod angle;
 mod compare;
 mod corpus;
 mod fonts;

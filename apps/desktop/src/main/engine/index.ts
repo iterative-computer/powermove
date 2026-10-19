@@ -1,3 +1,4 @@
+import { persistShaderEnvironment } from './shader-environment';
 import { packAgentProject } from '../agent-tools/project-packer';
 import { installAgentFramesIpc } from './agent-frames';
 /*
@@ -338,7 +339,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           POWERMOVE_ENGINE_ADDON: addon,
           // Invalidate first-use parity on every engine/browser/OS update.
           // GPU identity and native driver version are added by pm-render.
-          POWERMOVE_ENGINE_PARITY_ENV: JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() }),
+          POWERMOVE_ENGINE_PARITY_ENV: persistShaderEnvironment(path.join(cacheDirectory, CACHE_DIRS.shaderCache), JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() })),
           // Translated shader programs, kept across launches (plan section 11).
           POWERMOVE_ENGINE_SHADER_CACHE: path.join(cacheDirectory, CACHE_DIRS.shaderCache)
         }

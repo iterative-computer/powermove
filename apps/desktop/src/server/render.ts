@@ -1,3 +1,6 @@
+import { angleService } from './native/angle';
+import { readShaderEnvironment } from '../main/engine/shader-environment';
+import { homedir } from 'node:os';
 /** The user-facing native renderer. The user chooses both paths, so unlike
  * agent exports this command deliberately has no output-directory restriction. */
 import { spawn } from 'node:child_process';
@@ -17,7 +20,12 @@ export function renderInvocation(argv: string[], distDir: string, env: NodeJS.Pr
 
 export async function renderProject(argv: string[], distDir: string, env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const invocation = renderInvocation(argv, distDir, env);
-  const child = spawn(invocation.file, invocation.args, { stdio: 'inherit', windowsHide: true, env });
+  const userData = env['POWERMOVE_USER_DATA'] ?? path.join(homedir(), 'Library', 'Application Support', 'Powermove');
+  const cache = path.join(userData, 'Engine Cache', 'Shader Cache');
+  const parityEnvironment = env['POWERMOVE_ENGINE_PARITY_ENV'] ?? readShaderEnvironment(cache);
+  const runner = await angleService(distDir, env);
+  const child = spawn(invocation.file, invocation.args, { stdio: 'inherit', windowsHide: true, env: { ...env, ...runner.env,
+    POWERMOVE_ENGINE_PARITY_ENV: parityEnvironment, POWERMOVE_ENGINE_SHADER_CACHE: cache } });
   const forward = (signal: NodeJS.Signals) => { if (child.exitCode === null && child.signalCode === null) child.kill(signal); };
   const interrupt = () => forward('SIGINT'), terminate = () => forward('SIGTERM');
   process.on('SIGINT', interrupt); process.on('SIGTERM', terminate);
@@ -26,5 +34,5 @@ export async function renderProject(argv: string[], distDir: string, env: NodeJS
       child.once('error', error => reject(new Error(`native-renderer-unavailable: ${error.message}`)));
       child.once('exit', (code, signal) => resolve(code ?? 128 + (constants.signals[signal ?? 'SIGTERM'] ?? 15)));
     });
-  } finally { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); }
+  } finally { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); await runner.close(); }
 }

@@ -31,7 +31,7 @@ use crate::corpus::{member, string};
 pub enum Failure {
     Usage(String),
     Unsupported(Vec<String>),
-    /// Programs only a WebGL runner draws (decision 19): `pm-cli` has none,
+    /// Programs requiring the on-demand WebGL runner (decision 19): when absent,
     /// so the project is not headless-renderable (exit 4). Named per layer
     /// and definition; the same answer on every run.
     NotHeadless(Vec<String>),
@@ -627,7 +627,11 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     };
     install_interrupt();
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+    crate::angle::configure_probes(&mut renderer).map_err(Failure::Failed)?;
     renderer.require_shader_reference();
+    if let Some(host) = crate::angle::AngleHost::from_environment().map_err(Failure::Failed)? {
+        renderer.set_fallback_host(Some(Arc::new(host)));
+    }
     crate::fonts::install(
         &mut renderer,
         options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),

@@ -267,6 +267,21 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// A CLI host reading the desktop's persisted per-machine probe store.
+    /// GPU/driver and pipeline identity are the same suffix as `new` uses.
+    pub fn configure_shader_reference(
+        &mut self,
+        browser: &str,
+        directory: Option<std::path::PathBuf>,
+    ) {
+        let environment = format!(
+            "{browser}; {:?}; pipeline {}",
+            self.device.adapter_info(),
+            pm_glsl::pipeline::PIPELINE_REVISION
+        );
+        self.effects.parity.configure(Some(environment), directory);
+    }
+
     /// CLI hosts without an ANGLE environment must fail closed for user
     /// programs instead of treating the absence of a parity service as proof.
     /// A host that supplied the desktop environment retains its persisted
