@@ -1287,11 +1287,22 @@ impl Engine {
         self.install_document(sid, resync, mirror)
     }
 
+    /// Whether `sid` may start from another session's tree: only before it
+    /// has a mirror of its own. Node revisions are the window's revision
+    /// numbers, and render caches keep a subtree while its revision is at
+    /// most the one they were validated at; a session with caches of its
+    /// own reconciles against its own mirror, never a tree another window
+    /// stamped.
+    fn may_share_from_others(&self, sid: SessionId) -> bool {
+        self.sessions.get(&sid).is_some_and(|s| s.mirror.is_none())
+    }
+
     /// Another session's mirror that was resynced to this resync's hash, at
     /// or before its revision, with nothing applied since: the same content,
     /// every node stamped no later than this revision.
     fn verified_mirror(&self, sid: SessionId, resync: &Resync) -> Option<pm_model::Document> {
-        if resync.encoding != DocumentEncoding::CanonicalJsonV1 {
+        if resync.encoding != DocumentEncoding::CanonicalJsonV1 || !self.may_share_from_others(sid)
+        {
             return None;
         }
         self.sessions.iter().find_map(|(other, s)| {
@@ -1309,19 +1320,28 @@ impl Engine {
         })
     }
 
-    /// A mirror of the resync's document to reconcile against: this
-    /// session's own, else another session's, at or before the resync's
-    /// revision (so no node is stamped later than the new revision).
+    /// A mirror of the resync's document to reconcile against, at or before
+    /// the resync's revision (so no node is stamped later than the new
+    /// revision): this session's own (even behind after a refused batch:
+    /// what changed since is stamped anew), else, for a session without one,
+    /// another session's.
     fn base_mirror(&self, sid: SessionId, resync: &Resync) -> Option<&pm_model::Document> {
         let usable = |s: &Session| {
             s.document == resync.document
-                && !s.stale
                 && s.mirror
                     .as_ref()
                     .is_some_and(|m| m.revision() <= resync.revision.get())
         };
-        let own = self.sessions.get(&sid).filter(|s| usable(s));
-        own.or_else(|| self.sessions.values().find(|s| usable(s)))
+        if !self.may_share_from_others(sid) {
+            return self
+                .sessions
+                .get(&sid)
+                .filter(|s| usable(s))
+                .and_then(|s| s.mirror.as_ref());
+        }
+        self.sessions
+            .values()
+            .find(|s| usable(s) && !s.stale)
             .and_then(|s| s.mirror.as_ref())
     }
 

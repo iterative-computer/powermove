@@ -491,6 +491,34 @@ fn a_second_session_resyncing_to_a_checked_hash_shares_the_mirror_without_readin
         shared.hash.as_deref(),
         Some(pm_model::hash::hex(&hash.0).as_str())
     );
+    // A session with a mirror of its own (and render caches validated
+    // against its own revisions) never takes another session's tree.
+    let out = engine.receive(
+        WINDOW,
+        &request(
+            9,
+            resync(
+                8,
+                ResyncSource::CacheFile {
+                    handle: handle_for(0x32),
+                    length: ByteSize::new(1).unwrap(),
+                },
+                hash,
+            ),
+            Some(window),
+        ),
+        at(3),
+    );
+    assert!(
+        sent(&out, HOST).iter().any(|e| matches!(
+            e.message,
+            Message::Request {
+                body: Request::ResolveHandle(_),
+                ..
+            }
+        )),
+        "{out:?}"
+    );
     // A different hash still reads its body.
     let (_, other) = document(r#"{"comps":{},"layers":[],"name":"Other"}"#);
     let out = engine.receive(
