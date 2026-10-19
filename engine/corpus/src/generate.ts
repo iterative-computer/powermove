@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { GENERATED_MEDIA, mediaRefs, MISSING_MEDIA } from './media';
-import { allProjects, type CorpusProject } from './projects';
+import { allProjects, textLevel2Projects, type CorpusProject } from './projects';
 import { validateDocument, type Issue } from './validate';
 
 export interface GeneratedProject {
@@ -74,7 +74,7 @@ export function generateCorpus(outDir: string, projects = allProjects()): Genera
 
 if (import.meta.main) {
   const args = process.argv.slice(2);
-  const projects = allProjects();
+  const projects = args.includes('--native-text') ? textLevel2Projects() : allProjects();
   if (args.includes('--check')) {
     const failures = validateAll(projects);
     for (const failure of failures) for (const issue of failure.issues) console.error(`${failure.id}: ${issue.path}: ${issue.message}`);
@@ -83,7 +83,7 @@ if (import.meta.main) {
     process.exit(failures.length ? 1 : 0);
   }
   const at = args.indexOf('--out');
-  if (at < 0 || !args[at + 1]) { console.error('usage: generate.ts --out <dir> | --check'); process.exit(2); }
+  if (at < 0 || !args[at + 1]) { console.error('usage: generate.ts [--native-text] --out <dir> | --check'); process.exit(2); }
   const out = path.resolve(args[at + 1]!);
   const corpus = generateCorpus(out, projects);
   console.log(`Wrote ${corpus.projects.length} projects and ${Object.keys(corpus.media).length} generated media files to ${out}`);

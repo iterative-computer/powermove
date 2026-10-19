@@ -836,16 +836,19 @@ fn level2_content_of_every_layer_type_is_drawn() {
     ] {
         assert!(!level2(&mk(ty, d, None)), "{ty}");
     }
-    // Level 2 text the text renderer does not lay out yet is named.
-    let animated = mk(
-        "text",
+    // Typography, selectors and anchoring are native level 2 semantics.
+    // This fontless capability check may still name its missing fonts;
+    // it must never resurrect the old level 2 text routing reason.
+    for d in [
         json!({ "text": "x", "animators": [{ "id": "a" }] }),
-        None,
-    );
-    assert!(
-        animated
-            .iter()
-            .any(|f| matches!(f, Feature::Text(t) if t.contains("compat level 2"))),
-        "{animated:?}"
-    );
+        json!({ "text": "x", "styles": [{ "start": 0, "end": 1, "p": { "size": 32 } }] }),
+        json!({ "text": "x", "fontAnchorBounds": { "x0": 0, "y0": 0, "x1": 20, "y1": 30 } }),
+    ] {
+        let features = mk("text", d, None);
+        assert!(
+            !features.iter().any(|f| matches!(f, Feature::CompatLevel2)
+                || matches!(f, Feature::Text(t) if t.contains("compat level 2"))),
+            "{features:?}"
+        );
+    }
 }

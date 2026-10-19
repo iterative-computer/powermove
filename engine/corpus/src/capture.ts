@@ -18,6 +18,7 @@ import { launchLegacyApp, type LegacyApp } from './app';
 import { installBlenderRecorder, pairSnapshots, takeBlenderJobs, BLENDER_FORMAT, type SnapshotPass } from './blender';
 import { desktopRoot, EXTENSION_EFFECTS, parseRender3D, repoRoot, scene3d, shaderPresets } from './catalog';
 import { generateCorpus, stableJson, type GeneratedProject } from './generate';
+import { legacyCaptureProjects } from './legacy-capture';
 import { MISSING_MEDIA, resolveMedia, type MediaSource } from './media';
 import { sha256, timeLabel, writeFile, writeFloat, writePng, straightTopDown, type FileRecord } from './output';
 import { legacyScript } from './inject';
@@ -391,11 +392,16 @@ export async function capture(options: Options): Promise<string> {
   // Projects that install fixture extensions run last, in their own sessions, so extension
   // hooks (for example a text raster wrapper) never touch the plain projects' frames.
   const extensionKey = (item: CorpusProject) => [...(item.extensions ?? [])].sort().join(',');
-  const projects = (options.textOnly ? textOnlyProjects(allProjects()) : allProjects())
+  // Today's engine draws level 2 text at level 1: those documents have no
+  // legacy reference and go to the native semantic gate (legacy-capture.ts).
+  const split = legacyCaptureProjects(options.textOnly ? textOnlyProjects(allProjects()) : allProjects());
+  const nativeOnly = split.nativeOnly.map(item => item.id);
+  const projects = split.capture
     .filter(item => !options.only.length || options.only.some(prefix => item.id.startsWith(prefix)))
     .map((item, index) => ({ item, index }))
     .sort((a, b) => extensionKey(a.item).localeCompare(extensionKey(b.item)) || a.index - b.index)
     .map(({ item }) => item);
+  if (nativeOnly.length) log(`Left to the native semantic gate (level 2 text, no legacy reference): ${nativeOnly.length} projects`);
   const build = buildFingerprint();
   const session = new Session(options, await legacyScript());
   await session.start();
@@ -450,6 +456,7 @@ export async function capture(options: Options): Promise<string> {
       },
       shaderPresetCheck,
       generated: { dir: 'generated', projects: corpus.projects.length, media: corpus.media },
+      nativeOnly,
       totals: {
         projects: all.length, synthetic: records.length, real: real ? 1 : 0,
         frames: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.png).length, 0),

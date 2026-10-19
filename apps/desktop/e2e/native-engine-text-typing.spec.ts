@@ -30,6 +30,8 @@ import { expect, test } from '@playwright/test';
 import { launchApp } from './helpers/app';
 
 const MEASURE = process.env.PM_TEXT_TYPING_MEASURE === '1';
+// Compare new native typography with today's unchanged level 1 renderer.
+const LEVEL2 = process.env.PM_TEXT_TYPING_LEVEL2 === '1';
 const MODES = process.env.PM_TEXT_TYPING_PAIRED === '1' ? ['legacy', 'native'] as const : ['native'] as const;
 const OUT = process.env.PM_TEXT_TYPING_OUT ?? '/tmp/powermove-text-typing.jsonl';
 const KEYS = Number(process.env.PM_TEXT_TYPING_KEYS ?? 60);
@@ -53,7 +55,7 @@ for (const scenario of [
     const disk = await statfs('/System/Volumes/Data');
     if (disk.bavail * disk.bsize < 40 * 1024 ** 3) throw new Error('Disk below required 40 GiB before typing launch');
     const loadBefore = os.loadavg();
-    const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: mode === 'native' ? '1' : '0', POWERMOVE_ENGINE_FRAME_SOURCE: 'document', POWERMOVE_BRIDGE_TRACE: '1' } });
+    const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: mode === 'native' ? '1' : '0', POWERMOVE_ENGINE_FONTS: '1', POWERMOVE_ENGINE_FRAME_SOURCE: 'document', POWERMOVE_BRIDGE_TRACE: '1' } });
     try {
       const { page } = session;
       const displayBefore = await session.app.evaluate(({}, harnessPath) => process.getBuiltinModule('module').createRequire(harnessPath)(harnessPath).displayState(), process.env.POWERMOVE_PM_BRIDGE_HARNESS ?? path.join(os.homedir(),'Library/Caches/powermove-engine/pm_bridge_harness.node'));
@@ -63,10 +65,14 @@ for (const scenario of [
         await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
         await page.evaluate(() => (window as any).PM.EngineConnection.setTrace(true));
       }
-      const id = await page.evaluate((d) => {
+      const id = await page.evaluate(({ d, level2 }) => {
         const PM = (window as any).PM;
         const project = PM.mkProject({ name: 'Typing', w: 1920, h: 1080, fps: 30, dur: 10, bg: '#101010' });
         const layer = PM.mkLayer('text', { d, p: { 'position.x': 960, 'position.y': 480 } }, project);
+        for (const key of ['boxWidth', 'boxHeight']) {
+          if (typeof layer.d[key] === 'number') layer.d[key] = PM.P(layer.d[key]);
+        }
+        if (level2) layer.compat = 2;
         project.layers = [layer];
         PM.replaceProject(project);
         PM.selectLayers(layer.id);
@@ -77,7 +83,7 @@ for (const scenario of [
         PM.hist.clear();
         PM.invalidate();
         return layer.id;
-      }, scenario.d);
+      }, { d: scenario.d, level2: LEVEL2 && mode === 'native' });
       // The composition draws in the engine, text included.
       if (mode === 'native') await expect.poll(async () => {
         const s = await page.evaluate(() => {
@@ -155,6 +161,7 @@ for (const scenario of [
       const value = {
         scenario: scenario.name,
         mode,
+        compat: LEVEL2 && mode === 'native' ? 2 : 1,
         keys: KEYS,
         measured: samples.length,
         missed,

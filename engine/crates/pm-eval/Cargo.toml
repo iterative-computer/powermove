@@ -12,7 +12,7 @@ pm-model = { path = "../pm-model" }
 pm-time = { path = "../pm-time" }
 # Level 1 text layout (units for text animators, text bounds) without the
 # platform registry, so the same code runs in pm-wasm.
-pm-text = { path = "../pm-text", default-features = false }
+pm-text = { path = "../pm-text", default-features = false, features = ["level2"] }
 pm-vector = { path = "../pm-vector" }
 # Glyph outline boxes for text ink bounds (already in the tree through parley).
 skrifa = "0.44"
