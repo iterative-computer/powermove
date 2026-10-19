@@ -455,13 +455,14 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
 
   it('places transform targets where the three.js runtime does, and gestures write the same edits', async () => {
     let compared = 0, commands = 0, worst = 0, inexact = 0;
-    for (const seed of [31, 32, 33]) {
+    // More seeds than angles alone: a 1-ulp world matrix must never round a written edit differently.
+    for (const seed of [31, 32, 33, 34, 35, 36, 37, 38, 39, 40]) {
       const { PM, doc } = await editor();
       const random = rng(seed);
       const models = await addModels(PM);
       populate(PM, random, ['cube', 'wedge', ...models]);
       for (const name of models.slice(0, 3)) editScene(PM, { operation: 'add_object', object: { source: { assetId: name }, p: { x: random() * 3 - 1.5 } } });
-      if (seed === 33) addModelGroups(PM);
+      if (seed === 33 || seed === 37) addModelGroups(PM);
       // A flat group of 3D objects: its pivot is its members' box center.
       const objects = PM.proj.layers.filter((l: any) => l.d?.data?.object && !l.group).map((l: any) => l.id);
       if (objects.length > 2) PM.groupLayers(objects.slice(0, 2), 'Flat');

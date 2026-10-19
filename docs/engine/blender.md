@@ -231,7 +231,7 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 
 | Test | What | Result |
 |---|---|---|
-| `pm-render` `tests/blender_snapshots.rs` | Every Blender snapshot of the corpus (final, preview, export, exportAlpha; every shutter sample; nested compositions) against today's `renderSnapshot`; every frame list against `blenderFrameRequests` | 158 snapshots: 135 equal (geometry: 11,274,896 values, max abs difference 3.5e-16; 9,622 other values exact; asset ids, names, and SHA-256 equal), 23 not built (`3d/gltf`, `3d/gltf-materials`: imported models, the glTF lane); 74 of 74 frame lists equal (times bit for bit) |
+| `pm-render` `tests/blender_snapshots.rs` | Every Blender snapshot of the corpus (final, preview, export, exportAlpha; every shutter sample; nested compositions) against today's `renderSnapshot`; every frame list against `blenderFrameRequests` | 158 snapshots: 135 equal (geometry: 11,274,896 values, max abs difference 3.5e-16; 9,622 other values exact; asset ids, names, and SHA-256 equal), 23 not built (`3d/gltf`, `3d/gltf-materials`: imported models, the glTF lane); 74 of 74 frame lists equal (times bit for bit). Round 3 (2026-10-19, `v1` plus `threed-20261019-roles-maps`, not-built now a failure): 182 compared, 153 equal, **29 failures** (23 not built, 6 converted-texture differences); 90 frame lists equal; geometry max 3.5e-16 |
 | `pm-render` `tests/blender_composite.rs` | Two layers of 16-bit surfaces with gamma and sRGB chunks, off-center crops, 50% opacity, in plan order, against an f64 source-over reference | 32-bit: max 6.8e-8; 16-bit: max 1.06e-3 (half-float storage and accumulation); missing surfaces fail each layer with today's sentence; preview draws what it has and asks for the rest; nested compositions are their own frames |
 | `pm-export` `tests/blender_export.rs` | A 2-frame 16-bit PNG export of two models on the installed Blender | One Blender request per frame (layers batched), 4 surfaces, device `Metal {Apple M4 Max (GPU - 40 cores)}`; every exported sample equals the f64 composite of the stored surfaces (max 0 of 65,535); re-export: 0 Blender jobs, 4 cache hits (0.85 s against 0.03 s) |
 | same | Batched against one invocation per layer (EEVEE), and two batched runs | Decoded surfaces equal; files byte-identical; no text chunks |
@@ -302,9 +302,20 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 ## Gaps
 
 - **Imported glTF models** are not built into snapshots; their
-  compositions route (the static check lists them). The comparison harness
-  lists the glTF corpus snapshots as not built. Recipe parts are built since
-  Phase 3c (`generated`, docs/engine/scene3d.md).
+  compositions route (the static check lists them). Since Phase 3c round 3
+  the comparison harness counts every snapshot it cannot build as a
+  failure (it listed them as allowed before, a skipped corpus case), and it
+  compares the newest `threed-2*` capture by default as well: on `v1` plus
+  `threed-20261019-roles-maps` it reports 182 compared, 153 equal, 29
+  failures (23 glTF snapshots not built, 6 with differing converted
+  textures), so `cargo test -p pm-render --test blender_snapshots` fails
+  on a machine with the corpus until both are closed. Building them needs
+  posed meshes (`getVertexPosition` with skinning and morphs, skinned
+  normals through `applyBoneTransform`), `sourceMaterialSnapshot` from the
+  loader's material fields, and the texture snapshot ids in today's
+  asynchronous order (meshes are pushed as their materials resolve).
+  Recipe parts are built since Phase 3c (`generated`,
+  docs/engine/scene3d.md).
 - **The viewport's busy and error state** (`previewState()`: the
   spinner and the error line in the 3D viewport UI) still comes from
   today's renderer-side preview; the engine's preview jobs and failures
@@ -340,6 +351,22 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
   store failed every engine Blender job (`blender-motion.spec.ts`'s agent
   spec with the engine on). Their extension now comes from the file's
   first bytes (`assetExtension`, `main/engine/blender.ts`).
+  Round 3 completes it: today names a model file by the asset's name
+  (`chair.obj`, `scene.gltf`), so text models are recognised by content too
+  (glTF JSON with an `asset` member; OBJ by its first statement after
+  blank and `#` lines, UTF-8 with or without a byte order mark). EXR and
+  HDR files without an extension are no longer passed through: the engine
+  passes only PNG, JPEG and WebP images as they are (today's `blob.type`
+  rule) and converts every other image to PNG first, as today draws them
+  through a canvas (Chromium decodes neither EXR nor HDR, so today's
+  conversion fails, and the engine's fails the same way). A linked file
+  keeps its own extension. `blender.test.ts` covers each case.
+- **A missing Blender is a named error** (verified round 3): the viewer's
+  preview reports `blenderMissing` once until the shading changes
+  (`present::blender` `a_missing_blender_is_reported_once_until_the_shading_changes`),
+  a capture fails with `blenderMissing` (`pm-node` `tests/snapshot.rs`
+  `blender_compositions_are_captured_as_today`), and main's stage rejects
+  with `blenderMissing` and today's message (`blender.test.ts`).
 - **Level 2 surfaces stay 16-bit PNG** (decision 15); level 1 retains
   PNG8/dither 1 for existing-project parity. RFC 11 open question 1 (raw
   or EXR for level 2) is unchanged.

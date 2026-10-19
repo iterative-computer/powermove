@@ -160,7 +160,20 @@ repository.
   in wasm (V8) on 7 Khronos models plus a random composition, a new time
   per pick, editor view: p50 2.15 ms, p95 2.27 ms, max 3.73 ms
   (docs/engine/scene3d.md, "Phase 3c"). A model `pm_geom3d::gltf::load`
-  rejects is a named failure for every 3D question, not the missing box.
+  rejects is a named failure for every 3D question, not the missing box;
+  with "Use New Engine" on it is a visible `EngineFailure` (the engine
+  document is strict), never three.js.
+- Round 3: the 3D cursor's surface point uses the same kernel
+  (`Scene::cursor_hit`: `Picker::pick_as_runtime` over a model's meshes
+  only, with its points and lines skipped, as `placeCursor`'s
+  `find(h => h.object.isMesh)` does), equal to three.js on 480 rays
+  including skinned and instanced Khronos models
+  (`scene3d-geometry.test.ts`). Edit Mode never reads a glTF model's mesh
+  (`canEdit` refuses imported models); `objectMesh3d` answers `notMesh`
+  for it, the runtime's group.
+- `assets.get().object3d` is still the importer's three.js object (built by
+  `GLTFLoader`), not one built from this engine's geometry
+  (docs/engine/scene3d.md, "What remains").
 - Skinned meshes are not culled and sort transparent items by the
   geometry's sphere (see Fidelity notes); three.js's history-dependent
   programs are generated fresh.
