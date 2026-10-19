@@ -434,7 +434,10 @@ fn convert_to_png(path: &Path) -> Result<Vec<u8>, String> {
     })?;
     let f = &bitmap.frame.format;
     if f.planes.len() != 1 || f.planes[0].format != pm_media::frame::PlaneFormat::Rgba8 {
-        return Err(format!("a texture image layout this engine cannot convert ({})", f.label));
+        return Err(format!(
+            "a texture image layout this engine cannot convert ({})",
+            f.label
+        ));
     }
     let (w, h) = (f.width, f.height);
     let mut rgba = bitmap

@@ -169,10 +169,7 @@ impl LayerHost for GeomHost<'_> {
 
     fn mesh_asset_field(&self, definition: &pm_model::JsString) -> Option<String> {
         match &self.mesh_fields {
-            Some(fields) => definition
-                .as_str()
-                .and_then(|id| fields.get(id))
-                .cloned(),
+            Some(fields) => definition.as_str().and_then(|id| fields.get(id)).cloned(),
             None => (definition.as_str() == Some("powermove.3d.obj-model"))
                 .then(|| "assetId".to_owned()),
         }

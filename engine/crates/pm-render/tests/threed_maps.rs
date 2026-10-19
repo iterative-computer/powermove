@@ -33,15 +33,25 @@ fn maps_store_todays_texels_for_every_still_class() {
                     matches!(decode(&path, &pool), Err(MapError::Failed(_))),
                     "{name}"
                 );
-                assert!(matches!(Textures::probe(&path), Err(MapError::Failed(_))), "{name}");
+                assert!(
+                    matches!(Textures::probe(&path), Err(MapError::Failed(_))),
+                    "{name}"
+                );
                 rejected += 1;
             }
             outcome => {
-                assert_eq!(Textures::probe(&path), Ok(()), "{name}: drawn, never routed");
+                assert_eq!(
+                    Textures::probe(&path),
+                    Ok(()),
+                    "{name}: drawn, never routed"
+                );
                 let (w, h, rgba) = decode(&path, &pool).unwrap_or_else(|e| panic!("{name}: {e:?}"));
                 assert_eq!(
                     (u64::from(w), u64::from(h)),
-                    (row["width"].as_u64().unwrap(), row["height"].as_u64().unwrap()),
+                    (
+                        row["width"].as_u64().unwrap(),
+                        row["height"].as_u64().unwrap()
+                    ),
                     "{name}"
                 );
                 if outcome == "upload-failed" {
@@ -58,12 +68,22 @@ fn maps_store_todays_texels_for_every_still_class() {
             }
         }
     }
-    eprintln!("3D maps: {texels} classes texel-exact, {failed} failed uploads zeroed, {rejected} rejected imports");
-    assert!(texels >= 100 && failed >= 10 && rejected >= 2, "{texels} {failed} {rejected}");
+    eprintln!(
+        "3D maps: {texels} classes texel-exact, {failed} failed uploads zeroed, {rejected} rejected imports"
+    );
+    assert!(
+        texels >= 100 && failed >= 10 && rejected >= 2,
+        "{texels} {failed} {rejected}"
+    );
 }
 
 /// Reads mip `level` of an RGBA8 texture back as tight rows.
-fn read_level(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture, level: u32) -> Vec<u8> {
+fn read_level(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    level: u32,
+) -> Vec<u8> {
     let w = (texture.width() >> level).max(1);
     let h = (texture.height() >> level).max(1);
     let row = (w * 4).div_ceil(256) * 256;
@@ -89,10 +109,16 @@ fn read_level(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Textur
                 rows_per_image: Some(h),
             },
         },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit([encoder.finish()]);
-    buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     let data = buffer.slice(..).get_mapped_range().unwrap();
     (0..h as usize)
@@ -107,7 +133,9 @@ fn map_mip_levels_against_todays_generate_mipmap() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stills2");
     let rows: Vec<serde_json::Value> =
         serde_json::from_slice(&std::fs::read(root.join("three-maps.json")).unwrap()).unwrap();
-    let evidence = std::env::var("PM_THREED_MAPS_EVIDENCE").ok().map(std::path::PathBuf::from);
+    let evidence = std::env::var("PM_THREED_MAPS_EVIDENCE")
+        .ok()
+        .map(std::path::PathBuf::from);
     let renderer = pm_render::Renderer::headless().expect("a Metal device");
     let (device, queue) = (renderer.device(), renderer.queue());
     let pool = pm_media::pool::FramePool::new(0);
@@ -122,26 +150,42 @@ fn map_mip_levels_against_todays_generate_mipmap() {
         if w.max(h) < 2 {
             continue;
         }
-        for (srgb, key, space) in [(true, "level1Srgb", "srgb"), (false, "level1Linear", "linear")] {
+        for (srgb, key, space) in [
+            (true, "level1Srgb", "srgb"),
+            (false, "level1Linear", "linear"),
+        ] {
             let mut encoder = device.create_command_encoder(&Default::default());
-            let texture = textures.upload_rgba(device, queue, &mut encoder, w, h, &rgba, srgb, true);
+            let texture =
+                textures.upload_rgba(device, queue, &mut encoder, w, h, &rgba, srgb, true);
             queue.submit([encoder.finish()]);
             let level1 = read_level(device, queue, &texture, 1);
             compared += 1;
             if format!("{:x}", Sha256::digest(&level1)) == row[key].as_str().unwrap() {
                 equal += 1;
             } else if let Some(dir) = &evidence {
-                let base = Path::new(name).file_name().unwrap().to_string_lossy().into_owned();
+                let base = Path::new(name)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
                 let file = dir.join(format!("fixture-{base}.{space}.level1.rgba8"));
-                let today = std::fs::read(&file).or_else(|_| std::fs::read(dir.join(format!("{base}.{space}.level1.rgba8"))));
+                let today = std::fs::read(&file)
+                    .or_else(|_| std::fs::read(dir.join(format!("{base}.{space}.level1.rgba8"))));
                 if let Ok(today) = today {
-                    let d = today.iter().zip(&level1).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+                    let d = today
+                        .iter()
+                        .zip(&level1)
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max()
+                        .unwrap_or(0);
                     worst = worst.max(d);
                 }
             }
         }
     }
-    eprintln!("3D map level 1 mips: {equal} of {compared} equal to Chromium's generateMipmap; largest difference {worst} (with PM_THREED_MAPS_EVIDENCE)");
+    eprintln!(
+        "3D map level 1 mips: {equal} of {compared} equal to Chromium's generateMipmap; largest difference {worst} (with PM_THREED_MAPS_EVIDENCE)"
+    );
     assert_eq!(equal, compared, "every level 1 mip equals Chromium's");
     assert!(compared >= 200);
 }

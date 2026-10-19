@@ -1020,14 +1020,16 @@ impl SceneBuilder {
                 // `BufferGeometry`, so the object draws nothing, as today. (A
                 // legacy scene layer's `parseScene` refuses it and the layer
                 // fails, here as today.)
-                Some(self.cached(sha_key(&[b"empty geometry 1"]), || pm_geom3d::Geometry {
-                    positions: Vec::new(),
-                    normals: Vec::new(),
-                    uvs: Vec::new(),
-                    indices: Vec::new(),
-                    indexed: false,
-                    groups: Vec::new(),
-                }))
+                Some(
+                    self.cached(sha_key(&[b"empty geometry 1"]), || pm_geom3d::Geometry {
+                        positions: Vec::new(),
+                        normals: Vec::new(),
+                        uvs: Vec::new(),
+                        indices: Vec::new(),
+                        indexed: false,
+                        groups: Vec::new(),
+                    }),
+                )
             } else {
                 Some(self.geometry(&source_of(source)?))
             };

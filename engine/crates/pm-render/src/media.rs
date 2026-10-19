@@ -372,7 +372,8 @@ pub fn level1_bitmap(
     pool: &FramePool,
 ) -> Result<(pm_media::image::StillImage, bool), ProbeIssue> {
     probe_still(path, StillReader::Chromium)?;
-    let unreadable = |e: pm_media::MediaError| ProbeIssue::Unreadable(format!("{}: {e}", path.display()));
+    let unreadable =
+        |e: pm_media::MediaError| ProbeIssue::Unreadable(format!("{}: {e}", path.display()));
     let still = image_source(path, pool, true).map_err(unreadable)?;
     let fails = pm_media::image::compat::upload_fails(path, &still).map_err(unreadable)?;
     level1_bitmap_of(path, still, pool).map(|b| (b, fails))
@@ -383,7 +384,8 @@ fn level1_bitmap_of(
     still: pm_media::image::StillImage,
     pool: &FramePool,
 ) -> Result<pm_media::image::StillImage, ProbeIssue> {
-    let unreadable = |e: pm_media::MediaError| ProbeIssue::Unreadable(format!("{}: {e}", path.display()));
+    let unreadable =
+        |e: pm_media::MediaError| ProbeIssue::Unreadable(format!("{}: {e}", path.display()));
     if pm_media::image::avif_compat::applies(&still) {
         pm_media::image::avif_compat::read(path, &still, pool).map_err(unreadable)
     } else if pm_media::image::compat::applies(&still) {

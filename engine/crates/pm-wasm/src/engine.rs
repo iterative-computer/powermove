@@ -1199,9 +1199,12 @@ impl Engine {
                 }
                 let camera = try_js!(camera);
                 let (orthographic, fov, zoom, near, far) = match camera.lens {
-                    pm_geom3d::query::Lens::Perspective { fov, zoom, near, far } => {
-                        (false, fov, zoom, near, far)
-                    }
+                    pm_geom3d::query::Lens::Perspective {
+                        fov,
+                        zoom,
+                        near,
+                        far,
+                    } => (false, fov, zoom, near, far),
                     pm_geom3d::query::Lens::Orthographic { zoom, near, far } => {
                         (true, f64::NAN, zoom, near, far)
                     }

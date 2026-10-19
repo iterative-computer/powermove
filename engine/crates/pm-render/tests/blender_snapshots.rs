@@ -96,7 +96,10 @@ fn png_pixels(bytes: &[u8]) -> Option<Option<Vec<u8>>> {
     let mut buf = vec![0; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     buf.truncate(info.buffer_size());
-    Some((info.bit_depth == png::BitDepth::Eight && info.color_type == png::ColorType::Rgba).then_some(buf))
+    Some(
+        (info.bit_depth == png::BitDepth::Eight && info.color_type == png::ColorType::Rgba)
+            .then_some(buf),
+    )
 }
 
 #[test]
@@ -303,11 +306,18 @@ fn snapshots_equal_todays_render_snapshot() {
                                     && w.1.ends_with(".png")
                                     && snapshot.assets.iter().any(|a| {
                                         a.id == g.0
-                                            && matches!(a.bytes, pm_blender::snapshot::AssetBytes::Bytes(_))
+                                            && matches!(
+                                                a.bytes,
+                                                pm_blender::snapshot::AssetBytes::Bytes(_)
+                                            )
                                             && png_pixels(&a.bytes.read().unwrap())
-                                                == std::fs::read(blender.join("assets").join(format!("{}.png", w.2)))
-                                                    .ok()
-                                                    .and_then(|b| png_pixels(&b))
+                                                == std::fs::read(
+                                                    blender
+                                                        .join("assets")
+                                                        .join(format!("{}.png", w.2)),
+                                                )
+                                                .ok()
+                                                .and_then(|b| png_pixels(&b))
                                     }))
                         });
                     if converted_equal && want != got {
@@ -325,17 +335,41 @@ fn snapshots_equal_todays_render_snapshot() {
                         }
                         if want != got {
                             for (w, g) in want.iter().zip(&got).filter(|(w, g)| w != g) {
-                                let ours = snapshot.assets.iter().find(|a| a.id == g.0).and_then(|a| png_pixels(&a.bytes.read().unwrap()));
-                                let today = std::fs::read(blender.join("assets").join(format!("{}.png", w.2))).ok().and_then(|b| png_pixels(&b));
+                                let ours = snapshot
+                                    .assets
+                                    .iter()
+                                    .find(|a| a.id == g.0)
+                                    .and_then(|a| png_pixels(&a.bytes.read().unwrap()));
+                                let today = std::fs::read(
+                                    blender.join("assets").join(format!("{}.png", w.2)),
+                                )
+                                .ok()
+                                .and_then(|b| png_pixels(&b));
                                 let diff = match (&ours, &today) {
                                     (Some(Some(a)), Some(Some(b))) if a.len() == b.len() => {
-                                        let d = a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
-                                        let n = a.chunks(4).zip(b.chunks(4)).filter(|(x, y)| x != y).count();
+                                        let d = a
+                                            .iter()
+                                            .zip(b)
+                                            .map(|(x, y)| x.abs_diff(*y))
+                                            .max()
+                                            .unwrap_or(0);
+                                        let n = a
+                                            .chunks(4)
+                                            .zip(b.chunks(4))
+                                            .filter(|(x, y)| x != y)
+                                            .count();
                                         format!("max {d}, {n} pixels differ")
                                     }
-                                    _ => format!("ours {:?} today {:?}", ours.as_ref().map(|o| o.as_ref().map(Vec::len)), today.as_ref().map(|o| o.as_ref().map(Vec::len))),
+                                    _ => format!(
+                                        "ours {:?} today {:?}",
+                                        ours.as_ref().map(|o| o.as_ref().map(Vec::len)),
+                                        today.as_ref().map(|o| o.as_ref().map(Vec::len))
+                                    ),
                                 };
-                                lines.push(format!("  asset {} {}: today {} engine {} ({diff})", w.0, w.1, w.2, g.2));
+                                lines.push(format!(
+                                    "  asset {} {}: today {} engine {} ({diff})",
+                                    w.0, w.1, w.2, g.2
+                                ));
                             }
                         }
                         t.failed.push(lines.join("\n"));
@@ -346,7 +380,13 @@ fn snapshots_equal_todays_render_snapshot() {
     }
     eprintln!(
         "Blender snapshots: {} compared, {} equal ({} with converted textures equal by pixels); {} frame lists equal; geometry {} values, max |Δ| {:e}; {} exact values",
-        t.snapshots, t.equal, t.converted, t.frame_lists, t.geometry_values, t.geometry_max, t.exact_values
+        t.snapshots,
+        t.equal,
+        t.converted,
+        t.frame_lists,
+        t.geometry_values,
+        t.geometry_max,
+        t.exact_values
     );
     for (name, why) in &t.routed {
         eprintln!("not built (allowed until the glTF lane lands): {name}: {why}");

@@ -143,7 +143,10 @@ fn maps_with_transparency_draw_and_missing_maps_draw_without_them() {
     let with_clear = resolver("tex", &clear);
     assert!(pm_render::unsupported_with_media(&doc, "Ptest-root", &with_clear).is_empty());
     let translucent = render(&mut r, &textured(true), &with_clear).unwrap();
-    assert_ne!(translucent, mapped, "premultiplied texels differ from the opaque map's");
+    assert_ne!(
+        translucent, mapped,
+        "premultiplied texels differ from the opaque map's"
+    );
     assert_ne!(translucent, plain);
 
     // Offline (the resolver still names a path) and unreadable maps: the
@@ -352,7 +355,9 @@ fn unknown_primitives_draw_nothing_as_today() {
         .unwrap();
     knot["layers"][i]["d"]["data"]["object"]["source"] = json!({ "primitive": "knot" });
     let doc = load(&knot);
-    assert!(pm_render::unsupported_with_media(&doc, "Ptest-root", &MapResolver::default()).is_empty());
+    assert!(
+        pm_render::unsupported_with_media(&doc, "Ptest-root", &MapResolver::default()).is_empty()
+    );
     let drawn = render(&mut r, &knot, &MapResolver::default()).expect("draws");
     let mut without = textured(false);
     without["layers"][i]["on"] = json!(false);
