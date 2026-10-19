@@ -598,61 +598,38 @@ impl Conic {
         }
     }
 
-    fn compute_quad_pow2(&self, tolerance: f32) -> Option<u8> {
-        if tolerance < 0.0 || !tolerance.is_finite() {
-            return None;
-        }
-
-        if !self.points[0].is_finite() || !self.points[1].is_finite() || !self.points[2].is_finite()
-        {
-            return None;
-        }
-
-        // Limit the number of suggested quads to approximate a conic
-        const MAX_CONIC_TO_QUAD_POW2: usize = 4;
-
-        // "High order approximation of conic sections by quadratic splines"
-        // by Michael Floater, 1993
-        let a = self.weight - 1.0;
-        let k = a / (4.0 * (2.0 + a));
-        let x = k * (self.points[0].x - 2.0 * self.points[1].x + self.points[2].x);
-        let y = k * (self.points[0].y - 2.0 * self.points[1].y + self.points[2].y);
-
-        let mut error = (x * x + y * y).sqrt();
-        let mut pow2 = 0;
-        for _ in 0..MAX_CONIC_TO_QUAD_POW2 {
-            if error <= tolerance {
-                break;
-            }
-
-            error *= 0.25;
-            pow2 += 1;
-        }
-
-        // Unlike Skia, we always expect `pow2` to be at least 1.
-        // Otherwise it produces ugly results.
-        Some(pow2.max(1))
+    // SkConicCoeff / SkConic::evalAt, with Skia's coefficient and
+    // Horner operation order. Do not replace this by a quad approximation.
+    pub(crate) fn eval_at(&self, t: NormalizedF32) -> Point {
+        let p0 = self.points[0].to_f32x2();
+        let p1w = self.points[1].to_f32x2() * f32x2::splat(self.weight);
+        let p2 = self.points[2].to_f32x2();
+        let numer = QuadCoeff {
+            a: p2 - times_2(p1w) + p0,
+            b: times_2(p1w - p0),
+            c: p0,
+        };
+        let b = 2.0 * (self.weight - 1.0);
+        let tt = f32x2::splat(t.get());
+        Point::from_f32x2(numer.eval(tt) / f32x2::splat(((0.0 - b) * t.get() + b) * t.get() + 1.0))
     }
 
-    // Chop this conic into N quads, stored continuously in pts[], where
-    // N = 1 << pow2. The amount of storage needed is (1 + 2 * N)
-    pub fn chop_into_quads_pow2(&self, pow2: u8, points: &mut [Point]) -> u8 {
-        debug_assert!(pow2 < 5);
-
-        points[0] = self.points[0];
-        subdivide(self, &mut points[1..], pow2);
-
-        let quad_count = 1 << pow2;
-        let pt_count = 2 * quad_count + 1;
-        if points.iter().take(pt_count).any(|n| !n.is_finite()) {
-            // if we generated a non-finite, pin ourselves to the middle of the hull,
-            // as our first and last are already on the first/last pts of the hull.
-            for p in points.iter_mut().take(pt_count - 1).skip(1) {
-                *p = self.points[1];
-            }
+    pub(crate) fn eval_tangent_at(&self, t: NormalizedF32) -> Point {
+        if (t == NormalizedF32::ZERO && self.points[0] == self.points[1])
+            || (t == NormalizedF32::ONE && self.points[1] == self.points[2])
+        {
+            return self.points[2] - self.points[0];
         }
-
-        1 << pow2
+        let p20 = self.points[2].to_f32x2() - self.points[0].to_f32x2();
+        let p10 = self.points[1].to_f32x2() - self.points[0].to_f32x2();
+        let w = f32x2::splat(self.weight);
+        let c = w * p10;
+        let coeff = QuadCoeff {
+            a: w * p20 - p20,
+            b: p20 - c - c,
+            c,
+        };
+        Point::from_f32x2(coeff.eval(f32x2::splat(t.get())))
     }
 
     fn chop(&self) -> (Conic, Conic) {
@@ -861,8 +838,8 @@ fn subdivide<'a>(src: &Conic, mut points: &'a mut [Point], mut level: u8) -> &'a
 
 /// `SkAutoConicToQuads::computeQuads(pts, weight, tol)` exactly as Skia
 /// m149 has it (`SkConic::computeQuadPOW2` allows a single quad and up to
-/// 2^5; `chopIntoQuadsPOW2` with its extreme-weight check), unlike
-/// [`AutoConicToQuads`]: the quads' points, `1 + 2 × count` of them.
+/// 2^5; `chopIntoQuadsPOW2` with its extreme-weight check): the quads'
+/// points, `1 + 2 × count` of them.
 pub fn skia_conic_to_quads(
     pt0: Point,
     pt1: Point,
@@ -929,21 +906,6 @@ pub fn skia_conic_to_quads(
 // returns true if (a <= b <= c) || (a >= b >= c)
 fn between(a: f32, b: f32, c: f32) -> bool {
     (a - b) * (c - b) <= 0.0
-}
-
-pub(crate) struct AutoConicToQuads {
-    pub points: [Point; 64],
-    pub len: u8, // the number of quads
-}
-
-impl AutoConicToQuads {
-    pub fn compute(pt0: Point, pt1: Point, pt2: Point, weight: f32) -> Option<Self> {
-        let conic = Conic::new(pt0, pt1, pt2, weight);
-        let pow2 = conic.compute_quad_pow2(0.25)?;
-        let mut points = [Point::zero(); 64];
-        let len = conic.chop_into_quads_pow2(pow2, &mut points);
-        Some(AutoConicToQuads { points, len })
-    }
 }
 
 #[cfg(test)]
