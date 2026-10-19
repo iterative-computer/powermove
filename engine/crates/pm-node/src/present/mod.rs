@@ -62,6 +62,10 @@ pub const LEAD_ENV: &str = "POWERMOVE_BRIDGE_LEAD";
 pub const FPS_ENV: &str = "POWERMOVE_BRIDGE_TEST_FPS";
 pub const LOAD_ENV: &str = "POWERMOVE_BRIDGE_TEST_LOAD";
 pub const TRACE_ENV: &str = "POWERMOVE_BRIDGE_TRACE";
+/// Tests only: milliseconds the completion thread waits after the GPU
+/// finished a paused frame before it sends the frame (a frame kept in
+/// flight on purpose; at most 5000).
+pub const SEND_DELAY_ENV: &str = "POWERMOVE_BRIDGE_TEST_SEND_DELAY_MS";
 /// `1`: keep the stand-in log in the presenter's status (scrub
 /// measurements, docs/engine/scrub.md).
 pub const STAND_IN_LOG_ENV: &str = "POWERMOVE_ENGINE_STAND_IN_LOG";
@@ -153,6 +157,10 @@ impl PresenterConfig {
                     .filter(|p| !p.is_empty())
                     .map(std::path::PathBuf::from),
                 fonts: None,
+                send_delay: env(SEND_DELAY_ENV)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|ms| *ms > 0)
+                    .map(|ms| std::time::Duration::from_millis(ms.min(5_000))),
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),
