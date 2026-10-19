@@ -24,7 +24,16 @@ async function shownSum(session:LaunchedApp,width:number,height:number):Promise<
   },{...rect,width,height});
 }
 /** The engine's frame at `t` (a JPEG data URL of its pixels), or null with the engine off. */
-const engineFrame=(session:LaunchedApp,t=0)=>session.page.evaluate(t=>(window as any).PM.EngineCaptures?(window as any).PM.Export.snapshotAsync(t,160):null,t);
+const engineFrame=(session:LaunchedApp,t=0)=>session.page.evaluate(async t=>{
+  const PM=(window as any).PM;
+  if(!PM.EngineCaptures)return null;
+  const image=await PM.Export.snapshotAsync(t,160);
+  const frame=PM.EngineRender.snapshotSync({time:t,width:160,height:90,pixels:'premultiplied',motionBlurSamples:0,background:false});
+  let occupied=0;const colors=new Set<number>();
+  for(let i=0;i<frame.data.length;i+=4)if(frame.data[i+3]>0){occupied++;colors.add((frame.data[i]<<16)|(frame.data[i+1]<<8)|frame.data[i+2]);}
+  if(occupied<16||colors.size<2)throw new Error(`The engine's 3D assertion captured an empty frame (${occupied} occupied pixels, ${colors.size} colors)`);
+  return image;
+},t);
 /** The engine's frame, checked stable: a capture 250 ms later is the same. Media imported just
  *  before is drawn at once, as today; a frame that changes (a model first drawn as the missing
  *  box) fails here rather than being waited out. */
