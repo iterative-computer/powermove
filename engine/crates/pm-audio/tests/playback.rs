@@ -1934,7 +1934,10 @@ fn bounded_decode_wait(exceed: bool, device_rate: u32, workers: usize) {
         if !crossed && playback.stats().starved_renders > 0 {
             crossed = true;
             held_at = turn;
-            assert!(cache.blocked_decoders() > 0);
+            // The render can count the miss before the decode worker it
+            // queued reaches the gate; wait (wall time only, no device
+            // callbacks) until the worker is actually held there.
+            until(|| cache.blocked_decoders() > 0);
             if !exceed {
                 // Wall time alone cannot spend the buffered device frames.
                 std::thread::sleep(Duration::from_millis(130));
@@ -3224,10 +3227,14 @@ fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
             .find(|(frames, _)| *frames >= 512)
             .expect("first 512 frames published");
         let published = Duration::from_micros(published_us.saturating_sub(timing.requested_us));
+        let ms = |from: u64, to: u64| to.saturating_sub(from) as f64 / 1000.0;
         eprintln!(
-            "A8 sixteen-voice edit cold={cold} distinct={distinct} first buffer: published {:.3} ms ({frames} frames), observed {:.3} ms",
+            "A8 sixteen-voice edit cold={cold} distinct={distinct} first buffer: published {:.3} ms ({frames} frames), observed {:.3} ms; request to applied {:.3}, applied to ready {:.3}, ready to published {:.3}",
             published.as_secs_f64() * 1000.0,
-            observed.as_secs_f64() * 1000.0
+            observed.as_secs_f64() * 1000.0,
+            ms(timing.requested_us, timing.applied_us),
+            ms(timing.applied_us, timing.ready_us),
+            ms(timing.ready_us, published_us)
         );
         // Sixteen identical voices share one representative head, which
         // must publish within one 512-frame callback. Sixteen distinct cold
