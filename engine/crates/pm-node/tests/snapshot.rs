@@ -754,25 +754,49 @@ fn child_headless_scheduling() {
 fn scheduling(headless: bool) {
     let mut c = Child::start();
     let session = c.session;
-    c.resync(2, 1, &project(100.0));
     let mut state = viewer_state();
     state.headless = Some(headless);
-    c.event(Event::Viewer(state));
+    if headless {
+        c.event(Event::Viewer(state.clone()));
+        // A cold Play must survive the document/media pending state.
+        c.event(Event::Transport(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        }));
+    }
+    c.resync(2, 1, &project(100.0));
+    if !headless {
+        c.event(Event::Viewer(state));
+    }
     if headless {
         c.inbox
             .wait(Duration::from_secs(20), |_, m| match &m.message {
                 Message::Event {
-                    body: Event::Clock(_),
-                } if m.revision == Some(Revision::new(1).unwrap()) => Some(()),
+                    body: Event::Clock(clock),
+                } if m.revision == Some(Revision::new(1).unwrap())
+                    && clock.state == TransportState::Playing =>
+                {
+                    Some(())
+                }
+                _ => None,
+            });
+        c.event(Event::Transport(TransportCommand::Pause));
+        c.inbox
+            .wait(Duration::from_secs(5), |_, m| match &m.message {
+                Message::Event {
+                    body: Event::Clock(clock),
+                } if clock.state == TransportState::Stopped => Some(()),
                 _ => None,
             });
         // A newer document while paused must publish a fresh readiness
         // clock, even though the composition remains supported and ready.
         c.resync(3, 2, &project(100.0));
-        c.inbox.wait(Duration::from_secs(5), |_, m| match &m.message {
-            Message::Event { body: Event::Clock(_) } if m.revision == Revision::new(2).ok() => Some(()),
-            _ => None,
-        });
+        c.inbox
+            .wait(Duration::from_secs(5), |_, m| match &m.message {
+                Message::Event {
+                    body: Event::Clock(_),
+                } if m.revision == Revision::new(2).ok() => Some(()),
+                _ => None,
+            });
         // Presentation warms the GPU before the timed section below. A
         // headless session has drawn nothing: warm it with an offscreen
         // capture too, without allocating a presentation pool.

@@ -497,6 +497,8 @@ struct View {
     /// µs after which it starts on the host clock instead, and the audio
     /// epoch that was current when it was asked (not the answer).
     awaiting: Option<(i64, Option<u32>, PlaybackRateValue)>,
+    /// Latest Play intent while the document or media is not ready.
+    deferred_transport: Option<TransportCommand>,
     /// The audio clock version last followed.
     audio_version: u64,
     /// Paused after a `seek {scrub}`: frames may show stand-ins for video
@@ -1206,13 +1208,16 @@ impl Thread {
         }
         match command {
             TransportCommand::Play { rate } => {
+                if view.reported != Some(Route::Engine) {
+                    if !matches!(view.reported, Some(Route::Legacy(_))) {
+                        view.deferred_transport = Some(TransportCommand::Play { rate });
+                    }
+                    return;
+                }
+                view.deferred_transport = None;
                 if view.awaiting.is_some_and(|a| a.2 == rate)
                     || (view.clock.is_playing() && view.clock.rate() == rate)
                 {
-                    return;
-                }
-                // Routed to the legacy viewer: the legacy transport plays.
-                if view.reported != Some(Route::Engine) {
                     return;
                 }
                 let from = view.clock.media_at(at);
@@ -1252,8 +1257,15 @@ impl Thread {
                 post_roll,
             } => {
                 if view.reported != Some(Route::Engine) {
+                    if !matches!(view.reported, Some(Route::Legacy(_))) {
+                        view.deferred_transport = Some(TransportCommand::PlayAround {
+                            pre_roll,
+                            post_roll,
+                        });
+                    }
                     return;
                 }
+                view.deferred_transport = None;
                 let here = view.clock.media_at(at);
                 if !host_clock && self.audio_for(key).is_some() {
                     let audio = &self.audio[&key];
@@ -1282,6 +1294,7 @@ impl Thread {
                 }
             }
             TransportCommand::Pause => {
+                view.deferred_transport = None;
                 view.awaiting = None;
                 if view.clock.apply(TransportCommand::Pause, at) {
                     view.schedule.reset();
@@ -1590,6 +1603,7 @@ impl Thread {
             reported: None,
             layer_reports: Default::default(),
             awaiting: None,
+            deferred_transport: None,
             audio_version: 0,
             scrub: false,
             stand_in: None,
@@ -2299,6 +2313,13 @@ impl Thread {
             }
         }
         if stop {
+            if matches!(route, Route::Pending(_)) {
+                let rate = view.awaiting.map_or(view.clock.rate(), |a| a.2);
+                view.deferred_transport
+                    .get_or_insert(TransportCommand::Play { rate });
+            } else {
+                view.deferred_transport = None;
+            }
             view.awaiting = None;
             view.clock.apply(TransportCommand::Pause, t);
             view.schedule.reset();
@@ -2329,6 +2350,15 @@ impl Thread {
             }
             if let Route::Legacy(reasons) = &route {
                 self.report_legacy(key, reasons);
+            }
+        }
+        if route == Route::Engine {
+            let deferred = self
+                .views
+                .get_mut(&key)
+                .and_then(|v| v.deferred_transport.take());
+            if let Some(command) = deferred {
+                self.transport(key, command, t);
             }
         }
         if let Some(link) = self.audio.get(&key) {
