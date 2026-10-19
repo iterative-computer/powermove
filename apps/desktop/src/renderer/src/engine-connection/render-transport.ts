@@ -293,13 +293,16 @@ function failure(reply: Extract<EngineSnapshotReply, { status: 'failed' }>): Eng
  *  caps only its density, at `min(scale, 8192 / w, 8192 / h)` (legacy
  *  gl/raster.ts `textRasterGeometry`, `shapeRasterGeometry`, `rasterPaths`,
  *  the captions rasterizer), and the engine's rasterizers apply the same
- *  cap. So a positive scale goes as it is; Infinity (the cap) as the largest
- *  finite number, which the cap reduces to the same density; zero, a
- *  negative scale, or NaN, whose raster today is a canvas of at most one
- *  pixel with nothing on it (captions: density 0.05), as a vanishing density
- *  that gives a one-pixel transparent canvas with the same geometry. */
+ *  cap. So a positive scale goes as it is, up to the largest safe integer:
+ *  every number above it is an integer the wire's MessagePack encoder
+ *  refuses, and any raster box wider than 1e-12 pixels reaches the 8192
+ *  cap well below it, so Infinity and 1e300 give today's density there.
+ *  Zero, a negative scale, or NaN, whose raster today is a canvas of at
+ *  most one pixel with nothing on it (captions: density 0.05), go as a
+ *  vanishing density that gives a one-pixel transparent canvas with the
+ *  same geometry. */
 export function layerRasterScale(scale: number): number {
-  if (scale === Infinity) return Number.MAX_VALUE;
+  if (scale > Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER;
   return scale > 0 ? scale : VANISHING_RASTER_SCALE;
 }
 
