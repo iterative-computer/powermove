@@ -543,9 +543,19 @@ canvas's drawing buffer. It behaves like the compositor's context:
   viewer's overlay, until the next frame is presented, as drawing into the
   compositor's canvas did. Draw in a `frame:rendered` handler to draw on every
   frame: the context holds the new frame by then.
-- **Exports and captures** (`render.snapshot`, `renderFrameTo`, exports,
-  thumbnails) never include what you draw into it, as before: they draw their
-  own frames.
+- **Exports.** WebM exports render each frame into the compositor's canvas
+  and emit `frame:rendered` before encoding it, so what a handler draws into
+  the context then is in the exported frame, as before. With the engine, each
+  WebM frame comes to the window first: the context holds it at the export's
+  size while `frame:rendered` runs (`time` is the frame's), and the frame
+  encoded is what the context then holds, or the engine's own frame when no
+  handler drew. MP4, ProRes, PNG and still exports, `render.snapshot`,
+  `renderFrameTo` and thumbnails draw their own frames and never include it,
+  as before.
+- **`context.canvas`** is the bound canvas, and it holds what today's canvas
+  held: the frame on screen, then anything drawn over it. `drawImage`,
+  `toDataURL()`, `toBlob()` and texture uploads from it read them. The bound
+  canvas stays hidden under the engine's presentation.
 - **Its own resources** (textures, framebuffers, programs) work as in any
   WebGL2 context. It is not the context that draws the frame, so state you set
   does not affect the engine's drawing (it could break the compositor's).
@@ -567,7 +577,16 @@ raster of the layer. A layer the override returns unchanged (the captured
 service's own result object) is drawn by the engine itself; any other result
 is drawn on the quad it describes (`w`, `h`, `anchorX`, `anchorY`, `uv`).
 Return the captured service's result object itself for layers you do not
-change: a copy (`{ ...surface }`) is treated as changed pixels. Give changed
+change: a copy (`{ ...surface }`), a field you set on it, or its canvas you
+took (`surface.cv`) is treated as changed pixels. The fifth argument is
+today's preview crop window: in the viewer, a large text raster or a partly
+visible shape is asked for only the visible window of its raster (pass it
+on to the captured service, which returns `sourceWindow` for text and `uv`
+for shapes), a shape the viewport misses is not asked for, and a viewport
+inside a plain rectangle's fill draws the fill without calling the service,
+as before. Exports and snapshots pass no crop. A wrapper assigned to
+`PM.raster` through `api.host.pm` (the pattern before the services
+registry) runs outside the registered ones, as before. Give changed
 surfaces a `key` that changes whenever the pixels do: an unchanged key is not
 sent to the engine again. A wrapper that throws fails the frame, as it did:
 the viewer keeps the last frame and reports the error, and an export fails

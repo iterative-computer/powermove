@@ -19,7 +19,9 @@ and the compatibility context, today's document values for apiVersion 1 to
 | Engine: drawing compatibility rasters | `engine/crates/pm-render/src/compat.rs`, the hook in `plan.rs` (`compat_quad`), upload in `exec.rs` |
 | Engine: answers per session | `engine/crates/pm-node/src/present/compat.rs` (`CompatStore` answers, `CompatView`), `present/render.rs` (viewer frames and snapshots) |
 | Engine: exports | `engine/crates/pm-node/src/jobs/compat.rs` (`JobCompat` over `Request::CompatFrame`), main's `engine/compat-frames.ts` |
-| Protocol | `pm_protocol::snapshot::CompatMessage` (`Producers`, `Native`, `Reuse`, `Needs`), `CompatPixels.size/uv`, `CompatFrame.native/size/uv`, `DeliveryOptions.compat` |
+| Protocol | `pm_protocol::snapshot::CompatMessage` (`Producers`, `Native`, `Reuse`, `Needs`), `CompatPixels.size/uv`, `CompatFrame.native/size/uv`, `DeliveryOptions.compat`; this round `CompatNeed/CompatNative/CompatPixels/Reuse.crop` and `CompatFrameRequest.frame` (`CompatFrameInput`), PROTOCOL_BUILD `protocol-556adc1fa36ea9ee` |
+| Today's preview crop | `engine/crates/pm-render/src/compat_crop.rs`, `plan.rs` `preview_crop`, `renderer.rs` `preview_window` |
+| Export frames through the context | `pm-export` `render::FramePost` (`ExportPlan::frame_post`), `pm-node` `jobs/compat.rs` `ContextFrames`, `kernel/compat-context.ts` `exportFrame`, `kernel/install.ts` (the `compatContext` producer) |
 | `render.gl.canvas`, the compatibility context | `renderer/src/kernel/compat-context.ts` (`CompatContextHost`), wired in `kernel/install.ts` (hears `preview:presented` before extensions hear `frame:rendered`) |
 | Export paths carrying producers | sheet and queue: `legacy/core/exporter.ts` `sheetOptions`; `export_video`: `legacy/assistant/mcp-project-tools.ts` (`__mcp_context.compat`) → `main/agent-tools/bridge.ts` → `main/engine/agent-jobs.ts` (`exportSettingsFor`); the job's snapshot layer: `AgentJobs.compatLayer` → `compat-frames.ts` (`EngineCompatAsk.layer`); main's own snapshot sessions: `EngineSnapshotRequest.compatEvents` → `window-sessions.ts` |
 | Today's export format ids (issue P1) | `shared/delivery.ts` (`storedFormatId`), `core/export-defaults.ts` (`storedExportDefaults`) |
@@ -101,20 +103,86 @@ viewer passed to `render.gl.init`. What extensions get from it:
 | `context.canvas` is the bound canvas | the same (an own property of the context; the offscreen canvas is `context.compatCanvas`) |
 | the default framebuffer holds the presented frame (cleared to opaque black, the composite drawn at the canvas size), so `readPixels` reads the composite | before the first read (`readPixels`, `copyTex(Sub)Image2D/3D`, `blitFramebuffer` from it) or draw into the default framebuffer after a presented frame, the engine's canvas under the bound canvas is drawn over opaque black into a scratch canvas at the bound canvas's backing size (pixel for pixel at equal density, from the nearest whole-pixel origin) and blitted in, bottom row first. The extension's GL state (bindings, unpack flags, scissor, rasterizer discard) is restored |
 | drawing into the default framebuffer shows in the viewer until the next frame clears it | after a draw call, clear or blit into the default framebuffer, the offscreen canvas is copied (after the task) to a layer canvas inserted right after the engine's canvas (under the viewer's overlay) at the bound canvas's box; the next presented frame hides it. A `frame:rendered` handler draws on the new frame: the host hears `preview:presented` first |
-| exports and captures never include it (they render their own frames: `exporter.ts` `renderInto`, `GL.renderToPixels`) | the same: nothing reaches the engine |
+| WebM exports include it: the shipped exporter's `exportWebCodecs` and `exportRecorder` render each frame with `GL.render` into that canvas (`renderInto`), which emits `preview:presented` → `frame:rendered`, then encode the canvas. MP4 and ProRes (`exportNative`), PNG sequences, stills and captures read their own pass (`GL.renderToPixels`) and never include it | the same, per frame: see "Exports" below |
+| `context.canvas` holds the composite and the drawing (`preserveDrawingBuffer`): `drawImage`, `toDataURL`, `toBlob`, texture uploads read them | the bound canvas gets the same pixels: each presented frame is copied into it (under the bound canvas, over opaque black), then any drawing over it. It rests hidden under the presentation. A bound canvas without a context gets a 2D one; one that has today's compositor context (kept while the legacy compositor runs beside the engine) is written through that context with its state restored |
 | its own textures, framebuffers, programs | the same (an ordinary WebGL2 context) |
 
 Limits: it is not the context that draws the frame, so GL state an extension
 sets cannot affect the engine's drawing (it could disturb the compositor's
-today); `drawImage(context.canvas)` reads the bound canvas, which the engine
-presents over (it is blank), where today it read the composite; the frame
-read back is the presented frame (an `rgbaf16` EDR canvas is read as 8-bit
+today); the frame read back is the presented frame (an `rgbaf16` EDR canvas is read as 8-bit
 sRGB, as today's 8-bit canvas held it); a lost offscreen context is made
 again on the next access (a new object, as `GL.init` after a restore).
 Drawing is shown in the viewer's DOM rather than sent through the engine:
 today's result is the canvas's own contents, shown at once and replaced by
 the next frame, which a round trip through the engine would show a frame
 late.
+
+### Exports
+
+A WebM export (the sheet's `webm`, `webm-vp9`, `webm-vp8`, or the render
+queue) names the `compatContext` producer while an extension holds the
+context (`EngineRenderTransport.exportSources`). The job engine renders each
+frame, turns it into what today's canvas held (`output_rgba` premultiplied,
+rounded to 8 bits, over black, opaque) and sends it to the window with
+`Request::CompatFrame` (`CompatFrameRequest.frame`, a shared segment that
+main inlines for the window). The window's `CompatContextHost.exportFrame`
+sizes the context to the export, makes the frame its default framebuffer's
+content, emits `frame:rendered` (`time` the frame's, `quality` 1, the last
+presented `viewport`, as `renderInto` emitted them), and answers what the
+default framebuffer holds after the handlers when one drew into it, or a
+pass-through. The job encodes the answer (decoded back to working values) in
+place of its frame (`pm_export::render::ExportPlan::frame_post`). Frames
+nobody drew on keep the engine's precision. The drawing is not shown in the
+viewer during the export (today's viewer showed the export frames, resized,
+while it ran). `frame:rendered` is emitted for export frames only when an
+extension holds the context; without one no pixels can differ, and today's
+WebM exports emitted it for every frame.
+
+### Crop
+
+In a viewer frame of the open root composition, today's compositor passes
+`PM.raster` a crop window for a large text raster (at least 4M pixels, the
+visible part at most half, axes aligned: `previewTextRaster`) or a partly
+visible shape without paths (`previewShapeRaster`). It does not call the
+raster for a shape the viewport misses, and it fills the viewport with a
+plain rectangle's color when the viewport lies inside its fill. A wrapper sees
+those calls, and the typewriter fixture sizes its canvas from what it gets.
+`pm_render::compat_crop` ports the three functions; `compat_quad` plans the
+same decision from the request's region (viewer frames only: not exports,
+not snapshots), for top-level layers of the root composition without paths,
+renderable effects, masks, track matte or transitions (and, for text,
+without animators, styles or typography anchoring). The window travels with
+the need (`CompatNeed.crop`; `Native`, `Reuse` and `Pixels` carry it back) and
+is part of the answer's identity in the store and in the snapshot job's tags.
+The producer calls the chain with it, the base is the engine's raster of
+that window (`sourceWindow` for text, `uv` for shapes, as today), and a
+text result's `sourceWindow` is mapped onto the upload as the draw-window
+program samples it (`resultUv`). Not ported: 3D layers' plane windows (they
+get the whole raster) and the occlusion-culling scissor regions today draws
+under an opaque rectangle (each region a separate crop). The pixels a
+well-behaved wrapper returns are the same either way; a wrapper whose output
+depends on the window could differ there.
+
+### `PM.raster` assigned through `host.pm`
+
+Before the services registry, extensions wrapped the raster by assigning
+`PM.raster` (the C1 corpus's `private-extension-38` shifts the anchors of text
+with animated font axes that way). Today the compositor calls whatever
+`PM.raster` holds, so such a wrapper is outermost, above the registered ones.
+`PM.raster` is now an accessor (reads and writes behave as the data
+property did). An assigned function is the outermost link of the producer's
+chain, and assigning or restoring it updates the producer like a services
+change.
+
+### Shader layers' program keys
+
+Today's compositor set every drawn shader layer's `shaderKey` to
+`sh:<id>:<hashStr(code)>`, and `render.gl.compileError(shaderKey)` is the
+compiler's message or null. `EngineShaderMeta` sets the same key for each
+shader layer on every presented frame and files a `shaderCompile` report
+under it. A layer the WebGL fallback draws, which compiles today and cannot
+be exported headless, keeps the engine's `engine:<id>` key and notice (shaders
+lane).
 
 ### Playback
 
@@ -280,8 +348,5 @@ new ids through a typed accessor; none is added in this lane.
   oldest shape that works on today's app lies between 155481d0 and
   470eeaf3 and is not bisected.
 - The lookahead answers at the open composition's frame rate only.
-- `drawImage(render.gl.context.canvas)` reads the bound canvas the engine
-  presents over (blank), where today it read the composite; `readPixels` is
-  the supported readback.
 - `scene3d` controller methods and the `viewport.*` members are not probed
   one by one (the probe calls the reads); the 3D lane owns their backing.

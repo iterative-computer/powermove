@@ -895,9 +895,12 @@ export interface RenderAPI {
      * as today. With "Use New Engine" on it is a compatibility context on an
      * offscreen canvas: its default framebuffer holds the frame on screen
      * when you read it (`readPixels`, bottom row first) or draw on it, and
-     * what you draw into it shows in the viewer until the next frame; exports
-     * and captures never include it, as before (see "The compatibility WebGL
-     * context" in EXTENSIONS.md).
+     * what you draw into it shows in the viewer until the next frame. As
+     * before, what a `frame:rendered` handler draws there is in WebM exports
+     * (they encode that canvas); other exports and captures never include it.
+     * `context.canvas` holds the frame and the drawing, so
+     * `drawImage(context.canvas)` and `toDataURL()` read them (see "The
+     * compatibility WebGL context" in EXTENSIONS.md).
      */
     readonly context: WebGL2RenderingContext | null;
   };
