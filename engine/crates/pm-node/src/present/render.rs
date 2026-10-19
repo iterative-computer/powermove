@@ -162,10 +162,12 @@ pub enum Command {
     ClosePort {
         port: PortId,
     },
-    /// The session's document changed (document source).
+    /// The session's document changed (document source). `posted`: host
+    /// µs the engine handed it to the presenter (the per-frame trace).
     Document {
         key: Key,
         update: DocumentUpdate,
+        posted: i64,
     },
     /// The session's definitions (contract 10), and those a delta
     /// registered again.
@@ -305,7 +307,7 @@ fn media_lease(frame_cache: usize) -> pm_media::decode::service::MediaLease {
 }
 
 /// One frame's record for the S1 harness.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FrameTrace {
     pub seq: u64,
     pub k: i64,
@@ -321,6 +323,15 @@ pub struct FrameTrace {
     pub gpu_done: i64,
     pub sent: i64,
     pub timed: bool,
+    /// Host µs the pass that rendered this frame began (`work_view`):
+    /// from there to `start` is the pass's document step and requests.
+    pub work_start: i64,
+    /// CPU µs of the compose (planning and encoding).
+    pub cpu_us: i64,
+    /// The document revisions this frame is the first to show: revision,
+    /// host µs the engine handed it to the presenter, host µs the render
+    /// thread applied it.
+    pub revisions: Vec<[i64; 3]>,
 }
 
 /// Counters the engine reports in its status.
@@ -572,6 +583,11 @@ struct Thread {
     compat: super::compat::CompatStore,
     /// Waveform requests waiting for the host's media answer.
     peaks_waiting: BTreeSet<(Key, String)>,
+    /// With the per-frame trace on: each session's revisions not shown yet
+    /// (revision, posted, applied; host µs).
+    doc_trace: BTreeMap<Key, Vec<[i64; 3]>>,
+    /// Host µs the current `work_view` pass began.
+    work_start: i64,
 }
 
 /// Most waveform requests that wait for media answers at once.
@@ -635,6 +651,8 @@ pub fn run(
         snapshot_costs: BTreeMap::new(),
         compat: super::compat::CompatStore::default(),
         peaks_waiting: BTreeSet::new(),
+        doc_trace: BTreeMap::new(),
+        work_start: 0,
     };
     thread.check_in();
     loop {
@@ -916,7 +934,11 @@ impl Thread {
                     self.forget_session(key);
                 }
             }
-            Command::Document { key, update } => self.document(key, update),
+            Command::Document {
+                key,
+                update,
+                posted,
+            } => self.document(key, update, posted),
             Command::Definitions {
                 key,
                 set,
@@ -1103,7 +1125,8 @@ impl Thread {
 
     /// A document update: the mirror, the audio thread's mirror, the frame
     /// grid, and a redraw.
-    fn document(&mut self, key: Key, update: DocumentUpdate) {
+    fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64) {
+        let traced = i64::try_from(update.revision().get()).unwrap_or(i64::MAX);
         let doc = self.docs.entry(key).or_default();
         if let Err(error) = doc.update(&update) {
             // The engine applied this batch to its own mirror; this one could
@@ -1128,6 +1151,12 @@ impl Thread {
             audio.send(AudioCtl::Document(update));
         } else {
             self.warm_audio(key);
+        }
+        if self.config.trace {
+            let pending = self.doc_trace.entry(key).or_default();
+            if pending.len() < 4_096 {
+                pending.push([traced, posted, now()]);
+            }
         }
         self.refresh_timing(key);
         if let Some(view) = self.views.get_mut(&key) {
@@ -2334,6 +2363,7 @@ impl Thread {
     }
 
     fn work_view(&mut self, key: Key) {
+        self.work_start = now();
         let lead = self.config.lead;
         self.retry_pool(key);
         let draws = !self.config.document || self.document_step(key);
@@ -2917,6 +2947,17 @@ impl Thread {
                 gpu_done,
                 sent: now(),
                 timed: timing.is_some(),
+                work_start: self.work_start,
+                cpu_us,
+                revisions: self
+                    .doc_trace
+                    .get_mut(&key)
+                    .map(|pending| {
+                        let shown = i64::try_from(revision).unwrap_or(i64::MAX);
+                        let split = pending.partition_point(|r| r[0] <= shown);
+                        pending.drain(..split).collect()
+                    })
+                    .unwrap_or_default(),
             });
         }
         Some(descriptor)

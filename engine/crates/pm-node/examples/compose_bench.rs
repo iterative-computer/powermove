@@ -152,7 +152,13 @@ fn main() {
     if !apply_ms.is_empty() {
         apply_summary = format!("edit apply: {}", summary(&mut apply_ms));
     }
-    for _ in 0..20 {
+    // PM_BENCH_ROUTES: how many routing decisions to time (a profile of
+    // the capability check wants many).
+    let routes: usize = std::env::var("PM_BENCH_ROUTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    for _ in 0..routes.max(2) {
         let start = Instant::now();
         let reasons = pm_render::unsupported_with_media(&doc, &composition, &media);
         route_ms.push(start.elapsed().as_secs_f64() * 1e3);

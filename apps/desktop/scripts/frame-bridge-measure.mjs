@@ -822,7 +822,7 @@ function analyzeLatency(raw) {
     // showed it ended (presentation), split at the start of viz's
     // DrawAndSwap that drew it; for today, handled → the animation
     // frame that drew it, and that frame → presentation.
-    const hops = { inputToHandled: [], handledToArrival: [], arrivalToSubmit: [], submitToReceived: [], receivedToPresent: [], receivedToDraw: [], drawToPresent: [], handledToRaf: [], rafToPresent: [], handledToRenderStart: [], renderStartToGpuDone: [], gpuDoneToSent: [], sentToArrival: [] };
+    const hops = { inputToHandled: [], handledToArrival: [], arrivalToSubmit: [], submitToReceived: [], receivedToPresent: [], receivedToDraw: [], drawToPresent: [], handledToRaf: [], rafToPresent: [], handledToRenderStart: [], renderStartToGpuDone: [], gpuDoneToSent: [], sentToArrival: [], handledToPosted: [], postedToApplied: [], appliedToPass: [], passToRenderStart: [], composeCpu: [] };
     // The engine's side of handled → arrival, by descriptor seq (host µs → page ms).
     const engineBySeq = new Map((run.engineFrames ?? []).map((f) => [f.seq, f]));
     const hostMs = (us) => (us - raw.clock.offsetUs) / 1000;
@@ -857,6 +857,22 @@ function analyzeLatency(raw) {
               hops.renderStartToGpuDone.push((e.gpu_done - e.start) / 1000);
               hops.gpuDoneToSent.push((e.sent - e.gpu_done) / 1000);
               hops.sentToArrival.push(d.arrivedMs - hostMs(e.sent));
+              // The engine's side of handled → render start, when the
+              // engine's trace has the revision (pm-node FrameTrace):
+              // handled → the presenter has the batch (page flush, port,
+              // engine thread), → the render thread applied it, → the pass
+              // that rendered it began (the thread was busy), → render start
+              // (the pass's document step).
+              const r = (e.revisions ?? []).find((x) => x[0] === rev);
+              if (r) {
+                hops.handledToPosted.push(hostMs(r[1]) - handled);
+                hops.postedToApplied.push((r[2] - r[1]) / 1000);
+                if (e.work_start) {
+                  hops.appliedToPass.push((e.work_start - r[2]) / 1000);
+                  hops.passToRenderStart.push((e.start - e.work_start) / 1000);
+                }
+              }
+              if (e.cpu_us != null) hops.composeCpu.push(e.cpu_us / 1000);
             }
             if (pf.received != null) {
               hops.submitToReceived.push((pf.received - ctx.toTrace(d.submitMs)) / 1000);

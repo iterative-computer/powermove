@@ -655,6 +655,7 @@ impl FramePresenter for BridgePresenter {
         self.send(Command::Document {
             key: (port, session),
             update,
+            posted: render::now_us(),
         });
     }
 
