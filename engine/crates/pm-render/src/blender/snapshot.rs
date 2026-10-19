@@ -422,66 +422,36 @@ fn image_extension(path: &Path) -> Option<&'static str> {
 }
 
 /// An image Blender should not load as it is, as an 8-bit straight-alpha
-/// PNG (today: drawn into a canvas and `toBlob('image/png')`).
+/// PNG. Today the asset's `ImageBitmap` (Chromium's level 1 bitmap,
+/// premultiplied) is drawn 1:1 into a canvas and `toBlob('image/png')`
+/// reads it back unpremultiplied ([`unpremultiply`]). The PNG container
+/// bytes are this engine's encoder's; the pixels are today's.
 fn convert_to_png(path: &Path) -> Result<Vec<u8>, String> {
-    use pm_media::frame::{Layout, PlaneFormat};
     let pool = pm_media::pool::FramePool::new(0);
-    let still =
-        pm_media::image::read(path, &pool).map_err(|e| format!("{}: {e}", path.display()))?;
-    let f = &still.frame.format;
-    if f.layout != Layout::Rgba {
-        return Err("a texture image layout this engine cannot convert".into());
+    let (bitmap, _) = crate::media::level1_bitmap(path, &pool).map_err(|e| match e {
+        crate::media::ProbeIssue::Unsupported(f) => f.to_string(),
+        crate::media::ProbeIssue::Unreadable(m) => m,
+    })?;
+    let f = &bitmap.frame.format;
+    if f.planes.len() != 1 || f.planes[0].format != pm_media::frame::PlaneFormat::Rgba8 {
+        return Err(format!("a texture image layout this engine cannot convert ({})", f.label));
     }
     let (w, h) = (f.width, f.height);
-    let premultiplied = f.rgba_premultiplied;
-    let rgba = still
+    let mut rgba = bitmap
         .frame
         .with_planes(|planes| {
             let p = &planes[0];
             let mut out = Vec::with_capacity(w * h * 4);
             for y in 0..h {
-                for x in 0..w {
-                    let mut px = [0f64; 4];
-                    for (c, v) in px.iter_mut().enumerate() {
-                        // SAFETY: inside the plane (`with_planes` views).
-                        *v = unsafe {
-                            let b = p.desc.format.bytes();
-                            let at = p.ptr.add(y * p.stride + x * b);
-                            match p.desc.format {
-                                PlaneFormat::Rgba8 => f64::from(*at.add(c)) / 255.0,
-                                PlaneFormat::Rgba16 => {
-                                    f64::from(u16::from_le_bytes([
-                                        *at.add(c * 2),
-                                        *at.add(c * 2 + 1),
-                                    ])) / 65535.0
-                                }
-                                PlaneFormat::Rgba32Float => f64::from(f32::from_le_bytes([
-                                    *at.add(c * 4),
-                                    *at.add(c * 4 + 1),
-                                    *at.add(c * 4 + 2),
-                                    *at.add(c * 4 + 3),
-                                ])),
-                                _ => 0.0,
-                            }
-                        };
-                    }
-                    if premultiplied && px[3] > 0.0 {
-                        for c in 0..3 {
-                            px[c] /= px[3];
-                        }
-                    }
-                    out.extend(px.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
-                }
+                // SAFETY: the plane holds `height` rows of `stride` bytes.
+                out.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(p.ptr.add(y * p.stride), w * 4)
+                });
             }
             out
         })
         .map_err(|e| e.to_string())?;
-    if !matches!(
-        f.planes.first().map(|p| p.format),
-        Some(PlaneFormat::Rgba8 | PlaneFormat::Rgba16 | PlaneFormat::Rgba32Float)
-    ) {
-        return Err("a texture image sample format this engine cannot convert".into());
-    }
+    unpremultiply(&mut rgba);
     let mut png = Vec::new();
     {
         let mut e = png::Encoder::new(&mut png, w as u32, h as u32);
@@ -492,6 +462,28 @@ fn convert_to_png(path: &Path) -> Result<Vec<u8>, String> {
             .map_err(|e| e.to_string())?;
     }
     Ok(png)
+}
+
+/// Skia's read of premultiplied RGBA8 into an unpremultiplied image (the
+/// canvas's `toBlob`): each byte to f32 `b × (1 / 255)`, color times `1 /
+/// a` (0 where a is 0), clamped to [0, 1], stored as `(int)(v × 255 +
+/// 0.5)`.
+pub fn unpremultiply(rgba: &mut [u8]) {
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 255 {
+            continue;
+        }
+        let scale = if a == 0 {
+            0.0
+        } else {
+            1.0 / (f32::from(a) * (1.0 / 255.0))
+        };
+        for c in &mut px[..3] {
+            let v = (f32::from(*c) * (1.0 / 255.0) * scale).clamp(0.0, 1.0);
+            *c = (v * 255.0 + 0.5) as u8;
+        }
+    }
 }
 
 /// The assets the scene's materials name (`assetBytes` of each id).
