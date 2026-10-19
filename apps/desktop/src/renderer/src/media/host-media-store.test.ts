@@ -427,6 +427,43 @@ describe('the engine stamp', () => {
     }
   });
 
+  it('binds a changed record before the document batch that carries it reaches the engine', () => {
+    vi.useFakeTimers();
+    try {
+      const { host } = fakeHost();
+      const { legacy } = fakeLegacy();
+      const order: string[] = [];
+      host.bind = vi.fn(async (_project: string, assets: Record<string, unknown>) => { order.push(`bind ${JSON.stringify(assets)}`); });
+      const subscribers: Array<(batch: unknown) => void> = [];
+      const PM: any = {
+        MediaStore: legacy,
+        proj: { id: 'P1', assets: { a: { id: 'a', storageKey: 'media:v2:old' } }, layers: [], comps: {} },
+        bus: { on: vi.fn() },
+        EngineDoc: { subscribe: (fn: (batch: unknown) => void) => { subscribers.push(fn); return () => {}; } },
+      };
+      installHostMediaStore(PM, { mediaStore: host });
+      // An engine session subscribes after the media store (bootstrap order).
+      subscribers.push(() => order.push('post batch'));
+      const batch = () => { for (const fn of subscribers) fn({}); };
+      batch();
+      expect(order).toEqual(['bind {"a":{"key":"media:v2:old"}}', 'post batch']);
+      // An edit that changes no binding binds nothing.
+      batch();
+      expect(order.slice(2)).toEqual(['post batch']);
+      // A replace (a new record) is bound before its batch is posted, and
+      // so is its undo.
+      PM.proj.assets.a = { id: 'a', storageKey: 'media:v2:new' };
+      batch();
+      expect(order.slice(3)).toEqual(['bind {"a":{"key":"media:v2:new"}}', 'post batch']);
+      PM.proj.assets.a = { id: 'a', storageKey: 'media:v2:old' };
+      batch();
+      expect(order.slice(5)).toEqual(['bind {"a":{"key":"media:v2:old"}}', 'post batch']);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('migrates IndexedDB media before binding an export snapshot', async () => {
     vi.useFakeTimers();
     try {

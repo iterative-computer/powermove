@@ -535,11 +535,31 @@ export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: Media
   // The engine reads each asset through a handle main mints from these.
   let timer: ReturnType<typeof setTimeout> | null = null;
   let migrated: string | null = null;
+  let bound: { project: string; signature: string } | null = null;
+  /** Binds the project's assets when their bindings differ from the last
+   *  ones bound (or always, `force`). */
+  const bindNow = (force: boolean): void => {
+    const project = PM.proj;
+    if (!project?.id || !/^[A-Za-z0-9_-]{1,120}$/.test(project.id)) return;
+    const bindings = bindingsFor(project, store.recordFor);
+    const signature = JSON.stringify(bindings);
+    if (!force && bound && bound.project === project.id && bound.signature === signature) return;
+    bound = { project: project.id, signature };
+    void host.bind(project.id, bindings).catch(() => undefined);
+  };
+  // The engine resolves an asset again when its record changes (a replace,
+  // its undo and redo, a relink), through these bindings: bound late, an
+  // older binding answers the older file and the engine keeps drawing it.
+  // So every batch the document mirror applies binds first what it changed.
+  // This subscribes before any engine session does (bootstrap installs the
+  // media store before the engine connection), so the bind is sent to main
+  // before the batch is posted to the engine.
+  PM.EngineDoc?.subscribe?.(() => bindNow(false));
   const bind = () => {
     timer = null;
     const project = PM.proj;
     if (!project?.id || !/^[A-Za-z0-9_-]{1,120}$/.test(project.id)) return;
-    void host.bind(project.id, bindingsFor(project, store.recordFor)).catch(() => undefined);
+    bindNow(true);
     // Embedded media moves to the store on first open with the new engine;
     // IndexedDB keeps its copy (section 21).
     if (migrated !== project.id) {
