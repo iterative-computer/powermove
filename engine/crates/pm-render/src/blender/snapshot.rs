@@ -614,14 +614,31 @@ fn scene_assets(
                 )
                 .map_err(io)?,
                 None => {
-                    let png = convert_to_png(&path)
-                        .map_err(|e| format!("Could not convert texture {name}: {e}"))?;
-                    SnapshotAsset::new(
-                        id.clone(),
-                        format!("{id}.png"),
-                        AssetBytes::Bytes(Arc::new(png)),
-                    )
-                    .map_err(io)?
+                    let mut head = [0; 4096];
+                    let n = std::fs::File::open(&path)
+                        .and_then(|mut f| {
+                            use std::io::Read;
+                            f.read(&mut head)
+                        })
+                        .map_err(io)?;
+                    let browser_required = matches!(
+                        pm_media::image::sniff(&head[..n]),
+                        pm_media::image::ImageFormat::Avif | pm_media::image::ImageFormat::Svg
+                    );
+                    let png = if browser_required {
+                        assets.blender_png(&id, &path)?.ok_or_else(|| {
+                            format!(
+                                "The editor window did not provide the exact Blender PNG for {name}"
+                            )
+                        })?
+                    } else {
+                        Arc::new(
+                            convert_to_png(&path)
+                                .map_err(|e| format!("Could not convert texture {name}: {e}"))?,
+                        )
+                    };
+                    SnapshotAsset::new(id.clone(), format!("{id}.png"), AssetBytes::Bytes(png))
+                        .map_err(io)?
                 }
             }
         } else {

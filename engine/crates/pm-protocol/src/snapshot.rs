@@ -526,6 +526,8 @@ pub enum CompatFormat {
     Rgba8Straight,
     /// Binary16 premultiplied RGBA, little-endian (a float target).
     Rgba16fPremultiplied,
+    /// A complete Canvas2D `toBlob("image/png")` file for a Blender map.
+    Png,
 }
 
 impl CompatFormat {
@@ -533,6 +535,7 @@ impl CompatFormat {
         match self {
             CompatFormat::Rgba8Premultiplied | CompatFormat::Rgba8Straight => 4,
             CompatFormat::Rgba16fPremultiplied => 8,
+            CompatFormat::Png => 0,
         }
     }
 }
@@ -550,6 +553,28 @@ pub enum CompatSource {
     /// A level 1 SVG image's raster at a size bucket, drawn by Chromium
     /// (decision S1; [`CompatFrameRequest::svg`] names it).
     SvgImage,
+    /// Chromium's decoded image, drawn into Canvas2D and encoded as PNG.
+    BlenderPng,
+}
+
+/// The image whose exact Chromium Canvas2D PNG Blender needs. `content` is
+/// SHA-256 of the original file, so a window with a stale asset cannot answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct BlenderPngRequest {
+    pub asset: String,
+    pub content: crate::common::ContentHash,
+}
+
+impl Validate for BlenderPngRequest {
+    fn validate(&self) -> Result<(), Violation> {
+        ensure(
+            !self.asset.is_empty() && self.asset.len() <= 256,
+            ContractId::HostServices,
+            || "invalid Blender PNG asset id".into(),
+        )
+    }
 }
 
 /// The identity of one compatibility raster: one layer at one frame, as one
@@ -642,6 +667,9 @@ impl Validate for CompatMessage {
         const C: ContractId = ContractId::Frame;
         match self {
             CompatMessage::Pixels(p) => {
+                ensure(p.format != CompatFormat::Png, C, || {
+                    "PNG is not a compatibility pixel band".into()
+                })?;
                 p.id.validate()?;
                 ensure(
                     (1..=MAX_COMPAT_EDGE).contains(&p.width)
@@ -699,6 +727,13 @@ impl Validate for CompatMessage {
 /// The host asks the window that owns `document` and answers with
 /// [`CompatFrame`], or an `unavailable` error naming why (no window has the
 /// document open, the producer is gone).
+/// Output pixels per layer pixel the export needs.
+/// The document revision the export snapshot was taken at.
+/// For [`CompatSource::SvgImage`] (and only then): the raster (its
+/// SVG's content hash and bucket) and the asset. The answer is that
+/// bucket's premultiplied RGBA8 pixels, keyed
+/// `<content>:<width>x<height>`.
+/// Set only for `blenderPng`; the original file's content identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -708,17 +743,14 @@ pub struct CompatFrameRequest {
     pub layer: LayerId,
     pub time: Ticks,
     pub source: CompatSource,
-    /// Output pixels per layer pixel the export needs.
     pub scale: f64,
-    /// The document revision the export snapshot was taken at.
     pub revision: Revision,
-    /// For [`CompatSource::SvgImage`] (and only then): the raster (its
-    /// SVG's content hash and bucket) and the asset. The answer is that
-    /// bucket's premultiplied RGBA8 pixels, keyed
-    /// `<content>:<width>x<height>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub svg: Option<crate::svg_raster::SvgRasterRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub blender: Option<BlenderPngRequest>,
 }
 
 impl Validate for CompatFrameRequest {
@@ -736,6 +768,14 @@ impl Validate for CompatFrameRequest {
         )?;
         if let Some(svg) = &self.svg {
             svg.validate()?;
+        }
+        ensure(
+            (self.source == CompatSource::BlenderPng) == self.blender.is_some(),
+            C,
+            || "a blenderPng compatibility frame names its source image, and only it".into(),
+        )?;
+        if let Some(blender) = &self.blender {
+            blender.validate()?;
         }
         ensure(
             self.scale.is_finite() && self.scale > 0.0 && self.scale <= crate::frame::MAX_SCALE,
@@ -768,11 +808,30 @@ impl Validate for CompatFrame {
             C,
             || format!("compatibility frame {}×{}", self.width, self.height),
         )?;
-        let expected =
-            u64::from(self.width) * u64::from(self.height) * self.format.bytes_per_pixel();
-        ensure(self.payload.len() == expected, C, || {
-            "compatibility frame bytes".into()
-        })?;
+        if self.format == CompatFormat::Png {
+            ensure(
+                (33..=256 * 1024 * 1024).contains(&self.payload.len()),
+                C,
+                || "Blender PNG size".into(),
+            )?;
+            if let PixelPayload::Inline { bytes } = &self.payload {
+                let b = &bytes.0;
+                ensure(
+                    b.starts_with(b"\x89PNG\r\n\x1a\n")
+                        && b.get(12..16) == Some(b"IHDR".as_slice())
+                        && b.get(16..20) == Some(self.width.to_be_bytes().as_slice())
+                        && b.get(20..24) == Some(self.height.to_be_bytes().as_slice()),
+                    C,
+                    || "Blender PNG header or dimensions".into(),
+                )?;
+            }
+        } else {
+            let expected =
+                u64::from(self.width) * u64::from(self.height) * self.format.bytes_per_pixel();
+            ensure(self.payload.len() == expected, C, || {
+                "compatibility frame bytes".into()
+            })?;
+        }
         if let PixelPayload::SharedMemory { name, .. } = &self.payload {
             ensure(shared_name_ok(name), C, || {
                 "invalid shared-memory name".into()
@@ -1005,5 +1064,45 @@ mod tests {
                 .validate()
                 .is_err()
         );
+        assert!(band(0, 1, 0, CompatFormat::Png).validate().is_err());
+    }
+
+    #[test]
+    fn blender_png_is_an_encoded_answer_for_one_content_hash() {
+        let mut request = CompatFrameRequest {
+            document: "doc".into(),
+            composition: "c".into(),
+            layer: "L".into(),
+            time: Ticks::ZERO,
+            source: CompatSource::BlenderPng,
+            scale: 1.0,
+            revision: Revision::ZERO,
+            svg: None,
+            blender: Some(BlenderPngRequest {
+                asset: "a1".into(),
+                content: crate::common::ContentHash([7; 32]),
+            }),
+        };
+        assert!(request.validate().is_ok());
+        request.blender = None;
+        assert!(request.validate().is_err());
+        let mut png = vec![0; 33];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[12..16].copy_from_slice(b"IHDR");
+        png[16..20].copy_from_slice(&1u32.to_be_bytes());
+        png[20..24].copy_from_slice(&1u32.to_be_bytes());
+        let frame = CompatFrame {
+            key: "a".repeat(64),
+            width: 1,
+            height: 1,
+            format: CompatFormat::Png,
+            origin: [0.0, 0.0],
+            scale: 1.0,
+            payload: PixelPayload::Inline { bytes: Bytes(png) },
+        };
+        assert!(frame.validate().is_ok());
+        let mut bad = frame.clone();
+        bad.width = 2;
+        assert!(bad.validate().is_err());
     }
 }

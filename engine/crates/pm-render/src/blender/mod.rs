@@ -65,6 +65,9 @@ pub trait PreviewSurfaces: Send + Sync {
     fn lookup(&self, snapshot: &Snapshot, layer: &str) -> Option<Arc<DecodedSurface>>;
     /// A preview snapshot with at least one missing surface.
     fn wanted(&self, snapshot: Snapshot);
+    /// A preview frame whose snapshot could not be constructed. The host
+    /// reports this independently of any per-layer failure in the frame.
+    fn failed(&self, _frame: &BlenderFrame, _error: &str) {}
 }
 
 /// How a render treats Blender compositions.
@@ -142,7 +145,7 @@ pub(crate) struct PlanState {
     /// Frames already handled in this build.
     seen: HashSet<FrameKey>,
     /// Preview snapshots built in this build, by frame.
-    previews: Vec<(FrameKey, Option<Arc<Snapshot>>)>,
+    previews: Vec<(FrameKey, Result<Arc<Snapshot>, String>)>,
 }
 
 impl PlanState {
@@ -306,21 +309,36 @@ pub(crate) fn plan_object<'d>(
             let snapshot = match state.previews.iter().find(|(k, _)| *k == key) {
                 Some((_, s)) => s.clone(),
                 None => {
-                    let built = snapshot::build(scope, &frame, assets, &host.options())?
-                        .ok()
-                        .map(Arc::new);
-                    if let Some(s) = &built
-                        && s.layers().iter().any(|l| host.lookup(s, l).is_none())
-                    {
-                        host.wanted((**s).clone());
+                    let built = match snapshot::build(scope, &frame, assets, &host.options()) {
+                        Ok(built) => built,
+                        Err(error) => {
+                            host.failed(
+                                &frame,
+                                &format!("The Blender preview could not be prepared: {error}"),
+                            );
+                            return Err(error);
+                        }
+                    }
+                    .map(Arc::new)
+                    .map_err(|why| format!("The Blender preview could not be prepared: {why}"));
+                    match &built {
+                        Ok(s) if s.layers().iter().any(|l| host.lookup(s, l).is_none()) => {
+                            host.wanted((**s).clone());
+                        }
+                        Err(error) => host.failed(&frame, error),
+                        _ => {}
                     }
                     state.previews.push((key, built.clone()));
                     built
                 }
             };
-            Ok(snapshot
-                .and_then(|s| host.lookup(&s, &id))
-                .map(|surface| draw(&id, surface, width, height, compatibility)))
+            Ok(Some(match snapshot {
+                Ok(snapshot) => match host.lookup(&snapshot, &id) {
+                    Some(surface) => draw(&id, surface, width, height, compatibility),
+                    None => return Ok(None),
+                },
+                Err(error) => Planned::Fail(error),
+            }))
         }
     }
 }

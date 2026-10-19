@@ -47,7 +47,7 @@ use pm_blender::snapshot::Snapshot;
 use pm_blender::{BlenderError, DecodedSurface, SurfaceCache};
 use pm_engine::{Action, LogLevel};
 use pm_protocol::codec;
-use pm_protocol::common::{JobId, Revision};
+use pm_protocol::common::{JobId, Revision, Seq};
 use pm_protocol::envelope::{Envelope, Event, Message};
 use pm_protocol::error::{EngineError, EngineProcess, ErrorCode, ErrorScope, FailureReport};
 use pm_protocol::frame::{Shading3d, ViewOverride};
@@ -121,6 +121,7 @@ struct Want {
     hashes: Vec<[u8; 32]>,
     shading: Shading3d,
     revision: Revision,
+    generation: Option<Seq>,
     since: Instant,
 }
 
@@ -128,6 +129,9 @@ struct Running {
     key: Key,
     hashes: Vec<[u8; 32]>,
     cancel: Arc<AtomicBool>,
+    generation: Option<Seq>,
+    revision: Revision,
+    shading: Shading3d,
     /// The capture token when it prepares an async snapshot's frame.
     capture: Option<u64>,
 }
@@ -142,8 +146,28 @@ struct Capture {
 
 /// What the worker tells the render thread.
 pub enum Notice {
+    /// A debounced wanted set began rendering for this document revision.
+    Started {
+        key: Key,
+        revision: Revision,
+        generation: Option<Seq>,
+        shading: Shading3d,
+    },
     /// Preview surfaces of the view arrived: draw it again when paused.
-    Ready(Key),
+    Ready {
+        key: Key,
+        revision: Revision,
+        generation: Option<Seq>,
+        shading: Shading3d,
+    },
+    /// A wanted set failed; the normal session Failure is sent separately.
+    Failed {
+        key: Key,
+        revision: Revision,
+        generation: Option<Seq>,
+        shading: Shading3d,
+        error: String,
+    },
     /// A capture's frames are prepared, or why not.
     Captured {
         token: u64,
@@ -268,6 +292,9 @@ pub struct PreviewBlender {
 }
 
 impl PreviewBlender {
+    pub(crate) fn host_link(&self) -> Arc<HostLink> {
+        self.inner.link.clone()
+    }
     /// Starts the worker. `notify` asks the render thread to draw a view
     /// again (its preview surfaces arrived) or hands it a capture's frames.
     pub(crate) fn start(
@@ -317,6 +344,7 @@ impl PreviewBlender {
             inner: self.inner.clone(),
             options: options_for(view),
             wanted: Mutex::new(Vec::new()),
+            failure: Mutex::new(None),
             hashes: Mutex::new(HashMap::new()),
         })
     }
@@ -330,6 +358,7 @@ impl PreviewBlender {
         shading: Option<Shading3d>,
         revision: Revision,
         host: Option<&ViewHost>,
+        generation: Option<Seq>,
     ) {
         let mut st = self.inner.lock();
         let snapshots = match (shading, host) {
@@ -365,7 +394,18 @@ impl PreviewBlender {
                 .as_ref()
                 .is_some_and(|r| r.capture.is_none() && r.key == key && r.hashes == hashes);
             if running_same {
+                if let Some(r) = st.running.as_mut().filter(|r| r.key == key) {
+                    r.generation = generation;
+                    r.revision = revision;
+                    r.shading = shading.unwrap_or(Shading3d::Rendered);
+                }
                 st.wanted.remove(&key);
+            } else if same {
+                if let Some(w) = st.wanted.get_mut(&key) {
+                    w.generation = generation;
+                    w.revision = revision;
+                    w.shading = shading.unwrap_or(Shading3d::Rendered);
+                }
             } else if !same {
                 st.wanted.insert(
                     key,
@@ -374,6 +414,7 @@ impl PreviewBlender {
                         hashes,
                         shading: shading.unwrap_or(Shading3d::Rendered),
                         revision,
+                        generation,
                         since: Instant::now(),
                     },
                 );
@@ -481,12 +522,28 @@ pub struct ViewHost {
     inner: Arc<Inner>,
     options: SnapshotOptions,
     wanted: Mutex<Vec<Snapshot>>,
+    failure: Mutex<Option<String>>,
     /// Snapshot hashes by address: a render looks each snapshot up once
     /// per layer, and hashing one covers all of its geometry.
     hashes: Mutex<HashMap<usize, [u8; 32]>>,
 }
 
 impl ViewHost {
+    /// Number of snapshots this frame lacked when it was composed. Query
+    /// before `submit` takes the wanted set; a zero count means the frame
+    /// actually used all its Blender surfaces (or had no 3D objects).
+    pub fn pending_count(&self) -> usize {
+        self.wanted.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Snapshot construction failure encountered while composing this frame.
+    pub fn failure(&self) -> Option<String> {
+        self.failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn hash(&self, snapshot: &Snapshot) -> [u8; 32] {
         let address = snapshot as *const Snapshot as usize;
         *self
@@ -523,6 +580,13 @@ impl PreviewSurfaces for ViewHost {
             .unwrap_or_else(|e| e.into_inner())
             .push(snapshot);
     }
+
+    fn failed(&self, _frame: &pm_blender::snapshot::BlenderFrame, error: &str) {
+        let mut failure = self.failure.lock().unwrap_or_else(|e| e.into_inner());
+        if failure.is_none() {
+            *failure = Some(error.to_owned());
+        }
+    }
 }
 
 /// The worker's Blender stage and backend, made with the first job (the
@@ -558,6 +622,9 @@ fn run(inner: Arc<Inner>) {
                         key: c.key,
                         hashes: c.hashes.clone(),
                         cancel: cancel.clone(),
+                        generation: None,
+                        revision: Revision::ZERO,
+                        shading: Shading3d::Rendered,
                         capture: Some(c.token),
                     });
                     break Job::Capture(c, cancel);
@@ -576,6 +643,9 @@ fn run(inner: Arc<Inner>) {
                             key,
                             hashes: want.hashes.clone(),
                             cancel: cancel.clone(),
+                            generation: want.generation,
+                            revision: want.revision,
+                            shading: want.shading,
                             capture: None,
                         });
                         break Job::Preview(key, want, cancel);
@@ -601,6 +671,12 @@ fn run(inner: Arc<Inner>) {
             }
         };
         let id = JobId::new(format!("preview-{}-{}", key.0.0, key.1.get()));
+        (inner.notify)(Notice::Started {
+            key,
+            revision: want.revision,
+            generation: want.generation,
+            shading: want.shading,
+        });
         let result = render(
             &inner,
             &mut worker,
@@ -611,16 +687,32 @@ fn run(inner: Arc<Inner>) {
             &cancel,
         );
         let mut st = inner.lock();
+        let generation = st.running.as_ref().and_then(|r| r.generation);
+        let revision = st.running.as_ref().map_or(want.revision, |r| r.revision);
+        let shading = st.running.as_ref().map_or(want.shading, |r| r.shading);
         st.running = None;
         match result {
-            Ok(frames) => {
+            Ok(frames) if !cancel.load(Ordering::Relaxed) => {
                 for (hash, layers) in frames {
                     inner.remember(&mut st, hash, layers);
                 }
                 drop(st);
-                (inner.notify)(Notice::Ready(key));
+                (inner.notify)(Notice::Ready {
+                    key,
+                    revision,
+                    generation,
+                    shading,
+                });
+            }
+            Ok(_) => {
+                drop(st);
+                inner.stats(|s| s.cancelled += 1);
             }
             Err(BlenderError::Cancelled) => {
+                drop(st);
+                inner.stats(|s| s.cancelled += 1);
+            }
+            Err(_) if cancel.load(Ordering::Relaxed) => {
                 drop(st);
                 inner.stats(|s| s.cancelled += 1);
             }
@@ -640,7 +732,14 @@ fn run(inner: Arc<Inner>) {
                     LogLevel::Warn,
                     format!("viewer: the Blender preview failed: {message}"),
                 );
-                inner.report(key, want.revision, &error);
+                inner.report(key, revision, &error);
+                (inner.notify)(Notice::Failed {
+                    key,
+                    revision,
+                    generation,
+                    shading,
+                    error: message,
+                });
             }
         }
     }
@@ -1058,7 +1157,8 @@ mod tests {
             sink,
             stats.clone(),
             Box::new(move |notice| match notice {
-                Notice::Ready(key) => r.lock().unwrap().push(key),
+                Notice::Ready { key, .. } => r.lock().unwrap().push(key),
+                Notice::Started { .. } | Notice::Failed { .. } => {}
                 Notice::Captured { token, result } => c.lock().unwrap().push((token, result)),
             }),
             budget,
@@ -1113,6 +1213,7 @@ mod tests {
             blender_shading(Some(view)),
             Revision::ZERO,
             Some(&host),
+            None,
         );
         out
     }
@@ -1216,8 +1317,13 @@ mod tests {
             shading: Shading3d::Solid,
             ..material()
         };
-        r.blender
-            .submit(KEY, blender_shading(Some(&solid)), Revision::ZERO, None);
+        r.blender.submit(
+            KEY,
+            blender_shading(Some(&solid)),
+            Revision::ZERO,
+            None,
+            None,
+        );
         wait("second cancel", || {
             r.host.seen.lock().unwrap().cancels.len() == 2
         });
@@ -1357,7 +1463,7 @@ mod tests {
         paint(&r, &material(), &[snapshot(&["box"], 2.0)]);
         // A headless transition removes preview demand, not the session's
         // capture. Only ending the session (`forget`) cancels both.
-        r.blender.submit(KEY, None, Revision::ZERO, None);
+        r.blender.submit(KEY, None, Revision::ZERO, None, None);
         std::thread::sleep(Duration::from_millis(80));
         assert!(r.host.seen.lock().unwrap().cancels.is_empty());
         // A viewer joins again while the capture still runs.

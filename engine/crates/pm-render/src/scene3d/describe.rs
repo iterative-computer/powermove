@@ -55,6 +55,10 @@ pub enum Topology {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DrawState {
     pub color_write: bool,
+    /// An explicit channel mask (viewport selection coverage preserves IDs).
+    pub color_mask: Option<u32>,
+    /// False only for coverage drawn independently of scene occlusion.
+    pub depth_test: bool,
     pub depth_write: bool,
     /// `NormalBlending` of a transparent material (straight alpha).
     pub blend: bool,
@@ -312,6 +316,8 @@ fn state(
     let mirrored = math::determinant(world) < 0.0;
     DrawState {
         color_write: color,
+        color_mask: None,
+        depth_test: true,
         depth_write: depth,
         blend,
         cull: material_side != Side::Double,

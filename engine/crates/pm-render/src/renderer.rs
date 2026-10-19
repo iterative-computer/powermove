@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+mod chrome;
 mod layer_raster;
 pub use layer_raster::{LayerPixels, LayerRaster};
 

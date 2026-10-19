@@ -20,6 +20,9 @@ use super::describe::{self, DrawDesc, DrawState, Layer3d, PassDesc, TextureRef};
 use super::model::Scene3d;
 use super::textures::{MapError, Textures};
 
+#[path = "chrome_gpu.rs"]
+mod chrome;
+
 /// The MSAA sample count of the output canvas (`antialias: true`; ANGLE on
 /// Metal allocates 4 samples, recorded by `tools/three-ref`).
 pub const SAMPLES: u32 = 4;
@@ -239,6 +242,7 @@ pub struct Scene3dRenderer {
     shadows: HashMap<usize, ShadowTarget>,
     prepass: Option<PrepassKey>,
     depth_surface: Option<DepthSurface>,
+    chrome: Option<chrome::Targets>,
     textures: Textures,
     empty: Option<wgpu::TextureView>,
     cache: Option<cache::ProgramCache>,
@@ -264,6 +268,7 @@ impl Default for Scene3dRenderer {
             shadows: HashMap::new(),
             prepass: None,
             depth_surface: None,
+            chrome: None,
             textures: Textures::default(),
             empty: None,
             cache: None,
@@ -1001,7 +1006,11 @@ impl Scene3dRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(state.depth_write),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(if state.depth_test {
+                    wgpu::CompareFunction::LessEqual
+                } else {
+                    wgpu::CompareFunction::Always
+                }),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -1022,7 +1031,10 @@ impl Scene3dRenderer {
                     },
                     blend,
                     write_mask: if state.color_write {
-                        wgpu::ColorWrites::ALL
+                        state.color_mask.map_or(
+                            wgpu::ColorWrites::ALL,
+                            wgpu::ColorWrites::from_bits_truncate,
+                        )
                     } else {
                         wgpu::ColorWrites::empty()
                     },

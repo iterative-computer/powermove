@@ -18,6 +18,7 @@ pm-engine = { path = "../pm-engine" }
 pm-protocol = { path = "../pm-protocol", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 # The font service (plan section 12, Phase 2): the CoreText registry (macOS)
 # and subsets, on the utility process's main thread.
 pm-text = { path = "../pm-text", default-features = false, features = ["system"] }

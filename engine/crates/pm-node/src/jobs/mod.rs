@@ -33,6 +33,7 @@
 #![allow(clippy::result_large_err)]
 
 pub(crate) mod blender;
+pub(crate) mod blender_png;
 pub mod gate;
 mod svg;
 
@@ -1521,6 +1522,14 @@ fn lane_blender<'b>(
             Box::new(backend),
         ));
     }
+    blender.stage.as_mut().unwrap().converted_assets =
+        Some(Arc::new(blender_png::HostBlenderPng::new(
+            export.media.clone(),
+            shared.clone(),
+            document.session,
+            document.revision,
+            &export.document,
+        )));
     Ok(blender.stage.as_mut())
 }
 
