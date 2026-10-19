@@ -119,6 +119,9 @@ fn reference(
     let mut out = Vec::with_capacity((W * H * 4) as usize);
     for y in 0..H {
         for x in 0..W {
+            // Metal truncates f16 target writes after each blend. Model
+            // that storage in the straight-upload reference too; the
+            // original level-2 reference and tolerances stay unchanged.
             let round = |v: f64| {
                 if !compatibility || precision != Precision::Float16 {
                     return v;
