@@ -134,10 +134,8 @@ ANGLE that draws it today; a renderer without one (`pm-cli`) draws the
 native translation. Its GPU program is still built, so `validate_effect`
 compiles it. Built-ins (all bit-exact natively) and layers are never
 listed; the Store's other `liquid-glass-ios27` (zellzoi 2.0.1) matches
-natively and has another fingerprint. (Correction, second review: the
-`liquid-glass-ios27` in Chike's setup snapshot, `user-setups/chike-20261018`,
-is manifest 2.0.1, byte-identical to zellzoi 2.0.1's `index.ts`, not
-mrsigma 2.0.8; earlier notes said he uses 2.0.8.) Through the runner the program is
+natively and has another fingerprint. (A private user setup contains manifest 2.0.1, byte-identical to
+zellzoi 2.0.1, rather than the separately listed 2.0.8 release.) Through the runner the program is
 bit-exact against WebGL in all four variants (`effects_webgl`
 `fallback_effects_match_webgl` on a private mini corpus of the gate case,
 `PM_SHADER_STATS=1`: 36,864 of 36,864 pixels each); the shader gate draws
@@ -148,6 +146,94 @@ runner. Tests: `effects_fallback.rs`
 through its host, native without a runner, the built-in it copies stays
 native); `glsl::tests::fingerprints_ignore_numbers_and_spacing_only`. The
 cost is the runner's (see the throughput gap).
+
+## First-use native/ANGLE parity (DEFS-4)
+
+`effects::parity::Parity` judges the first frame of a user effect,
+transition, shader layer, or extension fragment layer with the window's
+runner attached. Built-ins retain their measured native path; forks and
+id overrides are user programs. `ANGLE_ONLY` remains a seed for known
+programs, rather than the only way a program reaches ANGLE.
+
+An unknown program holds presentation, draws through both pipelines with
+identical parameters and input texels, and presents the runner's result.
+Every binary16 channel is compared at an absolute bound of 1/255,
+including HDR values: one channel beyond it pins the program to ANGLE.
+Matching programs become native-verified. No pixel-count allowance or
+perturbation exemption participates in this decision. Effects compare
+before `clamp`, and every ping-pong pass is included. A failed comparison
+readback never verifies the program. A probe whose reference fails does
+not present the incomplete native frame.
+
+Decisions persist as small, content-addressed markers in
+`Engine Cache/Shader Cache/angle-parity`, without source, parameters or
+pixels. Separate atomic native and runner markers ensure that a
+simultaneous native verification cannot overwrite a pin. The fingerprint
+covers the exact wrapped vertex/fragment source (constants included), the
+engine build identity, pipeline revision, adapter/backend and driver
+identity, OS build, Electron and Chromium versions. Corrupt markers cause
+a re-probe. The desktop sets `POWERMOVE_ENGINE_PARITY_ENV` for both engine
+processes; standalone `pm-cli` has no browser reference and does not probe.
+
+The cost is bounded to first contact per program/environment. The existing
+runner queue, request limits, deadlines and content cache apply. Verified
+frames do no readback or runner round trip; pins pay the existing runner
+cost. Up to 32 native first-frame results stay paired with their request
+keys in memory (the transport's request bound). The reply is judged when
+it arrives, even if playback has moved on; repeated frames do not redraw
+the native probe while it is in flight. A paused redraw presents ANGLE's
+probed frame after verification. Cached native verifications also observe
+pins written by other renderer processes before drawing. This verifies
+the actual first frame; future parameter/input combinations need their
+own corpus coverage.
+
+`tools/shaders/user-setups.ts` captures private user setups through the
+real app extension builder and loader in isolated, hidden profiles, once
+with each setting. `collect.ts` discovers the private `user-setups/`
+corpus automatically, refuses differences in loader health, registrations
+or evaluated parameters, and includes all registered GLSL plus project
+parameter samples at keys and interval midpoints. A missing private
+corpus emits a named skip. `--user-loader <capture.json>` reuses a capture;
+all captures and per-program gate reports stay outside Git. Real-loader
+health includes extensions with no GLSL, so a failed activation cannot
+silently remove a shader from the inventory. Identical missing bundled
+dependencies remain visible in the private health report.
+
+The gate uses the production runtime probe for user programs and writes
+per-program outcomes with `PM_SHADER_GATE_REPORT`. Its older undefined-
+behavior exemption now names only the three generated probes exactly;
+a user's id containing `sub-` or `hub-` cannot bypass comparison. Effects
+whose WebGL draw raises a GL error are judged by the cleared target,
+just as layers already were.
+
+Tests: `effects::parity` (strict channel bound, HDR, version/source
+invalidation, persistent decisions, pin precedence), `effects_fallback`
+(first-frame hold and presentation, verification and pinning across a
+fresh renderer, transitions and fragment layers), and
+`e2e/engine-shader-parity.spec.ts` (actual native/ANGLE draws and app
+restart and asynchronous snapshots).
+
+The DEFS-4 qualification captured 41 private user programs through both
+settings with identical registrations, health and 49 evaluated project
+parameter samples. Of their 219 variants, 216 matched; three variants of
+one invalid program were refused identically by native and WebGL.
+The 40 drawable programs finished native-verified, with no runtime pins
+needed for these inputs. Across the selected shader corpus, 752 variants
+produced 730 matches and 22 identical refusals, with no pending references
+or pixel failures. Full original project-frame parity belongs to the
+integration gate; these results cover shader inputs and evaluated effect
+channels, rather than the composition's fonts, panels or raster assets.
+
+On the qualification machine, 239×137 debug-build snapshots measured
+822 ms on first use for the stable program and 556 ms for the unseeded
+ill-conditioned program. Both presented pixels exactly equal to the
+legacy compositor. Five subsequent snapshots averaged 202 ms and 423 ms,
+respectively, with zero and five runner rounds. After app restart, the
+stable program needed no probe (five steady snapshots averaged 5.2 ms);
+the persisted pin averaged 409 ms and continued to use ANGLE. These are
+end-to-end snapshot times under shared machine load, not GPU timings or a
+viewer frame-rate claim. Each snapshot stayed within the transport's 5 s
+bound; the first probe and runner draw deadlines remain unchanged.
 
 ## Where effects run
 
@@ -469,8 +555,11 @@ machine) runs in the renderer's own WebGL2 runner
    shares the asynchronous path's draw (a generator over the passes): it
    links as WebGL's `LINK_STATUS` query does (blocking, no compile
    deadline; a compile an asynchronous request started is reused) and
-   polls each pass's fence on the thread within the same draw deadline, so
-   the watchdog holds there too. A request whose textures did not come
+   finishes each pass synchronously before readback. A newly created
+   WebGL fence cannot signal within the issuing event-loop task (WebGL 2
+   specification), so the old tight poll always timed out in a real
+   browser. `gl.finish()` uses Chromium's GPU watchdog for the blocking
+   call; the runner also checks elapsed time before delivering pixels. A request whose textures did not come
    fails as `internal` rather than drawing unsampled. Tests: pm-node
    `snapshot.rs` `snapshots_send_an_effects_textures_to_main_ahead_of_the_answer`
    (every band on the host port before the answer, none on the window's,
@@ -1029,7 +1118,9 @@ For the owners of these files (derouter, device, bridge, dochost, jobs):
   carried).
 - **pm-node**: `present/render.rs` (texture bands, failures without
   routing, transient retry wake-ups; second review: a snapshot's texture
-  bands to main ahead of `needsRenderer`, `fallback_inputs`),
+  bands to main ahead of `needsRenderer`, `fallback_inputs`; DEFS-4:
+  fallback pixels and failures select the replying session's owning
+  definitions before delivery, even when another viewer parked its set),
   `jobs/{fallback,definitions,compile,mod}.rs`, `tests/document.rs`,
   `tests/snapshot.rs` (bridge's: one child test).
 - **pm-export** `render.rs`, **pm-cli** `main.rs`, `render.rs`,
@@ -1056,6 +1147,9 @@ For the owners of these files (derouter, device, bridge, dochost, jobs):
   `session.ts` (the bridge's `uploadFallback` for runner results), and
   `pm-render/tools/shaders/collect.ts` (a local extension that does not
   load is noted, not fatal).
+  DEFS-4 also sets the parity environment on utility processes in
+  `main/engine/index.ts`; the fallback runner's synchronous path uses
+  `gl.finish()` before readback.
   `kernel/api.ts`, `main/index.ts`, `legacy/core/editing.ts`, and
   `legacy/gl/raster.ts` are untouched.
 
@@ -1159,20 +1253,14 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
   exposed to rounding drift moved from `pm_render::effects::WEBGL_UNSTABLE`
   to a fixture in `effects_webgl` (`EXPOSED_BUILTINS`): the perturbation
   test fails when a built-in outside it turns out ill-conditioned.
-- **WebGL-unstable class: resolved for level 1 content** (2026-10-19).
-  Posterize, Color, and Levels are bit-exact against today (Parity); the
-  Store liquid-glass-ios27 2.0.8 glass effect draws through WebGL's runner
-  in the app (ANGLE-only programs, above). What remains: `pm-cli` draws
-  that program natively (no WebGL runner there, and no "today" to match);
-  a user's own program with the same ill-conditioning (a decision on a
-  texture sample at computed coordinates) that is not in the Store and not
-  listed would draw natively and could differ at isolated pixels. The
-  listing is by fingerprint, so it is extended as the gate finds programs;
-  nothing detects such a program on its own. Chike's installed extensions (38
-  effects, 2 extension layers) are now in the gate corpus and all match
-  natively (`docs/engine/shaders.md`); a runtime probe (draw a user
-  program's first frame both ways, pin it to the runner on a difference)
-  is not built and is a decision for the orchestrator.
+- **WebGL-unstable user programs:** the first-use probe now detects
+  unlisted programs on the actual machine; known fingerprints remain
+  seeded. The private corpus uses the real extension loader and actual
+  project parameter samples. Complete project-frame parity remains the
+  integration gate's responsibility. `pm-cli` still has no ANGLE reference
+  or runner and draws native translations of otherwise translatable
+  programs; it cannot claim equivalence to a desktop program pinned on
+  this machine.
 - **ANGLE parity residue** (shader level, within 1 CV): `radians`/`degrees`
   probes (6 of 36,864 pixels at 1 CV even with ANGLE's operand order),
   `halftone-fragcoord`, `outer-product-twist`, `mix-bool`,
