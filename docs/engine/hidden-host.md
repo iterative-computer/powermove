@@ -77,8 +77,11 @@ set to one:
 - `node apps/desktop/scripts/test-native-hidden-services.mjs --ssh`
 - In `apps/desktop`, set `POWERMOVE_NATIVE_HOST_DIST` to the built CLI `dist`
   and run `bunx playwright test e2e/document-host-contract.spec.ts --config playwright.prebuilt.config.ts --workers=1`.
-  The contract uses the prebuilt CLI engine and compares the complete no-window
-  workspace bytes, including every desktop built-in and a persisted user panel.
+  Set `POWERMOVE_CONTRACT_ENGINE_SCRIPT` to an engine bundle built beforehand
+  with `vite build -c engine.vite.config.ts --mode test` and a separate
+  `POWERMOVE_ENGINE_OUT`. Its deterministic IDs and live-byte statistics are
+  test-only. The contract compares complete no-window workspace bytes, including
+  every desktop built-in and a persisted user panel.
 - For shipping observation timing, use the same prebuilt config with
   `e2e/engine-agent-observation.spec.ts`, only when machine load is at most 8.
   `POWERMOVE_SHIPPING_ADDON_SHA256` binds the run to the assembled shipping addon;
