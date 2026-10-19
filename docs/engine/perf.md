@@ -755,6 +755,12 @@ isolated profiles and one Playwright worker. Raw results remain outside Git unde
 
 ### Composition scopes
 
+> **Superseded (history).** This round 1 table and its notes are kept as a
+> record. Round 2 replaced the detached path (about 10 µs, accepted by the owner),
+> and round 4 replaced the root-wrapper addressing, which answered expressions with
+> the project instead of the wrapper. Current figures: "fixups2 round 4" at the end
+> of this file.
+
 `scope-bench.test.ts` builds 100 layers with 40 keyed properties each (five keys
 per property), alternates native/legacy order over five samples, and warms both
 paths. Each root sample and each legacy sample times one million calls; detached

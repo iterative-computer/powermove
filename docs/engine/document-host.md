@@ -455,13 +455,67 @@ close or shutdown; no competing eviction policy was added here.
 
 The round 5 root-scope and boot-window entries above are superseded here.
 `Comps.get(rootId)` returns a fresh `rootComp` object sharing the open project's
-layers. When `cur.layers === proj.layers && cur.id === proj.compId`, NativeApi
-addresses the open composition and normalizes the scope stamp. Its identity
-registry can therefore keep interned property plans across these wrappers, without
-serializing the project. A repeated numeric answer at exactly the same time,
-revision, layer, property, key and scope is retained from pm-wasm; writes, scope
-changes and module death invalidate it. This is an additional small hot-path edit
-in native.ts beyond scope addressing, needed for the paired query-time gate.
+layers. A repeated numeric answer at exactly the same time, revision, layer,
+property, key and scope is retained from pm-wasm; writes, scope changes and module
+death invalidate it. This is an additional small hot-path edit in native.ts beyond
+scope addressing, needed for the paired query-time gate.
+
+**The wrapper is not the project (round 4).** Rounds 1 to 3 addressed any scope
+with `cur.layers === proj.layers && cur.id === proj.compId` as the open
+composition. That is exact for keyed channels but not for expressions: legacy
+`PM.ev`/`PM.evP` hand the wrapper itself to expressions as `comp`, and `param()`
+reads `PM.curComp().params`. `rootComp` (`legacy/core/compositions.ts`) builds
+`{ id: compId, name: compName }` plus the composition fields only: no `params`,
+`comps`, `compId`, `compName`, project `id` or `name`. Under the alias,
+`param("amp") + (comp.params ? 1000 : 0)` answered 1007 where today answers 0, and
+`comp.name` gave the project's name. Now:
+
+- pm-eval resolves `@root:<openId>` (`pm_eval::comp::ROOT_VIEW`) to the open
+  composition seen through the wrapper: in the canonical mirror `comps[compId]`
+  already is exactly `rootComp` (`pm_model::canonical`), read as a plain object; in
+  the stored form (no `compId`) the root is read with `id` from `compId`, `name`
+  from `compName`, the composition fields, and nothing else. The address is its
+  own, so interned ids, layer indexes, expression errors and retiming caches keyed
+  by composition id never mix the wrapper with the open composition.
+- NativeApi addresses a scope over the open composition's own layers (`id:
+  compId`) as `@root:` when it is exactly `rootComp(PM.proj)` now
+  (`isRootWrapper`: named reads of `id`, `name` and the 13 composition fields
+  against the project's values, plus one for-in walk that admits no other member
+  and counts them; about 30 ns). Any other object over those layers (an added
+  `params`, a stale `fps`, a partial `{ id, fps, layers }`) is a detached scope,
+  answered from its own contents.
+- A channel without an expression cannot read the scope (`evalKfs(prop.kf, T -
+  L.from)` or `prop.v`), so its slow path addresses any scope over the open layers
+  as `@root:`, and its interned id is checked against the mirror revision only,
+  without calling `PM.curComp()`. A channel with an expression checks the scope
+  stamp and, under `@root:`, `isRootWrapper` on every call: the wrapper is an
+  object outside the document and can change without the barrier seeing it.
+- Members `for...in` does not list (non-enumerable or symbol keys) are not
+  compared. `rootComp` never makes them, and an expression cannot tell them apart
+  from the comparison's view; this is the one shape the check does not prove.
+
+`strict.test.ts` compares `param()`, `comp.name`, `comp.id`,
+`comp.compId`/`comps`/`compName`, `comp.fps`/`layers.length` and an `ev` channel
+with today's answers under no scope, a fresh wrapper, alternating at one revision,
+a held wrapper changed without the barrier (`params` added, `name` changed, an
+extra member, a field removed), a stale wrapper after the project's `fps` changed,
+and the stored form. The previous native.ts fails it with exactly the reported
+1007-for-0 answer.
+
+**A scope object made anew per query (round 4).** A detached scope is keyed by
+object identity, so `PM.curComp = () => ({ ...comp })` got a new scope, a full
+serialization and a new pm-wasm entry per query: 92 ms per `evP` on 100 layers by
+40 channels, and a synchronous loop of them ran out of memory (each new scope's
+mirror stayed alive with its `WeakRef` target until the job ended). Now a fresh
+copy of the last object addressed (`copyOf`: same prototype, same member names in
+order, same `layers` array) shares that scope; its answers are validated against
+the new object's reads as for any mutation. The scope object's own read is its
+shape (like any container whose identity holds; every member read is its own
+input). NativeApi skips the whole-document walk for a copy of the object last found
+outside the document at the same revision (addressing it as detached is exact even
+if it were inside, only slower), and reuses a detached property's address for a
+copy. A throw pm-wasm returns before tracing (a refused scope update, no reads) is
+no longer kept as the scope's answer.
 
 Genuinely detached scopes still carry their exact contents. The renderer carries
 JSON as `compJsonText`, avoiding a second JavaScript object parse; pm-wasm hashes
@@ -484,6 +538,22 @@ A failed module load remains a named `pm-wasm-unavailable` failure and extension
 code is not run. `EngineDoc.stats().startup` records source/streaming compile,
 instantiation and mirror-ready durations; streaming compilation includes body
 delivery. No readiness check switches an answer to the legacy evaluator.
+
+**Activation when the module does not load (round 4).** Rounds 1 to 3 failed
+every extension's activation, built-ins included, each with a sticky toast, and a
+later successful `EngineDoc.retry()` left them inactive. Now each extension
+records the named activation error (`pm-wasm-unavailable`) without a toast of its
+own (the engine names the failure once, with Retry), stays out of the load plan,
+and activates in its planned order when `EngineDoc.onReady` fires after a
+successful retry (`kernel/loader.ts`, `loader.test.ts`; `strict.test.ts` checks
+`onReady`). Answers never route to the legacy evaluator.
+
+**The remaining boot window.** Only extension activation waits for `whenReady`.
+A kernel or evaluator call from anything else that runs between the UI install and
+module readiness (renderer code, an agent or IPC kernel call) is still a named
+`unavailable` failure under strict. Module compilation overlaps preload, so the
+window is short: every measured launch (rounds 1 to 3, and this round's e2e) had
+zero such failures. It is not proven empty.
 
 Regression coverage: fresh root wrappers never send compJson and keep one interned
 channel; numeric answers invalidate on a write or dead module; detached scopes

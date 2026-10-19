@@ -364,3 +364,17 @@ pins remain the vector lane's gaps, not accepted differences from this change.
 The GPU/item cache and full-sized alpha/blur upload are unchanged. Windowing saves
 CPU fill work; it does not establish that every animated-mask project beats today's
 GPU Canvas2D path. Paired viewer results and remaining limits are recorded in perf.md.
+
+Round 4 (after merging the wave 5 lanes, including perf2's pm-render caching and
+svgcompat): `tests/path_masks.rs` (54 canvases bit-exact), the pm-vector canvas2d
+unit tests and the 529-case Canvas2D gate (503 exact, 22 within one, the same four
+known exceptions, capture `canvas-20261018-220349-9a95e00c`) pass on the merged
+head. A new unit test, `windowed_pixel_aligned_rects_equal_full_canvas_at_every_pixel`,
+covers the non-AA bounds renderer (`Polygons { msaa: false }`, the 1X pattern) that
+the window test did not: device-aligned rectangles, within the pixel tolerance,
+mirrored, quarter-turned and partly or wholly offscreen, at 317x233, HD and UHD,
+asserting that path is taken. The windowing code is unchanged since round 1; the
+composite `path-masks*` corpus was not rerun this round: no pm-cli build exists in
+this worktree, and building one with 45 GB free risked the 40 GB disk floor. Its
+round 1 result (bit-exact) stands. The
+playback cadence tail is issue P4 (perf3 lane).
