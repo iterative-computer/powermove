@@ -12,9 +12,8 @@
 //! the loaded document.
 //!
 //! Nothing is allowed to differ or to be skipped (amendments 21 and 22): a
-//! snapshot the engine does not build (projects with imported glTF models,
-//! `imported models`, until their posed meshes and source materials are
-//! built) is a failure, as is any asset that differs. Source materials
+//! snapshot the engine does not build is a failure, as is any asset that
+//! differs. Source materials
 //! follow amendment 14's fix (`sourceMaterialSnapshot`), which corpus v1
 //! records; v0 recorded the throw instead.
 //!
@@ -24,7 +23,6 @@
 
 mod support;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use pm_blender::compare::{Comparison, compare};

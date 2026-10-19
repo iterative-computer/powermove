@@ -183,6 +183,13 @@ impl<'a> Poser<'a> {
                 v[c] += m[c];
             }
         }
+        self.apply_bone(i, v)
+    }
+
+    /// `SkinnedMesh.applyBoneTransform`, also used on `normal + position`
+    /// by today's Blender snapshot (normal morphs are deliberately not read).
+    pub fn apply_bone(&self, i: usize, mut v: Vec3) -> Vec3 {
+        let g = &self.model.geometries[self.drawable.geometry];
         if let (Some(bones), Some(si), Some(sw)) = (&self.bones, &g.skin_index, &g.skin_weight) {
             // `applyBoneTransform` with an identity bind matrix.
             let base = math::apply(&math::IDENTITY, v);

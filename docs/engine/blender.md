@@ -370,3 +370,23 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 - **Level 2 surfaces stay 16-bit PNG** (decision 15); level 1 retains
   PNG8/dither 1 for existing-project parity. RFC 11 open question 1 (raw
   or EXR for level 2) is unchanged.
+
+## Phase 3c round 4: imported-model snapshots
+
+Imported glTF snapshots now use the CPU pose kernel for positions, including
+relative morph targets and skinning. Normals follow today's snapshot exactly:
+normalize the attribute, or apply the bone transform to `normal + position`
+and subtract the posed point before normalizing. Instance transforms are not
+expanded, matching today's `renderSnapshot` traversal. The renderer's material
+state supplies the source colors, factors, and maps. The material snapshots
+resume empty-map awaits before new PNG conversions, preserving the captured
+texture ids and mesh completion order. Embedded images follow today's
+straight bitmap → premultiplied canvas → straight PNG conversion.
+
+Measured on the retained v1 and threed map captures: 182 built, 176 equal,
+23 with converted embedded textures equal by decoded pixels; all 90 frame
+lists equal. Across 14,118,112 geometry values the maximum absolute difference
+was 3.47e-16. All 23 previously unbuilt glTF snapshots now compare equal.
+The six snapshots with external converted TIFF/AVIF maps still fail; this
+change does not close that separate blocker. The same focused comparison with
+`PM_BLENDER_ONLY=3d/gltf` passes. The full comparison continues to fail honestly.

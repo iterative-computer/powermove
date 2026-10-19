@@ -44,7 +44,7 @@
 //!   recipe and its part name (`object.blender.object` or the part id),
 //!   unless the recipe is a mesh recipe without a mesh.
 //!
-//! Imported glTF models are not built here yet; the builder answers why.
+//! Imported glTF geometry and source materials are built by `snapshot_gltf`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -575,44 +575,6 @@ fn scene_assets(
 }
 
 /// Builds the snapshot of `frame` (`scope` is the frame's composition).
-/// Whether a model source names an imported glTF scene (`format` `gltf`
-/// or `glb`, or a `.gltf`/`.glb` name without a format), as
-/// `DocumentModels` reads it.
-fn names_gltf(root: &Node, object: Option<&Node>) -> bool {
-    let text = |n: Option<&Node>, k: &str| {
-        node::string(node::member(n, k))
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default()
-    };
-    let asset = text(node::member(object, "source"), "assetId");
-    if asset.is_empty() {
-        return false;
-    }
-    let Some(record) = node::member(node::member(Some(root), "assets"), &asset) else {
-        return false;
-    };
-    let format = text(Some(record), "format");
-    let name = text(Some(record), "name").to_ascii_lowercase();
-    matches!(format.as_str(), "gltf" | "glb")
-        || (format.is_empty() && (name.ends_with(".glb") || name.ends_with(".gltf")))
-}
-
-/// Whether the composition draws an imported glTF model: 3D object layers
-/// and legacy scenes' objects.
-fn imports_gltf(scope: &Scope<'_, '_>) -> bool {
-    let root = scope.comp.root();
-    scope.layers().iter().any(|l| {
-        let data = node::member(node::member(Some(l), "d"), "data");
-        if names_gltf(root, node::member(data, "object")) {
-            return true;
-        }
-        node::array(node::member(node::member(data, "scene"), "objects"))
-            .unwrap_or(&[])
-            .iter()
-            .any(|o| names_gltf(root, Some(o)))
-    })
-}
-
 pub fn build<'d>(
     scope: &mut Scope<'_, 'd>,
     frame: &BlenderFrame,
@@ -630,12 +592,6 @@ pub fn build<'d>(
             }
         }
     };
-    // The 3D pass now loads imported glTF scenes, but this snapshot does
-    // not yet match today's glTF meshes and embedded textures: such
-    // frames stay routed until it does.
-    if imports_gltf(scope) {
-        return Ok(Err("imported models".into()));
-    }
     // Recipe parts carry their group's evaluated recipe (`generated`).
     let evaluated = scope.composition_scene(time)?;
     let scene_json = evaluated.scene;
@@ -659,6 +615,7 @@ pub fn build<'d>(
         .map(|l| (js::layer_id(l), l))
         .collect();
     let mut objects = Vec::new();
+    let mut texture_snapshots = super::snapshot_gltf::Textures::default();
     let mut ids = Vec::new();
     for node in scene_json
         .get("objects")
@@ -682,7 +639,42 @@ pub fn build<'d>(
         }
         let mut m = Map::new();
         m.insert("id", Value::String(JsString::from(id.as_str())));
-        m.insert("meshes", Value::Array(object_meshes(node, object)));
+        let source_id = node
+            .get("source")
+            .and_then(|s| s.get("assetId"))
+            .and_then(Value::as_str);
+        let model = source_id.map(|id| {
+            use crate::scene3d::model::ModelSource;
+            crate::scene3d::layers::DocumentModels {
+                root: scope.comp.root(),
+                assets,
+            }
+            .model(id)
+        });
+        let meshes = if let Some(crate::scene3d::model::ModelLookup::Gltf(asset)) = model {
+            let mut world = scope.world3d(layer, time, false)?;
+            if let Some(part) = scope.animated_part(layer, time)? {
+                let d = scope.recipe_world_offset(layer, time, &part)?;
+                for k in 0..3 {
+                    world[12 + k] += d[k];
+                }
+            }
+            let from = node::number(node::member(Some(layer), "from"))
+                .filter(|f| !f.is_nan())
+                .unwrap_or(0.0);
+            super::snapshot_gltf::meshes(
+                &asset,
+                &world,
+                time - from,
+                object,
+                node,
+                objects.len(),
+                &mut texture_snapshots,
+            )
+        } else {
+            object_meshes(node, object)
+        };
+        m.insert("meshes", Value::Array(meshes));
         if let Some(c) = js_and(node.get("castShadow"), environment_shadows) {
             m.insert("castShadow", c);
         }
@@ -694,6 +686,9 @@ pub fn build<'d>(
         }
         objects.push(Value::Object(m));
         ids.push(id);
+    }
+    if let Err(e) = texture_snapshots.finish(&mut objects) {
+        return Ok(Err(e));
     }
     let lights: Vec<Value> = scene_json
         .get("lights")
@@ -758,10 +753,11 @@ pub fn build<'d>(
         snapshot.insert("background", b.clone());
     }
     snapshot.insert("camera", camera_json(&camera));
-    let assets = match scene_assets(scope.comp.root(), &scene_json, assets) {
+    let mut assets = match scene_assets(scope.comp.root(), &scene_json, assets) {
         Ok(a) => a,
         Err(e) => return Ok(Err(e)),
     };
+    assets.splice(0..0, texture_snapshots.assets);
     Ok(Ok(Snapshot {
         frame: frame.clone(),
         json: Value::Object(snapshot),

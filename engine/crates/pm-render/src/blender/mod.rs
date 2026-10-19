@@ -36,6 +36,7 @@
 pub mod frames;
 pub(crate) mod gpu;
 pub mod snapshot;
+mod snapshot_gltf;
 
 use std::collections::HashSet;
 use std::sync::Arc;
