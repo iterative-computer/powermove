@@ -90,7 +90,38 @@ export interface EngineViewerService {
   /** `false`: draw engine frames on the page's main thread rather than in
    *  a presentation worker (the measurement harness compares the two). */
   readonly offMainThread?: boolean;
+  /**
+   * "Use New Engine" is on (the kernel's connection): engine frames are the
+   * only frames this viewer shows. Until the first frame, while the engine
+   * restarts, and after the GPU fails, the last frame stays (or the stage
+   * stays empty) with a visible state; nothing hands the viewer back to
+   * the current engine.
+   */
+  readonly exclusive?: boolean;
+  /** Each new frame on screen, with the quality it was rendered at (the
+   *  kernel emits `frame:rendered` and `overlay` from it). */
+  presented?(frame: PresentedFrame, quality: number): void;
+  /** Animation frames a canvas that was hidden waits after its first frame
+   *  before that frame counts as on screen, and for a worker's frame until
+   *  the canvas took its size (default 2: the drawing's canvas and the page
+   *  commit separately, so a frame just submitted is not shown yet). 0
+   *  counts it at once (tests that run frames by hand). */
+  readonly revealFrames?: number;
 }
+
+/** Longest a newly shown canvas waits for its first frame to land (animation frames). */
+export const MAX_REVEAL_FRAMES = 30;
+
+/** Dispatched (bubbling) by a viewer's own presentation on its stage. */
+export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
+
+/** The visible states of an exclusive presentation without a frame to show. */
+export const PRESENTATION_STATUS = {
+  starting: 'Starting the engine…',
+  reconnecting: 'Reconnecting to the engine…',
+  gpuFailed: 'The viewer cannot draw: the GPU keeps failing. Restart Powermove.',
+  unavailable: 'The viewer cannot draw engine frames:'
+} as const;
 
 /** What the viewer decides; the presentation adds what the window knows. */
 export type ViewParams = Omit<ViewInput, 'composition' | 'cssWidth' | 'cssHeight' | 'devicePixelRatio' | 'edr' | 'colorSpace'>;
@@ -112,6 +143,11 @@ export type PresentationOptions = {
    * sizes at once.
    */
   sizeSettleMs?: number;
+  /** `viewer`: the viewer presents by itself (the default); `binding`: the
+   *  kernel's `render.gl.init` binding presents for a viewer that does not
+   *  (engine-connection/canvas-binding.ts). The stage is marked with it
+   *  (`data-engine-stage`), so the two never present over one stage. */
+  role?: 'viewer' | 'binding';
   /** Timers for the size settle (tests); the hosting window's otherwise. */
   timers?: { set(fn: () => void, ms: number): number; clear(id: number): void };
   /** Records per-frame timings (the S1 measurement harness). */
@@ -177,12 +213,46 @@ export class ViewerPresentation {
   /** When the drawing's device was lost recently (performance.now ms). */
   private losses: number[] = [];
 
+  /** The visible state while an exclusive presentation has no frame. */
+  private statusElement: HTMLElement | null = null;
+
   constructor(private readonly options: PresentationOptions) {
     this.canvasElement = this.makeCanvas(options.stage.ownerDocument);
     const before = options.before && options.before.parentElement === options.stage ? options.before : null;
     options.stage.insertBefore(this.canvasElement, before);
+    options.stage.dataset['engineStage'] = options.role ?? 'viewer';
+    // A `render.gl.init` binding over a canvas in this stage yields to it.
+    if ((options.role ?? 'viewer') === 'viewer') options.stage.dispatchEvent(new Event(ENGINE_STAGE_EVENT, { bubbles: true }));
+    if (options.service.exclusive) this.setStatus(PRESENTATION_STATUS.starting);
     this.offReady = options.service.onReady(() => void this.open());
     void this.open();
+  }
+
+  /** Whether engine frames are the only frames this viewer shows. */
+  get exclusive(): boolean {
+    return this.options.service.exclusive === true;
+  }
+
+  /** The visible state shown while there is no frame (null: none). */
+  get status(): string | null {
+    return this.statusElement?.textContent ?? null;
+  }
+
+  private setStatus(text: string | null): void {
+    if (text === null) {
+      this.statusElement?.remove();
+      this.statusElement = null;
+      return;
+    }
+    if (!this.statusElement) {
+      const el = this.options.stage.ownerDocument.createElement('div');
+      el.dataset['engineStatus'] = '';
+      el.setAttribute('role', 'status');
+      el.style.cssText = 'position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:5;max-width:calc(100% - 24px);padding:4px 10px;border-radius:var(--r-sm);background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+      this.options.stage.append(el);
+      this.statusElement = el;
+    }
+    if (this.statusElement.textContent !== text) this.statusElement.textContent = text;
   }
 
   /** The canvas engine frames are drawn into (replaced when presentation moves to another window from a worker). */
@@ -205,12 +275,26 @@ export class ViewerPresentation {
 
   /** Whether engine frames are on screen now. */
   get presenting(): boolean {
-    return this.canvasElement.style.visibility === 'visible';
+    return this.canvasElement.style.visibility === 'visible' && this.revealing === null && this.latestFrame !== null;
   }
 
   /** The newest frame drawn, with its tags and overlay geometry. */
   get latest(): PresentedFrame | null {
     return this.latestFrame;
+  }
+
+  /**
+   * The depth and object-id surface of a frame on screen (plan section 8:
+   * r depth, g/b object id − 1, a coverage; `rgba16float`, the frame's size
+   * and placement), for the 3D viewport chrome's occlusion and outlines.
+   * Ask for it with `ViewParams.depthId`. Null when the frame has none or
+   * its import has not arrived. Close it after reading; it stays valid
+   * while its frame is the one on screen.
+   */
+  depthFrame(frame: PresentedFrame | null = this.latestFrame): VideoFrame | null {
+    const depth = frame?.depthId;
+    if (!depth) return null;
+    return this.options.service.source.videoFrame(depth.poolGeneration, depth.poolIndex);
   }
 
   get state(): ViewerState | null {
@@ -237,11 +321,75 @@ export class ViewerPresentation {
     return () => this.hiddenListeners.delete(listener);
   }
 
-  /** Hides the canvas; tells `onHidden` listeners when it was showing. */
-  private hide(canvas: HTMLCanvasElement): void {
+  /** The newest frame drawn while the canvas waits to show (not on screen yet). */
+  private revealing: PresentedFrame | null = null;
+  private revealFor: Presenter | null = null;
+  private revealToken = 0;
+
+  /**
+   * A canvas that became visible shows its first frame only once the GPU
+   * finished drawing it (at a cold start the drawing's pipelines compile
+   * first) and the display took it: the frame counts as on screen
+   * (`latest`, `presenting`, frame events) `revealFrames` animation frames
+   * after the drawing said its GPU work finished, at most
+   * `MAX_REVEAL_FRAMES` after it was drawn. The newest frame drawn by then
+   * is the one shown.
+   */
+  private reveal(presenter: Presenter): void {
+    const token = ++this.revealToken;
+    this.revealFor = presenter;
+    const view = this.options.stage.ownerDocument.defaultView;
+    const done = (): void => {
+      if (token !== this.revealToken || this.disposed || this.presenter !== presenter) return;
+      const frame = this.revealing;
+      this.revealing = null;
+      this.revealFor = null;
+      if (!frame || this.canvasElement.style.visibility !== 'visible') return;
+      if (this.statusElement) this.setStatus(null);
+      this.show(frame);
+    };
+    const least = Math.max(0, Math.floor(this.options.service.revealFrames ?? 2));
+    // 0: frames run by hand (tests): a shown frame counts at once.
+    if (least === 0) return done();
+    const revealed = this.revealing?.seq ?? 0;
+    let finished = typeof presenter.onDone !== 'function';
+    const offDone = presenter.onDone?.((seq) => {
+      if (seq >= revealed) finished = true;
+    }) ?? (() => {});
+    let since = -1;
+    const wait = (count: number): void => {
+      if (token !== this.revealToken) return offDone();
+      if (finished && since < 0) since = count;
+      if ((since >= 0 && count - since >= least) || count >= MAX_REVEAL_FRAMES) {
+        offDone();
+        return done();
+      }
+      if (view?.requestAnimationFrame) view.requestAnimationFrame(() => wait(count + 1));
+      else setTimeout(() => wait(count + 1), 16);
+    };
+    wait(0);
+  }
+
+  /** A frame is on screen: the newest frame, listeners, and the service. */
+  private show(frame: PresentedFrame): void {
+    const fresh = this.latestFrame?.seq !== frame.seq || this.latestFrame.revision !== frame.revision || this.latestFrame.viewSeq !== frame.viewSeq;
+    this.latestFrame = frame;
+    for (const listener of this.listeners) listener(frame);
+    if (fresh) this.options.service.presented?.(frame, this.qualityOf(frame));
+  }
+
+  /** Hides the canvas; tells `onHidden` listeners when it was showing. An
+   *  exclusive presentation never hands the stage back: what is under the
+   *  canvas is not another engine's frame to show. */
+  private hide(canvas: HTMLCanvasElement, handBack = !this.exclusive, always = false): void {
     const was = canvas.style.visibility === 'visible';
     canvas.style.visibility = 'hidden';
-    if (was && !this.disposed) for (const listener of this.hiddenListeners) listener();
+    if (canvas === this.canvasElement) {
+      this.revealing = null;
+      this.revealFor = null;
+      this.revealToken++;
+    }
+    if ((was || always) && !this.disposed && handBack) for (const listener of this.hiddenListeners) listener();
   }
 
   /**
@@ -345,6 +493,11 @@ export class ViewerPresentation {
     // A popout is sized after it opens: its resizes count as layout.
     view.addEventListener?.('resize', refresh);
     this.mediaOffs.push(() => view.removeEventListener?.('resize', refresh));
+    // A live resize delays the panel's presentation: timed frames are
+    // picked for the later display while it lasts (`resizeLatencyRefreshes`).
+    const resized = (): void => this.presenter?.noteResize?.();
+    view.addEventListener?.('resize', resized);
+    this.mediaOffs.push(() => view.removeEventListener?.('resize', resized));
     for (const query of ['(dynamic-range: high)', '(color-gamut: p3)', `(resolution: ${view.devicePixelRatio || 1}dppx)`]) {
       const list = view.matchMedia?.(query);
       if (!list?.addEventListener) continue;
@@ -406,7 +559,10 @@ export class ViewerPresentation {
       painter = await (this.options.createPainter ?? createWebGpuPainter)(this.canvasElement);
     } catch (error) {
       this.painterFailed = true;
-      this.options.log?.('error', `engine presentation is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.log?.('error', `engine presentation is unavailable: ${message}`);
+      // A visible, named failure, never another engine's frames.
+      if (this.exclusive) this.setStatus(`${PRESENTATION_STATUS.unavailable} ${message}`);
       return false;
     }
     if (this.disposed || token !== this.backendToken || this.painter) {
@@ -436,9 +592,12 @@ export class ViewerPresentation {
       this.options.log?.('error', `engine presentation stopped: the WebGPU device was lost ${this.losses.length} times in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${message})`);
       this.painterFailed = true;
       this.workerUnavailable = true;
+      // A visible failure, never another engine's frames.
+      if (this.exclusive) this.setStatus(PRESENTATION_STATUS.gpuFailed);
       void this.replaceDrawing();
       return;
     }
+    if (this.exclusive) this.setStatus(PRESENTATION_STATUS.reconnecting);
     this.options.log?.('warn', `engine presentation lost its WebGPU device (${message}); drawing again on a new one`);
     void this.replaceDrawing();
   }
@@ -502,9 +661,26 @@ export class ViewerPresentation {
       // engine's canvas.
       if (this.routedRevision !== null && Number(frame.revision) <= this.routedRevision) return;
       this.routedRevision = null;
-      this.latestFrame = frame;
-      if (this.canvasElement.style.visibility !== 'visible') this.canvasElement.style.visibility = 'visible';
-      for (const listener of this.listeners) listener(frame);
+      // A canvas that was hidden shows a frame only once the GPU finished
+      // it and the display took it (the drawing's canvas and this page
+      // commit separately; at a cold start the drawing's pipelines compile
+      // first): it shows at once, so the page has committed it by then, and
+      // `latest`, `presenting`, and the frame events wait for the frame
+      // (`reveal`). A new presenter (a restart, a replaced drawing) starts
+      // its own wait.
+      if (this.canvasElement.style.visibility !== 'visible') {
+        this.canvasElement.style.visibility = 'visible';
+        this.revealing = frame;
+        this.reveal(presenter);
+        return;
+      }
+      if (this.revealing) {
+        this.revealing = frame;
+        if (this.revealFor !== presenter) this.reveal(presenter);
+        return;
+      }
+      if (this.statusElement) this.setStatus(null);
+      this.show(frame);
     });
     this.host = null;
     if (!this.follow()) presenter.start();
@@ -530,7 +706,12 @@ export class ViewerPresentation {
           // shows until the engine presents again.
           this.routedRevision = typeof message.revision === 'number' ? message.revision : null;
           this.latestFrame = null;
-          this.hide(this.canvasElement);
+          // Capability routing is development scaffolding (amendment 21):
+          // until it is removed it hands the stage back even when exclusive.
+          this.setStatus(null);
+          // An exclusive viewer hid what is under the canvas from the
+          // start, so it hands back even before its first frame.
+          this.hide(this.canvasElement, true, this.exclusive);
           return;
         }
         if (this.presenter) this.presenter.receive(message, arrivedMs);
@@ -562,8 +743,24 @@ export class ViewerPresentation {
     this.held = [];
     this.presenter?.dispose();
     this.presenter = null;
+    if (this.exclusive) {
+      // The engine restarts (section 19): the last frame stays on screen,
+      // with its tags for the overlay, until the new session presents.
+      this.setStatus(PRESENTATION_STATUS.reconnecting);
+      return;
+    }
     this.latestFrame = null;
     this.hide(this.canvasElement);
+  }
+
+  /** The output scale a frame was drawn at (today's preview quality factor). */
+  private qualityOf(frame: PresentedFrame): number {
+    const state = this.states.find((s) => Number(s.viewSeq) === frame.viewSeq) ?? this.sequencer.current;
+    switch (state?.resolution) {
+      case 'half': return 0.5;
+      case 'quarter': return 0.25;
+      default: return 1;
+    }
   }
 
   dispose(): void {
@@ -585,6 +782,8 @@ export class ViewerPresentation {
     this.listeners.clear();
     this.hiddenListeners.clear();
     this.canvasElement.remove();
+    this.setStatus(null);
+    if (this.options.stage.dataset['engineStage'] === (this.options.role ?? 'viewer')) delete this.options.stage.dataset['engineStage'];
   }
 }
 

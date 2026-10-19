@@ -187,6 +187,7 @@ fn setup(pool_bytes: u64) -> (Engine, Arc<Mutex<Vec<Call>>>, SessionId) {
 
 fn viewer_state(view_seq: u64) -> ViewerState {
     ViewerState {
+        headless: None,
         composition: "main".into(),
         size: Size::new(1600, 900),
         device_pixel_ratio: 2.0,
@@ -200,6 +201,7 @@ fn viewer_state(view_seq: u64) -> ViewerState {
         edr: false,
         view_seq: Seq::new(view_seq).unwrap(),
         vsync: None,
+        depth_id: None,
     }
 }
 

@@ -28,6 +28,8 @@ export type ViewInput = {
   shading?: Shading3d;
   xray?: boolean;
   localView?: string[];
+  /** The 3D chrome wants each frame's depth and object-id surface. */
+  depthId?: boolean;
 };
 
 const MAX_EDGE = 16384;
@@ -79,7 +81,8 @@ export class ViewSequencer {
       view,
       playEveryFrame: input.playEveryFrame,
       edr: input.edr,
-      viewSeq: this.seq
+      viewSeq: this.seq,
+      ...(input.depthId ? { depthId: true } : {})
     };
     if (this.last && sameState(this.last, candidate)) return { state: this.last, changed: false };
     this.seq += 1;

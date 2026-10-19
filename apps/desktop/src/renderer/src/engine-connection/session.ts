@@ -16,7 +16,7 @@
  * viewer (capability routing, section 21); a frame means the engine draws
  * it.
  */
-import type { AudioMessage, ClockSample, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
 
@@ -93,6 +93,8 @@ export type SessionOptions = {
   onClock?: (sample: ClockSample) => void;
   /** The engine's audio messages (levels, waveform peaks; contract 6). */
   onAudio?: (message: AudioMessage) => void;
+  /** The engine's presentation stats (`RenderStats`, at most 2 Hz). */
+  onStats?: (stats: RenderStats) => void;
   /**
    * The window replaced its document (a `load` batch: another project, or
    * `PM.proj` assigned outright) and the engine has it now. The viewer's
@@ -101,6 +103,8 @@ export type SessionOptions = {
    * not, so the connection asks for that layout here.
    */
   onLoaded?: () => void;
+  /** Before resyncing a replacement document, preserve its requested UI time. */
+  onLoading?: () => void;
   /** Resync bodies above this are staged as a cache file (bytes). */
   inlineLimit?: number;
   /** Definition snapshots for the session (with "Use New Engine" on). */
@@ -300,6 +304,7 @@ export class DocumentSession {
   private onBatch(batch: StreamBatch): void {
     if (this.closed || this.id === null) return;
     if (batch.origin === 'load') {
+      this.options.onLoading?.();
       const loaded = (): void => {
         if (!this.closed) this.options.onLoaded?.();
       };
@@ -331,9 +336,12 @@ export class DocumentSession {
     }
     this.streamRevision = batch.revision;
     this.batches++;
-    this.options.connection.event(
+    // Held until the run ends, merged with the run's other batches (one
+    // render per edit; patch-coalesce.ts).
+    this.options.connection.patches(
       { type: 'applyPatches', document: this.document, baseRevision: batch.baseRevision, revision: batch.revision, origin: batch.origin, encoding: 'canonicalV1', patchCount: Math.max(1, batch.count), body: batch.body },
-      id
+      id,
+      MAX_PATCH_BODY_BYTES
     );
   }
 
@@ -370,6 +378,15 @@ export class DocumentSession {
       case 'clock': {
         const { type: _t, ...sample } = event;
         this.clock = sample as unknown as ClockSample;
+        if (this.headless && message.revision !== null && Number(message.revision) >= this.applied) {
+          // Headless clocks are published only once the engine has the
+          // document/media and accepts transport, tagged with that revision.
+          const revision = Number(message.revision) || 0;
+          if (this.legacyRevision === null || revision > this.legacyRevision) {
+            this.legacyRevision = null;
+            this.setRoute('engine', null);
+          }
+        }
         this.options.onClock?.(this.clock);
         this.options.handlers.message({ type: 'clock', sample: this.clock }, arrivedMs);
         return;
@@ -377,6 +394,11 @@ export class DocumentSession {
       case 'audio': {
         const { type: _t, ...message } = event;
         this.options.onAudio?.(message as unknown as AudioMessage);
+        return;
+      }
+      case 'renderStats': {
+        const { type: _t, ...stats } = event;
+        this.options.onStats?.(stats as unknown as RenderStats);
         return;
       }
       case 'patchesApplied':
@@ -412,6 +434,38 @@ export class DocumentSession {
     }
   }
 
+  /** The interactive engine launch this session belongs to. */
+  get generation(): number {
+    return this.options.connection.generation;
+  }
+
+  /** A resync is in flight (a staged document reads asynchronously): the
+   *  engine reaches the current revision only after it lands. */
+  get resyncPending(): boolean {
+    return this.resyncing !== null;
+  }
+
+  /** Posts a fallback program's pixels on the session's port in row bands
+   *  that fit a message (the viewer's asks and the snapshot path). */
+  uploadFallback(pixels: { key: string; width: number; height: number; rgba16f: Uint16Array }): void {
+    const session = this.id;
+    if (session === null || this.closed) return;
+    const rowBytes = pixels.width * 8;
+    const rowsPerBand = Math.max(1, Math.floor(MAX_FALLBACK_BAND_BYTES / rowBytes));
+    const bytes = new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength);
+    for (let row = 0; row < pixels.height; row += rowsPerBand) {
+      const rows = Math.min(rowsPerBand, pixels.height - row);
+      this.options.connection.event({ type: 'shaderFallback', fallback: 'pixels', key: pixels.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: bytes.slice(row * rowBytes, (row + rows) * rowBytes) } as never, session);
+    }
+  }
+
+  /** Posts an event on the session's port (compatibility uploads). */
+  post(event: Record<string, unknown> & { type: string }): boolean {
+    if (this.id === null || this.closed) return false;
+    this.options.connection.event(event as never, this.id);
+    return true;
+  }
+
   /**
    * Draws one program the engine's pipeline cannot translate with the
    * fallback runner and uploads its pixels in row bands that fit a message
@@ -427,13 +481,7 @@ export class DocumentSession {
       this.fallbackRunner ??= this.options.fallbackRunner?.() ?? null;
       if (!this.fallbackRunner) throw new ShaderFallbackError(request.key, 'unavailable', 'no shader fallback runner');
       const pixels = await this.fallbackRunner.render(request);
-      const rowBytes = pixels.width * 8;
-      const rowsPerBand = Math.max(1, Math.floor(MAX_FALLBACK_BAND_BYTES / rowBytes));
-      const bytes = new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength);
-      for (let row = 0; row < pixels.height; row += rowsPerBand) {
-        const rows = Math.min(rowsPerBand, pixels.height - row);
-        send({ fallback: 'pixels', key: request.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: bytes.slice(row * rowBytes, (row + rows) * rowBytes) });
-      }
+      if (this.id === session) this.uploadFallback(pixels);
     } catch (error) {
       const reason = error instanceof ShaderFallbackError ? error.reason : 'unavailable';
       const message = error instanceof Error ? error.message : String(error);
@@ -442,8 +490,30 @@ export class DocumentSession {
     }
   }
 
+  /** The newest viewer state's sequence number sent (`ViewerState.viewSeq`). */
+  viewSeq: number | null = null;
+
+  /** A session owns the clock independently of any presentation channel. */
+  headless = false;
+  private lastState: ViewerState | null = null;
+
+  sendHeadless(composition: string): void {
+    this.sendViewerState({
+      size: { width: 1, height: 1 }, devicePixelRatio: 1,
+      zoom: 1, pan: [0, 0], resolution: 'full', media: 'automatic',
+      colorSpace: 'srgb', view: null, playEveryFrame: false, edr: false,
+      ...this.lastState, viewSeq: (this.viewSeq ?? 0) + 1,
+      headless: true, depthId: false,
+      // Always follow the open composition, including a project load.
+      composition
+    });
+  }
+
   sendViewerState(state: ViewerState): void {
     if (this.closed) return;
+    this.lastState = state;
+    this.headless = state.headless === true;
+    this.viewSeq = Number(state.viewSeq);
     if (this.id === null || this.resyncing && this.applied === 0) {
       this.pendingState = state;
       return;

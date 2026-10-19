@@ -46,6 +46,7 @@ export type ToWorker =
   | { type: 'frame'; session: number; desc: FrameDescriptor; frame: VideoFrame; arrivedMs: number }
   | { type: 'hostOffset'; session: number; us: number | null }
   | { type: 'display'; session: number; displayHz: number | null }
+  | { type: 'resize'; session: number }
   | { type: 'takeTrace'; session: number; id: number }
   | { type: 'dispose' };
 
@@ -59,6 +60,8 @@ export type FromWorker =
   | { type: 'release'; session: number; release: FrameRelease }
   /** A frame drawn, with the session's stats after it. */
   | { type: 'presented'; session: number; frame: PresentedFrame; stats: PresenterStats }
+  /** A drawn frame's GPU work finished (its canvas frame is ready to show). */
+  | { type: 'done'; session: number; seq: number }
   | { type: 'vsync'; session: number; hint: VsyncHint }
   | { type: 'stats'; session: number; stats: PresenterStats }
   | { type: 'trace'; session: number; id: number; trace: TraceRecord | null }
@@ -96,6 +99,17 @@ export type ServeOptions = {
  * time on the audio clock.
  */
 export const WORKER_LATENCY_REFRESHES = 1.5;
+/**
+ * Added while the window is being resized (docs/engine/perf.md, "A/V sync
+ * under load"): a live resize holds the panel's presentation of a worker
+ * canvas one to three refreshes longer, which left frames a refresh or two
+ * late outside ±10 ms (0.75: the best of 0.5, 0.75, and 1.0 on the
+ * measured offsets of six loaded runs). Idle prediction is unchanged: a
+ * later one there puts the runs where draw and presentation take one
+ * refresh outside ±10 ms (measured at 1.75: 208 of 1,433 frames at
+ * 23.976 fps).
+ */
+export const WORKER_RESIZE_LATENCY_REFRESHES = 0.75;
 export const WORKER_PRESENT_OFFSET_MS = 3.2;
 
 /** How often the worker sends a session's stats while frames flow. */
@@ -168,6 +182,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         // reaches the panel (WORKER_LATENCY_REFRESHES), rounded to the
         // nearest refresh, so they stay on the audio clock's line.
         latencyRefreshes: WORKER_LATENCY_REFRESHES,
+        resizeLatencyRefreshes: WORKER_RESIZE_LATENCY_REFRESHES,
         presentOffsetMs: WORKER_PRESENT_OFFSET_MS,
         nearestRefresh: true,
         now,
@@ -182,6 +197,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       s.statsSentMs = now();
       post({ type: 'presented', session: id, frame, stats: { ...stats, dropped: { ...stats.dropped } } });
     });
+    s.presenter.onDone((seq) => post({ type: 'done', session: id, seq }));
     s.presenter.start(requestFrame, cancelFrame);
     session = s;
   };
@@ -239,6 +255,9 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         return;
       case 'display':
         s?.presenter.retarget(requestFrame, cancelFrame, message.displayHz);
+        return;
+      case 'resize':
+        s?.presenter.noteResize();
         return;
       case 'takeTrace': {
         const trace = s?.presenter.trace ?? null;

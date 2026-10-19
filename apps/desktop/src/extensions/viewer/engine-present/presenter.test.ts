@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { DeviceLostError, type FramePainter } from './gpu';
-import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame } from './presenter';
+import { EnginePresenter, RESIZE_HOLD_MS, type FrameLink, type FrameSource, type PresentedFrame } from './presenter';
 import { TICKS_PER_SECOND, type ClockSample, type FrameDescriptor, type FrameRelease, type ViewerState, type VsyncHint } from './protocol';
 
 const F = TICKS_PER_SECOND / 60;
@@ -121,7 +121,7 @@ describe('EnginePresenter', () => {
     await flush();
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(presented).toEqual([
-      { seq: 1, revision: 4, viewSeq: 1, pts: 0, overlay: desc(1).overlay, rafMs: 16.7, timed: false, standIn: false, displayUs: null }
+      { seq: 1, revision: 4, viewSeq: 1, pts: 0, overlay: desc(1).overlay, rafMs: 16.7, timed: false, standIn: false, displayUs: null, depthId: null, width: 640, height: 360 }
     ]);
   });
 
@@ -241,6 +241,28 @@ describe('EnginePresenter', () => {
     // A descriptor of the retired generation still in flight is ignored.
     presenter.receive({ type: 'frame', frame: desc(2) });
     expect(presenter.stats.staleGeneration).toBe(1);
+    expect(link.releases).toEqual([]);
+  });
+
+  it('a depth and object-id pool never replaces the frames, and tags the frames that name it', () => {
+    const { source, link, presenter, painter } = setup();
+    const presented: PresentedFrame[] = [];
+    presenter.onPresented((p) => presented.push(p));
+    presenter.receive({ type: 'surfacePool', pool: { generation: 2, surfaces: [], role: 'depthId' } });
+    expect(source.retired).toEqual([]);
+    source.arrive(1, 1);
+    presenter.receive({ type: 'frame', frame: desc(1, { depthId: { poolIndex: 1, seq: 1, poolGeneration: 2 } }) });
+    presenter.refresh(16.7);
+    expect(painter.draws).toHaveLength(1);
+    expect(presented[0]!.depthId).toEqual({ poolIndex: 1, seq: 1, poolGeneration: 2 });
+    // A newer depth pool retires the older one's imports, not the frames'.
+    presenter.receive({ type: 'surfacePool', pool: { generation: 3, surfaces: [], role: 'depthId' } });
+    expect(source.retired).toEqual([2]);
+    // A frame naming a depth pool that is gone carries no depth.
+    source.arrive(1, 2);
+    presenter.receive({ type: 'frame', frame: desc(2, { depthId: { poolIndex: 2, seq: 2, poolGeneration: 2 } }) });
+    presenter.refresh(33.4);
+    expect(presented[1]!.depthId).toBeNull();
     expect(link.releases).toEqual([]);
   });
 
@@ -367,6 +389,56 @@ describe('EnginePresenter', () => {
       const displayMs = (f.displayUs! - 900_000) / 1000;
       expect(Math.abs(displayMs - (300 + (f.pts / F25) * 40))).toBeLessThanOrEqual(P / 2 + 1e-6);
       // The instant is 1.5 refreshes and 3.2 ms after the animation frame's vsync.
+      expect(displayMs - f.rafMs).toBeCloseTo(1.5 * P + 3.2, 6);
+    }
+  });
+  it('picks frames for a later display while the window resizes, then returns (resizeLatencyRefreshes)', () => {
+    const source = new Source();
+    const painter = new Painter();
+    const link = new Link();
+    let now = 0;
+    const presenter = new EnginePresenter({ link, source, painter, displayHz: 120, now: () => now, latencyRefreshes: 1.5, resizeLatencyRefreshes: 0.5, presentOffsetMs: 3.2, nearestRefresh: true });
+    presenter.receive({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } });
+    for (let i = 0; i < 6; i++) source.arrive(1, i);
+    const P = 1000 / 120;
+    const raf = (i: number): void => {
+      now = i * P + 0.3;
+      presenter.refresh(i * P);
+      painter.finishGpu();
+    };
+    for (let i = 0; i < 30; i++) raf(i);
+    const sample: ClockSample = { seq: 1, epoch: 2, state: 'playing', hostTime: 1_200_000, mediaTime: 0, rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48_000, loopRange: null };
+    presenter.receive({ type: 'clock', sample }, 300);
+    const F25 = TICKS_PER_SECOND / 25;
+    const shown: PresentedFrame[] = [];
+    presenter.onPresented((f) => shown.push(f));
+    let next = 0;
+    let resizeUntil = -1;
+    for (let i = 30; i < 150; i++) {
+      while (next < 40 && presenter.stats.received - presenter.stats.drawn - Object.values(presenter.stats.dropped).reduce((a, b) => a + b, 0) < 4) {
+        presenter.receive({ type: 'frame', frame: desc(next + 1, { poolIndex: next % 6, pts: next * F25, duration: F25 }) }, i * P);
+        next++;
+      }
+      // A live resize from refresh 60 to 90 (a step every other refresh).
+      if (i >= 60 && i <= 90 && i % 2 === 0) {
+        now = i * P;
+        presenter.noteResize();
+        resizeUntil = i * P + RESIZE_HOLD_MS;
+      }
+      raf(i);
+    }
+    const during = shown.filter((f) => f.rafMs >= 60 * P && f.rafMs < resizeUntil);
+    const after = shown.filter((f) => f.rafMs >= resizeUntil);
+    expect(during.length).toBeGreaterThanOrEqual(3);
+    expect(after.length).toBeGreaterThanOrEqual(3);
+    for (const f of during) {
+      // Half a refresh later while resizing, and still the frame nearest that instant.
+      const displayMs = (f.displayUs! - 900_000) / 1000;
+      expect(displayMs - f.rafMs).toBeCloseTo(2 * P + 3.2, 6);
+      expect(Math.abs(displayMs - (300 + (f.pts / F25) * 40))).toBeLessThanOrEqual(P / 2 + 1e-6);
+    }
+    for (const f of after) {
+      const displayMs = (f.displayUs! - 900_000) / 1000;
       expect(displayMs - f.rafMs).toBeCloseTo(1.5 * P + 3.2, 6);
     }
   });
