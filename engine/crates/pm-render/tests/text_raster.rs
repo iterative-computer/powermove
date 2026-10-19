@@ -16,14 +16,24 @@
 //! over ink windows (pixels whose local mean alpha exceeds 1/512 in either
 //! image) and over the full canvas.
 //!
-//! The captures are private (renders of the system fonts): `PM_TEXT_RASTER`
-//! names one, else the newest `text-raster-*` (main set) and the newest
-//! `text-closure-*` (closure set: distance-field text in every form, COLR
-//! fonts, CSS Color 4 colors) in the
-//! corpus directory are both gated. Without one the test reports and
-//! passes vacuously. Capture with `pm-electron-lock bun
-//! engine/crates/pm-text/capture/render.ts [--set closure]` (the closure set
-//! needs `capture/colr-fonts.py` run into the corpus's `fonts` directory).
+//! The captures are private (renders of the system fonts and of a real
+//! project): `PM_TEXT_RASTER` names one, else the newest capture of each set
+//! in the corpus directory is gated:
+//!
+//! - `text-raster-*`, the main set (`capture/render.ts`);
+//! - `text-closure-*`, distance-field text in every form, COLR fonts, CSS
+//!   Color 4 colors (`render.ts --set closure`; needs `capture/colr-fonts.py`
+//!   run into the corpus's `fonts` directory);
+//! - `text-paths-*`, glyphs above Skia's atlas limit drawn as paths
+//!   (`render.ts --set paths`);
+//! - `text-source-*`, the real project's text layers as source textures at
+//!   the density their world transform asks for (`capture/source.ts`).
+//!
+//! Capture each with `pm-electron-lock bun engine/crates/pm-text/capture/...`.
+//! A full run (neither `PM_TEXT_RASTER` nor `PM_TEXT_ONLY`) on a machine
+//! with the corpus directory fails when any FONTS-R entry has no selected
+//! capture; without the corpus directory the test reports and passes
+//! vacuously. A narrowed run lists the entries it did not check.
 //!
 //! `PM_TEXT_ONLY=<prefix>` limits cases; `PM_TEXT_DIFFS=<dir>` writes
 //! reference / engine / difference PNGs of failing cases;
@@ -39,45 +49,71 @@ mod support;
 #[cfg(target_os = "macos")]
 fn main() {
     use std::path::PathBuf;
-    // `PM_TEXT_RASTER` names one capture (either set); otherwise the newest
-    // main capture and the newest closure capture are both gated.
+    use support::text_residuals::{Gate, Ratchet};
+    // `PM_TEXT_RASTER` names one capture (any set); otherwise the newest
+    // capture of every set is gated.
+    let narrowed =
+        std::env::var_os("PM_TEXT_RASTER").is_some() || std::env::var_os("PM_TEXT_ONLY").is_some();
     let sets: Vec<PathBuf> = match std::env::var("PM_TEXT_RASTER") {
         Ok(p) => vec![PathBuf::from(p)],
-        Err(_) => [
-            support::newest_capture("text-raster-"),
-            support::newest_capture("text-closure-"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
+        Err(_) => CAPTURE_SETS
+            .iter()
+            .filter_map(|prefix| {
+                let found = support::newest_capture(prefix);
+                if found.is_none() {
+                    println!("no {prefix}* capture in the corpus directory");
+                }
+                found
+            })
+            .collect(),
     };
-    if sets.is_empty() {
-        eprintln!(
-            "no text raster capture; set PM_TEXT_RASTER or capture with pm-text/capture/render.ts"
-        );
-        return;
-    }
+    let mut ratchet = Ratchet::load();
     let mut failed = 0;
     for dir in &sets {
         println!("\n== {}", dir.display());
-        failed += gate(dir);
+        failed += gate(dir, &mut ratchet);
+    }
+    // Every FONTS-R raster entry is measured by a full run: a missing or
+    // unselected capture cannot leave one unchecked.
+    let unmeasured = ratchet.unmeasured(Gate::Raster);
+    if narrowed {
+        if !unmeasured.is_empty() {
+            println!(
+                "\npartial run (PM_TEXT_RASTER or PM_TEXT_ONLY): {} FONTS-R entries not checked; this is not the gate",
+                unmeasured.len()
+            );
+        }
+    } else if support::corpus_root().is_none() {
+        eprintln!(
+            "no private corpus directory on this machine: text raster parity and FONTS-R not checked"
+        );
+        return;
+    } else {
+        for line in &unmeasured {
+            println!("  FAILED {line}");
+        }
+        failed += unmeasured.len();
     }
     assert!(
         failed == 0,
-        "{failed} cases violate the strict 1-CV bound or FONTS-R ratchet"
+        "{failed} cases violate the strict 1-CV bound or FONTS-R ratchet, or were not measured"
     );
 }
 
+/// The capture sets a full run gates, by directory prefix (newest of each).
+#[cfg(target_os = "macos")]
+const CAPTURE_SETS: [&str; 4] = ["text-raster-", "text-closure-", "text-paths-", "text-source-"];
+
 /// Strict 1-CV measurement plus the explicit FONTS-R snapshot ratchet.
 #[cfg(target_os = "macos")]
-fn gate(dir: &std::path::Path) -> usize {
+fn gate(dir: &std::path::Path, ratchet: &mut support::text_residuals::Ratchet) -> usize {
     use pm_protocol::color::Precision;
     use pm_render::Renderer;
     use serde_json::{Value, json};
     use std::path::PathBuf;
     use support::doc::{layer, project};
     use support::text::{ink_ssim, png_rgba};
-    use support::text_residuals::{Key, Outcome, Ratchet};
+    use support::text_residuals::{Key, Outcome};
 
     let cases: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("cases.json")).unwrap()).unwrap();
@@ -122,7 +158,6 @@ fn gate(dir: &std::path::Path) -> usize {
     let mut refused = 0;
     let mut exact = 0;
     let mut ratcheted = 0;
-    let mut ratchet = Ratchet::load();
     let mut rows = Vec::new();
     let mut failed = Vec::new();
     let started = std::time::Instant::now();

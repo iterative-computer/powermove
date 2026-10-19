@@ -22,7 +22,7 @@ pub fn repo_root() -> PathBuf {
 
 /// The newest capture whose id starts with `prefix`.
 pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
-    let base = dirs_home()?.join("Library/Application Support/Powermove Engine Corpus");
+    let base = corpus_root()?;
     let mut caps: Vec<PathBuf> = std::fs::read_dir(&base)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -61,6 +61,14 @@ pub fn corpus_dirs() -> Vec<PathBuf> {
     .iter()
     .filter_map(|p| newest_capture(p))
     .collect()
+}
+
+/// The private corpus directory, when this machine has one (gates with
+/// approved residuals require their captures there; elsewhere they report
+/// and pass vacuously).
+pub fn corpus_root() -> Option<PathBuf> {
+    Some(dirs_home()?.join("Library/Application Support/Powermove Engine Corpus"))
+        .filter(|p| p.is_dir())
 }
 
 fn dirs_home() -> Option<PathBuf> {

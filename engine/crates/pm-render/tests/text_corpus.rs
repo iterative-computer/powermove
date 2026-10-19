@@ -31,7 +31,10 @@
 //! `PM_ENGINE_CORPUS` picks captures (default: the newest `v1-*`, `render-*`
 //! and `text-proj-*`, plus the newest `text-iso-*`); `PM_TEXT_ONLY` limits
 //! project names by prefix; `PM_TEXT_DIFFS=<dir>` writes engine and legacy
-//! PNGs of failures (every frame with `PM_TEXT_DIFFS_ALL`).
+//! PNGs of failures (every frame with `PM_TEXT_DIFFS_ALL`). A full run
+//! (neither `PM_ENGINE_CORPUS` nor `PM_TEXT_ONLY`) on a machine with the
+//! private corpus directory fails when any FONTS-R corpus entry was not
+//! measured; without the directory the test reports and passes vacuously.
 //!
 //! Runs without the harness (the CoreText registry needs the main thread).
 
@@ -43,8 +46,11 @@ fn main() {
     use pm_protocol::common::Size;
     use pm_render::parity::{dilate, ssim_map};
     use pm_render::{RenderRequest, Renderer};
-    use support::text_residuals::{Key, Outcome, Ratchet};
+    use support::text_residuals::{Gate, Key, Outcome, Ratchet};
     use support::*;
+
+    let narrowed = std::env::var_os("PM_ENGINE_CORPUS").is_some()
+        || std::env::var_os("PM_TEXT_ONLY").is_some();
 
     let mut captures = corpus_dirs();
     if std::env::var("PM_ENGINE_CORPUS").is_err()
@@ -65,7 +71,7 @@ fn main() {
     let mut ratcheted = 0;
     let mut ratchet = Ratchet::load();
     let mut expected = Vec::new();
-    if captures.is_empty() {
+    if captures.is_empty() && (narrowed || corpus_root().is_none()) {
         eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
         return;
     }
@@ -321,6 +327,19 @@ fn main() {
         }
     }
     failed.extend(ratchet.missing(expected));
+    // A full run measures every FONTS-R corpus entry: a missing or
+    // unselected capture cannot leave one unchecked.
+    let unmeasured = ratchet.unmeasured(Gate::Corpus);
+    if narrowed {
+        if !unmeasured.is_empty() {
+            println!(
+                "\npartial run (PM_ENGINE_CORPUS or PM_TEXT_ONLY): {} FONTS-R entries not checked; this is not the gate",
+                unmeasured.len()
+            );
+        }
+    } else {
+        failed.extend(unmeasured);
+    }
     println!(
         "\ncompared {compared} frames ({exact} exact within 2 code values, {ratcheted} FONTS-R ratcheted); {} failed",
         failed.len()
