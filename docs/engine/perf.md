@@ -1722,4 +1722,9 @@ including oscillators, five alternating 1,000-frame pairs per row, exact
 parity) and the five alternating time-to-UI/editor-open pairs run in the
 orchestrator's quiet measurement window under pm-electron-lock with this
 worktree's build (app bundle and release addons built from the final code;
-addons speak `protocol-25292d6fdfffb933`).
+addons speak `protocol-25292d6fdfffb933`). One combined attempt (boot e2e, this
+suite, the five boot pairs, all under one lock acquisition:
+`/tmp/ne-w5/fixups3-r4/electron/run.sh`) waited about 30 minutes behind
+about ten other lanes' lock waiters and never acquired the lock; it was
+stopped without touching the lock. No Electron timing or e2e pass is claimed
+for this round.
