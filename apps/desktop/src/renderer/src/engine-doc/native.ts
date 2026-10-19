@@ -296,7 +296,6 @@ export class NativeApi {
   private channels = new WeakMap<object, { layer: object; layerId: unknown; comp: string; ids: Map<string, number>; revision: number; shape: number; project: unknown; cur: unknown }>();
   private refs = new Map<number, number>();
   private expressionFrames = new ExpressionFrames();
-  private expressionComps = new Map<number, string>();
   /**
    * The module instance the interned ids belong to. `reset()` (a replaced
    * instance) moves it on; a registration from an earlier instance names an
@@ -738,7 +737,6 @@ export class NativeApi {
     if (n > 0) { this.refs.set(id, n); return; }
     this.refs.delete(id);
     this.expressionFrames.release(id);
-    this.expressionComps.delete(id);
     const wasm = this.wasm();
     if (wasm && !wasm.dead) try { wasm.release(id); } catch { /* the instance is gone */ }
   }
@@ -752,7 +750,6 @@ export class NativeApi {
     this.channels = new WeakMap();
     this.refs.clear();
     this.expressionFrames = new ExpressionFrames();
-    this.expressionComps.clear();
     this.indexed = new WeakMap();
     this.shapes = new WeakMap();
     this.rootsAnswer = null;
@@ -764,14 +761,12 @@ export class NativeApi {
     if (!raw.expr) {
       this.errors.delete(raw);
       this.expressionFrames.release(id);
-      this.expressionComps.delete(id);
       return;
     }
     if (comp && !this.dual) {
-      const slot = this.expressionFrames.register(comp, id, raw);
+      const slot = this.expressionFrames.register(comp, id);
       const entry = this.props.get(raw);
       if (entry?.id === id) entry.frame = slot;
-      this.expressionComps.set(id, comp);
     }
     const message = (wasm.evaluationStatus() & 0x80) ? wasm.expressionError(id) : null;
     if (message == null) this.errors.delete(raw);
@@ -869,16 +864,13 @@ export class NativeApi {
     const raw = prop && typeof prop === 'object' ? this.unwrap(prop) : null;
     // The ID still names this channel after a source removal, but it must no
     // longer occupy a resident expression slot in subsequent frame batches.
-    if (!raw?.expr && this.expressionComps.has(id)) {
-      this.expressionFrames.release(id);
-      this.expressionComps.delete(id);
-    }
+    if (!raw?.expr && this.expressionFrames.has(id)) this.expressionFrames.release(id);
     let n: number, status: number;
     try {
       if (raw?.expr) {
-        const comp = this.expressionComps.get(id);
-        const batch = comp ? this.expressionFrames.read(wasm, comp, id, T, this.barrier()!.revision) : null;
-        if (batch) { n = batch.value; status = batch.status; }
+        const slot = this.expressionFrames.slot(id);
+        status = slot ? this.expressionFrames.read(wasm, slot, T, this.barrier()!.revision) : -1;
+        if (status >= 0) n = this.expressionFrames.value;
         else { n = wasm.x.pm_ev(id, T); status = wasm.evaluationStatus(); }
       } else {
         n = wasm.x.pm_ev(id, T);
@@ -901,7 +893,7 @@ export class NativeApi {
       const id = entry?.ids.get(key);
       if (id !== undefined && Object.prototype.hasOwnProperty.call(raw.p ?? {}, key) && this.current(entry!, raw.p?.[key])) {
         const value = this.fastValue(id, T, raw.p?.[key]);
-        if (value !== MISS && raw.p?.[key]?.expr && !this.expressionComps.has(id)) this.noteError(raw.p[key], this.wasm()!, id, entry!.comp);
+        if (value !== MISS && raw.p?.[key]?.expr && !this.expressionFrames.has(id)) this.noteError(raw.p[key], this.wasm()!, id, entry!.comp);
         if (value !== MISS) { this.stats.calls.ev = (this.stats.calls.ev ?? 0) + 1; return value; }
       }
     }
@@ -941,7 +933,6 @@ export class NativeApi {
       if (entry && entry.key === key && entry.layer === this.unwrap(L) && this.current(entry, rawProp)) {
         if (!rawProp.expr && entry.frame) {
           this.expressionFrames.release(entry.id);
-          this.expressionComps.delete(entry.id);
           entry.frame = undefined;
           this.errors.delete(rawProp);
         }
@@ -955,20 +946,26 @@ export class NativeApi {
             return entry.number;
           }
         }
+        // A resident expression reads its frame run (see ExpressionFrames).
+        // Anything but a number takes fastValue, which decodes or falls back.
         const frame = entry.frame;
-        if (rawProp.expr && frame && !entry.wasm.dead && Object.is(frame.group.time, T)
-          && frame.group.revision === entry.revision && (frame.group.kinds![frame.index]! & 0x7f) === 0) {
-          const value = frame.group.values![frame.index]!;
-          const message = (frame.group.kinds![frame.index]! & 0x80) ? entry.wasm.expressionError(entry.id) : null;
-          if (message == null) this.errors.delete(rawProp); else this.errors.set(rawProp, message);
-          entry.time = T; entry.number = value;
-          this.stats.fastPath += 1;
-          this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1;
-          return value;
+        if (rawProp.expr && frame && !frame.released && !entry.wasm.dead) {
+          let status = -1;
+          try { status = this.expressionFrames.read(entry.wasm, frame, T, entry.revision); } catch { entry.wasm.dead = true; }
+          if (status >= 0 && (status & 0x7f) === 0) {
+            const value = this.expressionFrames.value;
+            const message = (status & 0x80) ? entry.wasm.expressionError(entry.id) : null;
+            if (message == null) this.errors.delete(rawProp); else this.errors.set(rawProp, message);
+            entry.time = T; entry.number = value;
+            this.stats.fastPath += 1;
+            this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1;
+            return value;
+          }
         }
         const value = this.fastValue(entry.id, T, rawProp);
-        if (value !== MISS && rawProp.expr && !entry.frame) {
-          if (this.expressionComps.has(entry.id)) entry.frame = this.expressionFrames.register(entry.comp, entry.id, rawProp);
+        if (value !== MISS && rawProp.expr && (!entry.frame || entry.frame.released)) {
+          const slot = this.expressionFrames.slot(entry.id);
+          if (slot) entry.frame = slot;
           else this.noteError(rawProp, entry.wasm, entry.id, entry.comp);
         }
         if (typeof value === 'number') { entry.time = T; entry.number = value; }
