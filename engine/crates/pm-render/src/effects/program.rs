@@ -17,11 +17,10 @@
 //! Legacy GLSL draws in GL row order (see `pm_glsl`'s `adjust_coordinate_space`
 //! and S3.md "Origin"), like every pm-render target.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use pm_glsl::reflect::{Block, Scalar, UniformType};
-use pm_glsl::{FRAGMENT_SET, Failure, FailureStage, Program, SAMPLER_BINDING_OFFSET};
+use pm_glsl::{FRAGMENT_SET, Failure, FailureStage, Program, SAMPLER_BINDING_OFFSET, VERTEX_SET};
 
 /// A `glUniform*` call as the compositor issues it.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,8 +90,8 @@ pub fn active(block: Option<&Block>, name: &str) -> bool {
 
 /// One compiled program, with pipelines per target format.
 pub struct GpuProgram {
-    vertex: wgpu::ShaderModule,
-    fragment: wgpu::ShaderModule,
+    vertex: crate::glsl::Stage,
+    fragment: crate::glsl::Stage,
     layout: wgpu::PipelineLayout,
     pub fragment_layout: wgpu::BindGroupLayout,
     pub vertex_layout: wgpu::BindGroupLayout,
@@ -215,15 +214,61 @@ impl GpuProgram {
                 ),
             ));
         }
+        // Each stage sees its own group: the fragment's block and samplers
+        // (set 0), the vertex stage's block (set 1). Metal compiles the MSL
+        // with the built-in calls ANGLE makes (`crate::glsl`).
+        let mut fragment_entries = Vec::new();
+        if let Some(b) = &fragment_block {
+            fragment_entries.push(crate::glsl::Entry::Buffer {
+                group: FRAGMENT_SET,
+                binding: b.binding,
+            });
+        }
+        for (_, binding) in &samplers {
+            fragment_entries.push(crate::glsl::Entry::Texture {
+                group: FRAGMENT_SET,
+                binding: *binding,
+            });
+            fragment_entries.push(crate::glsl::Entry::Sampler {
+                group: FRAGMENT_SET,
+                binding: binding + SAMPLER_BINDING_OFFSET,
+            });
+        }
+        let vertex_entries: Vec<_> = vertex_block
+            .iter()
+            .map(|b| crate::glsl::Entry::Buffer {
+                group: VERTEX_SET,
+                binding: b.binding,
+            })
+            .collect();
         let scopes = push_scopes(device);
-        let vertex = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pm legacy vertex"),
-            source: wgpu::ShaderSource::Naga(Cow::Owned(program.vertex.module)),
+        let stages = crate::glsl::stage_module(
+            device,
+            "pm legacy vertex",
+            program.vertex.module,
+            pm_gpu::glsl::naga::ShaderStage::Vertex,
+            &vertex_entries,
+        )
+        .and_then(|vertex| {
+            crate::glsl::stage_module(
+                device,
+                label,
+                program.fragment.module,
+                pm_gpu::glsl::naga::ShaderStage::Fragment,
+                &fragment_entries,
+            )
+            .map(|fragment| (vertex, fragment))
         });
-        let fragment = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(label),
-            source: wgpu::ShaderSource::Naga(Cow::Owned(program.fragment.module)),
-        });
+        let (vertex, fragment) = match stages {
+            Ok(s) => s,
+            Err(e) => {
+                let scoped = pop_error(scopes);
+                return Err(Failure::new(
+                    FailureStage::NagaValidate,
+                    scoped.map_or(e.clone(), |s| format!("{e}; {s}")),
+                ));
+            }
+        };
         // Every legacy texture is filterable (`rgba16float`, or
         // `rgba32float` on devices with `FLOAT32_FILTERABLE`; pm-render
         // refuses 32-bit precision elsewhere).
@@ -274,8 +319,8 @@ impl GpuProgram {
                 label: Some("pm legacy glsl"),
                 layout: Some(&self.layout),
                 vertex: wgpu::VertexState {
-                    module: &self.vertex,
-                    entry_point: Some("main"),
+                    module: &self.vertex.module,
+                    entry_point: Some(&self.vertex.entry_point),
                     compilation_options: Default::default(),
                     buffers: &[],
                 },
@@ -291,8 +336,8 @@ impl GpuProgram {
                 depth_stencil: None,
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
-                    module: &self.fragment,
-                    entry_point: Some("main"),
+                    module: &self.fragment.module,
+                    entry_point: Some(&self.fragment.entry_point),
                     compilation_options: Default::default(),
                     // Blending off (`gl.disable(gl.BLEND)` around every
                     // effect and transition draw).

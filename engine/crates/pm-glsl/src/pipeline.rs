@@ -55,8 +55,15 @@ void main(){
 /// The vertex outputs and the locations fragment inputs are pinned to.
 pub const VARYINGS: &[(&str, u32)] = &[("v_uv", 0), ("v_st", 1), ("v_px", 2)];
 
-/// Bumped whenever a stage changes what it emits; part of every cache key.
-pub const PIPELINE_REVISION: u32 = 1;
+/// Bumped whenever a stage changes what it emits; part of every cache key
+/// (the disk cache of prepared programs outlives the engine build that
+/// wrote it). `cache::tests::emitted_programs_match_the_pipeline_revision`
+/// fails when the emitted output changes and this has not been bumped.
+///
+/// - 1: the production pipeline.
+/// - 2: `round`, `radians` and `degrees` polyfills (`pm_round` rounds ties
+///   away from zero, as WebGL).
+pub const PIPELINE_REVISION: u32 = 2;
 
 /// The stage a program failed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -78,6 +85,10 @@ pub enum FailureStage {
     Deadline,
     /// A stage panicked.
     Panic,
+    /// The program translates, but its translation is proved to draw
+    /// differently from WebGL's at discontinuities (`pm_render`'s
+    /// `effects::ANGLE_ONLY`): where a runner is attached it draws instead.
+    AngleParity,
 }
 
 impl FailureStage {
@@ -93,6 +104,7 @@ impl FailureStage {
             FailureStage::NagaValidate => "naga-validate",
             FailureStage::Deadline => "deadline",
             FailureStage::Panic => "panic",
+            FailureStage::AngleParity => "angle-parity",
         }
     }
 

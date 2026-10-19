@@ -16,6 +16,20 @@
  *   hold for their revision: the engine repeats each that still holds at
  *   every revision it presents, before the frame, and `.frame(revision)`
  *   clears the ones a shown frame did not repeat.
+ * - Compile errors follow the route: while the engine presents the
+ *   composition, `GL.compileError` answers every engine key (`fx:`, `tr:`,
+ *   `extension:`, `engine:`, and a shader layer's `sh:` key) from the
+ *   engine's reports alone, so a program the engine compiles shows no error
+ *   and an error the legacy compositor recorded before is never shown
+ *   again; while the legacy compositor draws it (no viewer session, or the
+ *   composition routed), its own record answers the keys it sets. A definition failure the engine reports
+ *   for an older definitions generation than the session's latest push of
+ *   that id is stale and ignored (the translation of a set already
+ *   replaced).
+ * - `settle()` lets pending extension reloads finish and sends the
+ *   registries' pending changes now: a tool that renders after a
+ *   publication calls it first, so main and the engines hold the
+ *   publication before the render is asked for (no false "missing").
  *
  * With the flag off nothing is installed.
  */
@@ -36,12 +50,55 @@ export class EngineShaderMeta {
    * older than a frame shown is cleared (`frame`).
    */
   private layerReports = new Map<string, { revision: number; kind: 'compile' | 'missing' | 'scene' }>();
+  /**
+   * Shader layers the watchdog turned off, with the code it judged: the
+   * report holds until the layer's code changes (the engine does not repeat
+   * it per revision; a changed code is another program).
+   */
+  private watchdogLayers = new Map<string, string>();
+  /** The newest revision `frame` saw (layer meta is refreshed once per revision). */
+  private shownRevision = -1;
 
   constructor(private readonly PM: any) {}
 
-  /** `GL.compileError(key)` for engine-rendered programs. */
+  /**
+   * Who draws the open composition now: the engine (its viewer session
+   * presents frames) or the legacy compositor (no session yet, a session
+   * closed, or the engine routed the composition). Compile errors follow
+   * the route: while the legacy compositor draws, its own record is current.
+   */
+  private route: 'engine' | 'legacy' = 'legacy';
+
+  /** The viewer session's route (`DocumentSession.onRoute`); `pending` is not the engine's. */
+  setRoute(route: string): void {
+    this.route = route === 'engine' ? 'engine' : 'legacy';
+  }
+
+  /**
+   * Whether the engine answers `GL.compileError(key)` (no legacy fallback).
+   * `engine:<layer>` keys exist only in engine reports; the keys both
+   * compositors use (`fx:`, `tr:`, `extension:`, a shader layer's `sh:`)
+   * are the engine's while it presents and the legacy compositor's while
+   * it draws, so a shader layer the legacy viewer draws shows the error the
+   * legacy compile recorded, and one the engine draws never shows a stale
+   * legacy error.
+   */
+  owns(key: unknown): boolean {
+    if (typeof key !== 'string') return false;
+    if (key.startsWith('engine:')) return true;
+    return this.route === 'engine' && /^(fx|tr|extension|sh):/.test(key);
+  }
+
+  /** `GL.compileError(key)` for engine-rendered programs. A shader layer's
+   *  legacy key (`sh:<layer>:<hash>`) reads that layer's engine report. */
   compileError(key: string): string | null {
-    return this.errors.get(key) ?? null;
+    const direct = this.errors.get(key);
+    if (direct !== undefined) return direct;
+    if (typeof key === 'string' && key.startsWith('sh:')) {
+      const layer = key.slice(3, key.lastIndexOf(':') > 2 ? key.lastIndexOf(':') : undefined);
+      return this.errors.get('engine:' + layer) ?? null;
+    }
+    return null;
   }
 
   /** A definition's failures after an update (`definitionsApplied`). */
@@ -71,6 +128,44 @@ export class EngineShaderMeta {
    */
   frame(revision: number): void {
     for (const [id, report] of [...this.layerReports]) if (report.revision < revision) this.clearLayer(id);
+    if (revision === this.shownRevision) return;
+    this.shownRevision = revision;
+    for (const [id, code] of [...this.watchdogLayers]) {
+      const layer = this.layer(id);
+      if (!layer || String(layer.d?.code ?? '') !== code) {
+        this.watchdogLayers.delete(id);
+        this.errors.delete('engine:' + id);
+      }
+    }
+    this.refreshLayerMeta();
+  }
+
+  /**
+   * The shader meta the legacy compositor set for every shader and
+   * fragment extension layer it drew, kept by the engine for the layers it
+   * draws without a report: the key `GL.compileError` answers for, the
+   * registered definition, and whether it is missing. Layers with a report
+   * in force keep what the report set; 3D, scene, and mesh layers keep
+   * theirs.
+   */
+  private refreshLayerMeta(): void {
+    const ui = this.PM.UIState;
+    if (!ui?.getShaderMeta || !ui.setShaderMeta) return;
+    for (const layer of this.layers()) {
+      const id = layer?.id;
+      if (!id || this.layerReports.has(id) || this.watchdogLayers.has(id)) continue;
+      const meta = ui.getShaderMeta(layer) ?? {};
+      if (layer.type === 'shader') {
+        const shaderKey = 'engine:' + id;
+        if (meta.shaderKey !== shaderKey) ui.setShaderMeta(layer, { shaderKey });
+      } else if (layer.type === 'extension') {
+        const definitionId = String(layer.d?.definition ?? '');
+        const definition = this.PM.Kernel?.layerTypes?.get?.(definitionId) ?? null;
+        if (definition && definition.renderer?.kind !== 'fragment') continue;
+        const patch = { shaderKey: 'extension:' + definitionId, definition, missing: !definition, missingAsset: null };
+        if (meta.shaderKey !== patch.shaderKey || meta.definition !== definition || meta.missing !== patch.missing) ui.setShaderMeta(layer, patch);
+      }
+    }
   }
 
   private clearLayer(id: string): void {
@@ -85,14 +180,34 @@ export class EngineShaderMeta {
     }
   }
 
-  /** An isolated failure at a revision (`failure` event). Older reports for a layer than one already applied are ignored. */
-  failure(report: FailureReport): void {
+  /**
+   * An isolated failure at a revision (`failure` event). Older reports for a
+   * layer than one already applied are ignored. A definition's compile
+   * failure carries the definitions generation it was translated at; one
+   * older than `stream`'s latest push of that definition is stale.
+   */
+  failure(report: FailureReport, stream?: { changedAt?(kind: string, id: string): number | undefined } | null): void {
     const { error, revision } = report;
     const scope = error.scope;
-    if (scope.kind === 'definition') return this.definitionError(error);
+    if (scope.kind === 'definition') {
+      if (stream?.changedAt && (error.code === 'shaderCompile' || error.code === 'notHeadlessRenderable')) {
+        const at = Math.max(...['effect', 'transition', 'layer'].map((kind) => stream.changedAt!(kind, scope.definition) ?? 0));
+        if (revision < at) return;
+      }
+      return this.definitionError(error);
+    }
     if (scope.kind !== 'layer' && scope.kind !== 'effect') return;
     const layer = this.layer(scope.layer);
     if (!layer) return;
+    if (scope.kind === 'layer' && error.code === 'watchdogTimeout') {
+      // The watchdog turned a shader layer off: shown as its compile error
+      // until its code changes.
+      const shaderKey = 'engine:' + scope.layer;
+      this.watchdogLayers.set(scope.layer, String(layer.d?.code ?? ''));
+      this.errors.set(shaderKey, describe(error));
+      this.PM.UIState?.setShaderMeta?.(layer, { shaderKey, missing: false });
+      return;
+    }
     const last = this.revisions.get(scope.layer);
     if (last !== undefined && revision < last) return;
     this.revisions.set(scope.layer, revision);
@@ -165,7 +280,14 @@ export interface EngineDefinitions {
   /** A stream for one engine session: full first, then deltas. */
   session(send: (update: DefinitionsUpdate) => boolean | void): SessionDefinitions;
   applied(applied: DefinitionsApplied): void;
-  failure(report: FailureReport): void;
+  /** A failure event of the session whose stream is `stream` (stale definition failures are ignored). */
+  failure(report: FailureReport, stream?: { changedAt?(kind: string, id: string): number | undefined } | null): void;
+  /**
+   * Lets queued extension reloads finish and sends pending registry
+   * changes to every stream now (main's relay and the engine sessions), so
+   * a render asked for after it sees every publication.
+   */
+  settle(): Promise<void>;
   /** A frame at this revision is shown (clears layer reports it did not repeat). */
   frame(revision: number): void;
   /** The open session streams. */
@@ -201,7 +323,11 @@ export function createEngineDefinitions(PM: any, registries: DefinitionRegistrie
       return session;
     },
     applied: (applied) => meta.applied(applied),
-    failure: (report) => meta.failure(report),
+    failure: (report, stream) => meta.failure(report, stream),
+    async settle() {
+      try { await PM.Kernel?.loader?.whenIdle?.(); } catch { /* a failed reload still settles */ }
+      publisher.flush();
+    },
     frame: (revision) => meta.frame(revision),
     sessionCount: () => sessions.length,
     dispose() {
@@ -225,7 +351,9 @@ export async function installEngineDefinitions(PM: any, bridge: { nativeEngine?:
   definitions.session((update) => engine.pushDefinitions(update));
   const legacy = PM.GL?.compileError;
   if (PM.GL && typeof legacy === 'function') {
-    PM.GL.compileError = (key: string) => definitions.meta.compileError(key) ?? legacy(key);
+    // The engine owns its programs' errors: never the legacy compositor's
+    // record of an older compile for the same key.
+    PM.GL.compileError = (key: string) => definitions.meta.owns(key) ? definitions.meta.compileError(key) : legacy(key);
   }
   PM.EngineDefinitions = definitions;
   return definitions;

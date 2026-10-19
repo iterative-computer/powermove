@@ -23,7 +23,7 @@ reported by the host (`Event::Crash`).
 | `Isolation` | What the engine does for each scope (below) |
 | `Retry` | Never, after N ms, after a resync, after a user action |
 | `ErrorDetail` | Shader diagnostics with user line numbers, stale revision (applied and wanted), unsupported version (local and remote versions), missing surface count, offline assets |
-| `FailureReport` | An isolated failure at a revision; fills `uiState.getShaderMeta` and the status bar at the frame's revision |
+| `FailureReport` | An isolated failure at a revision; fills `uiState.getShaderMeta` and the status bar at the frame's revision. For a definition-scoped compile failure (`shaderCompile`, `notHeadlessRenderable` with `ErrorScope::Definition`) `revision` carries the definitions generation the program was translated at instead of a document revision (pm-node `present/render.rs`); the kernel's `EngineShaderMeta` ignores one older than its stream's latest push of that definition. Draft overload, to become its own field at the freeze |
 | `EngineProcess` | Interactive or job |
 | `CrashReport` | Which process, consecutive attempt, exit, suspects in flight, items now marked failed, restart delay |
 | `CrashLedger` | Host-side attribution |

@@ -533,6 +533,9 @@ struct View {
     /// The frame on screen showed stand-ins: the media "landed" counter when
     /// it was drawn. A change draws the frame again.
     stand_in: Option<u64>,
+    /// The GPU watchdog held the last frame (`RenderError::WatchdogPending`):
+    /// it is drawn again once the watchdog has judged the suspect frame.
+    watchdog_held: bool,
     /// What presenting this session costs (`RenderStats`).
     costs: super::stats::ViewStats,
     /// The depth and object-id pool, while the viewer asks for it.
@@ -621,6 +624,9 @@ struct Fallback {
     /// Layers each view was told draw through the runner (logged once per
     /// layer, not once per animated frame's request).
     logged: BTreeSet<(Key, String)>,
+    /// Views to draw again when a program whose request failed transiently
+    /// (the runner's context was lost) is asked for again (host µs).
+    retry_at: BTreeMap<Key, i64>,
 }
 
 fn now() -> i64 {
@@ -1007,7 +1013,15 @@ impl Thread {
                 doc.set_definitions(set, registered);
                 let definitions = doc.definitions().cloned();
                 let registered = doc.take_registered();
-                let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                // A definition failure is reported at the definitions
+                // generation it was translated at (not a document
+                // revision): the kernel drops one older than its latest
+                // push of that definition, the translation of a set already
+                // replaced (kernel/engine-definitions.ts).
+                let revision = definitions
+                    .as_ref()
+                    .and_then(|(set, _)| Revision::new(set.generation.get()).ok())
+                    .unwrap_or(Revision::ZERO);
                 // Translate now (not at the next frame) and report each
                 // definition that fails (contract 10; the kernel fills the
                 // shader UI from these).
@@ -1180,8 +1194,10 @@ impl Thread {
     }
 
     /// The runner's answer: a band of pixels (the frame renders again once
-    /// every band of a request arrived), or a failure (the composition is
-    /// routed to the legacy viewer, as a program the engine cannot draw).
+    /// every band of a request arrived), or a failure: the program draws
+    /// nothing or is skipped, as WebGL does with a program it refuses, and
+    /// is reported (a draw past the runner's deadline is turned off by the
+    /// watchdog). Nothing is routed to the legacy viewer (amendment 21).
     fn shader_fallback(
         &mut self,
         key: Key,
@@ -1216,23 +1232,32 @@ impl Thread {
                 (self.sink)(vec![Action::Log {
                     level: LogLevel::Warn,
                     message: format!(
-                        "viewer: the shader fallback runner could not draw a layer ({reason}: {message})"
+                        "viewer: the shader fallback runner could not draw a program ({reason}: {message})"
                     ),
                 }]);
-                if let (Some(view), Some(doc)) = (self.views.get_mut(&key), self.docs.get_mut(&key))
-                {
-                    let composition = view.state.composition.as_str().to_owned();
-                    doc.force_legacy(
-                        &composition,
-                        vec![format!(
-                            "the shader fallback runner could not draw a layer ({reason})"
-                        )],
-                    );
+                // A transient failure (a lost context) is asked for again
+                // after a backoff: the view is drawn again then.
+                let retry = self
+                    .gpu
+                    .as_mut()
+                    .and_then(|g| g.composer.as_mut())
+                    .and_then(|composer| {
+                        composer.renderer().put_fallback_failure(
+                            &request,
+                            pm_render::shader_layers::FallbackFailure { reason, message },
+                        )
+                    });
+                if let Some(delay) = retry.filter(|d| !d.is_zero()) {
+                    let at = now() + delay.as_micros() as i64;
+                    let slot = self.fallback.retry_at.entry(key).or_insert(at);
+                    *slot = (*slot).min(at);
+                }
+                if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
                 }
             }
-            // Requests travel the other way.
-            M::Requests { .. } => {}
+            // Requests and their textures travel the other way.
+            M::Requests { .. } | M::Input(_) => {}
         }
     }
 
@@ -1260,6 +1285,7 @@ impl Thread {
             *k != key
         });
         fallback.logged.retain(|(k, _)| *k != key);
+        fallback.retry_at.remove(&key);
         self.svg.forget_session(key);
         self.docs.remove(&key);
         self.audio.remove(&key);
@@ -1785,6 +1811,7 @@ impl Thread {
             audio_version: 0,
             scrub: false,
             stand_in: None,
+            watchdog_held: false,
             costs: Default::default(),
             depth: None,
             #[cfg(feature = "remote-layer")]
@@ -2274,6 +2301,9 @@ impl Thread {
     fn next_wake(&self) -> Duration {
         let now = now();
         let mut wake = now + 50_000;
+        if let Some(at) = self.fallback.retry_at.values().min() {
+            wake = wake.min(*at);
+        }
         if self.snapshots.waiting() {
             // Jobs wait for patches (their commands wake the thread), for
             // room between frames, or for a gesture to end: poll, and never
@@ -2367,6 +2397,36 @@ impl Thread {
         {
             self.recover_gpu();
         }
+        // The GPU watchdog sees completions promptly and frames that run
+        // away while they run (a turn is at most 50 ms apart); a frame it
+        // held is drawn again once the suspect frame is judged.
+        let holding = match self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+            Some(composer) => {
+                composer.renderer().watchdog_watch();
+                composer.renderer().watchdog_holding()
+            }
+            None => false,
+        };
+        if !holding {
+            for view in self.views.values_mut() {
+                if std::mem::take(&mut view.watchdog_held) {
+                    view.dirty = true;
+                }
+            }
+        }
+        // Programs whose runner request failed transiently are asked for
+        // again once their backoff passed.
+        let t = now();
+        let views = &mut self.views;
+        self.fallback.retry_at.retain(|key, at| {
+            if *at > t {
+                return true;
+            }
+            if let Some(view) = views.get_mut(key) {
+                view.dirty = true;
+            }
+            false
+        });
         let keys: Vec<Key> = self.views.keys().copied().collect();
         for key in keys {
             self.work_view(key);
@@ -3062,7 +3122,47 @@ impl Thread {
                         if let Ok(bytes) = codec::encode(&envelope) {
                             (self.sink)(vec![Action::Send { port: key.0, bytes }]);
                         }
+                        // The textures an effect or transition samples, in
+                        // row bands after its request.
+                        for r in chunk.iter().filter(|r| r.textures > 0) {
+                            let textures = composer
+                                .renderer()
+                                .fallback_textures(&r.key)
+                                .unwrap_or_default();
+                            for (texture, pixels) in textures.iter().enumerate() {
+                                for (row, rows, bytes) in pm_render::shader_layers::fallback::bands(
+                                    pixels,
+                                    pm_protocol::shader_fallback::MAX_BAND_BYTES,
+                                ) {
+                                    let body = Event::ShaderFallback(
+                                        pm_protocol::shader_fallback::ShaderFallbackMessage::Input(
+                                            pm_protocol::shader_fallback::ShaderFallbackInput {
+                                                key: r.key.clone(),
+                                                texture: texture as u32,
+                                                width: pixels.width,
+                                                height: pixels.height,
+                                                row,
+                                                rows,
+                                                rgba16f: pm_protocol::common::Bytes(bytes),
+                                            },
+                                        ),
+                                    );
+                                    let envelope =
+                                        Envelope::new(Message::Event { body }).with_session(key.1);
+                                    if let Ok(bytes) = codec::encode(&envelope) {
+                                        (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                                    }
+                                }
+                            }
+                        }
                     }
+                    return None;
+                }
+                Err(pm_render::RenderError::WatchdogPending) => {
+                    // A frame drawing one of these programs was seen running
+                    // past the hang budget: nothing is submitted with them
+                    // until the watchdog judged it (`work`).
+                    view.watchdog_held = true;
                     return None;
                 }
                 Err(pm_render::RenderError::Unsupported(list)) => {
@@ -3658,8 +3758,18 @@ impl Thread {
                     .into_iter()
                     .take(pm_protocol::shader_fallback::MAX_REQUESTS)
                     .collect();
+                // The textures an effect or a transition samples go to main
+                // ahead of the answer, on the same port so they arrive
+                // first, in row bands: the renderer may be the thread
+                // blocked on this snapshot and cannot read its own port, so
+                // main hands them back with the answer
+                // (`main/engine/fallback-inputs.ts`).
+                let inputs = fallback_inputs(renderer, &fallback, job.key.1);
                 for r in &fallback {
                     self.fallback.asked.insert(r.key.clone(), job.key);
+                }
+                for input in inputs {
+                    self.send(job.host, input);
                 }
                 self.stats().snapshot_needs += 1;
                 let outcome = SnapshotOutcome::NeedsRenderer {
@@ -4125,6 +4235,39 @@ fn blender_frames(
         );
     }
     BlenderFrames::Prepare(snaps.snapshots)
+}
+
+/// The texture bands of the fallback requests that sample textures (effects
+/// and transitions), as `ShaderFallback(Input)` events of `session`.
+fn fallback_inputs(
+    renderer: &pm_render::Renderer,
+    requests: &[pm_protocol::shader_fallback::ShaderFallbackRequest],
+    session: SessionId,
+) -> Vec<Envelope> {
+    use pm_protocol::shader_fallback::{ShaderFallbackInput, ShaderFallbackMessage};
+    let mut out = Vec::new();
+    for r in requests.iter().filter(|r| r.textures > 0) {
+        let textures = renderer.fallback_textures(&r.key).unwrap_or_default();
+        for (texture, pixels) in textures.iter().enumerate() {
+            for (row, rows, bytes) in pm_render::shader_layers::fallback::bands(
+                pixels,
+                pm_protocol::shader_fallback::MAX_BAND_BYTES,
+            ) {
+                let body =
+                    Event::ShaderFallback(ShaderFallbackMessage::Input(ShaderFallbackInput {
+                        key: r.key.clone(),
+                        texture: texture as u32,
+                        width: pixels.width,
+                        height: pixels.height,
+                        row,
+                        rows,
+                        rgba16f: pm_protocol::common::Bytes(bytes),
+                    }));
+                out.push(Envelope::new(Message::Event { body }).with_session(session));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

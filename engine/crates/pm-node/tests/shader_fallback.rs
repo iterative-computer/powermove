@@ -6,8 +6,11 @@
 //! its pixels (`ShaderFallbackMessage::Requests`), takes them back in row
 //! bands, and presents the frame, reporting the layer to the Shader panel
 //! as not headless-renderable (layer scope, at the frame's revision, before
-//! the frame) and logging it once; a runner failure routes the composition
-//! to the legacy viewer.
+//! the frame) and logging it once. A runner failure is reported and the
+//! layer draws nothing, as WebGL draws a program it refuses; nothing is
+//! routed to the legacy viewer (amendment 21). An effect only the runner
+//! draws is asked for with its textures (input and backdrop, in row bands
+//! after the request), and the frame draws the runner's pixels.
 #![cfg(target_os = "macos")]
 
 use std::process::{Command, Stdio};
@@ -149,15 +152,6 @@ fn frame(envelope: &Envelope) -> Option<FrameDescriptor> {
     }
 }
 
-fn failure(envelope: &Envelope) -> Option<ErrorCode> {
-    match &envelope.message {
-        Message::Event {
-            body: Event::Failure(f),
-        } => Some(f.error.code),
-        _ => None,
-    }
-}
-
 fn ch(v: Value) -> Value {
     json!({ "v": v, "kf": [], "expr": null })
 }
@@ -177,7 +171,6 @@ fn shader(code: &str) -> Value {
     })
 }
 
-#[allow(dead_code)]
 fn solid(x: f64, fx: Value) -> Value {
     json!({
         "id": "box", "type": "solid", "name": "box", "from": 0, "dur": 2, "on": true, "lock": false,
@@ -380,7 +373,8 @@ fn child_engine() {
     assert_eq!(logged.len(), 1, "{logged:?}");
     assert!(logged[0].starts_with("layer sky "), "{}", logged[0]);
     release(&mut host, &drawn);
-    // A runner failure routes the composition (another program).
+    // A runner failure is reported and the layer draws nothing (another
+    // program); the frame is presented, not routed.
     let doc2 = project(shader(&code.replace("1.0)", "0.5)")));
     let ops = pm_model::ops::diff_ops(Some(&model(&doc)), Some(&model(&doc2)));
     let body = pm_model::binary::encode(&ops).unwrap();
@@ -411,7 +405,140 @@ fn child_engine() {
             message: "the program does not link".into(),
         })),
     );
-    let code = inbox.wait(Duration::from_secs(20), failure);
-    assert_eq!(code, ErrorCode::Unsupported);
+    let mut reported = Vec::new();
+    let refused = inbox.wait(Duration::from_secs(20), |m| match &m.message {
+        Message::Event {
+            body: Event::Failure(f),
+        } => {
+            assert_ne!(
+                f.error.code,
+                ErrorCode::Unsupported,
+                "routed: {:?}",
+                f.error
+            );
+            reported.push(f.error.clone());
+            None
+        }
+        Message::Event {
+            body: Event::Frame(d),
+        } if d.revision.get() == 2 => Some(d.clone()),
+        _ => None,
+    });
+    assert!(
+        reported.iter().any(|e| e.code == ErrorCode::ShaderCompile
+            && e.scope
+                == ErrorScope::Layer {
+                    layer: "sky".into()
+                }
+            && e.message.contains("does not link")),
+        "{reported:?}"
+    );
+    release(&mut host, &refused);
+
+    // An effect only the runner draws: asked for with its textures.
+    let mut set = pm_render::builtin_definitions();
+    let mut cube = set
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap()
+        .clone();
+    cube.id = "acme.cube".into();
+    cube.origin = pm_protocol::definitions::DefinitionOrigin::Store;
+    cube.flags.backdrop = true;
+    let glsl = cube.glsl.as_mut().unwrap();
+    glsl.source = glsl.source.replacen(
+        "void main(){",
+        "uniform samplerCube u_env;\nvoid main(){",
+        1,
+    );
+    let end = glsl.source.rfind('}').unwrap();
+    glsl.source
+        .insert_str(end, "  o += texture(u_env, vec3(0.0, 0.0, 1.0)) * 0.0;\n");
+    set.definitions.push(cube);
+    send(
+        &mut host,
+        Envelope::new(Message::Request {
+            id: RequestId::new(3).unwrap(),
+            body: Request::PushDefinitions(pm_protocol::definitions::DefinitionsUpdate {
+                generation: Seq::new(1).unwrap(),
+                full: true,
+                upserts: set.definitions,
+                removals: vec![],
+            }),
+        })
+        .with_session(session),
+    );
+    inbox.wait(Duration::from_secs(5), |m| match &m.message {
+        Message::Response {
+            body: Response::DefinitionsApplied(_),
+            ..
+        } => Some(()),
+        _ => None,
+    });
+    let doc3 = project(solid(
+        130.0,
+        json!([{ "id": "fx1", "type": "acme.cube", "on": true, "p": {} }]),
+    ));
+    let ops = pm_model::ops::diff_ops(Some(&model(&doc2)), Some(&model(&doc3)));
+    let body = pm_model::binary::encode(&ops).unwrap();
+    send(
+        &mut host,
+        event(Event::ApplyPatches(PatchBatch {
+            document: "Ptracer".into(),
+            base_revision: Revision::new(2).unwrap(),
+            revision: Revision::new(3).unwrap(),
+            origin: PatchOrigin::Edit,
+            encoding: PatchEncoding::CanonicalV1,
+            patch_count: ops.len() as u32,
+            body: Bytes(body),
+        })),
+    );
+    let effect = inbox.wait(Duration::from_secs(20), |m| match &m.message {
+        Message::Event {
+            body: Event::ShaderFallback(ShaderFallbackMessage::Requests { requests }),
+        } => Some(requests[0].clone()),
+        Message::Event {
+            body: Event::Failure(f),
+        } if f.error.code == ErrorCode::Unsupported => panic!("routed: {:?}", f.error),
+        _ => None,
+    });
+    assert_eq!((effect.layer.as_str(), effect.textures), ("box", 2));
+    // Both textures follow in row bands covering every row.
+    let mut rows = [0u32; 2];
+    while rows.iter().any(|r| *r < effect.height) {
+        let input = inbox.wait(Duration::from_secs(20), |m| match &m.message {
+            Message::Event {
+                body: Event::ShaderFallback(ShaderFallbackMessage::Input(i)),
+            } => Some(i.clone()),
+            _ => None,
+        });
+        assert_eq!(input.key, effect.key);
+        assert_eq!((input.width, input.height), (effect.width, effect.height));
+        rows[input.texture as usize] += input.rows;
+    }
+    assert_eq!(rows, [effect.height, effect.height]);
+    let answer = |from: u32, rows: u32| {
+        event(Event::ShaderFallback(ShaderFallbackMessage::Pixels(
+            ShaderFallbackPixels {
+                key: effect.key.clone(),
+                width: effect.width,
+                height: effect.height,
+                row: from,
+                rows,
+                rgba16f: Bytes(
+                    (0..rows * effect.width)
+                        .flat_map(|_| [0x3800u16, 0, 0, 0x3c00])
+                        .flat_map(u16::to_le_bytes)
+                        .collect(),
+                ),
+            },
+        )))
+    };
+    send(&mut host, answer(0, effect.height));
+    let shown = inbox.wait(Duration::from_secs(20), |m| {
+        frame(m).filter(|d| d.revision.get() == 3)
+    });
+    release(&mut host, &shown);
     println!("CHILD-OK");
 }

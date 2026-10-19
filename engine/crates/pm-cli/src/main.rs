@@ -11,7 +11,9 @@
 //!
 //! `render` and `parity render` exit 0 done, 1 failed, 2 usage, 3 the engine
 //! cannot render this yet (the reasons are printed; the desktop app routes
-//! such projects to the current engine). `parity eval` (evaluation parity,
+//! such projects to the current engine); `render` exits 4 when a program
+//! only the app's WebGL fallback runner draws makes the project not
+//! headless-renderable (named per layer and definition). `parity eval` (evaluation parity,
 //! section 25; docs/engine/phase1-gate.md) keeps its own statuses, listed in
 //! `pm-cli parity eval --help`.
 
@@ -72,6 +74,9 @@ const USAGE: &str = "usage:
       --no-audio  --no-captions  --color quicktime|broadcast|srgb|rec709
       --dither on|off  --precision 16|32
       --composition ID  --media ASSET=FILE  --force (replace an existing file)
+      --definitions FILE  a definition set snapshot (contract 10, JSON) to draw
+               effects, transitions, and extension layers with (default: the
+               built-in definitions)
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
                        [--real FILE.pmv] [--no-definitions] [--determinism]
                        [--svg-rasters DIR]
@@ -223,6 +228,7 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
             "--timecode" => o.timecode = Some(value(args, &mut i, a)?.into()),
             "--reel" => o.reel = Some(value(args, &mut i, a)?.into()),
             "--no-captions" => o.no_captions = true,
+            "--definitions" => o.definitions = Some(PathBuf::from(value(args, &mut i, a)?)),
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
             other => {
                 if input.replace(PathBuf::from(other)).is_some() {
@@ -352,6 +358,17 @@ fn main() -> ExitCode {
                     }
                     ExitCode::from(3)
                 }
+                Err(render::Failure::NotHeadless(reasons)) => {
+                    eprintln!(
+                        "pm-cli: not headless-renderable: these programs compile in WebGL but \
+                         not in the native pipeline, and only the app's WebGL fallback runner \
+                         draws them (pm-cli has none):"
+                    );
+                    for r in reasons {
+                        eprintln!("  {r}");
+                    }
+                    ExitCode::from(4)
+                }
                 Err(render::Failure::Failed(m)) => {
                     eprintln!("pm-cli: {m}");
                     ExitCode::FAILURE
@@ -427,7 +444,9 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(render::Failure::Usage(m)) => fail_usage(&m),
-                Err(render::Failure::Unsupported(reasons)) => {
+                Err(
+                    render::Failure::Unsupported(reasons) | render::Failure::NotHeadless(reasons),
+                ) => {
                     eprintln!("pm-cli: the new engine cannot render this project yet:");
                     for r in reasons {
                         eprintln!("  {r}");

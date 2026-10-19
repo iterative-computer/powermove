@@ -244,6 +244,27 @@ pub fn unsupported_with_fonts(
     check(document, composition, assets, None, true)
 }
 
+/// The check for a renderer as configured: media facts when `assets` is
+/// given, effects, transitions, and extension layers against `effects`
+/// when the renderer holds definitions (`Effects::configured`), and text
+/// drawn when it has fonts. What the job engine, stills, and `pm-cli` route
+/// with (`Renderer::unsupported_with_media`).
+pub fn unsupported_for(
+    document: &Document,
+    composition: &str,
+    assets: Option<&dyn AssetResolver>,
+    effects: Option<&crate::effects::Effects>,
+    fonts: bool,
+) -> Vec<Unsupported> {
+    check(
+        document,
+        composition,
+        assets,
+        effects.filter(|e| e.configured()),
+        fonts,
+    )
+}
+
 fn check(
     document: &Document,
     composition: &str,
