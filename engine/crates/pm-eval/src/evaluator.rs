@@ -305,7 +305,38 @@ struct ExpressionPlan {
     source: Option<Arc<dyn CompiledExpression>>,
     bound: bool,
     compiled: Option<Arc<dyn CompiledExpression>>,
+    /// The static base (`v`) of a channel without keyframes.
     value: Option<JsValue>,
+    /// A keyed base's numeric track, prepared once with the plan (it answers
+    /// finite local times exactly as `evalKfs` on the same keys does).
+    track: Option<Arc<TemporalTrack>>,
+}
+
+impl ExpressionPlan {
+    /// The numeric base at local time `tl` without reading any node, when
+    /// the plan has one: a static number, or a temporal track's value.
+    fn scalar_base(&self, tl: f64) -> Option<f64> {
+        match (&self.value, &self.track) {
+            (Some(JsValue::Number(n)), _) => Some(*n),
+            (None, Some(track)) if tl.is_finite() => match track.value(tl) {
+                JsValue::Number(n) => Some(n),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The answer of a bound numeric plan: only time, local time and the
+    /// base, no node, scope, channel string or context. `None` for anything
+    /// else (including non-finite answers, which record an error).
+    fn scalar(&self, from: f64, time: f64) -> Option<f64> {
+        let tl = time - from;
+        let n = self
+            .compiled
+            .as_ref()?
+            .evaluate_scalars(tl, time, self.scalar_base(tl)?)?;
+        n.is_finite().then_some(n)
+    }
 }
 
 impl std::fmt::Debug for ExpressionPlan {
@@ -1075,10 +1106,7 @@ impl Evaluator {
                     // With no outstanding errors, it needs no layer, scope,
                     // channel string or context construction on a warm frame.
                     if self.errors.is_empty()
-                        && let (Some(compiled), Some(JsValue::Number(base))) =
-                            (&plan.compiled, &plan.value)
-                        && let Some(n) = compiled.evaluate_scalars(time - state.from, time, *base)
-                        && n.is_finite()
+                        && let Some(n) = plan.scalar(state.from, time)
                     {
                         let value = Ok(JsValue::Number(n));
                         self.slots[index].state.as_mut().expect("state").memo =
@@ -1338,6 +1366,7 @@ impl Evaluator {
                                         source: plan.source.clone(),
                                         bound: bound.is_some(),
                                         value: plan.value.clone(),
+                                        track: plan.track.clone(),
                                     };
                                     Some((false, from, Some(rebound)))
                                 }
@@ -1416,10 +1445,7 @@ impl Evaluator {
                 // Revalidation must retain the numeric execution path too:
                 // a drag revises the document on every evaluated frame.
                 if self.errors.is_empty()
-                    && let (Some(compiled), Some(JsValue::Number(base))) =
-                        (&plan.compiled, &plan.value)
-                    && let Some(n) = compiled.evaluate_scalars(time - state.from, time, *base)
-                    && n.is_finite()
+                    && let Some(n) = plan.scalar(state.from, time)
                 {
                     return Ok(JsValue::Number(n));
                 }
@@ -1441,9 +1467,22 @@ impl Evaluator {
         time: f64,
     ) -> JsResult<JsValue> {
         let tl = time - from;
-        let value = match plan.value {
-            Some(value) => value,
-            None => {
+        // A keyed base's prepared track answers finite times; the scalar plan
+        // then needs no node either. Errors elsewhere in the document only
+        // mean this channel's own entry must be cleared like `evaluate` does.
+        if let Some(n) = plan.scalar(from, time) {
+            self.clear_error(cx, Some(layer), &address.key);
+            return Ok(JsValue::Number(n));
+        }
+        let track = plan
+            .track
+            .as_ref()
+            .filter(|_| tl.is_finite())
+            .map(|track| track.value(tl));
+        let value = match (plan.value, track) {
+            (Some(value), _) => value,
+            (None, Some(value)) => value,
+            (None, None) => {
                 let prop = match &address.via {
                     Via::Channel => {
                         node::member(node::member(Some(layer), "p"), &key_str(&address.key))
@@ -1544,8 +1583,18 @@ impl Evaluator {
             // a document with >256 unique sources must not churn the shared
             // source cache on every frame. The original keyframe evaluator
             // still answers nonempty tracks at the exact requested local time.
-            let keyed =
-                node::array(node::member(Some(p), "kf")).is_some_and(|keys| !keys.is_empty());
+            let kf = node::member(Some(p), "kf");
+            let keyed = node::array(kf).is_some_and(|keys| !keys.is_empty());
+            // The same preparation `evalKfs` makes on every call; only a
+            // temporal (numeric) track is kept. Other keys read their nodes.
+            let track = if keyed {
+                match PreparedTrack::prepare(kf, &mut self.springs) {
+                    PreparedTrack::Temporal(track) => Some(track),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let source = expr
                 .node()
                 .and_then(|n| node::string(Some(n)))
@@ -1576,6 +1625,7 @@ impl Evaluator {
                     bound: bound.is_some(),
                     source,
                     value: (!keyed).then(|| node::get(p, b"v").to_js()),
+                    track,
                 }),
                 from,
             );

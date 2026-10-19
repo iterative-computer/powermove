@@ -13,7 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 
 use pm_eval::{Comp, CompiledExpression, ExprContext, ExprError, ExpressionEngine, JsValue};
-use pm_expr::{Context, Dialect, Expression, Host, JsStr, Object, Shape, Value};
+use pm_expr::{Context, Dialect, Expression, GeneralBinding, Host, JsStr, Object, Shape, Value};
 use pm_model::{JsString, Node, NodeKind};
 
 /// Compiles with `pm-expr`'s legacy dialect.
@@ -31,8 +31,9 @@ impl ExpressionEngine for PmExpressions {
             keys.extend(
                 ["params", "value", "toString"].map(|s| (JsStr::from(s), JsString::from(s))),
             );
-            let uses_layer = e.numeric_fixed_uses_layer();
-            let layer_local = e.numeric_fixed_is_layer_local();
+            // A source has a numeric plan or a general binding, never both.
+            let uses_layer = e.numeric_fixed_uses_layer() || e.general_uses_layer();
+            let layer_local = e.numeric_fixed_is_layer_local() || e.general_is_layer_local();
             let source = Arc::new(Source {
                 expression: e,
                 channel,
@@ -47,6 +48,7 @@ impl ExpressionEngine for PmExpressions {
                 source,
                 bound: None,
                 binding_bits: None,
+                general: None,
                 index: None,
                 verified: Mutex::new(None),
             }) as Arc<dyn CompiledExpression>
@@ -103,6 +105,8 @@ struct Compiled {
     source: Arc<Source>,
     bound: Option<Expression>,
     binding_bits: Option<Arc<[u64]>>,
+    /// A general binding (partial evaluation); never shared between slots.
+    general: Option<GeneralBinding>,
     index: Option<f64>,
     verified: Mutex<Option<(BindingStamp, bool)>>,
 }
@@ -165,6 +169,11 @@ impl PartialEq for Obj<'_> {
 }
 
 fn js_str(s: &JsString) -> JsStr {
+    // Most document strings are ASCII: one exact allocation, no UTF-8 decode.
+    let bytes = s.as_bytes();
+    if bytes.is_ascii() {
+        return JsStr::from_units(bytes.iter().map(|&b| u16::from(b)).collect::<Arc<[u16]>>());
+    }
     JsStr::from_units(s.utf16_units().collect::<Vec<u16>>())
 }
 
@@ -239,7 +248,14 @@ impl<'a> Host for NodeHost<'a> {
 
     fn property(&self, object: &Obj<'a>, key: &JsStr) -> Option<Value<Obj<'a>>> {
         let converted;
-        let key = if let Some((_, interned)) = self.0.iter().find(|(s, _)| s == key) {
+        // Literal keys are the interned strings themselves: match by identity
+        // first, then by value (a key computed at run time).
+        let interned = self
+            .0
+            .iter()
+            .find(|(s, _)| s.same(key))
+            .or_else(|| self.0.iter().find(|(s, _)| s == key));
+        let key = if let Some((_, interned)) = interned {
             interned
         } else {
             converted = JsString::from_utf16_units(key.units());
@@ -270,6 +286,19 @@ impl CompiledExpression for Compiled {
     }
 
     fn bind(&self, cx: &ExprContext<'_>) -> Option<Arc<dyn CompiledExpression>> {
+        if self.source.expression.has_general_binding() {
+            let host = NodeHost(&self.source.keys);
+            let ctx = self.binding_context(cx);
+            let (bound, binding) = self.source.expression.bind_general(&host, &ctx)?;
+            return Some(Arc::new(Self {
+                source: self.source.clone(),
+                bound: Some(bound),
+                binding_bits: None,
+                general: Some(binding),
+                index: Some(cx.idx),
+                verified: Mutex::new(None),
+            }));
+        }
         let stamp = self.source.stamp(cx);
         if let Some((previous, plan)) = &*self
             .source
@@ -302,6 +331,7 @@ impl CompiledExpression for Compiled {
             source: self.source.clone(),
             bound: Some(self.source.expression.bind_numeric(&host, &ctx)?),
             binding_bits: Some(bits.clone()),
+            general: None,
             index: Some(cx.idx),
             verified: Mutex::new(None),
         });
@@ -324,6 +354,32 @@ impl CompiledExpression for Compiled {
     }
 
     fn binding_matches(&self, cx: &ExprContext<'_>) -> Option<bool> {
+        if let Some(binding) = &self.general {
+            let stamp = self.source.stamp(cx);
+            if let Some((previous, result)) = *self
+                .verified
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                && previous == stamp
+            {
+                return Some(result);
+            }
+            // The bound program keeps the index it was bound at.
+            let same_index = !self.source.expression.needs_idx()
+                || self.index.map(f64::to_bits) == Some(cx.idx.to_bits());
+            let host = NodeHost(&self.source.keys);
+            let result = same_index
+                && self.source.expression.general_binding_matches(
+                    &host,
+                    &self.binding_context(cx),
+                    binding,
+                );
+            *self
+                .verified
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((stamp, result));
+            return Some(result);
+        }
         let bits = self.binding_bits.as_ref()?;
         if bits.is_empty() {
             return Some(true);
@@ -340,16 +396,16 @@ impl CompiledExpression for Compiled {
         let host = NodeHost(&self.source.keys);
         let ctx = self.binding_context(cx);
         let fixed = if self.source.expression.needs_idx() {
-            let (fixed, index) = bits.split_last()?;
-            // split_last returns (last, prefix).
-            if *fixed != cx.idx.to_bits() {
+            // The index is the last fixed input (see `binding_bits`).
+            let (index, fixed) = bits.split_last()?;
+            if *index != cx.idx.to_bits() {
                 *self
                     .verified
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((stamp, false));
                 return Some(false);
             }
-            index
+            fixed
         } else {
             bits.as_ref()
         };
@@ -365,7 +421,7 @@ impl CompiledExpression for Compiled {
     }
 
     fn binding_is_layer_local(&self) -> bool {
-        self.binding_bits.is_some() && self.source.layer_local
+        (self.binding_bits.is_some() || self.general.is_some()) && self.source.layer_local
     }
 
     fn evaluate_scalars(&self, t: f64, time: f64, value: f64) -> Option<f64> {

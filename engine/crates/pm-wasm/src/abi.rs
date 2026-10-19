@@ -11,7 +11,8 @@
 //! * the reply buffer (`pm_out_ptr`, `pm_out_len`): JSON replies, hashes,
 //!   messages;
 //! * the batch buffers (`pm_batch_ids`, `pm_batch_out`, `pm_batch_kinds`):
-//!   ids in, numbers and kinds out, as typed-array views (the S5 fast path).
+//!   ids in, numbers and kinds out, as typed-array views (the S5 fast path);
+//!   `pm_ev_batch` evaluates a prefix and `pm_ev_batch_range` any run of them.
 //!
 //! JavaScript re-acquires every view when `memory.buffer` changes. No export
 //! panics on any input: errors are return codes with a message in the reply
@@ -306,6 +307,36 @@ pub extern "C" fn pm_ev_batch(n: usize, t: f64) -> u32 {
             ..
         } = s;
         engine.ev_batch(&ids[..n], t, &mut values[..n], &mut kinds[..n]);
+        0
+    })
+}
+
+/// `ids[start..start + n]` at `t` into the same positions of `out` and
+/// `kinds`, leaving the rest of the buffers untouched: the renderer keeps one
+/// set of resident ids and evaluates only the runs a frame reads. 0 on
+/// success; 1 when the range is outside a buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_ev_batch_range(start: usize, n: usize, t: f64) -> u32 {
+    with(|s| {
+        let Some(end) = start.checked_add(n) else {
+            return 1;
+        };
+        if end > s.ids.len() || end > s.values.len() || end > s.kinds.len() {
+            return 1;
+        }
+        let State {
+            engine,
+            ids,
+            values,
+            kinds,
+            ..
+        } = s;
+        engine.ev_batch(
+            &ids[start..end],
+            t,
+            &mut values[start..end],
+            &mut kinds[start..end],
+        );
         0
     })
 }
