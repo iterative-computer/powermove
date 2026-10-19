@@ -10,7 +10,9 @@ import { LEGACY_GLOBAL, RETIMING_MODULE, TEXT_ANIMATION_MODULE, legacyScript } f
 import { FIXTURE_FILES, GENERATED_MEDIA, mediaRefs, MISSING_MEDIA, resolveMedia } from '../src/media';
 import { readFloat, straightTopDown, writeFile, writeFloat, writePng } from '../src/output';
 import { decodePng, encodePng } from '../src/png';
-import { allProjects } from '../src/projects';
+import { hasLevel2Text, legacyCaptureProjects } from '../src/legacy-capture';
+import { allProjects, textLevel2Projects } from '../src/projects';
+import { textOnlyProjects } from '../src/text-only';
 import { validateDocument } from '../src/validate';
 import { verifyCapture } from '../src/verify';
 
@@ -41,6 +43,44 @@ const channelValues = (value: any): unknown[] => value && typeof value === 'obje
 const isLayer = (node: any) => typeof node.type === 'string' && typeof node.id === 'string' && 'p' in node && 'fx' in node;
 
 describe('synthetic documents', () => {
+  test('level 2 text cases retain their native semantics in the generated corpus', () => {
+    const native = textLevel2Projects();
+    expect(native).toHaveLength(14);
+    expect(validateAll(native)).toEqual([]);
+    for (const item of native) {
+      expect(projects.find(project => project.id === item.id)).toEqual(item);
+      expect(item.doc.layers[0].compat).toBe(2);
+      expect(item.samples).toEqual([0, .25, .75, 2.5]);
+    }
+    expect(native.some(item => item.doc.layers[0].d.animators?.length)).toBe(true);
+    expect(native.some(item => item.doc.layers[0].d.styles?.length)).toBe(true);
+    expect(native.some(item => item.doc.layers[0].d.fontAnchorBounds)).toBe(true);
+    const dir = temp('native-text');
+    try {
+      expect(generateCorpus(dir,native).projects).toHaveLength(14);
+      for (const item of native) {
+        const document = JSON.parse(readFileSync(path.join(dir,'projects',item.id,'document.json'),'utf8'));
+        expect(document.layers[0].compat).toBe(2);
+      }
+    } finally { rmSync(dir,{ recursive:true, force:true }); }
+  });
+  test('the legacy capture leaves level 2 text to the native semantic gate', () => {
+    // Today's engine ignores `compat`: its picture of a level 2 document is a
+    // level 1 picture, never a level 2 reference for the parity gates.
+    const native = textLevel2Projects().map(item => item.id).sort();
+    for (const set of [projects, textOnlyProjects(projects)]) {
+      const split = legacyCaptureProjects(set);
+      expect(split.nativeOnly.map(item => item.id).sort()).toEqual(native);
+      expect(split.capture.length + split.nativeOnly.length).toBe(set.length);
+      expect(split.capture.some(item => hasLevel2Text(item.doc))).toBe(false);
+    }
+    // Every other project is still captured, in order.
+    expect(legacyCaptureProjects(projects).capture.map(item => item.id)).toEqual(projects.filter(item => !native.includes(item.id)).map(item => item.id));
+    // The predicate looks through precompositions, and only at text layers.
+    const nested = { layers: [], comps: { C1: { layers: [{ type: 'text', compat: 2 }] } } };
+    expect(hasLevel2Text(nested)).toBe(true);
+    expect(hasLevel2Text({ layers: [{ type: 'text', compat: 1 }, { type: 'text' }, { type: 'image', compat: 2 }] })).toBe(false);
+  });
   test('every document is a fixed point of sanitizeProject', () => {
     expect(validateAll(projects)).toEqual([]);
   });

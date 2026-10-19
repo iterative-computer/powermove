@@ -281,6 +281,9 @@ export interface LockedIntentEntry {
 }
 
 interface LayerBase<T extends LayerType, D extends object> {
+  /** Text compatibility only: the sanitizer drops this field on other layer types.
+   * Absent/1 preserves shipped semantics; 2 opts into native typography. */
+  compat?: 1 | 2;
   id: string;
   type: T;
   name: string;
