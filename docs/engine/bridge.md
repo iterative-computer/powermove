@@ -1563,6 +1563,57 @@ stays within 0.1 ms and the playhead is back on it within two animation
 frames. The stall is the page's main thread mounting the engine viewer
 (its presentation worker and painter); it is still recorded, not bounded.
 
+### Round 7: a frame in flight at an `unsupported` report (2026-10-19)
+
+Round 6's seq gate assumed a session's events arrive in the engine's
+order. Paused frames do not: they leave from the completion thread
+(`present/complete.rs`) once the GPU finishes them, and the render thread
+sent the report from `document_step` without waiting for them. A paused
+frame of revision R, still on the GPU, could arrive after a report caused
+by the batch at R+1, with a higher seq than any frame the viewer had. The
+session took it as a later decision, the route went back to `engine`, the
+status line cleared, and a stale picture stayed up with the reason hidden.
+
+- **The engine drains first.** `report_legacy` waits for the completion
+  thread before it sends the report. Every route to `legacy` goes through
+  it: a static reason, a draw that fails with `RenderError::Unsupported`
+  (`force_legacy`), and a shader fallback runner failure (`M::Failed`, also
+  `force_legacy`). The other `Unsupported` codes the engine sends are
+  request-scope errors (frame requests, snapshots, Blender jobs) and do not
+  change the route. The wait is bounded by the GPU work of at most
+  `MAX_IN_FLIGHT` (2) frames, and happens only when the route changes.
+- **The report names the newest seq.** `ErrorDetail::Unsupported {
+  lastFrame }` is `view.next_seq - 1` at the decision. The session drops
+  frames at or below it (falling back to the newest frame it received when
+  the detail is absent) and passes it on in `routed`. The presentation
+  drops presented frames at or below the larger of it and the newest its
+  channel delivered. Protocol build: `protocol-a8f64376eb9e1e12` (the
+  addon is rebuilt; pm-wasm does not depend on pm-protocol).
+- **Tests.** `tests/document.rs`
+  `an_unsupported_report_follows_the_frames_drawn_before_it` holds a paused
+  frame in the completion thread for 600 ms
+  (`POWERMOVE_BRIDGE_TEST_SEND_DELAY_MS`, tests only), sends a batch that
+  adds an effect without definitions 150 ms later, and checks that the
+  frame arrives before the report, that the report covers its seq, and
+  that no frame follows within 1.2 s. Without the drain it fails exactly as
+  reviewed: the report (`lastFrame` 2), then the seq 2 frame of revision 2.
+  `engine-connection.test.ts` covers the in-flight frame again (seq 2 of
+  revision 5 after a report naming seq 2: stale), replacing round 6's
+  re-delivery of seq 1, which cannot happen. `presentation.test.ts` does
+  the same with a report naming seq 7. Both TS cases fail with round 6's
+  gating.
+- **Runs.** pm-node: 94 library tests, document 5 of 5 (the new test three
+  times on its own), present 2 of 2, shader_fallback 1 of 1; pm-protocol
+  wire 11 of 11 (regeneration is a no-op); clippy `-D warnings` clean;
+  vitest (engine-connection, engine-present) 152 of 152; svelte-check 0
+  errors. Under the lock, `engine-render-transport`,
+  `engine-headless-playback` and `native-engine-tracer` (the A, B, A, B
+  switch with the viewer attached): 22 of 22. Join in that run: engine
+  25.1 ms against today's 20.1 ms.
+
+The viewer-mount playhead stall and the J/K/L 2x reverse sawtooth (issue
+P5) now belong to the perf3 lane.
+
 ### What remains
 
 - **The job engine's fonts.** Export and agent frames still refuse text:

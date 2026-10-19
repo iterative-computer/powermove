@@ -408,18 +408,33 @@ sentence as the stage's status line, keeps the current engine's canvas
 hidden, never hands the stage back, and clears the line at the next frame
 the engine draws. `EngineTransport` takes commands for every decided route.
 
-**Which frames a report makes stale (round 6).** A session's events arrive
-in the engine's order on one port, and a session's frame `seq` only
-increases (a view lives as long as its session). A frame after an
-`unsupported` report is therefore a later decision, at any revision; the
-revision cannot tell them apart, because a composition switch reaches the
-engine as a document batch (revision N) before the viewer state, so the
-engine reports the old composition at N and then draws the new one at N.
-The session drops only frames with `seq` at or below the newest it had when
-the report came; the presentation drops only presented frames with `seq` at
-or below the newest its channel had delivered then (frames still in the
-presenter's queue). A viewerless session takes `engine` from any route on a
-clock tagged with a revision at or past the one it applied.
+**Which frames a report makes stale (round 6, corrected in round 7).** The
+revision cannot decide it: a composition switch reaches the engine as a
+document batch (revision N) before the viewer state, so the engine reports
+the old composition at N and then draws the new one at N. The frame `seq`
+does, because it only increases within a session (a view lives as long as
+its session) and the engine assigns it when it draws. Arrival order does
+not: a session's events do not arrive in the engine's order. Paused frames
+leave from the completion thread once the GPU finishes them
+(`present/complete.rs`), while the render thread goes on to the next batch,
+so round 6's rule (any frame after the report is a later decision) let a
+paused frame of revision R, still on the GPU, arrive after a report caused
+by the batch at R+1, with a higher seq than any frame received so far. That
+frame brought the route back to `engine` and hid the reason. Two rules now
+hold. The render thread drains the completion thread before it sends any
+`unsupported` report (`report_legacy`, which every route to `legacy`
+reaches: a static reason, a draw that fails with
+`RenderError::Unsupported`, and a shader fallback runner failure), so every
+frame drawn before the decision is sent before it. And the report carries
+`ErrorDetail::Unsupported { lastFrame }`, the newest seq the engine had
+given the view when it decided. The session drops frames with `seq` at or
+below `lastFrame` (falling back to the newest frame it received when the
+detail is absent), and passes it on in its `routed` message. The
+presentation drops presented frames with `seq` at or below the larger of
+`lastFrame` and the newest its channel had delivered (frames still in the
+presenter's queue). A frame above it is a later decision at any revision. A
+viewerless session takes `engine` from any route on a clock tagged with a
+revision at or past the one it applied.
 
 Headless playback carries playback pressure for idle snapshots but has no draw
 schedule against which foreground async captures should wait. A Blender
