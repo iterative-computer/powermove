@@ -31,6 +31,7 @@ import { createTracker, patchCloning, querySite, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
 import { compileFrom, instantiate, MODULE_PATH, type PmWasm } from './wasm';
 import { FontLoader, type FontProvider } from './fonts';
+import { fontCensusStats } from './ui-font-census';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { setEvaluationWriter } from '../legacy/core/temporal-bridge';
 import { inversePlane, is3DLayer, local3D, parent3D, perspectiveAmount, planeContains, planeMatrix, projectPoint, world3D } from '../legacy/core/space-3d';
@@ -339,7 +340,12 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const api = new NativeApi(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, legacy, dual);
   const fontProvider = options.fonts !== undefined ? options.fonts : editorFonts();
   if (fontProvider) {
-    api.fonts = new FontLoader(fontProvider);
+    api.fonts = new FontLoader(fontProvider, () => {
+      // Font cache changes affect text bounds, carets, picks and overlays
+      // even when the document revision has not moved.
+      PM.invalidate?.();
+      PM.bus?.emit?.('fonts');
+    });
     api.fonts.watchSeeds(() => (state.ready ? wasm : null));
   }
   api.onStale = (op, paths) => {
@@ -377,6 +383,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
         mode: mode.name, ready: state.ready,
         barrier: barrier ? { revision: barrier.revision, ...barrier.stats } : null,
         native: api.stats,
+        fontCensus: typeof document === 'undefined' ? null : fontCensusStats(document),
         edits: edits.stats,
         dual: dual ? { ...dual.total(), compared: dual.stats.compared, mismatched: dual.stats.mismatched, stale: dual.stats.stale, allowed: dual.stats.allowed, fragile: dual.stats.fragile, fragileBudget: dual.fragileBudget() } : null,
         audit: auditor ? { audits: auditor.stats.audits, failures: auditor.stats.failures, missedWrites: auditor.stats.missedWrites, mirrorMismatches: auditor.stats.mirrorMismatches, ms: Math.round(auditor.stats.ms) } : null,

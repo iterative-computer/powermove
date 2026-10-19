@@ -60,6 +60,24 @@ describe('the UI font census', () => {
     stop();
   });
 
+  it('does not walk a timeline for playback transform and opacity updates', async () => {
+    const timeline = document.createElement('div');
+    timeline.style.font = '400 13px system-ui';
+    timeline.textContent = 'Timeline';
+    document.body.append(timeline);
+    const queue: Array<() => void> = [];
+    const stop = startUiFontCensus(document, { report: async () => true }, cb => queue.push(cb));
+    queue.splice(0).forEach(cb => cb());
+    timeline.style.transform = 'translateX(10px)';
+    timeline.style.opacity = '0.5';
+    await tick();
+    expect(queue).toHaveLength(0);
+    timeline.style.fontSize = '15px';
+    await tick();
+    expect(queue).toHaveLength(1);
+    stop();
+  });
+
   it('runs only with the new engine on and a channel to report to', () => {
     expect(installUiFontCensus({ nativeEngine: { enabledSync: () => false }, engineFonts: { reportUiFonts: async () => true } })).toBeNull();
     expect(installUiFontCensus({ nativeEngine: { enabledSync: () => true }, engineFonts: {} })).toBeNull();

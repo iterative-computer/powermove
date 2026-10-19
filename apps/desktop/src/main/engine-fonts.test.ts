@@ -578,6 +578,22 @@ describe('the engine font client', () => {
     await expect(named).rejects.toThrow(/did not take the font cache seeds of window 4/);
   });
 
+  it('rejects refused seed updates and retries the same session owner', async () => {
+    const client = new EngineFontClient();
+    const port = new FakeFontPort();
+    client.connect(port);
+    port.serve({ generation: 0 });
+    const owned = client.setSessionOwner(9, 4);
+    const request = port.sent.shift()!;
+    port.reply(request.id, FONT_STATUS.error, new TextEncoder().encode('invalid seeds'));
+    await expect(owned).rejects.toThrow('invalid seeds');
+    const retry = client.setSessionOwner(9, 4);
+    expect(port.sent).toHaveLength(1);
+    expect(port.sent[0]!.op).toBe(FONT_OP.seeds);
+    port.serve({ generation: 0 });
+    await retry;
+  });
+
   it('serves the channels, and main\'s own registry then stays unloaded', async () => {
     const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
     const ipc = { handle: (channel: string, fn: any) => void handlers.set(channel, fn), removeHandler: (channel: string) => void handlers.delete(channel) };

@@ -422,6 +422,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     onAgentJob: (job) => renderQueue?.agentJob(job)
   });
   renderQueue = new RenderQueue({
+    windowOpen: (owner) => { const contents = webContents.fromId(owner); return !!contents && !contents.isDestroyed(); },
     directory: path.join(options.userData, 'Render Queue'),
     engine: agentJobs,
     platform: {
@@ -511,6 +512,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       ? chosen.filePath
       : `${chosen.filePath}.${panel.extension}`;
     const id = await renderQueue!.add({
+      owner: event.sender.id,
       name: path.basename(file),
       project: options.snapshotMedia ? await options.snapshotMedia(JSON.parse(queueRequest.project)) : JSON.parse(queueRequest.project),
       options: queueRequest.options,

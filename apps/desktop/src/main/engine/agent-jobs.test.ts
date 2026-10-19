@@ -387,6 +387,14 @@ describe('Phase 3b delivery through the job engine', () => {
     expect(drafts).toEqual([[10, true], [10, false]]);
   });
 
+  it('keeps queue font seeds scoped to the starting renderer', async () => {
+    const engine = new FakeEngine();
+    const sessionOwner = vi.fn(async () => {});
+    const jobs = new AgentJobs({ engine, sessionOwner });
+    await jobs.exportQueued(project(), sheet({ format: 'webm-vp9' }), '/Users/x/Queued.webm', 'uniqueName', 42);
+    expect(sessionOwner).toHaveBeenCalledWith(10, 42);
+  });
+
   it('runs queue jobs without a window and reports to the queue', async () => {
     const engine = new FakeEngine();
     const queued: Array<[string, UserExportStatus]> = [];

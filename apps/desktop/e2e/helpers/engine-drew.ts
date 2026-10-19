@@ -24,6 +24,7 @@ export async function expectEngineDrewText(session: Pick<LaunchedApp, 'app' | 'p
   expect(status.route, `the viewer routed: ${status.routeReason}`).toBe('engine');
   expect(status.failures, 'layers the engine refused').toEqual([]);
   const report = await session.app.evaluate(async () => (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive') ?? null) as { presenter?: { layerFailures?: number; renderErrors?: number } } | null;
-  expect(report?.presenter?.layerFailures ?? 0, 'layers the presenter failed to draw').toBe(0);
-  expect(report?.presenter?.renderErrors ?? 0, 'presenter render errors').toBe(0);
+  expect(report?.presenter, 'main-process presenter report').toBeDefined();
+  expect(report?.presenter?.layerFailures, 'layers the presenter failed to draw').toBe(0);
+  expect(report?.presenter?.renderErrors, 'presenter render errors').toBe(0);
 }

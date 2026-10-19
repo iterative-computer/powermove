@@ -44,7 +44,7 @@ import type { UserExportStatus } from './agent-jobs';
 /** What the queue needs from the job engine (AgentJobs). */
 export interface QueueEngine {
   readonly available: boolean;
-  exportQueued(project: unknown, options: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail'): Promise<{ jobId: string; frames: number }>;
+  exportQueued(project: unknown, options: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', seedOwner?: number | null): Promise<{ jobId: string; frames: number }>;
   cancelQueued(jobId: string): Promise<void>;
 }
 
@@ -95,10 +95,13 @@ export type RenderQueueOptions = {
   /** Called with the new state after every change. */
   onChange?(state: RenderQueueState): void;
   now?: () => number;
+  windowOpen?(owner: number): boolean;
 };
 
 export class RenderQueue {
   private jobs: StoredJob[] = [];
+  // Runtime only: webContents ids must never survive an app relaunch.
+  private seedOwners = new Map<string, number>();
   private agents: AgentEntry[] = [];
   private running = false;
   /** The engine job of the queue job that is rendering. */
@@ -191,6 +194,7 @@ export class RenderQueue {
     destination: string;
     sidecars?: CaptionSidecar[];
     preset?: string;
+    owner?: number;
   }): Promise<string> {
     await this.loaded;
     if (!validSheetExportOptions(input.options)) throw new Error('Invalid export settings.');
@@ -209,6 +213,7 @@ export class RenderQueue {
       (s.extension === 'srt' || s.extension === 'vtt') && typeof s.text === 'string' && (s.suffix === undefined || SIDECAR_SUFFIX_PATTERN.test(s.suffix)));
     await mkdir(this.options.directory, { recursive: true, mode: 0o700 });
     await atomicWrite(this.snapshotFile(id), new TextEncoder().encode(JSON.stringify(project)));
+    if (input.owner !== undefined) this.seedOwners.set(id, input.owner);
     this.jobs.push({
       id,
       name: input.name,
@@ -300,7 +305,9 @@ export class RenderQueue {
     }
     const finished = new Promise<void>((resolve) => { this.waiters.set(job.id, resolve); });
     try {
-      const started = await this.options.engine.exportQueued(project, job.options, job.destination, ENGINE_POLICY[job.overwrite]);
+      const owner = this.seedOwners.get(job.id);
+      const seedOwner = owner !== undefined && this.options.windowOpen?.(owner) ? owner : null;
+      const started = await this.options.engine.exportQueued(project, job.options, job.destination, ENGINE_POLICY[job.overwrite], seedOwner);
       if (!this.current || this.current.id !== job.id) {
         // Cancelled while it was being submitted.
         await this.options.engine.cancelQueued(started.jobId);

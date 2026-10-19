@@ -558,19 +558,20 @@ export class AgentJobs {
 
   /** Starts a render queue job (unattended, from its stored snapshot) to its
    *  destination under its overwrite policy. Statuses go to `onQueueStatus`. */
-  async exportQueued(projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail'): Promise<{ jobId: string; frames: number }> {
-    return this.submitUser(QUEUE_OWNER, projectValue, options, destination, overwrite, true);
+  async exportQueued(projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', seedOwner: number | null = null): Promise<{ jobId: string; frames: number }> {
+    return this.submitUser(QUEUE_OWNER, projectValue, options, destination, overwrite, true, seedOwner);
   }
 
-  private async submitUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', queue: boolean): Promise<{ jobId: string; frames: number }> {
+  private async submitUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', queue: boolean, seedOwner: number | null = null): Promise<{ jobId: string; frames: number }> {
     const project = asProject(projectValue);
     const format = migrateFormat(options.format);
     const sequenceName = format === 'png' ? path.basename(destination) : undefined;
     const settings = userExportSettings(project, options, { preview: !queue, ...(sequenceName ? { sequenceName } : {}) });
     if (!this.options.engine.chooseOutput) throw new AgentJobError('This host cannot write user exports.');
     const jobId = `${queue ? 'queue' : 'user'}-export-${randomUUID()}`;
-    // Queue jobs run unattended (perhaps after a relaunch): no window.
-    const session = await this.openSnapshot(project, `${queue ? 'queue' : 'user'}-export-${jobId}`, queue ? null : owner);
+    // Queue ownership is for status delivery; seed ownership follows the
+    // window that queued this snapshot while that renderer still exists.
+    const session = await this.openSnapshot(project, `${queue ? 'queue' : 'user'}-export-${jobId}`, queue ? seedOwner : owner);
     const record: JobRecord = {
       jobId, owner, run: '', session, ...(queue ? { queue: true } : { user: true }),
       status: { job: jobId, class: 'userJob', state: 'queued', progress: 0, path: null, error: null, preview: null },

@@ -90,7 +90,7 @@ export class FontLoader {
   private seedsJson: string | null = null;
   private seedsTarget: (() => PmWasm | null) | null = null;
 
-  constructor(readonly provider: FontProvider) {}
+  constructor(readonly provider: FontProvider, private readonly seedsChanged: () => void = () => {}) {}
 
   /**
    * Follows the window's font cache seeds: asks once, hears changes, and
@@ -119,7 +119,7 @@ export class FontLoader {
   applySeeds(wasm: PmWasm): void {
     if (this.seedsJson === null) return;
     try {
-      wasm.setFontSeeds(this.seedsJson);
+      if (wasm.setFontSeeds(this.seedsJson)) this.seedsChanged();
     } catch (error) {
       console.warn('[engine-doc] font cache seeds refused', error);
     }

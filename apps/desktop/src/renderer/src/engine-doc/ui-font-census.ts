@@ -27,6 +27,13 @@ export interface UiFontCensusHost {
   report(json: string): Promise<unknown>;
 }
 
+export interface FontCensusStats { scans: number; visited: number; reports: number; ms: number; maxMs: number }
+const censusStats = new WeakMap<Document, FontCensusStats>();
+export const fontCensusStats = (doc: Document): FontCensusStats | null => {
+  const stats = censusStats.get(doc);
+  return stats ? { ...stats } : null;
+};
+
 type Idle = (callback: () => void) => void;
 
 const FORM_CONTROLS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
@@ -34,7 +41,7 @@ const FORM_CONTROLS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
 /** The description an element's text is laid out with. */
 export function useOf(style: Pick<CSSStyleDeclaration, 'fontFamily' | 'fontSize' | 'fontWeight' | 'fontStyle' | 'fontStretch'>): UiFontUse | null {
   const size = Number.parseFloat(style.fontSize);
-  const weight = Number.parseFloat(style.fontWeight);
+  const weight = style.fontWeight === 'normal' || !style.fontWeight ? 400 : style.fontWeight === 'bold' ? 700 : Number.parseFloat(style.fontWeight);
   if (!(size > 0) || !Number.isFinite(weight)) return null;
   // Only normal-width text reaches the seeds' cache keys.
   if (style.fontStretch && style.fontStretch !== 'normal' && style.fontStretch !== '100%') return null;
@@ -42,6 +49,7 @@ export function useOf(style: Pick<CSSStyleDeclaration, 'fontFamily' | 'fontSize'
 }
 
 function hasOwnText(el: Element): boolean {
+  if (['SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT'].includes(el.tagName)) return false;
   if (FORM_CONTROLS.has(el.tagName)) {
     const control = el as HTMLInputElement;
     if (el.tagName === 'INPUT' && ['hidden', 'checkbox', 'radio', 'range', 'color', 'file', 'image'].includes(control.type)) return false;
@@ -64,6 +72,8 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
     if (typeof view.requestIdleCallback === 'function') view.requestIdleCallback(() => cb(), { timeout: 1000 });
     else view.setTimeout(cb, 200);
   });
+  const stats: FontCensusStats = { scans: 0, visited: 0, reports: 0, ms: 0, maxMs: 0 };
+  censusStats.set(doc, stats);
   const seen = new Set<string>();
   const pending = new Set<Node>();
   let full = true;
@@ -71,6 +81,7 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
   let stopped = false;
 
   const visit = (el: Element, dpr: number, out: UiFontUse[]): void => {
+    stats.visited++;
     if (!hasOwnText(el) || el.getClientRects().length === 0) return;
     const use = useOf(view.getComputedStyle(el));
     if (!use) return;
@@ -89,6 +100,8 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
   const flush = (): void => {
     scheduled = false;
     if (stopped) return;
+    const started = view.performance.now();
+    stats.scans++;
     const dpr = view.devicePixelRatio || 1;
     const uses: UiFontUse[] = [];
     if (full) {
@@ -100,7 +113,11 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
       pending.clear();
       for (const n of nodes) scan(n, dpr, uses);
     }
+    const ms = view.performance.now() - started;
+    stats.ms += ms;
+    stats.maxMs = Math.max(stats.maxMs, ms);
     if (!uses.length) return;
+    stats.reports++;
     const census: UiFontCensus = { dpr, uses };
     host.report(JSON.stringify(census)).catch(() => undefined);
   };
@@ -110,16 +127,60 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
     schedule(flush);
   };
 
-  const observer = new view.MutationObserver((records) => {
+  // Playback mutates transforms and opacity every frame. Those cannot
+  // create a font-cache entry, so do not traverse the timeline for them.
+  const previousStyle = doc.createElement('span').style;
+  const fontStyleChanged = (record: MutationRecord): boolean => {
+    if (record.attributeName !== 'style') return true;
+    const before = previousStyle;
+    const after = (record.target as HTMLElement).style;
+    before.cssText = record.oldValue ?? '';
+    const names = new Set([...Array.from(before), ...Array.from(after)]);
+    return [...names].some((name) => /^(font|line-height|display|content-visibility|visibility|--)/.test(name)
+      && before.getPropertyValue(name) !== after.getPropertyValue(name));
+  };
+  const takeRecords = (records: MutationRecord[]): void => {
     for (const r of records) {
       if (r.type === 'childList') r.addedNodes.forEach((n) => pending.add(n));
       else if (r.type === 'characterData') pending.add(r.target);
+      else if (!fontStyleChanged(r)) continue;
       else if (r.target === doc.documentElement || r.target === doc.body) full = true;
       else pending.add(r.target);
     }
-    request();
-  });
-  observer.observe(doc, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'open', 'data-density'] });
+    if (full || pending.size) request();
+  };
+  const observer = new view.MutationObserver(takeRecords);
+  observer.observe(doc, { subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true, attributeFilter: ['class', 'style', 'hidden', 'open', 'data-density'] });
+
+  // A canvas font setter creates platform data too, even on the 1/100 px
+  // grid. Capture it before a later menu can claim the same cache key.
+  // Drain pending DOM layout first, then preserve the canvas's CSS size
+  // without applying DPR (canvas font measurement is in CSS pixels).
+  const restoreCanvas: Array<() => void> = [];
+  for (const proto of [(view as any).CanvasRenderingContext2D?.prototype, (view as any).OffscreenCanvasRenderingContext2D?.prototype]) {
+    if (!proto) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, 'font');
+    if (!descriptor?.set || !descriptor.get || !descriptor.configurable) continue;
+    const declaration = doc.createElement('span').style;
+    const setter = function (this: CanvasRenderingContext2D, value: string): void {
+      takeRecords(observer.takeRecords());
+      if (full || pending.size) flush();
+      descriptor.set!.call(this, value);
+      declaration.font = descriptor.get!.call(this);
+      const use = useOf(declaration);
+      if (!use) return;
+      const key = `1|${use.families.join(',')}|${use.size}|${use.weight}|${use.italic}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const census: UiFontCensus = { dpr: 1, uses: [use] };
+      stats.reports++;
+      host.report(JSON.stringify(census)).catch(() => undefined);
+    };
+    Object.defineProperty(proto, 'font', { ...descriptor, set: setter });
+    restoreCanvas.push(() => {
+      if (Object.getOwnPropertyDescriptor(proto, 'font')?.set === setter) Object.defineProperty(proto, 'font', descriptor);
+    });
+  }
 
   // Another display or page zoom lays every text out again.
   let media: MediaQueryList | null = null;
@@ -142,6 +203,7 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
   return () => {
     stopped = true;
     observer.disconnect();
+    for (const restore of restoreCanvas) restore();
     media?.removeEventListener('change', onRatio);
     doc.fonts?.removeEventListener?.('loadingdone', fontsDone);
   };

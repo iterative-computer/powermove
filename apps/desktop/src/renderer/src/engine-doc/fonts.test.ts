@@ -32,13 +32,14 @@ describe('FontLoader', () => {
 
   it('applies the window\'s font cache seeds to pm-wasm now, on change, and to a new instance', async () => {
     let listener: ((json: string) => void) | null = null;
+    const changed = vi.fn();
     const loader = new FontLoader({
       sync: false,
       answer: async () => '{}',
       subset: async () => new Uint8Array(),
       seeds: async () => '{"seeds":[1]}',
       onSeedsChanged: (l) => { listener = l; },
-    });
+    }, changed);
     const applied: string[] = [];
     const wasm: any = { setFontSeeds: (json: string) => { applied.push(json); return true; } };
     let ready = false;
@@ -51,6 +52,11 @@ describe('FontLoader', () => {
     expect(applied).toEqual(['{"seeds":[1]}']);
     listener!('{"seeds":[2]}');
     expect(applied).toEqual(['{"seeds":[1]}', '{"seeds":[2]}']);
+    expect(changed).toHaveBeenCalledTimes(2);
+    // An unchanged seed set does not invalidate cached editor answers.
+    wasm.setFontSeeds = () => false;
+    loader.applySeeds(wasm);
+    expect(changed).toHaveBeenCalledTimes(2);
     // A revived instance gets the latest seeds.
     const revived: any = { setFontSeeds: vi.fn() };
     loader.applySeeds(revived);
