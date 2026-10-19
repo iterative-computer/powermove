@@ -24,7 +24,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { svgRasterDimensions } from '../../renderer/src/legacy/gl/compositor';
-import { compositionFramePosition, previewRenderSize, previewRenderViewport } from './viewer';
+import { compositionFramePosition, previewRenderViewport, viewerCanvasSize } from './viewer';
 import { canvasOutputScale, todaysCanvas as viewerCanvas } from './engine-present/view-params';
 
 const FIXTURE = path.resolve(__dirname, '../../../../../engine/crates/pm-render/tests/fixtures/svg-viewer-buckets.json');
@@ -53,20 +53,16 @@ function compositorOutputScale(W: number, H: number, viewport: { width: number; 
   return [W / Math.max(1, Number(comp?.w) || W), H / Math.max(1, Number(comp?.h) || H)];
 }
 
-/** Today's viewer canvas for a view (`V.layout`): the crop when the
- *  project is crop safe and zoomed in, else the explicit resolution or
- *  `previewRenderSize`. */
+/** Today's viewer canvas for a view (`V.layout`, through its own
+ *  `viewerCanvasSize`): the crop when the project is crop safe and zoomed
+ *  in, else the explicit resolution or `previewRenderSize`. */
 function todaysCanvas(zoom: number, devicePixelRatio: number, resolution: string, quality: number, cropSafe: boolean) {
   const dpr = Math.min(devicePixelRatio || 1, 2);
   const position = compositionFramePosition(STAGE, { width: COMP.w, height: COMP.h }, zoom, PAN);
   const viewport = cropSafe
     ? previewRenderViewport(COMP.w, COMP.h, zoom, STAGE.width, STAGE.height, position.x, position.y, dpr, quality, 128, null)
     : null;
-  const size = viewport
-    ? { width: viewport.renderWidth, height: viewport.renderHeight }
-    : resolution !== 'auto'
-      ? { width: Math.max(2, Math.round(COMP.w * quality)), height: Math.max(2, Math.round(COMP.h * quality)) }
-      : previewRenderSize(COMP.w, COMP.h, zoom, dpr, quality);
+  const size = viewerCanvasSize(COMP.w, COMP.h, zoom, dpr, quality, resolution, viewport);
   return { width: size.width, height: size.height, viewport };
 }
 

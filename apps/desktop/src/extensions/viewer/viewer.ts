@@ -45,6 +45,19 @@ export function previewRenderSize(width: number, height: number, zoom: number, d
   };
 }
 
+/** The backing size of today's viewer canvas for a layout (`V.layout`): the
+ *  crop's render size when the view is cropped, the composition at the
+ *  quality with an explicit preview resolution, else `previewRenderSize`. */
+export function viewerCanvasSize(
+  compWidth: number, compHeight: number, zoom: number, dpr: number, quality: number,
+  previewResolution: string | number | null | undefined, viewport: { renderWidth: number; renderHeight: number } | null,
+): { width: number; height: number } {
+  if (viewport) return { width: viewport.renderWidth, height: viewport.renderHeight };
+  if (previewResolution && previewResolution !== 'auto') return { width: Math.max(2, Math.round(compWidth * quality)), height: Math.max(2, Math.round(compHeight * quality)) };
+  const { width, height } = previewRenderSize(compWidth, compHeight, zoom, dpr, quality);
+  return { width, height };
+}
+
 /** Effects may use the cropped viewer only when their shader has opted into
  * the viewport coordinate contract. Unknown effects stay on the full-frame
  * path so extensions do not silently change their visual result. */
@@ -1068,9 +1081,7 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   const viewport = viewportSafe
     ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, api.transport.quality, 128 + effectPadding / renderDensity, previousViewport)
     : null;
-  const renderSize: { width: number; height: number } = viewport
-    ? { width: viewport.renderWidth, height: viewport.renderHeight }
-    : api.transport.previewResolution && api.transport.previewResolution!=='auto' ? {width:Math.max(2,Math.round(p.w*api.transport.quality)),height:Math.max(2,Math.round(p.h*api.transport.quality))} : previewRenderSize(p.w, p.h, z, dpr, api.transport.quality);
+  const renderSize = viewerCanvasSize(p.w, p.h, z, dpr, api.transport.quality, api.transport.previewResolution, viewport);
   visibleRegion = { x: Math.max(0, -position.x) / z, y: Math.max(0, -position.y) / z,
     right: Math.min(p.w, (r.width - position.x) / z), bottom: Math.min(p.h, (r.height - position.y) / z) };
   /* A paused zoom or pan gesture keeps the engine's committed canvas by
