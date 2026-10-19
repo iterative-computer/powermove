@@ -23,7 +23,7 @@ const SYNC_DEBOUNCE_MS = 250;
 interface RemotePatch { projectId: string; seq: number; patches: Patch[]; from: number }
 
 type Registry = {
-  RemoteSync?: { flush(): Promise<void> };
+  RemoteSync?: { flush(): Promise<void>; refresh(): Promise<void> };
   proj?: { id?: string; assets?: Record<string, { id: string }> } & Record<string, unknown>;
   assets?: { get(id: string): unknown };
   restoreProjectAssets?(project: unknown, warn?: boolean): Promise<unknown>;
@@ -134,7 +134,17 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
     track();
   });
 
-  const sync = { flush: async () => {
+  // A newly booted DOM tab may have restored a stale local document after its
+  // first join. Before accepting tools, discard that unsent boot state and pull
+  // the current authoritative session (which may be newer than its seed).
+  const refresh = async (): Promise<void> => {
+    await joining; await sending;
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (joined) link.send(WEB.syncLeave, joined);
+    joined = null; failure = null;
+    track(); await joining;
+  };
+  const sync = { refresh, flush: async () => {
     await joining;
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
     flush(); await sending;

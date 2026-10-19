@@ -53,7 +53,7 @@ export class LazyNativeBrowser implements NativeBrowser {
             await PM.EngineDoc?.whenReady;
           }, snapshot.project);
         }
-        await page.evaluate(async () => { await (window as any).PM.RemoteSync.flush(); });
+        await page.evaluate(async () => { const sync = (window as any).PM.RemoteSync; await sync.refresh(); await sync.flush(); });
         this.log(`[native] DOM tab pinned to ${project}`);
         return page;
       })().catch(error => { this.pages.delete(project); throw error; });
