@@ -10,7 +10,7 @@ import { installAgentFramesIpc } from './agent-frames';
  * sandbox frames), tells windows about crashes and restarts, and serves
  * the engines' host requests (native-engine.ts).
  */
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -336,6 +336,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           ...(launch?.env ?? {}),
           POWERMOVE_ENGINE_PROCESS: process,
           POWERMOVE_ENGINE_ADDON: addon,
+          // Invalidate first-use parity on every engine/browser/OS update.
+          // GPU identity and native driver version are added by pm-render.
+          POWERMOVE_ENGINE_PARITY_ENV: JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() }),
           // Translated shader programs, kept across launches (plan section 11).
           POWERMOVE_ENGINE_SHADER_CACHE: path.join(cacheDirectory, CACHE_DIRS.shaderCache)
         }
