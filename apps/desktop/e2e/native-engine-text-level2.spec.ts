@@ -98,15 +98,86 @@ test('Pan Behind on font-anchored level 2 text keeps the resting text in place w
     const after = { ...api.bounds(layer, .75) };
     const native = PM.EngineDoc.stats().native;
     return { recorded: !!layer.d.fontAnchorBounds, before, after,
+      anchor: [PM.ev(PM.L(layer.id), 'anchor.x', .75), PM.ev(PM.L(layer.id), 'anchor.y', .75)],
       fallbacks: Object.entries(native.fallbacks).filter(([key, count]) => Number(count) > Number(fallbacks[key] || 0)),
       route: PM.EngineConnection.status().route };
   });
   expect(result.recorded).toBe(true);
+  expect(result.anchor).toEqual([30, 10]);
   expect(result.route).toBe('engine');
   expect(result.fallbacks, 'anchor edits stay native').toEqual([]);
   for (const key of ['x0', 'y0', 'x1', 'y1'] as const) {
     expect(Math.abs(result.after[key] - result.before[key]), `${key}: ${JSON.stringify(result)}`).toBeLessThan(0.01);
   }
   await expectEngineDrewText(session);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('level 2 selection keeps paragraph boxes, small-text padding and blank-text picks', async ({ session }) => {
+  test.setTimeout(90_000);
+  await session.openEditor();
+  const cases = [
+    { name: 'whitespace', text: '   ', size: 8, leading: 1.25, align: 'left', boxWidth: 0, boxHeight: 0 },
+    { name: 'empty', text: '', size: 8, leading: 1.25, align: 'left', boxWidth: 0, boxHeight: 0 },
+    { name: 'unicode whitespace', text: '\t\u2003\n', size: 8, leading: 1.25, align: 'left', boxWidth: 0, boxHeight: 0 },
+    ...(['left', 'center', 'right'] as const).flatMap(align => [0, 220].map(boxHeight => ({
+      name: `paragraph ${align} height ${boxHeight}`, text: 'one\ntwo', size: 12, leading: 1.25,
+      align, boxWidth: 260, boxHeight,
+    }))),
+    { name: 'small point text', text: 'Tiny', size: 8, leading: 1.25, align: 'left', boxWidth: 0, boxHeight: 0 },
+  ];
+  for (const item of cases) {
+    const result = await session.page.evaluate(async item => {
+      const PM = (window as any).PM;
+      const project = PM.mkProject({ name: item.name, w: 640, h: 360, dur: 3 });
+      const layer = PM.mkLayer('text', { d: { ...item, font: 'Georgia', weight: 400, color: '#FFFFFF',
+        boxWidth: PM.P(item.boxWidth), boxHeight: PM.P(item.boxHeight) },
+        p: { 'position.x': 320, 'position.y': 80 } }, project);
+      layer.compat = 2;
+      project.layers = [layer];
+      PM.replaceProject(project); PM.touch(); PM.setTime(0, { force: true });
+      const shot = await PM.EngineCaptures.snapshotAsync(0, 640);
+      const before = { ...PM.EngineDoc.stats().native.fallbacks };
+      const api = PM.EngineDoc.api;
+      const bounds = api.bounds(layer, 0);
+      const x = 320 + bounds.x1 - .25;
+      const y = 80 + (bounds.y0 + bounds.y1) / 2;
+      const inside = api.pick(x, y, 0)?.id === layer.id;
+      const outside = !!api.pick(x + 1, y, 0);
+      // Inspect this composition's rendered pixels, never the user's screen.
+      const image = new Image(); image.src = shot; await image.decode();
+      const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
+      const ctx = canvas.getContext('2d')!; ctx.drawImage(image, 0, 0);
+      const pixels = ctx.getImageData(0, 0, 640, 360).data;
+      let right = -1;
+      for (let i = 0; i < pixels.length; i += 4) {
+        if (pixels[i]! > 128 && pixels[i + 1]! > 128 && pixels[i + 2]! > 128) right = Math.max(right, (i / 4) % 640);
+      }
+      const native = PM.EngineDoc.stats().native;
+      return { bounds, inside, outside, right,
+        fallbacks: Object.entries(native.fallbacks).filter(([key, count]) => Number(count) > Number(before[key] || 0)),
+        status: PM.EngineConnection.status() };
+    }, item);
+    expect(result.status.route).toBe('engine');
+    expect(result.status.failures).toEqual([]);
+    expect(result.fallbacks, item.name).toEqual([]);
+    expect(result.inside, `${item.name}: edge inside selection`).toBe(true);
+    expect(result.outside, `${item.name}: outside selection`).toBe(false);
+    if (item.boxWidth > 0) {
+      const x0 = item.align === 'center' ? -130 : item.align === 'right' ? -260 : 0;
+      expect(result.bounds.x0).toBeCloseTo(x0 - 3, 6);
+      expect(result.bounds.x1).toBeCloseTo(x0 + 263, 6);
+      expect(result.bounds.y0).toBeCloseTo(-3, 6);
+      expect(result.bounds.y1).toBeCloseTo(item.boxHeight > 0 ? 223 : 33, 6);
+    } else if (!item.text.trim()) {
+      expect(result.bounds.x0).toBeCloseTo(-3.5, 6);
+      expect(result.bounds.x1).toBeCloseTo(3.5, 6);
+      expect(result.bounds.y1 - result.bounds.y0).toBeGreaterThanOrEqual(14);
+      if (item.text.includes('\n')) expect(result.bounds.y1 - result.bounds.y0).toBeGreaterThanOrEqual(26);
+    } else {
+      expect(result.right).toBeGreaterThan(320);
+      expect(320 + result.bounds.x1 - result.right, 'padding beyond visible small-text ink').toBeGreaterThanOrEqual(2);
+    }
+  }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

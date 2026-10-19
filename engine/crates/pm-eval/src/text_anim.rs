@@ -400,6 +400,13 @@ pub struct StyleState {
     pub p: Content,
 }
 
+/// Evaluated text controls before layout: enabled animators with their
+/// values, and the resolved range styles.
+pub struct TextControls<'d> {
+    animators: Controls<'d>,
+    pub styles: Vec<StyleState>,
+}
+
 /// `textAnimationState`'s answer.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct TextAnimation {
@@ -698,8 +705,16 @@ impl<'d> Scope<'_, 'd> {
         time: f64,
         layout: &GlyphLayout,
     ) -> JsResult<TextAnimation> {
+        let controls = self.text_controls(layer, time)?;
+        Ok(self.text_animation_weights(layer, time, controls, layout))
+    }
+
+    /// The channel half of [`Self::text_animation_state`]: every control
+    /// evaluated (in the same order) and the range styles resolved, before
+    /// any layout exists. Level 2 shapes with the styles first.
+    pub fn text_controls(&mut self, layer: &'d Node, time: f64) -> JsResult<TextControls<'d>> {
         let (animators, styles) = self.text_control_values(layer, time)?;
-        let mut out = TextAnimation::default();
+        let mut out = Vec::with_capacity(styles.len());
         for (item, values) in styles {
             let mut content = Content::new();
             if let Some(n) =
@@ -716,12 +731,31 @@ impl<'d> Scope<'_, 'd> {
                     .collect(),
             );
             content.insert(JsString::from("p"), JsValue::Object(Box::new(p_value)));
-            out.styles.push(StyleState {
+            out.push(StyleState {
                 item: content,
                 p: values,
             });
         }
-        for (item, values) in animators {
+        Ok(TextControls {
+            animators,
+            styles: out,
+        })
+    }
+
+    /// The layout half of [`Self::text_animation_state`]: each animator's
+    /// per-unit weights over `layout`.
+    pub fn text_animation_weights(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        controls: TextControls<'d>,
+        layout: &GlyphLayout,
+    ) -> TextAnimation {
+        let mut out = TextAnimation {
+            animators: Vec::with_capacity(controls.animators.len()),
+            styles: controls.styles,
+        };
+        for (item, values) in controls.animators {
             let raw_unit = node::js_value_opt(node::member(Some(item), "unit"));
             let unit = UnitKind::of_js(&raw_unit).unwrap_or_else(|| {
                 match UnitKind::of_js(get(&values, "unit")) {
@@ -739,7 +773,7 @@ impl<'d> Scope<'_, 'd> {
                 weights,
             });
         }
-        Ok(out)
+        out
     }
 
     /// `animatedGlyphs(PM, layer, time, d, layout, state)`: glyphs with their

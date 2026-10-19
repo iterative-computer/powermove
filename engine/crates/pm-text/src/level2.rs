@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, HashMap};
 const DEFAULT_WEIGHT: f32 = 500.0;
 
 /// One laid-out line.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Line {
     pub text: String,
@@ -77,7 +77,7 @@ pub struct Run {
 
 /// An evaluated typography span, in UTF-16 source coordinates. Callers
 /// resolve overlapping styles before shaping, in authored order.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StyleSpan {
     pub start: usize,
     pub end: usize,
@@ -103,11 +103,65 @@ pub struct Level2Layout {
 
 /// The level 2 layout engine over a host-filled font collection.
 pub struct Level2 {
-    fcx: FontContext,
+    fonts: FontSet,
     lcx: LayoutContext<u32>,
+}
+
+/// A font collection with its registrations and fallback configuration.
+/// A host that lays out text over several font sets swaps them through
+/// [`Level2::replace_fonts`] and keeps one layout context, whose shaping
+/// caches are keyed by [`FaceBlob`] identity.
+pub struct FontSet {
+    fcx: FontContext,
     keys: HashMap<u64, String>,
     families: BTreeMap<String, String>,
     base_family: Option<String>,
+    registrations: usize,
+}
+
+impl Default for FontSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FontSet {
+    pub fn new() -> Self {
+        let collection = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: false,
+        });
+        FontSet {
+            fcx: FontContext {
+                collection,
+                source_cache: Default::default(),
+            },
+            keys: HashMap::new(),
+            families: BTreeMap::new(),
+            base_family: None,
+            registrations: 0,
+        }
+    }
+
+    /// Fonts added so far (`add_font` and `add_face` calls).
+    pub fn registrations(&self) -> usize {
+        self.registrations
+    }
+}
+
+/// Font bytes as Parley shares them. Parley's shaping caches are keyed by
+/// the blob's identity, so a host that keeps one `FaceBlob` per registration
+/// reuses shaping data whenever the face is registered again.
+#[derive(Clone)]
+pub struct FaceBlob(Blob<u8>);
+
+impl FaceBlob {
+    pub fn new(data: &FontBytes) -> Self {
+        FaceBlob(Blob::new(data.shared()))
+    }
+    pub fn id(&self) -> u64 {
+        self.0.id()
+    }
 }
 
 impl Default for Level2 {
@@ -118,30 +172,32 @@ impl Default for Level2 {
 
 impl Level2 {
     pub fn new() -> Self {
-        let collection = Collection::new(CollectionOptions {
-            shared: false,
-            system_fonts: false,
-        });
         Level2 {
-            fcx: FontContext {
-                collection,
-                source_cache: Default::default(),
-            },
+            fonts: FontSet::new(),
             lcx: LayoutContext::new(),
-            keys: HashMap::new(),
-            families: BTreeMap::new(),
-            base_family: None,
         }
+    }
+
+    /// Lays out with `fonts` from now on and returns the previous set.
+    pub fn replace_fonts(&mut self, fonts: FontSet) -> FontSet {
+        std::mem::replace(&mut self.fonts, fonts)
     }
 
     /// Adds every face in `data` under `family` (the registry's family name;
     /// a subset's own name table may name a hidden system family). `key`
     /// names the source in `Run::font`. Returns the number of faces added.
     pub fn add_font(&mut self, key: &str, data: FontBytes, family: &str) -> usize {
-        let blob = Blob::new(data.shared());
-        self.keys.insert(blob.id(), key.to_string());
-        let added = self.fcx.collection.register_fonts(
-            blob,
+        self.add_face(key, &FaceBlob::new(&data), family)
+    }
+
+    /// [`Self::add_font`] with bytes the host keeps, so shaping data for a
+    /// face registered again is reused.
+    pub fn add_face(&mut self, key: &str, blob: &FaceBlob, family: &str) -> usize {
+        let fonts = &mut self.fonts;
+        fonts.keys.insert(blob.id(), key.to_string());
+        fonts.registrations += 1;
+        let added = fonts.fcx.collection.register_fonts(
+            blob.0.clone(),
             Some(FontInfoOverride {
                 family_name: Some(family),
                 ..Default::default()
@@ -149,7 +205,8 @@ impl Level2 {
         );
         let n: usize = added.iter().map(|(_, faces)| faces.len()).sum();
         if n > 0 {
-            self.families
+            fonts
+                .families
                 .insert(family.to_lowercase(), family.to_string());
         }
         n
@@ -159,12 +216,12 @@ impl Level2 {
     /// the emoji family, and the base family as `sans-serif` and `system-ui`.
     /// Families not added yet are skipped; call again after adding fonts.
     pub fn set_manifest(&mut self, manifest: &FallbackManifest) {
-        let collection = &mut self.fcx.collection;
+        let collection = &mut self.fonts.fcx.collection;
         let id = |c: &mut Collection, name: &str| c.family_id(name);
         if let Some(base) = id(collection, &manifest.base_family) {
             collection.set_generic_families(GenericFamily::SansSerif, std::iter::once(base));
             collection.set_generic_families(GenericFamily::SystemUi, std::iter::once(base));
-            self.base_family = Some(manifest.base_family.clone());
+            self.fonts.base_family = Some(manifest.base_family.clone());
         }
         if let Some(emoji) = manifest.emoji.as_deref().and_then(|e| id(collection, e)) {
             collection.set_generic_families(GenericFamily::Emoji, std::iter::once(emoji));
@@ -236,25 +293,20 @@ impl Level2 {
 
     /// Families added so far.
     pub fn families(&self) -> impl Iterator<Item = &str> {
-        self.families.values().map(String::as_str)
+        self.fonts.families.values().map(String::as_str)
     }
 
     /// A host that resolves only the faces needed by this text can provide
     /// their ordered fallback families instead of an eager platform census.
     pub fn set_fallback_families(&mut self, families: &[String]) {
+        let collection = &mut self.fonts.fcx.collection;
         let ids: Vec<_> = families
             .iter()
-            .filter_map(|f| self.fcx.collection.family_id(f))
+            .filter_map(|f| collection.family_id(f))
             .collect();
-        self.fcx
-            .collection
-            .set_generic_families(GenericFamily::SansSerif, ids.iter().copied());
-        self.fcx
-            .collection
-            .set_generic_families(GenericFamily::SystemUi, ids.iter().copied());
-        self.fcx
-            .collection
-            .set_fallbacks(Script::from_bytes(*b"Zyyy"), ids.into_iter());
+        collection.set_generic_families(GenericFamily::SansSerif, ids.iter().copied());
+        collection.set_generic_families(GenericFamily::SystemUi, ids.iter().copied());
+        collection.set_fallbacks(Script::from_bytes(*b"Zyyy"), ids.into_iter());
     }
 
     /// Lays `d` out.
@@ -268,7 +320,7 @@ impl Level2 {
         let text = d.text.clone();
         let size = d.size() as f32;
         let (leading, weight, tracking) = (leading_of(d), weight_of(d), tracking_of(d));
-        let base_family = self.base_family.clone();
+        let base_family = self.fonts.base_family.clone();
         let families = Self::families_of(base_family.as_deref(), d);
         // CoreText optical sizing: `opsz` follows the size unless the layer
         // sets it.
@@ -282,7 +334,9 @@ impl Level2 {
             variations.push(axis(OPSZ, size));
         }
 
-        let mut builder = self.lcx.ranged_builder(&mut self.fcx, &text, 1.0, false);
+        let mut builder = self
+            .lcx
+            .ranged_builder(&mut self.fonts.fcx, &text, 1.0, false);
         builder.push_default(StyleProperty::FontFamily(FontFamily::List(Cow::Owned(
             families,
         ))));
@@ -442,7 +496,12 @@ impl Level2 {
                 };
                 let run = gr.run();
                 let font = run.font();
-                let key = self.keys.get(&font.data.id()).cloned().unwrap_or_default();
+                let key = self
+                    .fonts
+                    .keys
+                    .get(&font.data.id())
+                    .cloned()
+                    .unwrap_or_default();
                 let synthesis = run.synthesis();
                 let mut glyphs = Vec::new();
                 for g in gr.positioned_glyphs() {

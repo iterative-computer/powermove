@@ -25,6 +25,9 @@ use skrifa::{FontRef, GlyphId, MetadataProvider, Tag};
 use crate::text_geom::{MeasuredLine, TextMeasure};
 
 mod level2;
+mod lru;
+#[cfg(test)]
+pub(crate) mod test_fonts;
 
 /// Level 2 uses font-metric baselines and normalized Parley coordinates.
 /// Keep outline geometry independent of platform rasterization.
@@ -92,11 +95,86 @@ type GlyphBox = Option<([f32; 4], f32)>;
 /// A face, glyph, and variation coordinates (tag, value bits).
 type BoxKey = (FaceId, u32, Vec<(u32, u32)>);
 
+const LEVEL2_GLYPH_LIMIT_ENTRIES: usize = 16_384;
+const LEVEL2_GLYPH_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+/// A split face's identity, glyph, size, coordinates, synthetic bold and
+/// oblique (bits).
+type Level2GlyphKey = (u64, u32, u32, Vec<i16>, bool, u32);
+
+/// What one cached glyph box retains: the key twice (the map and the
+/// recency index), the coordinates' allocations, and the slot.
+fn level2_glyph_entry_bytes(key: &Level2GlyphKey) -> usize {
+    let coords = if key.3.capacity() == 0 {
+        0
+    } else {
+        key.3.capacity() * std::mem::size_of::<i16>() + 16
+    };
+    2 * (std::mem::size_of::<Level2GlyphKey>() + coords)
+        + std::mem::size_of::<(Option<[f64; 4]>, u64, usize)>()
+        + std::mem::size_of::<u64>()
+}
+
+/// Level 2 cache use and its bounds.
+///
+/// Every bound holds whenever a level 2 call returns.
+///
+/// - Split faces: at most `face_limit_entries` faces and `face_limit_bytes`
+///   bytes, least recently used first. Byte counts include faces that share
+///   the resolver's bytes (`face_copied_bytes` is the part split out of
+///   collection files). While a request runs, its own faces may exceed the
+///   ceiling; it is enforced, on those faces too, before the request returns.
+/// - Parley collections (`set_entries`, at most `set_limit_entries`, the
+///   active one included) reference only faces in the split-face cache:
+///   evicting a face drops every collection and layout that used it. Their
+///   own metadata (`set_registrations` faces) is not counted in bytes.
+/// - Layouts: at most `layout_limit_entries` and `layout_limit_bytes`, each
+///   charged its key (whole span contents included) and layout capacities.
+/// - Glyph boxes: at most `glyph_limit_entries` and `glyph_limit_bytes`.
+///
+/// `retained_bytes` sums the three byte counts; it never exceeds
+/// `limit_bytes`. Frames own clones of the fonts they draw, outside the
+/// cache, until they are dropped.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Level2CacheStats {
+    pub face_entries: usize,
+    pub face_bytes: usize,
+    pub face_copied_bytes: usize,
+    pub face_limit_entries: usize,
+    pub face_limit_bytes: usize,
+    pub set_entries: usize,
+    pub set_registrations: usize,
+    pub set_limit_entries: usize,
+    pub layout_entries: usize,
+    pub layout_bytes: usize,
+    pub layout_limit_entries: usize,
+    pub layout_limit_bytes: usize,
+    pub glyph_entries: usize,
+    pub glyph_bytes: usize,
+    pub glyph_limit_entries: usize,
+    pub glyph_limit_bytes: usize,
+    pub retained_bytes: usize,
+    pub limit_bytes: usize,
+    pub face_hits: u64,
+    pub face_splits: u64,
+    pub face_evictions: u64,
+    pub set_hits: u64,
+    pub set_builds: u64,
+    pub set_evictions: u64,
+    pub registrations: u64,
+    pub layouts: u64,
+    pub layout_hits: u64,
+    pub glyph_hits: u64,
+    pub glyph_misses: u64,
+}
+
 /// Level 1 text measurement with ink boxes from outlines.
 pub struct CompatMeasure<R: FontResolver> {
     compat: Compat<R>,
     boxes: HashMap<BoxKey, GlyphBox>,
-    level2_faces: HashMap<(u64, u32), pm_text::font::FontBytes>,
+    level2: level2::Level2Cache,
+    level2_boxes: lru::Lru<Level2GlyphKey, Option<[f64; 4]>>,
+    level2_glyph_hits: u64,
+    level2_glyph_misses: u64,
 }
 
 impl<R: FontResolver> CompatMeasure<R> {
@@ -104,12 +182,53 @@ impl<R: FontResolver> CompatMeasure<R> {
         CompatMeasure {
             compat: Compat::new(resolver),
             boxes: HashMap::new(),
-            level2_faces: HashMap::new(),
+            level2: level2::Level2Cache::default(),
+            level2_boxes: lru::Lru::default(),
+            level2_glyph_hits: 0,
+            level2_glyph_misses: 0,
         }
     }
 
     pub fn compat(&mut self) -> &mut Compat<R> {
         &mut self.compat
+    }
+
+    pub fn level2_cache_stats(&self) -> Level2CacheStats {
+        let l2 = &self.level2;
+        let c = l2.counters;
+        Level2CacheStats {
+            face_entries: l2.face_entries(),
+            face_bytes: l2.face_bytes(),
+            face_copied_bytes: l2.copied_bytes(),
+            face_limit_entries: l2.face_limit_entries,
+            face_limit_bytes: l2.face_limit_bytes,
+            set_entries: l2.set_entries(),
+            set_registrations: l2.set_registrations(),
+            set_limit_entries: level2::SET_LIMIT_ENTRIES,
+            layout_entries: l2.layout_entries(),
+            layout_bytes: l2.layout_bytes(),
+            layout_limit_entries: level2::LAYOUT_LIMIT_ENTRIES,
+            layout_limit_bytes: level2::LAYOUT_LIMIT_BYTES,
+            glyph_entries: self.level2_boxes.len(),
+            glyph_bytes: self.level2_boxes.bytes(),
+            glyph_limit_entries: LEVEL2_GLYPH_LIMIT_ENTRIES,
+            glyph_limit_bytes: LEVEL2_GLYPH_LIMIT_BYTES,
+            retained_bytes: l2.face_bytes() + l2.layout_bytes() + self.level2_boxes.bytes(),
+            limit_bytes: l2.face_limit_bytes
+                + level2::LAYOUT_LIMIT_BYTES
+                + LEVEL2_GLYPH_LIMIT_BYTES,
+            face_hits: c.face_hits,
+            face_splits: c.face_splits,
+            face_evictions: c.face_evictions,
+            set_hits: c.set_hits,
+            set_builds: c.set_builds,
+            set_evictions: c.set_evictions,
+            registrations: c.registrations,
+            layouts: c.layouts,
+            layout_hits: c.layout_hits,
+            glyph_hits: self.level2_glyph_hits,
+            glyph_misses: self.level2_glyph_misses,
+        }
     }
 
     fn glyph_box(&mut self, face: FaceId, glyph: u32, coords: &[(u32, f32)]) -> GlyphBox {
@@ -441,7 +560,38 @@ impl<R: FontResolver> TextMeasure for CompatMeasure<R> {
         d: &TextContent,
         spans: &[pm_text::level2::StyleSpan],
     ) -> Result<crate::text_level2::Shaped, String> {
-        level2::shape(&mut self.compat, &mut self.level2_faces, d, spans)
+        level2::shape(&mut self.compat, &mut self.level2, d, spans)
+    }
+    fn level2_ink(
+        &mut self,
+        data: &pm_text::font::FontBytes,
+        run: &pm_text::level2::Run,
+        glyph: u32,
+    ) -> Option<[f64; 4]> {
+        let key = (
+            data.id(),
+            glyph,
+            run.size.to_bits(),
+            run.coords.clone(),
+            run.synthetic_bold,
+            run.skew.to_bits(),
+        );
+        if let Some(ink) = self.level2_boxes.get(&key) {
+            self.level2_glyph_hits += 1;
+            return *ink;
+        }
+        self.level2_glyph_misses += 1;
+        let ink = level2_ink(data, run, glyph);
+        let bytes = level2_glyph_entry_bytes(&key);
+        self.level2_boxes.insert(key, ink, bytes);
+        while self.level2_boxes.len() > LEVEL2_GLYPH_LIMIT_ENTRIES
+            || self.level2_boxes.bytes() > LEVEL2_GLYPH_LIMIT_BYTES
+        {
+            if self.level2_boxes.pop_lru(|_| false).is_none() {
+                break;
+            }
+        }
+        ink
     }
     fn measure_lines(&mut self, d: &TextContent) -> Vec<MeasuredLine> {
         let lines = self.compat.source_lines(d);

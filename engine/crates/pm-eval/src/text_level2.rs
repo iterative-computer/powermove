@@ -7,16 +7,17 @@ use crate::{
     js_sem::{JsResult, JsThrow, JsValue},
     node,
     scope::Scope,
+    text_anim::{StyleState, TextAnimation},
     text_geom::{Selection, TextMeasure, TextRaster, text_content},
     transform::{Mat2d, mul},
 };
 use pm_model::{JsString, Node};
 use pm_text::{
-    compat::{GlyphLayout, TextContent},
+    compat::TextContent,
     font::FontBytes,
     level2::{Level2Layout, Run, StyleSpan},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn is_level2(layer: &Node) -> bool {
     node::member(Some(layer), "compat").is_some_and(|v| node::to_number(Some(v)) >= 2.0)
@@ -40,11 +41,8 @@ pub struct Draw {
 pub struct Frame {
     pub layout: Level2Layout,
     pub draws: Vec<Draw>,
-    /// The selection box that bounds and picks use: the resting styled
-    /// text, so it neither collapses while animators hide every glyph nor
-    /// jumps as they settle (today's animated-text selection). With range
-    /// styles it also grows over the posed visible ink, as today's styled
-    /// path selects. Typography anchoring is applied.
+    /// The padded resting interaction box that bounds and picks use. An
+    /// authored paragraph keeps its full box, even where it has no ink.
     pub selection: Selection,
     /// The resting styled ink box with typography anchoring applied: what
     /// the anchor measures and what anchor edits start from.
@@ -112,8 +110,8 @@ fn get<'a>(d: &'a Content, key: &str) -> &'a JsValue {
 
 /// Resolve spans at grapheme boundaries; the last authored style wins for
 /// each property. Includes whitespace, which participates in line breaking.
-fn spans(d: &Content, state: &crate::text_anim::TextAnimation) -> Vec<StyleSpan> {
-    if state.styles.is_empty() {
+fn spans(d: &Content, styles: &[StyleState]) -> Vec<StyleSpan> {
+    if styles.is_empty() {
         return Vec::new();
     }
     let text = text_content(d).text;
@@ -121,7 +119,7 @@ fn spans(d: &Content, state: &crate::text_anim::TextAnimation) -> Vec<StyleSpan>
     let mut spans: Vec<StyleSpan> = Vec::new();
     for r in pm_text::compat::graphemes(&units) {
         let mut content = d.clone();
-        for style in &state.styles {
+        for style in styles {
             let start = get(&style.item, "start").to_number();
             let end = get(&style.item, "end").to_number();
             if r.start as f64 >= start && (r.start as f64) < end {
@@ -144,9 +142,9 @@ fn spans(d: &Content, state: &crate::text_anim::TextAnimation) -> Vec<StyleSpan>
     spans
 }
 
-fn color_at(d: &Content, state: &crate::text_anim::TextAnimation, source: usize) -> JsValue {
+fn color_at(d: &Content, styles: &[StyleState], source: usize) -> JsValue {
     let mut color = get(d, "color").clone();
-    for s in &state.styles {
+    for s in styles {
         if source as f64 >= get(&s.item, "start").to_number()
             && (source as f64) < get(&s.item, "end").to_number()
             && let Some(c) = s.p.get(&JsString::from("color"))
@@ -172,15 +170,21 @@ impl<'d> Scope<'_, 'd> {
     ) -> JsResult<Frame> {
         let d = self.resolved_text_content(layer, time)?;
         let tc: TextContent = text_content(&d);
-        let controls = self.text_animation_state(layer, time, &GlyphLayout::default())?;
+        // Controls are evaluated once: the range styles shape the text, and
+        // the selector weights follow its units.
+        let controls = self.text_controls(layer, time)?;
         let shaped = measure
-            .level2(&tc, &spans(&d, &controls))
+            .level2(&tc, &spans(&d, &controls.styles))
             .map_err(|why| JsThrow::type_error(&why))?;
         let layout = shaped.layout;
-        let mut state = self.text_animation_state(layer, time, &layout.units)?;
-        if !animate {
-            state.animators.clear();
-        }
+        let state = if animate {
+            self.text_animation_weights(layer, time, controls, &layout.units)
+        } else {
+            TextAnimation {
+                animators: Vec::new(),
+                styles: controls.styles,
+            }
+        };
         let poses = self.level2_glyphs(&d, &layout.units, &state);
         let poses: HashMap<_, _> = poses.iter().map(|g| (g.unit.source_start, g)).collect();
         let units: HashMap<_, _> = layout
@@ -203,7 +207,7 @@ impl<'d> Scope<'_, 'd> {
                     matrix: IDENTITY,
                     opacity: 1.0,
                     blur: 0.0,
-                    color: color_at(&d, &state, 0),
+                    color: color_at(&d, &state.styles, 0),
                 });
                 continue;
             }
@@ -236,10 +240,10 @@ impl<'d> Scope<'_, 'd> {
                             p.color
                                 .as_ref()
                                 .map(|s| JsValue::String(s.clone()))
-                                .unwrap_or_else(|| color_at(&d, &state, source)),
+                                .unwrap_or_else(|| color_at(&d, &state.styles, source)),
                         )
                     }
-                    _ => (IDENTITY, 1.0, 0.0, color_at(&d, &state, source)),
+                    _ => (IDENTITY, 1.0, 0.0, color_at(&d, &state.styles, source)),
                 };
                 let atom = Run {
                     line: run.line,
@@ -287,12 +291,19 @@ impl<'d> Scope<'_, 'd> {
             w: 0.0,
             h: layout.height,
         };
-        let mut resting = bounds(&draws, true).unwrap_or(empty);
-        let mut ink = bounds(&draws, false);
-        let mut selection = match (&ink, state.styles.is_empty()) {
-            (Some(ink), false) => union(&resting, ink),
-            _ => resting,
+        // Blank text has no ink: its box is the interaction box alone.
+        let (rest, mut ink) = if tc.text.trim().is_empty() {
+            (None, None)
+        } else {
+            bounds(&draws, &tc.text, measure)
         };
+        let mut resting = rest.unwrap_or(empty);
+        let mut selection = resting_selection(&tc, &layout, rest);
+        if !state.styles.is_empty()
+            && let Some(posed) = ink
+        {
+            selection = union(&selection, &posed);
+        }
         let mut offset = Offset::default();
         if anchor
             && let Some(reference) = BoundsValues::of(node::member(
@@ -330,30 +341,48 @@ impl<'d> Scope<'_, 'd> {
     }
 }
 
-/// Transformed outline control boxes, including blur reach (`resting`
-/// measures the unposed styled ink instead, hidden glyphs included). `None`
-/// when no glyph has ink: empty or whitespace-only text, or every glyph
-/// hidden by an animator.
-fn bounds(draws: &[Draw], resting: bool) -> Option<Selection> {
-    let mut b = [
+/// The resting styled ink box (no pose, hidden glyphs included) and the
+/// posed visible ink (transformed outline control boxes with blur reach),
+/// from one glyph box per glyph. `None` when no glyph has ink: blank text,
+/// or (posed) every glyph hidden by an animator. Glyphs of whitespace,
+/// controls and default-ignorables never have ink, even when a font gives
+/// them no outline but an advance.
+fn bounds(
+    draws: &[Draw],
+    text: &str,
+    measure: &mut dyn TextMeasure,
+) -> (Option<Selection>, Option<Selection>) {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let inkless: HashSet<usize> = pm_text::compat::graphemes(&units)
+        .into_iter()
+        .filter(|r| {
+            char::decode_utf16(units[r.clone()].iter().copied()).all(|c| {
+                c.is_ok_and(|ch| {
+                    ch.is_whitespace()
+                        || ch.is_control()
+                        || pm_text::blink::chars::is_default_ignorable(ch as u32)
+                })
+            })
+        })
+        .map(|r| r.start)
+        .collect();
+    let mut resting_box = [
         f64::INFINITY,
         f64::INFINITY,
         f64::NEG_INFINITY,
         f64::NEG_INFINITY,
     ];
+    let mut posed_box = resting_box;
     for draw in draws {
-        if !resting && (!draw.opacity.is_finite() || draw.opacity <= 0.0) {
-            continue;
-        }
-        for glyph in &draw.run.glyphs {
-            let Some(ink) = crate::text_measure::level2_ink(&draw.data, &draw.run, glyph.id) else {
+        let visible = draw.opacity.is_finite() && draw.opacity > 0.0;
+        let m = draw.matrix;
+        let pad = draw.blur.max(0.0) * 3.0;
+        for (i, glyph) in draw.run.glyphs.iter().enumerate() {
+            if draw.run.sources.get(i).is_some_and(|s| inkless.contains(s)) {
                 continue;
-            };
-            let m = if resting { IDENTITY } else { draw.matrix };
-            let pad = if resting {
-                0.0
-            } else {
-                draw.blur.max(0.0) * 3.0
+            }
+            let Some(ink) = measure.level2_ink(&draw.data, &draw.run, glyph.id) else {
+                continue;
             };
             for (x, y) in [
                 (ink[0], ink[1]),
@@ -362,15 +391,50 @@ fn bounds(draws: &[Draw], resting: bool) -> Option<Selection> {
                 (ink[2], ink[3]),
             ] {
                 let (x, y) = (x + glyph.x, y + glyph.y);
-                let (x, y) = (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
-                b[0] = b[0].min(x - pad);
-                b[1] = b[1].min(y - pad);
-                b[2] = b[2].max(x + pad);
-                b[3] = b[3].max(y + pad);
+                resting_box[0] = resting_box[0].min(x);
+                resting_box[1] = resting_box[1].min(y);
+                resting_box[2] = resting_box[2].max(x);
+                resting_box[3] = resting_box[3].max(y);
+                if visible {
+                    let (px, py) = (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+                    posed_box[0] = posed_box[0].min(px - pad);
+                    posed_box[1] = posed_box[1].min(py - pad);
+                    posed_box[2] = posed_box[2].max(px + pad);
+                    posed_box[3] = posed_box[3].max(py + pad);
+                }
             }
         }
     }
-    b.iter().all(|v| v.is_finite()).then(|| rect(b))
+    let finite = |b: [f64; 4]| b.iter().all(|v| v.is_finite()).then(|| rect(b));
+    (finite(resting_box), finite(posed_box))
+}
+
+/// Today's resting interaction box (`textGeometry(d).selection`): an
+/// authored paragraph's box (its height, or the lines' height when it has
+/// none, never under one line), aligned at the origin; otherwise the
+/// resting ink, or a one-pixel caret column at the origin for blank text.
+/// Both padded by `clamp(size × 0.055, 3, 12)`.
+fn resting_selection(d: &TextContent, layout: &Level2Layout, ink: Option<Selection>) -> Selection {
+    let pad = (d.size() * 0.055).clamp(3.0, 12.0);
+    if d.paragraph.unwrap_or(false)
+        && let Some(width) = d.box_width.filter(|w| w.is_finite() && *w > 0.0)
+    {
+        let height = d
+            .box_height
+            .filter(|h| h.is_finite() && *h > 0.0)
+            .map_or(d.line_height() * layout.lines.len().max(1) as f64, |h| {
+                h.max(d.line_height())
+            });
+        let x = match d.align() {
+            pm_text::compat::Align::Left => 0.0,
+            pm_text::compat::Align::Center => -width / 2.0,
+            pm_text::compat::Align::Right => -width,
+        };
+        return rect([x - pad, -pad, x + width + pad, height + pad]);
+    }
+    // Blank multiline text keeps all of its line boxes interactive too.
+    let ink = ink.unwrap_or_else(|| rect([-0.5, 0.0, 0.5, layout.height.max(d.size())]));
+    rect([ink.x0 - pad, ink.y0 - pad, ink.x1 + pad, ink.y1 + pad])
 }
 
 fn rect(b: [f64; 4]) -> Selection {
@@ -391,4 +455,103 @@ fn union(a: &Selection, b: &Selection) -> Selection {
         a.x1.max(b.x1),
         a.y1.max(b.y1),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paragraph_selection_uses_authored_box_and_alignment() {
+        let layout = Level2Layout {
+            lines: vec![Default::default(), Default::default()],
+            ..Default::default()
+        };
+        for (align, x0, x1) in [
+            ("left", -3.0, 263.0),
+            ("center", -133.0, 133.0),
+            ("right", -263.0, 3.0),
+        ] {
+            let d = TextContent {
+                size: Some(12.0),
+                leading: Some(1.25),
+                align: Some(align.into()),
+                paragraph: Some(true),
+                box_width: Some(260.0),
+                box_height: Some(220.0),
+                ..Default::default()
+            };
+            let selection = resting_selection(&d, &layout, Some(rect([12.0, 3.0, 34.0, 14.0])));
+            assert_eq!(
+                (selection.x0, selection.x1, selection.y0, selection.y1),
+                (x0, x1, -3.0, 223.0)
+            );
+            let auto = TextContent {
+                box_height: None,
+                ..d
+            };
+            assert_eq!(resting_selection(&auto, &layout, None).y1, 33.0);
+        }
+    }
+
+    #[test]
+    fn blank_point_text_has_an_interaction_box() {
+        for text in ["   ", "", "\t\u{2003}\n"] {
+            let d = TextContent {
+                size: Some(8.0),
+                text: text.into(),
+                ..Default::default()
+            };
+            let selection = resting_selection(&d, &Level2Layout::default(), None);
+            assert_eq!(
+                (selection.x0, selection.x1, selection.y0, selection.y1),
+                (-3.5, 3.5, -3.0, 11.0)
+            );
+            let multiline = Level2Layout {
+                height: 30.0,
+                ..Default::default()
+            };
+            assert_eq!(resting_selection(&d, &multiline, None).y1, 33.0);
+        }
+    }
+
+    #[test]
+    fn whitespace_glyphs_have_no_ink() {
+        use crate::text_measure::{CompatMeasure, test_fonts};
+        let data = FontBytes::new(test_fonts::font(400, 500, 400));
+        let glyph = |id, x| pm_text::compat::PlacedGlyph { id, x, y: 0.0 };
+        // "A" then U+2003, whose glyph has an advance and no outline.
+        let run = Run {
+            line: 0,
+            font: "k".into(),
+            size: 10.0,
+            coords: vec![],
+            synthetic_bold: false,
+            skew: 0.0,
+            glyphs: vec![
+                glyph(2 + 0x41 - 0x21, 0.0),
+                glyph(test_fonts::EM_SPACE, 5.0),
+            ],
+            sources: vec![0, 1],
+        };
+        let mut measure = CompatMeasure::new(test_fonts::Fonts::new());
+        // The outline-less fallback would give the space a box.
+        assert!(
+            measure
+                .level2_ink(&data, &run, test_fonts::EM_SPACE)
+                .is_some()
+        );
+        let draw = Draw {
+            run,
+            data,
+            matrix: IDENTITY,
+            opacity: 1.0,
+            blur: 0.0,
+            color: JsValue::from("#fff"),
+        };
+        let (resting, ink) = bounds(std::slice::from_ref(&draw), "A\u{2003}", &mut measure);
+        let resting = resting.unwrap();
+        assert_eq!((resting.x0, resting.x1), (0.5, 4.5));
+        assert_eq!(ink.unwrap().x1, 4.5);
+    }
 }

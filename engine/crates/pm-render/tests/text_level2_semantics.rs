@@ -60,6 +60,7 @@ fn main() {
     let mut request = RenderRequest::sized(Size::new(640, 360), Precision::Float32);
     request.background = false;
     let assets = MapResolver::default();
+    selection_contract(&mut measure, &mut renderer);
     let mut frames = 0;
     let mut stats = Stats::default();
     let mut ssim_failures = Vec::new();
@@ -172,13 +173,13 @@ fn main() {
             assert!(sel.w > 1.0 && sel.h > 1.0, "{id} at {t}: selection {sel:?}");
             assert_close(
                 &evaluated.resting,
-                &resting.selection,
+                &resting.resting,
                 1e-9,
                 &format!("{id} resting"),
             );
             let expected = match (&evaluated.ink, styled && animated) {
-                (Some(ink), true) => union(&evaluated.resting, ink),
-                _ => evaluated.resting,
+                (Some(ink), true) => union(&resting.selection, ink),
+                _ => resting.selection,
             };
             assert_close(&sel, &expected, 1e-9, &format!("{id} selection at {t}"));
             if !styled {
@@ -326,6 +327,42 @@ fn main() {
             "{id} forbidden routing: {issues:?}"
         );
         assert!(issues.is_empty(), "{id}: {issues:?}");
+        // Warm frame/query reuse must not rebuild its collection, register
+        // the faces again, or reshape the same typography. Include the
+        // mixed-weight/range and large emoji cases, not just plain Latin.
+        scope
+            .level2_text(layer, 0.75, &mut measure, true, true)
+            .unwrap();
+        let before = measure.level2_cache_stats();
+        scope
+            .level2_text(layer, 0.75, &mut measure, true, true)
+            .unwrap();
+        let cache = measure.level2_cache_stats();
+        assert_eq!(
+            cache.registrations, before.registrations,
+            "{id}: face registrations reused"
+        );
+        assert_eq!(cache.layouts, before.layouts, "{id}: layout reused");
+        assert!(
+            cache.layout_hits > before.layout_hits,
+            "{id}: warm layout hit"
+        );
+        assert!(cache.retained_bytes <= cache.limit_bytes, "{id}: {cache:?}");
+        assert!(
+            cache.face_bytes <= cache.face_limit_bytes
+                && cache.face_entries <= cache.face_limit_entries,
+            "{id}: {cache:?}"
+        );
+        assert!(
+            cache.set_entries <= cache.set_limit_entries,
+            "{id}: {cache:?}"
+        );
+        assert!(
+            cache.layout_bytes <= cache.layout_limit_bytes
+                && cache.glyph_bytes <= cache.glyph_limit_bytes,
+            "{id}: {cache:?}"
+        );
+        println!("{id}: cache {cache:?}");
         println!("{id}: four native frames, bounds, picks, plane, raster, no forbidden routing");
     }
     assert_eq!(frames, 52);
@@ -335,6 +372,129 @@ fn main() {
         "below the 0.98 CoreText ink SSIM floor: {ssim_failures:#?}"
     );
     println!("level 2 semantics: {frames} native frames passed");
+}
+
+/// Independent interaction contract: authored paragraph boxes and the
+/// minimum 3px padding remain selectable even where there is no glyph ink.
+#[cfg(target_os = "macos")]
+fn selection_contract(
+    measure: &mut pm_eval::text_measure::CompatMeasure<pm_text::registry::CoreTextRegistry>,
+    renderer: &mut pm_render::Renderer,
+) {
+    use pm_eval::bounds::{NoHost, PickOptions};
+    use pm_eval::{Comp, Evaluator, Scope};
+    use serde_json::json;
+    use support::doc::{layer, no_fill, project};
+
+    let mut cases = Vec::new();
+    for (align, x0) in [("left", 0.0), ("center", -130.0), ("right", -260.0)] {
+        for height in [0.0, 220.0] {
+            cases.push((
+                format!("paragraph {align} height {height}"),
+                json!({"text":"one\ntwo", "font":"Georgia", "size":12,
+                    "leading":1.25,"boxWidth":260,"boxHeight":height,"align":align}),
+                Some([
+                    x0 - 3.0,
+                    -3.0,
+                    x0 + 263.0,
+                    if height > 0.0 { 223.0 } else { 33.0 },
+                ]),
+            ));
+        }
+    }
+    cases.push((
+        "small point text".into(),
+        json!({"text":"Tiny", "font":"Georgia", "size":8}),
+        None,
+    ));
+    for text in ["   ", "", "\t\u{2003}\n"] {
+        cases.push((
+            format!("blank {text:?}"),
+            json!({"text":text,"font":"Georgia","size":8}),
+            None,
+        ));
+    }
+    for (name, d, expected) in cases {
+        let mut l = layer("text", "text", d, 320.0, 80.0, 3.0);
+        l["compat"] = json!(2);
+        let doc = pm_model::Document::new(
+            Some(
+                pm_model::json::parse(&project(640, 360, 3.0, no_fill(), vec![l]).to_string())
+                    .unwrap(),
+            ),
+            1,
+        );
+        let comp = Comp::resolve(&doc, "Ptest-root").unwrap();
+        let mut ev = Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let l = &scope.layers()[0];
+        let frame = scope.level2_text(l, 0.0, measure, true, true).unwrap();
+        let s = frame.selection;
+        if let Some(expected) = expected {
+            for (actual, expected) in [s.x0, s.y0, s.x1, s.y1].into_iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() < 1e-8,
+                    "{name}: {s:?}, expected {expected}"
+                );
+            }
+        } else if name.starts_with("blank") {
+            assert_eq!(
+                [s.x0, s.x1],
+                [-3.5, 3.5],
+                "{name}: blank x +/-0.5 plus interaction padding"
+            );
+            assert!(
+                s.h >= 8.0 + 6.0,
+                "{name}: non-collapsed blank selection {s:?}"
+            );
+            assert!(
+                s.h >= frame.layout.height + 6.0,
+                "{name}: all blank lines stay interactive"
+            );
+            assert!(frame.ink.is_none(), "{name}: blank text has no painted ink");
+        } else {
+            let r = frame.resting;
+            for actual in [r.x0 - s.x0, r.y0 - s.y0, s.x1 - r.x1, s.y1 - r.y1] {
+                assert!(
+                    (actual - 3.0).abs() < 1e-8,
+                    "{name}: minimum interaction padding {s:?} vs {r:?}"
+                );
+            }
+        }
+        // Pick inside the padded/paragraph edge, outside the tight ink.
+        let x = 320.0 + s.x1 - 0.25;
+        let y = 80.0 + (s.y0 + s.y1) / 2.0;
+        assert!(
+            scope
+                .pick(x, y, 0.0, &PickOptions::default(), measure, &mut NoHost)
+                .unwrap()
+                .is_some(),
+            "{name}: edge pick"
+        );
+        assert!(
+            scope
+                .pick(
+                    x + 1.0,
+                    y,
+                    0.0,
+                    &PickOptions::default(),
+                    measure,
+                    &mut NoHost
+                )
+                .unwrap()
+                .is_none(),
+            "{name}: outside pick"
+        );
+        let b = scope.bounds(l, 0.0, measure, &mut NoHost).unwrap().unwrap();
+        assert_eq!([b.x0, b.y0, b.x1, b.y1], [s.x0, s.y0, s.x1, s.y1], "{name}");
+        assert!(
+            renderer
+                .unsupported_with_media(&doc, "Ptest-root", &pm_render::MapResolver::default())
+                .is_empty(),
+            "{name}: native capability"
+        );
+        println!("selection contract: {name} passed");
+    }
 }
 
 #[cfg(target_os = "macos")]

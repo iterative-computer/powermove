@@ -196,6 +196,14 @@ impl pm_eval::text_geom::TextMeasure for InkProbe<'_> {
     ) -> Result<pm_eval::text_level2::Shaped, String> {
         self.inner.level2(d, spans)
     }
+    fn level2_ink(
+        &mut self,
+        data: &pm_text::font::FontBytes,
+        run: &pm_text::level2::Run,
+        glyph: u32,
+    ) -> Option<[f64; 4]> {
+        self.inner.level2_ink(data, run, glyph)
+    }
     fn measure_lines(
         &mut self,
         d: &pm_text::compat::TextContent,

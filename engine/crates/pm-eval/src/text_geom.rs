@@ -46,6 +46,15 @@ pub trait TextMeasure {
     ) -> Result<crate::text_level2::Shaped, String> {
         Err("level 2 text measurement is unavailable".into())
     }
+    /// A level 2 glyph box, shared by resting and posed geometry.
+    fn level2_ink(
+        &mut self,
+        data: &pm_text::font::FontBytes,
+        run: &pm_text::level2::Run,
+        glyph: u32,
+    ) -> Option<[f64; 4]> {
+        crate::text_measure::level2_ink(data, run, glyph)
+    }
     /// `textLines(d, meas, lh)` with each line's width and ink, measured with
     /// `font = fontStr(d)` and `letterSpacing = d.tracking px`.
     fn measure_lines(&mut self, d: &TextContent) -> Vec<MeasuredLine>;
