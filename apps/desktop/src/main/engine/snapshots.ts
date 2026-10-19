@@ -84,6 +84,8 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (fallback !== undefined && (document === undefined || !validFallback(fallback))) return false;
   const compat = v['compatEvents'];
   if (compat !== undefined && (document === undefined || !validCompatEvents(compat))) return false;
+  const svg = v['svgPixels'];
+  if (svg !== undefined && (document === undefined || !validSvgPixels(svg))) return false;
   if (v['revision'] !== null && !safeUint(v['revision'])) return false;
   const s = v['snapshot'] as Record<string, unknown> | null;
   if (!s || typeof s !== 'object') return false;
@@ -125,6 +127,12 @@ export const MAX_FALLBACK_PIXELS = 16;
 export const MAX_FALLBACK_BYTES = 256 * 1024 * 1024;
 /** Compatibility events in one `document` snapshot request (bands included). */
 export const MAX_COMPAT_EVENTS = 4096;
+/** Most level 1 SVG rasters one request carries, and their bytes (one
+ *  raster may be today's largest bucket, 8192 × 8192). */
+export const MAX_SVG_PIXELS = 64;
+export const MAX_SVG_BYTES = 512 * 1024 * 1024;
+/** Largest SVG raster edge (`svgRasterDimensions`' limit). */
+const MAX_SVG_EDGE = 8192;
 
 function validDocument(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -134,6 +142,21 @@ function validDocument(value: unknown): boolean {
   if (json === undefined || json === null) return d['hash'] === undefined || d['hash'] === null || (typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']));
   // A document's body comes with its canonical hash.
   return typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']) && json instanceof Uint8Array && json.byteLength > 0 && json.byteLength <= MAX_DOCUMENT_BYTES;
+}
+
+function validSvgPixels(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > MAX_SVG_PIXELS) return false;
+  let bytes = 0;
+  for (const p of value as Record<string, unknown>[]) {
+    const key = p?.['key'] as Record<string, unknown> | undefined;
+    if (!key || typeof key !== 'object' || typeof key['content'] !== 'string' || !/^[0-9a-f]{64}$/.test(key['content'])) return false;
+    const w = key['width'], h = key['height'];
+    if (!Number.isInteger(w) || !Number.isInteger(h) || (w as number) < 1 || (h as number) < 1 || (w as number) > MAX_SVG_EDGE || (h as number) > MAX_SVG_EDGE) return false;
+    const data = p['data'];
+    if (!(data instanceof Uint8Array) || data.byteLength !== (w as number) * (h as number) * 4) return false;
+    bytes += data.byteLength;
+  }
+  return bytes <= MAX_SVG_BYTES;
 }
 
 function validFallback(value: unknown): boolean {
@@ -247,7 +270,13 @@ export class SnapshotService {
       try {
         // Bounded like the snapshot itself: a blocked window always gets a reply.
         prepared = await Promise.race([
-          sessions.prepare(windowId, request.document, (request.fallbackPixels ?? []).map((p) => ({ ...p })), request.compatEvents ?? []),
+          sessions.prepare(
+            windowId,
+            request.document,
+            (request.fallbackPixels ?? []).map((p) => ({ ...p })),
+            (request.svgPixels ?? []).map((p) => ({ key: { ...p.key }, data: p.data })),
+            request.compatEvents ?? []
+          ),
           new Promise<'timeout'>((resolve) => {
             prepareTimer = setTimeout(() => resolve('timeout'), Math.max(0, deadline - now()));
           })
@@ -314,7 +343,7 @@ export class SnapshotService {
     }
     if (outcome.outcome === 'needsRenderer') {
       this.stats.needsRenderer++;
-      return { status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat };
+      return { status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat, svg: outcome.svg ?? [] };
     }
     const expected = outcome.width * outcome.height * 4;
     let data: Uint8Array;

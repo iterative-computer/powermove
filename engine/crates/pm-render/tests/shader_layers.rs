@@ -181,6 +181,45 @@ fn targets_are_capped_at_4096_pixels() {
 }
 
 #[test]
+fn level2_shader_layers_render_at_the_density_they_are_drawn_at() {
+    // A 40 × 20 layer scaled 3×: level 1 renders 40 × 20 texels (today),
+    // level 2 renders at the drawn density (120 × 60) without the 4,096 px
+    // cap and draws through the level 2 resampler.
+    let mut r = Renderer::headless().unwrap();
+    let mut d = shader(
+        "void main(){ fragColor = vec4(iResolution.x / 1000.0, iResolution.y / 1000.0, 0.0, 1.0); }",
+        json!({}),
+    );
+    d["w"] = json!(40);
+    d["h"] = json!(20);
+    let mut l = layer("L", "shader", d.clone(), 0.0, 4.0);
+    l["p"]["scale.x"] = ch(json!(300));
+    l["p"]["scale.y"] = ch(json!(300));
+    let doc = document(160, 90, 30.0, vec![l.clone()]);
+    let (px, _) = render(&mut r, &doc, (160, 90), 1.0).unwrap();
+    assert!(close(&px[..4], [0.04, 0.02, 0.0, 1.0]), "{:?}", &px[..4]);
+    l["compat"] = json!(2);
+    let doc = document(160, 90, 30.0, vec![l.clone()]);
+    assert!(pm_render::unsupported(&doc, "P-root").is_empty());
+    let (px, failures) = render(&mut r, &doc, (160, 90), 1.0).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(close(&px[..4], [0.12, 0.06, 0.0, 1.0]), "{:?}", &px[..4]);
+    // Beyond today's cap: 2,000 px drawn at 3× is 6,000 texels.
+    d["w"] = json!(2000);
+    d["code"] = json!("void main(){ fragColor = vec4(iResolution.x / 8192.0, 0.0, 0.0, 1.0); }");
+    let mut l = layer("L", "shader", d, 0.0, 4.0);
+    l["p"]["scale.x"] = ch(json!(300));
+    l["compat"] = json!(2);
+    let doc = document(160, 90, 30.0, vec![l]);
+    let (px, _) = render(&mut r, &doc, (160, 90), 1.0).unwrap();
+    assert!(
+        close(&px[..1], [6000.0 / 8192.0, 0.0, 0.0, 1.0]),
+        "{:?}",
+        &px[..4]
+    );
+}
+
+#[test]
 fn code_webgl_refuses_draws_nothing_and_is_reported() {
     let mut r = Renderer::headless().unwrap();
     let doc = document(

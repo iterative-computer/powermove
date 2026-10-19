@@ -116,6 +116,8 @@ pub(crate) struct Exec<'a> {
     /// Where screen, overlay, and soft light run with linear blending on.
     pub blend_domain: BlendDomain,
     pub export: bool,
+    /// What a level 1 SVG raster miss draws (`crate::vector::svg_rasters`).
+    pub svg_policy: crate::vector::svg_rasters::SvgMissPolicy,
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
     pub depth_id: bool,
@@ -360,12 +362,44 @@ impl Exec<'_> {
                         }
                     }
                     Source::Vector(v) => {
-                        match self
-                            .vector
-                            .resolve(self.device, self.queue, v, self.precision)
-                        {
-                            Ok(view) => r.view = Some(view),
-                            Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
+                        if let crate::vector::VectorSource::SvgImage { key, asset, path } = &**v {
+                            use crate::vector::cache::SvgResolved;
+                            // Chromium's raster of today's bucket (decision
+                            // S1); a miss draws the content's latest bucket
+                            // in preview, nothing otherwise.
+                            match self.vector.resolve_svg(
+                                self.device,
+                                self.queue,
+                                key,
+                                asset,
+                                path,
+                                self.svg_policy,
+                                (&plan.composition, &draw.layer),
+                            ) {
+                                Ok(SvgResolved::Drawn(view) | SvgResolved::Substitute(view)) => {
+                                    self.prepare_level2(encoder, r, view.texture(), false);
+                                    r.view = Some(view);
+                                }
+                                Ok(SvgResolved::Missing) => {}
+                                Err(message) => {
+                                    self.fail(plan, draw, MediaFailure::Failed(message))
+                                }
+                            }
+                        } else {
+                            match self
+                                .vector
+                                .resolve(self.device, self.queue, v, self.precision)
+                            {
+                                Ok(view) => {
+                                    // Level 2 content on a plane is resampled
+                                    // (`crate::space25d::local`).
+                                    self.prepare_level2(encoder, r, view.texture(), false);
+                                    r.view = Some(view);
+                                }
+                                Err(message) => {
+                                    self.fail(plan, draw, MediaFailure::Failed(message))
+                                }
+                            }
                         }
                     }
                     Source::Text(text) => {
@@ -378,7 +412,10 @@ impl Exec<'_> {
                             text,
                             self.precision,
                         ) {
-                            Ok(view) => r.view = Some(view),
+                            Ok(view) => {
+                                self.prepare_level2(encoder, r, view.texture(), false);
+                                r.view = Some(view);
+                            }
                             Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
                         }
                     }
@@ -408,6 +445,8 @@ impl Exec<'_> {
                     }
                     Source::Shader(shader) => match self.shader_source(encoder, shader) {
                         Ok((target, pooled)) => {
+                            // Level 2 shader output is resampled.
+                            self.prepare_level2(encoder, r, &target.texture, false);
                             // Legacy GLSL targets are in GL row order
                             // and hold E-encoded values.
                             r.view = Some(target.view.clone());
@@ -561,7 +600,7 @@ impl Exec<'_> {
     /// pass: cleared to the plan's background first (`clear`), or drawn
     /// over what it holds.
     #[allow(clippy::too_many_arguments)]
-    fn render_draws(
+    pub(crate) fn render_draws(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         plan: &CompPlan,

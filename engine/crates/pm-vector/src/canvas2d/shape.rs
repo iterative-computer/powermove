@@ -194,7 +194,7 @@ pub fn raster_paths(layer: &PathLayer, colors: &[PathColors], scale: f64) -> Res
 
 /// `tracePath(ctx, values)` replayed from the traced geometry (the same
 /// calls: moveTo, bezierCurveTo or lineTo, closePath).
-fn trace(c: &mut Context, path: &kurbo::BezPath) {
+pub(crate) fn trace(c: &mut Context, path: &kurbo::BezPath) {
     use kurbo::PathEl;
     c.begin_path();
     for el in path.elements() {

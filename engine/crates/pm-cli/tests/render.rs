@@ -353,3 +353,55 @@ fn every_preset_and_the_phase_3b_formats_render_from_the_cli() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Level 1 SVG images (decision S1): the app draws them with Chromium;
+/// pm-cli has no Chromium, draws them with resvg, and says so by name on
+/// stderr and in the summary. A project without SVG prints no notice.
+#[test]
+fn level_1_svg_images_render_with_a_named_approximate_svg_notice() {
+    let dir = scratch("svg");
+    let svg = dir.join("art.svg");
+    std::fs::write(
+        &svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32" viewBox="0 0 64 32"><rect width="64" height="32" rx="8" fill="#ff5a1f"/><circle cx="48" cy="16" r="8" fill="#fff"/></svg>"##,
+    )
+    .unwrap();
+    let mut p = project(true, false);
+    p["assets"]["still"] = json!({
+        "id": "still", "name": "art.svg", "kind": "image", "format": "svg", "w": 64, "h": 32,
+        "sourcePath": svg,
+    });
+    let project_file = dir.join("p.json");
+    std::fs::write(&project_file, p.to_string()).unwrap();
+    let out = cli(&[
+        project_file.to_str().unwrap(),
+        "-o",
+        dir.join("svg.mp4").to_str().unwrap(),
+        "--preset",
+        "web",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let s = summary(&out);
+    let draws = s["approximateSvg"].as_u64().unwrap_or(0);
+    assert!(draws >= 25, "every frame drew the SVG with resvg: {s}");
+    assert!(
+        stderr.contains(&format!(
+            "pm-cli: notice (approximate SVG): {draws} level 1 SVG image draw(s) were rasterized by resvg, not Chromium"
+        )),
+        "{stderr}"
+    );
+    // The PNG project: no SVG drawn, no notice.
+    let png_file = dir.join("png.json");
+    std::fs::write(&png_file, project(true, false).to_string()).unwrap();
+    let out = cli(&[
+        png_file.to_str().unwrap(),
+        "-o",
+        dir.join("png.mp4").to_str().unwrap(),
+        "--preset",
+        "web",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(summary(&out)["approximateSvg"], 0);
+    assert!(!stderr.contains("approximate SVG"), "{stderr}");
+    std::fs::remove_dir_all(dir).unwrap();
+}

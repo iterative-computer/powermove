@@ -16,7 +16,7 @@
  * viewer (capability routing, section 21); a frame means the engine draws
  * it.
  */
-import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
 
@@ -116,6 +116,8 @@ export type SessionOptions = {
   definitionsRetryMs?: number;
   /** The decision 19 shader fallback runner (created on the first request when absent). */
   fallbackRunner?: () => FallbackRunner;
+  /** Level 1 SVG rasters the engine asks this window for (svg-rasters.ts). */
+  svgRasters?: () => { answer(target: { post(event: Record<string, unknown> & { type: string }): boolean }, requests: readonly SvgRasterRequest[]): Promise<void> } | null;
 };
 
 export const DEFAULT_COLOR: ProjectColor = { mode: 'standard', linearBlending: false, precision: 'float16', blendDomain: 'hdrSafe' };
@@ -339,9 +341,12 @@ export class DocumentSession {
     }
     this.streamRevision = batch.revision;
     this.batches++;
-    this.options.connection.event(
+    // Held until the run ends, merged with the run's other batches (one
+    // render per edit; patch-coalesce.ts).
+    this.options.connection.patches(
       { type: 'applyPatches', document: this.document, baseRevision: batch.baseRevision, revision: batch.revision, origin: batch.origin, encoding: 'canonicalV1', patchCount: Math.max(1, batch.count), body: batch.body },
-      id
+      id,
+      MAX_PATCH_BODY_BYTES
     );
   }
 
@@ -411,6 +416,18 @@ export class DocumentSession {
       case 'shaderFallback': {
         if (event['fallback'] !== 'requests') return;
         for (const request of (event['requests'] as ShaderFallbackRequest[]) ?? []) void this.runFallback(request);
+        return;
+      }
+      case 'compat': {
+        // Level 1 SVG rasters a frame drew without (decision S1).
+        if (event['compat'] !== 'svgRequests') return;
+        const requests = (event['requests'] as SvgRasterRequest[]) ?? [];
+        const rasters = this.options.svgRasters?.();
+        if (!rasters) {
+          for (const r of requests) this.post({ type: 'compat', compat: 'svgFailed', key: r.key, reason: 'unavailable', message: 'This window draws no SVG rasters.' });
+          return;
+        }
+        void rasters.answer(this, requests);
         return;
       }
       case 'failure': {

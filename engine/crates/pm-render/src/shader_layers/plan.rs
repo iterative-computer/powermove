@@ -149,13 +149,18 @@ fn f(values: &[f64]) -> Call {
 }
 
 /// The target size: `w = max(1, Number(d.w || comp.w || W))` and
-/// `targetW = min(4096, max(2, round(w · sx)))`, both axes.
-fn size(
-    scope: &Scope<'_, '_>,
+/// `targetW = min(4096, max(2, round(w · sx)))`, both axes. A `compat`
+/// level 2 layer renders at the density it is drawn at (never below the
+/// output scale) without today's 4,096 px cap, up to the level 2 limit, and
+/// is drawn by the level 2 resampler (section 10: level 1 keeps the cap).
+fn size<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
     d: &Content,
     output: (u32, u32),
     scale: (f64, f64),
-) -> (f64, f64, u32, u32) {
+    time: f64,
+) -> JsResult<(f64, f64, u32, u32)> {
     let (cw, ch) = scope.comp_size();
     let (w, tw) = crate::scene3d::legacy::target_size(
         js::get(d, "w").to_number(),
@@ -169,7 +174,22 @@ fn size(
         f64::from(output.1),
         scale.1,
     );
-    (w, h, tw as u32, th as u32)
+    if crate::sampling::is_level2(layer) {
+        let (dx, dy) = crate::sampling::precomp_density(scope, layer, time, scale, w, h)?;
+        let side = |size: f64, s: f64, d: f64| {
+            js::min(
+                crate::sampling::MAX_TARGET,
+                js::max(2.0, js::round(size * js::max(s, d))),
+            )
+        };
+        return Ok((
+            w,
+            h,
+            side(w, scale.0, dx) as u32,
+            side(h, scale.1, dy) as u32,
+        ));
+    }
+    Ok((w, h, tw as u32, th as u32))
 }
 
 /// The calls both layer kinds make before their own uniforms:
@@ -278,7 +298,7 @@ pub(crate) fn shader_layer<'d>(
     scale: (f64, f64),
     fallback_runner: bool,
 ) -> JsResult<Planned> {
-    let sized = size(scope, d, output, scale);
+    let sized = size(scope, layer, d, output, scale, time)?;
     let code_value = js::get(d, "code");
     // `PM.SHADER_HEADER + '\n' + d.code` (string concatenation, so a missing
     // code is the text "undefined" and fails to compile, as today).
@@ -336,7 +356,7 @@ pub(crate) fn extension_layer<'d>(
     let Some(effects) = definitions else {
         return Ok(None);
     };
-    let sized = size(scope, d, output, scale);
+    let sized = size(scope, layer, d, output, scale, time)?;
     let Some(snapshot) = effects.get(DefinitionKind::Layer, definition) else {
         if !effects.is_missing(DefinitionKind::Layer, definition) {
             return Ok(Some(Planned::Unsupported(Feature::Definition(format!(

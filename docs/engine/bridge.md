@@ -331,6 +331,11 @@ The worker now predicts 1.5 refreshes plus 3.2 ms after its animation
 frame and picks the frame nearest that instant (`nearestRefresh`): either
 draw lands within a refresh of the frame's time on the line.
 
+(2026-10-18, `perf.md` "Amendment 22": measured again, draw and presentation
+together took two refreshes for nearly every frame idle and more under load,
+so the halfway prediction left offsets 3 to 4 ms late at every rate. The worker
+predicts 1.75 refreshes since; the table below is the 1.5 history.)
+
 | Run (bf5, bf6) | Load avg | Presented within ±10 ms | \|offset\| p95 (ms) | Outside ±10 ms, by load event |
 |---|---|---|---|---|
 | 23.976 fps idle | 8.8 | 1433 of 1433 | 6.78 | |

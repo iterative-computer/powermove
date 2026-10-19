@@ -18,14 +18,15 @@
  *   `INLINE_LIMIT`, staged in a cache file above it); a request that names
  *   a revision main's session does not have and carries no document gets
  *   `needsDocument`, and the window sends it;
- * - shader fallback pixels the window drew for a `needsRenderer` answer are
- *   posted to the session before the snapshot is asked again;
+ * - shader fallback pixels and level 1 SVG rasters the window drew for a
+ *   `needsRenderer` answer are posted to the session before the snapshot
+ *   is asked again;
  * - media resolve through host services as for every session.
  *
  * A session closes when its window goes, after `IDLE_CLOSE_MS` unused, and
  * with its engine launch. Main never waits on the renderer here.
  */
-import type { DefinitionsUpdate, Event, ProjectColor, Request, Response } from '../../shared/engine-protocol';
+import type { DefinitionsUpdate, Event, ProjectColor, Request, Response, SvgRasterKey } from '../../shared/engine-protocol';
 import type { Log } from './connection';
 
 /** A canonical hash's 32 bytes from its hex. */
@@ -56,6 +57,11 @@ export type WindowDocument = {
 };
 
 export type FallbackPixels = { key: string; width: number; height: number; rgba16f: Uint8Array };
+/** A level 1 SVG raster: premultiplied RGBA8, top-down (decision S1). */
+export type SvgPixels = { key: SvgRasterKey; data: Uint8Array };
+/** Largest SVG band posted in one event (the renderer's band size,
+ *  `MAX_SVG_BAND_BYTES` in engine-connection/svg-rasters.ts). */
+export const MAX_SVG_BAND_BYTES = 8 * 1024 * 1024;
 
 export interface WindowSessionEngine {
   isReady(process: 'interactive'): boolean;
@@ -102,9 +108,9 @@ export class WindowSnapshotSessions {
   /** The window's session at `document`, ready for a snapshot: `{ port,
    *  session }`, or `needsDocument` when main lacks the revision and the
    *  request carried no document. Serialized per window. */
-  prepare(windowId: number, document: WindowDocument, fallback: FallbackPixels[] = [], compat: readonly { [key: string]: unknown }[] = []): Promise<{ port: number; session: number } | 'needsDocument'> {
+  prepare(windowId: number, document: WindowDocument, fallback: FallbackPixels[] = [], svg: SvgPixels[] = [], compat: readonly { [key: string]: unknown }[] = []): Promise<{ port: number; session: number } | 'needsDocument'> {
     const previous = this.chains.get(windowId) ?? Promise.resolve();
-    const next = previous.catch(() => {}).then(() => this.run(windowId, document, fallback, compat));
+    const next = previous.catch(() => {}).then(() => this.run(windowId, document, fallback, svg, compat));
     this.chains.set(windowId, next);
     void next.finally(() => {
       if (this.chains.get(windowId) === next) this.chains.delete(windowId);
@@ -112,7 +118,7 @@ export class WindowSnapshotSessions {
     return next;
   }
 
-  private async run(windowId: number, document: WindowDocument, fallback: FallbackPixels[], compat: readonly { [key: string]: unknown }[] = []): Promise<{ port: number; session: number } | 'needsDocument'> {
+  private async run(windowId: number, document: WindowDocument, fallback: FallbackPixels[], svg: SvgPixels[], compat: readonly { [key: string]: unknown }[] = []): Promise<{ port: number; session: number } | 'needsDocument'> {
     const host = this.engine.hostPort('interactive');
     if (!host) throw new Error('the new engine is not running');
     let record = this.windows.get(windowId);
@@ -166,11 +172,28 @@ export class WindowSnapshotSessions {
       this.stats.resyncs++;
     }
     for (const pixels of fallback) this.postFallback(record.session, pixels);
+    for (const pixels of svg) this.postSvg(record.session, pixels);
     // The window's compatibility producers and answers (a `raster`
     // override): this session asks for, and draws, the window's layers as
     // the window's own session would.
     for (const event of compat) this.engine.event('interactive', event as unknown as Event, record.session);
     return { port: record.port, session: record.session };
+  }
+
+  /** Posts a level 1 SVG raster to the session in row bands, as the
+   *  window posts them on its own session. */
+  private postSvg(session: number, pixels: SvgPixels): void {
+    const { key, data } = pixels;
+    const rowBytes = key.width * 4;
+    if (rowBytes <= 0 || data.byteLength !== rowBytes * key.height) {
+      this.log('warn', `SVG raster ${key.width}x${key.height} pixels do not match their size; dropped`);
+      return;
+    }
+    const rowsPerBand = Math.max(1, Math.floor(MAX_SVG_BAND_BYTES / rowBytes));
+    for (let row = 0; row < key.height; row += rowsPerBand) {
+      const rows = Math.min(rowsPerBand, key.height - row);
+      this.engine.event('interactive', { type: 'compat', compat: 'svgPixels', key, row, rows, data: data.slice(row * rowBytes, (row + rows) * rowBytes) } as unknown as Event, session);
+    }
   }
 
   /** Posts a fallback program's pixels to the session in bands. */

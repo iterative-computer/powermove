@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DefinitionsUpdate, Event, Request, Response } from '../../shared/engine-protocol';
-import { INLINE_LIMIT, WindowSnapshotSessions, type WindowSessionEngine } from './window-sessions';
+import { INLINE_LIMIT, MAX_SVG_BAND_BYTES, WindowSnapshotSessions, type WindowSessionEngine } from './window-sessions';
 
 const hash = 'ab'.repeat(32);
 const json = (n = 7) => new TextEncoder().encode(JSON.stringify({ n }));
@@ -92,9 +92,26 @@ describe('main’s snapshot sessions for windows', () => {
       { type: 'compat', compat: 'producers', sources: ['rasterOverride'] },
       { type: 'compat', compat: 'native', composition: 'c', layer: 'L', time: 0, source: 'rasterOverride', scale: 1, revision: 1 }
     ];
-    await sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() }, [], events);
+    await sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() }, [], [], events);
     expect(f.events.map((e: any) => e.body)).toEqual(events);
     expect(f.events.every((e: any) => e.session === 40)).toBe(true);
+  });
+
+  it('posts level 1 SVG rasters to the session in bands before the snapshot', async () => {
+    const f = fakeEngine();
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {});
+    const width = 2048, height = 1100, rowBytes = width * 4;
+    const key = { content: 'c'.repeat(64), width, height };
+    const data = new Uint8Array(rowBytes * height);
+    data[rowBytes * 1024] = 9;
+    await sessions.prepare(9, { id: 'doc', revision: 1, hash, json: json() }, [], [{ key, data }]);
+    const rows = Math.floor(MAX_SVG_BAND_BYTES / rowBytes);
+    expect(f.events.map((e) => [(e.body as any).row, (e.body as any).rows])).toEqual([[0, rows], [rows, height - rows]]);
+    expect(f.events[1]).toMatchObject({ session: 40, body: { type: 'compat', compat: 'svgPixels', key } });
+    expect((f.events[1]!.body as any).data[0]).toBe(9);
+    // Pixels that do not match their size are dropped.
+    await sessions.prepare(9, { id: 'doc', revision: 1 }, [], [{ key, data: new Uint8Array(4) }]);
+    expect(f.events).toHaveLength(2);
   });
 
   it('opens a new session after an engine restart, and asks for the document again', async () => {

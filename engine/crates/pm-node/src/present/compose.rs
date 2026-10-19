@@ -133,6 +133,9 @@ pub struct Composed {
     /// Video layers drawn with a stand-in while their exact frame decodes
     /// (scrub renders, docs/engine/scrub.md): the source frame each shows.
     pub stand_ins: Vec<usize>,
+    /// Level 1 SVG rasters the frame drew without (decision S1): another
+    /// bucket stood in, or the layer drew nothing (`super::svg`).
+    pub svg_misses: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
 }
 
 const BLIT_WGSL: &str = r#"
@@ -170,6 +173,9 @@ pub struct Composer {
     /// The viewer is playing: today's playing motion-blur count and the
     /// playback resampler (`set_playing`).
     playing: bool,
+    /// Whether viewer frames reuse kept layer draws (on; `compose_bench`
+    /// turns it off to compare).
+    draw_reuse: bool,
     /// The view (hashed) whose definition set is in the renderer, and the
     /// identity and version of the set it was loaded from.
     definitions: Option<(u64, Option<(usize, u64)>)>,
@@ -282,6 +288,7 @@ impl Composer {
             parked: HashMap::new(),
             blender: pm_render::blender::BlenderRender::Native,
             playing: false,
+            draw_reuse: true,
         }
     }
 
@@ -346,6 +353,15 @@ impl Composer {
             self.definitions = None;
             let mut empty = self.renderer.effects().sibling();
             self.renderer.swap_effects(&mut empty);
+        }
+    }
+
+    /// Whether viewer frames reuse the draws of layers nothing changed
+    /// since the last frame (`pm_render::reuse`; on by default).
+    pub fn set_draw_reuse(&mut self, enabled: bool) {
+        self.draw_reuse = enabled;
+        if !enabled {
+            self.renderer.clear_draw_reuse();
         }
     }
 
@@ -487,6 +503,7 @@ impl Composer {
         let mut failures = Vec::new();
         let mut quads = Vec::new();
         let mut stand_ins = Vec::new();
+        let mut svg_misses = Vec::new();
         if let Some(region) = place.region {
             let request = RenderRequest {
                 output_size: place.output,
@@ -547,6 +564,10 @@ impl Composer {
                 ));
             }
             let depth_target = depth.and(self.depth_scratch.as_ref());
+            // The viewer's documents live as long as their view and change
+            // in place: frames of a paused time reuse the draws of layers
+            // nothing changed (docs/engine/perf.md, "Draw reuse").
+            self.renderer.set_draw_reuse(self.draw_reuse);
             let rendered = self.renderer.render_into(
                 doc,
                 composition,
@@ -555,10 +576,13 @@ impl Composer {
                 media,
                 scratch,
                 depth_target,
-            )?;
+            );
+            self.renderer.set_draw_reuse(false);
+            let rendered = rendered?;
             failures = rendered.failures;
             quads = rendered.quads;
             stand_ins = rendered.stand_ins;
+            svg_misses = rendered.svg_misses;
         }
         // Place the region (or only clear when nothing is visible).
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -592,6 +616,7 @@ impl Composer {
             failures,
             cpu_us: super::render::now_us() - start,
             stand_ins,
+            svg_misses,
         })
     }
 }

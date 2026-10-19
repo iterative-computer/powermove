@@ -7,10 +7,13 @@ import type { CompatSource } from "./CompatSource";
 import type { CompositionId } from "./CompositionId";
 import type { LayerId } from "./LayerId";
 import type { Revision } from "./Revision";
+import type { SvgRasterKey } from "./SvgRasterKey";
+import type { SvgRasterPixels } from "./SvgRasterPixels";
+import type { SvgRasterRequest } from "./SvgRasterRequest";
 
 /**
  * Renderer ↔ interactive engine (session-bound, the viewer's port):
- * `Pixels`, `Forget`, `Producers`, `Native`, and `Reuse` go to the engine,
- * `Needs` to the renderer.
+ * `Pixels`, `Forget`, `Producers`, `Native`, `Reuse`, `SvgPixels`, and
+ * `SvgFailed` go to the engine, `Needs` and `SvgRequests` to the renderer.
  */
-export type CompatMessage = { "compat": "pixels" } & CompatPixels | { "compat": "forget", composition: CompositionId, layer: LayerId, } | { "compat": "producers", sources: Array<CompatSource>, } | { "compat": "native" } & CompatNative | { "compat": "reuse", id: CompatKey, scale: number, revision: Revision, } | { "compat": "needs", revision: Revision, needs: Array<CompatNeed>, };
+export type CompatMessage = { "compat": "pixels" } & CompatPixels | { "compat": "forget", composition: CompositionId, layer: LayerId, } | { "compat": "producers", sources: Array<CompatSource>, } | { "compat": "native" } & CompatNative | { "compat": "reuse", id: CompatKey, scale: number, revision: Revision, } | { "compat": "needs", revision: Revision, needs: Array<CompatNeed>, } | { "compat": "svgRequests", requests: Array<SvgRasterRequest>, } | { "compat": "svgPixels" } & SvgRasterPixels | { "compat": "svgFailed", key: SvgRasterKey, reason: string, message: string, };

@@ -115,6 +115,9 @@ impl CompatRasters for JobCompat {
             source,
             scale,
             revision: self.revision,
+            // Layer producers only: SVG rasters have their own source
+            // (`pm_render::vector::svg_rasters::SvgRasterSource`).
+            svg: None,
         };
         let answer = match self.host.call(Request::CompatFrame(request), self.session) {
             Ok(Response::CompatFrame(frame)) if frame.native => CompatAnswer::Native,

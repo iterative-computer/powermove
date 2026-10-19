@@ -3,8 +3,15 @@ import type { CompatNeed } from "./CompatNeed";
 import type { Revision } from "./Revision";
 import type { ShaderFallbackRequest } from "./ShaderFallbackRequest";
 import type { SnapshotResult } from "./SnapshotResult";
+import type { SvgRasterRequest } from "./SvgRasterRequest";
 
 /**
  * The answer to a [`HostSnapshot`].
  */
-export type SnapshotOutcome = { "outcome": "rendered" } & SnapshotResult | { "outcome": "needsRenderer", revision: Revision, fallback: Array<ShaderFallbackRequest>, compat: Array<CompatNeed>, } | { "outcome": "empty", revision: Revision, };
+export type SnapshotOutcome = { "outcome": "rendered" } & SnapshotResult | { "outcome": "needsRenderer", revision: Revision, fallback: Array<ShaderFallbackRequest>, compat: Array<CompatNeed>, 
+/**
+ * Level 1 SVG rasters the frame needs (decision S1): the renderer
+ * draws them, posts them as `CompatMessage::SvgPixels`, and asks
+ * again naming each `SvgRasterKey::upload_key` in `uploaded`.
+ */
+svg: Array<SvgRasterRequest>, } | { "outcome": "empty", revision: Revision, };

@@ -66,6 +66,9 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
   if (Array.isArray(request?.fallbackPixels)) {
     plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0) }));
   }
+  if (Array.isArray(request?.svgPixels)) {
+    plain.svgPixels = request.svgPixels.map((p) => ({ key: { content: String(p?.key?.content), width: Number(p?.key?.width), height: Number(p?.key?.height) }, data: bytes(p?.data) ?? new Uint8Array(0) }));
+  }
   return plain;
 }
 
@@ -102,6 +105,8 @@ let nextMediaRequest = 0;
 function engineFontsBridge(): EngineFontsBridge {
   const invoke = <T>(channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args) as Promise<EngineFontsResult<T>>;
   return {
+    answerSync: (queries) => ipcRenderer.sendSync(ENGINE_FONTS_IPC.answerSync, String(queries)),
+    wholeSync: (blob, index) => ipcRenderer.sendSync(ENGINE_FONTS_IPC.wholeSync, String(blob), Number(index)),
     answer: (queries) => invoke(ENGINE_FONTS_IPC.answer, String(queries)),
     subset: (blob, index) => invoke(ENGINE_FONTS_IPC.subset, String(blob), Number(index)),
     manifest: (base) => invoke(ENGINE_FONTS_IPC.manifest, String(base)),

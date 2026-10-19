@@ -40,6 +40,9 @@ pub struct Frame {
     pub failures: Vec<LayerFailure>,
     /// The composition time rendered, in seconds.
     pub seconds: f64,
+    /// Level 1 SVG rasters the frame drew without (another bucket of the
+    /// same content, or nothing); see [`Rendered::svg_misses`].
+    pub svg_misses: Vec<crate::vector::svg_rasters::SvgRasterNeed>,
 }
 
 /// One layer's text raster ([`Renderer::text_raster`]).
@@ -79,6 +82,12 @@ pub struct Rendered {
     /// frame each shows (its presented index in its source). Empty when
     /// every video layer shows its exact frame.
     pub stand_ins: Vec<usize>,
+    /// Level 1 SVG rasters (decision S1) this preview frame drew without:
+    /// another bucket of the same content stood in, or the layer drew
+    /// nothing. The host asks the document's renderer for them and draws
+    /// the frame again when they arrive. Frames that may not substitute
+    /// fail with [`RenderError::SvgRastersPending`] instead.
+    pub svg_misses: Vec<crate::vector::svg_rasters::SvgRasterNeed>,
 }
 
 /// One drawn quad of a top-level layer ([`Rendered::quads`]).
@@ -189,6 +198,19 @@ pub struct Renderer {
     text_gpu: crate::text::gpu::TextGpu,
     /// The session's compatibility rasters (`crate::compat`).
     compat: Option<Arc<dyn crate::compat::CompatRasters>>,
+    /// Layer draws kept across frames of one paused time
+    /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
+    reuse: crate::reuse::DrawReuse,
+    reuse_enabled: bool,
+    /// The bottom of the last reusing frame kept on the GPU
+    /// (`crate::frame_prefix`).
+    prefix: crate::frame_prefix::FramePrefix,
+    /// Frames that are not exports wait for level 1 SVG rasters too
+    /// (snapshots) instead of substituting ([`Renderer::set_svg_wait`]).
+    svg_wait: bool,
+    /// Where a waiting frame gets missing level 1 SVG rasters itself (the
+    /// job engine's host services; [`Renderer::set_svg_source`]).
+    svg_source: Option<Arc<dyn crate::vector::svg_rasters::SvgRasterSource>>,
 }
 
 impl Renderer {
@@ -220,6 +242,11 @@ impl Renderer {
             shaders: Default::default(),
             explicit_meshes: Default::default(),
             compat: None,
+            reuse: crate::reuse::DrawReuse::new(),
+            reuse_enabled: false,
+            prefix: Default::default(),
+            svg_wait: false,
+            svg_source: None,
         }
     }
 
@@ -229,6 +256,111 @@ impl Renderer {
     /// `None` (the default): every layer is the engine's own.
     pub fn set_compat_rasters(&mut self, compat: Option<Arc<dyn crate::compat::CompatRasters>>) {
         self.compat = compat;
+    }
+
+    /// Whether [`Renderer::render_into`] plans with the layer draws kept
+    /// from the last frame that used them (`crate::reuse`). Off by
+    /// default; the interactive viewer turns it on around its own frames
+    /// of a long-lived document, which changes in place, and off for
+    /// everything else the renderer draws. Entries stay while it is off
+    /// (they are validated by revision when it is on again).
+    pub fn set_draw_reuse(&mut self, enabled: bool) {
+        self.reuse_enabled = enabled;
+    }
+
+    /// Drops the kept layer draws and the kept bottom of the last frame.
+    pub fn clear_draw_reuse(&mut self) {
+        self.reuse.clear();
+        self.prefix.clear(&mut self.pool);
+    }
+
+    /// The draw reuse's counters (with the frames drawn from a kept bottom
+    /// and the draws those did not draw again).
+    pub fn draw_reuse_stats(&self) -> crate::reuse::ReuseStats {
+        crate::reuse::ReuseStats {
+            prefix_frames: self.prefix.reused_frames,
+            prefix_draws: self.prefix.reused_draws,
+            ..self.reuse.stats()
+        }
+    }
+
+    /// A source a frame that waits for level 1 SVG rasters (an export, a
+    /// snapshot) fetches them from before drawing, blocking (the job
+    /// engine: host services ask the document's window). Without one such
+    /// a frame fails with [`RenderError::SvgRastersPending`].
+    pub fn set_svg_source(
+        &mut self,
+        source: Option<Arc<dyn crate::vector::svg_rasters::SvgRasterSource>>,
+    ) {
+        self.svg_source = source;
+    }
+
+    /// Who draws level 1 SVG rasters (decision S1): Chromium, through
+    /// [`Renderer::put_svg_raster`] (the default: every host with a
+    /// renderer), or resvg (`pm-cli`, an approximation it reports).
+    /// Changing it drops the stored rasters.
+    pub fn set_svg_rasterizer(&mut self, rasterizer: crate::vector::svg_rasters::SvgRasterizer) {
+        if self.vector.svg.rasterizer != rasterizer {
+            self.vector.svg.forget(None);
+        }
+        self.vector.svg.rasterizer = rasterizer;
+    }
+
+    /// Frames that are not exports also wait for missing level 1 SVG
+    /// rasters ([`RenderError::SvgRastersPending`]) instead of drawing the
+    /// content's latest bucket (snapshots). Exports always wait.
+    ///
+    /// For a renderer this caller owns (a job, a test). A renderer shared
+    /// with a viewer waits through [`Renderer::svg_waiting`], which puts
+    /// the viewer's policy back on every exit.
+    pub fn set_svg_wait(&mut self, wait: bool) {
+        self.svg_wait = wait;
+    }
+
+    /// Whether frames that are not exports wait for level 1 SVG rasters
+    /// ([`Renderer::set_svg_wait`], [`Renderer::svg_waiting`]).
+    pub fn svg_wait(&self) -> bool {
+        self.svg_wait
+    }
+
+    /// This renderer, waiting for level 1 SVG rasters until the guard is
+    /// dropped (a snapshot on the viewer's renderer). Dropping the guard,
+    /// on any return or unwind, restores the policy it found, so a
+    /// snapshot that bails out never leaves the viewer waiting (a viewer
+    /// that waits fails its frames instead of asking for the rasters).
+    pub fn svg_waiting(&mut self) -> SvgWaiting<'_> {
+        let restore = std::mem::replace(&mut self.svg_wait, true);
+        SvgWaiting {
+            renderer: self,
+            restore,
+        }
+    }
+
+    /// Stores a level 1 SVG raster the document's renderer drew:
+    /// premultiplied RGBA8, top-down, `key.width × key.height × 4` bytes.
+    pub fn put_svg_raster(
+        &mut self,
+        key: pm_protocol::svg_raster::SvgRasterKey,
+        rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        self.vector.svg.put(key, rgba)
+    }
+
+    /// Whether the raster is stored.
+    pub fn has_svg_raster(&self, key: &pm_protocol::svg_raster::SvgRasterKey) -> bool {
+        self.vector.svg.contains(key)
+    }
+
+    /// Drops the stored rasters of one SVG content (every content when
+    /// `None`): a replaced or relinked asset, a closed document.
+    pub fn forget_svg_rasters(&mut self, content: Option<&str>) {
+        self.vector.svg.forget(content);
+    }
+
+    /// Level 1 SVG draws resvg approximated since the renderer was made
+    /// ([`crate::vector::svg_rasters::SvgRasterizer::Resvg`]).
+    pub fn svg_approximated(&self) -> u64 {
+        self.vector.svg.approximated
     }
 
     /// Runs layer effects and adjustment layers through `host` instead of
@@ -703,6 +835,7 @@ impl Renderer {
             legend: r.legend,
             failures: r.failures,
             seconds: r.seconds,
+            svg_misses: r.svg_misses,
         })
     }
 
@@ -713,6 +846,63 @@ impl Renderer {
     /// On [`RenderError::Unsupported`] the targets are left untouched.
     #[allow(clippy::too_many_arguments)]
     pub fn render_into(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        depth_id: Option<&Target>,
+    ) -> Result<Rendered, RenderError> {
+        // A frame that waits for level 1 SVG rasters with a source attached
+        // fetches them and draws again (each round can only meet rasters
+        // the last did not draw, as more layers resolve).
+        for _ in 0..3 {
+            match self.render_into_once(
+                document,
+                composition,
+                time,
+                request,
+                assets,
+                target,
+                depth_id,
+            ) {
+                Err(RenderError::SvgRastersPending(needs)) if self.svg_source.is_some() => {
+                    let source = self.svg_source.clone().expect("checked");
+                    // Every raster the frame needs is asked for, even after
+                    // one fails, so a source sees the whole frame's needs.
+                    let mut first_error = None;
+                    for need in &needs {
+                        match source.fetch(need).and_then(|pixels| {
+                            self.vector.svg.put(need.request.key.clone(), pixels)
+                        }) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                first_error.get_or_insert(e);
+                            }
+                        }
+                    }
+                    if let Some(e) = first_error {
+                        return Err(RenderError::SvgRaster(e));
+                    }
+                }
+                other => return other,
+            }
+        }
+        self.render_into_once(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            depth_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_into_once(
         &mut self,
         document: &Document,
         composition: &str,
@@ -759,7 +949,9 @@ impl Renderer {
         self.effects
             .watchdog
             .collect(&self.device, &self.queue, false);
-        let (mut plan, build) = plan::build_with(
+        let options3d = self.options3d.for_request(request);
+        let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        let (mut plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
             &project,
@@ -769,15 +961,24 @@ impl Renderer {
             scale,
             assets,
             effect_host(&self.effect_host, &self.effects),
-            self.options3d.for_request(request),
+            options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
+            blender,
             self.compat.as_deref(),
+            self.reuse_enabled.then_some(&mut self.reuse),
         );
         if !request.background {
             plan.background = Background::Transparent;
         }
         let quads = LayerQuad::of_plan(&plan);
+        // Only the viewer's own frames (the reuse is on around them) keep
+        // their bottom; never with the depth and id surface, exports, or
+        // compositing nodes at the top level.
+        let prefix = self.reuse_enabled
+            && depth_id.is_none()
+            && !request.export
+            && !crate::composite::has_nodes(&plan);
         let mut failures = build.failures;
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
@@ -795,6 +996,8 @@ impl Renderer {
         // cache returns within its bound; 3D meshes and maps no recent 3D
         // frame drew are released.
         self.vector.begin_frame();
+        // Misses belong to the frame that records them.
+        self.vector.svg.take_misses();
         self.scene3d.begin_frame();
         let mut encoder = self
             .device
@@ -834,6 +1037,11 @@ impl Renderer {
                 working: color.working,
                 blend_domain: color.blend_domain,
                 export: request.export,
+                svg_policy: if request.export || self.svg_wait {
+                    crate::vector::svg_rasters::SvgMissPolicy::Wait
+                } else {
+                    crate::vector::svg_rasters::SvgMissPolicy::Substitute
+                },
                 depth_id: depth_id.is_some(),
                 taken: Vec::new(),
                 pyramids: &mut self.pyramids,
@@ -849,12 +1057,44 @@ impl Renderer {
                 target.format(),
                 pm_gpu::target::working_usage(),
             );
-            let resolved = exec.render_comp(&mut encoder, &plan, region, &gl_rows);
+            // The viewer's frames draw from the kept bottom of the last one
+            // when they start with the same draws (`crate::frame_prefix`).
+            let (resolved, kept_legend) = if prefix {
+                let key = crate::frame_prefix::PrefixKey {
+                    composition: composition.to_owned(),
+                    width: size.width,
+                    height: size.height,
+                    format: target.format(),
+                    region,
+                    precision,
+                    working: color.working,
+                    blend_domain: color.blend_domain,
+                    background: plan.background.clone(),
+                    plan_size: (plan.width, plan.height),
+                };
+                crate::frame_prefix::render(
+                    &mut exec,
+                    &mut encoder,
+                    &plan,
+                    region,
+                    &gl_rows,
+                    &mut self.prefix,
+                    key,
+                )
+            } else {
+                (
+                    exec.render_comp(&mut encoder, &plan, region, &gl_rows),
+                    Vec::new(),
+                )
+            };
             // Something met at exec time is unsupported (media facts the
             // plan could not see): the frame fails, and the caller's
             // targets keep their previous contents. The commands still run,
             // so media caches filled by this encoder stay valid.
-            let complete = exec.unsupported.is_empty() && exec.fallback_pending.is_empty();
+            let svg_waits = exec.svg_policy == crate::vector::svg_rasters::SvgMissPolicy::Wait
+                && exec.vector.svg.missed();
+            let complete =
+                exec.unsupported.is_empty() && exec.fallback_pending.is_empty() && !svg_waits;
             if complete {
                 exec.flip_color(&mut encoder, &gl_rows, target);
             }
@@ -877,7 +1117,10 @@ impl Renderer {
                 exec.flip(&mut encoder, &id_rows, ids);
                 exec.taken.push(id_rows);
             }
-            let legend: Vec<String> = resolved.iter().map(|r| r.layer.clone()).collect();
+            let legend: Vec<String> = kept_legend
+                .into_iter()
+                .chain(resolved.iter().map(|r| r.layer.clone()))
+                .collect();
             let timer = exec.timer.take();
             let pending = std::mem::take(&mut exec.fallback_pending);
             (
@@ -900,16 +1143,29 @@ impl Renderer {
         for t in taken {
             self.pool.give(t);
         }
+        if prefix {
+            if unsupported.is_empty() && pending.is_empty() {
+                self.prefix.remember(std::mem::take(&mut plan.draws));
+            } else {
+                self.prefix.clear(&mut self.pool);
+            }
+        }
         self.media.flush();
         self.media.scrub = scrub;
         failures.extend(exec_failures);
         if !unsupported.is_empty() {
+            self.vector.svg.take_misses();
             return Err(RenderError::Unsupported(unsupported));
         }
         if !pending.is_empty() {
+            self.vector.svg.take_misses();
             return Err(RenderError::ShaderFallbackPending(
                 pending.iter().map(|r| (**r).clone()).collect(),
             ));
+        }
+        let svg_misses = self.vector.svg.take_misses();
+        if !svg_misses.is_empty() && (request.export || self.svg_wait) {
+            return Err(RenderError::SvgRastersPending(svg_misses));
         }
         Ok(Rendered {
             quads,
@@ -917,6 +1173,7 @@ impl Renderer {
             failures,
             seconds,
             stand_ins: std::mem::take(&mut self.media.stand_ins),
+            svg_misses,
         })
     }
 
@@ -1197,11 +1454,13 @@ impl Renderer {
             build_options(&comp, request, self.shaders.fallback_runner),
             crate::blender::PlanState::collecting(preview, options),
             self.compat.as_deref(),
+            None,
         );
         Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
     }
 
-    /// The plan of a frame without rendering it (tests, `pm-cli parity`).
+    /// The plan of a frame without rendering it (tests, `pm-cli parity`),
+    /// with the draw reuse when it is on ([`Renderer::set_draw_reuse`]).
     pub fn plan(
         &mut self,
         document: &Document,
@@ -1223,7 +1482,9 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (plan, build) = plan::build_with(
+        let options3d = self.options3d.for_request(request);
+        let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        let (plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
             &project,
@@ -1233,10 +1494,12 @@ impl Renderer {
             scale,
             assets,
             effect_host(&self.effect_host, &self.effects),
-            self.options3d.for_request(request),
+            options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
+            blender,
             self.compat.as_deref(),
+            self.reuse_enabled.then_some(&mut self.reuse),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
@@ -1280,5 +1543,31 @@ pub fn effective_precision(request: Precision, project: Precision) -> Precision 
         Precision::Float32
     } else {
         Precision::Float16
+    }
+}
+
+/// A [`Renderer`] waiting for level 1 SVG rasters
+/// ([`Renderer::svg_waiting`]); dropping it restores the renderer's policy.
+pub struct SvgWaiting<'a> {
+    renderer: &'a mut Renderer,
+    restore: bool,
+}
+
+impl std::ops::Deref for SvgWaiting<'_> {
+    type Target = Renderer;
+    fn deref(&self) -> &Renderer {
+        self.renderer
+    }
+}
+
+impl std::ops::DerefMut for SvgWaiting<'_> {
+    fn deref_mut(&mut self) -> &mut Renderer {
+        self.renderer
+    }
+}
+
+impl Drop for SvgWaiting<'_> {
+    fn drop(&mut self) {
+        self.renderer.svg_wait = self.restore;
     }
 }

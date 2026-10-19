@@ -504,6 +504,7 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
             ));
         }
         let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+        renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
         let ticks = Ticks::new(
             pm_time::ticks_from_seconds(options.time)
                 .map_err(|e| Failure::Usage(format!("--time: {e}")))?,
@@ -517,6 +518,12 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
                 }
                 other => Failure::Failed(other.to_string()),
             })?;
+        if renderer.svg_approximated() > 0 {
+            eprintln!(
+                "{}",
+                crate::render::approximate_svg_notice(renderer.svg_approximated())
+            );
+        }
         if !frame.failures.is_empty() {
             return Err(Failure::Failed(format!(
                 "layer failures: {:?}",

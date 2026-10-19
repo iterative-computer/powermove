@@ -39,6 +39,7 @@ import { installAppCaptures, usesBlender } from './app-captures';
 // by themselves (old forks of the viewer).
 import { ViewerPresentation } from '../../../extensions/viewer/engine-present/presentation';
 import { ShaderFallbackRunner } from './shader-fallback';
+import { SvgRasters } from './svg-rasters';
 import { EngineTransport } from './transport';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
@@ -152,7 +153,19 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     }
   });
   const unrouteAudio = routeAudioPanels(PM.Audio, audio, () => transport.active());
-  const offAssets = PM.bus?.on?.('assets', () => audio.sync()) ?? (() => {});
+  // Level 1 SVG images: Chromium draws today's bucket rasters for the
+  // engine (decision S1, svg-rasters.ts); their content hashes are taken
+  // ahead so a synchronous snapshot can draw one.
+  const svgRasters = new SvgRasters({
+    asset: (id) => PM.assets?.get?.(id) ?? null,
+    assets: () => (PM.assets?.map?.values?.() ?? []) as Iterable<Record<string, any>>,
+    log
+  });
+  svgRasters.prime();
+  const offAssets = PM.bus?.on?.('assets', () => {
+    audio.sync();
+    svgRasters.prime();
+  }) ?? (() => {});
 
   // Edits reach the engine as soon as the write that made them returns: a
   // write that leaves the barrier dirty schedules one flush at the end of
@@ -203,6 +216,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
       // The `raster` override's answers (kernel/raster-compat.ts).
       onCompat: (message) => renderTransport.receiveCompat(message, session),
+      svgRasters: () => svgRasters,
       handlers: {
         message: (message, arrivedMs) => {
           if (message.type === 'frame' && !firstFrame) {
@@ -274,6 +288,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const barrier = PM.EngineDoc?.barrier;
       if (!barrier) return null;
       barrier.flush();
+      // A snapshot may block this thread until the engine has the revision:
+      // the batches this run holds (patch-coalesce.ts) leave now.
+      connection?.sendPatches();
       noteVersion();
       return barrier.revision;
     },
@@ -289,6 +306,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const barrier = doc?.barrier;
       if (!doc?.enabled || !barrier || typeof doc.snapshot !== 'function') return null;
       barrier.flush();
+      connection?.sendPatches();
       return {
         id: documentId(PM.proj?.id),
         revision: barrier.revision,
@@ -315,9 +333,14 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       console.error('[engine] frame render failed', error);
       PM.toast?.('The preview could not be rendered. See the console for details.');
     },
+    svgRasters: () => svgRasters,
     log
   });
   (PM as any).EngineRender = renderTransport;
+  // The job engine's export and agent frames ask this window for the SVG
+  // rasters of the document it has open (main's `compatFrame`).
+  const unprovideSvg = renderTransport.provideCompat('svgImage', (request) => svgRasters.produce(request));
+  (PM as any).EngineSvgRasters = svgRasters;
   // The app's own still captures (the Library's section thumbnails, the
   // agent's look and observe) draw through the engine too: with the new
   // engine on, nothing asks the current engine for pixels. The exporter's
@@ -476,6 +499,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offPending();
       offEager();
       offAssets();
+      unprovideSvg();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);

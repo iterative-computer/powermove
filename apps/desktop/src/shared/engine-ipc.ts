@@ -253,6 +253,11 @@ export type EngineSnapshotRequest = {
    *  `compat` needs): main posts them on its session for the window before
    *  the snapshot, as the window's own session gets them on its port. */
   compatEvents?: EngineCompatEvent[];
+  /** Level 1 SVG rasters (premultiplied RGBA8, top-down) drawn for an
+   *  earlier `needsRenderer` answer of a `document` snapshot: main posts
+   *  them on its session for the window before asking again (the window
+   *  may have no session of its own yet; decision S1). */
+  svgPixels?: { key: import('./engine-protocol').SvgRasterKey; data: Uint8Array }[];
 };
 
 /** A `compat` session event (pm_protocol `CompatMessage`) a window sends. */
@@ -292,6 +297,8 @@ export type EngineSnapshotReply =
       revision: number;
       fallback: import('./engine-protocol').ShaderFallbackRequest[];
       compat: import('./engine-protocol').CompatNeed[];
+      /** Level 1 SVG rasters to draw and post before asking again (decision S1). */
+      svg?: import('./engine-protocol').SvgRasterRequest[];
     }
   | { status: 'empty'; revision: number }
   | { status: 'failed'; code: string; message: string };
@@ -306,6 +313,11 @@ export type EngineCompatAsk = {
    *  queue job renders the project as queued, as today's queue did). */
   layer?: string;
 };
+
+/** A window's `unavailable` answer when another document is open there:
+ *  main keeps the more useful reason (the named S1 message, or another
+ *  window's) when every window says no. */
+export const OTHER_DOCUMENT_OPEN = 'This window has another document open.';
 
 /** renderer → main: the answer to an `EngineCompatAsk`. */
 export type EngineCompatAnswer =

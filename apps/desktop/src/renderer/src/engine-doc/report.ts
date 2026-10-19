@@ -10,6 +10,8 @@ export type ReportEvent =
   | { type: 'audit'; kind: string; revision: number; paths: string[]; detail: string; site?: string; tx?: 'none' | 'plain' | 'scoped' }
   | { type: 'consistency'; reason: string; revision: number; missed: string[]; ms: number }
   | { type: 'violation'; path: string; site: string; count: number }
+  /** A named failure with "Use New Engine" on (install.ts `strict`). */
+  | { type: 'failure'; code: string; message: string; retry: boolean }
   | { type: 'summary'; [key: string]: unknown }
   | { type: 'ready' | 'dead' | 'error'; [key: string]: unknown };
 
