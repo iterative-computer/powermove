@@ -32,7 +32,7 @@ fn main() {
     )));
     let cases: Vec<Value> =
         serde_json::from_str(include_str!("../../../corpus/fixtures/text-level2.json")).unwrap();
-    assert_eq!(cases.len(), 13, "every level 2 corpus case is exercised");
+    assert_eq!(cases.len(), 14, "every level 2 corpus case is exercised");
     let server = Arc::new(pm_text::served::DirectServer::new(
         CoreTextRegistry::new(),
         |r| r.generation(),
@@ -129,7 +129,32 @@ fn main() {
             let resting = scope
                 .level2_text(layer, t, &mut measure, false, true)
                 .unwrap();
-            assert_eq!(evaluated.layout.missing_glyphs, 0, "{id}");
+            // A character no face covers keeps its place and draws the
+            // primary face's `.notdef`, as level 1 and today's engine do.
+            let notdef: Vec<usize> = evaluated
+                .layout
+                .runs
+                .iter()
+                .flat_map(|r| r.glyphs.iter().zip(&r.sources))
+                .filter(|(g, _)| g.id == 0)
+                .map(|(_, s)| *s)
+                .collect();
+            if id == "text-level2/notdef" {
+                assert_eq!(evaluated.layout.missing_glyphs, 1, "{id}");
+                assert_eq!(notdef, [5], "{id}: the uncovered character is .notdef");
+                assert!(
+                    evaluated
+                        .layout
+                        .units
+                        .characters
+                        .iter()
+                        .any(|u| u.source_start == 5 && u.text == "\u{0378}"),
+                    "{id}: the uncovered character keeps its unit"
+                );
+            } else {
+                assert_eq!(evaluated.layout.missing_glyphs, 0, "{id}");
+                assert!(notdef.is_empty(), "{id}: {notdef:?}");
+            }
 
             // Glyph/source map: one source per glyph, inside the text, and
             // no source split over two glyph runs (a split run restarting
@@ -369,7 +394,7 @@ fn main() {
         println!("{id}: cache {cache:?}");
         println!("{id}: four native frames, bounds, picks, plane, raster, no forbidden routing");
     }
-    assert_eq!(frames, 52);
+    assert_eq!(frames, 56);
     assert_eq!(routes.routed.len(), cases.len());
     assert!(routes.failures().is_empty(), "{:?}", routes.failures());
     level2_routing_contract(&make_doc);

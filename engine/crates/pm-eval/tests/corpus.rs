@@ -1093,7 +1093,7 @@ fn semantic_gate_ids() -> std::collections::BTreeSet<String> {
 
 fn level2_documents_are_routed_to_the_semantic_gate() {
     let gate = semantic_gate_ids();
-    assert_eq!(gate.len(), 13);
+    assert_eq!(gate.len(), 14);
     assert!(gate.contains("text-level2/word-transform"));
     let doc = |compat: &str| {
         let json = format!(

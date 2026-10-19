@@ -45,7 +45,7 @@ const isLayer = (node: any) => typeof node.type === 'string' && typeof node.id =
 describe('synthetic documents', () => {
   test('level 2 text cases retain their native semantics in the generated corpus', () => {
     const native = textLevel2Projects();
-    expect(native).toHaveLength(13);
+    expect(native).toHaveLength(14);
     expect(validateAll(native)).toEqual([]);
     for (const item of native) {
       expect(projects.find(project => project.id === item.id)).toEqual(item);
@@ -57,7 +57,7 @@ describe('synthetic documents', () => {
     expect(native.some(item => item.doc.layers[0].d.fontAnchorBounds)).toBe(true);
     const dir = temp('native-text');
     try {
-      expect(generateCorpus(dir,native).projects).toHaveLength(13);
+      expect(generateCorpus(dir,native).projects).toHaveLength(14);
       for (const item of native) {
         const document = JSON.parse(readFileSync(path.join(dir,'projects',item.id,'document.json'),'utf8'));
         expect(document.layers[0].compat).toBe(2);
