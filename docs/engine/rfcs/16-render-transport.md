@@ -339,8 +339,11 @@ TypeScript and rebuild their addons when this lands.
 `ViewerState.headless?: boolean | null` keeps the session's composition,
 transport and pm-audio device alive without a presentation pool or draws.
 Absent/false retains presentation. A headless clock is emitted only after
-the document and media are ready to accept transport; its envelope carries
-the document revision. Every transition to ready publishes a clock, including
+the document and media are ready to accept transport. Its envelope carries
+the document revision only while the engine draws the composition (round 6):
+for a composition the engine cannot draw it comes untagged, so a tagged
+headless clock is how the renderer hears that an edit or a switch made the
+composition drawable again (there is no frame to say so). Every transition to ready publishes a clock, including
 paused sessions. Each paused headless document update also refreshes that
 clock at the new revision, even if its route remains ready. Headless playback
 still publishes levels and periodic clocks.
@@ -373,6 +376,19 @@ that replaces another (`missedRoute`). An exclusive presentation shows that
 sentence as the stage's status line, keeps the current engine's canvas
 hidden, never hands the stage back, and clears the line at the next frame
 the engine draws. `EngineTransport` takes commands for every decided route.
+
+**Which frames a report makes stale (round 6).** A session's events arrive
+in the engine's order on one port, and a session's frame `seq` only
+increases (a view lives as long as its session). A frame after an
+`unsupported` report is therefore a later decision, at any revision; the
+revision cannot tell them apart, because a composition switch reaches the
+engine as a document batch (revision N) before the viewer state, so the
+engine reports the old composition at N and then draws the new one at N.
+The session drops only frames with `seq` at or below the newest it had when
+the report came; the presentation drops only presented frames with `seq` at
+or below the newest its channel had delivered then (frames still in the
+presenter's queue). A viewerless session takes `engine` from any route on a
+clock tagged with a revision at or past the one it applied.
 
 Headless playback carries playback pressure for idle snapshots but has no draw
 schedule against which foreground async captures should wait. A Blender
