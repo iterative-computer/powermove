@@ -372,19 +372,19 @@ test.describe('Use New Engine: existing extensions', () => {
     const play = (page: Page) => page.evaluate(async () => {
       const PM = (window as any).PM;
       const api = PM.Kernel.api('cadence-probe');
-      const at: number[] = [];
-      const off: any = api.events.on('frame:rendered', () => at.push(performance.now()));
+      const at: number[] = [], times: number[] = [];
+      const off: any = api.events.on('frame:rendered', (event: any) => { at.push(performance.now()); times.push(event.time); });
       const needs = PM.EngineRender?.compatStats?.needs ?? 0;
       PM.setTime(0);
       await new Promise((r) => setTimeout(r, 300));
-      at.length = 0;
+      at.length = 0; times.length = 0;
       PM.play();
       await new Promise((r) => setTimeout(r, 3000));
       PM.pause();
       if (typeof off === 'function') off(); else off?.dispose?.();
       const gaps = at.slice(1).map((v, i) => v - at[i]!);
       const sorted = [...gaps].sort((a, b) => a - b);
-      return { frames: at.length, maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null };
+      return { frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null };
     });
     const { page } = session;
     await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint') && Boolean((window as any).PM?.EngineRender));
@@ -418,6 +418,7 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.maxGap).toBeLessThanOrEqual(today.maxGap + Math.ceil(1000 / 30));
     // (A 3 s window can start or end one frame apart: one frame of alignment.)
     expect(engine.frames).toBeGreaterThanOrEqual(today.frames - 1);
+    expect(engine.uniqueTimes).toBeGreaterThanOrEqual(today.uniqueTimes - 1);
   });
 
   test('an export of a project with a raster override draws the override, frame by frame', async ({ session }, testInfo) => {
