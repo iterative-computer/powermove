@@ -24,6 +24,27 @@ export type CachePreviewOptions = {
   camera?: { view: number[]; projection: { kind: 'perspective'; fovYDegrees: number; near: number; far: number } | { kind: 'orthographic'; halfHeight: number; near: number; far: number } } | null;
 };
 
+/**
+ * A cache preview's wake: opens the standby session, then requires the
+ * engine to have accepted its document. A refused first resync leaves the
+ * session open (a later gap or load resync recovers it), so the preview
+ * fails by name instead of rendering an empty engine document.
+ */
+export function documentWake(
+  wake: () => Promise<void>,
+  session: () => { closed: boolean; resyncs: number } | null,
+): () => Promise<void> {
+  return async () => {
+    await wake();
+    const current = session();
+    if (current && !current.closed && current.resyncs === 0) {
+      const error = new Error('The engine has not accepted this document yet');
+      error.name = 'EnginePreviewUnavailable';
+      throw error;
+    }
+  };
+}
+
 /** One explicit renderFrame/cancelRender operation in the interactive engine.
  * A Ready status alone is insufficient: the matching frame must reach the
  * viewer as well, including when GPU completion sends it after the status. */

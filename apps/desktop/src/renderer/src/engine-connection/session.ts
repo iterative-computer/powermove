@@ -233,9 +233,6 @@ export class DocumentSession {
     // (contract 10, read-your-registrations).
     this.startDefinitions();
     await this.resync('open');
-    if (this.resyncs === 0) {
-      throw new Error('the engine did not accept the initial document resync');
-    }
     if (this.pendingState && !this.closed) {
       const state = this.pendingState;
       this.pendingState = null;

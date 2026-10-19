@@ -42,7 +42,7 @@ import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallb
 import { SvgRasters } from './svg-rasters';
 import { BlenderPngs } from './blender-png';
 import { EngineTransport, TICKS_PER_SECOND } from './transport';
-import { EnginePreview } from './preview';
+import { EnginePreview, documentWake } from './preview';
 import { EngineSceneMetadata } from './scene-metadata';
 import { previewEngine } from '../core/scene3d/rendering';
 import { followOpenComposition } from './composition-follow';
@@ -162,7 +162,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       return barrier?.revision ?? current?.applied ?? 0;
     },
     () => previewEngine(PM) === 'eevee' ? 'material' : 'rendered',
-    () => wakeStandby()
+    documentWake(wakeStandby, () => current)
   );
   /** animVersion per revision sent, for `frame:rendered.version`. */
   const versions = new RevisionVersions();

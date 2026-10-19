@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EnginePreview, type PreviewSession, type PreviewStatus } from './preview';
+import { EnginePreview, documentWake, type PreviewSession, type PreviewStatus } from './preview';
 
 function rig() {
   const sent: Array<Record<string, unknown>> = [];
@@ -133,5 +133,18 @@ describe('native paused preview control', () => {
     const waking = preview.render({ cacheOnly: true, size: { width: 10, height: 10 } });
     preview.dispose();
     await expect(waking).rejects.toMatchObject({ name: 'EnginePreviewCancelled' });
+  });
+
+  it('names an unaccepted document instead of rendering an empty engine document', async () => {
+    let session: { closed: boolean; resyncs: number } | null = { closed: false, resyncs: 0 };
+    const wake = documentWake(async () => {}, () => session);
+    await expect(wake()).rejects.toMatchObject({ name: 'EnginePreviewUnavailable' });
+    session = { closed: false, resyncs: 1 };
+    await expect(wake()).resolves.toBeUndefined();
+    // A session that closed while starting settles through the closed path.
+    session = { closed: true, resyncs: 0 };
+    await expect(wake()).resolves.toBeUndefined();
+    session = null;
+    await expect(wake()).resolves.toBeUndefined();
   });
 });
