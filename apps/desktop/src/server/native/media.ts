@@ -39,16 +39,13 @@ export async function prepareHostMedia(media: MediaStoreService, engine: NativeE
   try {
     const facts = await engine.probeMedia(asset, null);
     const kind = facts.kind === 'still' ? 'image' : facts.kind;
-    const value = (label: string) => facts.facts.find(f => f.label === label)?.value ?? '';
-    const audio = value('Audio'), hasAudio = !!audio || kind === 'audio';
+    if ((kind === 'audio' || facts.facts.some(f => f.label === 'Audio')) && !facts.audio) throw new Error('native-runtime-version-mismatch: Rebuild the native CLI runtime to provide numeric audio import facts.');
+    const hasAudio = !!facts.audio;
     const [numerator, denominator = '1'] = (facts.settings.find(s => s.member === 'frameRate')?.value ?? '').split('/');
     const fps = Number(numerator) / Number(denominator);
-    const channelsText = audio.split(' · ').at(-1) ?? '';
-    const channels = channelsText === 'mono' ? 1 : channelsText === 'stereo' ? 2 : /^(\d+)(?:\.(\d+))?$/.test(channelsText)
-      ? channelsText.split('.').reduce((a, n) => a + Number(n), 0) : Number(/^(\d+) channels$/.exec(channelsText)?.[1] ?? 0);
     return { kind, fingerprint, storageKey, sourcePath: source, prepared: { size, w: facts.displaySize?.[0] ?? 0, h: facts.displaySize?.[1] ?? 0,
       dur: facts.duration ?? 0, fps: Number.isFinite(fps) && fps > 0 ? fps : undefined, hasAudio, audioDur: hasAudio ? facts.duration ?? 0 : 0,
-      channels, sampleRate: Number(/([\d.]+) kHz/.exec(audio)?.[1] ?? 0) * 1000, contentHash: hash,
+      channels: facts.audio?.channels ?? 0, sampleRate: facts.audio?.sampleRate ?? 0, contentHash: hash,
       ...(linked ? { storage: 'linked', link: linked } : {}) } };
   } finally { probes.delete(asset); }
 }
