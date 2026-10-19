@@ -738,6 +738,79 @@ fn a_job_draws_more_runner_steps_than_a_fixed_round_limit() {
     assert_eq!(drawn, expected);
 }
 
+/// A copy of the built-in Invert as a Store effect `id` that translates
+/// natively, listed as ANGLE-only (`pm_render::effects::ANGLE_ONLY`).
+fn angle_only_renderer(id: &str) -> Renderer {
+    let mut set = builtin_definitions();
+    let mut d = set
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap()
+        .clone();
+    d.id = id.into();
+    d.origin = DefinitionOrigin::Store;
+    let fingerprint = pm_render::glsl::body_fingerprint(d.glsl.as_ref().unwrap());
+    set.definitions.push(d);
+    let mut r = Renderer::headless().unwrap();
+    r.effects_mut()
+        .add_angle_only(fingerprint, "a test program WebGL draws differently");
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    assert!(matches!(
+        r.effects().status(DefinitionKind::Effect, id),
+        Some(Status::Ready)
+    ));
+    assert!(r.effects().angle_only(DefinitionKind::Effect, id));
+    r
+}
+
+#[test]
+fn an_angle_only_program_draws_through_the_runner_where_one_is_attached() {
+    let _gpu = gpu();
+    let doc = stack(fx("acme.glass"), Value::Null);
+    // Without a runner (pm-cli): the native translation draws, nothing is
+    // routed or reported.
+    let mut headless = angle_only_renderer("acme.glass");
+    let native = render(&mut headless, &doc).unwrap();
+    assert!(headless.watchdog_reports(true).is_empty());
+    let plain = render(&mut headless, &stack(json!([]), Value::Null)).unwrap();
+    assert_ne!(native, plain);
+    // The viewer: asked of the runner, with the effect's textures.
+    let mut viewer = angle_only_renderer("acme.glass");
+    viewer.set_shader_fallback_runner(true);
+    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut viewer, &doc) else {
+        panic!("expected a runner request")
+    };
+    assert_eq!(q.len(), 1);
+    assert_eq!(q[0].stage, "angle-parity");
+    assert!(
+        q[0].message.contains("draws differently from WebGL"),
+        "{}",
+        q[0].message
+    );
+    // The runner's pixels are drawn (the CPU stand-in's, not the native
+    // program's).
+    let drawn = loop {
+        match render(&mut viewer, &doc) {
+            Ok(px) => break px,
+            Err(RenderError::ShaderFallbackPending(q)) => answer(&mut viewer, q),
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_ne!(drawn, native);
+    // A job: through its host, the same frame as the viewer.
+    let host = Arc::new(Cpu::default());
+    let mut job = angle_only_renderer("acme.glass");
+    job.effects_mut().watchdog.set_policy(Policy::Job);
+    job.set_fallback_host(Some(host.clone()));
+    assert_eq!(render(&mut job, &doc).unwrap(), drawn);
+    assert_eq!(host.seen.lock().unwrap().len(), 1);
+    // The built-in it was copied from stays native everywhere.
+    let mut builtin = angle_only_renderer("acme.glass");
+    builtin.set_shader_fallback_runner(true);
+    assert!(render(&mut builtin, &stack(fx("invert"), Value::Null)).is_ok());
+}
+
 /// Answers every request with the same pixels at once: the engine's own
 /// cost of a fallback step (submit, readback, keying, upload) without a
 /// runner's draw.

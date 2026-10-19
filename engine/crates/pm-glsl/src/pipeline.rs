@@ -78,6 +78,10 @@ pub enum FailureStage {
     Deadline,
     /// A stage panicked.
     Panic,
+    /// The program translates, but its translation is proved to draw
+    /// differently from WebGL's at discontinuities (`pm_render`'s
+    /// `effects::ANGLE_ONLY`): where a runner is attached it draws instead.
+    AngleParity,
 }
 
 impl FailureStage {
@@ -93,6 +97,7 @@ impl FailureStage {
             FailureStage::NagaValidate => "naga-validate",
             FailureStage::Deadline => "deadline",
             FailureStage::Panic => "panic",
+            FailureStage::AngleParity => "angle-parity",
         }
     }
 

@@ -594,10 +594,13 @@ fn fallback_effects_match_webgl() {
         let id = case["id"].as_str().unwrap();
         let webgl = &status["cases"][id];
         let webgl_draws = webgl["compiled"].as_bool() == Some(true) && webgl["glError"].is_null();
+        // Programs the native pipeline cannot translate, and programs it
+        // translates but that are listed as drawn by WebGL's runner
+        // (`pm_render::effects::ANGLE_ONLY`).
         let needs = matches!(
             renderer.effects().status(def.kind, def.id.as_str()),
             Some(Status::NeedsFallback(_))
-        );
+        ) || renderer.effects().angle_only(def.kind, def.id.as_str());
         if !webgl_draws || !needs {
             continue;
         }
@@ -660,6 +663,16 @@ fn fallback_effects_match_webgl() {
                 pm_gpu::readback::read_f32(renderer.device(), renderer.queue(), &out.texture)
                     .unwrap();
             let m = compare(&pixels, &reference);
+            if std::env::var_os("PM_SHADER_STATS").is_some() {
+                eprintln!(
+                    "{id} {name} (runner): exact {:.3}% ({} of {} px), {} px over 1 CV, max {} CV",
+                    100.0 * m.exact as f64 / m.pixels.max(1) as f64,
+                    m.exact,
+                    m.pixels,
+                    m.over_one,
+                    m.max_cv
+                );
+            }
             if m.pass() {
                 matched += 1;
             } else {

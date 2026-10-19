@@ -300,6 +300,49 @@ fn render_layer(renderer: &mut Renderer, doc: &pm_model::Document, variant: &Val
     }
 }
 
+/// The answers of the app's runner (`tools/shaders/fallback-runner.ts
+/// --fallback <corpus>/fallback-effects`) for effects and transitions WebGL's
+/// runner draws (`pm_render::effects::ANGLE_ONLY`): a request without an
+/// answer is written for the tool and drawn transparent (a failure).
+struct EffectRunner {
+    dir: PathBuf,
+    missing: std::sync::Mutex<usize>,
+}
+
+impl pm_render::shader_layers::FallbackHost for EffectRunner {
+    fn run(
+        &self,
+        job: &pm_render::shader_layers::FallbackJob,
+    ) -> Result<pm_render::shader_layers::FallbackPixels, pm_render::shader_layers::FallbackFailure>
+    {
+        let r = &job.request;
+        if let Some(rgba16f) = read_f16(&self.dir.join("pixels").join(format!("{}.f16", r.key))) {
+            return Ok(pm_render::shader_layers::FallbackPixels {
+                width: r.width,
+                height: r.height,
+                rgba16f,
+            });
+        }
+        let requests = self.dir.join("requests");
+        std::fs::create_dir_all(&requests).unwrap();
+        for (i, t) in job.textures.iter().enumerate() {
+            let bytes: Vec<u8> = t.rgba16f.iter().flat_map(|v| v.to_le_bytes()).collect();
+            std::fs::write(requests.join(format!("{}-{i}.f16", r.key)), bytes).unwrap();
+        }
+        std::fs::write(
+            requests.join(format!("{}.json", r.key)),
+            serde_json::to_vec(r).unwrap(),
+        )
+        .unwrap();
+        *self.missing.lock().unwrap() += 1;
+        Ok(pm_render::shader_layers::FallbackPixels {
+            width: r.width,
+            height: r.height,
+            rgba16f: vec![0; r.width as usize * r.height as usize * 4],
+        })
+    }
+}
+
 #[test]
 fn every_shader_matches_webgl() {
     let Some(dir) = corpus_dir() else {
@@ -346,6 +389,28 @@ fn every_shader_matches_webgl() {
         definitions.push(Some(def));
     }
     set.generation = Seq::new(1).unwrap();
+    // Effects and transitions WebGL's runner draws (ANGLE-only): a second
+    // renderer with the runner's answers as its host, so the layers'
+    // fallback path above is unchanged.
+    let effect_runner = std::sync::Arc::new(EffectRunner {
+        dir: dir.join("fallback-effects"),
+        missing: std::sync::Mutex::new(0),
+    });
+    let mut via_runner = Renderer::headless().expect("a GPU");
+    via_runner.set_fallback_host(Some(effect_runner.clone()));
+    let _ = via_runner.set_definitions(&set).unwrap();
+    let mut runner_images: BTreeMap<String, Target> = BTreeMap::new();
+    for image in corpus["images"].as_array().unwrap() {
+        let (w, h) = (
+            image["width"].as_u64().unwrap() as u32,
+            image["height"].as_u64().unwrap() as u32,
+        );
+        let halfs = read_f16(&dir.join(image["file"].as_str().unwrap())).unwrap();
+        runner_images.insert(
+            image["name"].as_str().unwrap().into(),
+            upload(&via_runner, w, h, &halfs),
+        );
+    }
     let _ = renderer
         .set_definitions(&DefinitionSetSnapshot { ..set })
         .unwrap();
@@ -424,6 +489,12 @@ fn every_shader_matches_webgl() {
                     .map(js)
                     .collect();
                 let time = variant["time"].as_f64().unwrap();
+                let angle_only = renderer.effects().angle_only(dkind, def.id.as_str());
+                let (renderer, images) = if angle_only {
+                    (&mut via_runner, &runner_images)
+                } else {
+                    (&mut renderer, &images)
+                };
                 let out = if kind == "effect" {
                     let step = effect_step(def, "fx", &values);
                     let input = &images[variant["input"].as_str().unwrap()];
@@ -467,7 +538,10 @@ fn every_shader_matches_webgl() {
                         if unstable.is_some() {
                             dump_unstable(shown, name, &pixels, &reference, width, false);
                         }
-                        record(tally, shown, id, name, m, false, unstable);
+                        // An ANGLE-only program is judged as drawn by the
+                        // runner: never listed apart as WebGL-unstable.
+                        let unstable = unstable.filter(|_| !angle_only);
+                        record(tally, shown, id, name, m, angle_only, unstable);
                     }
                     Err(e) => tally.failures.push(format!("{shown} {name}: {e}")),
                 }
@@ -592,6 +666,13 @@ fn every_shader_matches_webgl() {
         eprintln!(
             "{requests_written} fallback requests written to {} (answer them with tools/shaders/fallback-runner.ts)",
             requests_dir.display()
+        );
+    }
+    let effect_requests = *effect_runner.missing.lock().unwrap();
+    if effect_requests > 0 {
+        eprintln!(
+            "{effect_requests} effect requests written to {} (answer them with tools/shaders/fallback-runner.ts --fallback <that dir>)",
+            effect_runner.dir.display()
         );
     }
     assert_eq!(failed, 0, "{failed} shader gate failures");

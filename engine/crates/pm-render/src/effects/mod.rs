@@ -78,7 +78,35 @@ struct Entry {
     prepared: Option<Arc<Prepared>>,
     /// Built on first use (the Metal compiler runs there).
     program: Option<GpuProgram>,
+    /// A program in [`ANGLE_ONLY`]: what it is.
+    angle_only: Option<String>,
 }
+
+/// Legacy programs whose native translation is proved to draw differently
+/// from today's WebGL, by the fingerprint of their user body
+/// ([`crate::glsl::body_fingerprint`], numbers ignored) and what they are.
+/// Where a fallback runner is attached (the app's viewer and its exports)
+/// they draw through it, the same ANGLE that draws them today (orchestrator
+/// decision DEFS-2, 2026-10-19: a level 1 program must match today, a speed
+/// cost is acceptable); a renderer without one (`pm-cli`) draws the native
+/// translation. Built-in definitions are never listed (every built-in is
+/// bit-exact natively).
+///
+/// - Store `mrsigma/liquid-glass-ios27` 2.0.8 (`liquid-glass-ios27.glass`):
+///   its rim search bisects the bilinear alpha of `u_orig` at coordinates
+///   derived from screen-space derivatives, a matrix inverse, and
+///   trigonometry, and branches on `alpha < 0.5`. A coordinate one ulp
+///   apart samples a different bilinear weight (8-bit fractions) and moves
+///   the rim by a bisection step, so the shader gate's 43 to 49 pixels (up
+///   to 111 CV) differ even with ANGLE's built-in calls; WebGL itself moves
+///   26 to 33 pixels by up to 67 CV under a one-step input perturbation
+///   (docs/engine/effects.md, "ANGLE-only programs"). The Store's other
+///   `liquid-glass-ios27` (zellzoi, 2.0.1) matches natively and is not
+///   listed.
+pub const ANGLE_ONLY: &[(&str, &str)] = &[(
+    "2e2c56341184fc54c1d6537996d2e172ae19e124ee3c89ca50d2d3ebfe0526ff",
+    "Store mrsigma/liquid-glass-ios27 2.0.8 (liquid-glass-ios27.glass)",
+)];
 
 /// The renderer's definitions and their programs.
 pub struct Effects {
@@ -97,6 +125,8 @@ pub struct Effects {
     /// Effects and transitions only the fallback runner draws
     /// ([`fallback`]).
     pub fallback: fallback::EffectFallback,
+    /// Fingerprints added to [`ANGLE_ONLY`] ([`Effects::add_angle_only`]).
+    angle_only: Vec<(String, String)>,
     /// What an empty texture unit samples: (0, 0, 0, 1), per format.
     dummies: std::collections::HashMap<wgpu::TextureFormat, pm_gpu::Target>,
     simple: std::collections::HashMap<(SimpleOp, wgpu::TextureFormat), wgpu::RenderPipeline>,
@@ -252,9 +282,40 @@ impl Effects {
             context,
             watchdog: Watchdog::default(),
             fallback: Default::default(),
+            angle_only: Vec::new(),
             dummies: Default::default(),
             simple: Default::default(),
         }
+    }
+
+    /// Lists another program as drawn by the fallback runner where one is
+    /// attached ([`ANGLE_ONLY`]; tests and the shader gate). Applies to
+    /// definitions translated from then on.
+    pub fn add_angle_only(&mut self, fingerprint: impl Into<String>, what: impl Into<String>) {
+        self.angle_only.push((fingerprint.into(), what.into()));
+    }
+
+    /// What a program in [`ANGLE_ONLY`] is, if it is one.
+    fn angle_only_program(&self, glsl: &pm_protocol::definitions::WrappedGlsl) -> Option<String> {
+        let fingerprint = crate::glsl::body_fingerprint(glsl);
+        ANGLE_ONLY
+            .iter()
+            .map(|(f, w)| (*f, *w))
+            .chain(
+                self.angle_only
+                    .iter()
+                    .map(|(f, w)| (f.as_str(), w.as_str())),
+            )
+            .find(|(f, _)| *f == fingerprint)
+            .map(|(_, w)| w.to_owned())
+    }
+
+    /// Whether `id`'s program is drawn by the fallback runner where one is
+    /// attached although it translates ([`ANGLE_ONLY`]).
+    pub fn angle_only(&self, kind: DefinitionKind, id: &str) -> bool {
+        self.entries
+            .get(&(kind, DefinitionId::from(id)))
+            .is_some_and(|e| e.angle_only.is_some())
     }
 
     /// An empty definition set sharing this one's translation cache (one
@@ -402,6 +463,16 @@ impl Effects {
             Err(f) => (Status::NeedsFallback(f.clone()), None),
         };
         let error = definition_error(&snapshot.id, &status);
+        // Built-ins are proved bit-exact natively and never listed; shader
+        // and extension layers have their own runner path.
+        let angle_only = (matches!(status, Status::Ready)
+            && snapshot.origin != pm_protocol::definitions::DefinitionOrigin::BuiltIn
+            && matches!(
+                snapshot.kind,
+                DefinitionKind::Effect | DefinitionKind::Transition
+            ))
+        .then(|| self.angle_only_program(glsl))
+        .flatten();
         // A changed definition gets a fresh watchdog record.
         self.watchdog.forget(snapshot.kind, &snapshot.id);
         self.entries.insert(
@@ -411,6 +482,7 @@ impl Effects {
                 status,
                 prepared,
                 program: None,
+                angle_only,
             },
         );
         error
@@ -608,6 +680,19 @@ impl Effects {
             entry.status = Status::NeedsFallback(f.clone());
             entry.program = None;
             return Err(f);
+        }
+        // An ANGLE-only program (built, so `build` and `validate_effect`
+        // still compile it) draws through the runner where one is attached:
+        // the caller takes the runner's path on this failure.
+        if let Some(what) = &entry.angle_only
+            && self.fallback.runner
+        {
+            return Err(Failure::new(
+                pm_glsl::FailureStage::AngleParity,
+                format!(
+                    "{what}: its native translation draws differently from WebGL, so WebGL's runner draws it"
+                ),
+            ));
         }
         Ok(entry.program.as_mut().expect("still built"))
     }
