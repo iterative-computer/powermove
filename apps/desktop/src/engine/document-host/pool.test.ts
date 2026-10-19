@@ -235,6 +235,22 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host poo
     expect(doc(host, 'Palpha').name).toBe('Agent name');
   }, 60_000);
 
+  it('retains a refused batch and sends it with the next successful call', async () => {
+    const host = hostServices(); host.seed('Prefused', 'Refused');
+    const base = host.services.session;
+    let refuse = true;
+    host.services.session = { ...base, patch: async (id, patches) => {
+      if (refuse) { refuse = false; throw new Error('host temporarily unavailable'); }
+      return base.patch(id, patches);
+    } };
+    const pool = newPool(host.services);
+    await expect(ask(pool, 'Prefused', 'run-a', 'apply_commands', { commands: [{ type: 'add_layer', layerType: 'solid', name: 'Retained' }] })).rejects.toMatchObject({ code: 'service-unavailable' });
+    expect(names(host, 'Prefused')).toEqual([]);
+    expect((await ask(pool, 'Prefused', 'run-r', 'get_project_state', {})).ok).toBe(true);
+    expect(names(host, 'Prefused')).toEqual(['Retained']);
+    expect((await pool.stats('Prefused')).hash).toBe(canonicalProjectHash(doc(host, 'Prefused')));
+  }, 60_000);
+
   it('waits for an edit made during the reconciliation send before answering', async () => {
     await reconciliationWindow(false, 0);
   }, 60_000);

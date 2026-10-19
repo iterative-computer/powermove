@@ -390,6 +390,8 @@ export class DocumentWorker {
   private sending: Promise<void> = Promise.resolve();
   /** A send the host refused: the next sync reconciles with the host's copy. */
   private diverged = false;
+  /** Refused paths stay local; reconciliation retries their current values. */
+  private retryPaths = new Map<string, Patch['path']>();
   /** Batches queued or in flight that the host has not acknowledged. */
   private unacked = new Set<Patch[]>();
   /** A reconciliation with the host's copy, queued behind the sends; it sends every local edit. */
@@ -416,7 +418,9 @@ export class DocumentWorker {
     if (!patches.length) return this.sending;
     this.unacked.add(patches);
     const send = this.sending.then(async () => {
-      try { this.seq = await this.service<number>('session.patch', projectId, patches); } finally { this.unacked.delete(patches); }
+      try { this.seq = await this.service<number>('session.patch', projectId, patches); }
+      catch (error) { this.retain(patches); throw error; }
+      finally { this.unacked.delete(patches); }
     });
     this.sending = send.catch((error) => {
       this.diverged = true;
@@ -446,13 +450,17 @@ export class DocumentWorker {
         const local = diffPatches(JSON.parse(this.synced), JSON.parse(JSON.stringify(PM['proj']))).forward;
         const host = JSON.stringify(joined.doc);
         this.seq = joined.seq;
-        const next = local.length ? applyPatch(JSON.parse(host), local) : JSON.parse(host);
+        const retry = [...this.retryPaths.values()].map(path => currentPatch(PM['proj'], path));
+        this.retryPaths.clear();
+        const next = applyPatch(JSON.parse(host), [...retry, ...local]);
         if (JSON.stringify(next) !== JSON.stringify(PM['proj'])) PM['replaceProject'](next, { selection: PM['sel'] });
         const mine = diffPatches(JSON.parse(host), JSON.parse(JSON.stringify(PM['proj']))).forward;
         this.synced = JSON.stringify(PM['proj']);
         if (mine.length) {
           this.unacked.add(mine);
-          try { this.seq = await this.service<number>('session.patch', projectId, mine); } finally { this.unacked.delete(mine); }
+          try { this.seq = await this.service<number>('session.patch', projectId, mine); }
+          catch (error) { this.retain(mine); throw error; }
+          finally { this.unacked.delete(mine); }
         }
       } finally {
         this.reconciling = null;
@@ -464,6 +472,10 @@ export class DocumentWorker {
       this.log(`[engine] ${projectId}: reconciling with the host failed (${(error as Error)?.message ?? error}); the next sync tries again`);
     });
     return run;
+  }
+
+  private retain(patches: Patch[]): void {
+    for (const patch of patches) this.retryPaths.set(JSON.stringify(patch.path), patch.path);
   }
 
   /** Sends what changed since the last sync; resolves once the host applied it. */
@@ -497,6 +509,16 @@ export class DocumentWorker {
       else void this.startReconcile().catch(() => { /* logged; retried on the next sync */ });
     }
   }
+}
+
+/** A refused path's current value, including deletions and later edits. */
+function currentPatch(root: any, path: Patch['path']): Patch {
+  let value = root;
+  for (const part of path) {
+    if (!value || typeof value !== 'object' || !Object.hasOwn(value, part)) return { path, exists: false };
+    value = value[part];
+  }
+  return { path, exists: true, value: structuredClone(value) };
 }
 
 /** One path is a prefix of the other: the two writes touch the same value. */
