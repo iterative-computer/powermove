@@ -225,6 +225,7 @@ mod review {
                 bitmaps: &mut bitmaps,
                 masks: None,
                 viewport: None,
+                path_rasterizer: None,
                 profile: Profile::CORETEXT,
                 unsupported: Vec::new(),
             };

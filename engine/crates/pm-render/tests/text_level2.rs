@@ -125,6 +125,7 @@ fn main() {
             bitmaps: &mut bitmaps,
             masks: None,
             viewport: None,
+            path_rasterizer: None,
             profile: profile.clone(),
             unsupported: Vec::new(),
         };

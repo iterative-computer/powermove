@@ -302,7 +302,7 @@ fn append(dst: &mut pm_skia_path::PathBuilder, src: &pm_skia_path::Path) {
 /// `frame` applied to `user` (`SkStrokeRec::applyToPath`, resolution
 /// scale 1): the stroke, plus the path itself for stroke-and-fill, added
 /// so its first contour winds clockwise.
-fn framed(user: &pm_skia_path::Path, frame: Frame) -> Option<pm_skia_path::Path> {
+pub fn framed(user: &pm_skia_path::Path, frame: Frame) -> Option<pm_skia_path::Path> {
     let stroke = pm_skia_path::Stroke {
         width: frame.width,
         miter_limit: frame.miter_limit,

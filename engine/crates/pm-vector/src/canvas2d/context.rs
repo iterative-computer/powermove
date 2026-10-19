@@ -548,6 +548,25 @@ impl Context {
     pub fn finish(&self) -> Vec<u8> {
         render_ops(self.width, self.height, &self.ops)
     }
+
+    /// Resolve a device-space crop of primitive path draws, retaining the
+    /// original canvas viewport. This bounds a glyph allocation without
+    /// changing the NDC round trip or any sample decisions.
+    pub fn finish_region(&self, rect: [i32; 4]) -> Option<Vec<u8>> {
+        if rect[2] <= rect[0] || rect[3] <= rect[1] { return None; }
+        if self.ops.iter().any(|o| !matches!(o,
+            Op::Polygons { .. } | Op::Triangles { .. } | Op::Analytic { .. })) {
+            return None;
+        }
+        let pattern = if self.ops.iter().any(needs_msaa) { &SAMPLES_4X[..] } else { &SAMPLES_1X[..] };
+        let mut target = MsaaTarget::new((rect[2] - rect[0]) as u32,
+                                        (rect[3] - rect[1]) as u32, pattern);
+        let viewport = tess::Viewport::of(self.width, self.height);
+        for op in &self.ops {
+            render_op_region(&mut target, op, None, viewport, [rect[0], rect[1]]);
+        }
+        Some(target.resolve())
+    }
 }
 
 fn needs_msaa(o: &Op) -> bool {
@@ -571,21 +590,33 @@ fn render_ops(width: u32, height: u32, ops: &[Op]) -> Vec<u8> {
     target.resolve()
 }
 fn render_op(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>) {
+    let viewport = tess::Viewport::of(target.width, target.height);
+    render_op_region(target, op, clip, viewport, [0, 0]);
+}
+fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
+                    viewport: tess::Viewport, origin: [i32; 2]) {
     use super::msaa::{fill_triangles, unorm8};
     let mut mask = target.mask();
     let mut coverage = None;
-    let viewport = tess::Viewport::of(target.width, target.height);
     let paint = match op {
         Op::Polygons { polys, color, rule, .. } => {
-            fill_polygons(&mut mask, &viewport.map_polygons(polys), *rule);
+            let mut mapped = viewport.map_polygons(polys);
+            for p in mapped.iter_mut().flatten() {
+                p[0] -= f64::from(origin[0]); p[1] -= f64::from(origin[1]);
+            }
+            fill_polygons(&mut mask, &mapped, *rule);
             color
         }
         Op::Triangles { tris, color } => {
-            fill_triangles(&mut mask, &viewport.map_triangles(tris));
+            let mut mapped = viewport.map_triangles(tris);
+            for p in mapped.iter_mut().flatten() {
+                p[0] -= origin[0] as f32; p[1] -= origin[1] as f32;
+            }
+            fill_triangles(&mut mask, &mapped);
             color
         }
         Op::Analytic { inst, color } => {
-            coverage = Some(analytic::rasterize(inst, target.width, target.height, target.pattern));
+            coverage = Some(analytic::rasterize_region(inst, target.width, target.height, target.pattern, origin));
             color
         }
         Op::Clip { op, clips } => {
@@ -672,7 +703,8 @@ fn render_op(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>) {
             continue;
         }
         let color = paint
-            .at((p % target.width as usize) as f32 + 0.5, (p / target.width as usize) as f32 + 0.5)
+            .at((p % target.width as usize) as f32 + origin[0] as f32 + 0.5,
+                (p / target.width as usize) as f32 + origin[1] as f32 + 0.5)
             .map(|v| v * cov);
         let inv = 1.0 - color[3];
         for c in 0..4 {

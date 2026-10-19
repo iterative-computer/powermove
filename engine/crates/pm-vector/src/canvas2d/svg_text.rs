@@ -125,6 +125,7 @@ impl<'a, R: FontResolver> TextRenderer<'a, R> {
                         bitmaps: &mut self.bitmaps,
                         masks: None,
                         viewport: None,
+                        path_rasterizer: None,
                         profile: Profile::CANVAS2D,
                         unsupported: Vec::new(),
                     };

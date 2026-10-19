@@ -501,6 +501,7 @@ impl TextContext {
                     None
                 },
                 viewport: Some(viewport),
+                path_rasterizer: Some(&pm_vector::canvas2d::text::RASTERIZER),
                 profile: self.profile.clone(),
                 unsupported: Vec::new(),
             },
@@ -715,6 +716,7 @@ impl TextContext {
             bitmaps: &mut self.bitmaps,
             masks: None,
             viewport: None,
+            path_rasterizer: None,
             profile: Profile::CORETEXT,
             unsupported: Vec::new(),
         };
