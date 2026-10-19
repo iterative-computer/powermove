@@ -223,9 +223,9 @@ async function capture(session: LaunchedApp, view: View, engine: boolean): Promi
   const shot = await session.app.evaluate(async ({ BrowserWindow }, at) => {
     const window = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && w.webContents.getURL().startsWith('app:'))!;
     const image = await window.webContents.capturePage(at);
-    const bitmap = image.toBitmap();
     const size = image.getSize();
-    return { width: size.width, height: size.height, data: Array.from(bitmap) };
+    // Base64: a number array of 5 MB per capture is most of the run's time.
+    return { width: size.width, height: size.height, data: image.toBitmap().toString('base64') };
   }, rect);
   // The canvas the frame on screen was drawn at (the engine) or today's crop (above).
   const shown = engine ? await page.evaluate(() => {
@@ -234,7 +234,7 @@ async function capture(session: LaunchedApp, view: View, engine: boolean): Promi
     const canvas = frame ? V.enginePresentation.stateFor(frame.viewSeq)?.canvas : null;
     return canvas ? [canvas.crop.x, canvas.crop.y, canvas.crop.width, canvas.crop.height, canvas.width, canvas.height] : null;
   }) : undefined;
-  return { width: shot.width, height: shot.height, data: Uint8Array.from(shot.data), geometry: { ...geometry, ...(engine ? { crop: shown && (shown[0] || shown[1] || geometry.shown > 1) ? shown : null } : {}) }, ...(engine ? { content: await content(page) } : {}) };
+  return { width: shot.width, height: shot.height, data: new Uint8Array(Buffer.from(shot.data, 'base64')), geometry: { ...geometry, ...(engine ? { crop: shown && (shown[0] || shown[1] || geometry.shown > 1) ? shown : null } : {}) }, ...(engine ? { content: await content(page) } : {}) };
 }
 
 /** A minimal RGBA PNG (evidence). */
