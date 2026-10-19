@@ -28,6 +28,7 @@ use super::model::{
 };
 use crate::three::materials::Side;
 use crate::three::math::{self, Mat4};
+use crate::three::program::Parameters;
 
 pub use asset::{DecodedImage, GltfAsset};
 
@@ -800,16 +801,12 @@ pub fn instantiate(
 /// The model and plan retain this mesh for queries, snapshots, and a map
 /// whose image fails only after planning. `resolve_maps` calls this after
 /// removing any late-failed scene maps from the final materials.
-pub(crate) fn short_attribute_blocks_draw(mesh: &Mesh3d) -> bool {
+pub(crate) fn short_attribute_blocks_draw(mesh: &Mesh3d, params: &Parameters) -> bool {
     let Some(extra) = mesh.geometry.extra.as_deref() else {
         return false;
     };
     extra.short_attributes.iter().any(|(name, count)| {
-        *count < extra.fetched_vertices
-            && mesh
-                .materials
-                .iter()
-                .any(|m| material::consumes_short_attribute(mesh, m, name))
+        *count < extra.fetched_vertices && material::consumes_short_attribute(params, name)
     })
 }
 

@@ -573,3 +573,76 @@ fn short_uv_model_draws_when_override_map_fails_after_planning() {
     let recovered = render_plan(&gpu, &mut Scene3dRenderer::default(), &mapped).unwrap();
     assert_eq!(recovered, expected, "late map failure leaves UV inactive");
 }
+
+/// A short NORMAL rejects the Standard color draw, but r180's shadow
+/// MeshDepthMaterial has no normal input. The caster must remain available
+/// to the shadow pass even though its own color pass cannot draw it.
+#[test]
+fn short_normal_model_still_casts_a_shadow() {
+    let dir = Dir::new("3d-short-normal-shadow");
+    let model_path = dir.0.join("short-normal.glb");
+    let mut bin = Vec::new();
+    for value in [
+        -1.0_f32, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+    ] {
+        bin.extend_from_slice(&value.to_le_bytes());
+    }
+    let mut json = serde_json::to_vec(&json!({
+        "asset": {"version": "2.0"}, "scene": 0,
+        "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}}]}],
+        "buffers": [{"byteLength": bin.len()}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36},
+            {"buffer": 0, "byteOffset": 36, "byteLength": 24}],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [-1, -1, 0], "max": [1, 1, 0]},
+            {"bufferView": 1, "componentType": 5126, "count": 2, "type": "VEC3"}
+        ]
+    }))
+    .unwrap();
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
+    let mut glb = Vec::new();
+    glb.extend_from_slice(b"glTF");
+    glb.extend_from_slice(&2_u32.to_le_bytes());
+    glb.extend_from_slice(&(12_u32 + 8 + json.len() as u32 + 8 + bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"JSON");
+    glb.extend_from_slice(&json);
+    glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"BIN\0");
+    glb.extend_from_slice(&bin);
+    std::fs::write(&model_path, glb).unwrap();
+
+    let mut doc = obj_doc();
+    doc["assets"]["model"]["format"] = json!("glb");
+    doc["assets"]["model"]["name"] = json!("short-normal.glb");
+    doc["layers"][0]["d"]["data"]["environment"]["shadows"] = json!(true);
+    doc["layers"][1]["d"]["data"]["light"]["castShadow"] = json!(true);
+    set(&mut doc["layers"][1], "position.x", json!(0));
+    set(&mut doc["layers"][1], "position.y", json!(0));
+    set(&mut doc["layers"][1], "position.z", json!(4));
+    set(&mut doc["layers"][2], "rotation.y", json!(0));
+    let mut receiver = object3d("receiver", "plane", json!({}), "#FFFFFF", W, H, 2.0);
+    set(&mut receiver, "position.z", json!(-0.7));
+    receiver["d"]["data"]["object"]["castShadow"] = json!(false);
+    doc["layers"].as_array_mut().unwrap().push(receiver);
+    let assets = resolver("model", &model_path);
+    let mut planner = Renderer::headless().unwrap();
+    let with_shadow = object_plans(&mut planner, &doc, &assets);
+    assert_eq!(with_shadow.len(), 2);
+    assert_eq!(with_shadow[0].scene.objects[0].meshes.len(), 1);
+    let mut without_doc = doc.clone();
+    without_doc["layers"][2]["d"]["data"]["object"]["castShadow"] = json!(false);
+    let without_shadow = object_plans(&mut planner, &without_doc, &assets);
+    let gpu = pm_gpu::Gpu::new("pm-render short normal shadow test").unwrap();
+    let lit = render_plan(&gpu, &mut Scene3dRenderer::default(), &with_shadow[1]).unwrap();
+    let unshadowed =
+        render_plan(&gpu, &mut Scene3dRenderer::default(), &without_shadow[1]).unwrap();
+    assert_ne!(
+        lit, unshadowed,
+        "short NORMAL color draw still casts a depth shadow"
+    );
+}

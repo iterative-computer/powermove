@@ -456,27 +456,6 @@ impl Scene3dRenderer {
             }
             s.warnings.extend(warnings);
         }
-        // The source model and scene plan keep every accepted mesh. Only the
-        // resolved render scene drops one whose final, loaded material binds
-        // an attribute shorter than the vertices this draw fetches. A map
-        // that failed above can therefore make a previously short UV inactive.
-        if resolved
-            .as_ref()
-            .unwrap_or(scene.as_ref())
-            .objects
-            .iter()
-            .any(|o| {
-                o.meshes
-                    .iter()
-                    .any(super::gltf::short_attribute_blocks_draw)
-            })
-        {
-            let s = resolved.get_or_insert_with(|| Scene3d::clone(scene));
-            for o in &mut s.objects {
-                o.meshes
-                    .retain(|m| !super::gltf::short_attribute_blocks_draw(m));
-            }
-        }
         let out = resolved.map_or_else(|| scene.clone(), Arc::new);
         self.warning_scenes.insert(
             Arc::as_ptr(scene) as usize,
@@ -1123,7 +1102,7 @@ impl Scene3dRenderer {
         scene: &Scene3d,
         draw: &DrawDesc,
         samples: u32,
-    ) -> Result<Prepared, Error3d> {
+    ) -> Result<Option<Prepared>, Error3d> {
         let mesh_desc = &scene.objects[draw.object].meshes[draw.mesh];
         if legacy_morph_packer_error(
             mesh_desc
@@ -1135,6 +1114,12 @@ impl Scene3dRenderer {
             return Err(Error3d::Failed(
                 "Cannot read properties of undefined (reading 'count')".into(),
             ));
+        }
+        // WebGL rejects a short bound attribute at renderBufferDirect. Use
+        // this pass's final program: an opaque color map can fail the color
+        // draw while its shadow depth program optimizes that UV away.
+        if super::gltf::short_attribute_blocks_draw(mesh_desc, &draw.params) {
+            return Ok(None);
         }
         let (key, compiled) = self.program(device, &draw.params)?;
         let pipeline = self.pipeline(
@@ -1287,14 +1272,14 @@ impl Scene3dRenderer {
             }
             None => 0..total,
         };
-        Ok(Prepared {
+        Ok(Some(Prepared {
             pipeline,
             bind,
             buffers,
             index,
             range,
             instances,
-        })
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1314,7 +1299,9 @@ impl Scene3dRenderer {
                 for (view, draws) in views {
                     let mut list = Vec::new();
                     for d in draws {
-                        list.push(self.prepare(device, queue, encoder, scene, d, 1)?);
+                        if let Some(prepared) = self.prepare(device, queue, encoder, scene, d, 1)? {
+                            list.push(prepared);
+                        }
                     }
                     prepared.push((view.viewport, list));
                 }
@@ -1370,7 +1357,11 @@ impl Scene3dRenderer {
                     }
                     let mut list = Vec::new();
                     for d in draws {
-                        list.push(self.prepare(device, queue, encoder, scene, d, samples)?);
+                        if let Some(prepared) =
+                            self.prepare(device, queue, encoder, scene, d, samples)?
+                        {
+                            list.push(prepared);
+                        }
                     }
                     let resolve = self
                         .gltf
@@ -1438,7 +1429,11 @@ impl Scene3dRenderer {
                 let samples = self.samples;
                 let mut list = Vec::new();
                 for d in draws {
-                    list.push(self.prepare(device, queue, encoder, scene, d, samples)?);
+                    if let Some(prepared) =
+                        self.prepare(device, queue, encoder, scene, d, samples)?
+                    {
+                        list.push(prepared);
+                    }
                 }
                 let a = self.attachments.as_ref().expect("attachments");
                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1472,7 +1467,11 @@ impl Scene3dRenderer {
                 let samples = self.samples;
                 let mut list = Vec::new();
                 for d in draws {
-                    list.push(self.prepare(device, queue, encoder, scene, d, samples)?);
+                    if let Some(prepared) =
+                        self.prepare(device, queue, encoder, scene, d, samples)?
+                    {
+                        list.push(prepared);
+                    }
                 }
                 let a = self.attachments.as_ref().expect("attachments");
                 let resolve = resolve.expect("a resolve target");

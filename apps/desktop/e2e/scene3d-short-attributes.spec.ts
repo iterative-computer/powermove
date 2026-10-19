@@ -39,5 +39,10 @@ test('Chromium binds only final-program attributes and packs short morphs in JS'
   // Chromium r180 keeps NORMAL active even with no lights or ambient only.
   for (const name of ['normalLitNoLights', 'normalLitAmbientOnly'] as const)
     expect(result[name].activeAttributes, name).toContain('normal');
+  // The depth cases are recorded with active attributes and pixels before
+  // assigning expected verdicts for r180's optimized map/normal shader.
+  for (const name of ['uvDepthNoMap', 'uvDepthMapOpaque',
+    'uvDepthMapAlphaTest', 'normalDepth', 'colorDepth'] as const)
+    expect(result[name].activeAttributes, name).toBeDefined();
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

@@ -313,13 +313,15 @@ result is superseded below.
 The readers now retain original source counts for attributes and morph
 targets while padding CPU arrays for safe bounds and poses. An index past
 the vertex range always suppresses a WebGL draw. A short ordinary
-attribute suppresses it only if the *final* material program consumes
+attribute suppresses a draw only if that draw's *final* program consumes
 that input and the draw fetches beyond the source count (an indexed draw
 may leave a short tail unused). The plan retains the mesh; the draw rule
 runs after the object's `useSourceMaterials` choice, including a
 Basic-to-Standard replacement, and after scene maps that failed to decode
 have been removed. A missing override map can therefore leave a short UV
-inactive and let the mesh draw. The rule considers active map UV
+inactive and let the mesh draw. The shadow depth/distance pass applies its
+own program's inputs; a short normal can reject a Standard color draw yet
+still cast a shadow. The rule considers active map UV
 channels 0–3, lighting normals, tangents, and vertex colors. The
 compatibility `Object3D` exposes `uv2` and `uv3`, too. Morph targets are
 packed into the GPU array texture as `WebGLMorphtargets` does: a short

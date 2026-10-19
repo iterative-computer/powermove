@@ -2,7 +2,9 @@ import * as THREE from 'three';
 
 type Case = 'uvUnused' | 'uvUsed' | 'uvUsedIndexedTail' | 'uv1Unused' | 'uv1Used' |
   'uv2Unused' | 'uv2Used' | 'uv3Unused' | 'uv3Used' |
+  'uvDepthNoMap' | 'uvDepthMapOpaque' | 'uvDepthMapAlphaTest' |
   'normalUnlit' | 'normalLit' | 'normalLitNoLights' | 'normalLitAmbientOnly' | 'normalOverride' |
+  'normalDepth' | 'colorDepth' |
   'tangentUnused' | 'tangentUsed' | 'shortMorph' | 'badIndex' |
   'normalOnlyMorph' | 'colorOnlyMorph';
 
@@ -33,8 +35,11 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
   const out = {} as Record<Case, { rgb: number[]; error: number; exception: string | null;
     activeAttributes: string[]; png: string }>;
   const cases: Case[] = ['uvUnused', 'uvUsed', 'uvUsedIndexedTail', 'uv1Unused', 'uv1Used',
-    'uv2Unused', 'uv2Used', 'uv3Unused', 'uv3Used', 'normalUnlit', 'normalLit',
+    'uv2Unused', 'uv2Used', 'uv3Unused', 'uv3Used',
+    'uvDepthNoMap', 'uvDepthMapOpaque', 'uvDepthMapAlphaTest',
+    'normalUnlit', 'normalLit',
     'normalLitNoLights', 'normalLitAmbientOnly', 'normalOverride',
+    'normalDepth', 'colorDepth',
     'tangentUnused', 'tangentUsed', 'shortMorph', 'badIndex', 'normalOnlyMorph', 'colorOnlyMorph'];
   for (const name of cases) {
     const geometry = new THREE.BufferGeometry();
@@ -51,6 +56,8 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
     }
     if (name.startsWith('normal')) geometry.setAttribute('normal',
       new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1], 3));
+    if (name === 'colorDepth') geometry.setAttribute('color',
+      new THREE.Float32BufferAttribute([1, 0, 0, 1, 0, 0], 3));
     if (name.startsWith('tangent')) {
       geometry.setAttribute('normal', new THREE.Float32BufferAttribute([
         0, 0, 1, 0, 0, 1, 0, 0, 1,
@@ -72,7 +79,12 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
       ];
       geometry.morphTargetsRelative = true;
     }
-    const material = name.startsWith('normalLit') || name.startsWith('tangent')
+    const material = name.startsWith('uvDepth') || name === 'normalDepth' || name === 'colorDepth'
+      ? new THREE.MeshDepthMaterial({ side: THREE.DoubleSide, depthPacking: THREE.RGBADepthPacking,
+        map: name === 'uvDepthMapOpaque' || name === 'uvDepthMapAlphaTest' ? white : null,
+        alphaTest: name === 'uvDepthMapAlphaTest' ? .5 : 0,
+        vertexColors: name === 'colorDepth' })
+      : name.startsWith('normalLit') || name.startsWith('tangent')
       ? new THREE.MeshStandardMaterial({ color: 0xff0000, side: THREE.DoubleSide,
         normalMap: name === 'tangentUsed' ? flatNormal : null })
       : new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide,

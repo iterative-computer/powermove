@@ -147,7 +147,9 @@ impl Scene3dRenderer {
         let mut id_draws = Vec::new();
         for d in &mut desc {
             adjust(d, &projection, DEPTH_FRAGMENT);
-            depth_draws.push(self.prepare(device, queue, encoder, &depth_scene, d, 1)?);
+            if let Some(prepared) = self.prepare(device, queue, encoder, &depth_scene, d, 1)? {
+                depth_draws.push(prepared);
+            }
             adjust(d, &projection, ID_FRAGMENT);
             let id = d.object as u32 + 1;
             if let Some((_, value)) = d.uniforms.iter_mut().find(|(n, _)| n == "diffuse") {
@@ -157,7 +159,9 @@ impl Scene3dRenderer {
                     0.0,
                 ];
             }
-            id_draws.push(self.prepare(device, queue, encoder, &depth_scene, d, 1)?);
+            if let Some(prepared) = self.prepare(device, queue, encoder, &depth_scene, d, 1)? {
+                id_draws.push(prepared);
+            }
         }
         let mask_scene = scene_override(scene, Side::Double);
         let mut mask_draws = Vec::new();
@@ -175,7 +179,9 @@ impl Scene3dRenderer {
                 if let Some((_, value)) = d.uniforms.iter_mut().find(|(n, _)| n == "diffuse") {
                     *value = vec![0.0, 0.0, kind];
                 }
-                mask_draws.push(self.prepare(device, queue, encoder, &mask_scene, &d, 1)?);
+                if let Some(prepared) = self.prepare(device, queue, encoder, &mask_scene, &d, 1)? {
+                    mask_draws.push(prepared);
+                }
             }
         }
         let targets = self.chrome.as_ref().expect("created above");

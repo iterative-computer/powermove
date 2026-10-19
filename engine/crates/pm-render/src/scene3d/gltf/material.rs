@@ -326,36 +326,85 @@ pub fn parameters(
     Ok(p)
 }
 
-/// Whether three r180's final program binds a source attribute. WebGL
-/// rejects a draw with a bound attribute shorter than POSITION, but ignores
-/// an inactive one. Check after `sync` has applied the object's replacement
-/// material and maps; the glTF source material alone cannot decide this.
-pub fn consumes_short_attribute(mesh: &Mesh3d, material: &Material3d, name: &str) -> bool {
-    let Ok(p) = parameters(mesh, material, material.side, &LightCounts::default(), Target::Canvas)
-    else {
-        return false;
+/// Whether three r180's *draw program* binds a source attribute. A color
+/// material and its shadow depth/distance material can consume different
+/// inputs even when both draws use the same mesh.
+pub fn consumes_short_attribute(p: &Parameters, name: &str) -> bool {
+    let shadow = matches!(
+        p.shader_type.as_str(),
+        "MeshDepthMaterial" | "MeshDistanceMaterial"
+    );
+    // Depth/distance fragments read the map's alpha only when testing or
+    // hashing it. An opaque map is copied onto WebGLShadowMap's material,
+    // but its sample and UV varyings are dead code in the final program.
+    let alpha_map_active = p.alpha_test || p.alpha_hash;
+    let uv0 = if shadow {
+        (alpha_map_active
+            && (p.map_uv.as_deref() == Some("uv") || p.alpha_map_uv.as_deref() == Some("uv")))
+            || p.displacement_map_uv.as_deref() == Some("uv")
+    } else {
+        [
+            &p.map_uv,
+            &p.alpha_map_uv,
+            &p.light_map_uv,
+            &p.ao_map_uv,
+            &p.emissive_map_uv,
+            &p.bump_map_uv,
+            &p.normal_map_uv,
+            &p.displacement_map_uv,
+            &p.metalness_map_uv,
+            &p.roughness_map_uv,
+            &p.anisotropy_map_uv,
+            &p.clearcoat_map_uv,
+            &p.clearcoat_normal_map_uv,
+            &p.clearcoat_roughness_map_uv,
+            &p.iridescence_map_uv,
+            &p.iridescence_thickness_map_uv,
+            &p.sheen_color_map_uv,
+            &p.sheen_roughness_map_uv,
+            &p.specular_map_uv,
+            &p.specular_color_map_uv,
+            &p.specular_intensity_map_uv,
+            &p.transmission_map_uv,
+            &p.thickness_map_uv,
+        ]
+        .into_iter()
+        .any(|uv| uv.as_deref() == Some("uv"))
     };
-    let uv0 = [
-        &p.map_uv, &p.alpha_map_uv, &p.light_map_uv, &p.ao_map_uv,
-        &p.emissive_map_uv, &p.bump_map_uv, &p.normal_map_uv,
-        &p.displacement_map_uv, &p.metalness_map_uv, &p.roughness_map_uv,
-        &p.anisotropy_map_uv, &p.clearcoat_map_uv, &p.clearcoat_normal_map_uv,
-        &p.clearcoat_roughness_map_uv, &p.iridescence_map_uv,
-        &p.iridescence_thickness_map_uv, &p.sheen_color_map_uv,
-        &p.sheen_roughness_map_uv, &p.specular_map_uv, &p.specular_color_map_uv,
-        &p.specular_intensity_map_uv, &p.transmission_map_uv, &p.thickness_map_uv,
-    ]
-    .into_iter()
-    .any(|uv| uv.as_deref() == Some("uv"));
+    let secondary_uv = |channel: &str| {
+        if shadow {
+            (alpha_map_active
+                && (p.map_uv.as_deref() == Some(channel)
+                    || p.alpha_map_uv.as_deref() == Some(channel)))
+                || p.displacement_map_uv.as_deref() == Some(channel)
+        } else {
+            match channel {
+                "uv1" => p.vertex_uv1s,
+                "uv2" => p.vertex_uv2s,
+                "uv3" => p.vertex_uv3s,
+                _ => false,
+            }
+        }
+    };
     match name {
-        "NORMAL" => matches!(material.kind, MaterialKind::Standard | MaterialKind::Physical)
-            && !p.flat_shading,
-        "TANGENT" => p.vertex_tangents && !p.flat_shading,
-        "COLOR_0" => p.vertex_colors,
+        "NORMAL" => {
+            if shadow {
+                p.displacement_map
+            } else {
+                matches!(
+                    p.shader_type.as_str(),
+                    "MeshStandardMaterial" | "MeshPhysicalMaterial"
+                ) && !p.flat_shading
+            }
+        }
+        "TANGENT" => !shadow && p.vertex_tangents && !p.flat_shading,
+        // The depth and distance shaders include no color chunks, including
+        // when alpha testing their copied map/alphaMap.
+        "COLOR_0" => !shadow && p.vertex_colors,
         "TEXCOORD_0" => uv0 || p.points_uvs,
-        "TEXCOORD_1" => p.vertex_uv1s,
-        "TEXCOORD_2" => p.vertex_uv2s,
-        "TEXCOORD_3" => p.vertex_uv3s,
+        "TEXCOORD_1" => secondary_uv("uv1"),
+        "TEXCOORD_2" => secondary_uv("uv2"),
+        "TEXCOORD_3" => secondary_uv("uv3"),
         _ => false,
     }
 }
