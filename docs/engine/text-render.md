@@ -388,7 +388,7 @@ check with fonts when their renderers have them, so text and captions no
 longer route there.
 The textl2 lane removes the animated/range-styled and typography-anchored
 level 2 refusal after implementing them in the shared evaluated frame.
-`text_level2_semantics` exercises eight native-only corpus projects and
+`text_level2_semantics` exercises thirteen native corpus projects and
 fails actual forbidden routing; renderer and geometry failures remain named
 failures. Production served fonts supply their Parley layouts lazily.
 `Renderer::set_captions_hidden` is `PM.captionsHidden`
@@ -1196,9 +1196,10 @@ Verification on macOS, 2026-10-19:
   succeeds. These release checks use `CARGO_PROFILE_RELEASE_LTO=false`;
   the shipping LTO profile was not verified by this lane.
 
-The new native corpus is generated with `--native-text` (see `text.md`). It
-runs unconditionally against CoreText and semantic invariants. Existing
-Canvas2D level 1 references remain the legacy-reference catalog. Range
+The native text subset is generated with `--native-text` (see `text.md`)
+and is also included in `allProjects`. It runs unconditionally against
+CoreText and semantic invariants. Existing Canvas2D level 1 captures remain
+unchanged. Range
 indices are UTF-16 and snap to grapheme starts; a shaped ligature follows
 its first logical grapheme's pose. Those are deliberate level 2 semantics.
 
@@ -1210,9 +1211,10 @@ its first logical grapheme's pose. Those are deliberate level 2 semantics.
   Fixed in `pm_text::level2` (see `text.md`); covered by layout tests and
   the `range-leading` project (color bands from caret edges, per-character
   selector lifts against the frame without animators).
-- Selection: bounds and picks use the resting styled box again (today's
-  animated-text selection), so stagger-in text is selectable at its first
-  frame; the posed ink sizes the compatibility raster.
+- Selection: bounds and picks use a resting box again, so stagger-in text
+  is selectable at its first frame. Round 3 below restores the authored
+  paragraph dimensions and interaction padding too; posed ink sizes the
+  compatibility raster.
 - Anchor edits start from the resting box (`text_anchor_box`); Pan Behind
   keeps the resting text in place under any animator.
 - Posed glyphs keep CoreText's upward smoothing offset in device space;
@@ -1231,26 +1233,120 @@ Verification on macOS (debug unless stated):
   mean alpha difference **0.0014 CV**, boxes within 1 px. Pan Behind keeps
   the resting text in place on **8** anchored frames. Every frame picks at
   its selection's center, the hidden stagger frame included.
-  Log: `/tmp/ne-w5/textl2-r2/semantics-debug-10.log`. After merging the
-  ltofix lane, the same gate and the 12 layout tests pass in the release
-  profile with its thin LTO (no `CARGO_PROFILE_RELEASE_LTO` override), with
-  identical minima: `/tmp/ne-w5/textl2-r2/release-lto.log`.
+  After merging the ltofix lane, the same gate and the 12 layout tests
+  pass in the release profile with thin LTO (no profile override), with
+  identical minima.
 - `pm-text` level 2 layout: **12** tests (two new: split glyph runs by line
   height and tracking, split RTL runs and the lam-alef ligature).
 - Level 1 unchanged (debug): **618 raster cases** (495 + 116 + 4 + 3) and
   **576 composed frames** pass; the **23 FONTS-R** measurement lines are
   identical to round 1's; **12/12** ratchet contracts; `text_gpu`,
   `text_colors` and the original `text_level2` smoke gate (400 cases, 20
-  layers, none below 0.98) pass. Log: `/tmp/ne-w5/textl2-r2/level1-debug-gates.log`.
+  layers, none below 0.98) pass.
 - Evaluation corpus: 0 mismatches in every class (textLayout 6162, bounds
   text 2157, textRaster 2157, textAnimators/Glyphs/Styles 57 each); layer
-  units 11/11. Log: `/tmp/ne-w5/textl2-r2/eval-gates.log`.
+  units 11/11.
 - Native-on app matrix under the Electron lock, one worker: **18/18**
   (the level 2 corpus test now picks every project at every time, and the
-  new Pan Behind test). Log: `/tmp/ne-w5/textl2-r2/e2e.log`.
+  new Pan Behind test).
 - `pm-wasm` queries 8/8, `pm-edit` tests, corpus 24/24, project sanitizer
   15/15, Svelte check 0 errors (the existing IconCropper warning). WASM is
   4,802,045 bytes (1,614,982 gzipped) after this round and the merges.
+
+### Round 3 (interaction and cache review fixes, 2026-10-19)
+
+Bounds and picks preserve today's resting interaction contract: point ink
+plus `clamp(size * .055, 3, 12)` on every edge; an authored paragraph box
+(explicit height or base line height times the line count) plus that pad;
+and a one-pixel column plus the pad for blank point text. Resting ink stays
+separate for typography anchoring. Range styles retain their coverage of
+posed ink. Native and app checks cover all three paragraph alignments,
+automatic and explicit height, 8px point text, and cold blank-text picks.
+The cold empty case exposed Parley's internal one-byte sentinel line:
+collecting it as an authored source range panicked in native and WASM.
+Empty layouts now retain the font metrics and expose one caret, with no
+sentinel glyphs or source units; a shaping test also covers empty after a
+nonempty layout.
+
+`CompatMeasure` keeps one Parley layout context and reuses collections with
+the exact ordered face/family signature. Split faces have true LRU eviction
+at 32 entries or 256 MiB, enforced even on an overbudget current request.
+Eviction drops every collection and cached layout referring to the face.
+Layouts and glyph boxes each have a 2 MiB payload bound. Collection keys and
+per-face aliases have separate bounds; parsed collection metadata, original
+resolver storage, active frames and transient TTC extraction buffers are
+outside those payload counters (see `text.md`). Glyph outlines are measured
+once for both resting and posed geometry, then reused across queries and
+frames. Range controls are also evaluated once; level 1 keeps its original
+evaluation order and measurement path.
+
+All thirteen level 2 projects now belong to `allProjects`; default corpus
+routing checks see them. The sampling gate rejects a revived level 2 text
+routing reason for animated, styled and anchored text. The paired Rust
+timing harness alternates level order for static frames, animated frames and
+typing mutations, reporting queries separately from GPU-complete rendering.
+The shared Electron lock was unavailable within the requested 20-minute
+window, so the browser key-event/bridge/presentation typing pair is deferred
+to the measurement window. Engine-only typing mutations are measured by the
+Rust pair; they do not establish full app typing latency.
+
+Verification on Apple M4 Max/macOS, using the shipping thin-LTO release
+profile without an override:
+
+- Sampling **7/7**. Level 1: **618 raster cases**, **576 composed frames**,
+  all **23 FONTS-R measurement lines identical** to the previous run and
+  **12/12 ratchet contracts**. No capture, fixture or tolerance changed.
+- Level 2: **52 native frames** and **10 interaction cases** pass, with no
+  forbidden routing. CoreText ink SSIM minima remain **0.9924** for linear
+  poses, **0.9966** for blur, **0.9965** for partial opacity, **0.9894** for
+  translation and **0.9905** for resting text. Unturned plane mean alpha
+  difference remains at most **0.0014 CV**; all **8** anchor-edit frames
+  preserve resting text. Every project's warm check reuses registrations
+  and layout.
+- The semantic corpus retains **8 faces**, **220,769,364 bytes (210.54
+  MiB)**, of which **192,570,796 bytes (183.65 MiB)** are TTC copies. Its
+  maximum total face/layout/glyph payload is **220,917,208 bytes (210.68
+  MiB)**, below the **260 MiB** combined payload ceiling. At completion:
+  **6 collections**, **28 layouts / 131,572 bytes**, and **99 glyph boxes /
+  16,272 bytes**. Collection metadata, keys/aliases, original resolver fonts,
+  active frames and transient extraction allocations are outside those
+  payload figures. Overbudget and entry/byte eviction paths have separate
+  synthetic-font tests.
+- Evaluation library **34/34**, pm-text library **35/35**, level 2 layout
+  **12/12**, WASM queries **8/8**, corpus validation **22/22** and corpus
+  typecheck pass. The evaluation corpus has zero mismatches in every class
+  (6,162 text layouts, 2,157 text bounds and 2,157 raster metrics); layer
+  parity and all **11** layer-unit tests pass.
+- Both native addons load and agree on the protocol. WASM validates at
+  **5,370,806 bytes (1,746,504 gzipped)**. This is the integrated branch's
+  size; there is no clean integration-baseline size comparison for this run.
+- Native-on app matrix under the Electron lock, one worker: **19/19** in
+  39.4 seconds. It includes the original 17 tests, Pan Behind with an actual
+  anchor-channel assertion, and all ten interaction cases in a fresh
+  session, with no new native geometry fallbacks.
+
+Paired engine timings at 1920×1080, Float16, compare the same authored text
+at compatibility 1 and 2 in the native renderer. Each sample runs bounds,
+caret layout, geometry and pick queries, then renders through GPU completion.
+Twenty warmups precede three passes; level order alternates per sample.
+Static/animated rows have 360 samples per level and typing has 213. One-minute
+machine load was 4.38 before and 3.77 after. Values below are combined p95
+milliseconds, **level 1 → level 2**:
+
+| Text | Static frame | Animated frame | Typing mutation |
+|---|---:|---:|---:|
+| Title 96px | 3.52 → 1.28 | 15.86 → 2.53 | 3.38 → 1.84 |
+| Paragraph 48px | 6.37 → 1.31 | 16.03 → 2.52 | 6.02 → 1.89 |
+| Caption-size 24px | 4.44 → 1.47 | 21.93 → 2.70 | 4.08 → 2.02 |
+| Range typography 40px | 11.32 → 3.35 | 12.87 → 5.36 | 10.30 → 3.70 |
+
+Query p95 and combined p95 improve in all twelve pairs. Rendering alone
+improves in all eight static/animated pairs and three typing pairs. The
+remaining caption typing render-only component is **1.1220 → 1.5198 ms**
+(**35.4% slower**, 0.40 ms); the first run reproduced that direction. This
+is an open TEXTL2-2 performance gap even though its combined engine cost is
+lower. These timings exclude browser events, IPC and presentation; they do
+not replace the deferred legacy/native app typing pair.
 
 ## Gaps
 
@@ -1301,16 +1397,25 @@ captures unchanged. The separate capture-transport fixes are described above.
 - Level 2 semantics are implemented by **textl2** (see `text.md`). Its
   native-only corpus and app checks are separate from the level 1 captures;
   existing projects retain their compatibility level and FONTS-R budgets.
-- Level 2 decision (for the orchestrator): CoreGraphics fades its font
-  smoothing out toward 45° rotations and drops it at 45° (and 135°); the
-  CoreText profile keeps smoothing continuous so animated rotation never
-  pops. Level 2 text posed near 45° is therefore heavier than CoreText's
-  (ink SSIM 0.832 at 45°, 0.983 at 42.5°; side-by-side
-  `/tmp/ne-w5/textl2-r2/rot45-side.png`, probe table
-  `/tmp/ne-w5/textl2-r2/rotation-probe.txt`). No corpus project poses text
-  there; matching CoreText would need a fitted angle-dependent smoothing.
-- Level 2 per-frame cost, the typing-latency gate for level 2 text, and the
-  split-face cache's memory are unmeasured (see `text.md`).
+- **TEXTL2-1 (owner decision):** retain continuous font smoothing near
+  45° so an animated rotation does not pop. CoreGraphics drops smoothing at
+  45° and 135°, so level 2 text is heavier there (measured ink SSIM 0.832 at
+  45°, 0.983 at 42.5°). This accepted level 2 design choice also applies to
+  level 2 captions through their CoreText profile; level 1 profiles are
+  unchanged.
+- The full browser key-event/bridge/presentation typing pair for level 2 is
+  deferred to the measurement window because the shared lock was unavailable
+  within 20 minutes. The Rust pair measures engine work only.
+- **TEXTL2-2 remains open for caption typing's render-only component:** its
+  paired p95 rises from 1.1220 to 1.5198 ms. Combined engine work improves
+  from 4.0787 to 2.0188 ms; that improvement does not waive the component
+  regression. Profile it in the performance window before claiming the
+  whole no-regression requirement closed.
+- A level 2 working set larger than the 256 MiB face budget is released on
+  return and may split again on the next request. The corpus stays below
+  that budget; overbudget correctness is tested, but its frame latency and
+  full process RSS are unmeasured. TTC extraction still copies a face and
+  temporarily holds both table buffers and the assembled face.
 - `Feature::Text` remains for a renderer without fonts, unparsed styles or
   an unanswered registry query; the derouter owns retiring that machinery.
 - Font-cache entries from pseudo-element text and cache purges under
@@ -1328,13 +1433,26 @@ captures unchanged. The separate capture-transport fixes are described above.
   the private corpus directory (CI): the captures are renders of system
   fonts and a private project and cannot be committed. On a machine with
   the directory, a full run fails for any FONTS-R entry it did not measure.
-- These measurements did not use the shipping LTO profile: test and addon
-  builds set `CARGO_PROFILE_RELEASE_LTO=false` because thin-LTO links
+- The earlier non-LTO measurements used `CARGO_PROFILE_RELEASE_LTO=false`
+  for test and addon builds because thin-LTO links
   reported missing bitcode. The cause was pm-media bundling CrabbyAvif's
   Rust staticlib into its rlib, not the compile cache; the shipping profile
   is verified since, see [release-build.md](release-build.md).
 
 ## Changes outside the lane
+
+2026-10-19 (lane ne-textl2, round 3):
+
+- Corpus catalog/test, `sampling.rs` and `composite.md`: include the native
+  text projects in default corpus gates and reject the removed routing
+  reason for animated, styled and anchored text.
+- `native-engine-text-typing.spec.ts`: optional level 2/native versus level
+  1/legacy pair, native font flag, authored paragraph channels, and an
+  explicit argument for the page-side `mode` value. The browser timing pair
+  remains deferred; listing the cases only checks harness compilation.
+- `pm-wasm/src/engine.rs`: forward the ink probe to the shared glyph-box
+  cache. The project type's compatibility comment now describes the
+  sanitizer's existing text-only rule.
 
 2026-10-19 (lane ne-textl2, round 2):
 

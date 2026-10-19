@@ -467,7 +467,7 @@ units, ordering, easing and split offsets. Equal poses share one paint
 operation. The `textAnimation` query poses level 2 units with the level 2
 poses the renderer draws (a pure translation is the authored offset).
 
-Geometry (round 2). The frame reports three boxes, typography anchoring
+Geometry (round 3). The frame reports three boxes, typography anchoring
 applied to each:
 
 - `resting`: the unposed styled ink, hidden glyphs included. Typography
@@ -475,11 +475,17 @@ applied to each:
 - `ink`: the posed visible ink with blur reach (`None` while nothing is
   visible). It sizes the compatibility raster with the selection, so moved
   glyphs are never clipped.
-- `selection`: what bounds and picks use. Like today's animated text
-  (`raster.ts`, "select the resting text box"), it is the resting box and
-  never collapses while animators hide every glyph or jumps as they settle;
-  stagger-in text is selectable and pickable at its first frame. With range
-  styles it also covers the posed ink, as today's styled path selects.
+- `selection`: the resting interaction box used by bounds and picks,
+  preserving `textGeometry(d).selection`'s contract. Point text expands its
+  resting styled ink by `clamp(size * .055, 3, 12)` on every side. Paragraph
+  text instead expands its authored width and height (or base line height
+  times the line count when height is automatic); alignment places that box
+  around the text origin. Whitespace-only point text keeps `x ± .5` plus the
+  padding and the laid-out line height (at least the font size). Hidden
+  stagger text therefore stays pickable. Range styling also preserves
+  coverage of posed visible ink.
+  Padding and authored paragraph dimensions do not change the ink box used
+  by typography anchoring.
 
 Anchor edits (`anchor_reference`, `capture_font_anchor`, `font_offset`)
 share `Scope::text_anchor_box`: today's raster selection at level 1 and the
@@ -506,19 +512,40 @@ its CoreText comparison and semantic invariants; the level 1 Canvas2D
 references and FONTS-R fixture remain unchanged.
 Generate their standalone corpus with
 `bun engine/corpus/src/generate.ts --native-text --out <outside-repo-dir>`.
-`textLevel2Projects` is the native-reference catalog; `allProjects` is the
-legacy-reference catalog. All thirteen native projects run unconditionally
-in `text_level2_semantics`, without private captures or a routing exemption.
-The every-corpus routing and unsupported gates iterate `allProjects` only,
-so the integration gate must run `text_level2_semantics` and
-`native-engine-text-level2.spec.ts` explicitly.
+`textLevel2Projects` is also included in `allProjects`, so default corpus
+validation, generation and every-corpus routing checks see every native
+case. All thirteen projects additionally run unconditionally in
+`text_level2_semantics` against CoreText and semantic invariants, without
+private captures or a routing exemption. Rust and app interaction checks
+also exercise fixed/automatic paragraph boxes in all three alignments,
+minimum point-text padding, and empty/whitespace picks.
 
-Remaining (not measured this lane): `TextMeasure::level2` builds a fresh
-Parley context and re-registers faces per frame and query, and runs
-`text_animation_state` twice; the split-face cache (`CompatMeasure`) has no
-eviction and copies whole collection faces on native hosts (Appendix A #21).
-Per-frame level 2 cost and the typing-latency gate for level 2 text are
-unmeasured. `TextFonts::level2`/`Level2Fonts` remain for tests only.
+**TEXTL2-2:** `CompatMeasure` owns reusable Parley font/layout contexts and
+retains face registrations across frames and queries. Its split-face LRU
+has a 256 MiB payload budget and 32-entry limit. Eviction also releases the
+old collection/source-cache references, so Parley cannot retain evicted
+font blobs. Layout and glyph-box caches each have a 2 MiB payload budget;
+keys include byte identity and variation/style inputs. Active frames and the
+registry's original font storage are separate from retained cache payloads.
+`level2_cache_stats()` reports the retained payloads, limits and reuse counts.
+Collections are capped at 32, with a 2 MiB charge for their map/recency
+signature keys and one active signature copy of at most 1 MiB. Each face's
+family alias memo is capped at 32 aliases and 32 KiB. These keys, aliases and
+parsed collection metadata are separate from the payload counters. TTC
+extraction briefly holds the source table buffers and the assembled face;
+that first-use allocation and active
+frame font clones are outside the retained-cache budget.
+Resting and posed geometry share one cached outline box per glyph; WASM's
+ink probe forwards to the same cache. Level 1 measurement remains unchanged.
+
+`pm-render/examples/text_level2_perf.rs` alternates level 1/2 sample order
+for title, paragraph, caption-size and mixed range typography. It reports
+query-bundle, GPU-complete frame and typing-mutation percentiles plus cache
+use. It measures engine work; browser key-event/bridge/presentation latency
+requires the separate `native-engine-text-typing.spec.ts` pair with
+`PM_TEXT_TYPING_LEVEL2=1 PM_TEXT_TYPING_PAIRED=1 PM_TEXT_TYPING_MEASURE=1`.
+Run both under the Electron lock. `TextFonts::level2`/`Level2Fonts` remain for
+standalone tests only.
 
 ## Gates and how to run them
 
