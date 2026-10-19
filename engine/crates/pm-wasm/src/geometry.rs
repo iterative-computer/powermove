@@ -86,7 +86,11 @@ impl Models {
                         groups: Vec::new(),
                     };
                     (
-                        ModelAsset::Mesh(Arc::new(TriangleMesh::new(&g)), mesh.source_vertex_count),
+                        ModelAsset::Mesh(
+                            Arc::new(TriangleMesh::new(&g)),
+                            mesh.source_vertex_count,
+                            Arc::new(g),
+                        ),
                         None,
                     )
                 }

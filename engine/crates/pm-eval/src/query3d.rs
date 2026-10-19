@@ -46,8 +46,13 @@ pub enum ModelAsset {
     /// No asset, or one without geometry (offline, a `.blend` source): the
     /// orange missing-model box.
     Missing,
-    /// An OBJ model (`asset.mesh`): triangles and `asset.vertices`.
-    Mesh(Arc<TriangleMesh>, usize),
+    /// An OBJ model (`asset.mesh`): triangles, `asset.vertices`, and the
+    /// buffers the runtime's `BufferGeometry` holds.
+    Mesh(
+        Arc<TriangleMesh>,
+        usize,
+        Arc<pm_geom3d::primitives::Geometry>,
+    ),
     /// An imported glTF model (`asset.object3d`).
     Gltf(Arc<Picker>),
     /// A model today's runtime holds geometry for (`asset.object3d`) that
@@ -73,7 +78,7 @@ impl ModelAsset {
     fn vertices(&self) -> usize {
         match self {
             ModelAsset::Missing => 0,
-            ModelAsset::Mesh(_, v) => *v,
+            ModelAsset::Mesh(_, v, _) => *v,
             ModelAsset::Gltf(p) => p.model.vertices,
             ModelAsset::Unloadable(_) => 0,
         }
@@ -102,6 +107,18 @@ pub trait Geometry3d {
     }
     /// Scenes built during one question.
     fn scenes(&mut self) -> &mut SceneCache;
+}
+
+/// What `runtime.objects.get(id)` is for Edit Mode.
+pub enum ObjectMesh3d {
+    /// No object (the layer is not active, or not a 3D object).
+    Missing,
+    /// Not a mesh (an imported model's group).
+    NotMesh,
+    /// A mesh with an empty `BufferGeometry` (a source three.js builds nothing from).
+    Empty,
+    /// A mesh and its geometry.
+    Mesh(pm_geom3d::primitives::Geometry),
 }
 
 /// Composition scenes by (composition, time) for one question.
@@ -609,7 +626,7 @@ fn place(
                     mesh: query::missing_box(),
                     materials: Materials::Single(Facing::DEFAULT),
                 },
-                ModelAsset::Mesh(mesh, _) => Shape::Mesh {
+                ModelAsset::Mesh(mesh, _, _) => Shape::Mesh {
                     mesh: mesh.clone(),
                     materials: materials.clone(),
                 },
@@ -847,6 +864,77 @@ impl<'d> Scope<'_, 'd> {
                     .map(|o| o.world)
             })
             .collect())
+    }
+
+    /// `placeCursor`'s surface point on the composition's runtime at `time`
+    /// along a world ray (`Scene::cursor_hit`), or `None` when nothing is hit.
+    pub fn cursor_hit3d(
+        &mut self,
+        ray: &pm_geom3d::gltf::pick::Ray,
+        time: f64,
+        host: &mut dyn LayerHost,
+    ) -> JsResult<Option<[f64; 3]>> {
+        let Some(g) = host.geometry() else {
+            return Err(host_only("The 3D cursor's surface"));
+        };
+        let scene = self.composition_scene3d(time, g)?;
+        scene.scene.cursor_hit(ray).map_err(query_error)
+    }
+
+    /// The geometry `runtime.objects.get(id).geometry` holds for 3D object
+    /// layer `id` of the composition's runtime at `time` (Edit Mode's
+    /// `currentMesh` reads it for sources without their own mesh).
+    pub fn object_mesh3d(
+        &mut self,
+        id: &str,
+        time: f64,
+        host: &mut dyn LayerHost,
+    ) -> JsResult<ObjectMesh3d> {
+        let Some(g) = host.geometry() else {
+            return Err(host_only("3D object meshes"));
+        };
+        // The runtime is built first: what throws building it throws here.
+        let scene = self.composition_scene3d(time, g)?;
+        if !scene.scene.objects.iter().any(|o| o.id == id) {
+            return Ok(ObjectMesh3d::Missing);
+        }
+        let evaluated = self.composition_scene(time)?;
+        let Value::Object(described) = &evaluated.scene else {
+            return Err(JsThrow::type_error("the evaluated 3D scene"));
+        };
+        let object = described
+            .get("objects")
+            .and_then(Value::as_array)
+            .and_then(|a| {
+                a.iter()
+                    .filter_map(Value::as_object)
+                    .find(|o| text(o, "id").as_deref() == Some(id))
+            });
+        let Some(object) = object else {
+            return Ok(ObjectMesh3d::Missing);
+        };
+        let source = obj(object, "source").cloned().unwrap_or_default();
+        if let Some(asset) = text(&source, "assetId") {
+            return Ok(match g.model(&asset) {
+                // `makeObject`'s placeholder: `new BoxGeometry(1, 1, 1)`.
+                ModelAsset::Missing => ObjectMesh3d::Mesh(
+                    pm_geom3d::Primitive::Box {
+                        width: 1.0,
+                        height: 1.0,
+                        depth: 1.0,
+                    }
+                    .geometry(),
+                ),
+                ModelAsset::Mesh(_, _, geometry) => ObjectMesh3d::Mesh((*geometry).clone()),
+                // A glTF model's object is the group its asset sits under.
+                ModelAsset::Gltf(_) => ObjectMesh3d::NotMesh,
+                ModelAsset::Unloadable(why) => return Err(unloadable(&why)),
+            });
+        }
+        Ok(match source_of(&source) {
+            Some(s) => ObjectMesh3d::Mesh(s.geometry()),
+            None => ObjectMesh3d::Empty,
+        })
     }
 
     /// `compositionRuntime(PM, time).camera`: the composition's render

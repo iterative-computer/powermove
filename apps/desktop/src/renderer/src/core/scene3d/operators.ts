@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import {compositionRuntime} from './service';
+import {cursorHit} from './engine-edit';
 import {targetScene} from './engine-targets';
 import {layer3DRole} from './layers';
 import {editScene} from './operations';
@@ -183,8 +183,7 @@ export function snap(PM:any,operation:SnapOperation):boolean {
 }
 /** Shift+right click: place the cursor on the surface under the pointer, else on the view plane through it. */
 export function placeCursor(PM:any,ray:THREE.Ray,viewNormal:THREE.Vector3):void {
-  const world=compositionRuntime(PM),caster=new THREE.Raycaster(ray.origin,ray.direction);
-  const hit=caster.intersectObjects([...world.objects.values()].filter(o=>!(o as any).isLight),true).find(h=>h.object.visible&&(h.object as any).isMesh);
-  const point=hit?.point??ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(viewNormal,cursorLocation(PM)),new THREE.Vector3());
+  // The surface hit: pm-wasm's with the engine on (engine-edit.ts), today's raycast off.
+  const point=cursorHit(PM,ray)??ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(viewNormal,cursorLocation(PM)),new THREE.Vector3());
   if(point)setCursorLocation(PM,point);
 }

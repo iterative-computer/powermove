@@ -27,6 +27,8 @@ import { compositionRuntime } from '../core/scene3d/service';
 import { runtimeBoxes } from '../core/scene3d/navigation';
 import { renderCamera, runtimeCameraFacts } from '../core/scene3d/render-camera';
 import { targetScene } from '../core/scene3d/engine-targets';
+import { objectGeometry, runtimeObjectMesh, runtimeCursorHit, cursorHit } from '../core/scene3d/engine-edit';
+import { meshFromGeometry } from '../core/scene3d/editmesh';
 import { resolveTargets, deltaCommands } from '../core/scene3d/targets';
 import * as THREE from 'three';
 import { parseObj } from '../kernel/obj';
@@ -508,6 +510,62 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     expect(compared).toBeGreaterThan(30);
     expect(commands).toBeGreaterThan(60);
     console.log(`transform targets: ${compared} compared, ${inexact} inexact numbers, worst relative difference ${worst}; ${commands} gesture edits equal`);
+  });
+
+  it('gives Edit Mode the meshes and the 3D cursor the surface points three.js does, exactly', async () => {
+    let meshes = 0, rays = 0, hits = 0;
+    for (const seed of [41, 42, 43, 44]) {
+      const { PM, doc } = await editor();
+      const random = rng(seed);
+      const models = await addModels(PM);
+      const ids = populate(PM, random, ['cube', 'wedge', ...models]);
+      for (const name of models) editScene(PM, { operation: 'add_object', object: { source: { assetId: name }, p: { x: random() * 3 - 1.5, z: random() } } });
+      if (seed === 44) addModelGroups(PM);
+      PM.touch();
+      const objects = PM.proj.layers.filter((l: any) => l.d?.data?.object).map((l: any) => l.id);
+      for (const t of [0, 1.3, 2.6]) {
+        PM.time = t;
+        for (const id of [...objects, 'nope']) {
+          const today = runtimeObjectMesh(PM, id, t);
+          let asked = 0;
+          const native = doc.api!.objectMesh3d(id, t, () => { asked++; return today; });
+          expect(asked).toBeLessThanOrEqual(1);
+          expect(native, `seed ${seed} t ${t} ${id}`).toEqual(today);
+          // What Edit Mode makes of it: the same EditMesh.
+          const runtime = compositionRuntime(PM, t).objects.get(id) as any;
+          const engine = objectGeometry(PM, id, t);
+          expect(!!engine, `seed ${seed} ${id}`).toBe(!!runtime?.isMesh);
+          if (engine && runtime?.geometry?.getAttribute('position')) expect(meshFromGeometry(engine)).toEqual(meshFromGeometry(runtime.geometry));
+          meshes++;
+        }
+        // Rays from the render camera through a grid of points, and from random origins.
+        const camera = renderCamera(PM, t);
+        for (let k = 0; k < 40; k++) {
+          const ray = new THREE.Ray();
+          if (k < 30) {
+            const x = (k % 6) / 2.5 - 1, y = Math.floor(k / 6) / 2 - 1;
+            ray.origin.setFromMatrixPosition(camera.matrixWorld);
+            ray.direction.set(x * 0.8, y * 0.8, 0.5).unproject(camera).sub(ray.origin).normalize();
+          } else {
+            ray.origin.set((random() - 0.5) * 8, (random() - 0.5) * 6, 6 + random() * 4);
+            ray.direction.set((random() - 0.5) * 0.6, (random() - 0.5) * 0.6, -1).normalize();
+          }
+          let today: number[] | null | undefined, threw: string | null = null;
+          try { today = runtimeCursorHit(PM, ray, t); } catch (error) { threw = String((error as Error).message); }
+          if (threw !== null) { expect(() => doc.api!.cursorHit3d(ray.origin.toArray(), ray.direction.toArray(), t, () => runtimeCursorHit(PM, ray, t))).toThrow(); continue; }
+          const native = doc.api!.cursorHit3d(ray.origin.toArray(), ray.direction.toArray(), t, () => today!);
+          expect(native, `seed ${seed} t ${t} ray ${k}`).toEqual(today);
+          expect(cursorHit(PM, ray, t)?.toArray() ?? null).toEqual(today);
+          rays++;
+          if (today) hits++;
+        }
+      }
+      expect(mismatches(doc)).toEqual([]);
+      expect(Object.keys(doc.api!.stats.fallbacks).filter(k => /^(objectMesh3d|cursorHit3d):/.test(k))).toEqual([]);
+      void ids;
+    }
+    expect(hits).toBeGreaterThan(50);
+    console.log(`edit mode and cursor: ${meshes} meshes, ${rays} rays (${hits} hits) equal`);
   });
 
   it('gives the viewport the render camera three.js holds, exactly', async () => {

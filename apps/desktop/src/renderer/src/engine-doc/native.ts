@@ -27,6 +27,12 @@ import type { FontLoader } from './fonts';
 
 type Legacy = Record<string, any>;
 
+/** `runtime.objects.get(id)` as Edit Mode reads it (`NativeApi.objectMesh3d`). */
+export type ObjectMesh3d =
+  | { missing: true }
+  | { notMesh: true }
+  | { positions: number[] | null; uvs?: number[]; index?: number[] | null };
+
 /** A native answer: the value, a throw to rethrow, or a reason to ask the legacy code. */
 type Native<T> = { value: T } | { threw: Error } | { fallback: string };
 
@@ -1083,6 +1089,37 @@ export class NativeApi {
       if (!c) return { fallback: 'context' };
       return this.query('camera3d', { comp: c.comp, open: c.open, t: T, ...geometryRequest(this.PM) });
     }, legacy, () => ({ t: T }));
+  }
+
+  /**
+   * `placeCursor`'s surface point (core/scene3d/operators.ts): the first
+   * visible mesh hit along the world ray `origin` + t `direction` in the
+   * composition being viewed at `T`, from pm-wasm; null when nothing is hit.
+   * `legacy` is today's three.js raycast (dual mode's reference; with "Use
+   * New Engine" on a question pm-wasm cannot answer is a named failure).
+   */
+  cursorHit3d(origin: readonly number[], direction: readonly number[], T: number, legacy: () => number[] | null): number[] | null {
+    return this.answer('cursorHit3d', () => {
+      const c = this.comps();
+      if (!c) return { fallback: 'context' };
+      return this.query<number[] | null>('cursorHit3d', { comp: c.comp, open: c.open, origin: [...origin], direction: [...direction], t: T, ...geometryRequest(this.PM) });
+    }, legacy, () => ({ origin: [...origin], direction: [...direction], t: T }));
+  }
+
+  /**
+   * What `runtime.objects.get(id)` holds for Edit Mode's `currentMesh`
+   * (core/scene3d/editmode.ts) in the composition being viewed at `T`:
+   * `{missing}`, `{notMesh}`, or its geometry's buffers (`positions` null
+   * for an empty geometry). `legacy` is today's runtime answer (dual mode).
+   */
+  objectMesh3d(id: string, T: number, legacy: () => ObjectMesh3d): ObjectMesh3d {
+    return this.answer('objectMesh3d', () => {
+      const c = this.comps();
+      if (!c) return { fallback: 'context' };
+      // A geometry without a uv attribute has no `uvs` (pm-wasm sends them empty).
+      return this.query<ObjectMesh3d>('objectMesh3d', { comp: c.comp, open: c.open, id, t: T, ...geometryRequest(this.PM) },
+        (v: any) => (v && Array.isArray(v.uvs) && !v.uvs.length ? (({ uvs: _uvs, ...rest }) => rest)(v) : v));
+    }, legacy, () => ({ id, t: T }));
   }
 
   /**

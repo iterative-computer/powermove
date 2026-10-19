@@ -567,6 +567,17 @@ impl TriangleMesh {
     /// `Mesh.raycast` with `matrixWorld = world`: the closest hit's world
     /// distance, or three.js's `TypeError` for a group without a material.
     fn raycast(&self, world: &Mat4, materials: &Materials, ray: &Ray) -> Result<Option<f64>, ()> {
+        Ok(self.raycast_point(world, materials, ray)?.map(|(d, _)| d))
+    }
+
+    /// [`TriangleMesh::raycast`] with the hit's world point
+    /// (`intersection.point`: the local intersection through `matrixWorld`).
+    fn raycast_point(
+        &self,
+        world: &Mat4,
+        materials: &Materials,
+        ray: &Ray,
+    ) -> Result<Option<(f64, Vec3)>, ()> {
         let center = math::apply(world, self.sphere.0);
         let radius = self.sphere.1 * math::max_scale_on_axis(world);
         if !reaches_sphere(ray, center, radius) {
@@ -600,7 +611,7 @@ impl TriangleMesh {
         };
         Ok(found.map(|(t, _)| {
             let point = math::apply(world, local.at(t));
-            length(sub(point, ray.origin))
+            (length(sub(point, ray.origin)), point)
         }))
     }
 }
@@ -760,6 +771,74 @@ impl Scene {
             }
         }
         Ok(best.map(|(_, id)| id))
+    }
+
+    /// `placeCursor`'s surface point: `new Raycaster(ray.origin,
+    /// ray.direction).intersectObjects(objects without lights, true)`, the
+    /// first hit by distance whose object is a visible mesh. Unlike
+    /// [`Scene::pick`] no material filter applies (a transparent surface is
+    /// hit) and an imported model's meshes count by their own visibility
+    /// (the loader's nodes are visible whatever the layer object is). Points
+    /// and lines are hit by the raycaster but are not meshes, so they never
+    /// answer. Equal distances keep the first object in scene order (the
+    /// sort is stable).
+    pub fn cursor_hit(&self, ray: &Ray) -> Result<Option<Vec3>, QueryError> {
+        let mut best: Option<(f64, Vec3)> = None;
+        let mut consider = |d: f64, p: Vec3| {
+            // `Raycaster` near 0, far Infinity.
+            if d < 0.0 {
+                return;
+            }
+            if best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, p));
+            }
+        };
+        for o in &self.objects {
+            match &o.shape {
+                Shape::Light => {}
+                Shape::Mesh { mesh, materials } => {
+                    // Raycast first: a missing group material throws even
+                    // for a hidden mesh, as three.js raycasts before `find`.
+                    let hit = mesh
+                        .raycast_point(&o.world, materials, ray)
+                        .map_err(|()| QueryError::MissingGroupMaterial)?;
+                    if let Some((d, p)) = hit
+                        && o.visible
+                    {
+                        consider(d, p);
+                    }
+                }
+                Shape::Model {
+                    picker,
+                    posed,
+                    materials,
+                } => {
+                    let model = &picker.model;
+                    let is_mesh = |i: usize| match &model.objects[i].kind {
+                        ObjectKind::Drawable(d) => {
+                            model.geometries[d.geometry].mode == Mode::Triangles
+                        }
+                        _ => false,
+                    };
+                    let facing = |i: usize| -> Option<Facing> {
+                        match materials {
+                            ModelMaterials::Source => Some(Scene::model_facing(model, i)),
+                            ModelMaterials::Single(f) => Some(*f),
+                            // An array material on meshes without groups: no hits.
+                            ModelMaterials::Slots(_) => None,
+                        }
+                    };
+                    let side = |i: usize| facing(i).map_or(Side::Front, |f| f.side);
+                    let skip = |i: usize| !is_mesh(i) || facing(i).is_none();
+                    if let Some(h) =
+                        picker.pick_as_runtime(posed, ray, 0.0, f64::INFINITY, &side, &skip)
+                    {
+                        consider(h.distance, h.point);
+                    }
+                }
+            }
+        }
+        Ok(best.map(|(_, p)| p))
     }
 
     /// `runtime.worldBounds(ids)`: the union of the visible meshes' geometry

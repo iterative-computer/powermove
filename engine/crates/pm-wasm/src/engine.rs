@@ -1217,6 +1217,62 @@ impl Engine {
                 }
                 out.raw("}");
             }
+            "cursorHit3d" => {
+                // `placeCursor`: the surface point along a world ray, or null.
+                let vec = |k: &str| -> Option<[f64; 3]> {
+                    let a = get(request, k)?.as_array()?;
+                    let n = |i: usize| a.get(i).and_then(Value::as_f64);
+                    Some([n(0)?, n(1)?, n(2)?])
+                };
+                let (Some(origin), Some(direction)) = (vec("origin"), vec("direction")) else {
+                    return Ok(Err(JsThrow::type_error("cursorHit3d needs a ray")));
+                };
+                let ray = pm_geom3d::gltf::pick::Ray { origin, direction };
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let hit = scope.cursor_hit3d(&ray, t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                match try_js!(hit) {
+                    Some(p) => out.nums(&p),
+                    None => out.raw("null"),
+                }
+            }
+            "objectMesh3d" => {
+                // `runtime.objects.get(id)` for Edit Mode: `{missing}`,
+                // `{notMesh}`, or the geometry's buffers (positions and uvs as
+                // the Float32Array holds them, the index when it has one).
+                let id = get(request, "id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let mesh = scope.object_mesh3d(&id, t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                use pm_eval::query3d::ObjectMesh3d;
+                match try_js!(mesh) {
+                    ObjectMesh3d::Missing => out.raw("{\"missing\":true}"),
+                    ObjectMesh3d::NotMesh => out.raw("{\"notMesh\":true}"),
+                    ObjectMesh3d::Empty => out.raw("{\"positions\":null}"),
+                    ObjectMesh3d::Mesh(g) => {
+                        let f = |v: &[f32]| v.iter().map(|x| f64::from(*x)).collect::<Vec<f64>>();
+                        out.raw("{\"positions\":");
+                        out.nums(&f(&g.positions));
+                        out.raw(",\"uvs\":");
+                        out.nums(&f(&g.uvs));
+                        out.raw(",\"index\":");
+                        if g.indexed {
+                            let ix: Vec<f64> = g.indices.iter().map(|i| f64::from(*i)).collect();
+                            out.nums(&ix);
+                        } else {
+                            out.raw("null");
+                        }
+                        out.raw("}");
+                    }
+                }
+            }
             "camera3d" => {
                 // `compositionRuntime(PM, t).camera`: lens and `matrixWorld`.
                 let mut host = crate::geometry::GeomHost::new(models, request);
