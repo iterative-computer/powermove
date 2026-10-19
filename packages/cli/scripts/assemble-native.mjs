@@ -3,7 +3,7 @@
  * --ffmpeg <LGPL build out> [--out <native root>] [--node <clean Node 22>]
  */
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +13,9 @@ while (args.length) {
   if (!['--arch', '--artifacts', '--ffmpeg', '--out', '--node', '--media-native'].includes(flag) || !value) throw new Error(`Invalid assembly option ${flag}`);
   flags.set(flag, value);
 }
+const protocolFile = fileURLToPath(new URL('../../../apps/desktop/src/shared/engine-protocol/index.ts', import.meta.url));
+const protocolBuild = /PROTOCOL_BUILD = "([^"]+)"/.exec(readFileSync(protocolFile, 'utf8'))?.[1];
+if (!protocolBuild) throw new Error('The generated protocol build is missing.');
 const arch = flags.get('--arch');
 if (!['arm64', 'x64'].includes(arch)) throw new Error('--arch must be arm64 or x64');
 const artifacts = path.resolve(flags.get('--artifacts') ?? ''), ffmpeg = path.resolve(flags.get('--ffmpeg') ?? process.env.PM_FFMPEG_DIR ?? '');
@@ -68,7 +71,7 @@ try {
   const node = flags.get('--node') ?? process.execPath;
   if (run(node, ['-p', 'process.arch']).trim() !== arch) throw new Error('--node must match the prebuild architecture');
   if (Number(run(node, ['-p', 'process.versions.node.split(".")[0]']).trim()) !== 22) throw new Error('--node must name a clean Node 22 executable for the required load test');
-  run(node, ['-e', 'const a = require(process.argv[1]); const b = require(process.argv[2]); if (!a.buildId() || typeof a.EngineHost !== "function" || typeof b.FontRegistry !== "function") process.exit(1); const engine = new a.EngineHost("job"); engine.tick(); engine.pump();', path.join(stage, 'pm_node.node'), path.join(stage, 'pm_bridge.node')]);
+  run(node, ['-e', 'const a = require(process.argv[1]); const b = require(process.argv[2]); if (a.buildId() !== process.argv[3]) throw new Error("native-protocol-mismatch: " + a.buildId() + " != " + process.argv[3]); if (typeof a.EngineHost !== "function" || typeof b.FontRegistry !== "function") process.exit(1); const engine = new a.EngineHost("job"); engine.tick(); engine.pump();', path.join(stage, 'pm_node.node'), path.join(stage, 'pm_bridge.node'), protocolBuild]);
   run(path.join(stage, 'pm-cli'), ['--help']);
   const destination = path.join(root, `darwin-${arch}`);
   if (existsSync(destination)) throw new Error(`native-output-exists: ${destination}; select a fresh --out root`);
