@@ -5,8 +5,8 @@
  * - A raster wrapper assigned to `PM.raster` through `api.host.pm` (the
  *   pre-services pattern) draws on the engine as today.
  * - A raster override at a deep viewer zoom gets today's preview crop
- *   window (the typewriter fixture), and the engine's viewer frame equals
- *   today's.
+ *   window (the typewriter fixture), presents the requested time, and
+ *   keeps advancing at densities 24 and 32.
  * - What an extension draws into `render.gl.context` after each frame is in
  *   a WebM export (today's `renderInto` exports), not in an MP4 one, and
  *   `drawImage(context.canvas)` reads the frame and the drawing as today.
@@ -22,6 +22,7 @@ import type { ElectronApplication, Page } from 'playwright';
 
 import { expect, launchApp, test } from './helpers/app';
 import { ffmpegBinary } from './helpers/ffmpeg';
+import { TICKS_PER_SECOND } from '../src/shared/frame-rate';
 import { previewTextRaster } from '../src/renderer/src/legacy/gl/shape-raster-window';
 
 const ON = { POWERMOVE_NEW_ENGINE: '1' };
@@ -32,6 +33,7 @@ const FIXTURES: Record<string, string> = {
   'legacy-raster-assign': 'fixtures/compat-corpus/legacy-raster-assign',
   'context-watermark': 'fixtures/compat-corpus/context-watermark',
   'crop-recorder': 'fixtures/compat-corpus/crop-recorder',
+  'label-substitution': 'fixtures/compat-corpus/label-substitution',
   'typewriter-effect': 'fixtures/typewriter-effect'
 };
 
@@ -133,10 +135,10 @@ async function zoomViewer(page: Page, zoom: number, x: number, y: number, time: 
 }
 
 /** The viewer's frame as pixels: the canvas showing it (the engine's presentation, or today's compositor canvas). */
-async function viewerPixels(page: Page, engine: boolean): Promise<{ width: number; height: number; data: number[]; png: string }> {
-  return page.evaluate(async (engine) => {
+async function viewerPixels(page: Page, engine: boolean): Promise<{ width: number; height: number; data: Buffer; png: string }> {
+  const result = await page.evaluate(async (engine) => {
     const PM = (window as any).PM;
-    const settle = async () => { for (let i = 0; i < 40; i++) await new Promise((r) => requestAnimationFrame(r)); await new Promise((r) => setTimeout(r, 600)); };
+    const settle = async () => { for (let i = 0; i < 2; i++) await new Promise((r) => requestAnimationFrame(r)); await new Promise((r) => setTimeout(r, 600)); };
     await settle();
     const source = engine
       ? (Array.from(document.querySelectorAll('canvas#engine-present')) as HTMLCanvasElement[]).find((c) => c.style.visibility === 'visible' && c.width > 0)!
@@ -144,9 +146,15 @@ async function viewerPixels(page: Page, engine: boolean): Promise<{ width: numbe
     const c = document.createElement('canvas');
     c.width = source.width; c.height = source.height;
     const c2 = c.getContext('2d')!;
-    c2.drawImage(source, 0, 0);
-    return { width: c.width, height: c.height, data: Array.from(c2.getImageData(0, 0, c.width, c.height).data), png: c.toDataURL('image/png') };
+    // Use the compatibility API's preserved presented frame. A later read
+    // of the WebGPU swapchain can see its cleared surface instead.
+    const pixels = engine ? PM.Kernel.api('zoom-probe').render.gl.context.canvas : source;
+    c2.drawImage(pixels, 0, 0, c.width, c.height);
+    const bytes = c2.getImageData(0, 0, c.width, c.height).data;
+    let raw = ''; for (let i = 0; i < bytes.length; i += 32768) raw += String.fromCharCode(...bytes.subarray(i, i + 32768));
+    return { width: c.width, height: c.height, rgba: btoa(raw), png: c.toDataURL('image/png') };
   }, engine);
+  return { width: result.width, height: result.height, data: Buffer.from(result.rgba, 'base64'), png: result.png };
 }
 
 /** An exported video's frames as 8-bit RGBA (through our FFmpeg). */
@@ -234,6 +242,40 @@ test.describe('Use New Engine: the customization moat, round two', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('a wrapper that substitutes text keeps its own raster geometry and pixels', async ({ session }) => {
+    await install(session.userData, ['label-substitution']);
+    await session.relaunch(); await session.openEditor();
+    await waitActive(session.page, ['label-substitution']);
+    const rows = await session.page.evaluate(async () => {
+      const PM = (window as any).PM, api = PM.Kernel.api('label-probe');
+      const p = PM.mkProject({ w: 480, h: 270, dur: 2, fps: 30, bg: '#203040' });
+      const layer = PM.mkLayer('text', { from: 0, dur: 2, d: { text: 'MESSAGE', font: 'Helvetica', size: 36, color: '#FFFFFF' } }, p);
+      layer.id = 'dynamic-label'; p.layers = [layer]; PM.replaceProject(p); PM.Projects.put(PM.proj);
+      const geometry = (r: any) => [r.w, r.h, r.anchorX, r.anchorY, r.selection, r.cv.width, r.cv.height];
+      const pixels = (c: HTMLCanvasElement) => c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+      const rows = [];
+      for (const time of [.2, 1.2]) {
+        const live = PM.L('dynamic-label');
+        const changed = { ...live, id: 'detached-label', d: { ...api.anim.resolveContent(live, time), text: time < 1 ? 'I' : 'Wide label' } };
+        const reference = PM.__rasterBase(changed, 1, time);
+        const sync = api.render.raster(live, 1, time);
+        const asyncSurface = await api.render.rasterAsync(live, 1, time);
+        const engine = api.render.renderFrameTo(time, 480, 270, { mblur: false });
+        const today = PM.renderFrameTo(time, 480, 270, { mblur: false });
+        const a = pixels(engine), b = pixels(today);
+        let max = 0, over1 = 0, values = 0;
+        for (let i = 0; i < a.length; i++) if (i % 4 !== 3) { const d = Math.abs(a[i]! - b[i]!); max = Math.max(max, d); over1 += Number(d > 1); values++; }
+        rows.push({ time, sync: geometry(sync), async: geometry(asyncSurface), today: geometry(reference), max, over1, values });
+      }
+      return rows;
+    });
+    console.log(JSON.stringify({ substitutedLabel: rows }));
+    for (const row of rows) {
+      expect(row.sync).toEqual(row.today); expect(row.async).toEqual(row.today);
+      expect(row.max).toBeLessThanOrEqual(4); expect(row.over1).toBeLessThanOrEqual(row.values * .001);
+    }
+  });
+
   test('a raster override advances at zoom 8 and 16 and receives today\'s planned crop windows', async ({ session }) => {
     test.setTimeout(180_000);
     const ids = ['typewriter-effect', 'crop-recorder'];
@@ -243,12 +285,27 @@ test.describe('Use New Engine: the customization moat, round two', () => {
     const page = session.page;
     await waitActive(page, ids);
     await bigTypewriterProject(page);
-    await page.evaluate(() => (window as any).__installCropRecorder());
+    await page.evaluate(() => { (window as any).__installCropRecorder(); void (window as any).PM.Kernel.api('zoom-probe').render.gl.context; });
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
     // A hidden legacy window does not enter preview-viewport mode. Gate
     // the engine on its own against the legacy crop function (the same
     // function ported by pm_render::compat_crop), without showing/focusing
     // an ordinary window on the owner's desktop.
+    await mkdir(EVIDENCE, { recursive: true });
+    const presentedAt = async (zoom: number, time: number) => {
+      try {
+        await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').enginePresentation.latest?.pts)).toBe(Math.round(time * TICKS_PER_SECOND));
+      } catch (error) {
+        const state = await page.evaluate(() => {
+          const PM = (window as any).PM, view = PM.Kernel.services.get('viewer').enginePresentation;
+          return { time: PM.time, latest: view.latest, view: view.state, presenter: view.stats(), status: PM.EngineConnection.status(), crops: (window as any).__crops };
+        });
+        console.log(JSON.stringify({ staleZoom: zoom, requestedTime: time, state }));
+        const stale = await viewerPixels(page, true);
+        await writeFile(path.join(EVIDENCE, `zoom-${zoom}-stale-at-${time}.png`), Buffer.from(stale.png.split(',')[1]!, 'base64'));
+        throw error;
+      }
+    };
     for (const zoom of [8, 16]) {
       const before = await page.evaluate(() => (window as any).PM.EngineConnection.status().frames);
       await page.evaluate(() => { (window as any).__crops.length = 0; });
@@ -256,9 +313,11 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().frames), { timeout: 20_000 }).toBeGreaterThan(before);
       await expect.poll(() => page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 16).length)).toBeGreaterThan(0);
       await viewerPixels(page, true); // let setZoom's intermediate pan state settle
-      await page.evaluate(() => { (window as any).__crops.length = 0; const PM = (window as any).PM; PM.setTime(.7, { force: true }); });
+      await page.evaluate(() => { (window as any).__crops.length = 0; const PM = (window as any).PM; PM.setTime(.2, { force: true }); });
       await expect.poll(() => page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'plain' && c.scale > 16).length)).toBeGreaterThan(0);
+      await presentedAt(zoom, .2);
       const first = await viewerPixels(page, true);
+      expect(first.data.some((v, i) => i % 4 !== 3 && v > 180), 'the presented frame contains text pixels').toBe(true);
       const plan = await page.evaluate(() => {
         const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
         const state = viewer.enginePresentation.state;
@@ -289,9 +348,12 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       for (const called of plan.typed) expect(called.crop).toBeNull();
       expect(plan.failures).toEqual([]);
       const frameBeforeSeek = await page.evaluate(() => (window as any).PM.EngineConnection.status().frames);
-      await page.evaluate(() => { const PM = (window as any).PM; PM.setTime(1.2, { force: true }); });
+      await page.evaluate(() => { const PM = (window as any).PM; PM.setTime(1.7, { force: true }); });
       await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().frames)).toBeGreaterThan(frameBeforeSeek);
+      await presentedAt(zoom, 1.7);
       const second = await viewerPixels(page, true);
+      await writeFile(path.join(EVIDENCE, `zoom-${zoom}-time-0.2.png`), Buffer.from(first.png.split(',')[1]!, 'base64'));
+      await writeFile(path.join(EVIDENCE, `zoom-${zoom}-time-1.7.png`), Buffer.from(second.png.split(',')[1]!, 'base64'));
       expect(first.data.some((v, i) => v !== second.data[i]), `zoom ${zoom}: the typewriter advances after seeking`).toBe(true);
       console.log(JSON.stringify({ zoom, frames: [before, frameBeforeSeek, await page.evaluate(() => (window as any).PM.EngineConnection.status().frames)], scales: [...new Set(plan.crops.map((c: any) => c.scale))], crop }));
     }
