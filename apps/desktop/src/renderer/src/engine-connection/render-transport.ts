@@ -218,6 +218,10 @@ export type CompatAnswerResult =
 export const COMPAT_LOOKAHEAD = 6;
 /** Main-thread time one lookahead call may take (ms); the rest waits for the next frame. */
 const LOOKAHEAD_BUDGET_MS = 6;
+const LOOKAHEAD_MAX_ANSWERS = 16;
+const LOOKAHEAD_POLL_MS = 4;
+
+type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; revision: number | null; clockCursor: number | null };
 
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
 
@@ -237,6 +241,8 @@ export type RenderTransportOptions = {
   playing?: () => boolean;
   /** The open composition's frame duration in ticks (the first lookahead step). */
   frameTicks?: () => number | null;
+  /** Audio-clock playhead in ticks, independent of frames reaching the viewer. */
+  playhead?: () => { time: number; rate: number } | null;
   /** Every open session of the window (viewer sessions and the standby):
    *  each learns which compatibility producers the window has. */
   sessions?: () => TransportSession[];
@@ -319,16 +325,13 @@ export class EngineRenderTransport {
   private readonly reused = new Set<string>();
   readonly compatStats = { needs: 0, rasters: 0, natives: 0, reuses: 0, unanswered: 0, exportAsks: 0 };
   private answering = 0;
-  /**
-   * Playback lookahead. During playback a frame whose compatibility answers
-   * are missing is not drawn (the presenter draws the clock's frame when
-   * they arrive, by which time the clock moved on), so the window answers
-   * ahead: each layer the engine asked for is answered for the next
-   * `COMPAT_LOOKAHEAD` frames, and one more per presented frame. Today's
-   * compositor called the wrapper synchronously at each frame it drew.
-   */
-  private readonly ahead = new Map<string, { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number }>();
-  readonly lookaheadStats = { answered: 0, asked: 0, askedAhead: 0, recent: [] as number[] };
+  /** Clock-driven, bounded playback lookahead. Answers are keyed by the
+   * layer's exact need (including scale/crop) and document revision. */
+  private readonly ahead = new Map<string, AheadEntry>();
+  private aheadTimer: ReturnType<typeof setTimeout> | null = null;
+  private aheadTurn = 0;
+  private pumpingAhead = false;
+  readonly lookaheadStats = { answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, recent: [] as number[] };
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
   /** UI snapshots (thumbnails, library cards, posters, the project thumbnail). */
@@ -341,6 +344,9 @@ export class EngineRenderTransport {
 
   dispose(): void {
     this.offAsk();
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer);
+    this.aheadTimer = null;
+    this.ahead.clear();
     this.producers.clear();
     this.answerers.clear();
   }
@@ -394,76 +400,125 @@ export class EngineRenderTransport {
   receiveCompat(message: Record<string, unknown>, session: TransportSession | null = this.options.session()): void {
     if (message['compat'] !== 'needs' || !session) return;
     const needs = Array.isArray(message['needs']) ? message['needs'] as CompatNeed[] : [];
-    for (const need of needs) this.answerNeed(need, session);
-    // Paused, the layers asked for are remembered so playback starts with
-    // its next frames answered.
     const playing = !!this.options.playing?.();
-    if (playing) {
-      for (const need of needs) {
+    const clock = playing ? this.options.playhead?.() : null;
+    const frame = this.options.frameTicks?.() ?? 0;
+    for (const need of needs) {
+      // A delayed request is no longer the frame the engine can present.
+      // Answer the clock's frame instead of filling an obsolete FIFO.
+      const stale = !!clock && need.composition === this.options.composition() && frame > 0
+        && Math.sign(clock.rate) * (clock.time - need.time) > frame;
+      const answered = !stale && this.answerNeed(need, session);
+      if (stale) this.lookaheadStats.skipped++;
+      if (playing) {
         this.lookaheadStats.asked++;
-        const entry = this.ahead.get(`${need.composition}\u0000${need.layer}\u0000${need.source}`);
-        // Asked although answered ahead: the answer was missed.
-        if (entry && Math.sign(entry.step) * (entry.posted - need.time) >= 0 && need.time !== entry.cursor) this.lookaheadStats.askedAhead++;
+        const entry = this.ahead.get(this.aheadTag(need));
+        if (entry?.sent.has(need.time)) this.lookaheadStats.askedAhead++;
         this.lookaheadStats.recent.push(need.time);
         if (this.lookaheadStats.recent.length > 12) this.lookaheadStats.recent.shift();
       }
+      this.lookahead(need, session, answered);
     }
-    for (const need of needs) this.lookahead(need, session, playing);
+    if (playing) this.presentedWhilePlaying();
   }
 
-  /**
-   * A frame was presented while playing, or playback started: the answers
-   * move one frame on and are kept `COMPAT_LOOKAHEAD` frames ahead, within
-   * a few milliseconds of this thread per call (the rest on later frames).
-   */
+  /** Clock-driven replenishment also runs when no frame was presented. */
   presentedWhilePlaying(): void {
-    if (!this.options.playing?.()) return;
-    const until = performance.now() + LOOKAHEAD_BUDGET_MS;
-    for (const entry of this.ahead.values()) {
-      entry.cursor += entry.step;
-      this.answerAhead(entry, until);
-    }
+    if (!this.options.playing?.() || this.pumpingAhead) return;
+    this.pumpingAhead = true;
+    try {
+      const deadline = performance.now() + LOOKAHEAD_BUDGET_MS;
+      const clock = this.options.playhead?.();
+      const revision = this.options.revision();
+      const entries = [...this.ahead.values()].filter(entry => {
+        if (entry.session.closed || !this.answerers.has(entry.need.source)) {
+          this.ahead.delete(this.aheadTag(entry.need));
+          return false;
+        }
+        const step = (this.options.frameTicks?.() ?? Math.abs(entry.step)) * (clock && clock.rate < 0 ? -1 : 1);
+        const clockCursor = clock ? Math.max(0, Math.floor(clock.time / Math.abs(step)) * Math.abs(step)) : null;
+        const cursor = clockCursor === null ? entry.cursor : entry.need.composition === this.options.composition()
+          ? clockCursor : entry.cursor + (entry.clockCursor === null ? 0 : clockCursor - entry.clockCursor);
+        entry.clockCursor = clockCursor;
+        if (revision !== entry.revision || Math.sign(step) !== Math.sign(entry.step)
+          || Math.sign(step) * (cursor - entry.cursor) < 0) entry.sent.clear();
+        if (Math.sign(step) * (cursor - entry.posted) > Math.abs(step)) this.lookaheadStats.recoveries++;
+        entry.revision = revision;
+        entry.step = step;
+        entry.cursor = cursor;
+        for (const time of entry.sent) {
+          const distance = Math.sign(step) * (time - cursor);
+          if (distance < -Math.abs(step) || distance > COMPAT_LOOKAHEAD * Math.abs(step)) entry.sent.delete(time);
+        }
+        return step !== 0;
+      });
+      // Breadth first: every layer's current frame precedes speculative
+      // work. A slow producer gets at most one turn before another layer.
+      let done = 0, pending = 0;
+      for (let offset = 0; offset <= COMPAT_LOOKAHEAD; offset++) {
+        for (let i = 0; i < entries.length; i++) {
+          const entry = entries[(i + this.aheadTurn) % entries.length]!;
+          const time = entry.cursor + offset * entry.step;
+          if (time < 0 || entry.sent.has(time)) continue;
+          pending++;
+          if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
+          done++;
+          if (this.answerNeed({ ...entry.need, time }, entry.session)) {
+            entry.sent.add(time);
+            entry.posted = time;
+            this.lookaheadStats.answered++;
+            pending--;
+          }
+        }
+      }
+      this.aheadTurn++;
+      this.lookaheadStats.pending = pending;
+      this.lookaheadStats.maxPending = Math.max(this.lookaheadStats.maxPending, pending);
+    } finally { this.pumpingAhead = false; }
+    this.scheduleAhead();
   }
 
-  /** Playback started: answer ahead from where the layers were asked for while paused. */
   playbackStarted(): void {
-    if (!this.options.playing?.()) return;
-    const until = performance.now() + LOOKAHEAD_BUDGET_MS;
-    for (const entry of this.ahead.values()) this.answerAhead(entry, until);
+    this.presentedWhilePlaying();
   }
 
-  private lookahead(need: CompatNeed, session: TransportSession, answer: boolean): void {
-    const tag = `${need.composition}\u0000${need.layer}\u0000${need.source}`;
+  private scheduleAhead(): void {
+    // A timer, rather than a presented-frame callback, breaks the deadlock
+    // when one late answer consumed the entire presentation horizon.
+    if (!this.options.playhead || this.aheadTimer !== null || !this.ahead.size) return;
+    this.aheadTimer = setTimeout(() => {
+      this.aheadTimer = null;
+      this.presentedWhilePlaying();
+    }, LOOKAHEAD_POLL_MS);
+  }
+
+  private aheadTag(need: CompatNeed): string {
+    return `${need.composition}\u0000${need.layer}\u0000${need.source}`;
+  }
+
+  private lookahead(need: CompatNeed, session: TransportSession, answered: boolean): void {
+    const tag = this.aheadTag(need);
     const frame = this.options.frameTicks?.() ?? 0;
+    if (!frame) return;
     const previous = this.ahead.get(tag);
-    const same = !!previous && previous.session === session;
-    // One frame of the open composition, in the direction the clock moves.
-    // (A nested or retimed layer whose time runs at another rate is answered
-    // ahead at the open composition's frames; frames that miss are asked
-    // for, as without the lookahead.)
-    const moved = same ? need.time - previous!.cursor : 0;
-    const step = moved < 0 ? -frame : frame;
-    if (!step) return;
-    const keep = same && Math.sign(previous!.step) === Math.sign(step) && Math.sign(step) * (previous!.posted - need.time) > 0;
-    const entry = { need, session, step, cursor: need.time, posted: keep ? previous!.posted : need.time };
+    const same = previous?.session === session && previous.need.scale === need.scale
+      && JSON.stringify(previous.need.crop) === JSON.stringify(need.crop);
+    const clock = this.options.playhead?.();
+    const step = frame * (clock && clock.rate < 0 ? -1 : 1);
+    const entry: AheadEntry = same ? previous : {
+      need, session, step, cursor: need.time, posted: need.time,
+      sent: new Set<number>(), revision: this.options.revision(), clockCursor: null
+    };
+    entry.need = need;
+    // Never infer reverse playback from a late need. Only the transport's
+    // rate determines direction; an explicit seek resets the sent window.
+    if (!clock || need.composition !== this.options.composition()) {
+      entry.cursor = need.time;
+      entry.clockCursor = clock ? Math.floor(clock.time / frame) * frame : null;
+    }
+    if (answered) entry.sent.add(need.time);
     this.ahead.set(tag, entry);
     if (this.ahead.size > 256) this.ahead.delete(this.ahead.keys().next().value!);
-    if (answer) this.answerAhead(entry, performance.now() + LOOKAHEAD_BUDGET_MS);
-  }
-
-  private answerAhead(entry: { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number }, deadline: number): void {
-    if (entry.session.closed) return;
-    // Fallen behind the clock: answer from the frame it is on.
-    if (Math.sign(entry.step) * (entry.cursor - entry.posted) > 0) entry.posted = entry.cursor - entry.step;
-    const until = entry.cursor + COMPAT_LOOKAHEAD * entry.step;
-    // At least two frames per call (one keeps pace, one catches up), more within the budget.
-    let done = 0;
-    while (Math.sign(entry.step) * (until - entry.posted) > 0 && (done++ < 2 || performance.now() < deadline)) {
-      entry.posted += entry.step;
-      if (entry.posted < 0) break;
-      if (!this.answerNeed({ ...entry.need, time: entry.posted }, entry.session)) break;
-      this.lookaheadStats.answered++;
-    }
   }
 
   /** Draws one need with its producer and posts the answer; false when there was none. */
