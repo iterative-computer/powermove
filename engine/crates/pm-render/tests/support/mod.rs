@@ -4,6 +4,7 @@
 
 pub mod doc;
 pub mod text;
+pub mod text_residuals;
 
 use std::path::{Path, PathBuf};
 

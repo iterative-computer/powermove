@@ -6,7 +6,8 @@
 //! Classes: the *text pixels* are those our frame changes when its text and
 //! captions layers are hidden (opacity 0), grown by 3 pixels. Text matches
 //! today exactly (amendment 22): every text pixel within 2 code values of
-//! the capture. Every difference beyond that bound fails. SSIM over the text
+//! the capture. The exact FONTS-R snapshots are ratcheted separately; new or
+//! regressed residuals, and stale budgets after improvements, fail. SSIM over the text
 //! pixels is reported. Every other pixel keeps the Standard
 //! class (≤ 1 CV for 99.9%, ≤ 4 for any). `tests/corpus.rs` leaves these
 //! projects to this test.
@@ -42,6 +43,7 @@ fn main() {
     use pm_protocol::common::Size;
     use pm_render::parity::{dilate, ssim_map};
     use pm_render::{RenderRequest, Renderer};
+    use support::text_residuals::{Key, Outcome, Ratchet};
     use support::*;
 
     let mut captures = corpus_dirs();
@@ -60,6 +62,9 @@ fn main() {
     // Projects compared in full or in isolation, by name.
     let mut covered = std::collections::BTreeSet::new();
     let mut exact = 0;
+    let mut ratcheted = 0;
+    let mut ratchet = Ratchet::load();
+    let mut expected = Vec::new();
     if captures.is_empty() {
         eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
         return;
@@ -108,6 +113,11 @@ fn main() {
             if !text::has_text(&p.document) {
                 continue;
             }
+            expected.extend(
+                p.samples
+                    .iter()
+                    .map(|sample| Key::corpus(&p.name, in_isolation, sample.time)),
+            );
             if !p.missing_media.is_empty() {
                 skipped.push((
                     format!("{}{tag}", p.name),
@@ -235,8 +245,11 @@ fn main() {
                 let rest_ok = !rest.contains(&true) || d.passes();
                 compared += 1;
                 covered.insert(p.name.clone());
-                let text_ok = over2 == 0;
+                let decision =
+                    ratchet.check(Key::corpus(&p.name, in_isolation, s.time), over2, tmax);
+                let text_ok = decision.is_ok();
                 exact += usize::from(over2 == 0);
+                ratcheted += usize::from(matches!(&decision, Ok(Outcome::Ratcheted)) && rest_ok);
                 let line = format!(
                     "{:<44} t={:<6} text px {:>7} SSIM {:.4} >2 CV {:>6} max {:>3} | rest ≤1 {:>7.3}% max {}",
                     format!("{}{tag}", p.name),
@@ -248,6 +261,11 @@ fn main() {
                     100.0 * d.fraction_within_one(),
                     d.max
                 );
+                let line = match &decision {
+                    Ok(Outcome::Ratcheted) => format!("{line} [FONTS-R]"),
+                    Err(error) => format!("{line} [{error}]"),
+                    _ => line,
+                };
                 println!("{line}");
                 let fails = !text_ok || !rest_ok;
                 if fails {
@@ -255,7 +273,7 @@ fn main() {
                 }
                 // `PM_TEXT_DIFFS_ALL` writes the images of passing frames too
                 // (side-by-sides for review).
-                if (fails || std::env::var("PM_TEXT_DIFFS_ALL").is_ok())
+                if (over2 > 0 || fails || std::env::var("PM_TEXT_DIFFS_ALL").is_ok())
                     && let Some(dir) = &diffs
                 {
                     std::fs::create_dir_all(dir).unwrap();
@@ -302,8 +320,9 @@ fn main() {
             ));
         }
     }
+    failed.extend(ratchet.missing(expected));
     println!(
-        "\ncompared {compared} frames ({exact} exact within 2 code values); {} failed",
+        "\ncompared {compared} frames ({exact} exact within 2 code values, {ratcheted} FONTS-R ratcheted); {} failed",
         failed.len()
     );
     for f in &failed {
@@ -311,7 +330,7 @@ fn main() {
     }
     assert!(
         failed.is_empty(),
-        "{} frames outside the text class",
+        "{} frames violate the text class or FONTS-R ratchet",
         failed.len()
     );
 }

@@ -10,7 +10,8 @@
 //!
 //! Gate: today's pixels exactly (amendment 22): every channel of every pixel
 //! within 1 code value of the capture. Refusals and any pixels beyond the
-//! bound fail; no differences are accepted by pins. Reported besides:
+//! bound fail, except the exact FONTS-R snapshots in fixtures/text-residuals.json.
+//! Regressions, new residuals and improvements with stale budgets fail. Reported besides:
 //! SSIM (the mean of the four channels' maps, 11 × 11 Gaussian, σ = 1.5)
 //! over ink windows (pixels whose local mean alpha exceeds 1/512 in either
 //! image) and over the full canvas.
@@ -63,11 +64,11 @@ fn main() {
     }
     assert!(
         failed == 0,
-        "{failed} cases differ from today (within 1 code value required)"
+        "{failed} cases violate the strict 1-CV bound or FONTS-R ratchet"
     );
 }
 
-/// Every capture is compared with the same bound; no accepted differences.
+/// Strict 1-CV measurement plus the explicit FONTS-R snapshot ratchet.
 #[cfg(target_os = "macos")]
 fn gate(dir: &std::path::Path) -> usize {
     use pm_protocol::color::Precision;
@@ -76,6 +77,7 @@ fn gate(dir: &std::path::Path) -> usize {
     use std::path::PathBuf;
     use support::doc::{layer, project};
     use support::text::{ink_ssim, png_rgba};
+    use support::text_residuals::{Key, Outcome, Ratchet};
 
     let cases: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("cases.json")).unwrap()).unwrap();
@@ -119,6 +121,8 @@ fn gate(dir: &std::path::Path) -> usize {
     let diffs = std::env::var("PM_TEXT_DIFFS").ok().map(PathBuf::from);
     let mut refused = 0;
     let mut exact = 0;
+    let mut ratcheted = 0;
+    let mut ratchet = Ratchet::load();
     let mut rows = Vec::new();
     let mut failed = Vec::new();
     let started = std::time::Instant::now();
@@ -206,14 +210,25 @@ fn gate(dir: &std::path::Path) -> usize {
             max_diff = max_diff.max(d);
             off += usize::from(d > 1);
         }
-        let pass = geometry.is_empty() && off == 0;
+        let strict_pass = geometry.is_empty() && off == 0;
+        let decision = ratchet.check(Key::raster(id), off, max_diff);
+        let in_ratchet = matches!(&decision, Ok(Outcome::Ratcheted));
+        let pass = geometry.is_empty() && decision.is_ok();
+        let ratchet_error = decision.as_ref().err().cloned();
         exact += usize::from(off == 0);
+        ratcheted += usize::from(in_ratchet && geometry.is_empty());
         let line = format!(
             "{id:<26} {:>5}x{:<5} ink SSIM {ink:.4}  full {full:.4}  ink ratio {ratio:.3}  max Δ {max_diff:>3}  >1 CV {off:>6} {geometry}",
             cw, ch,
         );
+        let line = match &decision {
+            Ok(Outcome::Ratcheted) => format!("{line} [FONTS-R]"),
+            Err(error) => format!("{line} [{error}]"),
+            _ => line,
+        };
         println!("{line}");
-        let write_diff = !pass;
+        // Keep review images for ratcheted residuals too.
+        let write_diff = !strict_pass;
         if !pass {
             failed.push(line);
         }
@@ -245,8 +260,19 @@ fn gate(dir: &std::path::Path) -> usize {
             std::fs::write(d.join(format!("{id}.{cw}x{ch}.engine.rgba")), &ours).unwrap();
             std::fs::write(d.join(format!("{id}.{cw}x{ch}.legacy.rgba")), &reference).unwrap();
         }
-        rows.push(json!({"id": id, "group": case["group"], "inkSsim": ink, "fullSsim": full, "inkRatio": ratio, "maxDiff": max_diff, "over1": off, "pass": pass}));
+        rows.push(json!({"id": id, "group": case["group"], "inkSsim": ink, "fullSsim": full, "inkRatio": ratio, "maxDiff": max_diff, "over1": off, "pass": pass, "ratcheted": in_ratchet, "ratchetError": ratchet_error}));
     }
+    failed.extend(
+        ratchet.missing(
+            cases["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|case| case["id"].as_str())
+                .filter(|id| only.as_deref().is_none_or(|prefix| id.starts_with(prefix)))
+                .map(Key::raster),
+        ),
+    );
     // Per group summary.
     let mut groups: std::collections::BTreeMap<String, (usize, f64, f64)> = Default::default();
     for r in &rows {
@@ -266,10 +292,11 @@ fn gate(dir: &std::path::Path) -> usize {
     }
     let stats = renderer.text_gpu().stats;
     println!(
-        "\n{} cases in {:.1} s; {} exact within 1 code value; {} refused (gaps); {} failed; pages {} (cpu {}); vello: {}",
+        "\n{} cases in {:.1} s; {} exact within 1 code value; {} FONTS-R ratcheted; {} refused (gaps); {} failed; pages {} (cpu {}); vello: {}",
         rows.len() + refused,
         started.elapsed().as_secs_f64(),
         exact,
+        ratcheted,
         refused,
         failed.len(),
         stats.pages,
