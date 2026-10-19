@@ -130,10 +130,29 @@ export interface TransportSession {
   post(event: Record<string, unknown> & { type: string }): boolean;
 }
 
-/** What draws fallback programs (ShaderFallbackRunner). */
+/** What draws fallback programs (ShaderFallbackRunner). `textures` are an
+ *  effect's or a transition's (binary16 RGBA, GL row order). */
 export interface TransportFallbackRunner {
-  render(request: ShaderFallbackRequest): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array }>;
-  renderSync(request: ShaderFallbackRequest): { key: string; width: number; height: number; rgba16f: Uint16Array };
+  render(request: ShaderFallbackRequest, textures?: Uint16Array[]): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array }>;
+  renderSync(request: ShaderFallbackRequest, textures?: Uint16Array[]): { key: string; width: number; height: number; rgba16f: Uint16Array };
+}
+
+/** The textures a fallback request samples, from the answer that names it
+ *  (main hands them back with `needsRenderer`; main/engine/fallback-inputs.ts). */
+export function fallbackTextures(reply: { fallbackTextures?: { key: string; textures: Uint8Array[] }[] }, request: ShaderFallbackRequest): Uint16Array[] {
+  const count = request.textures ?? 0;
+  if (count === 0) return [];
+  const found = reply.fallbackTextures?.find((t) => t.key === request.key);
+  const size = request.width * request.height * 8;
+  if (!found || found.textures.length !== count || found.textures.some((t) => t.byteLength !== size)) {
+    throw new EngineSnapshotError('internal', `The textures of program ${request.key.slice(0, 12)} did not arrive with the answer.`);
+  }
+  return found.textures.map((t) => {
+    // Aligned copies: an IPC buffer may start at an odd offset.
+    const values = new Uint16Array(t.byteLength / 2);
+    new Uint8Array(values.buffer).set(t);
+    return values;
+  });
 }
 
 /** Draws one layer's compatibility pixels for an export frame (the `raster`
@@ -305,7 +324,7 @@ export class EngineRenderTransport {
         if (!runner || !session) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');
         for (const request of reply.fallback) {
           if (uploaded.includes(request.key)) throw new EngineSnapshotError('internal', `The engine asked again for program ${request.key.slice(0, 12)}.`);
-          session.uploadFallback(runner.renderSync(request));
+          session.uploadFallback(runner.renderSync(request, fallbackTextures(reply, request)));
           uploaded.push(request.key);
         }
       }
@@ -361,7 +380,7 @@ export class EngineRenderTransport {
       if (!runner) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');
       for (const r of reply.fallback) {
         if (uploaded.includes(r.key)) throw new EngineSnapshotError('internal', `The engine asked again for program ${r.key.slice(0, 12)}.`);
-        const pixels = runner.renderSync(r);
+        const pixels = runner.renderSync(r, fallbackTextures(reply, r));
         fallbackPixels.push({ key: pixels.key, width: pixels.width, height: pixels.height, rgba16f: new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength) });
         uploaded.push(r.key);
       }
@@ -398,7 +417,7 @@ export class EngineRenderTransport {
         if (!runner || !session) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');
         for (const request of reply.fallback) {
           if (uploaded.includes(request.key)) throw new EngineSnapshotError('internal', `The engine asked again for program ${request.key.slice(0, 12)}.`);
-          session.uploadFallback(await runner.render(request));
+          session.uploadFallback(await runner.render(request, fallbackTextures(reply, request)));
           uploaded.push(request.key);
         }
       }

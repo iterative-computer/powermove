@@ -286,6 +286,11 @@ export type EngineSnapshotReply =
       revision: number;
       fallback: import('./engine-protocol').ShaderFallbackRequest[];
       compat: import('./engine-protocol').CompatNeed[];
+      /** The textures of the `fallback` requests that sample them (effects
+       *  and transitions): binary16 RGBA bytes in GL row order, one per
+       *  texture, as the engine sent them to main ahead of the answer
+       *  (main/engine/fallback-inputs.ts). */
+      fallbackTextures?: { key: string; textures: Uint8Array[] }[];
     }
   | { status: 'empty'; revision: number }
   | { status: 'failed'; code: string; message: string };

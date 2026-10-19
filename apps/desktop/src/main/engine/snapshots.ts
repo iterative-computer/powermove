@@ -36,6 +36,9 @@ export interface SnapshotEngine {
   isReady(process: 'interactive'): boolean;
   clientPort(id: number, process: 'interactive'): { port: number; generation: number } | null;
   request(process: 'interactive', body: Request, session?: number | null, revision?: number | null): Promise<Response>;
+  /** The textures the engine sent ahead of a `needsRenderer` answer for
+   *  one of its fallback requests (fallback-inputs.ts). */
+  fallbackTextures?(key: string, count: number, width: number, height: number): Uint8Array[] | null;
 }
 
 /** Maps an engine's shared-memory segment once and unlinks it (pm-bridge). */
@@ -294,7 +297,19 @@ export class SnapshotService {
     }
     if (outcome.outcome === 'needsRenderer') {
       this.stats.needsRenderer++;
-      return { status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat };
+      // An effect's or a transition's textures arrived ahead of the answer
+      // (the renderer may be blocked on it and cannot read its own port).
+      const fallbackTextures: { key: string; textures: Uint8Array[] }[] = [];
+      for (const r of outcome.fallback) {
+        const count = r.textures ?? 0;
+        if (count === 0) continue;
+        const textures = this.options.engine.fallbackTextures?.(r.key, count, r.width, r.height) ?? null;
+        if (textures) fallbackTextures.push({ key: r.key, textures });
+      }
+      return {
+        status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat,
+        ...(fallbackTextures.length ? { fallbackTextures } : {})
+      };
     }
     const expected = outcome.width * outcome.height * 4;
     let data: Uint8Array;

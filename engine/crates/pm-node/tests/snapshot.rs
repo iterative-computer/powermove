@@ -127,6 +127,11 @@ fn snapshots_that_need_the_renderer_name_what_it_draws() {
 }
 
 #[test]
+fn snapshots_send_an_effects_textures_to_main_ahead_of_the_answer() {
+    run_child("child_fallback_effect");
+}
+
+#[test]
 fn frames_carry_their_depth_and_id_surface_when_the_viewer_asks() {
     run_child("child_depth");
 }
@@ -1058,6 +1063,129 @@ fn child_fallback() {
     // binary16 0x3400 = 0.25 → 64, where the layer moved.
     assert_eq!(at(&px, 320, 200, 20), [64, 64, 64, 255]);
     assert_eq!(at(&px, 320, 40, 20), BACKGROUND);
+    println!("CHILD-OK");
+}
+
+/// An effect only the runner draws: the built-in Invert with a cube
+/// sampler (amendment 9: WebGL samples it as (0, 0, 0, 1)).
+fn cube_effect_definitions() -> pm_protocol::definitions::DefinitionsUpdate {
+    let mut set = pm_render::builtin_definitions();
+    let mut cube = set
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap()
+        .clone();
+    cube.id = "acme.cube".into();
+    cube.origin = pm_protocol::definitions::DefinitionOrigin::Store;
+    cube.flags.backdrop = true;
+    let glsl = cube.glsl.as_mut().unwrap();
+    glsl.source = glsl
+        .source
+        .replacen("void main(){", "uniform samplerCube u_env;\nvoid main(){", 1);
+    let end = glsl.source.rfind('}').unwrap();
+    glsl.source
+        .insert_str(end, "  o += texture(u_env, vec3(0.0, 0.0, 1.0)) * 0.0;\n");
+    set.definitions.push(cube);
+    pm_protocol::definitions::DefinitionsUpdate {
+        generation: Seq::new(1).unwrap(),
+        full: true,
+        upserts: set.definitions,
+        removals: vec![],
+    }
+}
+
+#[test]
+#[ignore = "run by snapshots_send_an_effects_textures_to_main_ahead_of_the_answer"]
+fn child_fallback_effect() {
+    use pm_protocol::shader_fallback::ShaderFallbackMessage;
+    use std::collections::BTreeSet;
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    let session = c.session;
+    c.window(
+        Envelope::new(Message::Request {
+            id: RequestId::new(2).unwrap(),
+            body: Request::PushDefinitions(cube_effect_definitions()),
+        })
+        .with_session(session),
+    );
+    c.inbox
+        .wait(Duration::from_secs(5), |port, m| match &m.message {
+            Message::Response {
+                body: Response::DefinitionsApplied(_),
+                ..
+            } if port == WINDOW => Some(()),
+            _ => None,
+        });
+    let mut doc = project(100.0);
+    doc["layers"][0]["fx"] = json!([{ "id": "fx1", "type": "acme.cube", "on": true, "p": {} }]);
+    c.resync(3, 1, &doc);
+    let small = Size::new(320, 180);
+    c.snapshot(
+        40,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    // The bands come to main (the host port) before the answer: the scan
+    // meets them first. Each is (key, texture, first row, rows).
+    let mut before = BTreeSet::new();
+    let mut to_window = 0;
+    let mut answer40 = answer(40);
+    let outcome = c.inbox.wait(Duration::from_secs(20), |port, m| {
+        if let Message::Event {
+            body: Event::ShaderFallback(ShaderFallbackMessage::Input(i)),
+        } = &m.message
+        {
+            if port == HOST {
+                before.insert((i.key.clone(), i.texture, i.row, i.rows, i.width, i.height));
+            } else {
+                to_window += 1;
+            }
+            return None;
+        }
+        answer40(port, m)
+    });
+    let request = match outcome {
+        Ok(SnapshotOutcome::NeedsRenderer { fallback, .. }) => {
+            assert_eq!(fallback.len(), 1);
+            fallback[0].clone()
+        }
+        other => panic!("expected needsRenderer, got {other:?}"),
+    };
+    assert_eq!((request.layer.as_str(), request.textures), ("box", 2));
+    // Never on the renderer's port: it may be the thread blocked on this.
+    assert_eq!(to_window, 0);
+    for texture in 0..2 {
+        let rows: u32 = before
+            .iter()
+            .filter(|b| b.0 == request.key && b.1 == texture)
+            .map(|b| {
+                assert_eq!((b.4, b.5), (request.width, request.height));
+                b.3
+            })
+            .sum();
+        assert_eq!(rows, request.height, "texture {texture}: {before:?}");
+    }
+    // The renderer draws it with those textures, posts it on its port, and
+    // asks again.
+    for band in bands(&request, 0x3800) {
+        c.event(band);
+    }
+    let mut again = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
+    again.uploaded = vec![request.key.clone()];
+    c.snapshot(41, again, Some(1), WINDOW, session);
+    let px = pixels_of(&rendered(c.inbox.wait(Duration::from_secs(20), answer(41))));
+    // binary16 0x3800 = 0.5 everywhere the runner's pixels cover: an
+    // effect with a backdrop draws into the layer's composition-sized
+    // buffer.
+    assert_eq!((request.width, request.height), (320, 180));
+    assert_eq!(at(&px, 320, 120, 70), [128, 128, 128, 255]);
+    assert_eq!(at(&px, 320, 300, 160), [128, 128, 128, 255]);
     println!("CHILD-OK");
 }
 

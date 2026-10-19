@@ -38,6 +38,7 @@ import type { HardwareArbiter, LeaseGrant, MemoryArbiter } from './arbiter';
 import type { HostHandler, Log } from './connection';
 import { CrashLedger, isAttributable } from './crash';
 import { DefinitionRelay } from './definitions';
+import { FallbackInputs } from './fallback-inputs';
 import { HandleRejected, type HandleTable } from './handles';
 import type { OutputDestinations } from './outputs';
 import type { ChannelFactory, ClientPortInfo, PortLike, SpawnEngine } from './ports';
@@ -142,6 +143,9 @@ export class NativeEngine {
   /** Blender supervision for both engines (contract 11, `blender.ts`). */
   readonly blender: EngineBlender | null;
   readonly definitions = new DefinitionRelay();
+  /** Texture bands the interactive engine sends ahead of a snapshot's
+   *  `needsRenderer` answer (fallback-inputs.ts). */
+  readonly fallbackInputs = new FallbackInputs();
   readonly ledger = new CrashLedger();
   private readonly supervisors: Record<EngineProcess, EngineSupervisor>;
   private nextPort = 1;
@@ -336,6 +340,11 @@ export class NativeEngine {
   /** Posts an event to `process` for a session main opened. */
   event(process: EngineProcess, body: Event, session: number | null): void {
     this.supervisors[process].event(body, session);
+  }
+
+  /** The textures of a snapshot's fallback request (fallback-inputs.ts). */
+  fallbackTextures(key: string, count: number, width: number, height: number): Uint8Array[] | null {
+    return this.fallbackInputs.take(key, count, width, height);
   }
 
   clientPort(id: number, process: EngineProcess): { port: number; generation: number } | null {
@@ -615,6 +624,12 @@ export class NativeEngine {
   }
 
   private onEvent(process: EngineProcess, body: Event, session: number | null): void {
+    // The textures of a snapshot's fallback requests, ahead of its answer
+    // (fallback-inputs.ts): for whichever session the snapshot is of.
+    if (process === 'interactive' && body.type === 'shaderFallback' && (body as { fallback?: string }).fallback === 'input') {
+      if (!this.fallbackInputs.receive(body)) this.options.log('warn', 'the interactive engine sent a damaged fallback texture band; dropped');
+      return;
+    }
     // What a session main opened itself reports (window snapshot sessions,
     // window-sessions.ts): main only snapshots them.
     if (session !== null && SESSION_EVENTS.has(body.type)) return;

@@ -83,6 +83,34 @@ describe('EngineRenderTransport', () => {
     expect(asked[1]!.snapshot.uploaded).toEqual(['a'.repeat(64)]);
   });
 
+  it('draws an effect with the textures main handed back with the answer, on this thread and asynchronously', async () => {
+    const effect: ShaderFallbackRequest = { ...fallbackRequest('d'.repeat(64)), textures: 2, units: [{ unit: 0, texture: 0, chain: false }, { unit: 1, texture: 1, chain: false }], morePasses: [] };
+    // 2 × 2 binary16 RGBA: 32 bytes a texture, at an odd offset as IPC may give them.
+    const band = (value: number) => {
+      const backing = new Uint8Array(33);
+      const bytes = backing.subarray(1);
+      new DataView(bytes.buffer, 1).setUint16(0, value, true);
+      return bytes;
+    };
+    const needs = (): EngineSnapshotReply => ({ status: 'needsRenderer', revision: 12, fallback: [effect], compat: [], fallbackTextures: [{ key: effect.key, textures: [band(0x3c00), band(0x3800)] }] });
+    const sync = setup([needs(), rendered(2, 2)]);
+    sync.transport.snapshotSync({ time: 0, width: 2, height: 2 });
+    const [request, textures] = sync.runner.renderSync.mock.calls[0] as unknown as [ShaderFallbackRequest, Uint16Array[]];
+    expect(request.key).toBe(effect.key);
+    expect(textures.map((t) => [t.length, t[0]])).toEqual([[16, 0x3c00], [16, 0x3800]]);
+    expect(sync.session.uploads).toEqual([effect.key]);
+    const later = setup([needs(), rendered(2, 2)]);
+    await later.transport.snapshot({ time: 0, width: 2, height: 2 });
+    expect((later.runner.render.mock.calls[0] as unknown as [ShaderFallbackRequest, Uint16Array[]])[1].map((t) => t[0])).toEqual([0x3c00, 0x3800]);
+  });
+
+  it('fails an effect whose textures did not come with the answer rather than drawing it unsampled', () => {
+    const effect: ShaderFallbackRequest = { ...fallbackRequest('e'.repeat(64)), textures: 1, units: [{ unit: 0, texture: 0, chain: false }], morePasses: [] };
+    const { transport, runner } = setup([{ status: 'needsRenderer', revision: 12, fallback: [effect], compat: [] }]);
+    expect(() => transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(EngineSnapshotError);
+    expect(runner.renderSync).not.toHaveBeenCalled();
+  });
+
   it('gives up after bounded rounds and when the engine repeats a program', () => {
     const needs: EngineSnapshotReply = { status: 'needsRenderer', revision: 12, fallback: [fallbackRequest('b'.repeat(64))], compat: [] };
     const { transport } = setup([needs, needs]);

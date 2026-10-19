@@ -3592,8 +3592,18 @@ impl Thread {
                     .into_iter()
                     .take(pm_protocol::shader_fallback::MAX_REQUESTS)
                     .collect();
+                // The textures an effect or a transition samples go to main
+                // ahead of the answer, on the same port so they arrive
+                // first, in row bands: the renderer may be the thread
+                // blocked on this snapshot and cannot read its own port, so
+                // main hands them back with the answer
+                // (`main/engine/fallback-inputs.ts`).
+                let inputs = fallback_inputs(renderer, &fallback, job.key.1);
                 for r in &fallback {
                     self.fallback.asked.insert(r.key.clone(), job.key);
+                }
+                for input in inputs {
+                    self.send(job.host, input);
                 }
                 self.stats().snapshot_needs += 1;
                 let outcome = SnapshotOutcome::NeedsRenderer {
@@ -4060,6 +4070,38 @@ fn blender_frames(
     BlenderFrames::Prepare(snaps.snapshots)
 }
 
+
+/// The texture bands of the fallback requests that sample textures (effects
+/// and transitions), as `ShaderFallback(Input)` events of `session`.
+fn fallback_inputs(
+    renderer: &pm_render::Renderer,
+    requests: &[pm_protocol::shader_fallback::ShaderFallbackRequest],
+    session: SessionId,
+) -> Vec<Envelope> {
+    use pm_protocol::shader_fallback::{ShaderFallbackInput, ShaderFallbackMessage};
+    let mut out = Vec::new();
+    for r in requests.iter().filter(|r| r.textures > 0) {
+        let textures = renderer.fallback_textures(&r.key).unwrap_or_default();
+        for (texture, pixels) in textures.iter().enumerate() {
+            for (row, rows, bytes) in pm_render::shader_layers::fallback::bands(
+                pixels,
+                pm_protocol::shader_fallback::MAX_BAND_BYTES,
+            ) {
+                let body = Event::ShaderFallback(ShaderFallbackMessage::Input(ShaderFallbackInput {
+                    key: r.key.clone(),
+                    texture: texture as u32,
+                    width: pixels.width,
+                    height: pixels.height,
+                    row,
+                    rows,
+                    rgba16f: pm_protocol::common::Bytes(bytes),
+                }));
+                out.push(Envelope::new(Message::Event { body }).with_session(session));
+            }
+        }
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {
