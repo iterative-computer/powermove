@@ -243,7 +243,7 @@ export class SvgRasters {
     const asset = this.options.asset(request.asset);
     if (!asset || !asset.el) throw new SvgRasterError('missing', `This window has no decoded SVG for asset ${request.asset}.`);
     if (content === null) throw new SvgRasterError('stale', `The SVG of asset ${request.asset} is not hashed yet in this window.`);
-    if (content !== request.key.content) throw new SvgRasterError('stale', `The SVG of asset ${request.asset} in this window is not the engine's (another version of the file).`);
+    if (content !== request.key.content) throw new SvgRasterError('stale', `The SVG of asset ${request.asset} in this window (${content.slice(0, 12)}) is not the engine's (${request.key.content.slice(0, 12)}): another version of the file.`);
     return asset.el;
   }
 
