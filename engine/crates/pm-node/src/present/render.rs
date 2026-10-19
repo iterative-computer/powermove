@@ -2424,6 +2424,20 @@ impl Thread {
             }
         }
         if takes_transport(Some(&route)) {
+            // Paused exact seeks while the route was undecided moved only
+            // the line (a load, a composition switch, media resolving): the
+            // audio a paused session already has prepares its next start
+            // at the line again.
+            if changed
+                && !self.config.host_clock
+                && let Some(view) = self.views.get(&key)
+                && !view.clock.is_playing()
+                && view.awaiting.is_none()
+                && view.deferred_transport.is_none()
+                && let Some(link) = self.audio.get(&key)
+            {
+                link.send(AudioCtl::Seek(view.clock.media_at(t)));
+            }
             let deferred = self
                 .views
                 .get_mut(&key)
