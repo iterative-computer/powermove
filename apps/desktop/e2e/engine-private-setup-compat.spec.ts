@@ -141,6 +141,12 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
       const app = await launchApp({ userData: profile, env: { POWERMOVE_NEW_ENGINE: engine ? '1' : '0' } });
       const mode = engine ? 'engine' : 'today';
       try {
+        await app.app.evaluate(({ app, BrowserWindow }) => {
+          const events = (globalThis as any).__c1RendererExits = [];
+          const attach = (window: any) => window.webContents.on('render-process-gone', (_event: unknown, details: any) => events.push({ windowId: window.id, ...details }));
+          BrowserWindow.getAllWindows().forEach(attach);
+          app.on('browser-window-created', (_event, window) => attach(window));
+        });
         await app.openEditor();
         console.log(`C1 ${mode}: waiting for all extension activations`);
         await app.page.waitForFunction((ids) => {
@@ -230,6 +236,7 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
 
       } catch (error) {
         results[mode] ??= {}; results[mode].failure = String(error);
+        results[mode].rendererExits = await app.app.evaluate(() => (globalThis as any).__c1RendererExits ?? []).catch(() => []);
         results[mode].extensions = await facts(app.page, ids).catch(() => results[mode].extensions ?? []);
         results[mode].failureState = await app.page.evaluate(() => {
           const PM = (window as any).PM;
