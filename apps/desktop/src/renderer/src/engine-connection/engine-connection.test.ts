@@ -151,35 +151,42 @@ describe('the engine connection', () => {
     expect(session.batches).toBe(2);
 
     // A frame says the engine draws the composition; an `unsupported`
-    // failure routes it to the legacy viewer.
+    // failure routes it to the legacy viewer. The report names the newest
+    // frame seq the engine had given the view: 2, a paused frame of
+    // revision 5 the GPU had not finished yet (the completion thread sends
+    // it), so it was never received.
+    const failure = (revision: number, lastFrame: number | null) => envelope({ kind: 'event', body: { type: 'failure', revision, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'Drawn by the current engine: effects.', retry: { kind: 'never' }, detail: lastFrame === null ? null : { kind: 'unsupported', lastFrame } } } } as never, 5);
     port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 1, revision: 5 } } as never, 5));
-    port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 6, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'Drawn by the current engine: effects.', retry: { kind: 'never' }, detail: null } } } as never, 5));
+    port.deliver(failure(6, 2));
     expect(routes).toEqual(['engine', 'legacy']);
     expect(messages).toEqual(['frame', 'routed']);
     expect(session.routeReason).toMatch(/effects/);
-    // A frame the engine produced before the report is stale: it neither
-    // shows nor brings the engine back.
-    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 1, revision: 5 } } as never, 5));
+    // That frame, still in flight at the report, arrives after it with a
+    // higher seq than any frame received: it is of the older revision and
+    // stale. It neither shows nor brings the engine back.
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, seq: 2, revision: 5 } } as never, 5));
     expect(routes).toEqual(['engine', 'legacy']);
     expect(messages).toEqual(['frame', 'routed']);
+    expect(session.routeReason).toMatch(/effects/);
+    expect(session.lastFrame?.seq).toBe(1);
     // A composition switch: the document batch reached the engine before the
     // viewer state, so it reported the old composition at revision 6 and
     // then drew the new one at the same revision. That frame is a later
     // decision and brings the engine back.
-    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, seq: 2, revision: 6 } } as never, 5));
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 3, revision: 6 } } as never, 5));
     expect(routes).toEqual(['engine', 'legacy', 'engine']);
     expect(messages).toEqual(['frame', 'routed', 'frame']);
     expect(session.routeReason).toBeNull();
     // Back to the composition the engine cannot draw and over again (A, B,
-    // A, B), every report and frame at revision 7.
-    const failure = (revision: number) => envelope({ kind: 'event', body: { type: 'failure', revision, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'Drawn by the current engine: effects.', retry: { kind: 'never' }, detail: null } } } as never, 5);
-    port.deliver(failure(7));
-    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, seq: 2, revision: 6 } } as never, 5));
+    // A, B), every report and frame at revision 7. This report carries no
+    // seq (the gate falls back to the newest frame received).
+    port.deliver(failure(7, null));
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 3, revision: 6 } } as never, 5));
     expect(routes).toEqual(['engine', 'legacy', 'engine', 'legacy']);
-    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 3, revision: 7 } } as never, 5));
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, seq: 4, revision: 7 } } as never, 5));
     expect(routes).toEqual(['engine', 'legacy', 'engine', 'legacy', 'engine']);
     expect(messages).toEqual(['frame', 'routed', 'frame', 'routed', 'frame']);
-    expect(session.lastFrame?.seq).toBe(3);
+    expect(session.lastFrame?.seq).toBe(4);
   });
 
   it('streams the kernel\'s definitions to the session before its document, and their failures back', async () => {

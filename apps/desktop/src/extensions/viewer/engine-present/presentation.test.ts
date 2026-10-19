@@ -479,6 +479,24 @@ describe('ViewerPresentation', () => {
       expect(presentation.latest?.revision).toBe(revision);
       expect(presentation.status).toBeNull();
     }
+    // The report names the newest seq the engine had given the view (7):
+    // frames 6 and 7, of revision 12, were still on the GPU. Frame 6 arrives
+    // after the report with a higher seq than any delivered: it is stale and
+    // the line stays. Frame 8 is a later decision.
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: why, revision: 13, seq: 7 } as never, performance.now());
+    expect(presentation.status).toBe(why);
+    second.handlers.message({ type: 'frame', frame: { ...desc(6, 1), revision: 12 } }, performance.now());
+    runFrames(rafs, performance.now() + 300);
+    runFrames(rafs, performance.now() + 320);
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.latest).toBeNull();
+    expect(presentation.status).toBe(why);
+    second.handlers.message({ type: 'frame', frame: { ...desc(8, 1), revision: 13 } }, performance.now());
+    runFrames(rafs, performance.now() + 340);
+    runFrames(rafs, performance.now() + 360);
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.latest?.seq).toBe(8);
+    expect(presentation.status).toBeNull();
     expect(hidden).toEqual([]);
     presentation.dispose();
     expect(stage.querySelector('[data-engine-status]')).toBeNull();
