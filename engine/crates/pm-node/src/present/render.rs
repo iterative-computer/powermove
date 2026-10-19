@@ -1208,10 +1208,10 @@ impl Thread {
         }
         match command {
             TransportCommand::Play { rate } => {
-                if view.reported != Some(Route::Engine) {
-                    if !matches!(view.reported, Some(Route::Legacy(_))) {
-                        view.deferred_transport = Some(TransportCommand::Play { rate });
-                    }
+                if !takes_transport(view.reported.as_ref()) {
+                    // Not decided yet (document or media on its way): the
+                    // latest Play waits for the route.
+                    view.deferred_transport = Some(TransportCommand::Play { rate });
                     return;
                 }
                 view.deferred_transport = None;
@@ -1256,13 +1256,11 @@ impl Thread {
                 pre_roll,
                 post_roll,
             } => {
-                if view.reported != Some(Route::Engine) {
-                    if !matches!(view.reported, Some(Route::Legacy(_))) {
-                        view.deferred_transport = Some(TransportCommand::PlayAround {
-                            pre_roll,
-                            post_roll,
-                        });
-                    }
+                if !takes_transport(view.reported.as_ref()) {
+                    view.deferred_transport = Some(TransportCommand::PlayAround {
+                        pre_roll,
+                        post_roll,
+                    });
                     return;
                 }
                 view.deferred_transport = None;
@@ -1308,7 +1306,7 @@ impl Thread {
             TransportCommand::Seek { time, mode } => {
                 let playing = view.clock.following() && view.clock.is_playing();
                 let awaiting = view.awaiting;
-                let engine = view.reported == Some(Route::Engine);
+                let engine = takes_transport(view.reported.as_ref());
                 view.scrub = mode == SeekMode::Scrub && !playing && awaiting.is_none();
                 view.clock.apply(TransportCommand::Seek { time, mode }, at);
                 if playing || awaiting.is_some() {
@@ -1376,7 +1374,7 @@ impl Thread {
     /// only when enabled, otherwise it silently prepares the next start.
     fn scrub_grain(&mut self, key: Key, media: i64) {
         if self.config.host_clock
-            || self.views.get(&key).and_then(|v| v.reported.as_ref()) != Some(&Route::Engine)
+            || !takes_transport(self.views.get(&key).and_then(|v| v.reported.as_ref()))
         {
             return;
         }
@@ -1621,7 +1619,13 @@ impl Thread {
             a == state
         };
         let composition_changed = view.state.composition != state.composition;
+        let attached = view.state.headless == Some(true) && state.headless != Some(true);
         view.state = state;
+        // A viewer attaching to a session whose composition the renderer
+        // cannot draw is told so (the report went out while headless).
+        if attached && matches!(view.reported, Some(Route::Legacy(_))) {
+            view.reported = None;
+        }
         if let Some(revision) = revision {
             view.revision = view.revision.max(revision);
         }
@@ -2112,7 +2116,8 @@ impl Thread {
             if (view.dirty && view.state.headless != Some(true))
                 || !view.requests.is_empty()
                 || (view.sample_due
-                    && (view.state.headless != Some(true) || view.reported == Some(Route::Engine)))
+                    && (view.state.headless != Some(true)
+                        || takes_transport(view.reported.as_ref())))
             {
                 return Duration::ZERO;
             }
@@ -2307,19 +2312,21 @@ impl Thread {
                     view.dirty = true;
                     view.sample_due = true;
                 }
-                Route::Legacy(_) | Route::Pending(_) => {
+                // Something the renderer cannot draw (plan amendment 21: no
+                // other engine draws it): the stage shows the named failure,
+                // and the transport and audio go on as they were.
+                Route::Legacy(_) => {}
+                Route::Pending(_) => {
                     stop = view.clock.is_playing() || view.awaiting.is_some();
                 }
             }
         }
         if stop {
-            if matches!(route, Route::Pending(_)) {
-                let rate = view.awaiting.map_or(view.clock.rate(), |a| a.2);
-                view.deferred_transport
-                    .get_or_insert(TransportCommand::Play { rate });
-            } else {
-                view.deferred_transport = None;
-            }
+            // Not decided (a resync, media being resolved): the run stops
+            // and resumes, from where it stopped, once the route is known.
+            let rate = view.awaiting.map_or(view.clock.rate(), |a| a.2);
+            view.deferred_transport
+                .get_or_insert(TransportCommand::Play { rate });
             view.awaiting = None;
             view.clock.apply(TransportCommand::Pause, t);
             view.schedule.reset();
@@ -2352,7 +2359,7 @@ impl Thread {
                 self.report_legacy(key, reasons);
             }
         }
-        if route == Route::Engine {
+        if takes_transport(Some(&route)) {
             let deferred = self
                 .views
                 .get_mut(&key)
@@ -2377,7 +2384,10 @@ impl Thread {
             .get(&key)
             .and_then(|d| Revision::new(d.revision()).ok())
             .unwrap_or(Revision::ZERO);
-        let mut message = format!("Drawn by the current engine: {}.", reasons.join("; "));
+        let mut message = format!(
+            "The new engine cannot draw this composition yet: {}.",
+            reasons.join("; ")
+        );
         if message.len() > 2_000 {
             message.truncate(1_997);
             message.push_str("...");
@@ -2398,6 +2408,13 @@ impl Thread {
         let lead = self.config.lead;
         self.retry_pool(key);
         let draws = !self.config.document || self.document_step(key);
+        // A headless view's clock is heard once its route is decided (drawn
+        // or not: the transport runs either way).
+        let takes = draws
+            || self
+                .views
+                .get(&key)
+                .is_some_and(|v| takes_transport(v.reported.as_ref()));
         // Clock samples.
         if let Some(view) = self.views.get_mut(&key) {
             let t = now();
@@ -2405,7 +2422,7 @@ impl Thread {
                 && view
                     .last_sample
                     .is_none_or(|last| t - last >= SAMPLE_INTERVAL_US);
-            if (view.sample_due || periodic) && (!view.state.headless.is_some_and(|h| h) || draws) {
+            if (view.sample_due || periodic) && (!view.state.headless.is_some_and(|h| h) || takes) {
                 view.sample_due = false;
                 view.last_sample = Some(t);
                 let sample = view.clock.sample(t);
@@ -2429,7 +2446,7 @@ impl Thread {
                     key,
                     id,
                     ErrorCode::Unsupported,
-                    "The current engine draws this composition.",
+                    "The new engine cannot draw this composition yet.",
                 );
             }
             return;
@@ -3669,6 +3686,13 @@ enum BlenderFrames {
 
 /// Snapshot build failures the static check routes for exports
 /// (`pm_export::blender`): the engine cannot build these frames.
+/// Whether a view's route takes transport: the engine runs the clock and
+/// audio for every decided route, drawn or not (amendment 21: nothing hands
+/// playback to the legacy engine). Only an undecided route defers it.
+fn takes_transport(route: Option<&Route>) -> bool {
+    matches!(route, Some(Route::Engine | Route::Legacy(_)))
+}
+
 fn blender_routed(why: &str) -> bool {
     matches!(why, "imported models" | "model-group recipe parts")
 }
