@@ -140,6 +140,13 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
       for (const id of ids) await cp(path.join(CORPUS, 'extensions', id), path.join(profile, 'extensions', id), { recursive: true });
       const app = await launchApp({ userData: profile, env: { POWERMOVE_NEW_ENGINE: engine ? '1' : '0' } });
       const mode = engine ? 'engine' : 'today';
+      const runtimeSamples: unknown[] = [];
+      app.page.on('console', (message) => {
+        const line = message.text();
+        if (!line.startsWith('C1_RUNTIME ')) return;
+        try { runtimeSamples.push(JSON.parse(line.slice(11))); } catch { return; }
+        if (runtimeSamples.length > 120) runtimeSamples.shift();
+      });
       try {
         await app.app.evaluate(({ app, BrowserWindow }) => {
           const events = (globalThis as any).__c1RendererExits = [];
@@ -148,6 +155,12 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
           app.on('browser-window-created', (_event, window) => attach(window));
         });
         await app.openEditor();
+        if (engine) await app.page.evaluate(() => {
+          setInterval(() => {
+            const w = window as any, PM = w.PM, memory = (performance as any).memory;
+            console.info('C1_RUNTIME ' + JSON.stringify({ at: Date.now(), layers: PM?.proj?.layers?.length, openDone: w.__c1OpenDone, heapBytes: memory?.usedJSHeapSize, heapLimit: memory?.jsHeapSizeLimit, status: PM?.EngineConnection?.status?.(), snapshots: PM?.EngineRender?.stats, compat: PM?.EngineRender?.compatStats }));
+          }, 1000);
+        });
         console.log(`C1 ${mode}: waiting for all extension activations`);
         await app.page.waitForFunction((ids) => {
           const PM = (window as any).PM;
@@ -236,6 +249,7 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
 
       } catch (error) {
         results[mode] ??= {}; results[mode].failure = String(error);
+        results[mode].runtimeSamples = runtimeSamples;
         results[mode].rendererExits = await app.app.evaluate(() => (globalThis as any).__c1RendererExits ?? []).catch(() => []);
         results[mode].extensions = await facts(app.page, ids).catch(() => results[mode].extensions ?? []);
         results[mode].failureState = await app.page.evaluate(() => {
