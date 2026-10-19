@@ -242,10 +242,30 @@ later replacement scope at the same document revision.
 Interned static and keyed expressions now retain their compiled source in a
 plan. Same-revision frames reuse the validated layer position and resolve each
 composition once per batch. `CompiledExpression::bind` optionally binds pure
-document inputs; every root revision discards the binding. Time, local time,
+document inputs. The initial implementation discarded bindings on every root
+revision; EXPR-1 now validates their fixed inputs and refreshes changed bindings
+only (see `perf.md`, round 3). Time, local time,
 frame and the keyed base stay dynamic. Mixed/keyed bases still use the existing
 keyframe evaluator. Last-answer keys remain the exact f64 bits and revision.
 `expression_error_at` accepts the address's original JS strings, returning at
 once for an empty error map without allocating UTF-8 strings per channel.
 The 400-source regression, invalidation vectors and native/wasm V8 comparisons
 cover this path; measurements and remaining gates are in `perf.md`.
+
+`binding_matches` defaults to unknown for extension expression engines, so
+their bindings are conservatively refreshed. Production numeric plans compare
+all fixed input bits and retain the original source separately for rebinding.
+Nonnumeric fixed leaves decline binding; general bytecode keeps fresh document
+reads and invalidates its answer memo on root edits. Unchanged layer lists
+preserve validated positions, and changed lists still check unique first IDs.
+Immutable composition views carry unique tokens for sharing validation within
+a batch without trusting pointer reuse across documents. Source/shape pools
+hold weak plan references, so cache eviction does not invalidate resident IDs.
+
+`document_patched` can advance a bound layer-local slot from the exact applied
+base revision when patch paths prove its layer/index unchanged: parameter and
+provenance writes, or leaf writes inside another layer excluding its ID.
+Structural operations, layer replacements, unknown composition paths and slots
+older than that base keep ordinary validation. The notification is called only
+after successful document apply. Regressions cover an unevaluated layer edit
+followed by a parameter edit and another layer becoming the first duplicate ID.

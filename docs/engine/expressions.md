@@ -241,9 +241,9 @@ including encoded number bits and exception messages, for every compiled case.
 The second P6 pass adds a typed numeric plan ahead of the complete bytecode.
 Runtime types that need coercion decline that plan and use the complete native
 bytecode. Document fields, params, fps and idx can be bound at an interned slot's
-revision; time, local time, frame and keyed values stay dynamic. Every root
-revision discards bindings, including unrelated edits, so no document read is
-assumed constant across a write. Bound plans retain the original bytecode for
+revision; time, local time, frame and keyed values stay dynamic. This pass
+initially discarded bindings on every root revision; EXPR-1 replaces that with
+exact fixed-input validation. Bound plans retain the original bytecode for
 runtime type changes. Parity now compares unbound and bound numeric results,
 including changed time/frame/keyed-value inputs, against the same exact V8
 vectors. The same-revision slot also reuses its validated layer position; it
@@ -258,3 +258,13 @@ context construction for these warm channels. Non-finite answers, nonnumeric
 bases and error recovery retain the ordinary evaluator. The existing V8 vectors
 also compare this entry, including changed dynamic inputs; production engine
 regressions cover revision changes, numeric-to-string bases and error recovery.
+
+EXPR-1 retains unchanged bindings across edits and shares plans for equal full
+source and fixed numeric input bits. Every fixed leaf must be numeric before
+binding; signed zero is distinct. A changed source prepares that channel only;
+a changed dependency rebinds from the original source, never from its previously
+folded tree. Numeric validation is allocation-free and can share a result within
+one immutable composition view, including the layer/index/fps inputs it reads.
+The parity suite checks fixed-input shape matching alongside every bound case.
+Parameter/source/add/remove edit measurements and cache counters are in
+`perf.md`; the scalar one-off difference is explicitly accepted by the owner.

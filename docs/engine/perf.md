@@ -1500,3 +1500,116 @@ changed. Final-code Electron expression and five-pair startup confirmation are
 pending for the orchestrator's measurement window. Node's pass does not infer
 an Electron or startup pass. The worktree's `engine/target` was removed after
 validation; rebuilt addons and the release module remain staged outside Git.
+
+### Round 3: incremental expression rebinding (EXPR-1)
+
+The owner accepted the scalar one-off difference (127 versus 109 ns) and set
+the cold first-frame bound to 8 ms for the 400-channel fixture. Repeated
+edit-and-frame cost remains subject to comparison with today's evaluator.
+The Node runner now measures a single scene-parameter drag, one expression
+source edit, layer insertion, and layer removal independently. Each row has
+nine alternating pairs of 40 timed edits after 40 edit warmups per side, each
+including the production writer and
+the next frame at a new time. `PM_BENCH_EDIT_STEPS` changes that count. Source
+and structural edits use the real scoped `PM.Edit.apply`/history transaction;
+parameter edits share the setter used by generated workspace controls. For
+structural rows, the opposite operation and its frame run outside the timed
+step, so insertion and removal each have a stable 400-expression baseline.
+Each step's frame sum and every channel's final answer must match exactly.
+The output includes median/p95, barrier operations, reintern counts and Rust
+plan counters. Optional `PM_BENCH_PROFILE=1` adds diagnostic timing around
+flush/batch/frame; a profiled run cannot report a gate pass.
+
+Interned channel addresses survive leaf edits and structural changes when
+their original live owner, property, composition scope and first-ID identity
+remain valid. Expression removal/addition updates the resident batch. A scene
+parameter's generated setter names its exact dirty path only when the map
+key still owns that parameter; customized aliases retain the unknown-write
+path. A parameter drag therefore neither diffs the entire document nor
+reinterns the fixture's 400 channels.
+
+Rust retains the immutable source and static/keyframed base independently of
+its bound numeric plan. A new revision validates fixed numeric inputs bit for
+bit, retains unchanged plans and refreshes only changed bindings; unrelated
+root edits preserve unchanged layer addresses without another property walk.
+Equal full source and numeric binding shape share a weakly held plan, bounded
+to 256 hash-indexed pool entries per source. The immutable source/bytecode is shared too.
+Validation sharing is scoped to a unique immutable composition-view token,
+plus layer identity where read, captured index and fps. It cannot confuse
+fresh documents, reused allocations, signed zero or changed numeric types.
+Any nonnumeric fixed input uses the original general evaluator. Dynamic
+time/local time/base inputs are never folded. Revalidated numeric plans use
+the same scalar execution path as warm frames.
+
+For plans whose fixed reads are exclusively layer-local (including captured
+index), an unchanged layer revision and index prove the binding unchanged
+without rebuilding a context or rereading its fields. Composition fields, fps,
+and parameters always take fixed-input validation. This proof is opt-in for
+expression-engine implementations; unknown implementations remain conservative.
+The composition's layer node is resolved once with its immutable view.
+
+Final unprofiled measurement: Node 24.18.0 / V8 13.6.233.17-node.50, nice 0,
+load 7.038 before / 7.590 after. Nine alternating pairs
+per case; 4,000 warm frames per side and 40 timed edits after 40 edit warmups.
+
+| Case | Native median | Today median | Native p95 | Today p95 |
+|---|---:|---:|---:|---:|
+| 400 channels, block average µs/frame | 48.046635 | 89.997990 | 52.559062 | 100.159969 |
+| 400 channels, individual frame µs | 51.416000 | 96.167000 | 55.000000 | 113.250000 |
+| One-channel scalar µs/call | 0.168386 | 0.142275 | 0.207364 | 0.158288 |
+| Cold 400-channel frame µs | 5216.583000 | 244.875000 | 6834.125000 | 551.834000 |
+| parameterDrag + frame µs | 98.708000 | 113.375000 | 132.958000 | 136.542000 |
+| sourceEdit + frame µs | 604.458000 | 516.083000 | 819.167000 | 645.125000 |
+| layerAdd + frame µs | 5190.459000 | 4357.917000 | 6891.375000 | 5167.125000 |
+| layerRemove + frame µs | 5015.208000 | 4301.375000 | 5492.250000 | 4674.333000 |
+
+Warm frame and parameter-drag median/p95 pass. The maximum of the nine cold
+frames is 6.834 ms, under EXPR-1's 8 ms bound. The scalar difference
+remains in the accepted one-off category; these are updated observations, not
+an assertion that its cost equals today's. The runner's overall `pass` remains
+false: source edit, layer insertion and layer removal still regress. No
+acceptance is inferred for those rows. Layer operations use the standard
+front insertion, so captured `idx` and `comp.layers.length` really change.
+
+Across the 360 timed parameter steps there are 360 leaf batches, zero structural
+fallback diffs and zero reinterns. Each 40-step pair refreshes 4,000 bindings
+(100 parameter-dependent channels per step); unchanged plans are retained.
+Source edits refresh 40 plans per pair, one per changed source, with zero
+reinterns. Structural rows also retain all 400 channel IDs; their plan counters
+include the untimed opposite-operation setup, and refresh the 200 channels
+whose captured index or layer count changed. A separate native regression
+asserts exact affected-plan counts for parameter, fps, layer value, source,
+insertion and removal edits. Duplicate IDs and a parameter edit following an
+unevaluated layer edit cannot advance a stale binding.
+
+Applied patch paths additionally advance already-validated layer-local plans
+when only parameters/provenance changed, or a leaf in another layer changed.
+The exact base revision is required. Layer IDs, whole-layer replacements,
+structural operations and unknown composition paths retain full revalidation.
+This avoids context/address work for unaffected channels, including during a
+parameter drag. The ordinary numeric execution path and exact memo bits remain.
+
+The diagnostic profile before that final patch-path shortcut attributes about
+59 µs per source edit to flush/diff/apply and 67 µs to the numeric batch; layer
+insertion/removal flushes are about 472/442 µs, with batches 181/211 µs. These
+profiled numbers identify remaining work and are not gate timings. Source and
+structural writers also include real scoped history/provenance work. Optimizing
+that shared writer/barrier path remains necessary to close all P6 rows; this
+round does not hide or accept the remaining regressions.
+
+The final production wasm SHA-256 is `0d3b90c4d5df45db25544611d9bd87c8a0e51e64d1fe3c977985b4bc9423b27a`.
+Raw final samples are in `/tmp/ne-w5/fixups3-r3-node-incremental.json`; the
+profiled diagnostic is `/tmp/ne-w5/fixups3-r3-node-profile4.json`, outside Git.
+Native and production js-pow wasm again match all 42,498 saved Electron V8 cases
+and 13 × 400,000 math samples. EngineDoc's 102 tests pass, with two opt-in
+benchmark skips. The native engine's incremental regressions, evaluator
+vectors, renderer typecheck and three-library clippy pass.
+
+The single combined Electron/startup attempt acquired the lock after about ten
+seconds, within its 20-minute acquisition budget. Both preflights stopped
+before app launch because machine load stayed above 8 (the expression check
+observed 10.702). No Electron timing or startup pair was measured; both remain
+pending for a quiet orchestrator window. The attempt released its own lock.
+Its external evidence is `/tmp/ne-w5/fixups3-r3-electron/`. The own release
+addons were rebuilt against integration `92beaaa8` and speak
+`protocol-25292d6fdfffb933`; no fixups2 addon was borrowed.

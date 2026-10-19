@@ -458,3 +458,10 @@ uses weak owners and removes released ids; a module reset drops all batches.
 The 120-channel integration unit test covers errors/recovery, signed zero,
 repeat times, revisions, nonnumeric results, reset and memory growth; a second
 case alternates stored composition scopes.
+
+EXPR-1 keeps channel IDs across leaf/shape changes after live-owner and first-ID
+validation. Generated scene-parameter controls touch only their owned value
+path, retaining unknown-write handling for customized aliases. Applied numeric
+plans validate changed fixed inputs; exact patch paths advance unaffected
+layer-local plans only from the applied batch's base revision. Source and
+structural edit costs remain separately reported in `perf.md`, round 3.
