@@ -4,7 +4,9 @@ On macOS, `powermove mcp` reads the launch-time Use New Engine setting from the
 profile and selects `server/native/mcp.ts` when enabled. Host services run inside
 the CLI process. `server/native/host.ts` embeds the production `DocumentHostPool`,
 with one process, pm-wasm document, kernel, extension registry and Undo history
-per project. The host persists worker edits before answering tools.
+per project. The host persists worker edits before answering tools. Profile writes are
+serialized, and shared project/trash indexes apply each worker’s changes against
+the current host value, preserving projects created or renamed by other workers.
 
 The interactive and job `pm-node` children use the desktop `NativeEngine`
 supervisor, restart ledger, attribution, backoff, host capabilities, budgets,

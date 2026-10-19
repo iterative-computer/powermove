@@ -109,7 +109,7 @@ export interface DocumentHostServices {
   /** The profile store (main's StorageEngine on the desktop, the CLI host's store). */
   store: {
     read(key: string): Promise<unknown | null>;
-    write(key: string, value: unknown): Promise<void>;
+    write(key: string, value: unknown, base?: unknown): Promise<void>;
     remove(key: string): Promise<void>;
     /** Initial synchronous editor preferences/library view. */
     snapshot?(): Promise<Record<string, unknown>>;

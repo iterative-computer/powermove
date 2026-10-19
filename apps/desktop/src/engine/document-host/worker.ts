@@ -75,8 +75,10 @@ export class DocumentWorker {
     const memory = memoryStore(seed);
     const set = memory.set, del = memory.del;
     memory.set = (key, value) => {
+      const base = key === 'projects' || key === 'projectTrash' ? memory.get(key, null) : undefined;
       set(key, value);
-      this.storeWrites = this.storeWrites.then(() => this.service('store.write', key, value));
+      const written = memory.get(key, null);
+      this.storeWrites = this.storeWrites.then(() => this.service('store.write', key, written, base));
       return true;
     };
     memory.setAsync = async (key, value) => { memory.set(key, value); await this.storeWrites; return true; };

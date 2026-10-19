@@ -1,4 +1,5 @@
 import { prepareHostMedia } from './media';
+import { profileStore } from './profile-store';
 import { createRequire } from 'node:module';
 import { SnapshotService } from '../../main/engine/snapshots';
 import { WindowSnapshotSessions } from '../../main/engine/window-sessions';
@@ -122,8 +123,7 @@ export class NativeHiddenHost {
       packProject: (project, session, document) => packAgentProject(project, { directory: options.exportsDir,
         resolveAsset: id => this.media.resolveAsset(id, { process: 'job', session }) }, document), log: (level, message) => log(`[jobs:${level}] ${message}`) });
     const services: DocumentHostServices = {
-      store: { read: async key => { const raw = store.getSerialized?.(key); return raw == null ? store.snapshot()[key] ?? null : JSON.parse(raw); }, write: async (key, value) => { await store.set(key, value); await store.flushAll(); },
-        remove: async key => { await store.delete(key); await store.flushAll(); }, snapshot: async () => store.snapshot() },
+      store: profileStore(store),
       session: {
         join: async project => {
           let member = this.members.get(project);
