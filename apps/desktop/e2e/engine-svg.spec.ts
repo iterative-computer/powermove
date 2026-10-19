@@ -66,6 +66,23 @@ const ART = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90" vie
 <path d="M10 80 Q 60 40 110 80" fill="none" stroke="#7CFFB2" stroke-width="3.5" stroke-dasharray="7 4" stroke-linecap="round"/>
 </svg>`;
 
+/** The same layers over a PNG of the SVG at its natural size instead of
+ *  the SVG (the export test's control: no SVG raster involved). */
+async function pngProject(page: Page): Promise<void> {
+  await svgProject(page);
+  await page.evaluate(async () => {
+    const PM = (window as any).PM;
+    const svg = Object.values(PM.proj.assets).find((a: any) => a.format === 'svg') as any;
+    const canvas = document.createElement('canvas');
+    canvas.width = 160; canvas.height = 90;
+    canvas.getContext('2d')!.drawImage(PM.assets.get(svg.id).el, 0, 0, 160, 90);
+    const blob: Blob = await new Promise((resolve) => canvas.toBlob((b) => resolve(b!), 'image/png'));
+    const png = await PM.assets.add(new File([blob], 'art.png', { type: 'image/png' }), { newAsset: true, silent: true });
+    for (const layer of PM.proj.layers) layer.d.asset = png.id;
+    PM.touch();
+  });
+}
+
 /** The project: three level 1 SVG image layers (contain at 100%; cover,
  *  rotated 23° at 230%; stretch with animated scale and opacity) over a
  *  solid background, 640 × 360. */
@@ -138,24 +155,70 @@ test.describe('Use New Engine: level 1 SVG images', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('a replaced SVG is asked for again and never drawn from the old bytes', async ({ session }) => {
+  test('a replaced SVG is drawn from its new bytes, never the old raster', async ({ session }) => {
     const { page } = session;
     await openEngine(session);
-    const before = await compareFrame(page, 0.5);
-    expect(before.differ).toBe(0);
+    expect((await compareFrame(page, 0.5)).differ).toBe(0);
+    // A point inside the clip circle, off the stroke: the clipped rect's
+    // colour, in the contain layer.
+    const at = (x: number, y: number) => page.evaluate(({ x, y }) => {
+      const PM = (window as any).PM;
+      const engine = PM.EngineRender.snapshotSync({ time: 0.5, width: 640, height: 360, pixels: 'opaque', motionBlurSamples: 0, background: true });
+      const legacy: Uint8Array = PM.GL.renderToPixels(0.5, 640, 360, { opaque: true, topDownOpaque: true, mblur: false });
+      const i = (y * 640 + x) * 4;
+      return { engine: [...engine.data.slice(i, i + 3)], legacy: [...legacy.slice(i, i + 3)] };
+    }, { x, y });
+    const before = await at(205, 81);
+    expect(before.engine).toEqual(before.legacy);
     await page.evaluate(async (svg) => {
       const PM = (window as any).PM;
       const asset = Object.values(PM.proj.assets).find((a: any) => a.format === 'svg') as any;
-      const replaced = svg.replace('#FFD23F', '#00C2A8');
-      await PM.assets.replace(asset.id, new File([replaced], 'art.svg', { type: 'image/svg+xml' }));
+      await PM.assets.replace(asset.id, new File([svg.replace('#FFD23F', '#00C2A8')], 'art.svg', { type: 'image/svg+xml' }));
     }, ART);
-    await expect.poll(async () => (await compareFrame(page, 0.5)).differ, { timeout: 20_000 }).toBe(0);
+    // The engine draws the new bytes (another content, asked for again),
+    // as today's compositor does.
+    await expect.poll(async () => (await at(205, 81)).engine, { timeout: 20_000 }).not.toEqual(before.engine);
+    const after = await at(205, 81);
+    console.log(`replace: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`);
+    expect(after.engine).toEqual([0x00, 0xC2, 0xA8]);
+    expect(after.engine).toEqual(after.legacy);
+    const replaced = await compareFrame(page, 0.5);
+    expect({ differ: replaced.differ, max: replaced.max }).toEqual({ differ: 0, max: 0 });
+    // Undo draws the old bytes again, and redo the new ones.
+    await page.evaluate(() => (window as any).PM.hist.undo());
+    await expect.poll(async () => (await at(205, 81)).engine, { timeout: 20_000 }).toEqual(before.engine);
+    expect((await at(205, 81)).legacy).toEqual(before.engine);
+    await page.evaluate(() => (window as any).PM.hist.redo());
+    await expect.poll(async () => (await at(205, 81)).engine, { timeout: 20_000 }).toEqual(after.engine);
+    expect((await compareFrame(page, 0.5)).differ).toBe(0);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('a restarted engine starts with no rasters and asks the window for them again', async ({ session }) => {
+    const { page } = session;
+    await openEngine(session);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
+    const before = await page.evaluate(() => ({ connections: (window as any).PM.EngineConnection.status().connections, posted: (window as any).PM.EngineSvgRasters.stats.posted }));
+    const pid = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.status().interactive.pid as number);
+    expect(pid).toBeGreaterThan(0);
+    process.kill(pid, 'SIGKILL');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().connections), { timeout: 45_000 }).toBeGreaterThan(before.connections);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    // The new engine's viewer frame asked for the same buckets again.
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(before.posted + 3);
+    for (const t of [0, 1.5]) {
+      const r = await compareFrame(page, t);
+      expect({ t, differ: r.differ, max: r.max }).toEqual({ t, differ: 0, max: 0 });
+    }
+    expect(session.diagnostics.pageErrors).toEqual([]);
   });
 });
 
 test('an export in the job engine gets the rasters from the window: the still equals today’s exporter’s', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-engine-svg-'));
-  const exportStill = async (env: Record<string, string>, file: string) => {
+  // PM_E2E_EVIDENCE keeps the stills there (outside the repository).
+  const keep = process.env.PM_E2E_EVIDENCE;
+  const root = keep ?? await mkdtemp(path.join(os.tmpdir(), 'powermove-engine-svg-'));
+  const exportStills = async (env: Record<string, string>, tag: string) => {
     const session = await launchApp({ env });
     try {
       await session.openEditor();
@@ -165,33 +228,31 @@ test('an export in the job engine gets the rasters from the window: the still eq
           return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';
         }), { timeout: 30_000 }).toBe('ready/ready');
       }
-      await svgProject(session.page);
-      await session.app.evaluate(({ dialog }, filePath) => {
-        dialog.showSaveDialog = async () => ({ canceled: false, filePath });
-      }, file);
-      const result = await session.page.evaluate(async () => {
-        const PM = (window as any).PM;
-        PM.setTime(1, { raw: true, force: true });
-        const out = await PM.Export.run({ format: 'still', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false });
-        return { out, produced: PM.EngineSvgRasters?.stats.produced ?? null };
-      });
-      expect(result.out).toEqual({ cancelled: false });
-      return { produced: result.produced, errors: session.diagnostics.pageErrors };
+      const out: Record<string, { file: string; produced: number | null }> = {};
+      for (const [name, make] of [['svg', svgProject], ['png', pngProject]] as const) {
+        await make(session.page);
+        const file = path.join(root, `${tag}-${name}.png`);
+        await session.app.evaluate(({ dialog }, filePath) => {
+          dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+        }, file);
+        const result = await session.page.evaluate(async () => {
+          const PM = (window as any).PM;
+          PM.setTime(1, { raw: true, force: true });
+          const before = PM.EngineSvgRasters?.stats.produced ?? 0;
+          const out = await PM.Export.run({ format: 'still', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false });
+          return { out, produced: PM.EngineSvgRasters ? PM.EngineSvgRasters.stats.produced - before : null };
+        });
+        expect(result.out).toEqual({ cancelled: false });
+        out[name] = { file, produced: result.produced };
+      }
+      expect(session.diagnostics.pageErrors).toEqual([]);
+      return out;
     } finally {
       await session.close();
     }
   };
-  try {
-    const today = path.join(root, 'today.png');
-    const engine = path.join(root, 'engine.png');
-    const off = await exportStill({}, today);
-    const on = await exportStill(ON, engine);
-    expect(off.errors).toEqual([]);
-    expect(on.errors).toEqual([]);
-    // The job engine asked this window for the buckets (host services).
-    expect(on.produced).toBeGreaterThanOrEqual(3);
-    const [a, b] = await Promise.all([readFile(today), readFile(engine)]);
-    const [pa, pb] = [decodePng(a), decodePng(b)];
+  const compare = async (a: string, b: string) => {
+    const [pa, pb] = [decodePng(await readFile(a)), decodePng(await readFile(b))];
     expect([pb.width, pb.height]).toEqual([pa.width, pa.height]);
     let differ = 0, max = 0;
     for (let i = 0; i < pa.data.length; i++) {
@@ -199,8 +260,25 @@ test('an export in the job engine gets the rasters from the window: the still eq
       if (d) differ++;
       if (d > max) max = d;
     }
-    expect({ differ, max }).toEqual({ differ: 0, max: 0 });
+    return { differ, max };
+  };
+  try {
+    const today = await exportStills({}, 'today');
+    const engine = await exportStills(ON, 'engine');
+    // The job engine asked this window for the SVG buckets (host services),
+    // and for nothing in the PNG control.
+    expect(engine.svg!.produced).toBeGreaterThanOrEqual(3);
+    expect(engine.png!.produced).toBe(0);
+    const svg = await compare(today.svg!.file, engine.svg!.file);
+    const control = await compare(today.png!.file, engine.png!.file);
+    console.log(`still export against today's: svg ${JSON.stringify(svg)}, png control ${JSON.stringify(control)}`);
+    // Both must equal today's stills. The PNG control involves no SVG
+    // raster: when it differs too, the difference is the job engine's
+    // still pipeline, not the rasters (docs/engine/vector.md, "Level 1
+    // measured").
+    expect.soft({ control }).toEqual({ control: { differ: 0, max: 0 } });
+    expect({ svg }).toEqual({ svg: { differ: 0, max: 0 } });
   } finally {
-    await rm(root, { recursive: true, force: true });
+    if (!keep) await rm(root, { recursive: true, force: true });
   }
 });
