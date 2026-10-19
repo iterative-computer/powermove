@@ -387,8 +387,10 @@ M4 Max), the machine shared with other lanes.
 - The non-SVG residuals of the corpus run (composite, masks, missing
   extension layers, 2.5D routing; above), each with its lane.
 - Preview: a viewer miss shows the content's previous bucket, or nothing for
-  a new or replaced file, until the window's bands arrive (one round trip,
-  20 to 31 ms measured for the e2e project's six buckets); today's
+  a new or replaced file, until the window's bands arrive (the slowest ask
+  was answered in 20.9 to 31.1 ms across the e2e runs, with six buckets asked
+  at once at open; a single bucket change was not measured on its own, so
+  "at most one frame" at 60 Hz is not established); today's
   asynchronous `<img>` decode likewise shows nothing until it resolves, and
   today's synchronous canvas redraw on a bucket change has no such frame.
   Paused frames and every snapshot and export are exact.
