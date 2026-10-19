@@ -271,16 +271,29 @@ least recent use.
 **A miss** is recorded per frame (`SvgRasterNeed`: the request, the file, the
 first layer and composition that drew it):
 
-- *Viewer preview* (`Composer` scopes `Renderer::svg_waiting`): the frame
-  is not submitted until every exact bucket is present. Missing buckets are
-  requested during render-ahead over the viewer session's port; the view
-  retains that frame's schedule position while the port answers, allowing
-  other views and audio to continue. The prior frame stays on screen rather
-  than publishing a new frame with the old bucket. An edit, view change,
-  transport epoch, or new surface pool cancels the obsolete wait. Completion
-  wakes the view; unanswered requests retain the existing bounded retry
-  policy. `SvgMissPolicy::Substitute` remains available to diagnostic callers
-  but the app viewer does not use it.
+- *Viewer preview* (`Composer` scopes `Renderer::svg_waiting_viewer`): the
+  frame is not submitted until every exact bucket is present. Missing
+  buckets are requested during render-ahead over the viewer session's port;
+  the view retains that frame's schedule position while the port answers,
+  allowing other views and audio to continue. The prior frame stays on
+  screen rather than publishing a new frame with the old bucket. An edit,
+  view change, transport epoch, or new surface pool cancels the obsolete
+  wait. Completion wakes the view. A bucket the window cannot draw
+  (`SvgFailed`: `missing`, `decode`, `stale`, `size`, `unavailable`), a
+  refused band, or no answer within 5 s of the ask
+  (`pm_node::present::svg::VIEW_WAIT_US`) ends the wait at once: the key is
+  marked failed in the renderer (`Renderer::fail_svg_raster`) and the frame
+  is drawn without that image, as today's compositor draws the frame without
+  a layer whose `rasterSvgAsset` throws. Such a frame is not a stand-in (no
+  other bucket is shown; `Stats::svg_failed_frames` counts it). The bucket is
+  asked for again 5 s after the failure while a view still draws without it,
+  without drawing a frame for it; its raster arriving clears the failure and
+  draws it. Snapshots and exports never skip a failed bucket (pm-node
+  `present::wait`; tests `a_viewer_frame_draws_without_a_bucket_the_window_could_not_draw`,
+  `an_svg_raster_the_window_cannot_draw_never_freezes_the_viewer`,
+  `an_unanswered_svg_raster_times_out_instead_of_freezing_the_viewer`).
+  `SvgMissPolicy::Substitute` remains available to diagnostic callers but
+  the app viewer does not use it.
 - *Exports, agent frames, and snapshots* (`SvgMissPolicy::Wait`: an export
   request, `Renderer::set_svg_wait` on a renderer the caller owns, or
   `Renderer::svg_waiting` for a snapshot on the viewer's renderer, a guard

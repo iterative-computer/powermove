@@ -824,6 +824,50 @@ from the simulation. Re-run paired mount, cadence, and A/V probes on an awake,
 unlocked display with load at most 8. The between-deadline worker submission
 change above also still needs its common-compositor-clock validation.
 
+### SVG buckets and runner pixels in the viewer: every wait ends promptly
+
+Waiting for the exact SVG bucket or fallback runner pixels (instead of a
+stand-in) introduced a per-view wait (`pm_node::present::wait`). Review found
+two freezes in its first version: a failed SVG raster held the viewer for 5 s
+and, for a permanent failure (`missing`, `decode`), forever, since every retry
+missed and waited again; a runner `Failed` (compile error, watchdog, lost
+context) or the end of a transient backoff only marked the view dirty, which a
+valid wait ignores, so the picture froze for up to 10 s. Every exit is now
+explicit and prompt:
+
+- the pixels arrive: drawn (unchanged);
+- `SvgFailed` or a refused band: the key is marked failed in the renderer
+  (`Renderer::fail_svg_raster`), views waiting for it draw at once without the
+  image (`Renderer::svg_waiting_viewer`; snapshots and exports still wait),
+  and the key is asked for again 5 s later while a view draws without it,
+  without drawing a frame for that;
+- runner `Failed`: the view's runner wait ends and it draws at once (a final
+  failure draws nothing or skips the step; a transient one follows the
+  renderer's backoff), and a backoff's end ends a runner wait too;
+- an edit, view change, or transport discontinuity: the wait is obsolete;
+- nothing arrives: the wait times out 5 s (SVG) or 10 s (runner, its own
+  compile and draw deadlines) after the first ask (re-rendering never extends
+  it); the timeout is a failure (`unanswered` for the runner, transient) and
+  the frame is drawn without it. `Stats::external_wait_timeouts` counts them.
+  `POWERMOVE_ENGINE_EXTERNAL_WAIT_MS` caps both bounds (tests only).
+
+Tests: `wait` unit tests (state, deadlines, bounds); `svg` unit tests
+(retry time, refused band names its key); pm-render
+`a_viewer_frame_draws_without_a_bucket_the_window_could_not_draw`; pm-node
+`an_svg_raster_the_window_cannot_draw_never_freezes_the_viewer` (frame within
+1 s of `SvgFailed`, not a stand-in, asked again at ≈5 s with no redraw, drawn
+when it lands), `an_unanswered_svg_raster_times_out_instead_of_freezing_the_viewer`
+(1.5 s cap), `a_runner_failure_or_silence_never_freezes_the_viewer` (a lost
+context asks again at once, a second draws the frame at once and asks again
+after the 250 ms backoff, silence times out at the 3 s cap), and the existing
+runner test now requires the compile-failure frame within 2 s. Each new
+integration assertion was checked to fail with its fix removed (frame after
+10.0 s, 4.7 s, and a re-ask after 3.0 s).
+
+Not covered by an integration test: a refused SVG band (it takes 256 rasters
+assembling at once or 512 MiB; the mapping is unit-tested and shares the
+`SvgFailed` path).
+
 ### Repeating the paired perf3 rows
 
 All app commands below require the machine-wide `pm-electron-lock` wrapper,
