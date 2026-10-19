@@ -852,3 +852,26 @@ Inspector's Cancel relies on it. The native preview is cancelled alongside;
 `rendering.test.ts` (a pending model job is rejected by the cancel; the
 unavailable cases resolve; other errors still reject) and the app test
 `engine-scene3d-cancel-model.spec.ts` (real Blender, engine on).
+
+### Round 6 verification (2026-10-19)
+
+- Rust: `pm-render`, `pm-geom3d`, `pm-wasm` and `pm-eval` tests pass with
+  4 threads (448 passed, 9 ignored, with `corpus_render_parity` run separately), apart from `corpus_render_parity`'s
+  five known video-class frames (`motion/blur-video`, `retime/speed`,
+  `space25d/precomps`; composite.md), which this lane does not touch; its
+  48 `3d/` rows are all within the 3D bar. All-target Clippy with warnings
+  denied passes for `pm-geom3d`, `pm-render`, `pm-wasm` and `pm-node`.
+- Blender: both `blender_snapshots` tests pass with no environment set
+  (182/182, 29 converted textures by pixels, 90 frame lists).
+- Vitest with `PM_WASM_REQUIRED=1` over core/scene3d, scene3d-geometry,
+  engine-connection, layers-3d, viewer and main/blender: 46 files, 408
+  tests pass, including the glTF acceptance table and
+  `corrupt-scenes.test.ts`.
+- App tests with Use New Engine on, under the Electron lock, one worker:
+  26 of 27 passed in the batch (scene3d, viewport3d, engine-blender,
+  blender-motion, comp-thumbnails, chrome, preview API, PNG transport, SVG
+  maps, captures, compat and import parity); the new
+  `engine-scene3d-cancel-model.spec.ts` failed there only because its
+  recipe exceeded the geometry budget, and passes with a valid recipe
+  (1/1). Chrome pixels match round 5 (max 51-52 CV only inside reference
+  MSAA edges, 0 CV outside).

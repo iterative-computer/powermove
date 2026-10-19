@@ -35,9 +35,16 @@ test('native scene3d cancelRender stops a running model generation and resolves'
     const before = await page.evaluate(() => JSON.stringify((window as any).PM.proj.comps));
     await page.evaluate(() => {
       const api = (window as any).PM.Kernel.api('native-cancel-model');
-      (window as any).__model = api.scene3d.model({ operation: 'create_model', recipe: { kind: 'rocket', parameters: {}, modifiers: [{ type: 'subdivision', levels: 3 }] } });
+      const w = window as any;
+      w.__model = api.scene3d.model({ operation: 'create_model', recipe: { kind: 'rocket', parameters: {}, modifiers: [] } });
+      w.__model.then((r: unknown) => { w.__modelSettled = r; }, (e: Error) => { w.__modelSettled = { thrown: String(e) }; });
     });
-    await expect.poll(() => app.evaluate(() => (globalThis as any).__modelJobs.started), { timeout: 30_000 }).toBe(1);
+    // The job reaches main's worker (or, if it never does, say why).
+    await expect.poll(async () => {
+      const started = await app.evaluate(() => (globalThis as any).__modelJobs.started);
+      const settled = await page.evaluate(() => (window as any).__modelSettled ?? null);
+      return started === 1 ? 'started' : settled ? JSON.stringify(settled) : 'waiting';
+    }, { timeout: 30_000 }).toBe('started');
     const cancelled = await page.evaluate(async () => {
       const PM = (window as any).PM, api = PM.Kernel.api('native-cancel-model');
       const cancel = await api.scene3d.cancelRender().then(() => 'resolved', (error: Error) => `${error.name}: ${error.message}`);
