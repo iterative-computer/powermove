@@ -13,7 +13,7 @@
  *   node scripts/build-engine-addon.mjs [--debug]
  */
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -22,19 +22,30 @@ const engine = path.resolve(desktop, '../../engine');
 const debug = process.argv.includes('--debug');
 const profile = debug ? 'debug' : 'release';
 
+// A loaded Mach-O must retain its inode and code signature. Overwriting it
+// in place can kill a running engine or the verification load on macOS.
+function installAddon(source, target) {
+  mkdirSync(path.dirname(target), { recursive: true });
+  const staged = `${target}.${process.pid}.tmp`;
+  try {
+    copyFileSync(source, staged);
+    renameSync(staged, target);
+  } finally {
+    rmSync(staged, { force: true });
+  }
+}
+
 const cargo = `. ./env.sh && cargo build ${debug ? '' : '--release '}--locked -p pm-node --features node && exec cargo build ${debug ? '' : '--release '}--locked -p pm-bridge --lib --features node`;
 execFileSync('/bin/sh', ['-c', cargo], { cwd: engine, stdio: 'inherit' });
 
 const bridgeBuilt = path.join(engine, 'target', profile, 'libpm_bridge.dylib');
 for (const bridgeTarget of [path.join(desktop, 'native', 'pm_bridge.node'), path.join(engine, 'target', 'pm-bridge', 'pm_bridge.node')]) {
-  mkdirSync(path.dirname(bridgeTarget), { recursive: true });
-  copyFileSync(bridgeBuilt, bridgeTarget);
+  installAddon(bridgeBuilt, bridgeTarget);
 }
 
 const built = path.join(engine, 'target', profile, 'libpm_node.dylib');
 const target = path.join(desktop, 'native', 'pm_node.node');
-mkdirSync(path.dirname(target), { recursive: true });
-copyFileSync(built, target);
+installAddon(built, target);
 
 const expected = /PROTOCOL_BUILD = "([^"]+)"/.exec(readFileSync(path.join(desktop, 'src/shared/engine-protocol/index.ts'), 'utf8'))?.[1];
 const addon = createRequire(import.meta.url)(target);
