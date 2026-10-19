@@ -41,7 +41,7 @@ import { ViewerPresentation } from '../../../extensions/viewer/engine-present/pr
 import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
 import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
 import { SvgRasters } from './svg-rasters';
-import { EngineTransport } from './transport';
+import { EngineTransport, ticks } from './transport';
 import { followOpenComposition } from './composition-follow';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
@@ -374,6 +374,11 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const rate = resolveFrameRate(PM.proj?.fps, PM.proj?.fpsRational);
       const ticks = rate ? (TICKS_PER_SECOND * rate.den) / rate.num : 0;
       return Number.isInteger(ticks) && ticks > 0 ? ticks : null;
+    },
+    playhead: () => {
+      const position = transport.now(performance.now());
+      const rate = current?.clock?.rate;
+      return position ? { time: ticks(position.time), rate: rate ? rate.num / rate.den : 1 } : null;
     },
     // A snapshot's own failure (an extension's request): recorded, never on the stage.
     onFailure: (code, message) => current?.reportFailure(code, message, undefined, false),
