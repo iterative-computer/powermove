@@ -254,4 +254,53 @@ describe('Blender jobs from the engines', () => {
     await expect(slow).rejects.toMatchObject({ code: 'cancelled' });
     await b.dispose();
   });
+
+  it('lets only an explicit interactive cache capture finish during playback, then restores the pause', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const state = (pid: number) => execFileSync('/bin/ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+    const b = blender();
+    await b.render(await job(['warm'], 'warm'), session, port, () => {});
+    const { pid } = JSON.parse(await readFile(record, 'utf8'));
+    b.setPaused(true);
+    expect(state(pid)).toMatch(/^T/);
+    const automatic = b.render(await job(['a'], 'automatic', { priority: 'interactive' }), session, port, () => {});
+    const capture = b.render(await job(['b'], 'foreground', { priority: 'interactive', foregroundCapture: true }), session, port, () => {});
+    await Promise.all([automatic, capture]);
+    expect(state(pid)).toMatch(/^T/);
+    let completed = false;
+    const ordinary = b.render(await job(['c'], 'ordinary', { priority: 'interactive' }), session, port, () => {}).then(() => { completed = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(completed).toBe(false);
+    b.setPaused(false);
+    await ordinary;
+    expect(completed).toBe(true);
+    await b.dispose();
+  });
+
+  it('restores playback pause when the queued foreground capture is cancelled', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const state = (pid: number) => execFileSync('/bin/ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+    const b = blender();
+    await b.render(await job(['warm'], 'warm'), session, port, () => {});
+    const { pid } = JSON.parse(await readFile(record, 'utf8'));
+    b.setPaused(true);
+    const automatic = b.render(await job(['slow'], 'slow-preview', { priority: 'interactive' }), session, port, () => {})
+      .then(() => null, (error: Error) => error);
+    const capture = b.render(await job(['b'], 'foreground', { priority: 'interactive', foregroundCapture: true }), session, port, () => {})
+      .then(() => null, (error: Error) => error);
+    expect(b.cancel('foreground')).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(state(pid)).toMatch(/^T/);
+    expect(b.cancel('slow-preview')).toBe(true);
+    expect(await automatic).toMatchObject({ code: 'cancelled' });
+    expect(await capture).toMatchObject({ code: 'cancelled' });
+    await b.dispose();
+  });
+
+  it('rejects a foreground capture from a non-interactive class', async () => {
+    const b = blender();
+    await expect(b.render(await job(['a'], 'invalid', { foregroundCapture: true }), session, port, () => {}))
+      .rejects.toMatchObject({ code: 'invalidMessage' });
+    await b.dispose();
+  });
 });

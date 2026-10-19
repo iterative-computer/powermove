@@ -83,6 +83,7 @@ pub(crate) struct JobParams {
     /// The session (handles are bound to it) and class.
     pub session: SessionId,
     pub priority: PriorityClass,
+    pub foreground_capture: bool,
     /// The export job (or the viewer's preview), to name Blender jobs
     /// after it.
     pub export: JobId,
@@ -294,6 +295,7 @@ impl<P: HostPort + ?Sized> BlenderBackend for HostBackend<P> {
         let request = BlenderJobRequest {
             job: id.clone(),
             priority: params.priority,
+            foreground_capture: params.foreground_capture,
             snapshot: SnapshotRef {
                 hash,
                 encoding: SnapshotEncoding::RenderSnapshotJsonV1,

@@ -553,6 +553,7 @@ pub fn blender_job() -> BlenderJobRequest {
     BlenderJobRequest {
         job: "blender-1".into(),
         priority: PriorityClass::UserJob,
+        foreground_capture: false,
         snapshot: SnapshotRef {
             hash: hash(1),
             encoding: SnapshotEncoding::RenderSnapshotJsonV1,

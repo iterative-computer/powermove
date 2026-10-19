@@ -193,6 +193,10 @@ pub struct SurfaceRequest {
 pub struct BlenderJobRequest {
     pub job: JobId,
     pub priority: PriorityClass,
+    /// An explicit interactive renderFrame cache capture may run while playback
+    /// continues. Automatic viewer previews and all other jobs remain paused.
+    #[serde(default)]
+    pub foreground_capture: bool,
     pub snapshot: SnapshotRef,
     pub worker_script_hash: ContentHash,
     pub assets: Vec<BlenderAsset>,
@@ -209,6 +213,9 @@ impl Validate for BlenderJobRequest {
         use limits::*;
         const C: ContractId = ContractId::Blender;
         ensure(self.job.is_valid(), C, || "invalid job id".into())?;
+        ensure(!self.foreground_capture || self.priority == PriorityClass::Interactive, C, || {
+            "foreground capture requires interactive priority".into()
+        })?;
         ensure(
             !self.surfaces.is_empty() && self.surfaces.len() <= MAX_NESTED_FRAMES,
             C,
@@ -460,6 +467,7 @@ pub(crate) mod tests {
         BlenderJobRequest {
             job: "blender-1".into(),
             priority: PriorityClass::UserJob,
+            foreground_capture: false,
             snapshot: SnapshotRef {
                 hash: ContentHash([1; 32]),
                 encoding: SnapshotEncoding::RenderSnapshotJsonV1,
@@ -495,6 +503,16 @@ pub(crate) mod tests {
     #[test]
     fn job_limits() {
         assert!(job().validate().is_ok());
+        let mut foreground = job();
+        foreground.foreground_capture = true;
+        assert!(foreground.validate().is_err());
+        foreground.priority = PriorityClass::Interactive;
+        assert!(foreground.validate().is_ok());
+        let mut old_wire = serde_json::to_value(job()).unwrap();
+        old_wire.as_object_mut().unwrap().remove("foregroundCapture");
+        assert!(!serde_json::from_value::<BlenderJobRequest>(old_wire)
+            .unwrap()
+            .foreground_capture);
         let mut big = job();
         big.surfaces[0].size = Size::new(8193, 10);
         assert!(big.validate().is_err());

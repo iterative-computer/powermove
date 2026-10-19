@@ -142,6 +142,7 @@ struct Capture {
     key: Key,
     snapshots: Vec<Snapshot>,
     hashes: Vec<[u8; 32]>,
+    foreground_capture: bool,
 }
 
 /// What the worker tells the render thread.
@@ -442,13 +443,14 @@ impl PreviewBlender {
     /// of `key` (today's `prepareFrame` before `snapshotAsync` captures).
     /// The answer comes as [`Notice::Captured`] with `token`, unless the
     /// capture is cancelled first.
-    pub fn capture(&self, token: u64, key: Key, snapshots: Vec<Snapshot>) {
+    pub fn capture(&self, token: u64, key: Key, snapshots: Vec<Snapshot>, foreground_capture: bool) {
         let hashes = snapshots.iter().map(|s| s.hash().0).collect();
         self.inner.lock().captures.push_back(Capture {
             token,
             key,
             snapshots,
             hashes,
+            foreground_capture,
         });
         self.inner.work.notify_all();
     }
@@ -601,6 +603,7 @@ fn run(inner: Arc<Inner>) {
     let params = Arc::new(Mutex::new(JobParams {
         session: pm_protocol::common::SessionId::new(1).expect("1 is a session id"),
         priority: PriorityClass::Interactive,
+        foreground_capture: false,
         export: JobId::new("preview"),
     }));
     let mut worker = Worker {
@@ -685,6 +688,7 @@ fn run(inner: Arc<Inner>) {
             &want.hashes,
             id,
             &cancel,
+            false,
         );
         let mut st = inner.lock();
         let generation = st.running.as_ref().and_then(|r| r.generation);
@@ -760,7 +764,7 @@ fn run_capture(inner: &Inner, worker: &mut Worker, c: Capture, cancel: &AtomicBo
         c.key.1.get(),
         c.token
     ));
-    let result = render(inner, worker, c.key, &c.snapshots, &c.hashes, id, cancel);
+    let result = render(inner, worker, c.key, &c.snapshots, &c.hashes, id, cancel, c.foreground_capture);
     let mut st = inner.lock();
     st.running = None;
     let result = match result {
@@ -807,10 +811,12 @@ fn render(
     hashes: &[[u8; 32]],
     id: JobId,
     cancel: &AtomicBool,
+    foreground_capture: bool,
 ) -> Result<Frames, BlenderError> {
     *worker.params.lock().unwrap_or_else(|e| e.into_inner()) = JobParams {
         session: key.1,
         priority: PriorityClass::Interactive,
+        foreground_capture,
         export: id,
     };
     inner.stats(|s| s.runs += 1);
@@ -945,7 +951,7 @@ mod tests {
 
     #[derive(Default)]
     struct Seen {
-        renders: Vec<(JobId, usize)>,
+        renders: Vec<(JobId, usize, bool)>,
         cancels: Vec<JobId>,
         statuses: u32,
     }
@@ -1041,7 +1047,7 @@ mod tests {
                             s.lock()
                                 .unwrap()
                                 .renders
-                                .push((job.job.clone(), job.surfaces.len()));
+                                .push((job.job.clone(), job.surfaces.len(), job.foreground_capture));
                             if *m.lock().unwrap() == Mode::Hold {
                                 held.push((call.token, job.job.clone()));
                                 continue;
@@ -1407,7 +1413,7 @@ mod tests {
         let r = rig(Mode::Render, None, SURFACE_BYTES);
         let a = final_frame(&["box", "ball"], 0.0);
         assert!(r.blender.prepared(std::slice::from_ref(&a)).is_none());
-        r.blender.capture(41, KEY, vec![a.clone()]);
+        r.blender.capture(41, KEY, vec![a.clone()], true);
         wait("captured", || !r.captured.lock().unwrap().is_empty());
         let (token, result) = r.captured.lock().unwrap().remove(0);
         assert_eq!(token, 41);
@@ -1425,6 +1431,7 @@ mod tests {
                 "{:?}",
                 seen.renders[0].0
             );
+            assert!(seen.renders[0].2, "explicit renderFrame capture bypasses playback pause");
         }
         // A capture is never a preview failure, and does not ask the view to
         // draw again.
@@ -1454,7 +1461,7 @@ mod tests {
     fn a_capture_runs_before_waiting_previews_and_a_preview_never_cancels_it() {
         let r = rig(Mode::Hold, None, SURFACE_BYTES);
         let a = final_frame(&["box"], 0.0);
-        r.blender.capture(5, KEY, vec![a]);
+        r.blender.capture(5, KEY, vec![a], false);
         wait("capture job", || {
             r.host.seen.lock().unwrap().renders.len() == 1
         });
@@ -1481,12 +1488,14 @@ mod tests {
         });
         let seen = r.host.seen.lock().unwrap();
         assert!(seen.renders[1].0.as_str().starts_with("preview-3-7"));
+        assert!(!seen.renders[0].2, "ordinary captures keep the playback pause");
+        assert!(!seen.renders[1].2, "automatic previews keep the playback pause");
     }
 
     #[test]
     fn a_capture_failure_answers_the_capture_and_leaves_previews_running() {
         let r = rig(Mode::Missing, None, SURFACE_BYTES);
-        r.blender.capture(9, KEY, vec![final_frame(&["box"], 0.0)]);
+        r.blender.capture(9, KEY, vec![final_frame(&["box"], 0.0)], false);
         wait("failed", || !r.captured.lock().unwrap().is_empty());
         let (_, result) = r.captured.lock().unwrap().remove(0);
         match result {
@@ -1504,8 +1513,8 @@ mod tests {
     #[test]
     fn a_closed_session_drops_its_waiting_captures() {
         let r = rig(Mode::Hold, None, SURFACE_BYTES);
-        r.blender.capture(1, KEY, vec![final_frame(&["box"], 0.0)]);
-        r.blender.capture(2, KEY, vec![final_frame(&["box"], 1.0)]);
+        r.blender.capture(1, KEY, vec![final_frame(&["box"], 0.0)], false);
+        r.blender.capture(2, KEY, vec![final_frame(&["box"], 1.0)], false);
         wait("first", || r.host.seen.lock().unwrap().renders.len() == 1);
         r.blender.forget(KEY);
         wait("cancelled", || !r.captured.lock().unwrap().is_empty());

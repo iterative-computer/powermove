@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { sourceMaterialSnapshot } from './rendering';
+import { renderBlenderPreview, setPreviewMode, sourceMaterialSnapshot } from './rendering';
 
 const textures = new Map<THREE.Texture, string>();
 const textureAsset = async (texture: THREE.Texture | undefined) => (texture ? textures.get(texture) : undefined);
@@ -101,5 +101,25 @@ describe('cancelRender with the engine on', () => {
     } finally {
       installBridgeForTests(undefined);
     }
+  });
+});
+
+describe('native preview of nested 3D compositions', () => {
+  it('prepares the Blender cache when the viewer has no direct 3D scene', async () => {
+    const render = vi.fn(async () => {});
+    const comp = { id: 'root', w: 128, h: 96, layers: [{ type: 'precomp', d: { comp: 'nested' } }] };
+    const PM: any = {
+      proj: comp, curComp: () => comp, playing: false,
+      EngineDoc: { enabled: true },
+      EngineConnection: { preview: { render }, session: () => ({ route: 'engine', headless: false }) },
+      invalidate: vi.fn(),
+    };
+    setPreviewMode(PM, 'rendered');
+    await renderBlenderPreview(PM);
+    expect(render).toHaveBeenCalledWith({ cacheOnly: true, size: { width: 128, height: 96 }, camera: null });
+
+    comp.layers.push({ type: 'model', d: { definition: 'powermove.3d.object' } } as never);
+    await renderBlenderPreview(PM);
+    expect(render).toHaveBeenLastCalledWith();
   });
 });

@@ -155,8 +155,12 @@ per frame: plan without drawing → snapshots (per nested composition)
   anything plays, main stops the worker's process group (`SIGSTOP`) and
   continues it (`SIGCONT`) when playback ends; a job that starts during
   playback starts stopped; the 10-minute timeout does not count paused
-  time. The job engine therefore waits for an answer (bounded at 6 hours,
-  for a host that never answers) rather than timing Blender itself.
+  time. The explicit interactive `renderFrame` cache capture is a narrow
+  exception: its typed `foregroundCapture` request resumes the worker while
+  that capture is queued or running, then restores the playback pause. The
+  single worker drains any already queued work ahead of it in order. The job
+  engine therefore waits for an answer (bounded at 6 hours, for a host that
+  never answers) rather than timing Blender itself.
 - Discovery: the Blender chosen in Settings (`blender-path.json`, as the
   current engine reads it), else the first Blender 4.5 or newer found
   (`discoverBlender`).
@@ -206,9 +210,10 @@ playback draw natively. The interactive engine does the same:
   job: `cancelJobs` for its Blender job, which kills the worker's process
   group. Main accepts `cancelJobs` from the interactive engine for its own
   launch's Blender jobs only (`EngineBlender.owns`).
-- **Playback.** Host services stop Blender (`SIGSTOP`) while anything plays
-  (contract 13); a job running when playback starts finishes after it
-  stops, and no job starts during playback.
+- **Playback.** Host services stop automatic previews during playback
+  (contract 13); a running job resumes when playback stops. An explicit
+  `renderFrame` cache capture temporarily resumes the serialized worker,
+  without changing the transport, and restores the pause afterward.
 - **Failures** (Blender missing, a failed job) go to the viewer as a
   session failure (`blenderMissing`, `blenderFailed`; the viewer logs it)
   and stop that view's previews until its shading changes, as today's
@@ -316,7 +321,8 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
   requests the engine's Blender preview. With a paused Material or Rendered
   viewer, it completes after the matching fully backed frame is shown by
   the engine viewer's presentation. During playback, in Solid or Wireframe,
-  or with no mounted viewer, it prepares the same Blender cache through the
+  with no direct 3D viewport (including a nested composition), or with no
+  mounted viewer, it prepares the same Blender cache through the
   engine document session and completes without a viewer frame. Neither path
   pauses, seeks, or changes the viewport shading. `cancelRender` cancels the
   engine job (and resolves after the window worker cancel even if the engine

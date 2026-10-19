@@ -4659,7 +4659,7 @@ impl Thread {
                             generation: control.generation,
                         },
                     );
-                    blender.capture(token, key, snapshots);
+                    blender.capture(token, key, snapshots, true);
                 }
                 Err(error) => {
                     if let Some(status) = self.preview_controls.failed(
@@ -4962,7 +4962,7 @@ impl Thread {
                         );
                         return;
                     }
-                    blender.capture(token, job.key, snapshots);
+                    blender.capture(token, job.key, snapshots, false);
                     self.stats().snapshot_blender += 1;
                     self.snapshots.requeue(job);
                     return;

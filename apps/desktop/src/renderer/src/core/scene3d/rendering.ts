@@ -681,10 +681,13 @@ export async function renderBlenderPreview(PM: any) {
     if (!PM.EngineConnection?.preview) throw Object.assign(new Error("The native preview controller is unavailable"), { name: "EnginePreviewUnavailable" });
     state(PM).error = null;
     const session = PM.EngineConnection.session?.();
+    // A nested 3D composition can render with Blender while the open
+    // composition has no direct 3D layers (and thus no 3D viewer override).
+    const comp = PM.curComp?.() || PM.proj;
     const cacheOnly = !!PM.playing || state(PM).mode === "draft" ||
+      !comp?.layers?.some((layer: any) => layer3DRole(layer)) ||
       !session || session.headless || session.route !== "engine";
     if (!cacheOnly) return PM.EngineConnection.preview.render();
-    const comp = PM.curComp?.() || PM.proj;
     const camera = getViewportMode(PM) === "editor" ? editorCamera(PM) : null;
     camera?.updateMatrixWorld?.(true);
     const engineCamera = camera ? {

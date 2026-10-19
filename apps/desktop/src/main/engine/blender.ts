@@ -324,7 +324,7 @@ export type EngineBlenderOptions = {
   timeoutMs?: number;
 };
 
-type Queued = { job: string; port: number; cancelled: boolean };
+type Queued = { job: string; port: number; cancelled: boolean; foregroundCapture: boolean };
 
 /** Host services' Blender: status, render jobs, and their cancellation. */
 export class EngineBlender {
@@ -359,18 +359,26 @@ export class EngineBlender {
 
   /** Runs one render job; `send` delivers events to the requesting engine. */
   render(req: BlenderJobRequest, session: number, port: number, send: (event: Event) => void): Promise<void> {
+    if (req.foregroundCapture && req.priority !== 'interactive')
+      return Promise.reject(new ProtocolError('invalidMessage', 'Foreground Blender capture requires interactive priority'));
     if (this.queued.length + (this.current ? 1 : 0) >= MAX_QUEUED_JOBS || this.queued.some((q) => q.job === req.job) || this.current?.job === req.job)
       return Promise.reject(new ProtocolError('blenderFailed', 'Blender queue is full or request already exists'));
-    const entry: Queued = { job: req.job, port, cancelled: false };
+    const entry: Queued = { job: req.job, port, cancelled: false, foregroundCapture: req.foregroundCapture ?? false };
     this.queued.push(entry);
+    this.applyPause();
     const work = this.tail.catch(() => {}).then(async () => {
       this.queued = this.queued.filter((q) => q !== entry);
-      if (entry.cancelled) throw new ProtocolError('cancelled', 'Blender request cancelled');
+      if (entry.cancelled) {
+        this.applyPause();
+        throw new ProtocolError('cancelled', 'Blender request cancelled');
+      }
       this.current = entry;
+      this.applyPause();
       try {
         await this.run(req, session, port, send, entry);
       } finally {
         this.current = null;
+        this.applyPause();
       }
     });
     this.tail = work;
@@ -382,11 +390,13 @@ export class EngineBlender {
     const queued = this.queued.find((q) => q.job === job);
     if (queued) {
       queued.cancelled = true;
+      this.applyPause();
       return true;
     }
     if (this.current?.job === job) {
       this.current.cancelled = true;
       this.worker?.kill();
+      this.applyPause();
       return true;
     }
     return false;
@@ -402,13 +412,22 @@ export class EngineBlender {
    *  plays (`SlicingPolicy.blender` is `pause`, S8). */
   setPaused(paused: boolean): void {
     this.paused = paused;
-    this.worker?.setPaused(paused);
+    this.applyPause();
+  }
+
+  /** A user-requested cache capture can finish without stopping playback.
+   *  The sole worker also has to finish any paused job ahead of it in FIFO. */
+  private applyPause(): void {
+    const foreground = (this.current?.foregroundCapture && !this.current.cancelled) ||
+      this.queued.some((q) => q.foregroundCapture && !q.cancelled);
+    this.worker?.setPaused(this.paused && !foreground);
   }
 
   /** An engine launch ended: its Blender jobs stop. */
   endPort(port: number): void {
     for (const q of this.queued) if (q.port === port) q.cancelled = true;
     if (this.current?.port === port) this.cancel(this.current.job);
+    this.applyPause();
   }
 
   async dispose(): Promise<void> {
@@ -469,7 +488,7 @@ export class EngineBlender {
       await mkdir(this.scratch, { recursive: true, mode: 0o700 });
       this.worker = new PinnedWorker(found.path, this.scratch, this.options.timeoutMs);
     }
-    this.worker.setPaused(this.paused);
+    this.applyPause();
     const worker = this.worker;
     const layers = req.surfaces.map((s) => s.layer);
     const groups = req.batchLayers ? [layers] : layers.map((l) => [l]);

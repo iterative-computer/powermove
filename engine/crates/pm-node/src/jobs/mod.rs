@@ -1602,6 +1602,7 @@ fn lane_blender<'b>(
     let params = blender::JobParams {
         session: document.session,
         priority: class,
+        foreground_capture: false,
         export: job.clone(),
     };
     let shared_params = blender
