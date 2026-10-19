@@ -1415,6 +1415,10 @@ round on 2x reverse, 20 samples over 10 ms, the documented sawtooth; audio
 and performance owners). Headless: 706 device callbacks, no host-clock run,
 no stall, join playhead error 31.5 ms against today's 30.4 ms.
 
+After merging the dochost lane as well (its sync font IPC touches
+`preload/index.ts`), with pm-wasm and the addon rebuilt, the same five e2e
+specs pass 27 of 27 again.
+
 Smaller items: rustfmt is clean on pm-node; the viewer's version lock entry
 matches 1.2.2 (inspector, keymap-default and timeline remain stale on the
 base, other lanes).
