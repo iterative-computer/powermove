@@ -6,7 +6,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CONTRACT_SEQUENCE, CONTRACT_EXCLUSIONS } from './contract';
-import { runContractOnWorker } from './contract-run';
+import { runContractOnWorker, normalizeMintedIds } from './contract-run';
 import { BRIDGE, WASM, buildEngineBundle } from './test-host';
 
 import { POWERMOVE_AGENT_TOOLS } from '../../main/agent-tools/spec';
@@ -26,6 +26,7 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the agent-tool contra
     }
     const second = await runContractOnWorker(bundle!.script);
     expect(second.document).toBe(first.document);
+    expect(second.documents).toEqual(first.documents);
     expect(second.answers).toEqual(first.answers);
     expect(first.document).toContain('Powermove engine');
   }, 180_000);
@@ -43,4 +44,18 @@ it('accounts for every document tool in the public spec and every harness dispat
   expect([...names].filter(n => !routed.has(n) && !internal.has(n) && !covered.has(n) && !CONTRACT_EXCLUSIONS[n]).sort()).toEqual([]);
   const actions = new Set(CONTRACT_SEQUENCE.filter(c => c.tool === 'manage_media').map(c => c.arguments.operation));
   expect([...actions].sort()).toEqual(['create_folder', 'delete', 'delete_folder', 'move', 'move_folder', 'rename', 'rename_folder']);
+});
+
+
+it('does not rename document values using unrelated window panel ids', () => {
+  const document = JSON.stringify({ layers: [{ id: 'Lfixed', type: 'text', d: { align: 'center' } }], origin: 'agent' });
+  const result = normalizeMintedIds({ answers: [], document, documents: [document], workspaceRaw: { registeredPanels: [{ id: 'text' }, { id: 'center' }, { id: 'agent' }] } }, JSON.parse(document));
+  expect(result.document).toBe(document);
+  expect(result.documents).toEqual([document]);
+});
+
+
+it('normalizes ids that occur only in an intermediate document before rollback', () => {
+  const transcript = (id: string) => ({ answers: [], document: '{}', documents: [JSON.stringify({ edits: [{ id }] }), '{}'] });
+  expect(normalizeMintedIds(transcript('editLeft'), {})).toEqual(normalizeMintedIds(transcript('editRight'), {}));
 });

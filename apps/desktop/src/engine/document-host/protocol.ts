@@ -192,6 +192,8 @@ export interface InstanceStats {
   fallbacks: Record<string, number>;
   /** Native queries and kernels answered. */
   calls: number;
+  /** Live document bytes exposed only by an explicitly seeded test build. */
+  testDocument?: string;
   auditor: { audits: number; failures: number } | null;
   /** Dual answers (development modes): native vs legacy comparisons. */
   dual: { compared: number; mismatched: number; stale: number; comparedOps?: Record<string, number>; mismatchedOps: Record<string, number> } | null;

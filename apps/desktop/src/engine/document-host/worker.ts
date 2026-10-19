@@ -315,6 +315,7 @@ export class DocumentWorker {
       historyDepth: PM['hist'].export({ copy: false }).entries.length,
       fallbacks,
       calls,
+      ...(import.meta.env.MODE === 'test' && process.env['POWERMOVE_DOCUMENT_HOST_TEST_SEED'] ? { testDocument: JSON.stringify(PM['proj']) } : {}),
       auditor: engine.audit ? { audits: engine.audit.audits, failures: engine.audit.failures } : null,
       dual: engine.dual ? { compared: sum(engine.dual.compared), mismatched: sum(engine.dual.mismatched), stale: sum(engine.dual.stale), comparedOps: { ...engine.dual.compared }, mismatchedOps: { ...engine.dual.mismatched } } : null,
       failures: (PM['EngineDoc']?.failures?.() ?? []).map((f: { code: string; message: string; retry: boolean }) => ({ code: f.code, message: f.message, retry: f.retry })),
