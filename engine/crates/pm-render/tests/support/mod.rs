@@ -19,9 +19,16 @@ pub fn repo_root() -> PathBuf {
         .unwrap()
 }
 
+/// The parity corpus directory (outside the repository).
+pub fn corpus_root() -> PathBuf {
+    dirs_home()
+        .unwrap_or_default()
+        .join("Library/Application Support/Powermove Engine Corpus")
+}
+
 /// The newest capture whose id starts with `prefix`.
 pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
-    let base = dirs_home()?.join("Library/Application Support/Powermove Engine Corpus");
+    let base = corpus_root();
     let mut caps: Vec<PathBuf> = std::fs::read_dir(&base)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))

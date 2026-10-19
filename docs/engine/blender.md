@@ -428,3 +428,43 @@ matching generation; temporary pending resources still retry.
 The follow-up editor-camera restart check passes after the synchronized
 25-test run. The flag-off Blender motion suite also passes 3/3 with the
 original WebGL capture and legacy worker-manifest assertions retained.
+
+## Phase 3c round 6: reproducible Blender corpus inputs
+
+AVIF and SVG maps reach Blender as the PNG the editor window's Chromium draws
+(decision THREED-2), so `tests/blender_snapshots.rs` needs those PNGs as
+inputs. They are corpus data, kept outside Git beside the captures:
+
+- **Where:** `~/Library/Application Support/Powermove Engine Corpus/blender-chromium-pngs/`,
+  one `<sha256 of the original file>.png` per source, with the
+  `<sha256>.json` need (content hash and source path) that produced it.
+  `PM_BLENDER_CHROMIUM_PNGS` overrides the directory. The directory sits at
+  the corpus root, not inside a capture, so each capture's own file list
+  still verifies with no unlisted files.
+- **Generate:** run the comparison once. A missing PNG fails the test, which
+  writes a need for every AVIF and SVG still of the failing project and
+  names the command. Then, under the Electron lock:
+
+  ```sh
+  ~/Library/Caches/powermove-engine/bin/pm-electron-lock \
+    bun engine/crates/pm-render/tools/blender-png/run.ts \
+    --needs "$HOME/Library/Application Support/Powermove Engine Corpus/blender-chromium-pngs"
+  ```
+
+  `run.ts` checks each source's hash, converts it in a hidden Electron
+  window through the app's own `BlenderPngs` producer
+  (`engine-connection/blender-png.ts`), and writes `<sha256>.png`. It
+  refuses a directory inside the repository and never reads the capture's
+  expected PNGs.
+- **Test:** `cargo test -p pm-render --test blender_snapshots` runs both
+  tests with no environment variables. The TIFF full-depth test
+  (`tiff_renditions_equal_todays_blender_textures_at_full_depth`) now builds
+  `maps-level1` with the same Chromium PNG resolver as the full comparison;
+  round 5 left it on the plain resolver, so it failed on `hdr-pq.avif`.
+
+Measured 2026-10-19: both tests pass with no environment set: 182 compared,
+182 equal (29 converted textures equal by decoded pixels), 90 frame lists
+equal, geometry max |Δ| 3.5e-16, 15,070 exact values. Regenerating the five
+AVIF inputs from scratch into an empty directory with the command above
+produced five PNGs byte-identical to the stored ones (`cmp`), so the stored
+inputs are reproducible from the original media.

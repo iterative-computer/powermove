@@ -20,6 +20,14 @@
 //! `PM_ENGINE_CORPUS` picks the captures (comma-separated; default: the
 //! newest `v1-*` and the newest `threed-2*` capture, which has the level 1 map
 //! classes); `PM_BLENDER_ONLY` limits to project names with a prefix.
+//!
+//! AVIF and SVG maps take the PNG the editor window's Chromium draws
+//! (decision THREED-2). Those PNGs are corpus inputs, content-addressed by the
+//! original file's SHA-256, in `blender-chromium-pngs/` at the corpus root
+//! (`PM_BLENDER_CHROMIUM_PNGS` overrides the directory). A missing PNG fails
+//! the test and leaves a `<sha>.json` need beside it; generate the PNGs with
+//! `pm-electron-lock bun engine/crates/pm-render/tools/blender-png/run.ts
+//! --needs <directory>` and run the test again (docs/engine/blender.md).
 
 mod support;
 
@@ -45,7 +53,29 @@ const PASSES: [&str; 4] = ["final", "preview", "export", "exportAlpha"];
 /// is used only as the expected output below, never as the resolver input.
 struct ChromiumPngResolver<'a> {
     files: &'a pm_render::MapResolver,
-    dir: Option<&'a std::path::Path>,
+    dir: &'a std::path::Path,
+}
+
+/// Where the Chromium Blender PNGs live: `PM_BLENDER_CHROMIUM_PNGS`, else
+/// `blender-chromium-pngs/` at the corpus root (beside the captures, so the
+/// captures' own file lists stay verified).
+fn chromium_png_dir() -> std::path::PathBuf {
+    std::env::var_os("PM_BLENDER_CHROMIUM_PNGS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| corpus_root().join("blender-chromium-pngs"))
+}
+
+/// The failure note for a snapshot the engine did not build because a
+/// Chromium PNG input is missing.
+fn generation_hint(why: &str, dir: &std::path::Path) -> String {
+    if why.contains("did not provide the exact Blender PNG") {
+        format!(
+            " (generate the missing inputs: ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-render/tools/blender-png/run.ts --needs {:?})",
+            dir
+        )
+    } else {
+        String::new()
+    }
 }
 
 impl AssetResolver for ChromiumPngResolver<'_> {
@@ -58,24 +88,45 @@ impl AssetResolver for ChromiumPngResolver<'_> {
         _asset: &str,
         source: &std::path::Path,
     ) -> Result<Option<Arc<Vec<u8>>>, String> {
-        let Some(dir) = self.dir else { return Ok(None) };
-        let original = std::fs::read(source).map_err(|e| e.to_string())?;
-        let content: String = Sha256::digest(&original)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let png = dir.join(format!("{content}.png"));
+        let png = self.dir.join(format!("{}.png", content_sha(source)?));
         if png.exists() {
             return std::fs::read(png)
                 .map(|bytes| Some(Arc::new(bytes)))
                 .map_err(|e| e.to_string());
         }
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let need = serde_json::json!({ "content": content, "source": source.to_string_lossy() });
-        std::fs::write(dir.join(format!("{content}.json")), need.to_string())
-            .map_err(|e| e.to_string())?;
+        // The builder stops at the first missing PNG; record every
+        // browser-decoded still of the project so one generation run covers
+        // them all.
+        std::fs::create_dir_all(self.dir).map_err(|e| e.to_string())?;
+        let mut sources: Vec<&std::path::Path> =
+            self.files.paths.values().map(|p| p.as_path()).collect();
+        sources.push(source);
+        for path in sources {
+            let Ok(head) = std::fs::read(path) else {
+                continue;
+            };
+            let browser = matches!(
+                pm_media::image::sniff(&head[..head.len().min(4096)]),
+                pm_media::image::ImageFormat::Avif | pm_media::image::ImageFormat::Svg
+            );
+            let content = content_sha(path)?;
+            if !browser || self.dir.join(format!("{content}.png")).exists() {
+                continue;
+            }
+            let need = serde_json::json!({ "content": content, "source": path.to_string_lossy() });
+            std::fs::write(self.dir.join(format!("{content}.json")), need.to_string())
+                .map_err(|e| e.to_string())?;
+        }
         Ok(None)
     }
+}
+
+fn content_sha(path: &std::path::Path) -> Result<String, String> {
+    let original = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Sha256::digest(&original)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 fn get<'a>(v: &'a Value, k: &str) -> Option<&'a Value> {
@@ -185,7 +236,7 @@ fn snapshots_equal_todays_render_snapshot() {
         return;
     }
     let only = std::env::var("PM_BLENDER_ONLY").ok();
-    let chromium_pngs = std::env::var_os("PM_BLENDER_CHROMIUM_PNGS").map(std::path::PathBuf::from);
+    let chromium_pngs = chromium_png_dir();
     let mut t = Totals::default();
     for (capture, dir) in captures
         .iter()
@@ -306,14 +357,15 @@ fn snapshots_equal_todays_render_snapshot() {
                     let mut scope = pm_eval::Scope::new(&mut ev, &comp, &root);
                     let resolver = ChromiumPngResolver {
                         files: &p.resolver,
-                        dir: chromium_pngs.as_deref(),
+                        dir: &chromium_pngs,
                     };
                     let built =
                         build(&mut scope, &frame, &resolver, &SnapshotOptions::default()).unwrap();
                     let snapshot = match built {
                         Ok(s) => s,
                         Err(why) => {
-                            t.failed.push(format!("{label}: not built: {why}"));
+                            let hint = generation_hint(&why, &chromium_pngs);
+                            t.failed.push(format!("{label}: not built: {why}{hint}"));
                             continue;
                         }
                     };
@@ -551,9 +603,21 @@ fn tiff_renditions_equal_todays_blender_textures_at_full_depth() {
         shutter: None,
         preview: false,
     };
-    let built = build(&mut scope, &frame, &p.resolver, &SnapshotOptions::default())
+    // The level 1 maps include AVIF classes, which take Chromium's PNG
+    // exactly as the full comparison above does.
+    let chromium_pngs = chromium_png_dir();
+    let resolver = ChromiumPngResolver {
+        files: &p.resolver,
+        dir: &chromium_pngs,
+    };
+    let built = build(&mut scope, &frame, &resolver, &SnapshotOptions::default())
         .unwrap()
-        .unwrap();
+        .unwrap_or_else(|why| {
+            panic!(
+                "maps-level1 not built: {why}{}",
+                generation_hint(&why, &chromium_pngs)
+            )
+        });
     let mut compared = 0;
     for asset in &built.assets {
         let source = loaded
