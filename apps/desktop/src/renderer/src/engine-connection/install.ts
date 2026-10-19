@@ -28,7 +28,7 @@ import type { ClockSample } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
-import { DocumentSession, documentId, type DocumentStream } from './session';
+import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
 import { EngineRenderTransport } from './render-transport';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
@@ -88,6 +88,17 @@ export interface EngineConnectionHandle {
   hostClock: HostClock;
   transport: EngineTransport;
   dispose(): void;
+}
+
+/**
+ * The route message a viewer attaching to `session` missed: the session
+ * already presents (no viewerless state in between, which would make the
+ * engine say it again) a composition the engine cannot draw. Null
+ * otherwise.
+ */
+export function missedRoute(session: { readonly headless: boolean; readonly route: Route; readonly routeReason: string | null }): { type: 'routed'; route: 'legacy'; reason: string } | null {
+  if (session.headless || session.route !== 'legacy') return null;
+  return { type: 'routed', route: 'legacy', reason: session.routeReason ?? '' };
 }
 
 export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHost | null | undefined, target: Window = window): EngineConnectionHandle | null {
@@ -399,6 +410,18 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const previous = viewerHandlers;
       viewerHandlers = handlers;
       previous?.closed('another viewer attached to the engine session');
+      // A viewer that replaces another on a session already presenting
+      // (no viewerless state in between, which would make the engine say
+      // it again) learns why a composition the engine cannot draw shows
+      // nothing. Its channel is in place by the next microtask.
+      const missed = missedRoute(opened);
+      if (missed) {
+        queueMicrotask(() => {
+          if (lease === viewerLease && viewerHandlers === handlers && opened.route === 'legacy') {
+            handlers.message(missed, performance.now());
+          }
+        });
+      }
       return {
         sendViewerState: (state) => {
           if (lease === viewerLease) opened.sendViewerState({ ...state, headless: false } as never);
@@ -411,18 +434,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           transport.refresh();
         }
       };
-      // A viewer that replaces another on a session already presenting
-      // (no viewerless state in between, which would make the engine say
-      // it again) learns why a composition the engine cannot draw shows
-      // nothing. Its channel is in place by the next microtask.
-      if (!opened.headless && opened.route === 'legacy') {
-        const reason = opened.routeReason ?? '';
-        queueMicrotask(() => {
-          if (lease === viewerLease && viewerHandlers === handlers && opened.route === 'legacy') {
-            handlers.message({ type: 'routed', route: 'legacy', reason }, performance.now());
-          }
-        });
-      }
     }
   });
   let service = makeService();

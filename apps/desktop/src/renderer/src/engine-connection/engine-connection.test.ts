@@ -11,7 +11,7 @@ import { decodeEnvelope, encodeEnvelope, envelope, localRanges } from '../../../
 import { ENGINE_VIEWER_CHANGED as VIEWER_CHANGED, ENGINE_VIEWER_SERVICE as VIEWER_SERVICE } from '../../../extensions/viewer/engine-present/presentation';
 import { EngineConnection, type PortLike } from './connection';
 import { bestOffset, HostClock } from './host-clock';
-import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE } from './install';
+import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, missedRoute } from './install';
 import { DEFINITIONS_RETRIES, DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
 import { EngineTransport, mediaTicksAt, ticks, TICKS_PER_SECOND } from './transport';
 import { createEngineDefinitions } from '../kernel/engine-definitions';
@@ -352,6 +352,17 @@ describe('the engine connection', () => {
     expect(stage).toHaveBeenCalledWith(5, expect.any(Uint8Array));
     const source = (port.requests('resync')[0]!.message as { body: { source: { kind: string; handle: string } } }).body.source;
     expect(source).toEqual({ kind: 'cacheFile', handle: 'f'.repeat(32), length: 18 });
+  });
+
+  it('tells a viewer replacing another why the engine draws nothing', () => {
+    // Presenting a composition the engine cannot draw: the new viewer is told.
+    expect(missedRoute({ headless: false, route: 'legacy', routeReason: 'The new engine cannot draw this composition yet: path masks.' }))
+      .toEqual({ type: 'routed', route: 'legacy', reason: 'The new engine cannot draw this composition yet: path masks.' });
+    // Viewerless (the engine says it again when a viewer attaches), drawn,
+    // or undecided: nothing missed.
+    expect(missedRoute({ headless: true, route: 'legacy', routeReason: 'x' })).toBeNull();
+    expect(missedRoute({ headless: false, route: 'engine', routeReason: null })).toBeNull();
+    expect(missedRoute({ headless: false, route: 'pending', routeReason: null })).toBeNull();
   });
 
   it('keeps document ids within the contract', () => {
