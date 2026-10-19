@@ -1,0 +1,13 @@
+// m152 SDFTextRenderStep, affine mask-to-device transform.
+layout(set=0,binding=0) uniform Params { float4 u[9]; };
+layout(location=0) out float2 textureCoords;
+layout(location=1) out float2 unormTexCoords;
+void main() {
+    float4 a=u[1], tr=u[2];
+    float4x4 matrix=float4x4(float4(a.xy,0,0),float4(a.zw,0,0),float4(0,0,1,0),float4(tr.xy,0,1));
+    float2 unused;
+    float4 devPosition = text_vertex_fn(float2(sk_VertexID >> 1, sk_VertexID & 1),
+        matrix, float4x4(1), float2(1.0/256.0), u[3].xy, float2(2), tr.zw,
+        1.0, 0.5, textureCoords, unormTexCoords, unused);
+    sk_Position=float4(u[0].zw*devPosition.xy-sign(u[0].zw)*devPosition.ww,devPosition.zw);
+}

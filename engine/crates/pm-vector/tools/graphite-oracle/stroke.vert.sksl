@@ -1,0 +1,13 @@
+// m152 TessellateStrokesRenderStep, explicit curve type as on Dawn.
+layout(set=0, binding=0) uniform Params { float4 u[9]; };
+layout(set=0, binding=1) readonly buffer Patches { float4 p[]; };
+void main() {
+    uint base = uint(sk_InstanceID) * 5;
+    float4 p01 = p[base], p23 = p[base+1], affine = p[base+2], tr = p[base+3], joinStroke = p[base+4];
+    float edgeID = float(sk_VertexID >> 1);
+    if ((sk_VertexID & 1) != 0) { edgeID = -edgeID; }
+    float4 coords = tessellate_stroked_curve(edgeID, 16383,
+        float2x2(affine.xy, affine.zw), tr.xy, tr.z, p01, p23,
+        joinStroke.xy, joinStroke.zw, tr.w);
+    sk_Position = float4(u[0].zw * coords.xy - sign(u[0].zw), 0.5, 1.0);
+}
