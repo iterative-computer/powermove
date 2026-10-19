@@ -210,7 +210,9 @@ export class CompatContextHost {
     }
     const { width, height } = frame;
     if (!(width >= 1 && height >= 1) || frame.data.byteLength !== width * height * 4) throw new Error(`The export frame is not ${width}×${height} RGBA.`);
-    const image = new ImageData(new Uint8ClampedArray(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength), width, height);
+    const pixels = new Uint8ClampedArray(width * height * 4);
+    pixels.set(frame.data);
+    const image = new ImageData(pixels, width, height);
     const before = { width: state.canvas.width, height: state.canvas.height };
     state.exporting = image;
     state.canvas.width = width;
@@ -275,9 +277,13 @@ export class CompatContextHost {
         state.mirror = null;
       }
     }
-    const c2 = state.mirror;
-    if (!c2) return;
     const width = state.bound.width, height = state.bound.height;
+    // A bound canvas that already has today's compositor context (kept
+    // beside the engine while the legacy compositor still runs): the
+    // pixels go into its default framebuffer instead, through a 2D copy at
+    // the bound canvas's size.
+    const c2 = state.mirror ?? this.scratchMirror(width, height);
+    if (!c2) return;
     try {
       c2.setTransform(1, 0, 0, 1, 0, 0);
       c2.globalCompositeOperation = 'copy';
@@ -293,9 +299,75 @@ export class CompatContextHost {
         c2.imageSmoothingEnabled = false;
         c2.drawImage(source, 0, 0, width, height);
       }
+      if (!state.mirror && !this.uploadToBoundGl(state, c2.canvas as OffscreenCanvas | HTMLCanvasElement)) return;
       this.stats.mirrored++;
     } catch {
       // A canvas that cannot be read (lost device): today's would be black too.
+    }
+  }
+
+  private mirrorCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
+
+  private scratchMirror(width: number, height: number): CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null {
+    try {
+      let canvas = this.mirrorCanvas;
+      if (!canvas) canvas = this.mirrorCanvas = (this.env.makeCanvas ?? defaultCanvas)(width, height);
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      return canvas.getContext('2d', { alpha: false }) as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Writes `image` into the default framebuffer of the bound canvas's own
+   *  WebGL2 context (today's compositor's), leaving its state as it was. */
+  private uploadToBoundGl(state: CompatState, image: OffscreenCanvas | HTMLCanvasElement): boolean {
+    let gl: WebGL2RenderingContext | null = null;
+    try {
+      gl = state.bound.getContext('webgl2') as WebGL2RenderingContext | null;
+    } catch {
+      gl = null;
+    }
+    if (!gl || gl.isContextLost()) return false;
+    const width = state.bound.width, height = state.bound.height;
+    const saved = {
+      read: gl.getParameter(gl.READ_FRAMEBUFFER_BINDING), draw: gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING),
+      tex: gl.getParameter(gl.TEXTURE_BINDING_2D),
+      unpackBuffer: gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING), flip: gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL),
+      premultiply: gl.getParameter(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL), conversion: gl.getParameter(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL),
+      alignment: gl.getParameter(gl.UNPACK_ALIGNMENT), scissor: gl.isEnabled(gl.SCISSOR_TEST), discard: gl.isEnabled(gl.RASTERIZER_DISCARD)
+    };
+    const tex = gl.createTexture(), fbo = gl.createFramebuffer();
+    try {
+      // (on the active unit, whose binding is restored below)
+      gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, image as TexImageSource);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.disable(gl.RASTERIZER_DISCARD);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      return true;
+    } finally {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, saved.read);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, saved.draw);
+      gl.deleteFramebuffer(fbo);
+      gl.deleteTexture(tex);
+      gl.bindTexture(gl.TEXTURE_2D, saved.tex);
+      gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, saved.unpackBuffer);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, saved.flip);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, saved.premultiply);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, saved.conversion);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, saved.alignment);
+      if (saved.scissor) gl.enable(gl.SCISSOR_TEST);
+      if (saved.discard) gl.enable(gl.RASTERIZER_DISCARD);
     }
   }
 

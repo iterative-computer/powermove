@@ -162,13 +162,24 @@ export default function activate(api: PowermoveAPI): void {
         return { ok: !!k && has === k && value === 50 && value2 === 75 && near(after, todayAfter) && opacity.kf.length === 0, detail: { value, value2, after, todayAfter, eased: json(eased), left: opacity.kf.length } };
       });
       check('anim.expressionErrors', () => {
-        // Today: a throwing expression evaluates to the property's value,
-        // and the error is kept for the property until it evaluates again.
+        // Today: a failing expression evaluates to the property's value, and
+        // its message (legacy/core/anim.ts evalProp over today's expression
+        // language, legacy/core/expression.ts, where an unknown name is
+        // undefined) is kept for the property until it evaluates again.
         const errors = api.anim.expressionErrors;
         const clean = errors.has(opacity) === false;
         const property = text.p['position.y'];
         const kept = property.expr;
-        property.expr = 'probeUndefinedName * 2';
+        const source = 'probeUndefinedName * 2';
+        const todays = (() => {
+          const c = pm.compileExpr?.(source);
+          if (!c?.f) return 'Expression syntax is invalid.';
+          try {
+            const r = c.f(t - text.from, t, api.model.curComp().fps, property.v, text, api.model.curComp(), () => 0, 'position.y', 0);
+            return (typeof r === 'number' && isFinite(r)) || typeof r === 'string' || typeof r === 'boolean' ? null : 'Expression did not return a finite value.';
+          } catch (e) { return e instanceof Error ? e.message : 'Expression failed.'; }
+        })();
+        property.expr = source;
         api.anim.touch();
         let value: unknown, message: unknown, has = false;
         try {
@@ -179,7 +190,7 @@ export default function activate(api: PowermoveAPI): void {
         const after = api.anim.ev(text, 'position.y', t);
         const cleared = errors.has(property) === false;
         const text_ = String((message as any)?.message ?? message ?? '');
-        return { ok: clean && has && /probeUndefinedName/.test(text_) && /not defined/.test(text_) && value === property.v && after === property.v && cleared, detail: { value, message: text_, cleared } };
+        return { ok: clean && has && typeof todays === 'string' && text_ === todays && value === property.v && after === property.v && cleared, detail: { value, message: text_, todays, cleared } };
       });
 
       /* ── model.* ── */
@@ -373,7 +384,7 @@ export default function activate(api: PowermoveAPI): void {
         if (peaks.length === today.length) { peakDiff = 0; for (let i = 0; i < today.length; i++) peakDiff = Math.max(peakDiff, Math.abs(peaks[i]! - today[i]!)); }
         const draw = () => {
           const c = document.createElement('canvas'); c.width = 300; c.height = 48;
-          const drew = api.media.audio.drawWaveform(c.getContext('2d')!, layer);
+          const drew = api.media.audio.drawWaveform(c.getContext('2d')!, layer, { x: 0, y: 0, width: c.width, height: c.height, color: '#FFFFFF' });
           return { drew, data: pixels(c) };
         };
         const ours = draw();
