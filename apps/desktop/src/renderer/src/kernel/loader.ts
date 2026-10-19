@@ -241,8 +241,8 @@ export function createLoader(options: LoaderOptions): Loader {
     // synchronous evaluator/helper available to activate() has a ready mirror.
     const doc = (hostDeps.pm as any)?.EngineDoc;
     if (doc?.enabled && !doc.ready) {
-      if (!await doc.whenReady) {
-        failActivation(record, new Error("The new engine's document module did not load (pm-wasm-unavailable)."));
+      if (!await doc.whenReady && !doc.ready) {
+        waitForEngine(record, doc);
         return false;
       }
       if (disposed || active.has(id)) return active.has(id);
@@ -325,6 +325,36 @@ export function createLoader(options: LoaderOptions): Loader {
       console.warn(`[kernel] values for "${record.id}" are unavailable`, error);
       return {};
     }
+  }
+
+  /* The document module did not load. The engine names that failure once, with
+     a Retry action (engine-doc/install.ts); each extension waits for it rather
+     than fail with a toast of its own, and activates, in the order it was
+     planned, once a retry succeeds. Until then it stays out of the plan. */
+  const engineWaiting: string[] = [];
+  let engineListener: (() => void) | null = null;
+  function waitForEngine(record: ExtensionRecord, doc: { onReady?: (fn: () => void) => () => void }): void {
+    const id = record.id;
+    activationFailures.add(id);
+    if (!engineWaiting.includes(id)) engineWaiting.push(id);
+    console.error(`[kernel] extension "${id}" waits for the new engine's document module (pm-wasm-unavailable)`);
+    reportHealth(id, { state: 'activation-error', error: "The new engine's document module did not load (pm-wasm-unavailable). Retry it from the engine's notice." });
+    if (engineListener || typeof doc.onReady !== 'function') return;
+    const stop = doc.onReady(() => {
+      stop();
+      engineListener = null;
+      void enqueue(async () => {
+        const ids = engineWaiting.splice(0), activated: string[] = [];
+        for (const waiting of ids) activationFailures.delete(waiting);
+        for (const waiting of ids) {
+          const next = recordFor(waiting);
+          if (disposed || !next || next.enabled === false || BLOCKED.has(next.health?.state as string)) continue;
+          if (await activate(next)) activated.push(waiting);
+        }
+        if (activated.length) kernel.events.emit('extensions:changed', { ids: activated, reason: 'engine-ready' });
+      });
+    });
+    engineListener = stop;
   }
 
   function failActivation(record: ExtensionRecord, error: unknown): void {
@@ -532,6 +562,8 @@ export function createLoader(options: LoaderOptions): Loader {
     whenIdle: () => queue,
     async dispose() {
       disposed = true;
+      engineListener?.();
+      engineListener = null;
       stopSlowNotices();
       unsubscribe?.();
       unsubscribe = null;

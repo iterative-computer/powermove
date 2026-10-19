@@ -130,6 +130,11 @@ export interface EngineDoc {
   failures(): EngineFailure[];
   /** Loads the module again after a `pm-wasm-unavailable` failure; resolves with readiness. */
   retry(): Promise<boolean>;
+  /**
+   * `fn` runs once the module becomes ready after `whenReady` resolved false
+   * (a successful `retry()`): the extension loader activates what waited.
+   */
+  onReady(fn: () => void): () => void;
   /** Loads the faces the open composition's text needs before anything asks (asynchronous font providers). */
   warmFonts(): Promise<void>;
 }
@@ -150,7 +155,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false),
       check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
-      failures: () => [], retry: () => Promise.resolve(false), warmFonts: () => Promise.resolve(),
+      failures: () => [], retry: () => Promise.resolve(false), onReady: () => () => {}, warmFonts: () => Promise.resolve(),
     };
     PM.EngineDoc = off;
     return off;
@@ -420,6 +425,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const subscribers = new Set<(batch: PatchBatch) => void>();
   const pendingListeners = new Set<() => void>();
   const eager = new Set<() => boolean>();
+  const readyListeners = new Set<() => void>();
   let readyResolve: (ok: boolean) => void = () => {};
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
@@ -456,8 +462,15 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       api.fonts?.retry();
       failed.clear();
       if (state.ready) return Promise.resolve(true);
-      return start().then((ok) => { if (ok) afterReady(); return ok; });
+      return start().then((ok) => {
+        if (ok) {
+          afterReady();
+          for (const fn of [...readyListeners]) { try { fn(); } catch (error) { console.error(error); } }
+        }
+        return ok;
+      });
     },
+    onReady(fn) { readyListeners.add(fn); return () => { readyListeners.delete(fn); }; },
     warmFonts: () => (state.ready ? api.warmFonts() : Promise.resolve()),
   };
   PM.EngineDoc = state;
