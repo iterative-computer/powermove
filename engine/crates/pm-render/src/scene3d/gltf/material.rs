@@ -780,12 +780,18 @@ mod short_normal_tests {
     #[test]
     fn normal_follows_the_r180_vertex_programs() {
         let mut basic = params("MeshBasicMaterial");
-        assert!(!consumes_short_attribute(&basic, "NORMAL"), "unskinned Basic");
+        assert!(
+            !consumes_short_attribute(&basic, "NORMAL"),
+            "unskinned Basic"
+        );
         basic.skinning = true;
         assert!(consumes_short_attribute(&basic, "NORMAL"), "skinned Basic");
         basic.skinning = false;
         basic.env_map = true;
-        assert!(consumes_short_attribute(&basic, "NORMAL"), "env-mapped Basic");
+        assert!(
+            consumes_short_attribute(&basic, "NORMAL"),
+            "env-mapped Basic"
+        );
         basic.env_map = false;
         basic.morph_normals = true;
         basic.morph_targets = true;
@@ -800,10 +806,16 @@ mod short_normal_tests {
             lit.flat_shading = true;
             assert!(consumes_short_attribute(&lit, "NORMAL"), "flat {kind}");
             lit.skinning = true;
-            assert!(consumes_short_attribute(&lit, "NORMAL"), "skinned flat {kind}");
+            assert!(
+                consumes_short_attribute(&lit, "NORMAL"),
+                "skinned flat {kind}"
+            );
             // USE_TANGENT requires `flatShading === false`.
             lit.vertex_tangents = true;
-            assert!(!consumes_short_attribute(&lit, "TANGENT"), "flat {kind} tangent");
+            assert!(
+                !consumes_short_attribute(&lit, "TANGENT"),
+                "flat {kind} tangent"
+            );
             lit.flat_shading = false;
             assert!(consumes_short_attribute(&lit, "TANGENT"), "{kind} tangent");
         }
@@ -811,9 +823,15 @@ mod short_normal_tests {
         for kind in ["MeshDepthMaterial", "MeshDistanceMaterial"] {
             let mut shadow = params(kind);
             shadow.skinning = true;
-            assert!(!consumes_short_attribute(&shadow, "NORMAL"), "skinned {kind}");
+            assert!(
+                !consumes_short_attribute(&shadow, "NORMAL"),
+                "skinned {kind}"
+            );
             shadow.displacement_map = true;
-            assert!(consumes_short_attribute(&shadow, "NORMAL"), "displaced {kind}");
+            assert!(
+                consumes_short_attribute(&shadow, "NORMAL"),
+                "displaced {kind}"
+            );
         }
 
         let mut points = params("PointsMaterial");

@@ -2,9 +2,9 @@
 //! behind an occluder. Transport values must survive half-float readback.
 mod support;
 use pm_gpu::Target;
-use pm_protocol::frame::ChromeSelection;
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
+use pm_protocol::frame::ChromeSelection;
 use pm_render::{MapResolver, RenderRequest, Renderer};
 use serde_json::{Value, json};
 use support::{doc::*, ticks};
@@ -263,23 +263,34 @@ fn color_and_chrome(glb: &[u8], name: &str) -> (usize, usize, usize, usize) {
 fn skinned_short_normal_rejects_basic_chrome_and_unlit_draws() {
     // Controls: complete normals draw everywhere.
     for (skinned, unlit) in [(true, true), (true, false)] {
-        let (lit, depth, ids, mask) =
-            color_and_chrome(&triangle_glb(3, skinned, unlit), "full");
-        assert!(lit > 0 && depth > 0 && ids > 0 && mask > 0,
-            "full normal skinned={skinned} unlit={unlit}: {lit} {depth} {ids} {mask}");
+        let (lit, depth, ids, mask) = color_and_chrome(&triangle_glb(3, skinned, unlit), "full");
+        assert!(
+            lit > 0 && depth > 0 && ids > 0 && mask > 0,
+            "full normal skinned={skinned} unlit={unlit}: {lit} {depth} {ids} {mask}"
+        );
     }
     // Skinned: every MeshBasic program (unlit color, chrome depth/ID/mask)
     // consumes the short NORMAL; the Standard color draw does as well.
     for unlit in [true, false] {
         let (lit, depth, ids, mask) =
             color_and_chrome(&triangle_glb(2, true, unlit), "skinned-short");
-        assert_eq!((lit, depth, ids, mask), (0, 0, 0, 0), "skinned short unlit={unlit}");
+        assert_eq!(
+            (lit, depth, ids, mask),
+            (0, 0, 0, 0),
+            "skinned short unlit={unlit}"
+        );
     }
     // Unskinned unlit draws; the overrides draw for an unskinned Standard
     // mesh whose own color draw is rejected.
     let (lit, depth, ids, mask) = color_and_chrome(&triangle_glb(2, false, true), "unlit-short");
-    assert!(lit > 0 && depth > 0 && ids > 0 && mask > 0, "unskinned unlit short normal: {lit} {depth} {ids} {mask}");
+    assert!(
+        lit > 0 && depth > 0 && ids > 0 && mask > 0,
+        "unskinned unlit short normal: {lit} {depth} {ids} {mask}"
+    );
     let (lit, depth, ids, mask) = color_and_chrome(&triangle_glb(2, false, false), "lit-short");
     assert_eq!(lit, 0, "unskinned Standard short normal color");
-    assert!(depth > 0 && ids > 0 && mask > 0, "unskinned Standard short normal chrome");
+    assert!(
+        depth > 0 && ids > 0 && mask > 0,
+        "unskinned Standard short normal chrome"
+    );
 }
