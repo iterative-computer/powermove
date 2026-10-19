@@ -3219,44 +3219,50 @@ fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
             ])
             .unwrap();
         let bound = Duration::from_secs_f64(512.0 / SR as f64);
-        // The deadline is checked against the producer's own publication
-        // time, not against when this thread happened to observe the ring:
-        // an observer descheduled under load must not hide a late queue,
-        // nor fail an on-time one.
+        // The ring captures both clocks around the same acquired publication.
+        // Its earlier upper bound tolerates either producer or observer being
+        // descheduled after the PCM became visible.
         while side.queued_frames() < 512 && at.elapsed() < Duration::from_secs(5) {
             std::thread::yield_now();
         }
         let observed = at.elapsed();
-        assert!(
-            side.queued_frames() >= 512,
-            "edited first buffer: {observed:?}"
-        );
+        let publication = side
+            .publication_for_queued_frames(512)
+            .unwrap_or_else(|| panic!("edited first buffer: {observed:?}"));
         side.callback(&mut out, 2, host_now_us());
         let timing = playback.start_timing().unwrap();
-        let &(frames, published_us) = timing
-            .publications
-            .iter()
-            .find(|(frames, _)| *frames >= 512)
-            .expect("first 512 frames published");
-        let published = Duration::from_micros(published_us.saturating_sub(timing.requested_us));
+        #[cfg(target_os = "macos")]
+        assert!(
+            matches!(
+                timing.producer_scheduling.as_str(),
+                "device-workgroup" | "mach-time-constraint"
+            ) && timing.worker_workgroup_joins + timing.worker_mach_joins > 0
+                && timing.worker_scheduling_failures == 0
+                && timing.scheduling_constraint_overruns == 0
+                && timing.scheduling_restore_failures == 0,
+            "actual audio scheduling: {timing:?}"
+        );
+        let published_us = publication.visible_by_us;
+        assert!(
+            published_us >= timing.requested_us,
+            "first buffer publication preceded Play: {publication:?}, {timing:?}"
+        );
+        let published = Duration::from_micros(published_us - timing.requested_us);
         let ms = |from: u64, to: u64| to.saturating_sub(from) as f64 / 1000.0;
         eprintln!(
-            "A8 sixteen-voice edit cold={cold} distinct={distinct} first buffer: published {:.3} ms ({frames} frames), observed {:.3} ms; request to applied {:.3}, applied to ready {:.3}, ready to published {:.3}",
+            "A8 sixteen-voice edit cold={cold} distinct={distinct} first buffer: visible by {:.3} ms (512 frames), observed {:.3} ms; producer stamp {:?}; request to applied {:.3}, applied to ready {:.3}, ready to visible {:.3}",
             published.as_secs_f64() * 1000.0,
             observed.as_secs_f64() * 1000.0,
+            publication.published_us,
             ms(timing.requested_us, timing.applied_us),
             ms(timing.applied_us, timing.ready_us),
             ms(timing.ready_us, published_us)
         );
-        // A prepared start needs no vocoder work after Play: it must publish
-        // within one 512-frame callback by the producer's own clock. A cold
-        // start's publication time is its CPU preparation (the canonical
-        // pre-roll on the shared pool), which a niceness-15 test process
-        // cannot guarantee beside other foreground load. It is reported
-        // here; its latency gate is the paired app capture against today.
+        // Both prepared and cold starts must publish complete PCM within one
+        // 512-frame callback after Play, including the cold pre-roll work.
         assert!(
-            cold || published <= bound,
-            "first 512 frames published {published:?} after Play (bound {bound:?}, cold={cold}, distinct={distinct})"
+            published <= bound,
+            "first 512 frames visible {published:?} after Play (bound {bound:?}, cold={cold}, distinct={distinct}, {publication:?})"
         );
         // Distinct signals cannot share an immutable head; identical cold
         // starts do (the representative job's prefix serves all sixteen).

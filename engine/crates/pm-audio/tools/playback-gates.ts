@@ -117,6 +117,11 @@ for (const native of modes) {
         else Object.assign(loop, { underruns: after.stats.underrunEvents - before.stats.underrunEvents });
         result[native ? 'nativeLoop' : 'todayLoop'] = loop;
         await writeFile(output, JSON.stringify(result, null, 2));
+        if (native && (loop.underruns !== 0 || after.startTiming?.programUnderruns !== 0
+          || (process.platform === 'darwin' && (after.startTiming?.workerSchedulingFailures !== 0
+            || after.startTiming?.schedulingConstraintOverruns !== 0 || after.startTiming?.schedulingRestoreFailures !== 0)))) {
+          throw new Error(`loop delivery or real-time scheduling failed: ${JSON.stringify({ underruns: loop.underruns, timing: after.startTiming })}`);
+        }
       }
       const samples = [];
       for (let run = 0; run < Number(count); run++) {
@@ -177,9 +182,13 @@ for (const native of modes) {
               return (Object.values(report.presenter.audio)[0] as any)?.startTiming;
             });
             if (timing && timing.requestedUs >= sample.requestedHostUs) {
-              if (timing.omittedPrefixFrames !== 0 || timing.startSpreadFrames !== 0 || timing.safetyNetFires !== 0 || timing.programUnderruns !== 0
+              if (timing.omittedPrefixFrames !== 0 || timing.startSpreadFrames !== 0 || timing.safetyNetFires !== 0 || timing.programUnderruns !== 0 || timing.historyClaims !== 0
                 || timing.voiceStartSamples.length !== voices) {
                 throw new Error(`ordinary start must be complete and simultaneous: ${JSON.stringify(timing)}`);
+              }
+              if (process.platform === 'darwin' && (!['device-workgroup', 'mach-time-constraint'].includes(timing.producerScheduling)
+                || timing.workerWorkgroupJoins + timing.workerMachJoins === 0 || timing.workerSchedulingFailures !== 0 || timing.schedulingConstraintOverruns !== 0 || timing.schedulingRestoreFailures !== 0)) {
+                throw new Error(`audio threads did not enter a real-time schedule: ${JSON.stringify(timing)}`);
               }
               // Distinct signals must not be served by a shared immutable head.
               if (distinct !== 'none' && timing.prefillReadyUs !== 0) {
