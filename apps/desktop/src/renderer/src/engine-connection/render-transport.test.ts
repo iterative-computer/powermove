@@ -357,10 +357,14 @@ describe('compatibility answers during playback', () => {
     expect(asked.slice(before)).toEqual([3, 3 + COMPAT_LOOKAHEAD - 1, 3 + COMPAT_LOOKAHEAD].map((n) => n * 23_520_000));
   });
 
-  it('answers only what was asked while paused', () => {
-    const { t, session, asked } = rig(false);
+  it('answers only what was asked while paused, and runs ahead from there when playback starts', () => {
+    const { t, session, asked, state } = rig(false);
     t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
     t.presentedWhilePlaying();
     expect(asked).toEqual([0]);
+    state.playing = true;
+    t.presentedWhilePlaying();
+    expect(asked[1]).toBe(23_520_000);
+    expect(asked.length).toBeGreaterThan(1);
   });
 });

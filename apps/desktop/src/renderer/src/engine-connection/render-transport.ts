@@ -166,6 +166,8 @@ export type CompatAnswerResult =
 /** Answers the engine's needs for one source (the raster override's producer). */
 /** Frames of compatibility answers kept ahead of the clock during playback. */
 export const COMPAT_LOOKAHEAD = 6;
+/** Main-thread time one lookahead call may take (ms); the rest waits for the next frame. */
+const LOOKAHEAD_BUDGET_MS = 6;
 
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
 
@@ -290,23 +292,27 @@ export class EngineRenderTransport {
     if (message['compat'] !== 'needs' || !session) return;
     const needs = Array.isArray(message['needs']) ? message['needs'] as CompatNeed[] : [];
     for (const need of needs) this.answerNeed(need, session);
-    if (this.options.playing?.()) for (const need of needs) this.lookahead(need, session);
-    else this.ahead.clear();
+    // Paused, the layers asked for are remembered so playback starts with
+    // its next frames answered.
+    const playing = !!this.options.playing?.();
+    for (const need of needs) this.lookahead(need, session, playing);
   }
 
-  /** A frame was presented while playing: keep the answers `COMPAT_LOOKAHEAD` frames ahead. */
+  /**
+   * A frame was presented while playing, or playback started: the answers
+   * move one frame on and are kept `COMPAT_LOOKAHEAD` frames ahead, within
+   * a few milliseconds of this thread per call (the rest on later frames).
+   */
   presentedWhilePlaying(): void {
-    if (!this.options.playing?.()) {
-      this.ahead.clear();
-      return;
-    }
+    if (!this.options.playing?.()) return;
+    const until = performance.now() + LOOKAHEAD_BUDGET_MS;
     for (const entry of this.ahead.values()) {
       entry.cursor += entry.step;
-      this.answerAhead(entry);
+      this.answerAhead(entry, until);
     }
   }
 
-  private lookahead(need: CompatNeed, session: TransportSession): void {
+  private lookahead(need: CompatNeed, session: TransportSession, answer: boolean): void {
     const tag = `${need.composition}\u0000${need.layer}\u0000${need.source}`;
     const frame = this.options.frameTicks?.() ?? 0;
     const previous = this.ahead.get(tag);
@@ -321,13 +327,16 @@ export class EngineRenderTransport {
     const keep = same && Math.sign(previous!.step) === Math.sign(step) && Math.sign(step) * (previous!.posted - need.time) > 0;
     const entry = { need, session, step, cursor: need.time, posted: keep ? previous!.posted : need.time };
     this.ahead.set(tag, entry);
-    this.answerAhead(entry);
+    if (this.ahead.size > 256) this.ahead.delete(this.ahead.keys().next().value!);
+    if (answer) this.answerAhead(entry, performance.now() + LOOKAHEAD_BUDGET_MS);
   }
 
-  private answerAhead(entry: { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number }): void {
+  private answerAhead(entry: { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number }, deadline: number): void {
     if (entry.session.closed) return;
+    // Fallen behind the clock: answer from the frame it is on.
+    if (Math.sign(entry.step) * (entry.cursor - entry.posted) > 0) entry.posted = entry.cursor - entry.step;
     const until = entry.cursor + COMPAT_LOOKAHEAD * entry.step;
-    while (Math.sign(entry.step) * (until - entry.posted) > 0) {
+    while (Math.sign(entry.step) * (until - entry.posted) > 0 && performance.now() < deadline) {
       entry.posted += entry.step;
       if (entry.posted < 0) break;
       if (!this.answerNeed({ ...entry.need, time: entry.posted }, entry.session)) break;
