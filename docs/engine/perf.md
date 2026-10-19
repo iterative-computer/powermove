@@ -1333,3 +1333,398 @@ it belongs with the perf3 lane's items and is reported to the orchestrator.
 Exactness for these paths is in `strict.test.ts` (wrapper members, held and
 changed wrappers, stale wrappers, the stored form, a scope object made anew per
 call with scope and channel edits) and `detached.test.ts`.
+
+## P6/B3 fixups: expression frames and async boot readiness (2026-10-19)
+
+P6 removes the unconditional error-string crossing, compiles pm-expr bytecode
+once per source and retains it in each resident static/keyed expression plan.
+pm-wasm omits unused expression dependency tracing while keeping model-host
+reads and exact revision/time invalidation. It interns literal host keys and
+avoids computing legacy-inaccessible `frame` and unused `ch` inputs.
+
+`ExpressionFrames` batches the resident expression ids of each composition at
+one exact time in one wasm call, and serves the channel reads from that frame.
+The first address read still interns/evaluates the channel. Separate scope
+copies prevent one composition's ABI buffers overwriting another's memo.
+Errors are read only when the scalar status word or batch status flags them;
+error recovery deletes the old live-channel entry. Nonnumeric values and throws
+use the original decoder. `expression-frame.test.ts` exercises 120 channels,
+exact answers after edits, errors/recovery, signed zero, scopes and memory growth.
+
+`engine-expression-performance.spec.ts` is the paired P6 gate: 100 layers with
+four expression channels each, including arithmetic, params/comp/layer reads,
+Math and idx; five alternating pairs of 2,000 frames. It separately measures a
+single-channel fixture, asserts exact results and sums, writes every sample and
+checks load average <=8 before and after. It never turns a slow result into an
+allowed difference. Run it with `PM_FIXUPS3_MEASURE=1` and
+`PM_FIXUPS3_EVIDENCE=/tmp/ne-w5/fixups3-evidence` under pm-electron-lock.
+
+B3 queues async agent/MCP/CLI tool requests, scripts, native menu and kernel
+input and project opens until EngineDoc is ready. Parsing/media restoration
+continue during compilation; first frame and blank-project creation wait too.
+The boot e2e holds the real wasm fetch over reload, dispatches an agent read
+while readiness is false, then releases it and requires the exact keyed answer
+10 with no native fallbacks. Direct synchronous APIs keep their signatures;
+callers outside these async boundaries still must wait for readiness.
+
+The existing five-pair boot harness now alternates launch order by pair, waits
+for load <=8 outside each timing span and records every UI/editor/open value.
+Each app launch checks the data volume for >=40 GiB free. Measurements and final
+validation results are appended after the runs; no timing pass is inferred from
+functional tests.
+
+### Observed results and the remaining performance gate
+
+- Final correctness: native and production `js-pow` wasm each match all 42,498
+  V8 cases, including 200 corpus cases, and 13 × 400,000 math samples. The same
+  vectors compare tracked/untracked evaluation and bound numeric plans with
+  changed time/frame/keyed inputs. No references or tolerances changed. The
+  non-production no-`js-pow` fallback retains its established seven pow-only
+  case differences; production uses V8's Math.pow import.
+- The final renderer/kernel selection passes 155 tests with two opt-in skips;
+  the held-real-wasm agent and activation e2es both pass. Clippy is clean and
+  renderer typecheck reports zero errors and the existing IconCropper warning.
+- First completed quiet-machine expression pairs: 400 channels, median native
+  191.700 µs/frame versus today 65.400 µs/frame. The intermediate numeric/slot
+  pass measured 113.750 versus 65.050 µs/frame (284.375 versus 162.625 ns/call).
+  Intermediate scalar calls measured 371.500 versus 90.000 ns. Those rows fail
+  the no-slower target. They precede the final source/module freeze and removal
+  of per-channel error-string conversions, and are not final-code timing claims.
+- The final timing retry passed the load <=8 guard, but never acquired the
+  shared Electron lock. The expression job waited over ten minutes; the fresh
+  boot-pair job also remained queued. The lock was held by other lanes' native
+  text harnesses. Only this worktree's verified waiting wrappers were stopped;
+  no other lane or lock was changed. Final-code P6 timing is **unverified**, and
+  its performance gate stays open. Own `engine/target` was removed.
+- Five alternating boot pairs were captured earlier with load <=8 before each
+  launch. Today UI median/max: 608.318/806.402 ms; native: 617.971/662.866 ms.
+  Editor median/max: 889.924/1093.429 versus 922.988/940.655 ms. Editor-open span
+  median/max: 114.364/116.636 versus 116.236/120.156 ms. All launches returned
+  activation value 10 with no native failure/fallback. The medians regress, so
+  this is not a performance pass. That first capture included a redundant df
+  call inside the startup timing span; the harness now checks disk entirely
+  outside that span, and the corrected final rerun was blocked by the lock.
+- App runs reused fixups2's matching-protocol native addons through explicit
+  absolute overrides; pm-wasm was rebuilt from this branch. The expression
+  results concern the renderer's actual pm-wasm facade. Rebuild integration's
+  addons before treating a new startup run as the full Phase 3c timing gate.
+
+Evidence is outside Git: `/tmp/ne-w5/fixups3-evidence/` (first pairs),
+`/tmp/ne-w5/fixups3-profile/` (intermediate diagnostics),
+`/tmp/ne-w5/fixups3-final-expression-parity.log`,
+`/tmp/ne-w5/fixups3-boot-native-e2e.log`, the final unit/typecheck/clippy logs,
+and `fixups3-resource-block.json` plus the load retry records. No final
+performance pass is inferred from correctness. Cold address interning remains
+separate from the warm resident-frame measurement; arbitrary direct synchronous
+compatibility calls outside the readiness boundaries still require a ready host.
+
+### Round 2: Node inner loop and bound scalar plans
+
+`apps/desktop/scripts/expression-benchmark.mjs` bundles the real renderer
+`legacy/core/anim.ts` (and its `expression.ts` dependency), model/easing modules,
+and production EngineDoc facade into a temporary Node ESM bundle. No evaluator
+or expression helper is replaced. Only host services unrelated to evaluation
+(invalidation, notifications, asset lookup and bus transport) are inert; the bus
+still delivers listeners. Both evaluators run in the same Node process against
+independent, identical projects, with the production release pm-wasm. Electron
+and the shared Electron lock are absent from this inner loop.
+
+Run from the repository root after building the release module:
+
+```sh
+node engine/crates/pm-wasm/scripts/build.mjs
+PM_BENCH_OUT=/tmp/expression-benchmark.json node apps/desktop/scripts/expression-benchmark.mjs
+```
+
+The runner requires nice 0, at least 40 GiB free, and one-minute load <=8 before
+and after measurement. It waits up to 30 seconds for quiet and otherwise fails
+for a later retry. `PM_BENCH_FRAMES` overrides the default 4,000 frames per side
+of each of nine alternating pairs. Each side first warms for 1,000 frames. The
+400-channel fixture is the same four sources on 100 layers as the Electron
+fixture above. Every frame changes time; signed zero and other reference times
+are checked with `Object.is`, and every pair must have identical accumulated
+answers. Results include median/p95 of the nine block averages and a separate
+2,000-frame-per-side latency distribution, sampled in eight alternating pairs.
+
+The scalar case uses one layer/channel and nine alternating 100,000-call pairs.
+Cold means the first evaluated frame of a fresh project and native instance,
+with module compilation, document loading and fixture construction outside the
+timing. Edit/rebind means changing a parameter and one expression source,
+calling the real `touch()` and evaluating the same frame time; diff/apply and
+re-binding are included. Cold/edit each have nine alternating pairs. All units
+are microseconds per frame (per call for the one-channel scalar case).
+
+Resident frame groups now prepare their numeric id buffer once. A warm frame
+calls only `pm_ev_batch(n, time)` and reads shared numeric result/status views;
+there is no per-channel JS/wasm marshalling or hot-path string/JSON encoding.
+Scope switches and generic batch users restore the correct ids; buffer growth
+renews views. Scope-owned copies keep independent frame memos exact. Bound
+numeric plans additionally accept only time/local-time/base on the warm path,
+avoiding document-context construction; full bytecode remains the fallback.
+The ordinary empty scope no longer constructs a scope-stamp object per channel.
+
+Measured on Node 24.18.0 / V8 13.6, nice 0, load 7.897 before / 7.825 after:
+
+| Case | Native median | Today median | Native p95 | Today p95 |
+|---|---:|---:|---:|---:|
+| 400 channels, block average µs/frame | 38.323 | 77.704 | 38.795 | 78.026 |
+| 400 channels, individual frame µs | 37.709 | 75.541 | 39.792 | 80.208 |
+| One-channel scalar µs/call | 0.127128 | 0.108808 | 0.147446 | 0.110591 |
+| Cold 400-channel frame µs | 4196.625 | 180.083 | 4808.916 | 267.917 |
+| Edit/rebind + frame µs | 1275.958 | 133.500 | 3081.625 | 207.750 |
+
+The requested warm 400-channel Node gate passes: 95.808 versus 194.261 ns per
+channel, about 51% less frame cost. Scalar, cold and edit/rebind still regress
+and are separate remaining costs; this does not claim every expression workload
+is at parity. Absolute Node timings are not substitutes for Electron 44 / V8
+15.2 timings. The release module SHA-256 is
+`77dd7a122c6bc8e3db8b437b2d0f8d8e305b2b9fb1b3f459e836a4e0a9e139e9`.
+Raw samples and runtime versions are outside Git in
+`/tmp/ne-w5/fixups3-r2-node-numeric.json`.
+
+Current integration was merged first. Both release addons were rebuilt here
+and load with `protocol-25292d6fdfffb933`; no fixups2 addon is used in round 2.
+Native Rust and production `js-pow` wasm replay the unchanged saved Electron V8
+reference: 42,498 exact cases and all 13 × 400,000 math samples pass, including
+the new scalar-input comparisons. The wasm replay runs in Node against those
+saved V8 answers; it does not regenerate references with Node. pm-eval's 14
+vector/cache/identity tests and pm-wasm's engine/query tests pass, including the
+new revision/type/error guard regression. EngineDoc's 101 unit/dual/audit tests
+pass (two opt-in benchmark skips); the earlier kernel/agent selection remains
+passing. Renderer typecheck has zero errors and the existing IconCropper
+warning, and the three changed libraries pass clippy with warnings denied.
+
+The single combined Electron expression/startup confirmation attempt could
+not acquire the shared lock within its 20-minute window. Its own waiting
+wrapper was stopped; no Electron run started, and no other lane or lock was
+changed. Final-code Electron expression and five-pair startup confirmation are
+pending for the orchestrator's measurement window. Node's pass does not infer
+an Electron or startup pass. The worktree's `engine/target` was removed after
+validation; rebuilt addons and the release module remain staged outside Git.
+
+### Round 3: incremental expression rebinding (EXPR-1)
+
+The owner accepted the scalar one-off difference (127 versus 109 ns) and set
+the cold first-frame bound to 8 ms for the 400-channel fixture. Repeated
+edit-and-frame cost remains subject to comparison with today's evaluator.
+The Node runner now measures a single scene-parameter drag, one expression
+source edit, layer insertion, and layer removal independently. Each row has
+nine alternating pairs of 40 timed edits after 40 edit warmups per side, each
+including the production writer and
+the next frame at a new time. `PM_BENCH_EDIT_STEPS` changes that count. Source
+and structural edits use the real scoped `PM.Edit.apply`/history transaction;
+parameter edits share the setter used by generated workspace controls. For
+structural rows, the opposite operation and its frame run outside the timed
+step, so insertion and removal each have a stable 400-expression baseline.
+Each step's frame sum and every channel's final answer must match exactly.
+The output includes median/p95, barrier operations, reintern counts and Rust
+plan counters. Optional `PM_BENCH_PROFILE=1` adds diagnostic timing around
+flush/batch/frame; a profiled run cannot report a gate pass.
+
+Interned channel addresses survive leaf edits and structural changes when
+their original live owner, property, composition scope and first-ID identity
+remain valid. Expression removal/addition updates the resident batch. A scene
+parameter's generated setter names its exact dirty path only when the map
+key still owns that parameter; customized aliases retain the unknown-write
+path. A parameter drag therefore neither diffs the entire document nor
+reinterns the fixture's 400 channels.
+
+Rust retains the immutable source and static/keyframed base independently of
+its bound numeric plan. A new revision validates fixed numeric inputs bit for
+bit, retains unchanged plans and refreshes only changed bindings; unrelated
+root edits preserve unchanged layer addresses without another property walk.
+Equal full source and numeric binding shape share a weakly held plan, bounded
+to 256 hash-indexed pool entries per source. The immutable source/bytecode is shared too.
+Validation sharing is scoped to a unique immutable composition-view token,
+plus layer identity where read, captured index and fps. It cannot confuse
+fresh documents, reused allocations, signed zero or changed numeric types.
+Any nonnumeric fixed input uses the original general evaluator. Dynamic
+time/local time/base inputs are never folded. Revalidated numeric plans use
+the same scalar execution path as warm frames.
+
+For plans whose fixed reads are exclusively layer-local (including captured
+index), an unchanged layer revision and index prove the binding unchanged
+without rebuilding a context or rereading its fields. Composition fields, fps,
+and parameters always take fixed-input validation. This proof is opt-in for
+expression-engine implementations; unknown implementations remain conservative.
+The composition's layer node is resolved once with its immutable view.
+
+Final unprofiled measurement: Node 24.18.0 / V8 13.6.233.17-node.50, nice 0,
+load 7.038 before / 7.590 after. Nine alternating pairs
+per case; 4,000 warm frames per side and 40 timed edits after 40 edit warmups.
+
+| Case | Native median | Today median | Native p95 | Today p95 |
+|---|---:|---:|---:|---:|
+| 400 channels, block average µs/frame | 48.046635 | 89.997990 | 52.559062 | 100.159969 |
+| 400 channels, individual frame µs | 51.416000 | 96.167000 | 55.000000 | 113.250000 |
+| One-channel scalar µs/call | 0.168386 | 0.142275 | 0.207364 | 0.158288 |
+| Cold 400-channel frame µs | 5216.583000 | 244.875000 | 6834.125000 | 551.834000 |
+| parameterDrag + frame µs | 98.708000 | 113.375000 | 132.958000 | 136.542000 |
+| sourceEdit + frame µs | 604.458000 | 516.083000 | 819.167000 | 645.125000 |
+| layerAdd + frame µs | 5190.459000 | 4357.917000 | 6891.375000 | 5167.125000 |
+| layerRemove + frame µs | 5015.208000 | 4301.375000 | 5492.250000 | 4674.333000 |
+
+Warm frame and parameter-drag median/p95 pass. The maximum of the nine cold
+frames is 6.834 ms, under EXPR-1's 8 ms bound. The scalar difference
+remains in the accepted one-off category; these are updated observations, not
+an assertion that its cost equals today's. The runner's overall `pass` remains
+false: source edit, layer insertion and layer removal still regress. No
+acceptance is inferred for those rows. Layer operations use the standard
+front insertion, so captured `idx` and `comp.layers.length` really change.
+
+Across the 360 timed parameter steps there are 360 leaf batches, zero structural
+fallback diffs and zero reinterns. Each 40-step pair refreshes 4,000 bindings
+(100 parameter-dependent channels per step); unchanged plans are retained.
+Source edits refresh 40 plans per pair, one per changed source, with zero
+reinterns. Structural rows also retain all 400 channel IDs; their plan counters
+include the untimed opposite-operation setup, and refresh the 200 channels
+whose captured index or layer count changed. A separate native regression
+asserts exact affected-plan counts for parameter, fps, layer value, source,
+insertion and removal edits. Duplicate IDs and a parameter edit following an
+unevaluated layer edit cannot advance a stale binding.
+
+Applied patch paths additionally advance already-validated layer-local plans
+when only parameters/provenance changed, or a leaf in another layer changed.
+The exact base revision is required. Layer IDs, whole-layer replacements,
+structural operations and unknown composition paths retain full revalidation.
+This avoids context/address work for unaffected channels, including during a
+parameter drag. The ordinary numeric execution path and exact memo bits remain.
+
+The diagnostic profile before that final patch-path shortcut attributes about
+59 µs per source edit to flush/diff/apply and 67 µs to the numeric batch; layer
+insertion/removal flushes are about 472/442 µs, with batches 181/211 µs. These
+profiled numbers identify remaining work and are not gate timings. Source and
+structural writers also include real scoped history/provenance work. Optimizing
+that shared writer/barrier path remains necessary to close all P6 rows; this
+round does not hide or accept the remaining regressions.
+
+The final production wasm SHA-256 is `0d3b90c4d5df45db25544611d9bd87c8a0e51e64d1fe3c977985b4bc9423b27a`.
+Raw final samples are in `/tmp/ne-w5/fixups3-r3-node-incremental.json`; the
+profiled diagnostic is `/tmp/ne-w5/fixups3-r3-node-profile4.json`, outside Git.
+Native and production js-pow wasm again match all 42,498 saved Electron V8 cases
+and 13 × 400,000 math samples. EngineDoc's 102 tests pass, with two opt-in
+benchmark skips. The native engine's incremental regressions, evaluator
+vectors, renderer typecheck and three-library clippy pass.
+
+The single combined Electron/startup attempt acquired the lock after about ten
+seconds, within its 20-minute acquisition budget. Both preflights stopped
+before app launch because machine load stayed above 8 (the expression check
+observed 10.702). No Electron timing or startup pair was measured; both remain
+pending for a quiet orchestrator window. The attempt released its own lock.
+Its external evidence is `/tmp/ne-w5/fixups3-r3-electron/`. The own release
+addons were rebuilt against integration `92beaaa8` and speak
+`protocol-25292d6fdfffb933`; no fixups2 addon was borrowed.
+
+### Round 4: every expression style, lazy frames (2026-10-19)
+
+Review of round 3 found the warm-frame pass did not generalize: the committed
+fixtures used four sources inside the numeric subset, while ternaries,
+comparisons and the helpers (and every source with a string or a dynamic
+index) ran the bytecode evaluator per frame, measured up to 45% slower than
+today; and the frame batch evaluated every resident id at each new time, so a
+project of sequential layers paid for inactive and deleted layers (2.5x slower
+reading 10 of 100 layers). Round 4 changes (details in `expressions.md`,
+`write-path.md`, `pm-eval.md`):
+
+- pm-expr's typed plan covers comparisons, `!`, `&&`/`||`, conditionals,
+  `Math` constants and every numeric helper; other sources get a general
+  binding (subexpressions without time/value/channel inputs evaluated once per
+  revision, substituted when primitive, revalidated by re-evaluation). Literal
+  member keys compile into one op; ASCII document strings convert with one
+  allocation.
+- pm-eval prepares a keyed expression's temporal track with its plan (it was
+  rebuilt per evaluation: 186 versus 10 µs per native 400-channel frame) and
+  serves keyed bases and documents with errors elsewhere from the scalar plan.
+- The renderer evaluates expression ids in runs that frames read
+  (`pm_ev_batch_range`), sized from the last epoch's in-order streaks and
+  limited to recently read members; lone channels use the scalar call.
+
+**Methodology.** `scripts/expression-benchmark.mjs` (Node 24.18.0, V8
+13.6.233.17-node.50) now also runs a suite (`e2e/helpers/expression-suites.ts`)
+of five expression styles, each on 400 channels with static and keyframed
+bases, read either all per frame or as a 10-of-100-layer window moving one
+layer per frame; each row has nine alternating 2,000-frame pairs, an
+`Object.is` guard on eight reference times per channel and on every pair's
+sums, and must have native median and p95 at or below today. It also reports
+wasm ids evaluated per frame. **Node's V8 is not the shipping Electron 44 V8
+(15.2):** their `Math.sin` differs in the last bit for some inputs (the
+reviewer's `wiggle(2, 10) + value` at t = 17/30), while pm-expr matches
+Electron's bit for bit. The Node runner's exactness guard and "today" timings
+are therefore Node-specific; it skips the sin-based `oscillators` suite, and
+its `numeric` fixture's `Math.sin(time)` passes the guard because of its
+inputs. Electron is the authority: `engine-expression-performance.spec.ts`
+runs every suite, oscillators included, against today in Electron 44.
+
+Final unprofiled Node run, nice 0, load 5.99 before / 5.56 after, wasm
+`bdbbee04f37592b1a5aecbf19e06d07a7bd1b1fd29442f609e20ca55d3a013b5`
+(raw: `/tmp/ne-w5/fixups3-r4/node-full-run1.json`):
+
+| Case | Native median | Today median | Native p95 | Today p95 |
+|---|---:|---:|---:|---:|
+| 400 channels, block average µs/frame | 43.951 | 75.554 | 44.211 | 77.173 |
+| 400 channels, individual frame µs | 43.500 | 73.500 | 46.333 | 79.916 |
+| One-channel scalar µs/call (EXPR-1) | 0.136 | 0.108 | 0.155 | 0.110 |
+| Cold 400-channel frame µs (max 4741) | 3888.708 | 189.834 | 4741.041 | 426.667 |
+| parameterDrag + frame µs | 81.417 | 86.792 | 98.292 | 105.750 |
+| sourceEdit + frame µs (EXPR-2) | 471.625 | 411.042 | 574.917 | 492.458 |
+| layerAdd + frame µs (EXPR-2) | 4094.042 | 3575.625 | 4363.875 | 3783.875 |
+| layerRemove + frame µs (EXPR-2) | 4074.292 | 3563.417 | 4286.125 | 3821.750 |
+
+Suite, µs per frame (native median/p95 against today median/p95; ids
+evaluated per frame for the channels read):
+
+| Suite | Base | Read | Native | Today | Evaluated |
+|---|---|---|---:|---:|---:|
+| numeric | static | all 400 | 48.00 / 53.31 | 82.41 / 87.23 | 400 |
+| numeric | static | window 40 | 4.91 / 5.02 | 8.31 / 8.64 | 40.01 |
+| numeric | keyed | all 400 | 50.47 / 51.43 | 100.90 / 102.06 | 400 |
+| numeric | keyed | window 40 | 5.33 / 5.44 | 10.22 / 11.30 | 40.01 |
+| helpers | static | all 400 | 53.87 / 54.26 | 93.13 / 93.94 | 400 |
+| helpers | static | window 40 | 5.60 / 5.67 | 9.52 / 9.62 | 40.01 |
+| helpers | keyed | all 400 | 56.41 / 56.75 | 113.29 / 113.85 | 400 |
+| helpers | keyed | window 40 | 5.78 / 6.00 | 11.04 / 11.19 | 40.01 |
+| conditionals | static | all 400 | 50.46 / 50.85 | 66.27 / 67.21 | 400 |
+| conditionals | static | window 40 | 5.07 / 5.20 | 6.68 / 6.74 | 40.01 |
+| conditionals | keyed | all 400 | 53.23 / 54.60 | 84.70 / 84.91 | 400 |
+| conditionals | keyed | window 40 | 5.33 / 5.37 | 8.54 / 8.67 | 40.01 |
+| general | static | all 400 | 47.98 / 48.33 | 103.89 / 104.69 | 400 |
+| general | static | window 40 | 4.68 / 4.85 | 10.38 / 10.70 | 40.01 |
+| general | keyed | all 400 | 50.97 / 54.56 | 123.83 / 124.66 | 400 |
+| general | keyed | window 40 | 4.97 / 5.12 | 12.11 / 12.36 | 40.01 |
+
+The `helpers` and `conditionals` suites are the reviewer's two source sets
+(their round-3 measurements: 90.1 versus 85.2 and 88.0 versus 60.6 µs per
+frame); the window is the reviewer's sequential-layers read (19.96 versus
+7.92 µs). Every suite row passes median and p95; windows evaluate the 40 ids
+they read (0.01 is the first frame's short run). Warm frames, latency, drag
+and the cold bound pass; the scalar one-off and the three discrete edit rows
+remain in the owner-accepted EXPR-1/EXPR-2 categories (the runner's overall
+`pass` stays false because of those rows and is not overridden).
+
+A second complete run (load 6.37 before / 6.53 after,
+`/tmp/ne-w5/fixups3-r4/node-full-run2.json`) repeats the outcome: all 16
+suite rows pass median and p95; warm frames 46.154 / 47.492 against 76.391 /
+76.993; drag 82.916 / 98.125 against 87.291 / 105.667; cold maximum 4.739 ms;
+scalar 0.144 against 0.112; source edit 473.6 against 421.5; layer add/remove
+4255 / 4227 against 3687 / 3687 (medians, µs). A third run on a quiet machine
+(load 2.13 / 2.74, `node-full-run3.json`) agrees: every suite row passes
+(the closest, conditionals static window, 4.864 / 4.998 against 6.448 /
+6.713); warm frames 44.036 / 44.432 against 73.990 / 74.822; drag 80.417 /
+95.167 against 85.459 / 106.000; cold maximum 4.567 ms; scalar 0.138 against
+0.110.
+
+Native Rust alone (`ev_batch` over 400 ids, no JS) for orientation: numeric
+9.4 µs, helpers 12.4 µs, general 11.7 µs (was 119.4), keyed numeric 10.3 µs
+(was 186.1) per frame.
+
+Electron 44: the suite measurement (`PM_FIXUPS3_MEASURE=1`, every suite
+including oscillators, five alternating 1,000-frame pairs per row, exact
+parity) and the five alternating time-to-UI/editor-open pairs run in the
+orchestrator's quiet measurement window under pm-electron-lock with this
+worktree's build (app bundle and release addons built from the final code;
+addons speak `protocol-25292d6fdfffb933`). One combined attempt (boot e2e, this
+suite, the five boot pairs, all under one lock acquisition:
+`/tmp/ne-w5/fixups3-r4/electron/run.sh`) waited about 30 minutes behind
+about ten other lanes' lock waiters and never acquired the lock; it was
+stopped without touching the lock. No Electron timing or e2e pass is claimed
+for this round.

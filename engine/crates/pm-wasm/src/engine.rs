@@ -432,6 +432,7 @@ impl Engine {
         self.doc
             .apply_ops_at(&ops, revision)
             .map_err(|e| ApplyError::Mismatch(e.to_string()))?;
+        self.ev.document_patched(&self.doc, base, &ops);
         self.stats.batches += 1;
         self.stats.ops += ops.len() as u64;
         Ok(ops.len())
@@ -524,19 +525,25 @@ impl Engine {
         let ids: Vec<PropId> = ids.iter().map(|&i| PropId::from_index(i)).collect();
         let mut k = vec![ValueKind::Number; ids.len()];
         self.ev.ev_batch(&self.doc, &ids, t, out, &mut k);
-        for (dst, src) in kinds.iter_mut().zip(k) {
-            *dst = src as u8;
+        for ((dst, src), &id) in kinds.iter_mut().zip(k).zip(&ids) {
+            *dst = src as u8
+                | if self.expression_error(id).is_some() {
+                    0x80
+                } else {
+                    0
+                };
         }
+    }
+
+    /// Diagnostics for incremental plan reuse (not on the evaluation path).
+    pub fn evaluation_cache_stats(&self) -> pm_eval::CacheStats {
+        self.ev.cache_stats()
     }
 
     /// The expression error recorded for an id's channel, if any.
     pub fn expression_error(&self, id: PropId) -> Option<&str> {
         let a = self.ev.address(id)?;
-        self.ev.expression_error(
-            &a.comp.to_string_lossy(),
-            &a.layer.to_string_lossy(),
-            &a.key.to_string_lossy(),
-        )
+        self.ev.expression_error_at(a)
     }
 
     // ── fonts ─────────────────────────────────────────────────────────────

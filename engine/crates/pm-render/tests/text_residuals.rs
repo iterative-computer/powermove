@@ -7,7 +7,14 @@ use serde_json::{Value, json};
 
 /// The synthetic approved table the logic tests use.
 const EDGE: [Approved; 1] = [residuals::raster("edge", 3, 4)];
-const EDGE_CORPUS: [Approved; 1] = [residuals::corpus("edge", "group/project", false, 16.0, 3, 4)];
+const EDGE_CORPUS: [Approved; 1] = [residuals::corpus(
+    "edge",
+    "group/project",
+    false,
+    16.0,
+    3,
+    4,
+)];
 
 fn load(f: &Value) -> Result<Ratchet, String> {
     Ratchet::from_json_with(&f.to_string(), &EDGE)
@@ -136,8 +143,14 @@ fn every_listed_case_of_a_gate_must_be_measured_in_a_full_run() {
 #[test]
 fn the_real_fixture_loads_within_the_approved_ceilings() {
     let r = Ratchet::load();
-    assert_eq!(r.unmeasured(Gate::Raster).len(), 19);
-    assert_eq!(r.unmeasured(Gate::Corpus).len(), 4);
+    let fixture = real();
+    let entries = fixture["cases"].as_array().unwrap();
+    for (gate, name) in [(Gate::Raster, "raster"), (Gate::Corpus, "corpus")] {
+        assert_eq!(
+            r.unmeasured(gate).len(),
+            entries.iter().filter(|e| e["gate"] == name).count()
+        );
+    }
     let mut ids: Vec<_> = APPROVED.iter().map(|a| a.id).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -197,7 +210,8 @@ fn an_approved_budget_cannot_be_moved_to_another_measurement() {
     }
     let mut f = real();
     f["cases"][0]["gate"] = json!("corpus");
-    f["cases"][0]["corpus"] = json!({"project": "real/powermove-ad", "isolated": false, "time": 16});
+    f["cases"][0]["corpus"] =
+        json!({"project": "real/powermove-ad", "isolated": false, "time": 16});
     assert!(Ratchet::from_json(&f.to_string()).is_err());
 }
 
@@ -214,5 +228,32 @@ fn lowering_or_removing_budgets_stays_possible_by_editing_the_fixture() {
         let mut f = real();
         f["cases"].as_array_mut().unwrap().remove(i);
         assert!(Ratchet::from_json(&f.to_string()).is_ok());
+    }
+}
+
+#[test]
+fn retired_exact_cases_cannot_be_revived_by_editing_the_fixture() {
+    for id in [
+        "colr-0033",
+        "colr-0034",
+        "caption-pop-0455",
+        "caption-pop-0456",
+        "caption-pop-0458",
+        "caption-pop-0459",
+        "caption-stroke-0491",
+        "caption-whisper-0442",
+        "caption-whisper-0443",
+        "caption-whisper-0444",
+    ] {
+        let mut f = real();
+        f["cases"].as_array_mut().unwrap().push(json!({
+            "gate":"raster","id":id,"pixelsOverBound":1,"maxCv":2,
+            "cause":"An exact case must stay on the strict bound.",
+            "sideBySide":format!("{id}.png")
+        }));
+        assert!(
+            Ratchet::from_json(&f.to_string()).is_err(),
+            "retired case {id} revived"
+        );
     }
 }
