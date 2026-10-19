@@ -45,6 +45,13 @@ requires Node 22 for addon loading, and launches `pm-cli`. The package build cop
 ignored `packages/cli/prebuilds` into `dist/native`. Both darwin-arm64 and darwin-x64
 need their own matching LGPL FFmpeg artifacts and clean Node 22 load test.
 
+Shipping-profile validation remains blocked on the LTO repair. With the current
+thin-LTO release profile, `pm-cli` fails to link with
+`failed to get bitcode from object file for LTO (Can't find section __bitcode)`.
+Debug-profile Node 22 loading does not establish that a release prebuild can ship.
+Rebuild and load-test the CLI and both addons with the shipping profile after the
+hybrid-crate/LTO fix lands; do not change the release profile to bypass this gate.
+
 `pm-cli render` now calls `Renderer::require_shader_reference`. The shared effect,
 transition and shader-layer gates consult a configured parity service even when no
 runner is attached. Unknown and pinned programs then fail by name, rather than
