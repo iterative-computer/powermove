@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { imports, PmWasm } from '../../engine-doc/wasm';
 import { loadGltf, disposeModel } from './import-model';
+import { object3dFromEngine } from './compat-object3d';
 
 const MODULE = fileURLToPath(new URL('../../../public/engine/pm_wasm.wasm', import.meta.url));
 const REQUIRED = process.env.PM_WASM_REQUIRED === '1';
@@ -160,17 +161,14 @@ function glb(json: Json): Uint8Array {
 }
 
 /** A node two nodes list as a child. GLTFLoader attaches it to whichever
- * parent's `loadNode` promise settles last, which depends on promise depth
- * and on asynchronous texture decoding; the engine does not reproduce that
- * order and refuses the file (the missing-model box). A known gap
- * (docs/engine/gltf.md, "Acceptance"). */
+ * parent's `loadNode` promise settles last. */
 const twoParents = (): Json => { const g = base(); g.nodes.push({ name: 'other', children: [1] }); g.scenes[0].nodes.push(2); return g; };
 
 /** Today's verdict: `loadGltf` (GLTFLoader may never settle on some broken
  * files; such a file never becomes a model). */
 async function today(bytes: Uint8Array): Promise<string | null> {
   const timeout = new Promise<string>(resolve => setTimeout(() => resolve('never settles'), 3000));
-  const load = loadGltf(new Blob([bytes])).then(m => { disposeModel(m.object3d); return null; }, (e: Error) => String(e?.message ?? e));
+  const load = loadGltf(new Blob([new Uint8Array(bytes)])).then(m => { disposeModel(m.object3d); return null; }, (e: Error) => String(e?.message ?? e));
   return Promise.race([load, timeout]);
 }
 
@@ -210,8 +208,8 @@ describe.skipIf(!REQUIRED && !existsSync(MODULE))('glTF acceptance: today\'s imp
   }, 120_000);
 });
 
-describe.skipIf(!REQUIRED && !existsSync(MODULE))('glTF acceptance: the known gap', () => {
-  it('a node with two parents loads today and is refused by the engine', async () => {
+describe.skipIf(!REQUIRED && !existsSync(MODULE))('glTF acceptance: shared child nodes', () => {
+  it('loads a two-parent node and attaches it to the same parent as GLTFLoader', async () => {
     const module = await WebAssembly.compile(readFileSync(MODULE));
     const bytes = new TextEncoder().encode(JSON.stringify(twoParents()));
     const g = globalThis as any;
@@ -220,7 +218,10 @@ describe.skipIf(!REQUIRED && !existsSync(MODULE))('glTF acceptance: the known ga
     try {
       expect(await today(bytes)).toBeNull();
     } finally { if (!hadProgressEvent) delete g.ProgressEvent; }
-    expect(() => new PmWasm(new WebAssembly.Instance(module, imports)).importModel(bytes)).toThrow(/two parents/);
-    expect(new PmWasm(new WebAssembly.Instance(module, imports)).setModel('case', 'gltf', bytes)).toMatch(/two parents/);
+    const data = new PmWasm(new WebAssembly.Instance(module, imports)).importModel(bytes);
+    const model = await object3dFromEngine(data, bytes);
+    expect(model.object3d.getObjectByName('tri')?.parent?.name).toBe('other');
+    disposeModel(model.object3d);
+    expect(new PmWasm(new WebAssembly.Instance(module, imports)).setModel('case', 'gltf', bytes)).toBeNull();
   });
 });

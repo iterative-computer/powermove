@@ -7,7 +7,7 @@ use pm_blender::snapshot::{AssetBytes, SnapshotAsset};
 use pm_geom3d::gltf::{Mode, ObjectKind, pose};
 use pm_model::json::{Map, Value};
 
-use crate::scene3d::gltf::{GltfAsset, GltfMap, MapSource, material};
+use crate::scene3d::gltf::{GltfAsset, GltfMap, MapSource, material, source_material};
 use crate::scene3d::{Material3d, MaterialKind, Object3d};
 use crate::three::math::{self, Mat4};
 
@@ -220,13 +220,10 @@ pub(super) fn meshes(
         .and_then(Value::as_array)
         .and_then(|s| s.first());
     let mut out = Vec::new();
-    let mut mesh_index = 0;
     for i in model.traversal() {
         let ObjectKind::Drawable(d) = &model.objects[i].kind else {
             continue;
         };
-        let mesh = &object.meshes[mesh_index];
-        mesh_index += 1;
         let g = &model.geometries[d.geometry];
         if g.mode != Mode::Triangles {
             continue;
@@ -252,14 +249,21 @@ pub(super) fn meshes(
             let point = poser.vertex(v);
             positions.extend(point);
             if let Some(normal) = &g.normal {
-                let mut dir = std::array::from_fn(|c| f64::from(normal.data[v * 3 + c]));
-                if d.skinned {
-                    let origin: [f64; 3] =
-                        std::array::from_fn(|c| f64::from(g.position.data[v * 3 + c]));
-                    dir = poser.apply_bone(v, std::array::from_fn(|c| dir[c] + origin[c]));
-                    dir = std::array::from_fn(|c| dir[c] - point[c]);
+                if g.short_attributes.iter().any(|(name, count)| *name == "NORMAL" && v >= *count) {
+                    // `BufferAttribute.getXYZ` past a short NORMAL returns
+                    // undefined; Vector3 arithmetic makes it NaN, and the
+                    // snapshot's JSON writes null for each component.
+                    normals.extend([f64::NAN; 3]);
+                } else {
+                    let mut dir = std::array::from_fn(|c| f64::from(normal.data[v * 3 + c]));
+                    if d.skinned {
+                        let origin: [f64; 3] =
+                            std::array::from_fn(|c| f64::from(g.position.data[v * 3 + c]));
+                        dir = poser.apply_bone(v, std::array::from_fn(|c| dir[c] + origin[c]));
+                        dir = std::array::from_fn(|c| dir[c] - point[c]);
+                    }
+                    normals.extend(math::normalize(dir));
                 }
-                normals.extend(math::normalize(dir));
             }
             for c in 0..2 {
                 let v = g.uv[0]
@@ -272,14 +276,15 @@ pub(super) fn meshes(
         m.insert("positions", numbers(positions));
         m.insert("normals", numbers(normals));
         m.insert("uvs", numbers(uvs));
-        m.insert("matrix", numbers(mesh.world));
+        m.insert("matrix", numbers(worlds[i]));
         m.insert("materialIndex", Value::Number(0.0));
         m.insert("smooth", Value::Bool(true));
         if use_source && slot.is_none() {
+            let source = source_material(asset, &model.materials[d.material], 0);
             textures.start(
                 object_index,
                 Value::Object(m),
-                mesh.materials.iter().next().unwrap(),
+                &source,
             );
         } else {
             m.insert(

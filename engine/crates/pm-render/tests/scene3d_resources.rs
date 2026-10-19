@@ -420,3 +420,79 @@ fn foreign_schema_corruption_fails_the_composition_scene() {
         );
     }
 }
+
+/// A morph target with no POSITION is a valid imported model. Three r180
+/// fails only when WebGLMorphtargets packs it for a draw, so the failure must
+/// stay on the object layer rather than becoming a missing-model placeholder.
+#[test]
+fn normal_or_color_only_morph_fails_when_drawn_not_when_imported() {
+    fn glb(target: &str) -> Vec<u8> {
+        let mut bin = Vec::new();
+        for value in [-1.0_f32, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0] {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+        bin.extend_from_slice(&[0; 36]);
+        let mut graph = json!({
+            "asset": {"version": "2.0"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0},
+                "targets": [{}]}]}],
+            "buffers": [{"byteLength": 72}],
+            "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36},
+                {"buffer": 0, "byteOffset": 36, "byteLength": 36}],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                    "min": [-1, -1, 0], "max": [1, 1, 0]},
+                {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"}
+            ]
+        });
+        graph["meshes"][0]["primitives"][0]["targets"][0][target] = json!(1);
+        let mut json = serde_json::to_vec(&graph).unwrap();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2_u32.to_le_bytes());
+        out.extend_from_slice(
+            &(12_u32 + 8 + json.len() as u32 + 8 + bin.len() as u32).to_le_bytes(),
+        );
+        out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    let dir = Dir::new("3d-morph-no-position");
+    let mut doc = obj_doc();
+    doc["assets"]["model"]["format"] = json!("glb");
+    let mut renderer = Renderer::headless().unwrap();
+    for target in ["NORMAL", "COLOR_0"] {
+        let path = dir.0.join(format!("{target}.glb"));
+        std::fs::write(&path, glb(target)).unwrap();
+        doc["assets"]["model"]["name"] = json!(format!("{target}.glb"));
+        let assets = resolver("model", &path);
+        let plans = object_plans(&mut renderer, &doc, &assets);
+        assert_eq!(plans.len(), 1, "{target}: imported object layer");
+        assert_eq!(
+            plans[0].scene.objects[0].meshes.len(),
+            1,
+            "{target}: imported model is present, not a placeholder"
+        );
+        let frame = renderer
+            .render(&load(&doc), "Ptest-root", ticks(0.0), &request(), &assets)
+            .unwrap();
+        assert_eq!(frame.failures.len(), 1, "{target}: {:?}", frame.failures);
+        assert_eq!(frame.failures[0].layer, "o");
+        assert!(
+            frame.failures[0].message.contains("reading 'count'"),
+            "{target}: {:?}",
+            frame.failures
+        );
+    }
+}

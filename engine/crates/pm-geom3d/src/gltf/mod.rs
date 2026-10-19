@@ -21,6 +21,7 @@
 
 pub mod anim;
 mod load;
+pub(crate) mod promise_order;
 pub mod math;
 pub mod pick;
 pub mod pose;
@@ -80,6 +81,10 @@ pub struct Morph {
     pub position: Option<Vec<Attribute>>,
     pub normal: Option<Vec<Attribute>>,
     pub color: Option<Vec<Attribute>>,
+    /// Original accessor counts before CPU-safe padding. Three's JS texture
+    /// packer iterates the position target's count and leaves later texels
+    /// zero; a shorter normal/color target inside that loop writes NaN.
+    pub source_counts: [Vec<usize>; 3],
 }
 
 impl Morph {
@@ -130,10 +135,12 @@ pub struct Geometry {
     /// largest morph displacement (`None` without min and max).
     pub bounding_box: Option<(Vec3, Vec3)>,
     pub mode: Mode,
-    /// Why WebGL refuses to draw this primitive, when it does (a vertex
-    /// attribute shorter than POSITION): three.js loads it, counts it in
-    /// the import facts and bounds, picks it, and draws nothing for it.
+    /// A bad index refuses a WebGL draw regardless of the material.
     pub undrawable: Option<String>,
+    /// Attributes whose source accessor is shorter than POSITION. The CPU
+    /// arrays are padded for safe poses; only a final shader that consumes
+    /// one of these attributes makes WebGL refuse the draw.
+    pub short_attributes: Vec<(&'static str, usize)>,
 }
 
 impl Geometry {
@@ -165,10 +172,11 @@ impl Geometry {
         }
         // `computeBoundingBox` with relative morph attributes: each
         // target's box added to the running box's corners.
-        for target in self.morph.position.iter().flatten() {
+        for (i, target) in self.morph.position.iter().flatten().enumerate() {
             let mut tlo = [f64::INFINITY; 3];
             let mut thi = [f64::NEG_INFINITY; 3];
-            for p in target.data.chunks_exact(3) {
+            let source_len = self.morph.source_counts[0].get(i).copied().unwrap_or(target.count());
+            for p in target.data[..source_len * 3].chunks_exact(3) {
                 for k in 0..3 {
                     tlo[k] = tlo[k].min(f64::from(p[k]));
                     thi[k] = thi[k].max(f64::from(p[k]));

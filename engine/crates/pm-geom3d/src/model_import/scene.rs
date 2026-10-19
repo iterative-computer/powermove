@@ -260,6 +260,9 @@ impl Builder<'_> {
     }
 
     fn attach(&mut self, parent: usize, child: usize) {
+        if let Some(old) = self.objects[child].parent {
+            self.objects[old].children.retain(|&c| c != child);
+        }
         self.objects[child].parent = Some(parent);
         self.objects[parent].children.push(child);
     }
@@ -315,6 +318,7 @@ impl Builder<'_> {
 
     /// `loadNode` (`_loadNodeShallow` plus children).
     fn node(&mut self, n: usize) -> usize {
+        if let Some(node) = self.node_objects[n] { return node; }
         let def = &self.model.nodes[n];
         let node_name = self.names.nodes[n].clone();
         let mut objects = vec![];

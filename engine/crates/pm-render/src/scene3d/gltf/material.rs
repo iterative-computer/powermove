@@ -326,6 +326,40 @@ pub fn parameters(
     Ok(p)
 }
 
+/// Whether three r180's final program binds a source attribute. WebGL
+/// rejects a draw with a bound attribute shorter than POSITION, but ignores
+/// an inactive one. Check after `sync` has applied the object's replacement
+/// material and maps; the glTF source material alone cannot decide this.
+pub fn consumes_short_attribute(mesh: &Mesh3d, material: &Material3d, name: &str) -> bool {
+    let Ok(p) = parameters(mesh, material, material.side, &LightCounts::default(), Target::Canvas)
+    else {
+        return false;
+    };
+    let uv0 = [
+        &p.map_uv, &p.alpha_map_uv, &p.light_map_uv, &p.ao_map_uv,
+        &p.emissive_map_uv, &p.bump_map_uv, &p.normal_map_uv,
+        &p.displacement_map_uv, &p.metalness_map_uv, &p.roughness_map_uv,
+        &p.anisotropy_map_uv, &p.clearcoat_map_uv, &p.clearcoat_normal_map_uv,
+        &p.clearcoat_roughness_map_uv, &p.iridescence_map_uv,
+        &p.iridescence_thickness_map_uv, &p.sheen_color_map_uv,
+        &p.sheen_roughness_map_uv, &p.specular_map_uv, &p.specular_color_map_uv,
+        &p.specular_intensity_map_uv, &p.transmission_map_uv, &p.thickness_map_uv,
+    ]
+    .into_iter()
+    .any(|uv| uv.as_deref() == Some("uv"));
+    match name {
+        "NORMAL" => matches!(material.kind, MaterialKind::Standard | MaterialKind::Physical)
+            && !p.flat_shading,
+        "TANGENT" => p.vertex_tangents && !p.flat_shading,
+        "COLOR_0" => p.vertex_colors,
+        "TEXCOORD_0" => uv0 || p.points_uvs,
+        "TEXCOORD_1" => p.vertex_uv1s,
+        "TEXCOORD_2" => p.vertex_uv2s,
+        "TEXCOORD_3" => p.vertex_uv3s,
+        _ => false,
+    }
+}
+
 fn push_map(
     u: &mut Vec<(String, Vec<f64>)>,
     t: &mut Vec<(String, TextureRef)>,

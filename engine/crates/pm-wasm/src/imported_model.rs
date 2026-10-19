@@ -84,7 +84,8 @@ pub fn import(bytes: &[u8]) -> Result<Value, String> {
         "weights":m.weights,
         "primitives":m.primitives.iter().map(|p| json!({
             "topology":format!("{:?}",p.topology),"positions":p.positions,"normals":p.normals,
-            "uv":p.uv,"uv1":p.uv1,"colors":p.colors,"colorComponents":p.color_components,
+            "uv":p.uv,"uv1":p.uv1,"uv2":p.uv2,"uv3":p.uv3,
+            "colors":p.colors,"colorComponents":p.color_components,
             "tangents":p.tangents,"joints":p.joints,"weights":p.weights,"indices":p.indices,
             "targets":p.targets.iter().map(|t|json!({"position":t.position,"normal":t.normal})).collect::<Vec<_>>(),
             "material":p.material,"accessorBounds":p.accessor_bounds

@@ -75,9 +75,11 @@ pub struct Primitive {
     pub topology: Topology,
     pub positions: Vec<[f32; 3]>,
     pub normals: Option<Vec<[f32; 3]>>,
-    /// TEXCOORD_0 and TEXCOORD_1 (three.js `uv`, `uv1`).
+    /// TEXCOORD_0 through TEXCOORD_3 (three.js `uv` through `uv3`).
     pub uv: Option<Vec<[f32; 2]>>,
     pub uv1: Option<Vec<[f32; 2]>>,
+    pub uv2: Option<Vec<[f32; 2]>>,
+    pub uv3: Option<Vec<[f32; 2]>>,
     /// COLOR_0 as RGBA (RGB colors get alpha 1); `color_components` says
     /// which the file stored (three.js keeps the item size).
     pub colors: Option<Vec<[f32; 4]>>,
@@ -94,10 +96,9 @@ pub struct Primitive {
     /// The POSITION accessor's min and max (normalized components scaled),
     /// grown by the largest morph displacement (GLTFLoader's `computeBounds`).
     pub accessor_bounds: Option<([f64; 3], [f64; 3])>,
-    /// Why WebGL refuses to draw this primitive, when it does: an index past
-    /// the last vertex or a vertex attribute shorter than POSITION. three.js
-    /// loads such a primitive (it counts toward the import facts and
-    /// bounds) and draws nothing for it, so the renderer skips it.
+    /// An index past the last vertex refuses a WebGL draw. Short vertex
+    /// attributes depend on the final material's active shader inputs and
+    /// short morph targets are packed into a texture by three.js.
     pub undrawable: Option<String>,
 }
 
@@ -455,10 +456,8 @@ pub fn load(bytes: &[u8]) -> Result<Model> {
         });
     }
     let scene = raw["scene"].as_u64().unwrap_or(0) as usize;
-    model.roots = raw["scenes"]
-        .get(scene)
-        .map(|s| ids(&s["nodes"]))
-        .unwrap_or_default();
+    // `load_nodes` kept only roots still owned by the default scene after
+    // GLTFLoader's loadScene promises for every scene have attached.
     model.scene_name = raw["scenes"]
         .get(scene)
         .and_then(|s| s["name"].as_str())
@@ -561,6 +560,8 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
             let normals = opt3("NORMAL")?;
             let uv = opt2("TEXCOORD_0")?;
             let uv1 = opt2("TEXCOORD_1")?;
+            let uv2 = opt2("TEXCOORD_2")?;
+            let uv3 = opt2("TEXCOORD_3")?;
             let (colors, color_components) = match attr("COLOR_0") {
                 Some(i) => {
                     let (v, c) = data.read(i as usize)?;
@@ -629,17 +630,6 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
             {
                 undrawable = Some(format!("mesh {mi}: index out of range"));
             }
-            for (name, len) in [
-                ("NORMAL", normals.as_ref().map(Vec::len)),
-                ("TEXCOORD_0", uv.as_ref().map(Vec::len)),
-                ("TEXCOORD_1", uv1.as_ref().map(Vec::len)),
-                ("COLOR_0", colors.as_ref().map(Vec::len)),
-                ("TANGENT", tangents.as_ref().map(Vec::len)),
-            ] {
-                if len.is_some_and(|l| l < positions.len()) {
-                    undrawable.get_or_insert(format!("mesh {mi}: {name} is shorter than POSITION"));
-                }
-            }
             let joints = match attr("JOINTS_0") {
                 Some(i) => {
                     let (v, c) = data.read(i as usize)?;
@@ -686,18 +676,6 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                     "mesh {mi}: skin attributes are shorter than POSITION"
                 ));
             }
-            if targets.iter().any(|t| {
-                [
-                    t.position.as_ref().map(Vec::len),
-                    t.normal.as_ref().map(Vec::len),
-                ]
-                .iter()
-                .any(|l| l.is_some_and(|l| l < positions.len()))
-            }) {
-                undrawable.get_or_insert(format!(
-                    "mesh {mi}: a morph target is shorter than POSITION"
-                ));
-            }
             let accessor_bounds = accessor_bounds(raw, pos_index as usize, p["targets"].as_array());
             primitives.push(Primitive {
                 topology,
@@ -705,6 +683,8 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                 normals,
                 uv,
                 uv1,
+                uv2,
+                uv3,
                 colors,
                 color_components,
                 tangents,
@@ -833,13 +813,16 @@ fn load_nodes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
             is_bone: bones[ni],
         });
     }
+    let selected = crate::gltf::promise_order::selected_parents(raw)
+        .ok_or_else(|| Error("glTF node hierarchy is cyclic or invalid".into()))?;
+    model.roots = selected.default_roots;
     for i in 0..model.nodes.len() {
-        for c in model.nodes[i].children.clone() {
-            if model.nodes[c].parent.is_some() {
-                return err(format!("node {c} has two parents"));
-            }
-            model.nodes[c].parent = Some(i);
-        }
+        model.nodes[i].children.retain(|&c| selected.parents.get(c) == Some(&Some(i)));
+    }
+    for (i, parent) in selected.parents.into_iter().enumerate() {
+        model.nodes[i].parent = parent;
+    }
+    for i in 0..model.nodes.len() {
         let n = &model.nodes[i];
         if n.mesh.is_some_and(|m| m >= model.meshes.len())
             || n.skin

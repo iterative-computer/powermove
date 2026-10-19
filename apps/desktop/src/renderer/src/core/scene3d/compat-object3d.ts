@@ -74,6 +74,8 @@ function geometry(p: any, metadata?: any): THREE.BufferGeometry {
   if (p.normals) g.setAttribute('normal', new THREE.Float32BufferAttribute(flat(p.normals), 3));
   if (p.uv) g.setAttribute('uv', new THREE.Float32BufferAttribute(flat(p.uv), 2));
   if (p.uv1) g.setAttribute('uv1', new THREE.Float32BufferAttribute(flat(p.uv1), 2));
+  if (p.uv2) g.setAttribute('uv2', new THREE.Float32BufferAttribute(flat(p.uv2), 2));
+  if (p.uv3) g.setAttribute('uv3', new THREE.Float32BufferAttribute(flat(p.uv3), 2));
   if (p.colors) g.setAttribute('color', new THREE.Float32BufferAttribute(flat(p.colors).filter((_: number, i: number) => p.colorComponents === 4 || i % 4 !== 3), p.colorComponents));
   if (p.tangents) g.setAttribute('tangent', new THREE.Float32BufferAttribute(flat(p.tangents), 4));
   if (p.joints) g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(flat(p.joints), 4));

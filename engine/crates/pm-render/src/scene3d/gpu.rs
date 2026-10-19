@@ -1088,8 +1088,19 @@ impl Scene3dRenderer {
         draw: &DrawDesc,
         samples: u32,
     ) -> Result<Prepared, Error3d> {
-        let (key, compiled) = self.program(device, &draw.params)?;
         let mesh_desc = &scene.objects[draw.object].meshes[draw.mesh];
+        if legacy_morph_packer_error(
+            mesh_desc
+                .geometry
+                .extra
+                .as_deref()
+                .and_then(|e| e.morph.as_ref()),
+        ) {
+            return Err(Error3d::Failed(
+                "Cannot read properties of undefined (reading 'count')".into(),
+            ));
+        }
+        let (key, compiled) = self.program(device, &draw.params)?;
         let pipeline = self.pipeline(
             device,
             key,
@@ -1876,6 +1887,23 @@ impl Scene3dRenderer {
         pool.give(depth);
         Ok(target)
     }
+}
+
+/// Three r180's `WebGLMorphtargets.update` chooses the first present morph
+/// attribute for its target count, then unconditionally reads the position
+/// target's `.count` while packing. This throws only when a drawable reaches
+/// `renderBufferDirect`; loaders, queries, and Blender snapshot construction
+/// still succeed for a normal-only or color-only target.
+fn legacy_morph_packer_error(
+    morph: Option<&(
+        bool,
+        bool,
+        bool,
+        u32,
+        std::sync::Arc<super::gltf::MorphTexture>,
+    )>,
+) -> bool {
+    morph.is_some_and(|(position, _, _, count, _)| !position && *count > 0)
 }
 
 /// A draw ready to record.

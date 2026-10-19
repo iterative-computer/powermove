@@ -182,11 +182,9 @@ repository.
   reduction not measured); embedded JPEG EXIF orientation and a texture
   object shared between an sRGB and a linear slot (three.js's last color
   space wins) are not separately tested.
-- Nodes outside the default scene, and multiple scenes sharing nodes, are
-  not modeled (the default scene is loaded; names of other scenes' nodes do
-  not take part in `createUniqueName`).
-- A node two nodes list as a child loads today and is the missing-model
-  box here (see "Acceptance").
+- Names of nodes outside the default scene do not take part in
+  `createUniqueName`; shared-node attachment and root ownership across
+  scenes follow r180's promise order since round 7 (see below).
 - An imported scene over two million vertices: today's runtime throws in
   `sync` (not re-checked in round 6).
 - Blender rendering of models is the Blender lane's.
@@ -303,9 +301,58 @@ reads the raw JSON through the renderer reader's container, and its
 acceptance is `pm_geom3d::gltf::load`'s (`scene::import` calls it first),
 so `object3d` exists exactly when the engine draws the model.
 
-**Known gap: two-parent nodes.** GLTFLoader attaches a node two parents
+**Round 6 known gap, closed in round 7: two-parent nodes.** GLTFLoader attaches a node two parents
 list to whichever parent's `loadNode` promise settles last. That depends
 on promise depth and on asynchronous image decoding, so it is not a
-static function of the file, and both readers refuse such a file (the
-missing-model box). `gltf-acceptance.test.ts` pins the divergence in a
-separate test so it is noticed when it changes.
+static function of the file. At the round 6 checkpoint both readers
+refused such a file (the missing-model box); that historical acceptance
+result is superseded below.
+
+## Phase 3c round 7: short inputs and shared-node promises
+
+The readers now retain original source counts for attributes and morph
+targets while padding CPU arrays for safe bounds and poses. An index past
+the vertex range always suppresses a WebGL draw. A short ordinary
+attribute suppresses it only if the *final* material program consumes
+that input and the draw fetches beyond the source count (an indexed draw
+may leave a short tail unused): the rule runs after the object's `useSourceMaterials` choice,
+including a Basic-to-Standard replacement, and considers active map UV
+channels 0–3, lighting normals, tangents, and vertex colors. The
+compatibility `Object3D` exposes `uv2` and `uv3`, too. Morph targets are
+packed into the GPU array texture as `WebGLMorphtargets` does: a short
+primary target leaves later texels at zero, and a shorter secondary
+target inside that loop stores NaNs. This supersedes the combined
+short-attribute/morph entry in the round 6 table, which describes its
+dated checkpoint.
+
+For a node listed by two parents, `pm_geom3d::gltf::promise_order`
+simulates r180's cached `loadNode`, `_loadNodeShallow`, mesh, geometry,
+accessor, buffer, skin, and scene Promise dependencies and runs their
+attachment callbacks in microtask order. It also processes all scenes:
+a later scene root attachment can move a node out of the default scene,
+and the engine importer and renderer both omit that node from the
+default scene. For live image decoding, the completion order can vary
+between loads; the scheduler's deterministic image policy is decoded
+images completed in request order. Multiple independent data-URI buffer
+loads likewise use request order. Texture-bearing material extension
+chains and asynchronous image loading beyond that policy are not yet
+proven against all accepted inputs. A normal-only or color-only morph
+with no position target hits an unconditional `morphTargets[i].count`
+read in r180's texture packer and fails the legacy render. The native
+renderer now returns that error when the mesh reaches a draw, while
+import, geometry queries, and Blender scene construction still accept it.
+The added native render and Chromium exception checks await the central
+test run.
+
+As of 2026-10-19, a fresh WASM comparison against three.js r180's
+`GLTFLoader` passes nine hand-selected shared-node cases, 192 generated
+acyclic graphs across data-URI, sparse-accessor, and GLB encoding (with
+camera attachments and cached meshes), a two-scene case where a
+second buffer delays a scene and moves the shared node out of the
+default scene, and data-URI/GLB cases with instancing, geometry cache
+sharing, Standard/Physical/Unlit material chains, and an off-scene
+animation target. The round 7 parent-order and acceptance tests pass
+7/7 against the rebuilt WASM. Native short-morph texture-packing unit tests and the
+Chromium attribute/pixel-capture checks are added for the next central
+test run; their outcomes are recorded in that run's evidence, not
+assumed here.

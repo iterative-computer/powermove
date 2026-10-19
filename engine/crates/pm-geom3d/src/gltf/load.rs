@@ -435,6 +435,8 @@ struct Loader<'a> {
     light_defs: Vec<Option<usize>>,
     /// glTF node → its object.
     node_objects: HashMap<usize, usize>,
+    selected_parents: Vec<Option<usize>>,
+    selected_roots: Vec<usize>,
     /// Per mesh: how many nodes reference it, and uses so far.
     mesh_refs: HashMap<usize, (u32, u32)>,
     light_refs: HashMap<usize, (u32, u32)>,
@@ -908,17 +910,15 @@ impl Loader<'_> {
             }
             Ok(())
         };
-        // A vertex attribute with fewer elements than POSITION loads today
-        // (`BufferAttribute` keeps its own count; the import facts and
-        // bounds read positions only), and WebGL refuses to draw the
-        // primitive (`model_import`'s `undrawable`): it is padded here so
-        // every reader indexes it safely, and never drawn. Shorter skin
-        // attributes throw in `setFromObject` (below).
-        let mut short: Vec<&str> = Vec::new();
+        // Keep the source lengths for the final shader's active-attribute
+        // decision. CPU poses use padded values; an inactive short attribute
+        // does not make WebGL refuse the draw. Short skin attributes throw
+        // in `setFromObject` (below).
+        let mut short: Vec<(&'static str, usize)> = Vec::new();
         let mut pad = |a: Option<Raw>, name: &'static str| -> Option<Raw> {
             a.map(|mut a| {
                 if a.count() < count {
-                    short.push(name);
+                    short.push((name, a.count()));
                     a.values.resize(count * a.size, 0.0);
                 }
                 a
@@ -930,7 +930,8 @@ impl Loader<'_> {
         check(&tangent, "TANGENT", &[4])?;
         let mut uv: [Option<Attribute>; 4] = Default::default();
         for (k, slot) in uv.iter_mut().enumerate() {
-            let a = pad(read(&format!("TEXCOORD_{k}"))?, "TEXCOORD");
+            let name = ["TEXCOORD_0", "TEXCOORD_1", "TEXCOORD_2", "TEXCOORD_3"][k];
+            let a = pad(read(name)?, name);
             check(&a, "TEXCOORD", &[2])?;
             *slot = a.map(|a| a.attribute());
         }
@@ -989,7 +990,7 @@ impl Loader<'_> {
         if let Some(ix) = &indices
             && ix.iter().any(|&i| i as usize >= count)
         {
-            short.insert(0, "an index past the last vertex");
+            short.insert(0, ("an index past the last vertex", 0));
         }
         // `computeBounds`.
         let bounding_box = {
@@ -1075,23 +1076,22 @@ impl Loader<'_> {
             };
             if hp {
                 morph.position = Some(list("POSITION", Some(&position))?);
+                morph.source_counts[0] = morph.position.as_ref().unwrap().iter().map(Attribute::count).collect();
             }
             if hn {
                 morph.normal = Some(list("NORMAL", normal.as_ref())?);
+                morph.source_counts[1] = morph.normal.as_ref().unwrap().iter().map(Attribute::count).collect();
             }
             if hc {
                 morph.color = Some(list("COLOR_0", color.as_ref())?);
+                morph.source_counts[2] = morph.color.as_ref().unwrap().iter().map(Attribute::count).collect();
             }
         }
-        // A morph target shorter than POSITION: as a short attribute.
-        for (name, targets) in [
-            ("a POSITION morph target", &mut morph.position),
-            ("a NORMAL morph target", &mut morph.normal),
-            ("a COLOR_0 morph target", &mut morph.color),
-        ] {
+        // WebGLMorphtargets packs morph attributes into a texture in JS.
+        // Short targets therefore do not bind a short vertex buffer.
+        for targets in [&mut morph.position, &mut morph.normal, &mut morph.color] {
             for t in targets.iter_mut().flatten() {
                 if t.data.len() < count * t.size {
-                    short.push(name);
                     t.data.resize(count * t.size, 0.0);
                 }
             }
@@ -1112,13 +1112,14 @@ impl Loader<'_> {
             morph,
             bounding_box,
             mode,
-            undrawable: short.first().map(|&name| {
-                if name.starts_with("an index") {
-                    name.to_owned()
-                } else {
-                    format!("{name} is shorter than POSITION")
-                }
-            }),
+            undrawable: short
+                .iter()
+                .find(|(name, _)| name.starts_with("an index"))
+                .map(|(name, _)| (*name).to_owned()),
+            short_attributes: short
+                .into_iter()
+                .filter(|(name, _)| !name.starts_with("an index"))
+                .collect(),
         };
         self.geometries.push(g);
         let i = self.geometries.len() - 1;
@@ -1481,6 +1482,9 @@ impl Loader<'_> {
             if c == ni {
                 return err(format!("node {ni} is its own child"));
             }
+            if self.selected_parents.get(c) != Some(&Some(ni)) {
+                continue;
+            }
             children.push(self.node(c, depth + 1)?);
         }
         if let Some(si) = index(&def["skin"]) {
@@ -1495,12 +1499,7 @@ impl Loader<'_> {
                 stack.extend(self.objects[x].children.iter().copied());
             }
         }
-        for c in children {
-            if self.objects[c].parent.is_some() {
-                return err(format!("a node of node {ni} has two parents"));
-            }
-            self.attach(o, c);
-        }
+        for c in children { self.attach(o, c); }
         Ok(o)
     }
 
@@ -1766,6 +1765,8 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
             light_refs.entry(l).or_insert((0, 0)).0 += 1;
         }
     }
+    let selection = super::promise_order::selected_parents(&json)
+        .ok_or_else(|| Error("glTF node hierarchy is cyclic or invalid".into()))?;
     let mut loader = Loader {
         doc,
         ext,
@@ -1782,6 +1783,8 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
         lights: Vec::new(),
         light_defs: Vec::new(),
         node_objects: HashMap::new(),
+        selected_parents: selection.parents,
+        selected_roots: selection.default_roots,
         mesh_refs,
         light_refs,
         camera_refs,
@@ -1807,6 +1810,7 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
     let mut roots = Vec::new();
     for n in scene["nodes"].as_array().into_iter().flatten() {
         let n = index(n).ok_or_else(|| Error("a scene node is not an index".into()))?;
+        if !loader.selected_roots.contains(&n) { continue; }
         roots.push(loader.node(n, 0)?);
     }
     // `loadScene`: `scene.add(node)` for each scene node once every one
