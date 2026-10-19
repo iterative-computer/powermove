@@ -1493,24 +1493,42 @@ headless e2e prints them (every run this round: `stalls` 0, `slowTurns` at
 most one turn of 50 to 100 ms, the longest 85 ms). The headless spec's
 premise check threw `a viewer is attached` when no engine session existed
 yet before Play (Play opens one, viewerless); it now fails only on a viewer
-service or a session with presentation, and says which. A first-test run of
-a full suite later failed it the other way: no viewer service, but a
-session with presentation (`headless false`). That did not reproduce in 6
-isolated runs; the error now names who presents (the session's last state,
-the `render.gl.init` binding, the engine stages and their canvases). One
-way to get there was a real defect, now fixed: the `render.gl.init`
-binding unbound a detached canvas only at the caller's next
-`render.gl.resize`, so a viewer torn down before its own presentation took
-the stage over (disabled or unmounted early) left the binding's
-presentation holding a presenting session for a stage nobody sees. The
-binding now watches its canvas with a ResizeObserver and unbinds when it
-leaves the document (unit test in `canvas-binding.test.ts`). Whether that
-was the cause of this run is not proven.
+service or a session with presentation, and says which. Three first-test
+runs of a full suite later failed it the other way: no viewer service, but
+a session with presentation. With the error naming who
+presents, the next one showed the `render.gl.init` binding presenting over
+the built-in viewer's `#gl` canvas (connected, the session's first state
+552x311). The path, inferred from that state rather than traced: the
+viewer was mounted and disposed at startup (its extension off), and the
+animation frame its `attach` schedules ran `V.layout` after the dispose
+(only the viewer calls `render.gl.resize`, and layout had no disposed guard), so it committed the
+compositor's pending size through `render.gl.resize`, and the binding, no
+longer seeing the viewer's presentation on the stage, presented over the
+canvas the viewer leaves in the panel skeleton. That is a production defect
+(disabling the viewer, or a viewer runtime replaced at startup, leaves a
+ghost presenter holding the window's session attached), and three fixes
+close it:
 
-**Merged feat/native-engine again (perf2, wave 5)** after this round's
-first measurements, with pm-wasm and the addon rebuilt (protocol
-unchanged, `protocol-2f8d7cab61015d02`); the viewer's version lock entry is
-updated for the merged tree.
+- `V.layout` and `commitPendingResize` return once the runtime is disposed
+  (`viewer-engine.test.ts`: a layout after dispose makes no
+  `render.gl.resize` call; it fails without the guard).
+- The built-in viewer marks its stage `data-engine-self-presents` from
+  `attach` (before `render.gl.init`) until it is disposed, and the binding
+  yields to that as well as to the viewer's presentation, so it never
+  presents over the built-in viewer before its presentation exists either.
+  Old forks that draw through the compositor still get the binding.
+- The binding watches its canvas with a ResizeObserver and unbinds as soon
+  as it leaves the document, instead of at the caller's next resize.
+
+After the three fixes, two full-suite runs passed 28 of 28 each (the
+headless spec first in both).
+
+**Merged feat/native-engine twice more** during the round: perf2 (protocol
+unchanged) and then svgcompat (the protocol build is now
+`protocol-05819931f26a31b9`; the only conflict was install.ts's dispose,
+which keeps both teardowns). pm-wasm and the addon were rebuilt each time,
+and the viewer's version lock entry follows the merged tree (1.2.2,
+unreleased).
 
 **Final run (one lock, after every change).** pm-node: 88 library tests,
 document 4 of 4, snapshot 7 of 7. Vitest (main/engine, preload,
@@ -1521,12 +1539,13 @@ skipped. E2E `native-engine-transport`, `native-engine-tracer`,
 sample over 10 ms, worst 10.1 ms). Then `engine-headless-playback` three
 times: 6 of 6.
 
-After the perf2 merge and the binding fix, the same set again under one
-lock: 28 of 28 (J/K/L 2x reverse worst 7.2 ms, no sample over 10 ms), then
-`engine-headless-playback` three times, 6 of 6. A post-merge run before the
-binding fix had failed two: the headless premise (above) and the J/K/L 2x
-reverse sawtooth (20 samples over 10 ms, 8.6 to 12.6 ms, the documented
-pattern; audio and performance owners).
+After the merges and the viewer fixes, at HEAD: pm-node 94 library tests,
+document 4 of 4, snapshot 9 of 9; vitest 842 passed, 1 skipped;
+svelte-check 0 errors; boundaries ok. The five e2e specs twice: 28 of 28
+and 28 of 28 (J/K/L 2x reverse worst 7.4 and 7.0 ms, no sample over
+10 ms). Earlier in the round, runs failed only on the headless premise
+(above) and once on the J/K/L 2x reverse sawtooth (20 samples over 10 ms,
+8.6 to 12.6 ms, the documented pattern; audio and performance owners).
 
 **The join, for the orchestrator's decision.** Playhead (`PM.time`) error
 while the viewer mounts mid-play, engine against today (flag off), same
@@ -1534,8 +1553,12 @@ invocation: 39.3 against 26.9 ms (the suite), then 36.9 against 25.2, 32.2
 against 24.1, and 32.1 against 34.7 ms (the repeats). After the merge: 36.7
 against 27.0, 32.0 against 23.5, 29.6 against 32.1 (repeats); final lock:
 43.1 against 37.3 ms (the suite), then 28.9 against 24.0, 34.9 against
-29.2, and 36.6 against 33.5 ms. Over the 11 pairs the engine is 5.9 ms
-slower on average (from 2.6 ms faster to 12.4 ms slower). The engine's line
+29.2, and 36.6 against 33.5 ms; after the svgcompat merge (repeats): 33.7
+against 22.2, 32.2 against 31.1, 39.8 against 30.9, then 34.2 against
+24.5, 32.4 against 24.0, 33.6 against 24.7; the last two suites: 27.8
+against 25.4 and 22.1 against 23.2 ms. Over the 19 pairs the engine is
+6.0 ms slower on average (from 2.6 ms faster to 12.4 ms slower; worst
+43.1 ms against today's worst 37.3 ms). The engine's line
 stays within 0.1 ms and the playhead is back on it within two animation
 frames. The stall is the page's main thread mounting the engine viewer
 (its presentation worker and painter); it is still recorded, not bounded.
