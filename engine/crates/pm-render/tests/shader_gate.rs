@@ -262,6 +262,10 @@ struct Tally {
     /// Matched variants whose WebGL draw raised a GL error (both show the
     /// cleared target); listed for the record, counted as matches.
     draw_error_matched: Vec<String>,
+    /// A real user program's runtime parity verdict once its variants ran
+    /// (`NativeVerified`, `Runner`, the static seed, or refused by both).
+    #[serde(rename = "runtimeVerdict", skip_serializing_if = "Option::is_none")]
+    runtime_verdict: Option<String>,
 }
 
 /// Probes and cases whose WebGL and engine answers differ for a documented
@@ -346,6 +350,41 @@ impl pm_render::shader_layers::FallbackHost for EffectRunner {
             message: "the gate has not captured this ANGLE request yet".into(),
         })
     }
+}
+
+/// A real user program's verdict after its variants ran through the probe:
+/// it must end decided (`NativeVerified` or pinned to the runner), refused
+/// by both, or on the static ANGLE-only seed; `Unknown` fails the gate.
+fn settle_user_verdict(
+    tally: &mut Tally,
+    case: &Value,
+    def: Option<&DefinitionSnapshot>,
+    via_runner: &mut Renderer,
+    renderer: &mut Renderer,
+) {
+    let shown = if case["private"].as_bool() == Some(true) {
+        "local (private)"
+    } else {
+        case["id"].as_str().unwrap()
+    };
+    let frag = case["frag"].as_str().unwrap();
+    let verdict = if tally.both_refuse == tally.variants {
+        "RefusedByBoth".to_owned()
+    } else if matches!(case["kind"].as_str(), Some("effect" | "transition")) {
+        if def.is_some_and(|d| via_runner.effects().angle_only(d.kind, d.id.as_str())) {
+            "runner (static seed)".to_owned()
+        } else {
+            format!("{:?}", via_runner.effects_mut().parity.verdict(frag))
+        }
+    } else {
+        format!("{:?}", renderer.effects_mut().parity.verdict(frag))
+    };
+    if verdict == "Unknown" {
+        tally.failures.push(format!(
+            "{shown}: the runtime parity probe never judged it (Unknown)"
+        ));
+    }
+    tally.runtime_verdict = Some(verdict);
 }
 
 #[test]
@@ -443,7 +482,20 @@ fn every_shader_matches_webgl() {
     let filter = std::env::var("PM_SHADER_FILTER").ok();
     let mut programs: BTreeMap<String, Tally> = BTreeMap::new();
     let mut requests_written = 0;
-    for (case, def) in cases.iter().zip(&definitions) {
+    // The last user program run: its verdict is settled before the next
+    // case can reconfigure the probe.
+    let mut last_user: Option<usize> = None;
+    for (n, (case, def)) in cases.iter().zip(&definitions).enumerate() {
+        if let Some(u) = last_user.take() {
+            let tally = programs.get_mut(cases[u]["id"].as_str().unwrap()).unwrap();
+            settle_user_verdict(
+                tally,
+                &cases[u],
+                definitions[u].as_ref(),
+                &mut via_runner,
+                &mut renderer,
+            );
+        }
         let id = case["id"].as_str().unwrap();
         if filter.as_deref().is_some_and(|f| !id.contains(f)) {
             continue;
@@ -461,6 +513,9 @@ fn every_shader_matches_webgl() {
         let variants = case["variants"].as_array().unwrap();
         // Keep decisions across the variants of one real user program.
         let is_user = case["group"].as_str() == Some("user-setups");
+        if is_user {
+            last_user = Some(n);
+        }
         if !is_user {
             via_runner.effects_mut().parity.configure(None, None);
             renderer.effects_mut().parity.configure(None, None);
@@ -695,6 +750,26 @@ fn every_shader_matches_webgl() {
             }
         }
     }
+    if let Some(u) = last_user.take() {
+        let tally = programs.get_mut(cases[u]["id"].as_str().unwrap()).unwrap();
+        settle_user_verdict(
+            tally,
+            &cases[u],
+            definitions[u].as_ref(),
+            &mut via_runner,
+            &mut renderer,
+        );
+    }
+    let verdicts: BTreeMap<&str, usize> = programs
+        .values()
+        .filter_map(|t| t.runtime_verdict.as_deref())
+        .fold(BTreeMap::new(), |mut m, v| {
+            *m.entry(v).or_default() += 1;
+            m
+        });
+    if !verdicts.is_empty() {
+        eprintln!("user-setups runtime parity verdicts: {verdicts:?}");
+    }
     if let Ok(path) = std::env::var("PM_SHADER_GATE_REPORT") {
         let path = PathBuf::from(path);
         assert!(
@@ -707,46 +782,7 @@ fn every_shader_matches_webgl() {
                 ),
             "gate reports must stay outside the repository"
         );
-        let mut report = serde_json::to_value(&programs).unwrap();
-        for (case, def) in cases.iter().zip(&definitions) {
-            if case["group"].as_str() != Some("user-setups") {
-                continue;
-            }
-            let id = case["id"].as_str().unwrap();
-            let Some(row) = report.get_mut(id) else {
-                continue;
-            };
-            let kind = case["kind"].as_str().unwrap();
-            let verdict = if matches!(kind, "effect" | "transition") {
-                if def
-                    .as_ref()
-                    .is_some_and(|d| via_runner.effects().angle_only(d.kind, d.id.as_str()))
-                {
-                    "runner (static seed)".to_owned()
-                } else {
-                    format!(
-                        "{:?}",
-                        via_runner
-                            .effects_mut()
-                            .parity
-                            .verdict(case["frag"].as_str().unwrap())
-                    )
-                }
-            } else {
-                format!(
-                    "{:?}",
-                    renderer
-                        .effects_mut()
-                        .parity
-                        .verdict(case["frag"].as_str().unwrap())
-                )
-            };
-            row["runtimeVerdict"] = if row["both_refuse"].as_u64() == row["variants"].as_u64() {
-                json!("RefusedByBoth")
-            } else {
-                json!(verdict)
-            };
-        }
+        let report = serde_json::to_value(&programs).unwrap();
         std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
     let mut groups: BTreeMap<String, Tally> = BTreeMap::new();
@@ -1119,4 +1155,53 @@ fn user_program_ids_never_receive_the_generated_undefined_behavior_exemption() {
         assert_eq!(known_open(id), None, "{id}");
     }
     assert!(known_open("generated-s3/ub-divide-by-zero").is_some());
+}
+
+/// A real user program the runtime probe never judged (left `Unknown`)
+/// fails the gate; a judged one, or one both refuse, passes.
+#[test]
+fn a_user_program_the_probe_never_judged_fails_the_gate() {
+    let mut via_runner = Renderer::headless().expect("a GPU");
+    let mut renderer = Renderer::headless().expect("a GPU");
+    for r in [&mut via_runner, &mut renderer] {
+        r.effects_mut()
+            .parity
+            .configure(Some("gate verdict test".into()), None);
+    }
+    let effect =
+        json!({"id": "user/fx", "kind": "effect", "frag": "never judged", "private": true});
+    let mut tally = Tally {
+        variants: 2,
+        ..Tally::default()
+    };
+    settle_user_verdict(&mut tally, &effect, None, &mut via_runner, &mut renderer);
+    assert_eq!(tally.runtime_verdict.as_deref(), Some("Unknown"));
+    assert_eq!(tally.failures.len(), 1, "{:?}", tally.failures);
+    assert!(
+        tally.failures[0].starts_with("local (private)"),
+        "private ids stay out of the output"
+    );
+    let px = FallbackPixels {
+        width: 1,
+        height: 1,
+        rgba16f: vec![0; 4],
+    };
+    via_runner.effects_mut().parity.judge("judged", &px, &px);
+    let judged = json!({"id": "user/ok", "kind": "transition", "frag": "judged"});
+    let mut tally = Tally {
+        variants: 1,
+        ..Tally::default()
+    };
+    settle_user_verdict(&mut tally, &judged, None, &mut via_runner, &mut renderer);
+    assert_eq!(tally.runtime_verdict.as_deref(), Some("NativeVerified"));
+    assert!(tally.failures.is_empty());
+    let layer = json!({"id": "user/layer", "kind": "layer", "frag": "refused"});
+    let mut tally = Tally {
+        variants: 3,
+        both_refuse: 3,
+        ..Tally::default()
+    };
+    settle_user_verdict(&mut tally, &layer, None, &mut via_runner, &mut renderer);
+    assert_eq!(tally.runtime_verdict.as_deref(), Some("RefusedByBoth"));
+    assert!(tally.failures.is_empty());
 }
