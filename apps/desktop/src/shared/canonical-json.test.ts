@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { COMP_FIELDS, rotateProject } from '../renderer/src/legacy/core/compositions';
-import { CANONICAL_COMP_FIELDS, canonicalHash, canonicalProject, canonicalProjectHash, canonicalStringify, realizeProject } from './canonical-json';
+import { CANONICAL_COMP_FIELDS, canonicalHash, canonicalProject, canonicalProjectHash, canonicalStringify, jsonClone, realizeProject } from './canonical-json';
 import { sha256Hex } from './sha256';
 
 const engineTests = path.resolve(__dirname, '../../../../engine/crates/pm-model/tests');
@@ -57,6 +57,35 @@ describe('canonicalStringify', () => {
     const value = { b: [1, 2], a: 'é😀' };
     expect(canonicalHash(value)).toBe(sha256Hex(new TextEncoder().encode('{"a":"é😀","b":[1,2]}')));
     expect(() => canonicalHash(undefined)).toThrow(TypeError);
+  });
+
+  it('clones exactly what a JSON round trip yields, without the string', () => {
+    const odd = { toJSON: (key: string) => ({ key, n: new Number(3), s: new String('boxed'), b: new Boolean(false) }) };
+    const sparse: any[] = [1, , 3]; // eslint-disable-line no-sparse-arrays
+    const proto = JSON.parse('{"__proto__": {"x": 1}, "y": 2}');
+    const values: unknown[] = [
+      { b: [1, -0, 0.1, 1e21, 1e-7, NaN, Infinity, -Infinity], a: 'é😀', lone: 'a\ud800b', u: undefined, f: () => 1, s: Symbol('x'), d: new Date(0), nested: { odd, sparse, list: [undefined, () => 2, Symbol('y'), null] } },
+      proto, [odd, odd], 'top', 12, -0, null, true, new String('s'), new Uint8Array([1, 2]), new Map([[1, 2]]),
+    ];
+    for (const value of values) {
+      const want = JSON.parse(JSON.stringify(value));
+      const got = jsonClone(value);
+      expect(got).toEqual(want);
+      expect(JSON.stringify(got)).toBe(JSON.stringify(want));
+      expect(Object.getPrototypeOf(got ?? {})).toBe(Object.getPrototypeOf(want ?? {}));
+    }
+    expect(Object.is(jsonClone(-0), 0)).toBe(true);
+    expect(Object.keys(jsonClone(proto))).toEqual(['__proto__', 'y']);
+    expect(jsonClone(undefined)).toBeUndefined();
+    expect(jsonClone(() => 1)).toBeUndefined();
+    const cycle: any = { a: 1 }; cycle.self = cycle;
+    expect(() => jsonClone(cycle)).toThrow(TypeError);
+    expect(() => jsonClone({ n: 1n })).toThrow(TypeError);
+    // Shared references are copied apart, as a round trip would.
+    const shared = { k: 1 };
+    const both = jsonClone({ a: shared, b: shared });
+    expect(both.a).not.toBe(both.b);
+    expect(both.a).not.toBe(shared);
   });
 
   it('hashes in pieces exactly what the whole serialization hashes', () => {

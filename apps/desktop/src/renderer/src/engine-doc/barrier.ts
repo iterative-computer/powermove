@@ -27,7 +27,7 @@ import type { PathPart } from '../../../shared/patch';
 import { applyOps, type PatchOp } from '../../../shared/patch-ids';
 import { diffJsonOps as diffOps } from './json-diff';
 import { encodePatchOps } from '../../../shared/patch-binary';
-import { canonicalHash, canonicalProject, canonicalStringify } from '../../../shared/canonical-json';
+import { canonicalHash, canonicalProject, canonicalStringify, jsonClone } from '../../../shared/canonical-json';
 import { canonicalPath } from '../legacy/core/compositions';
 import { APPLY, type PmWasm } from './wasm';
 
@@ -277,9 +277,12 @@ export class DocumentBarrier {
 
   /** Replaces the mirror with the live document. */
   resync(): void {
-    const json = JSON.stringify(canonicalProject(this.project()));
+    const canonical = canonicalProject(this.project());
+    const json = JSON.stringify(canonical);
     this.revision += 1;
-    this.shadow = json === undefined ? undefined : JSON.parse(json);
+    // The parse of `json`, built directly and sharing the live document's
+    // strings (shared/canonical-json.ts `jsonClone`).
+    this.shadow = json === undefined ? undefined : jsonClone(canonical);
     this.wasm.resync(json ?? '', this.revision);
     this.shapeRevision = this.revision;
     if (json && json.length > 4 * 1024 * 1024) this.wasm.releaseInput();
