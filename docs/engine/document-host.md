@@ -652,6 +652,65 @@ The disk-space guard (`requireEngineDiskSpace`) is limited to the opt-in
 measurement tests again; the ordinary boot tests (extension activation, agent
 at launch) no longer fail on a machine with less than 40 GiB free.
 
+### Round 4 review fixes: first-frame recovery, app commands, keys during a Retry
+
+**First frame.** The first scheduled editor frame used to wait for the
+document and return for good when the load failed, so a later successful
+Retry left an editor that was never laid out and had no agent assistant. It
+now runs in two parts. `viewerService.layout()` and
+`timelineService.frameView()` read only the panels' measured sizes and always
+run in the frame, as before B3. The part that reads the document (the
+`layers`/`sel` announcements, the inspector refresh, `invalidate('all')` and
+`('status')`, `SpatialAssistant.init()` and the first `persistCurrent` and
+`projects:open`) runs once: in the frame when the document can answer, when
+the pending load settles ready, or, after a failed load, from
+`EngineDoc.onReady` when a Retry or a revival succeeds. `onReady` now also
+fires after an asynchronous revival (and the timer's synchronous revival),
+not only after `retry()`; the extension loader's listener disposes itself
+after its first call, so it is unaffected.
+
+**Keys and menu commands.** Keys, trusted keys from sandboxed panels and
+native menu commands go through `runCommandWhenReady` (`readiness.ts`).
+App commands never read or write the document and always run:
+`settings` (where "Use New Engine" is switched off), `palette`, `agent`,
+`projects`, `open`, `newProject`, `closeTab`, `nextTab`, `previousTab` and
+`moveTabToNewWindow`. The opening commands reach their own open paths, which
+wait for the document. Every other command, including any extension command,
+is a document command (the safe default). It runs at once when the document
+can answer. While a load is in flight (boot, Retry or revival) it is queued on
+`EngineDoc.settled()` and runs in order once that settles. Before, the kernel
+waited on `whenReady`, which had already resolved during a Retry, so keys
+pressed then were dropped. If the load failed under strict, the command does
+not run and the named failure is shown again. The kernel's no-op `.then` and
+the shim's `.catch(() => {})` used to drop these silently. Window roles,
+Hide and Quit are native menu roles and never reach the renderer.
+
+**Named failure, never silent.** `EngineDoc.showFailure()` shows the newest
+`pm-wasm-unavailable` notice again, with Retry. It uses the same toast key, so
+it replaces the notice rather than stacking, and it does not add to
+`failures()`. `waitForDocumentReady` calls it whenever it rejects under
+strict. So every async entry point that used to rely on the first notice now
+shows it again: project open, New project, blank project, `pm-open-project`,
+`openProjectHere`, agent tools and scripts.
+
+Tests: `legacy/app.test.ts` covers the ready first frame, then a failed load
+followed by Retry: layout in the frame, then `SpatialAssistant.init`, the
+inspector refresh and `layers`/`sel`/`projects:open` exactly once after the
+Retry, and not again on a second readiness. `kernel/install.test.ts` covers
+Settings by shortcut after a failed load, a document key showing the named
+failure, a key pressed during a Retry that runs after it, and trusted panel
+keys. `legacy/host/electron-shim.test.ts` covers Settings by menu after a
+failed load, document menu commands showing the failure, and a menu command
+during a Retry. `engine-doc/strict.test.ts` covers the real EngineDoc: a
+failed load, the repeated named notice with Retry, and a command queued
+during a real `retry()` that runs once it is ready. `readiness.test.ts`
+covers the classification and the queue.
+
+Still open: while a document command is queued, the kernel's key listener
+treats the key as handled. So `inFields` and contextual bindings cannot
+decline during the load window (about 80 ms at boot, or the length of a
+Retry).
+
 What remains:
 
 - Direct synchronous compatibility calls outside these async boundaries

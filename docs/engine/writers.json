@@ -699,43 +699,43 @@
       "code": "pm: deps.pm"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:249",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:250",
       "class": "touch",
       "scope": "makeAnim > touch",
       "code": "PM?.touch?.()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:334",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:335",
       "class": "hist.do",
       "scope": "makeHistory > (anonymous)",
       "code": "PM?.hist?.do?.(label, fn)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:335",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:336",
       "class": "history.transaction",
       "scope": "makeHistory > begin",
       "code": "PM?.hist?.begin?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:340",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:341",
       "class": "history.external",
       "scope": "makeHistory > external",
       "code": "PM?.hist?.external?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:353",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:354",
       "class": "edit.mutate",
       "scope": "makeEdit > (anonymous)",
       "code": "PM?.Edit?.mutate?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:510",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:511",
       "class": "doc.touched",
       "scope": "makeUIState > setLayerCollapsed",
       "code": "touchedDocument(PM, [['layers', index, 'collapsed']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:962",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:957",
       "class": "extension-layer-refresh",
       "scope": "installKernel > kernel.layerTypes.onChange(callback)",
       "code": "writeDocument(PM, [['layers'], ['comps']], () => { for (const container of containers) for (const layer of container?.layers ?? []) { if ..."
