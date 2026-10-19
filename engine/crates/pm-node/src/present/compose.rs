@@ -571,7 +571,10 @@ impl Composer {
             // A preview must use the bucket for this frame, just as today's
             // synchronous SVG canvas redraw does. Render-ahead requests it
             // before its display deadline; never publish a substituted bucket.
-            let mut renderer = self.renderer.svg_waiting();
+            // A bucket the window could not draw is drawn as nothing instead
+            // (`super::wait`), as today draws the frame without a layer whose
+            // raster throws.
+            let mut renderer = self.renderer.svg_waiting_viewer();
             let rendered = renderer.render_into(
                 doc,
                 composition,
