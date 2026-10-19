@@ -114,7 +114,7 @@ const QUAD_RECURSIVE_LIMIT: usize = 3;
 // quads with extreme widths (e.g. (0,1) (1,6) (0,3) width=5e7) recurse to point of failure
 // largest seen for normal cubics: 5, 26
 // largest seen for normal quads: 11
-const RECURSIVE_LIMITS: [i32; 4] = [5 * 3, 26 * 3, 11 * 3, 11 * 3]; // 3x limits seen in practice
+const RECURSIVE_LIMITS: [i32; 4] = [5 * 3, 24, 11 * 3, 11 * 3]; // Skia chrome/m152
 
 type CapProc = fn(
     pivot: Point,
@@ -375,7 +375,6 @@ impl PathStroker {
         let mut iter = path.segments();
         iter.set_auto_close(true);
         loop {
-            let start = iter.last_point();
             let Some(segment) = iter.next() else { break };
             match segment {
                 PathSegment::MoveTo(p) => {
@@ -390,17 +389,7 @@ impl PathStroker {
                     last_segment_is_line = false;
                 }
                 PathSegment::ConicTo(p1, p2, weight) => {
-                    // Skia strokes conics as conics; glyph outlines (the only
-                    // paths stroked here) have none, so they go as quads.
-                    if let Some(quads) =
-                        path_geometry::AutoConicToQuads::compute(start, p1, p2, weight)
-                    {
-                        let mut offset = 1;
-                        for _ in 0..quads.len {
-                            self.quad_to(quads.points[offset], quads.points[offset + 1]);
-                            offset += 2;
-                        }
-                    }
+                    self.conic_to(p1, p2, weight);
                     last_segment_is_line = false;
                 }
                 PathSegment::CubicTo(p1, p2, p3) => {
@@ -550,6 +539,144 @@ impl PathStroker {
         self.post_join_to(p2, normal_bc, unit_bc);
     }
 
+    // SkPathStroker::conicTo. Stroke the rational curve itself, before
+    // the scan converter chops the resulting joins into device-space quads.
+    fn conic_to(&mut self, p1: Point, p2: Point, weight: f32) {
+        let conic = path_geometry::Conic::new(self.prev_pt, p1, p2, weight);
+        let (reduction, reduction_type) = check_conic_linear(&conic);
+        if reduction_type == ReductionType::Point || reduction_type == ReductionType::Line {
+            self.line_to(p2, None);
+            return;
+        }
+        if reduction_type == ReductionType::Degenerate {
+            self.line_to(reduction, None);
+            let save_joiner = self.joiner;
+            self.joiner = round_joiner;
+            self.line_to(p2, None);
+            self.joiner = save_joiner;
+            return;
+        }
+        let mut normal_ab = Point::zero();
+        let mut unit_ab = Point::zero();
+        if !self.pre_join_to(p1, false, &mut normal_ab, &mut unit_ab) {
+            self.line_to(p2, None);
+            return;
+        }
+        let mut quad_points = QuadConstruct::default();
+        self.init_quad(
+            StrokeType::Outer,
+            NormalizedF32::ZERO,
+            NormalizedF32::ONE,
+            &mut quad_points,
+        );
+        self.conic_stroke(&conic, &mut quad_points);
+        self.init_quad(
+            StrokeType::Inner,
+            NormalizedF32::ZERO,
+            NormalizedF32::ONE,
+            &mut quad_points,
+        );
+        self.conic_stroke(&conic, &mut quad_points);
+        let (mut normal_bc, mut unit_bc) = (Point::zero(), Point::zero());
+        if !set_normal_unit_normal(
+            p1,
+            p2,
+            self.res_scale,
+            self.radius,
+            &mut normal_bc,
+            &mut unit_bc,
+        ) {
+            normal_bc = normal_ab;
+            unit_bc = unit_ab;
+        }
+        self.post_join_to(p2, normal_bc, unit_bc);
+    }
+
+    fn conic_perp_ray(
+        &self,
+        conic: &path_geometry::Conic,
+        t: NormalizedF32,
+        tp: &mut Point,
+        on_p: &mut Point,
+        tangent: Option<&mut Point>,
+    ) {
+        *tp = conic.eval_at(t);
+        let mut dxy = conic.eval_tangent_at(t);
+        if dxy.is_zero() {
+            dxy = conic.points[2] - conic.points[0];
+        }
+        self.set_ray_points(*tp, &mut dxy, on_p, tangent);
+    }
+
+    fn compare_quad_conic(
+        &self,
+        conic: &path_geometry::Conic,
+        q: &mut QuadConstruct,
+    ) -> ResultType {
+        if !q.start_set {
+            let mut tp = Point::zero();
+            self.conic_perp_ray(
+                conic,
+                q.start_t,
+                &mut tp,
+                &mut q.quad[0],
+                Some(&mut q.tangent_start),
+            );
+            q.start_set = true;
+        }
+        if !q.end_set {
+            let mut tp = Point::zero();
+            self.conic_perp_ray(
+                conic,
+                q.end_t,
+                &mut tp,
+                &mut q.quad[2],
+                Some(&mut q.tangent_end),
+            );
+            q.end_set = true;
+        }
+        let result = self.intersect_ray(IntersectRayType::CtrlPt, q);
+        if result != ResultType::Quad {
+            return result;
+        }
+        let (mut ray0, mut ray1) = (Point::zero(), Point::zero());
+        self.conic_perp_ray(conic, q.mid_t, &mut ray1, &mut ray0, None);
+        self.stroke_close_enough(&q.quad.clone(), &[ray0, ray1], q)
+    }
+
+    fn conic_stroke(&mut self, conic: &path_geometry::Conic, q: &mut QuadConstruct) -> bool {
+        let result = self.compare_quad_conic(conic, q);
+        if result == ResultType::Quad {
+            let path = if self.stroke_type == StrokeType::Outer {
+                &mut self.outer
+            } else {
+                &mut self.inner
+            };
+            path.quad_to(q.quad[1].x, q.quad[1].y, q.quad[2].x, q.quad[2].y);
+            return true;
+        }
+        if result == ResultType::Degenerate {
+            self.add_degenerate_line(q);
+            return true;
+        }
+        self.recursion_depth += 1;
+        if self.recursion_depth > RECURSIVE_LIMITS[2] {
+            self.add_degenerate_line(q);
+            return true;
+        }
+        let mut half = QuadConstruct::default();
+        half.init_with_start(q);
+        if !self.conic_stroke(conic, &mut half) {
+            return false;
+        }
+        half.init_with_end(q);
+        if !self.conic_stroke(conic, &mut half) {
+            return false;
+        }
+        self.recursion_depth -= 1;
+        true
+    }
+
     fn cubic_to(&mut self, pt1: Point, pt2: Point, pt3: Point) {
         let cubic = [self.prev_pt, pt1, pt2, pt3];
         let mut reduction = [Point::zero(); 3];
@@ -670,13 +797,14 @@ impl PathStroker {
             }
         }
 
-        if !quad_points.quad[2].x.is_finite() || !quad_points.quad[2].x.is_finite() {
+        if !quad_points.quad[2].is_finite() {
             return false; // just abort if projected quad isn't representable
         }
 
         self.recursion_depth += 1;
         if self.recursion_depth > RECURSIVE_LIMITS[self.found_tangents as usize] {
-            return false; // just abort if projected quad isn't representable
+            self.add_degenerate_line(quad_points);
+            return true;
         }
 
         let mut half = QuadConstruct::default();
@@ -1020,7 +1148,8 @@ impl PathStroker {
 
         self.recursion_depth += 1;
         if self.recursion_depth > RECURSIVE_LIMITS[QUAD_RECURSIVE_LIMIT] {
-            return false; // just abort if projected quad isn't representable
+            self.add_degenerate_line(quad_points);
+            return true;
         }
 
         let mut half = QuadConstruct::default();
@@ -1815,6 +1944,26 @@ fn check_quad_linear(quad: &[Point; 3]) -> (Point, ReductionType) {
         path_geometry::eval_quad_at(quad, t),
         ReductionType::Degenerate,
     )
+}
+
+fn check_conic_linear(conic: &path_geometry::Conic) -> (Point, ReductionType) {
+    let p = &conic.points;
+    let ab = degenerate_vector(p[1] - p[0]);
+    let bc = degenerate_vector(p[2] - p[1]);
+    if ab & bc {
+        return (Point::zero(), ReductionType::Point);
+    }
+    if ab | bc {
+        return (Point::zero(), ReductionType::Line);
+    }
+    if !quad_in_line(p) {
+        return (Point::zero(), ReductionType::Quad);
+    }
+    let t = path_geometry::find_quad_max_curvature(p);
+    if t == NormalizedF32::ZERO {
+        return (Point::zero(), ReductionType::Line);
+    }
+    (conic.eval_at(t), ReductionType::Degenerate)
 }
 
 fn degenerate_vector(v: Point) -> bool {
