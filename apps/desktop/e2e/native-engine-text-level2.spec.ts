@@ -181,3 +181,57 @@ test('level 2 selection keeps paragraph boxes, small-text padding and blank-text
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('a character no font covers draws .notdef in level 2 text and keeps every query native', async ({ session }) => {
+  test.setTimeout(60_000);
+  await session.openEditor();
+  const measure = (text: string) => session.page.evaluate(async text => {
+    const PM = (window as any).PM;
+    const project = PM.mkProject({ name: 'Uncovered', w: 640, h: 360, dur: 3 });
+    // Plain level 2 text: no animators, range styles or typography anchor.
+    const layer = PM.mkLayer('text', { d: { text, font: 'Georgia', weight: 400, size: 40, color: '#FFFFFF', align: 'left' },
+      p: { 'position.x': 100, 'position.y': 80 } }, project);
+    layer.compat = 2;
+    project.layers = [layer];
+    PM.replaceProject(project); PM.touch(); PM.setTime(0, { force: true }); PM.invalidate();
+    const shot = await PM.EngineCaptures.snapshotAsync(0, 640);
+    const before = { ...PM.EngineDoc.stats().native.fallbacks };
+    const api = PM.EngineDoc.api;
+    const bounds = api.bounds(layer, 0);
+    const layout = api.glyphLayout(layer, 0);
+    const caret = api.textLayout(layer, 0);
+    const picked = api.pick(100 + bounds.x1 - 6, 80 + (bounds.y0 + bounds.y1) / 2, 0)?.id === layer.id;
+    // This composition's rendered pixels, never the user's screen.
+    const image = new Image(); image.src = shot; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
+    const ctx = canvas.getContext('2d')!; ctx.drawImage(image, 0, 0);
+    const pixels = ctx.getImageData(0, 0, 640, 360).data;
+    let right = -1;
+    for (let i = 0; i < pixels.length; i += 4) {
+      if (pixels[i]! > 128 && pixels[i + 1]! > 128 && pixels[i + 2]! > 128) right = Math.max(right, (i / 4) % 640);
+    }
+    const native = PM.EngineDoc.stats().native;
+    return { bounds, right, picked, characters: layout.characters.length,
+      boundaries: caret.lines.reduce((n: number, line: any) => n + line.boundaries.length, 0),
+      fallbacks: Object.entries(native.fallbacks).filter(([key, count]) => Number(count) > Number(before[key] || 0)),
+      status: PM.EngineConnection.status() };
+  }, text);
+  await expect.poll(() => session.page.evaluate(() => (window as any).PM.EngineConnection.status().route)).toBe('engine');
+  const covered = await measure('Motion type');
+  const uncovered = await measure('Motion type ͸');
+  for (const result of [covered, uncovered]) {
+    expect(result.status.route).toBe('engine');
+    expect(result.status.failures).toEqual([]);
+    expect(result.fallbacks, 'geometry stays native').toEqual([]);
+    expect(result.picked).toBe(true);
+  }
+  // The uncovered character keeps its unit and caret stop and draws a box
+  // past the covered text: the layer is drawn, not refused.
+  expect(uncovered.characters).toBeGreaterThan(covered.characters);
+  expect(uncovered.boundaries).toBe(covered.boundaries + 2);
+  expect(uncovered.bounds.x1).toBeGreaterThan(covered.bounds.x1 + 10);
+  expect(uncovered.right).toBeGreaterThan(covered.right + 10);
+  expect(uncovered.bounds.x0).toBeCloseTo(covered.bounds.x0, 6);
+  await expectEngineDrewText(session);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
