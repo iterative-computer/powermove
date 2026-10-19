@@ -1141,24 +1141,63 @@ fn native_content_quad<'d>(
             let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
             let format = js::string(&rec("format")).to_ascii_lowercase();
             if ty == "image" && format == "svg" {
-                // Valid level 1 paint records remain gated. A broken
-                // XML/image document paints nothing, as Chromium's <img>
-                // does. usvg paint support does not determine corruption.
                 if !crate::vector::level2(layer) {
+                    // Level 1 (decision S1): today's `<img>` raster at
+                    // today's bucket, drawn by Chromium in the document's
+                    // renderer, sampled as today's image texture. A
+                    // document Chromium is measured to show as a broken
+                    // `<img>` paints nothing, as there.
                     match pm_media::image::svg::broken_image_file(&path) {
-                        Err(e) => b.failures.push(LayerFailure {
-                            composition: comp_id,
-                            layer: js::layer_id(layer),
-                            message: format!("{}: {e}", path.display()),
-                        }),
-                        Ok(true) => {}
-                        Ok(false) => b.unsupported.push(Unsupported::layer(
-                            &comp_id,
-                            layer,
-                            Feature::SvgImage,
-                        )),
+                        Err(e) => {
+                            b.failures.push(LayerFailure {
+                                composition: comp_id,
+                                layer: js::layer_id(layer),
+                                message: format!("{}: {e}", path.display()),
+                            });
+                            return Ok(None);
+                        }
+                        Ok(true) => return Ok(None),
+                        Ok(false) => {}
                     }
-                    return Ok(None);
+                    let content = match crate::vector::svg::content_hash(&path) {
+                        Ok(c) => c,
+                        Err(message) => {
+                            b.failures.push(LayerFailure {
+                                composition: comp_id,
+                                layer: js::layer_id(layer),
+                                message,
+                            });
+                            return Ok(None);
+                        }
+                    };
+                    // `const bw = d.w || W, bh = d.h || H` with the live
+                    // asset's `w`/`h` (its natural size, persisted).
+                    let sw = js::or_number(&rec("w"), 1.0);
+                    let sh = js::or_number(&rec("h"), 1.0);
+                    let bw = js::or_number(js::get(&d, "w"), wf);
+                    let bh = js::or_number(js::get(&d, "h"), hf);
+                    let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
+                    // `svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H))`.
+                    let world = scaled_world(scope, layer, time, scale)?;
+                    let (width, height, _) = pm_vector::render::svg::svg_raster_dimensions(
+                        sw, sh, bw, bh, &world, 8192.0,
+                    );
+                    return Ok(Some(Quad::Texture {
+                        source: Source::Vector(Box::new(crate::vector::VectorSource::SvgImage {
+                            key: pm_protocol::svg_raster::SvgRasterKey {
+                                content,
+                                width,
+                                height,
+                            },
+                            asset: asset_id,
+                            path,
+                        })),
+                        w: bw,
+                        h: bh,
+                        ax: bw / 2.0,
+                        ay: bh / 2.0,
+                        uv,
+                    }));
                 }
                 if let Err(message) = crate::vector::svg::document(&path) {
                     b.failures.push(LayerFailure {

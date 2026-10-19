@@ -5,6 +5,9 @@
 //! - Level 1 rasters are computed on the CPU by `pm_vector::canvas2d` and
 //!   uploaded as premultiplied `Rgba8Unorm`, the texture today's compositor
 //!   samples (Standard color: the canvas's sRGB values are working values).
+//! - Level 1 SVG images are Chromium's rasters at today's buckets
+//!   (decision S1, [`super::svg_rasters`]), uploaded like level 1 rasters:
+//!   [`VectorCache::resolve_svg`].
 //! - Level 2 SVG images that are not plain vectors are drawn by resvg at
 //!   output resolution and uploaded like level 1 rasters.
 //! - Level 2 scenes get analytic area coverage from Vello's GPU compute
@@ -23,6 +26,22 @@ use pm_vector::render::cpu::render_coverage;
 use pm_vector::render::scene::{AtlasLayout, CoverageScene, PixelRect};
 
 use super::VectorSource;
+use super::svg_rasters::{SvgMissPolicy, SvgRasterNeed, SvgRasterizer, SvgRasters};
+use pm_protocol::svg_raster::SvgRasterKey;
+
+/// A level 1 SVG raster's texture for a frame ([`VectorCache::resolve_svg`]).
+pub enum SvgResolved {
+    /// The bucket the frame asked for.
+    Drawn(wgpu::TextureView),
+    /// Preview: another bucket of the same content while the asked one is
+    /// on its way.
+    Substitute(wgpu::TextureView),
+    /// Nothing to draw this frame (the miss is recorded).
+    Missing,
+}
+
+/// The precision slot of level 1 SVG raster textures (always `Rgba8Unorm`).
+const SVG_SLOT: u8 = u8::MAX;
 
 /// Which coverage backend level 2 uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +200,8 @@ pub struct VectorCache {
     paint: Option<Paint>,
     /// Which backend rendered the last level 2 scene (tests).
     pub last_backend: Option<&'static str>,
+    /// Level 1 SVG rasters the renderers uploaded (decision S1).
+    pub svg: SvgRasters,
 }
 
 impl Default for VectorCache {
@@ -202,6 +223,7 @@ impl VectorCache {
             gpu: None,
             paint: None,
             last_backend: None,
+            svg: SvgRasters::default(),
         }
     }
 
@@ -215,9 +237,9 @@ impl VectorCache {
         self.backend = backend;
     }
 
-    /// Bytes of cached textures.
+    /// Bytes of cached textures and of the stored level 1 SVG rasters.
     pub fn bytes(&self) -> u64 {
-        self.bytes
+        self.bytes + self.svg.bytes()
     }
 
     /// Cached textures.
@@ -255,9 +277,11 @@ impl VectorCache {
     }
 
     /// Evicts least recently used textures until at most `budget` bytes
-    /// stay (lease pressure, between frames: every entry may go).
+    /// stay (lease pressure, between frames: every entry may go), then
+    /// stored SVG rasters within what the textures leave.
     pub fn trim(&mut self, budget: u64) {
         self.evict(budget, self.max_entries, true);
+        self.svg.evict(budget.saturating_sub(self.bytes));
     }
 
     /// Evicts least recently used entries until at most `bytes` and
@@ -330,6 +354,23 @@ impl VectorCache {
             VectorSource::Scene { scene, rect } => {
                 self.render_scene(device, queue, scene, *rect, precision)?
             }
+            VectorSource::SvgImage { key, asset, path } => {
+                // Through `resolve_svg` with the policy of a frame that waits.
+                return match self.resolve_svg(
+                    device,
+                    queue,
+                    key,
+                    asset,
+                    path,
+                    SvgMissPolicy::Wait,
+                )? {
+                    SvgResolved::Drawn(view) | SvgResolved::Substitute(view) => Ok(view),
+                    SvgResolved::Missing => Err(format!(
+                        "the SVG raster {}×{} has not arrived",
+                        key.width, key.height
+                    )),
+                };
+            }
             VectorSource::SvgRaster {
                 path,
                 transform,
@@ -350,10 +391,20 @@ impl VectorCache {
                 )
             }
         };
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         // Make room before inserting: earlier frames' entries go first, so
         // the bound holds within a frame too (a work item can be a whole
         // export).
+        Ok(self.insert(key, texture, bytes))
+    }
+
+    /// Caches a new texture under `key`, making room first.
+    fn insert(
+        &mut self,
+        key: ([u8; 32], u8),
+        texture: wgpu::Texture,
+        bytes: u64,
+    ) -> wgpu::TextureView {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.evict(
             self.max_bytes.saturating_sub(bytes),
             self.max_entries.saturating_sub(1),
@@ -370,7 +421,77 @@ impl VectorCache {
                 frame: self.frame,
             },
         );
-        Ok(view)
+        view
+    }
+
+    /// A cached texture, marked used by this frame.
+    fn touch(&mut self, key: &([u8; 32], u8)) -> Option<wgpu::TextureView> {
+        let (tick, frame) = (self.tick, self.frame);
+        self.entries.get_mut(key).map(|e| {
+            e.used = tick;
+            e.frame = frame;
+            e.view.clone()
+        })
+    }
+
+    /// The texture of a level 1 SVG raster (`Rgba8Unorm`, premultiplied,
+    /// top-down: the bytes today's `texImage2D` of the bucket canvas
+    /// stores). On a miss the need is recorded ([`SvgRasters::take_misses`])
+    /// and, under [`SvgMissPolicy::Substitute`], the content's latest
+    /// bucket stands in.
+    pub fn resolve_svg(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: &SvgRasterKey,
+        asset: &str,
+        path: &std::path::Path,
+        policy: SvgMissPolicy,
+    ) -> Result<SvgResolved, String> {
+        self.tick += 1;
+        let source_key = |k: &SvgRasterKey| {
+            let source = VectorSource::SvgImage {
+                key: k.clone(),
+                asset: String::new(),
+                path: Default::default(),
+            };
+            (source.key(), SVG_SLOT)
+        };
+        let id = source_key(key);
+        if self.svg.rasterizer == SvgRasterizer::Resvg {
+            self.svg.approximated += 1;
+        }
+        if let Some(view) = self.touch(&id) {
+            self.svg.drawn(key);
+            return Ok(SvgResolved::Drawn(view));
+        }
+        let pixels = match self.svg.rasterizer {
+            SvgRasterizer::Resvg => {
+                let (doc, _) = super::svg::document(path)?;
+                Some(std::sync::Arc::new(doc.raster(key.width, key.height).rgba))
+            }
+            SvgRasterizer::Chromium => self.svg.get(key),
+        };
+        if let Some(pixels) = pixels {
+            let texture = upload_rgba8(device, queue, key.width, key.height, &pixels);
+            let view = self.insert(id, texture, key.bytes());
+            self.svg.drawn(key);
+            return Ok(SvgResolved::Drawn(view));
+        }
+        self.svg.miss(SvgRasterNeed {
+            request: pm_protocol::svg_raster::SvgRasterRequest {
+                key: key.clone(),
+                asset: asset.to_owned(),
+            },
+            path: path.to_path_buf(),
+        });
+        if policy == SvgMissPolicy::Substitute
+            && let Some(latest) = self.svg.latest(key).cloned()
+            && let Some(view) = self.touch(&source_key(&latest))
+        {
+            return Ok(SvgResolved::Substitute(view));
+        }
+        Ok(SvgResolved::Missing)
     }
 
     fn gpu(&mut self, device: &wgpu::Device) -> Option<&mut GpuCoverage> {

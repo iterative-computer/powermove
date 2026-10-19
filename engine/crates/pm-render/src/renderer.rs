@@ -40,6 +40,9 @@ pub struct Frame {
     pub failures: Vec<LayerFailure>,
     /// The composition time rendered, in seconds.
     pub seconds: f64,
+    /// Level 1 SVG rasters the frame drew without (another bucket of the
+    /// same content, or nothing); see [`Rendered::svg_misses`].
+    pub svg_misses: Vec<crate::vector::svg_rasters::SvgRasterNeed>,
 }
 
 /// One layer's text raster ([`Renderer::text_raster`]).
@@ -79,6 +82,12 @@ pub struct Rendered {
     /// frame each shows (its presented index in its source). Empty when
     /// every video layer shows its exact frame.
     pub stand_ins: Vec<usize>,
+    /// Level 1 SVG rasters (decision S1) this preview frame drew without:
+    /// another bucket of the same content stood in, or the layer drew
+    /// nothing. The host asks the document's renderer for them and draws
+    /// the frame again when they arrive. Frames that may not substitute
+    /// fail with [`RenderError::SvgRastersPending`] instead.
+    pub svg_misses: Vec<crate::vector::svg_rasters::SvgRasterNeed>,
 }
 
 /// One drawn quad of a top-level layer ([`Rendered::quads`]).
@@ -187,6 +196,9 @@ pub struct Renderer {
     explicit_meshes: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
     text: crate::text::TextContext,
     text_gpu: crate::text::gpu::TextGpu,
+    /// Frames that are not exports wait for level 1 SVG rasters too
+    /// (snapshots) instead of substituting ([`Renderer::set_svg_wait`]).
+    svg_wait: bool,
 }
 
 impl Renderer {
@@ -217,7 +229,53 @@ impl Renderer {
             effect_host: None,
             shaders: Default::default(),
             explicit_meshes: Default::default(),
+            svg_wait: false,
         }
+    }
+
+    /// Who draws level 1 SVG rasters (decision S1): Chromium, through
+    /// [`Renderer::put_svg_raster`] (the default: every host with a
+    /// renderer), or resvg (`pm-cli`, an approximation it reports).
+    /// Changing it drops the stored rasters.
+    pub fn set_svg_rasterizer(&mut self, rasterizer: crate::vector::svg_rasters::SvgRasterizer) {
+        if self.vector.svg.rasterizer != rasterizer {
+            self.vector.svg.forget(None);
+        }
+        self.vector.svg.rasterizer = rasterizer;
+    }
+
+    /// Frames that are not exports also wait for missing level 1 SVG
+    /// rasters ([`RenderError::SvgRastersPending`]) instead of drawing the
+    /// content's latest bucket (snapshots). Exports always wait.
+    pub fn set_svg_wait(&mut self, wait: bool) {
+        self.svg_wait = wait;
+    }
+
+    /// Stores a level 1 SVG raster the document's renderer drew:
+    /// premultiplied RGBA8, top-down, `key.width × key.height × 4` bytes.
+    pub fn put_svg_raster(
+        &mut self,
+        key: pm_protocol::svg_raster::SvgRasterKey,
+        rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        self.vector.svg.put(key, rgba)
+    }
+
+    /// Whether the raster is stored.
+    pub fn has_svg_raster(&self, key: &pm_protocol::svg_raster::SvgRasterKey) -> bool {
+        self.vector.svg.contains(key)
+    }
+
+    /// Drops the stored rasters of one SVG content (every content when
+    /// `None`): a replaced or relinked asset, a closed document.
+    pub fn forget_svg_rasters(&mut self, content: Option<&str>) {
+        self.vector.svg.forget(content);
+    }
+
+    /// Level 1 SVG draws resvg approximated since the renderer was made
+    /// ([`crate::vector::svg_rasters::SvgRasterizer::Resvg`]).
+    pub fn svg_approximated(&self) -> u64 {
+        self.vector.svg.approximated
     }
 
     /// Runs layer effects and adjustment layers through `host` instead of
@@ -692,6 +750,7 @@ impl Renderer {
             legend: r.legend,
             failures: r.failures,
             seconds: r.seconds,
+            svg_misses: r.svg_misses,
         })
     }
 
@@ -780,6 +839,8 @@ impl Renderer {
         // cache returns within its bound; 3D meshes and maps no recent 3D
         // frame drew are released.
         self.vector.begin_frame();
+        // Misses belong to the frame that records them.
+        self.vector.svg.take_misses();
         self.scene3d.begin_frame();
         let mut encoder = self
             .device
@@ -819,6 +880,11 @@ impl Renderer {
                 working: color.working,
                 blend_domain: color.blend_domain,
                 export: request.export,
+                svg_policy: if request.export || self.svg_wait {
+                    crate::vector::svg_rasters::SvgMissPolicy::Wait
+                } else {
+                    crate::vector::svg_rasters::SvgMissPolicy::Substitute
+                },
                 depth_id: depth_id.is_some(),
                 taken: Vec::new(),
                 pyramids: &mut self.pyramids,
@@ -839,7 +905,10 @@ impl Renderer {
             // plan could not see): the frame fails, and the caller's
             // targets keep their previous contents. The commands still run,
             // so media caches filled by this encoder stay valid.
-            let complete = exec.unsupported.is_empty() && exec.fallback_pending.is_empty();
+            let svg_waits = exec.svg_policy == crate::vector::svg_rasters::SvgMissPolicy::Wait
+                && exec.vector.svg.missed();
+            let complete =
+                exec.unsupported.is_empty() && exec.fallback_pending.is_empty() && !svg_waits;
             if complete {
                 exec.flip_color(&mut encoder, &gl_rows, target);
             }
@@ -889,12 +958,18 @@ impl Renderer {
         self.media.scrub = scrub;
         failures.extend(exec_failures);
         if !unsupported.is_empty() {
+            self.vector.svg.take_misses();
             return Err(RenderError::Unsupported(unsupported));
         }
         if !pending.is_empty() {
+            self.vector.svg.take_misses();
             return Err(RenderError::ShaderFallbackPending(
                 pending.iter().map(|r| (**r).clone()).collect(),
             ));
+        }
+        let svg_misses = self.vector.svg.take_misses();
+        if !svg_misses.is_empty() && (request.export || self.svg_wait) {
+            return Err(RenderError::SvgRastersPending(svg_misses));
         }
         Ok(Rendered {
             quads,
@@ -902,6 +977,7 @@ impl Renderer {
             failures,
             seconds,
             stand_ins: std::mem::take(&mut self.media.stand_ins),
+            svg_misses,
         })
     }
 

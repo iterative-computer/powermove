@@ -29,6 +29,13 @@ pub enum RenderError {
     /// The targets are left untouched.
     #[error("waiting for the shader fallback runner ({} layer draws)", .0.len())]
     ShaderFallbackPending(Vec<crate::shader_layers::FallbackRequest>),
+    /// Level 1 SVG rasters (decision S1) a frame that may not substitute
+    /// them (an export, a snapshot: `Renderer::set_svg_wait`) did not
+    /// have: the caller gets them from the document's renderer
+    /// (`Renderer::put_svg_raster`) and renders the frame again. The
+    /// targets are left untouched.
+    #[error("waiting for {} SVG raster(s) from the document's renderer", .0.len())]
+    SvgRastersPending(Vec<crate::vector::svg_rasters::SvgRasterNeed>),
 }
 
 /// A layer that failed while the rest of the frame rendered (section 8,
