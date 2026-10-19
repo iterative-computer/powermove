@@ -688,6 +688,7 @@ mod tests {
         resolution: PreviewResolution,
     ) -> ViewerState {
         ViewerState {
+            headless: None,
             composition: "c".into(),
             size: Size::new(width, height),
             device_pixel_ratio: dpr,

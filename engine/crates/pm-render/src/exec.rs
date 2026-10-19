@@ -400,6 +400,7 @@ impl Exec<'_> {
                             self.queue,
                             &blender.surface,
                             self.precision,
+                            blender.compatibility,
                         ));
                         // Premultiplied E like the native 3D output: linear
                         // light decodes it (section 9).

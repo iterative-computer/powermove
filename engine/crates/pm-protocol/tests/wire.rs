@@ -11,6 +11,29 @@ use pm_protocol::samples;
 use proptest::prelude::*;
 
 #[test]
+fn headless_viewer_state_is_optional_and_round_trips() {
+    let state = samples::all()
+        .into_iter()
+        .find_map(|(_, env)| match env.message {
+            Message::Event {
+                body: pm_protocol::Event::Viewer(state),
+            } => Some(state),
+            _ => None,
+        })
+        .unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    json.as_object_mut().unwrap().remove("headless");
+    let old: pm_protocol::frame::ViewerState =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&json).unwrap()).unwrap();
+    assert_eq!(old.headless, None);
+    let mut headless = old;
+    headless.headless = Some(true);
+    let back: pm_protocol::frame::ViewerState =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&headless).unwrap()).unwrap();
+    assert_eq!(back, headless);
+}
+
+#[test]
 fn every_sample_round_trips_through_messagepack_and_json() {
     for (name, envelope) in samples::all() {
         let bytes = encode(&envelope).unwrap_or_else(|e| panic!("{name}: {e}"));

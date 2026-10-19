@@ -127,7 +127,13 @@ fn run_child(child: &str, envs: &[(&str, &str)]) -> String {
     let server = Rendezvous::register(&name).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", child, "--ignored", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            child,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, "1")
         .env(BRIDGE_ENV, &name)
         .env_remove(HOST_CLOCK_ENV)
@@ -142,7 +148,14 @@ fn run_child(child: &str, envs: &[(&str, &str)]) -> String {
     let table = Arc::new(Mutex::new(SurfaceTable::default()));
     let main = std::thread::spawn(move || {
         let stop = AtomicBool::new(false);
-        host::run(server, &expected, Duration::from_secs(60), &table, &stop, &mut |_| {});
+        host::run(
+            server,
+            &expected,
+            Duration::from_secs(60),
+            &table,
+            &stop,
+            &mut |_| {},
+        );
     });
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -155,7 +168,22 @@ fn run_child(child: &str, envs: &[(&str, &str)]) -> String {
 #[test]
 fn a_silent_composition_plays_from_play_without_waiting_for_the_audio_device() {
     let stdout = run_child("child_silent_play", &[(SOURCE_ENV, "document")]);
-    assert!(stdout.contains("CHILD-OK"), "child did not finish:\n{stdout}");
+    assert!(
+        stdout.contains("CHILD-OK"),
+        "child did not finish:\n{stdout}"
+    );
+}
+
+#[test]
+fn headless_playback_draws_nothing_and_a_view_joins_its_running_clock() {
+    let stdout = run_child(
+        "child_silent_play",
+        &[(SOURCE_ENV, "document"), ("PM_HEADLESS_TEST", "1")],
+    );
+    assert!(
+        stdout.contains("CHILD-OK"),
+        "child did not finish: {stdout}"
+    );
 }
 
 #[test]
@@ -218,15 +246,30 @@ fn child_silent_play() {
         })
         .with_session(session),
     );
-    send(&mut host, event(Event::Viewer(state(1))));
-    let first = inbox.wait(Duration::from_secs(20), frame);
-    send(
-        &mut host,
-        event(Event::ReleaseFrame(FrameRelease {
-            pool_index: first.pool_index,
-            seq: first.seq,
-        })),
-    );
+    let headless = std::env::var("PM_HEADLESS_TEST").is_ok();
+    let mut viewer = state(1);
+    viewer.headless = Some(headless);
+    send(&mut host, event(Event::Viewer(viewer)));
+    if headless {
+        inbox.wait(Duration::from_secs(5), |m| match &m.message {
+            Message::Event {
+                body: Event::Clock(_),
+            } if m.revision == Revision::new(1).ok() => Some(()),
+            _ => None,
+        });
+        let status: Value = serde_json::from_str(&host.status_json()).unwrap();
+        assert_eq!(status["presenter"]["pools"], 0);
+        assert_eq!(status["presenter"]["frames"], 0);
+    } else {
+        let first = inbox.wait(Duration::from_secs(20), frame);
+        send(
+            &mut host,
+            event(Event::ReleaseFrame(FrameRelease {
+                pool_index: first.pool_index,
+                seq: first.seq,
+            })),
+        );
+    }
     // Give a warmed audio thread time to decide (it must not open the
     // device for a silent composition).
     std::thread::sleep(Duration::from_millis(300));
@@ -251,6 +294,25 @@ fn child_silent_play() {
         "the run starts {lead} µs after Play"
     );
     assert_eq!(run.output_latency_us, 0, "{run:?}");
+    if headless {
+        std::thread::sleep(Duration::from_millis(150));
+        let status: Value = serde_json::from_str(&host.status_json()).unwrap();
+        assert_eq!(status["presenter"]["frames"], 0);
+        send(&mut host, event(Event::Viewer(state(2))));
+        let joined = inbox.wait(Duration::from_secs(20), frame);
+        assert!(
+            joined.duration.is_some(),
+            "joins timed playback, without a pause or seek"
+        );
+        assert!(joined.pts.get() > 0);
+        let clock = inbox.wait(Duration::from_secs(2), |m| match &m.message {
+            Message::Event {
+                body: Event::Clock(c),
+            } if c.state == TransportState::Playing => Some(*c),
+            _ => None,
+        });
+        assert_eq!(clock.epoch, run.epoch);
+    }
     send(&mut host, event(Event::Transport(TransportCommand::Pause)));
     inbox.wait(Duration::from_secs(5), |m| match &m.message {
         Message::Event {
@@ -263,7 +325,11 @@ fn child_silent_play() {
     assert_eq!(presenter["silentRuns"], 1, "{presenter}");
     assert_eq!(presenter["hostClockRuns"], 0, "{presenter}");
     // The view's audio thread never opened a device.
-    for audio in presenter["audio"].as_object().into_iter().flat_map(|a| a.values()) {
+    for audio in presenter["audio"]
+        .as_object()
+        .into_iter()
+        .flat_map(|a| a.values())
+    {
         assert!(audio["device"].is_null(), "{presenter}");
     }
     drop(host);
@@ -367,6 +433,7 @@ fn model(v: &Value) -> pm_model::Value {
 
 fn state(view_seq: u64) -> ViewerState {
     ViewerState {
+        headless: None,
         composition: "Ptracer-root".into(),
         size: Size::new(1280, 720),
         device_pixel_ratio: 2.0,

@@ -1192,6 +1192,7 @@ pub fn events() -> Vec<Envelope> {
             role: Some(crate::interop::PoolRole::DepthId),
         })),
         event(Event::Viewer(ViewerState {
+            headless: None,
             composition: "main".into(),
             size: Size::new(3024, 1964),
             device_pixel_ratio: 2.0,
