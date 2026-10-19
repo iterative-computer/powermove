@@ -429,16 +429,17 @@ export class EngineRenderTransport {
       }
       this.lookahead(need, session, answered);
     }
-    if (playing) this.presentedWhilePlaying();
+    if (playing || this.preparers.size) this.presentedWhilePlaying(!playing);
   }
 
   /** Clock-driven replenishment also runs when no frame was presented. */
-  presentedWhilePlaying(): void {
-    if (!this.options.playing?.() || this.pumpingAhead) return;
+  presentedWhilePlaying(warm = false, warmUntil = performance.now() + 50): void {
+    if (warm && !this.options.playing?.() && performance.now() >= warmUntil) return;
+    if ((!this.options.playing?.() && !warm) || this.pumpingAhead) return;
     this.pumpingAhead = true;
     try {
       const deadline = performance.now() + LOOKAHEAD_BUDGET_MS;
-      const clock = this.options.playhead?.();
+      const clock = this.options.playing?.() ? this.options.playhead?.() : null;
       const revision = this.options.revision();
       const entries = [...this.ahead.values()].filter(entry => {
         if (entry.session.closed || !this.answerers.has(entry.need.source)) {
@@ -476,7 +477,7 @@ export class EngineRenderTransport {
           if (prepare && this.aheadInFlight >= 2) continue;
           done++;
           if (prepare) {
-            this.prepareAhead(entry, time, revision ?? 0, prepare);
+            this.prepareAhead(entry, time, revision ?? 0, prepare, warm, warmUntil);
             pending--;
             continue;
           }
@@ -499,18 +500,18 @@ export class EngineRenderTransport {
     this.presentedWhilePlaying();
   }
 
-  private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>): void {
+  private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>, warm = false, warmUntil = Infinity): void {
     const need = { ...entry.need, time };
     entry.pending.add(time);
     this.aheadInFlight++;
     this.lookaheadStats.inFlight = this.aheadInFlight;
     this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
     void Promise.resolve().then(() => prepare(need, revision)).then(() => {
-      const clock = this.options.playhead?.();
+      const clock = this.options.playing?.() ? this.options.playhead?.() : null;
       const cursor = clock && need.composition === this.options.composition()
         ? Math.floor(clock.time / Math.abs(entry.step)) * Math.abs(entry.step) : entry.cursor;
       const distance = Math.sign(entry.step) * (time - cursor);
-      if (!this.options.playing?.() || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
+      if ((!this.options.playing?.() && (!warm || performance.now() >= warmUntil)) || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
         || this.preparers.get(need.source) !== prepare || revision !== this.options.revision() || distance < -Math.abs(entry.step) || distance > COMPAT_LOOKAHEAD * Math.abs(entry.step)) {
         this.lookaheadStats.obsolete++;
         return;
@@ -533,14 +534,14 @@ export class EngineRenderTransport {
       this.lookaheadStats.inFlight = this.aheadInFlight;
       // Each completed answer is independent: a slower sibling does not
       // hold its ready pixels behind a Promise.all barrier.
-      this.presentedWhilePlaying();
+      this.presentedWhilePlaying(warm, warmUntil);
     });
   }
 
   private scheduleAhead(): void {
     // A timer, rather than a presented-frame callback, breaks the deadlock
     // when one late answer consumed the entire presentation horizon.
-    if (!this.options.playhead || this.aheadTimer !== null || !this.ahead.size) return;
+    if (!this.options.playing?.() || !this.options.playhead || this.aheadTimer !== null || !this.ahead.size) return;
     this.aheadTimer = setTimeout(() => {
       this.aheadTimer = null;
       this.presentedWhilePlaying();
@@ -567,7 +568,7 @@ export class EngineRenderTransport {
     entry.need = need;
     // Never infer reverse playback from a late need. Only the transport's
     // rate determines direction; an explicit seek resets the sent window.
-    if (!clock || need.composition !== this.options.composition()) {
+    if (!clock || !this.options.playing?.() || need.composition !== this.options.composition()) {
       entry.cursor = need.time;
       entry.clockCursor = clock ? Math.floor(clock.time / frame) * frame : null;
     }

@@ -63,6 +63,8 @@ export interface RasterCompatOptions {
   engineRaster: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => any;
   /** Prepare the same base surface without blocking the renderer's event loop. */
   engineRasterAsync?: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => Promise<any>;
+  /** Native-evaluated content identity for a base whose pixels are time independent. */
+  rasterKey?: (layer: any, scale: number, time: number, crop?: RasterWindowLike) => string | null;
   /** Reads a surface's pixels as the compositor uploads them. */
   readPixels?: (source: CanvasImageSource & { width: number; height: number }) => { width: number; height: number; format: 'rgba8Premultiplied' | 'rgba8Straight'; data: Uint8Array } | null;
   log?: (message: string) => void;
@@ -265,6 +267,9 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   const posted = new Map<string, string>();
   const ready = new Map<string, { layer: unknown; surface: any }>();
   const preparing = new Map<string, { layer: unknown; promise: Promise<void> }>();
+  const bases = new Map<string, { layer: unknown; surface: any; bytes: number }>();
+  let baseBytes = 0;
+  let answeringLayer: unknown = null;
   let pending = 0, generation = 0, readyRevision: number | null = null;
   let active: { layer: unknown; key: string; scale: number; time: number; crop: string } | null = null;
   let serial = 0;
@@ -276,10 +281,23 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   const sampleRevision = (revision: number) => {
     if (readyRevision === revision) return;
     readyRevision = revision;
-    ready.clear();
+    ready.clear(); bases.clear(); baseBytes = 0;
     generation++;
   };
-  const clearReady = () => { ready.clear(); preparing.clear(); readyRevision = null; generation++; };
+  const clearReady = () => { ready.clear(); preparing.clear(); bases.clear(); baseBytes = 0; readyRevision = null; generation++; };
+  const rememberBase = (key: string | null, layer: unknown, surface: any) => {
+    if (!key || !surface) return;
+    const bytes = Number(surface.cv?.width) * Number(surface.cv?.height) * 4;
+    if (!(bytes > 0 && bytes <= 32 * 1024 * 1024)) return;
+    const old = bases.get(key);
+    if (old) baseBytes -= old.bytes;
+    bases.delete(key);
+    bases.set(key, { layer, surface, bytes }); baseBytes += bytes;
+    while (bases.size > 2 || baseBytes > 32 * 1024 * 1024) {
+      const first = bases.keys().next().value!;
+      baseBytes -= bases.get(first)!.bytes; bases.delete(first);
+    }
+  };
 
   const wrapped = (): boolean => {
     const chain = options.chain();
@@ -296,7 +314,13 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const t = Number(time ?? PM?.time ?? 0);
       const prepared = active && active.layer === layer ? ready.get(active.key) : undefined;
       const matches = prepared?.layer === layer && active?.scale === s && active.time === t && active.crop === cropKey(crop ?? undefined);
-      const load = () => matches ? prepared!.surface : options.engineRaster(layer, s, t, crop ?? undefined);
+      const key = answeringLayer === layer ? options.rasterKey?.(layer, s, t, crop ?? undefined) ?? null : null;
+      const load = () => {
+        if (matches) return prepared!.surface;
+        const surface = options.engineRaster(layer, s, t, crop ?? undefined);
+        rememberBase(key, layer, surface);
+        return surface;
+      };
       // A captions layer between cues is null today: decide it now.
       if (layer?.type === 'captions') return load();
       return lazySurface({ layer, scale: s, time: t, crop }, load);
@@ -319,6 +343,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const crop: RasterWindowLike | undefined = need.crop ? { x: need.crop.x, y: need.crop.y, width: need.crop.width, height: need.crop.height } : undefined;
       let result: any;
       producing++;
+      answeringLayer = layer;
       active = answerOptions?.prepared === true && answerOptions.layer === undefined
         ? { layer, key: sampleKey(need, revision), scale, time, crop: cropKey(crop) } : null;
       try {
@@ -337,6 +362,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         producing--;
         if (active) ready.delete(active.key);
         active = null;
+        answeringLayer = null;
       }
       const mark: LazyMark | undefined = result?.[LAZY];
       // The base itself, for this layer, density and window, untouched: the
@@ -369,6 +395,13 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       if (!layer || (layer.type === 'captions' && PM?.captionsHidden)) return;
       const key = sampleKey(need, revision);
       if (ready.get(key)?.layer === layer) return;
+      const baseKey = options.rasterKey?.(layer, Number(need.scale), Number(need.time) / TICKS_PER_SECOND, need.crop ?? undefined) ?? null;
+      const cached = baseKey ? bases.get(baseKey) : undefined;
+      if (cached && cached.layer === layer) {
+        ready.set(key, { layer, surface: cached.surface });
+        while (ready.size > 2) ready.delete(ready.keys().next().value!);
+        return;
+      }
       const existing = preparing.get(key);
       if (existing) { if (existing.layer === layer) await existing.promise; return; }
       if (pending >= 2) return;
@@ -379,6 +412,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         try {
           const surface = await options.engineRasterAsync!(layer, Number(need.scale), Number(need.time) / TICKS_PER_SECOND, crop);
           if (generation !== epoch || findLayer(PM, String(need.composition), String(need.layer)) !== layer || !wrapped()) return;
+          rememberBase(baseKey, layer, surface);
           ready.set(key, { layer, surface });
           while (ready.size > 2) ready.delete(ready.keys().next().value!);
         } catch (error) {
