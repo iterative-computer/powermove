@@ -90,6 +90,8 @@ pub struct Options {
     pub definitions: Option<PathBuf>,
     /// The editor's display scale factor (`crate::fonts`).
     pub ui_scale: Option<f32>,
+    /// Parameter values supplied by the CLI user, parsed as JSON.
+    pub parameters: Vec<(String, Value)>,
 }
 
 fn usage(m: impl Into<String>) -> Failure {
@@ -290,7 +292,8 @@ fn load(options: &Options) -> Result<Loaded, Failure> {
         pm_model::container::ReadOptions::default(),
     )
     .map_err(|e| Failure::Failed(format!("{}: {e}", options.input.display())))?;
-    let project = container.project().clone();
+    let mut project = container.project().clone();
+    crate::parameters::apply(&mut project, &options.parameters).map_err(usage)?;
     let composition = match &options.composition {
         Some(c) => c.clone(),
         None => pm_model::canonical::open_comp_id(&project)

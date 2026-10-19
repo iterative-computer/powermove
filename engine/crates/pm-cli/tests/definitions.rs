@@ -295,3 +295,38 @@ fn a_program_only_the_webgl_runner_draws_is_not_headless_renderable() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn cli_parameter_overrides_change_rendered_expression_values_and_refuse_invalid_values() {
+    let dir = scratch("parameters");
+    let file = dir.join("p.json");
+    let mut p = project(json!([]));
+    p["params"] = json!({ "alpha": { "control": "num", "value": 100, "min": 0, "max": 100 } });
+    p["layers"][0]["p"]["opacity"]["expr"] = json!("param('alpha')");
+    std::fs::write(&file, p.to_string()).unwrap();
+    let out = dir.join("parameter.png");
+    ok(&cli(&[
+        file.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--format",
+        "still",
+        "--param",
+        "alpha=0",
+    ]));
+    assert_eq!(corner(&out), [0, 0, 0]);
+    let invalid = dir.join("invalid.png");
+    let result = cli(&[
+        file.to_str().unwrap(),
+        "-o",
+        invalid.to_str().unwrap(),
+        "--format",
+        "still",
+        "--param",
+        "alpha=101",
+    ]);
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("invalid value for parameter"));
+    assert!(!invalid.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}

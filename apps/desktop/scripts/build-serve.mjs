@@ -6,6 +6,7 @@
  *   node scripts/build-serve.mjs [--out <dir>] [--skip-renderer]
  */
 import { build } from 'esbuild';
+import { existsSync } from 'node:fs';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -25,6 +26,8 @@ if (!skipRenderer) {
 
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
+const prebuilds = path.resolve(desktop, '../../packages/cli/prebuilds');
+if (existsSync(prebuilds)) await cp(prebuilds, path.join(outDir, 'native'), { recursive: true });
 
 await build({
   entryPoints: [path.join(desktop, 'src/server/cli.ts')],

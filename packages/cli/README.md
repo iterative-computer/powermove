@@ -74,6 +74,42 @@ The CLI also provides a stdio MCP server. Run `powermove mcp-install-browser` on
 
 Use `--user-data` and `--exports` for other folders. `mcp --connect --user-data <profile>` connects to an already running app or host. See [the MCP guide](https://github.com/iterative-computer/powermove/blob/main/apps/desktop/docs/MCP.md) for client configuration, tool workflow and capability limits.
 
+## Native renders
+
+```sh
+powermove render project.pmv /any/output/folder/movie.mov --preset master
+powermove render project.pmv frame.png --format still --param 'title="Hello"'
+```
+
+The second argument is the destination, including paths outside the exports folder.
+Render options are the native `pm-cli render` options: definition snapshots
+(`--definitions`), media overrides, fonts via the host registry, composition, range,
+rate, size, presets and repeatable `--param NAME=JSON` values. Parameter overrides
+use the player's numeric bounds, toggle, color and select validation. Existing
+outputs require `--force`. Native process exit codes reach the caller.
+
+A source checkout can set `POWERMOVE_PM_CLI` to its built binary. A packaged build
+looks under `dist/native/<platform>-<arch>/pm-cli` and names a missing runtime as
+`native-renderer-unavailable`.
+
+Maintainers assemble each macOS architecture from its matching Rust artifacts and
+verified LGPL FFmpeg build before building the package:
+
+```sh
+bun run build:native --arch arm64 --artifacts ../../engine/target/release --ffmpeg /path/to/lgpl-build --node /path/to/clean-node22
+# Repeat with x64 artifacts, x64 FFmpeg, and x64 Node 22.
+bun run build
+```
+
+Assembly relocates dependent dylibs, applies ad-hoc signatures, and load-tests the
+addons plus `pm-cli` with Node 22. It writes ignored `prebuilds/`; the package build
+copies those into `dist/native`. This does not create a release or publish.
+Both architecture gates are required before distributing native CLI support.
+
+On macOS, `mcp` with Use New Engine enabled currently returns
+`native-hidden-host-unavailable`; connect to the native desktop with `--connect`
+until the per-project native hidden host is integrated.
+
 ## Requirements
 
 Node 22 or newer. Linux and macOS.

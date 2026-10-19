@@ -20,6 +20,7 @@
 mod compare;
 mod corpus;
 mod fonts;
+mod parameters;
 mod parity;
 mod render;
 mod render_parity;
@@ -78,6 +79,7 @@ const USAGE: &str = "usage:
       --definitions FILE  a definition set snapshot (contract 10, JSON) to draw
                effects, transitions, and extension layers with (default: the
                built-in definitions)
+      --param NAME=JSON (repeatable; validates against the parameter definition)
       --ui-scale S  the editor's display scale factor, which fixes how its
                     renderer measures system-ui text (default 2)
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
@@ -232,6 +234,9 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
             "--timecode" => o.timecode = Some(value(args, &mut i, a)?.into()),
             "--reel" => o.reel = Some(value(args, &mut i, a)?.into()),
             "--no-captions" => o.no_captions = true,
+            "--param" => o
+                .parameters
+                .push(parameters::parse(value(args, &mut i, a)?)?),
             "--definitions" => o.definitions = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
