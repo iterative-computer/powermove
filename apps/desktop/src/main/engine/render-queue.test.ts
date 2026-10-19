@@ -16,13 +16,13 @@ const options = (format = 'prores-hq'): SheetExportOptions => ({
 
 class FakeEngine implements QueueEngine {
   available = true;
-  submitted: Array<{ project: any; options: SheetExportOptions; destination: string; overwrite: string; jobId: string; definitions?: unknown[] }> = [];
+  submitted: Array<{ project: any; options: SheetExportOptions; destination: string; overwrite: string; jobId: string; definitions?: unknown[]; seedOwner?: number | null }> = [];
   cancelled: string[] = [];
   fail: string | null = null;
-  async exportQueued(project: unknown, o: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', definitions?: any[]) {
+  async exportQueued(project: unknown, o: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', definitions?: any[], seedOwner?: number | null) {
     if (this.fail) throw new Error(this.fail);
     const jobId = `engine-${this.submitted.length + 1}`;
-    this.submitted.push({ project, options: o, destination, overwrite, jobId, definitions });
+    this.submitted.push({ project, options: o, destination, overwrite, jobId, definitions, seedOwner });
     return { jobId, frames: 48 };
   }
   async cancelQueued(jobId: string) {
@@ -61,18 +61,28 @@ afterEach(async () => {
   queues = [];
 });
 
-async function setup() {
+async function setup(windowOpen: (owner: number) => boolean = () => false) {
   const dir = await mkdtemp(path.join(tmpdir(), 'pm-queue-'));
   dirs.push(dir);
   const engine = new FakeEngine();
   const p = platform();
   const changes = vi.fn();
-  const queue = new RenderQueue({ directory: dir, engine, platform: p, onChange: changes, now: () => 1000 });
+  const queue = new RenderQueue({ directory: dir, engine, platform: p, windowOpen, onChange: changes, now: () => 1000 });
   queues.push(queue);
   return { dir, engine, p, queue, changes };
 }
 
 describe('render queue', () => {
+  it('uses the starting window while it is open and never persists its renderer id', async () => {
+    const { engine, queue, dir } = await setup(owner => owner === 42);
+    await queue.add({ name: 'A.mov', project: project(), options: options(), destination: '/out/A.mov', owner: 42 });
+    await queue.start(); await settle();
+    expect(engine.submitted[0]!.seedOwner).toBe(42);
+    const saved = JSON.parse(await readFile(path.join(dir, 'queue.json'), 'utf8'));
+    expect(saved.jobs[0]).not.toHaveProperty('owner');
+    expect(saved.jobs[0]).not.toHaveProperty('seedOwner');
+  });
+
   it('runs jobs unattended from their snapshots, one at a time, and keeps going after a failure', async () => {
     const { engine, p, queue, dir } = await setup();
     const live = project();

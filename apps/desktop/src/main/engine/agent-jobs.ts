@@ -353,6 +353,10 @@ export type AgentJobsOptions = {
   onAgentJob?(job: { jobId: string; owner: number; name: string; summary: string; status: RenderStatus }): void;
   /** A job finished with a file at `path` (export sidecars remember it). */
   onDelivered?(owner: number, path: string): void;
+  /** The window a job engine session is for (`null`: no window, or the
+   *  session closed): its text measures with that window's font cache
+   *  seeds (engine-fonts-seeds.ts). Awaited before the session renders. */
+  sessionOwner?(session: number, owner: number | null): Promise<unknown>;
   queueBoundMs?: number;
   now?: () => number;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
@@ -413,7 +417,7 @@ export class AgentJobs {
     // engine asks for a folder destination by the format.
     const extension = extensionOf(format, delivery) ?? 'png';
     const jobId = `agent-export-${randomUUID()}`;
-    const session = await this.openSnapshot(project, `agent-export-${jobId}`, this.windowUpdates(owner));
+    const session = await this.openSnapshot(project, `agent-export-${jobId}`, owner, this.windowUpdates(owner));
     const record: JobRecord = {
       jobId, owner, run, session,
       status: { job: jobId, class: 'agentExport', state: 'queued', progress: 0, path: null, error: null },
@@ -588,18 +592,20 @@ export class AgentJobs {
 
   /** Starts a render queue job (unattended, from its stored snapshot) to its
    *  destination under its overwrite policy. Statuses go to `onQueueStatus`. */
-  async exportQueued(projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', definitions: DefinitionsUpdate[] = []): Promise<{ jobId: string; frames: number }> {
-    return this.submitUser(QUEUE_OWNER, projectValue, options, destination, overwrite, true, definitions);
+  async exportQueued(projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', definitions: DefinitionsUpdate[] = [], seedOwner: number | null = null): Promise<{ jobId: string; frames: number }> {
+    return this.submitUser(QUEUE_OWNER, projectValue, options, destination, overwrite, true, definitions, seedOwner);
   }
 
-  private async submitUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', queue: boolean, definitions: DefinitionsUpdate[]): Promise<{ jobId: string; frames: number }> {
+  private async submitUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', queue: boolean, definitions: DefinitionsUpdate[], seedOwner: number | null = null): Promise<{ jobId: string; frames: number }> {
     const project = asProject(projectValue);
     const format = migrateFormat(options.format);
     const sequenceName = format === 'png' ? path.basename(destination) : undefined;
     const settings = userExportSettings(project, options, { preview: !queue, ...(sequenceName ? { sequenceName } : {}) });
     if (!this.options.engine.chooseOutput) throw new AgentJobError('This host cannot write user exports.');
     const jobId = `${queue ? 'queue' : 'user'}-export-${randomUUID()}`;
-    const session = await this.openSnapshot(project, `${queue ? 'queue' : 'user'}-export-${jobId}`, definitions);
+    // Queue ownership is for status delivery; seed ownership follows the
+    // window that queued this snapshot while that renderer still exists.
+    const session = await this.openSnapshot(project, `${queue ? 'queue' : 'user'}-export-${jobId}`, queue ? seedOwner : owner, definitions);
     const record: JobRecord = {
       jobId, owner, run: '', session, ...(queue ? { queue: true } : { user: true }),
       status: { job: jobId, class: 'userJob', state: 'queued', progress: 0, path: null, error: null, preview: null },
@@ -708,7 +714,7 @@ export class AgentJobs {
         return this.currentDefinitions(owner, { ...current, revision, hash });
       }
       const generation = this.generation;
-      const session = await this.openSession(`agent-frames-${owner}`, 'job');
+      const session = await this.openSession(`agent-frames-${owner}`, 'job', owner);
       this.frameOwners.set(session, owner);
       await this.resync(session, `agent-frames-${owner}`, canonical, hash, 1);
       return this.currentDefinitions(owner, { session, revision: 1, hash, generation, definitions: null });
@@ -758,7 +764,7 @@ export class AgentJobs {
    * (`validate_effect`).
    */
   async compileDefinitions(snapshots: DefinitionsUpdate['upserts']): Promise<DefinitionsApplied['failures']> {
-    const session = await this.openSession(`validate-${randomUUID()}`, 'job');
+    const session = await this.openSession(`validate-${randomUUID()}`, 'job', null);
     try {
       let answer: Response;
       try {
@@ -784,17 +790,47 @@ export class AgentJobs {
 
   /* ── sessions ──────────────────────────────────────────────────────── */
 
-  private async openSession(document: string, role: 'job' | 'jobSnapshot'): Promise<number> {
+  private async openSession(document: string, role: 'job' | 'jobSnapshot', owner: number | null): Promise<number> {
     if (!this.available) throw new AgentJobError('The job engine is not running.', 'internal');
     const opened = await this.options.engine.request('job', { type: 'openSession', document, role, process: 'job', color: STANDARD_COLOR });
     if (opened.type !== 'sessionOpened') throw new AgentJobError('The job engine did not open a session.');
+    if (owner !== null) {
+      try {
+        await this.ownSession(opened.session, owner);
+      } catch (error) {
+        await this.closeSession(opened.session);
+        throw new AgentJobError(`The job engine could not lay text out as this window does, so the export did not start: ${error instanceof Error ? error.message : String(error)}`, 'internal');
+      }
+    }
     return opened.session;
   }
 
+  /** Tells the job engine's font service whose window a session is for,
+   *  once more if it did not answer: without it the session would measure
+   *  text with every window's seeds, which can differ from this window's
+   *  layout, so the job does not run. */
+  private async ownSession(session: number, owner: number): Promise<void> {
+    try {
+      await this.options.sessionOwner?.(session, owner);
+    } catch (error) {
+      this.options.log?.('warn', `font cache seeds for session ${session}: ${error instanceof Error ? error.message : String(error)}; trying again`);
+      await this.options.sessionOwner?.(session, owner);
+    }
+  }
+
+  /** Forgets a closed session's window; failures only log. */
+  private async sessionOwner(session: number, owner: null): Promise<void> {
+    try {
+      await this.options.sessionOwner?.(session, owner);
+    } catch (error) {
+      this.options.log?.('warn', `font cache seeds for session ${session}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   /** A frozen snapshot of the project for one export, with the definitions it renders with. */
-  private async openSnapshot(project: Project, document: string, definitions: DefinitionsUpdate[]): Promise<number> {
+  private async openSnapshot(project: Project, document: string, owner: number | null, definitions: DefinitionsUpdate[]): Promise<number> {
     const canonical = canonicalProject(project);
-    const session = await this.openSession(document, 'jobSnapshot');
+    const session = await this.openSession(document, 'jobSnapshot', owner);
     try {
       await this.options.bindMediaSession?.(session, project);
       await this.resync(session, document, canonical, canonicalHash(canonical), 1);
@@ -822,6 +858,7 @@ export class AgentJobs {
   }
 
   private async closeSession(session: number): Promise<void> {
+    void this.sessionOwner(session, null);
     await this.options.bindMediaSession?.(session, null);
     await this.options.engine.request('job', { type: 'closeSession' }, session).catch(() => undefined);
   }

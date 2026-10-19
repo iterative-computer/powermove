@@ -289,9 +289,9 @@ impl Child {
             |key: &str| std::env::var(key).ok(),
         )
         .unwrap();
-        host.attach(HOST.0, "host").unwrap();
+        host.attach(HOST.0, "host", None).unwrap();
         inbox.push(host.receive(HOST.0, &hello(PeerRole::Host)));
-        host.attach(WINDOW.0, "renderer").unwrap();
+        host.attach(WINDOW.0, "renderer", Some(WINDOW.0)).unwrap();
         inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
         let mut child = Child {
             host,
@@ -407,6 +407,7 @@ fn frame_request(
         view_seq: Some(Seq::new(4).unwrap()),
         wait_ms,
         blender_wait_ms: 0,
+        captions_hidden: false,
         uploaded: Vec::new(),
     }
 }

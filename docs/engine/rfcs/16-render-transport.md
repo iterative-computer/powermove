@@ -36,7 +36,7 @@ for all of that.
 ### Snapshot request
 
 `SnapshotRequest { composition, time (ticks), outputSize, target, pixels,
-class, viewSeq, waitMs, blenderWaitMs?, uploaded }`:
+class, viewSeq, waitMs, blenderWaitMs?, captionsHidden?, uploaded }`:
 
 - `target`: `frame { motionBlurSamples, background, draft3d }` or
   `layer { layer, scale, crop, content? }`. `content` is the layer object
@@ -65,6 +65,9 @@ class, viewSeq, waitMs, blenderWaitMs?, uploaded }`:
   draws a frame an earlier capture prepared, or fails `blenderFailed`
   with today's words. Main waits at most `2 × waitMs + blenderWaitMs`
   plus its render allowance.
+- `captionsHidden` (optional, default false): omit caption layers for this
+  frame capture, matching `PM.captionsHidden`. It does not alter the viewer
+  or subsequent captures.
 - `uploaded`: shader fallback keys the caller drew and posted on the
   session's port after a `needsRenderer` answer (see below).
 
@@ -124,7 +127,10 @@ the buffer to the renderer in shared memory again (Mojo big buffers).
    font service (the registry on the utility process's main thread,
    answered through a broker; `pm-node/src/fonts/render.rs`). A frame whose
    fonts did not answer in time fails with `timeout`; it never draws text
-   with missing fonts.
+   with missing fonts. Main-owned snapshot sessions bind to the originating
+   window's font seeds before resync; the render scope includes both port
+   and session. This waits only on the engine font-service port using main's
+   cached seeds, never on the blocked renderer.
 6. **Failures are named, never another engine's pixels.** `unsupported`
    (with the engine's reasons), `timeout`, `unknownSession`,
    `budgetExceeded`, `deviceLost`, `invalidMessage`, `internal`,
@@ -253,8 +259,8 @@ snapshot(options: EngineSnapshotOptions, cls?: 'async' | 'idle'): Promise<Engine
 renderFrameToSync(time, width, height, options?): HTMLCanvasElement | null; // today's renderOpaqueFrame
 renderFrameToCanvasSync(time, width, height, options?): HTMLCanvasElement; // throws EngineSnapshotError
 renderFrameTo(time, width, height, options?): Promise<HTMLCanvasElement>;
-snapshotDataUrlSync(time, maxWidth, size: { w; h }): string;          // JPEG 0.74, '' only on failure (throws for blenderFailed)
-snapshotDataUrl(time, maxWidth, size, options?: { prepareBlender?: boolean }): Promise<string>; // prepareBlender: today's snapshotAsync
+snapshotDataUrlSync(time, maxWidth, size: { w; h }, options?: { captionsHidden?: boolean }): string;          // JPEG 0.74, '' only on failure (throws for blenderFailed)
+snapshotDataUrl(time, maxWidth, size, options?: { prepareBlender?: boolean; captionsHidden?: boolean }): Promise<string>; // prepareBlender: today's snapshotAsync
 currentRevision(): number | null;                                      // flushes pending edits
 rasterSync(layer: string, scale, time, crop?, options?: RasterOptions): EngineSnapshot | null;  // null: draws nothing then
 raster(layer: string, scale, time, crop?, options?: RasterOptions): Promise<EngineSnapshot | null>;
@@ -265,7 +271,7 @@ forgetCompat(layer, composition?): boolean;
 provideCompat(source: CompatSource, producer: CompatProducer): () => void;
 readonly stats: TransportStats;
 
-type EngineSnapshotOptions = { time; width; height; composition?; pixels?; motionBlurSamples?; background?; draft3d?; waitMs?;
+type EngineSnapshotOptions = { time; width; height; composition?; pixels?; motionBlurSamples?; captionsHidden?; background?; draft3d?; waitMs?;
   prepareBlender?;  // async and idle frames: Blender renders the frame first (only in documents with a Blender composition)
   layer?: { id: string; scale: number; crop?: { x; y; width; height } | null; content?: Uint8Array | null } };
 type RasterOptions = { composition?: string; content?: Uint8Array | null; maxEdge?: number };

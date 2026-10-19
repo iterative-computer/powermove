@@ -56,6 +56,8 @@ function engine(answer: (body: Request, revision: number | null) => Promise<Resp
 describe('snapshot requests', () => {
   it('accept the shapes the renderer sends and refuse the rest', () => {
     expect(validSnapshotRequest(request())).toBe(true);
+    expect(validSnapshotRequest(request({ captionsHidden: true }))).toBe(true);
+    expect(validSnapshotRequest(request({ captionsHidden: 'false' as never }))).toBe(false);
     expect(validSnapshotRequest(request({ target: { kind: 'layer', layer: 'L1', scale: 2, crop: { x: 0, y: 0, width: 8, height: 8 } } }))).toBe(true);
     expect(validSnapshotRequest(request({ outputSize: { width: 0, height: 2 } }))).toBe(false);
     expect(validSnapshotRequest(request({ outputSize: { width: 16_385, height: 2 } }))).toBe(false);

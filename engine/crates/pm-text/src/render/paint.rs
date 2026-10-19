@@ -169,9 +169,24 @@ fn blur(img: &mut Image, rect: [i64; 4], sigma: f64) {
     }
 }
 
+/// The host's image filter, with an N32 save-layer source origin and the
+/// full canvas dimensions. The result is clipped to that canvas.
+pub type ImageFilter<'a> = dyn Fn(&Image, [i32; 2], (u32, u32), f64) -> Image + 'a;
+
 /// Paints `scene` with the coverage pages of `atlas` (RGBA8 rows, alpha is
 /// coverage) into a new float target.
 pub fn paint(scene: &TextScene, atlas: &Atlas, pages: &[(u32, u32, Vec<u8>)]) -> Image {
+    paint_with_filter(scene, atlas, pages, None)
+}
+
+/// The host can provide its Canvas2D image filter without creating a
+/// dependency from pm-text back to the vector renderer.
+pub fn paint_with_filter(
+    scene: &TextScene,
+    atlas: &Atlas,
+    pages: &[(u32, u32, Vec<u8>)],
+    filter: Option<&ImageFilter<'_>>,
+) -> Image {
     let mut target = Image::new(scene.width, scene.height);
     let mut cells: std::collections::HashMap<usize, Vec<&super::atlas::Cell>> =
         std::collections::HashMap::new();
@@ -217,6 +232,42 @@ pub fn paint(scene: &TextScene, atlas: &Atlas, pages: &[(u32, u32, Vec<u8>)]) ->
                 ]
             }
         };
+        if item.blur > 0.0
+            && let Some(filter) = filter
+        {
+            // A filter may read beyond the canvas. Paint the save layer
+            // first, then clip its filtered result to the canvas.
+            let r = i64::from(blur_radius(item.blur));
+            let origin = [(rect[0] - r) as i32, (rect[1] - r) as i32];
+            let mut layer = Image::new(
+                (rect[2] - rect[0] + 2 * r) as u32,
+                (rect[3] - rect[1] + 2 * r) as u32,
+            );
+            let mut shifted = item.clone();
+            if let ItemContent::Image { transform, .. } = &mut shifted.content {
+                *transform = kurbo::Affine::translate((-(origin[0] as f64), -(origin[1] as f64)))
+                    * *transform;
+            }
+            let coverage = |x, y| coverage(x + i64::from(origin[0]), y + i64::from(origin[1]));
+            let moved = [
+                rect[0] - i64::from(origin[0]),
+                rect[1] - i64::from(origin[1]),
+                rect[2] - i64::from(origin[0]),
+                rect[3] - i64::from(origin[1]),
+            ];
+            paint_item(&shifted, &coverage, moved, &mut layer);
+            let filtered = filter(&layer, origin, (scene.width, scene.height), item.blur);
+            for (d, s) in target
+                .data
+                .chunks_exact_mut(4)
+                .zip(filtered.data.chunks_exact(4))
+            {
+                for c in 0..4 {
+                    d[c] = d[c].mul_add(1.0 - s[3], s[c]);
+                }
+            }
+            continue;
+        }
         if item.blur > 0.0 {
             let mut layer = Image::new(scene.width, scene.height);
             paint_item(item, &coverage, rect, &mut layer);
@@ -242,11 +293,15 @@ pub fn paint(scene: &TextScene, atlas: &Atlas, pages: &[(u32, u32, Vec<u8>)]) ->
 
 /// Renders `scene` entirely on the CPU (`vello_cpu` coverage, float paint).
 pub fn render_cpu(scene: &TextScene) -> Image {
+    render_cpu_with_filter(scene, None)
+}
+
+pub fn render_cpu_with_filter(scene: &TextScene, filter: Option<&ImageFilter<'_>>) -> Image {
     let atlas = super::atlas::pack(scene, 4096);
     let pages: Vec<_> = (0..atlas.pages.len())
         .map(|p| super::cpu::render_page(scene, &atlas, p))
         .collect();
-    paint(scene, &atlas, &pages)
+    paint_with_filter(scene, &atlas, &pages, filter)
 }
 
 #[cfg(test)]

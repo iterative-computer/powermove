@@ -23,6 +23,7 @@
 //! and called on the utility process's JavaScript thread, which is the
 //! process's main thread.
 
+pub mod hub;
 pub mod render;
 pub mod wire;
 
@@ -92,6 +93,110 @@ struct ProjectFontArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NoArgs {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeedsArgs {
+    /// The seeds of work no window is known for.
+    seeds: Vec<pm_text::compat::FontCacheSeed>,
+    /// Each window's own seeds.
+    #[serde(default)]
+    owners: Vec<OwnerSeedsArgs>,
+    /// The window each session main opened is for (its exports).
+    #[serde(default)]
+    sessions: Vec<SessionOwnerArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerSeedsArgs {
+    owner: u32,
+    seeds: Vec<pm_text::compat::FontCacheSeed>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionOwnerArgs {
+    session: u64,
+    owner: u32,
+}
+
+/// Most seeds a message may carry per window (the app sends a few per
+/// scale factor).
+pub const MAX_SEEDS: usize = 256;
+/// Most windows and sessions a seeds message may name.
+pub const MAX_SEED_OWNERS: usize = 256;
+pub const MAX_SEED_SESSIONS: usize = 4096;
+
+/// The editor renderers' font cache seeds: each window is its own renderer
+/// with its own font cache, so a layout measures with the seeds of the
+/// window it is drawn for (`docs/engine/text.md`, "Seeds per window").
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SeedTable {
+    /// Work no window is known for (every window's seeds, as main sends
+    /// them).
+    pub fallback: Vec<pm_text::compat::FontCacheSeed>,
+    /// Each window's seeds, by its owner id (main's webContents id).
+    pub owners: std::collections::BTreeMap<u32, Vec<pm_text::compat::FontCacheSeed>>,
+    /// The window each session main opened is for.
+    pub sessions: std::collections::BTreeMap<u64, u32>,
+}
+
+impl SeedTable {
+    /// The seeds of the window `owner`, or the fallback when main named no
+    /// such window.
+    pub fn for_owner(&self, owner: Option<u32>) -> &[pm_text::compat::FontCacheSeed] {
+        owner
+            .and_then(|o| self.owners.get(&o))
+            .unwrap_or(&self.fallback)
+    }
+
+    /// The seeds of work on a port of window `port_owner` (when the port
+    /// belongs to one) or in `session`.
+    pub fn resolve(
+        &self,
+        port_owner: Option<u32>,
+        session: Option<u64>,
+    ) -> &[pm_text::compat::FontCacheSeed] {
+        let owner = port_owner.or_else(|| session.and_then(|s| self.sessions.get(&s).copied()));
+        self.for_owner(owner)
+    }
+}
+
+fn seed_table(args: SeedsArgs) -> Result<SeedTable, String> {
+    if args.owners.len() > MAX_SEED_OWNERS || args.sessions.len() > MAX_SEED_SESSIONS {
+        return Err("too many font cache seed owners".into());
+    }
+    let mut table = SeedTable {
+        fallback: seeds(args.seeds)?,
+        ..SeedTable::default()
+    };
+    for o in args.owners {
+        table.owners.insert(o.owner, seeds(o.seeds)?);
+    }
+    for s in args.sessions {
+        table.sessions.insert(s.session, s.owner);
+    }
+    Ok(table)
+}
+
+/// Checks seeds main sent: a family name within the limits and finite,
+/// positive sizes and weights.
+fn seeds(
+    list: Vec<pm_text::compat::FontCacheSeed>,
+) -> Result<Vec<pm_text::compat::FontCacheSeed>, String> {
+    if list.len() > MAX_SEEDS {
+        return Err("too many font cache seeds".into());
+    }
+    for s in &list {
+        family(&s.family)?;
+        let ok = |v: f32| v.is_finite() && v > 0.0;
+        if !(ok(s.size) && ok(s.specified) && ok(s.weight)) {
+            return Err("invalid font cache seed".into());
+        }
+    }
+    Ok(list)
+}
 
 fn parse<'a, T: Deserialize<'a>>(json: &'a str) -> Result<T, String> {
     serde_json::from_str(json).map_err(|e| format!("invalid font request arguments: {e}"))
@@ -166,6 +271,11 @@ type Registry = pm_text::registry::CoreTextRegistry;
 pub struct FontService {
     layout: pm_text::compat::Compat<Registry>,
     generation_base: u64,
+    /// The editor renderers' font cache seeds, as main last sent them.
+    seeds: SeedTable,
+    /// Main finished replaying to a port (its seeds come last, after the
+    /// open and the project fonts).
+    opened: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -177,6 +287,8 @@ impl FontService {
         Ok(FontService {
             layout: pm_text::compat::Compat::new(registry),
             generation_base: 0,
+            seeds: SeedTable::default(),
+            opened: false,
         })
     }
 
@@ -213,6 +325,12 @@ impl FontService {
             Op::Open => {
                 let args: OpenArgs = parse(json)?;
                 self.generation_base = args.generation_base;
+                Ok(generation_json(self.generation()))
+            }
+            Op::Seeds => {
+                let args: SeedsArgs = parse(json)?;
+                self.seeds = seed_table(args)?;
+                self.opened = true;
                 Ok(generation_json(self.generation()))
             }
             Op::Answer => {
@@ -300,6 +418,52 @@ impl FontService {
         }
     }
 
+    /// The editor renderers' font cache seeds main sent (`Op::Seeds`).
+    pub fn seeds(&self) -> &SeedTable {
+        &self.seeds
+    }
+
+    /// Whether main has finished its replay on a port: the open, the
+    /// project fonts, then the seeds (`Op::Seeds` goes last), so render
+    /// threads never lay text out before the fonts and seeds main is about
+    /// to send.
+    pub fn opened(&self) -> bool {
+        self.opened
+    }
+
+    /// Answers a render thread's queries (`hub::FontHub::drain`): the
+    /// registry's answers and the full bytes of every face they name.
+    pub fn serve(
+        &mut self,
+        queries: &[pm_text::answers::Query],
+    ) -> Result<pm_text::served::Served, String> {
+        let generation = self.generation();
+        let answers = self.registry().answer(queries).map_err(|e| e.to_string())?;
+        let mut fonts: Vec<pm_text::served::ServedFont> = Vec::new();
+        for rec in &answers.faces {
+            if fonts
+                .iter()
+                .any(|f| f.blob == rec.blob && f.index == rec.index)
+            {
+                continue;
+            }
+            let info = self
+                .face(rec.id)
+                .ok_or_else(|| format!("unknown face {}", rec.id))?;
+            fonts.push(pm_text::served::ServedFont {
+                blob: rec.blob.clone(),
+                index: rec.index,
+                data: info.data.clone(),
+                read_index: info.index,
+            });
+        }
+        Ok(pm_text::served::Served {
+            generation,
+            answers,
+            fonts,
+        })
+    }
+
     /// Level 1 glyph runs for the engine's own text rendering: the same
     /// layout `pm-wasm` computes over subsets, here over the full fonts.
     pub fn line_runs(
@@ -361,6 +525,26 @@ impl FontService {
             .map(|r| r.id)
             .unwrap_or_else(|e| e.id.unwrap_or(0));
         wire::encode_reply(id, Status::Error, b"the native font registry is macOS only")
+    }
+
+    pub fn serve(
+        &mut self,
+        _queries: &[pm_text::answers::Query],
+    ) -> Result<pm_text::served::Served, String> {
+        Err("the native font registry is macOS only".into())
+    }
+
+    pub fn generation(&self) -> u64 {
+        0
+    }
+
+    pub fn seeds(&self) -> &SeedTable {
+        static NONE: std::sync::OnceLock<SeedTable> = std::sync::OnceLock::new();
+        NONE.get_or_init(SeedTable::default)
+    }
+
+    pub fn opened(&self) -> bool {
+        false
     }
 }
 

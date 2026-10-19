@@ -709,7 +709,18 @@ pub struct Samples {
 
 /// Rasterizes an instance's mesh.
 pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]]) -> Samples {
-    let verts: Vec<Varyings> = (0..36).map(|i| vertex(inst, i)).collect();
+    rasterize_region(inst, width, height, pattern, [0, 0])
+}
+
+/// Rasterize a crop without changing device coordinates or interpolants.
+pub fn rasterize_region(inst: &Instance, width: u32, height: u32,
+                        pattern: &[[f64; 2]], origin: [i32; 2]) -> Samples {
+    let verts: Vec<Varyings> = (0..36).map(|i| {
+        let mut v = vertex(inst, i);
+        v.pos[0] -= origin[0] as f32;
+        v.pos[1] -= origin[1] as f32;
+        v
+    }).collect();
     let n = pattern.len();
     let mut out = Samples {
         width,

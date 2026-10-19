@@ -15,3 +15,5 @@ pub mod stroke;
 pub mod svg;
 pub mod tess;
 pub mod svg_text;
+
+pub mod text;

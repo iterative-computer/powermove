@@ -918,6 +918,14 @@ impl Renderer {
         self.text_gpu.clear();
     }
 
+    /// The window the next frames are drawn for: text measures with that
+    /// renderer's font cache seeds (`text::served::SeedScope`).
+    pub fn set_text_seed_scope(&mut self, scope: crate::text::served::SeedScope) {
+        if let Some(fonts) = self.text.fonts.as_deref_mut() {
+            fonts.set_seed_scope(scope);
+        }
+    }
+
     /// Text layout and rendering state (profiles, the captions switch).
     pub fn text(&mut self) -> &mut crate::text::TextContext {
         &mut self.text
@@ -931,6 +939,9 @@ impl Renderer {
     /// `PM.captionsHidden` for the following frames: an export without
     /// burned-in captions (`captionsBurn: false`) draws no captions layer.
     pub fn set_captions_hidden(&mut self, hidden: bool) {
+        if self.text.captions_hidden() != hidden {
+            self.clear_draw_reuse();
+        }
         self.text.set_captions_hidden(hidden);
     }
 

@@ -51,7 +51,7 @@ pub struct Outline {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Key {
-    font: usize,
+    font: u64,
     index: u32,
     glyph: u32,
     size: u32,
@@ -68,7 +68,7 @@ pub struct FaceRef<'a> {
     pub data: &'a [u8],
     pub index: u32,
     /// Buffer identity for caching.
-    pub id: usize,
+    pub id: u64,
 }
 
 impl<'a> FaceRef<'a> {
@@ -76,7 +76,7 @@ impl<'a> FaceRef<'a> {
         FaceRef {
             data: info.data.as_slice(),
             index: info.index,
-            id: info.data.ptr_id(),
+            id: info.data.id(),
         }
     }
 
@@ -86,7 +86,7 @@ impl<'a> FaceRef<'a> {
 }
 
 /// Normalized coordinates of a face at user coordinates.
-type LocationKey = (usize, u32, Vec<(u32, u32)>);
+type LocationKey = (u64, u32, Vec<(u32, u32)>);
 
 /// The glyph outline cache.
 #[derive(Default)]

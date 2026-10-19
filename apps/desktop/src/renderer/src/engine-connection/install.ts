@@ -319,6 +319,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       };
     },
     usesBlender: () => usesBlender(PM.proj),
+    captionsHidden: () => PM.captionsHidden === true,
     svgRasters: () => svgRasters,
     log
   });

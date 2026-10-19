@@ -136,10 +136,184 @@ pub struct Run<'a> {
     pub bitmap_size: Option<f32>,
 }
 
+/// A glyph's mask as the platform's text rasterizer makes it (CoreGraphics
+/// on macOS, `cgmask`), before the paint's preblend.
+#[derive(Debug)]
+pub struct GlyphMask {
+    pub width: u32,
+    pub height: u32,
+    /// The mask's top-left pixel relative to the glyph's whole-pixel origin
+    /// (x right, y down; the origin is the pixel corner left of the pen on
+    /// the baseline).
+    pub left: i32,
+    pub top: i32,
+    /// Coverage before the preblend, row by row.
+    pub coverage: Vec<u8>,
+}
+
+/// How a platform glyph mask is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaskStyle {
+    /// The glyph's offset right of a whole pixel, in quarter pixels.
+    pub quarter: u8,
+    /// Skia's synthetic italic: `x' = x + skew × y` with y down (0: none).
+    pub skew: f32,
+}
+
+/// Where level 1 glyph masks come from when the platform rasterizes them as
+/// Canvas2D does (`cgmask` on macOS).
+pub trait MaskSource {
+    /// The mask of `glyph` of `face` at `size` device px and variation
+    /// `coords`, drawn in `style`; `bounds` is the glyph's outline box at
+    /// that size (device px, y down).
+    fn mask(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        style: MaskStyle,
+        bounds: Rect,
+    ) -> Option<Arc<GlyphMask>>;
+    /// The preblend table for straight E-encoded paint `rgb`.
+    fn preblend(&self, rgb: [f64; 3]) -> [u8; 256];
+    /// The mask of a glyph Skia draws from its path (synthesized bold,
+    /// `strokeText`): `glyph` of `face` at `size` device px and variation
+    /// `coords` in `style` (quarter offset, skew), with `frame` applied in
+    /// user space (the device transform is a uniform `scale`). `None` when
+    /// the platform does not draw glyphs this way.
+    #[cfg(feature = "cg-masks")]
+    #[allow(clippy::too_many_arguments)]
+    fn path_mask(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        style: MaskStyle,
+        scale: f32,
+        frame: super::skpath::Frame,
+    ) -> Option<Arc<GlyphMask>> {
+        let _ = (face, coords, glyph, size, style, scale, frame);
+        None
+    }
+    /// The mask of `glyph` at text size `size` under the device 2×2
+    /// `post` (`[scaleX, skewY, skewX, scaleY]`, kept to 1/1024) with the
+    /// synthetic skew `skew`, at quarter offsets `sub` in x and y, as the
+    /// platform generates glyphs under a rotated, skewed or non-uniform
+    /// matrix. `None` when the platform does not draw glyphs this way.
+    #[cfg(feature = "cg-masks")]
+    #[allow(clippy::too_many_arguments)]
+    fn matrix_mask(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        post: [f32; 4],
+        skew: f32,
+        sub: (u8, u8),
+    ) -> Option<Arc<GlyphMask>> {
+        let _ = (face, coords, glyph, size, post, skew, sub);
+        None
+    }
+    /// A glyph's outline as Skia draws text as paths
+    /// (`SkStrikeSpec::MakePath`): the platform's outline at the canonical
+    /// 64 px (`SkFontPriv::kCanonicalTextSizeForPaths`), y down, no
+    /// subpixel offset. `None` when the platform does not provide it.
+    #[cfg(feature = "cg-masks")]
+    fn canonical_path(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        skew: f32,
+    ) -> Option<Arc<pm_skia_path::Path>> {
+        let _ = (face, coords, glyph, skew);
+        None
+    }
+    /// The distance field of `glyph` as the GPU canvas's distance-field
+    /// text generates it (`sdf`): CoreGraphics' smoothed mask at the strike
+    /// size `strike` (256 px; 162 at exactly 162) with the synthetic skew
+    /// `skew`, linearized, no preblend. `None` when the platform does not
+    /// provide it.
+    /// `frame` (strike px) is the glyph's path frame when Skia generates
+    /// the strike's A8 from the path: synthesized bold, `strokeText`.
+    #[cfg(feature = "cg-masks")]
+    fn sdf_glyph(
+        &mut self,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        strike: f32,
+        skew: f32,
+        frame: Option<super::skpath::Frame>,
+    ) -> Option<Arc<super::sdf::SdfGlyph>> {
+        let _ = (face, coords, glyph, strike, skew, frame);
+        None
+    }
+    /// The mask gamma of path-generated masks for paint `rgb` (no
+    /// CoreGraphics linearization).
+    fn path_preblend(&self, rgb: [f64; 3]) -> [u8; 256] {
+        let _ = rgb;
+        std::array::from_fn(|i| i as u8)
+    }
+    /// A color glyph (`sbix` emoji) as the platform draws it at `size`
+    /// device px, `quarter`/4 px right of a whole pixel: a premultiplied
+    /// image and its top-left pixel relative to the whole-pixel origin.
+    /// `em` is the size of the glyph's em box (`FontResolver::em_advance`).
+    fn color(
+        &mut self,
+        face: FaceRef<'_>,
+        glyph: u16,
+        size: f32,
+        quarter: u8,
+        em: f32,
+    ) -> Option<(Arc<Rgba8>, i32, i32)> {
+        let _ = (face, glyph, size, quarter, em);
+        None
+    }
+    /// Forget everything drawn so far: the fonts behind the faces' ids
+    /// changed (ids are never reused, so this frees memory; it is not
+    /// needed for correctness).
+    fn reset(&mut self) {}
+}
+
+pub use pm_skia_path::PathVerb as CanonicalVerb;
+
+/// A canonical platform outline and its exact Graphite draw matrix.
+#[derive(Clone)]
+pub struct PathGlyph {
+    pub path: Arc<pm_skia_path::Path>,
+    pub matrix: [f32; 6],
+    /// None for a fill; otherwise stroke width in the path's space.
+    pub stroke: Option<f32>,
+}
+
+/// The host's Canvas2D path renderer. Kept at this seam because pm-vector
+/// also consumes pm-text; text must not acquire a reverse dependency.
+pub trait PathRasterizer {
+    fn raster(
+        &self,
+        paths: &[PathGlyph],
+        viewport: (u32, u32),
+        color: Rgba,
+        opacity: f64,
+        blur: f64,
+    ) -> Option<Item>;
+}
+
 /// What a glyph draw needs: the caches and the profile.
 pub struct Painter<'c> {
     pub outlines: &'c mut Outlines,
     pub bitmaps: &'c mut Bitmaps,
+    /// Level 1 glyph masks from the platform rasterizer, when it has one;
+    /// glyphs Canvas2D draws from masks are then drawn from these.
+    pub masks: Option<&'c mut dyn MaskSource>,
+    /// Full Canvas2D backing dimensions used by Graphite's device-to-NDC
+    /// and viewport round trip before subpixel snapping.
+    pub viewport: Option<(u32, u32)>,
+    pub path_rasterizer: Option<&'c dyn PathRasterizer>,
     pub profile: Profile,
     /// What the scene could not draw (color vector glyphs): the renderer
     /// refuses such a layer rather than drawing it wrong.
@@ -157,6 +331,115 @@ struct Placement {
 }
 
 impl Placement {
+    /// A glyph's device origin as Skia maps it for `drawTextBlob` at
+    /// `origin`: the canvas matrix in `f32`, pre-translated by the blob's
+    /// origin (`SkMatrix::preTranslate`), then the glyph's blob position
+    /// mapped (`SkMatrix::mapPoints`), all in `f32` (Chromium builds Skia
+    /// without floating-point contraction).
+    fn glyph_origin(&self, origin: (f64, f64), g: (f64, f64)) -> kurbo::Point {
+        let [sx, ky, kx, sy, tx, ty] = self.m.as_coeffs().map(|v| v as f32);
+        let (ox, oy) = (origin.0 as f32, origin.1 as f32);
+        let translate_only = sx == 1.0 && sy == 1.0 && kx == 0.0 && ky == 0.0;
+        let (tx, ty) = if translate_only {
+            (tx + ox, ty + oy)
+        } else {
+            (tx + (sx * ox + kx * oy), ty + (ky * ox + sy * oy))
+        };
+        let (gx, gy) = (g.0 as f32, g.1 as f32);
+        kurbo::Point::new(
+            f64::from(gx * sx + gy * kx + tx),
+            f64::from(gy * sy + gx * ky + ty),
+        )
+    }
+
+    /// The matrix a glyph's path draws with (`PathOpSubmitter`): the canvas
+    /// matrix in `f32` concatenated with a translation to the glyph's
+    /// position (blob origin plus glyph offset) and the strike-to-source
+    /// scale, as `[a, b, c, d, e, f]`.
+    #[cfg(feature = "cg-masks")]
+    fn glyph_matrix(&self, origin: (f64, f64), g: (f64, f64), scale: f32) -> [f32; 6] {
+        let [a, b, c, d, e, f] = self.m.as_coeffs().map(|v| v as f32);
+        let px = g.0 as f32 + origin.0 as f32;
+        let py = g.1 as f32 + origin.1 as f32;
+        [
+            a * scale,
+            b * scale,
+            c * scale,
+            d * scale,
+            a * px + c * py + e,
+            b * px + d * py + f,
+        ]
+    }
+
+    /// The device scale a glyph strike is made for: Skia's descriptor
+    /// keeps the device matrix to 1/1024 (`sk_relax` in
+    /// `SkScalerContext::MakeRecAndEffects`), so glyph masks of a scaled
+    /// word are generated at `size × relax(scale)`, not at the exact scale.
+    fn strike_scale(&self) -> f32 {
+        let x = self.scale as f32;
+        (x * 1024.0 + 0.5).floor() / 1024.0
+    }
+
+    /// The device 2×2 as the strike descriptor keeps it (each entry to
+    /// 1/1024, `sk_relax`), `[scaleX, skewY, skewX, scaleY]`.
+    #[cfg(feature = "cg-masks")]
+    fn relaxed_post(&self) -> [f32; 4] {
+        let [a, b, c, d, _, _] = self.m.as_coeffs();
+        let relax = |v: f64| ((v as f32) * 1024.0 + 0.5).floor() / 1024.0;
+        [relax(a), relax(b), relax(c), relax(d)]
+    }
+
+    /// A distance-field glyph's quad as `prepare_for_SDFT_drawing` and
+    /// Graphite's `VertexFiller` place it: the glyph position mapped into
+    /// strike space by the creation matrix (`1 / strikeToSourceScale`, in
+    /// `f32`) plus the field's bounds inset by 2, drawn through the canvas
+    /// matrix pre-translated by the blob origin and post-scaled by the
+    /// creation matrix's inverse (`[a, b, c, d, e, f]`).
+    #[cfg(feature = "cg-masks")]
+    fn sdf_placement(
+        &self,
+        origin: (f64, f64),
+        g: (f64, f64),
+        text_size: f32,
+        strike: f32,
+        field: &super::sdf::SdfGlyph,
+    ) -> ((f32, f32), [f32; 6]) {
+        let to_source = text_size / strike;
+        let creation = 1.0 / to_source;
+        let inverse = 1.0 / creation;
+        let mapped = (g.0 as f32 * creation, g.1 as f32 * creation);
+        let inset = super::sdf::INSET as f32;
+        let left_top = (
+            (field.left as f32 + inset) + mapped.0,
+            (field.top as f32 + inset) + mapped.1,
+        );
+        let [a, b, c, d, e, f] = self.m.as_coeffs().map(|v| v as f32);
+        let (ox, oy) = (origin.0 as f32, origin.1 as f32);
+        (
+            left_top,
+            [
+                a * inverse,
+                b * inverse,
+                c * inverse,
+                d * inverse,
+                a * ox + c * oy + e,
+                b * ox + d * oy + f,
+            ],
+        )
+    }
+
+    /// `SkMatrix::getMaxScale` of the 2×2 (the largest singular value).
+    fn max_scale(&self) -> f32 {
+        let [a, b, c, d, _, _] = self.m.as_coeffs();
+        // Singular values of [[a, c], [b, d]].
+        let s1 = a * a + b * b;
+        let s2 = c * c + d * d;
+        let s12 = a * c + b * d;
+        let mean = (s1 + s2) / 2.0;
+        let diff = ((s1 - s2) / 2.0).hypot(s12);
+        ((mean + diff).max(0.0).sqrt()) as f32
+    }
+
     fn of(m: Affine) -> Placement {
         let [a, b, c, d, _, _] = m.as_coeffs();
         let det = a * d - b * c;
@@ -182,11 +465,52 @@ impl Placement {
     }
 }
 
+/// The GPU canvas's distance-field strike size for text of `size` under
+/// the placement's matrix, or `None` outside its range
+/// (`SubRunControl::isSDFT`, `getSDFFont` on macOS): from 162 to 256 device
+/// px, 256 excluded (`SkFontPriv::ApproximateTransformedTextSize`;
+/// `SubRunContainer` draws text at or above the maximum size as paths), the
+/// 162 px strike at exactly 162 and the 256 px strike above.
+fn sdf_strike(size: f32, place: &Placement) -> Option<f32> {
+    let approx = size * place.max_scale();
+    if !(approx.is_finite() && approx > 0.0) {
+        return None;
+    }
+    if (162.0..256.0).contains(&approx) {
+        Some(if approx <= 162.0 { 162.0 } else { 256.0 })
+    } else {
+        None
+    }
+}
+
 fn union(r: &mut Option<Rect>, b: Rect) {
     *r = Some(r.map_or(b, |u| u.union(b)));
 }
 
 impl Painter<'_> {
+    /// MakePath preserves synthetic skew/bold at the canonical 64 px.
+    /// Its scaler builds a framed outline, then Graphite fills that path.
+    #[cfg(feature = "cg-masks")]
+    fn canonical_glyph(
+        &mut self,
+        run: &Run<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+    ) -> Option<Arc<pm_skia_path::Path>> {
+        let skew = skew_of(run) as f32;
+        let path = self
+            .masks
+            .as_deref_mut()?
+            .canonical_path(run.face, coords, glyph, skew)?;
+        if !run.synthetic_bold {
+            return Some(path);
+        }
+        // The Mac scaler applies the font transform in CoreGraphics
+        // before converting the path to f32. A later shear loses bits.
+        let path = super::skpath::framed(path.as_ref(), super::skpath::Frame::fake_bold(64.0))?;
+        Some(Arc::new(path))
+    }
+
     /// The fake-bold outset per side for a synthesized bold run.
     fn fake_bold(&self, synthetic: bool, device_size: f64) -> (f64, f64) {
         if synthetic {
@@ -223,12 +547,36 @@ impl Painter<'_> {
         let mut mask = (Vec::new(), None::<Rect>);
         let mut path = (Vec::new(), None::<Rect>);
         let mut images = Vec::new();
+        let mut canonical_glyphs = Vec::new();
+        // Platform masks of this call, at whole device pixels; `true` for
+        // masks Skia generates from paths (their own gamma table).
+        let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
+        // Glyphs drawn as distance-field text (coverage per pixel).
+        let mut sdf_glyphs: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
         let mut curve_size = 0.0f64;
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
             let dsize = device_size as f32;
             let bitmap_face = has_bitmaps(run.face);
+            let color_face = bitmap_face && super::bitmap::has_color_bitmaps(run.face);
+            // Canvas2D draws Apple Color Emoji lower than CoreGraphics does,
+            // by whole pixels (`apple_emoji_shift`, measured on `fit-emoji`).
+            let emoji_shift = if color_face && super::bitmap::is_apple_color_emoji(run.face) {
+                Some(
+                    super::bitmap::apple_emoji_shift(dsize, run.bitmap_size.unwrap_or(dsize))
+                        as i32,
+                )
+            } else {
+                None
+            };
             let colr = super::bitmap::has_colr(run.face);
+            // Distance-field text: the strike size, when this run's device
+            // size is in the GPU canvas's SDFT range.
+            let sdf_strike = if self.masks.is_some() {
+                sdf_strike(run.size, &place)
+            } else {
+                None
+            };
             let large = self.profile.is_large(device_size);
             let (ex, ey) = if large {
                 (self.profile.large.expand_x, self.profile.large.expand_y)
@@ -247,8 +595,16 @@ impl Painter<'_> {
                 ..style
             };
             for g in run.glyphs {
-                let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
+                let p = place.glyph_origin(origin, (g.x, g.y));
                 let bsize = run.bitmap_size.unwrap_or(dsize);
+                if color_face
+                    && place.axis_aligned
+                    && let Some(item) =
+                        self.color_glyph(run, g.id, p, bsize, emoji_shift, color, opacity, blur)
+                {
+                    images.push(item);
+                    continue;
+                }
                 if bitmap_face && let Some(bmp) = self.bitmaps.get(run.face, g.id, dsize, bsize) {
                     let (x, y) = if place.axis_aligned {
                         self.profile.position(p.x, p.y, device_size, true)
@@ -275,16 +631,190 @@ impl Painter<'_> {
                     continue;
                 }
                 if colr && super::bitmap::is_colr_glyph(run.face, g.id) {
-                    let what = "color vector glyphs (COLR)".to_owned();
-                    if !self.unsupported.contains(&what) {
-                        self.unsupported.push(what);
+                    #[cfg(feature = "cg-masks")]
+                    match self.bitmaps.colr.get(
+                        run.face,
+                        run.coords,
+                        g.id,
+                        dsize,
+                        skew_of(run) as f32,
+                        color,
+                    ) {
+                        Ok(Some(glyph)) => {
+                            let t = Affine::translate(((p.x + 0.125).floor(), (p.y + 0.5).floor()))
+                                * place.residual
+                                * glyph.transform;
+                            images.push(Item {
+                                bounds: t.transform_rect_bbox(Rect::new(
+                                    0.0,
+                                    0.0,
+                                    glyph.image.width as f64,
+                                    glyph.image.height as f64,
+                                )),
+                                content: ItemContent::Image {
+                                    image: glyph.image.clone(),
+                                    transform: t,
+                                },
+                                color,
+                                opacity,
+                                blur,
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => self.unsupported.push(format!("COLR: {error}")),
                     }
+                    #[cfg(not(feature = "cg-masks"))]
+                    self.unsupported.push("COLR rasterizer unavailable".into());
                     continue;
                 }
                 let Some(bare) = self.outlines.get(run.face, run.coords, g.id, plain) else {
                     continue;
                 };
                 let as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                // A glyph whose distance field is beyond the atlas is drawn
+                // as a direct mask when its mask fits (`SubRunContainer`
+                // hands the SDFT run's rejects to the direct mask case).
+                #[cfg(feature = "cg-masks")]
+                let mut sdf_rejected = false;
+                #[cfg(feature = "cg-masks")]
+                if let (Some(strike), Coords::User(coords), Some(masks)) =
+                    (sdf_strike, run.coords, self.masks.as_deref_mut())
+                    && let Some(field) = masks.sdf_glyph(
+                        run.face,
+                        coords,
+                        g.id as u16,
+                        strike,
+                        skew_of(run) as f32,
+                        run.synthetic_bold
+                            .then(|| super::skpath::Frame::fake_bold(strike)),
+                    )
+                {
+                    // A field beyond the atlas is drawn as its path
+                    // (`SkGlyphDigest::fitsInAtlasDirect`).
+                    if field.width.max(field.height) <= 256 {
+                        let (left_top, matrix) =
+                            place.sdf_placement(origin, (g.x, g.y), run.size, strike, &field);
+                        if let Some(cov) =
+                            super::sdf::draw(&field, left_top, matrix, super::sdf::APPLE_GPU)
+                        {
+                            sdf_glyphs.push(cov);
+                        }
+                        continue;
+                    }
+                    sdf_rejected = true;
+                }
+                #[cfg(not(feature = "cg-masks"))]
+                let _ = sdf_strike;
+                // Beyond the atlas, the GPU canvas draws a glyph as its path,
+                // 4× multisampled, at its exact position.
+                if as_path && self.masks.is_some() {
+                    // As the GPU canvas tessellates the platform's outline at
+                    // the canonical 64 px under the glyph's matrix.
+                    #[cfg(feature = "cg-masks")]
+                    if let Coords::User(coords) = run.coords
+                        && let Some(local) = self.canonical_glyph(run, coords, g.id as u16)
+                    {
+                        let gm = place.glyph_matrix(origin, (g.x, g.y), run.size / 64.0);
+                        canonical_glyphs.push(PathGlyph {
+                            path: local,
+                            matrix: gm,
+                            stroke: None,
+                        });
+                        continue;
+                    }
+                    self.unsupported
+                        .push("canonical platform glyph path unavailable".into());
+                    continue;
+                }
+                // Synthesized bold: Skia draws the glyph image from its path
+                // with a stroke-and-fill frame (`skpath`).
+                #[cfg(feature = "cg-masks")]
+                let large = large && !sdf_rejected;
+                #[cfg(feature = "cg-masks")]
+                if !as_path
+                    && !large
+                    && place.axis_aligned
+                    && run.synthetic_bold
+                    && let Some(masks) = self.masks.as_deref_mut()
+                {
+                    let (x, y) = self.profile.snap.apply(p.x, p.y);
+                    let ix = x.floor();
+                    let quarter = (((x - ix) * 4.0).round()).clamp(0.0, 3.0);
+                    let skew = skew_of(run);
+                    let Coords::User(coords) = run.coords else {
+                        continue;
+                    };
+                    if let Some(m) = masks.path_mask(
+                        run.face,
+                        coords,
+                        g.id as u16,
+                        run.size * place.strike_scale(),
+                        MaskStyle {
+                            quarter: quarter as u8,
+                            skew: skew as f32,
+                        },
+                        place.strike_scale(),
+                        super::skpath::Frame::fake_bold(run.size),
+                    ) {
+                        platform.push((ix as i64, y as i64, m, true));
+                    }
+                    continue;
+                }
+                if !as_path
+                    && !large
+                    && place.axis_aligned
+                    && !run.synthetic_bold
+                    && let (Some(masks), Coords::User(coords)) =
+                        (self.masks.as_deref_mut(), run.coords)
+                {
+                    let (x, y) = self.profile.snap.apply(p.x, p.y);
+                    let ix = x.floor();
+                    let style = MaskStyle {
+                        quarter: (((x - ix) * 4.0).round() as i64).clamp(0, 3) as u8,
+                        skew: skew_of(run) as f32,
+                    };
+                    let grow_x = f64::from(style.skew).abs()
+                        * bare.bounds.y0.abs().max(bare.bounds.y1.abs());
+                    if let Some(m) = masks.mask(
+                        run.face,
+                        coords,
+                        g.id as u16,
+                        run.size * place.strike_scale(),
+                        style,
+                        bare.bounds.inflate(grow_x, 0.0),
+                    ) {
+                        platform.push((ix as i64, y as i64, m, false));
+                    }
+                    continue;
+                }
+                // Under a rotated, skewed or non-uniform matrix Skia still
+                // draws glyph masks, generated with the whole matrix and
+                // positioned to quarter pixels in x and y.
+                #[cfg(feature = "cg-masks")]
+                if !as_path
+                    && !large
+                    && !place.axis_aligned
+                    && !run.synthetic_bold
+                    && let (Some(masks), Coords::User(coords)) =
+                        (self.masks.as_deref_mut(), run.coords)
+                {
+                    let qx = (p.x * 4.0 + 0.5).floor() / 4.0;
+                    let qy = (p.y * 4.0 + 0.5).floor() / 4.0;
+                    let (ix, iy) = (qx.floor(), qy.floor());
+                    let sub = (((qx - ix) * 4.0) as u8, ((qy - iy) * 4.0) as u8);
+                    if let Some(m) = masks.matrix_mask(
+                        run.face,
+                        coords,
+                        g.id as u16,
+                        run.size,
+                        place.relaxed_post(),
+                        skew_of(run) as f32,
+                        sub,
+                    ) {
+                        platform.push((ix as i64, iy as i64, m, false));
+                    }
+                    continue;
+                }
                 let dy = if as_path {
                     0.0
                 } else if large {
@@ -328,6 +858,21 @@ impl Painter<'_> {
                 }
             }
         }
+        if !platform.is_empty()
+            && let Some(masks) = self.masks.as_deref_mut()
+        {
+            let rgb = [color[0], color[1], color[2]];
+            out.extend(mask_image(
+                &platform,
+                [&masks.preblend(rgb), &masks.path_preblend(rgb)],
+                color,
+                opacity,
+                blur,
+            ));
+        }
+        if !sdf_glyphs.is_empty() {
+            out.extend(sdf_image(sdf_glyphs, color, opacity, blur));
+        }
         if let Some(bounds) = mask.1 {
             out.push(Item {
                 content: ItemContent::Coverage {
@@ -361,12 +906,31 @@ impl Painter<'_> {
                 bounds,
             });
         }
-        out.extend(images);
+        if !canonical_glyphs.is_empty() {
+            if let (Some(renderer), Some(viewport)) = (self.path_rasterizer, self.viewport) {
+                if let Some(item) =
+                    renderer.raster(&canonical_glyphs, viewport, color, opacity, blur)
+                {
+                    out.push(item);
+                }
+            } else {
+                self.unsupported
+                    .push("Canvas2D glyph path renderer unavailable".into());
+            }
+        }
+        // ARGB glyphs are drawn one by one into the canvas's RGBA8
+        // destination. Preserve rounding when out-of-base COLR layers of
+        // adjacent glyphs overlap, before the float composition pass.
+        if runs.iter().any(|r| super::bitmap::has_colr(r.face)) {
+            out.extend(flatten_color_glyphs(images, color, opacity, blur));
+        } else {
+            out.extend(images);
+        }
     }
 
     /// `strokeText` of the runs with `lineWidth = width` (layout px), round
     /// joins, and miter limit 2 (the captions context). Color bitmap glyphs
-    /// are not stroked (Skia strokes outlines only).
+    /// have no outline to stroke: on macOS their image is drawn again.
     #[allow(clippy::too_many_arguments)]
     pub fn stroke_text(
         &mut self,
@@ -382,12 +946,40 @@ impl Painter<'_> {
         if place.scale == 0.0 || width <= 0.0 {
             return;
         }
+        if runs.iter().any(|r| {
+            r.glyphs
+                .iter()
+                .any(|g| super::bitmap::is_colr_glyph(r.face, g.id))
+        }) {
+            for run in runs {
+                for glyph in run.glyphs {
+                    let single = Run {
+                        glyphs: std::slice::from_ref(glyph),
+                        ..*run
+                    };
+                    if super::bitmap::is_colr_glyph(run.face, glyph.id) {
+                        self.fill_text(out, &[single], origin, m, color, opacity, 0.0);
+                    } else {
+                        self.stroke_text(out, &[single], origin, m, width, color, opacity);
+                    }
+                }
+            }
+            return;
+        }
+        #[cfg(feature = "cg-masks")]
+        if place.axis_aligned
+            && self.masks.is_some()
+            && self.stroke_masks(out, runs, origin, &place, width, color, opacity)
+        {
+            return;
+        }
         let device_width = width * place.scale + 2.0 * self.profile.stroke.widen;
         let stroke = Stroke::new(device_width)
             .with_join(kurbo::Join::Round)
             .with_miter_limit(2.0);
         let half = device_width / 2.0 + 1.0;
         let mut paths = Vec::new();
+        let mut canonical_glyphs = Vec::new();
         let mut bounds: Option<Rect> = None;
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
@@ -408,10 +1000,38 @@ impl Painter<'_> {
                 {
                     continue;
                 }
+                #[cfg(feature = "cg-masks")]
+                if self.masks.is_some()
+                    && self.path_rasterizer.is_some()
+                    && self.viewport.is_some()
+                    && let Coords::User(coords) = run.coords
+                    && let Some(local) = self.canonical_glyph(run, coords, g.id as u16)
+                {
+                    // PathOpSubmitter::needsExactCTM: stroke the path in
+                    // source space, leaving the canvas CTM unchanged.
+                    let scale = run.size / 64.0;
+                    let source = pm_skia_path::Transform::from_row(
+                        scale,
+                        0.0,
+                        0.0,
+                        scale,
+                        origin.0 as f32 + g.x as f32,
+                        origin.1 as f32 + g.y as f32,
+                    );
+                    let Some(local) = local.as_ref().clone().transform(source) else {
+                        continue;
+                    };
+                    canonical_glyphs.push(PathGlyph {
+                        path: Arc::new(local),
+                        matrix: m.as_coeffs().map(|v| v as f32),
+                        stroke: Some(width as f32),
+                    });
+                    continue;
+                }
                 let Some(outline) = self.outlines.get(run.face, run.coords, g.id, style) else {
                     continue;
                 };
-                let p = place.m * kurbo::Point::new(origin.0 + g.x, origin.1 + g.y);
+                let p = place.glyph_origin(origin, (g.x, g.y));
                 let (x, y) = if place.axis_aligned {
                     self.profile.stroke_position(p.x, p.y)
                 } else {
@@ -424,6 +1044,12 @@ impl Painter<'_> {
                 );
                 paths.push(placed(&outline, t, PathStyle::Stroke(stroke.clone())));
             }
+        }
+        if !canonical_glyphs.is_empty()
+            && let (Some(renderer), Some(viewport)) = (self.path_rasterizer, self.viewport)
+            && let Some(item) = renderer.raster(&canonical_glyphs, viewport, color, opacity, 0.0)
+        {
+            out.push(item);
         }
         if let Some(bounds) = bounds {
             out.push(Item {
@@ -438,6 +1064,410 @@ impl Painter<'_> {
             });
         }
     }
+}
+
+impl Painter<'_> {
+    /// A color bitmap glyph as the platform draws it (CoreGraphics, the
+    /// whole-pixel position and quarter offset, Apple Color Emoji's shift),
+    /// with the paint's alpha; `None` when the platform does not draw it.
+    #[allow(clippy::too_many_arguments)]
+    fn color_glyph(
+        &mut self,
+        run: &Run<'_>,
+        glyph: u32,
+        p: kurbo::Point,
+        bsize: f32,
+        emoji_shift: Option<i32>,
+        color: Rgba,
+        opacity: f64,
+        blur: f64,
+    ) -> Option<Item> {
+        let masks = self.masks.as_deref_mut()?;
+        let (x, y) = self.profile.snap.apply(p.x, p.y);
+        let ix = x.floor();
+        let quarter = (((x - ix) * 4.0).round() as i64).clamp(0, 3) as u8;
+        // Drawn at the em size CoreText uses for the strike.
+        let shift = emoji_shift.unwrap_or(0);
+        let (image, left, top) = masks
+            .color(run.face, glyph as u16, bsize, quarter, bsize)
+            .map(|(i, l, t)| (i, l + ix as i32, t + y as i32 + shift))?;
+        let t = Affine::translate((f64::from(left), f64::from(top)));
+        let b = Rect::new(
+            f64::from(left),
+            f64::from(top),
+            f64::from(left) + f64::from(image.width),
+            f64::from(top) + f64::from(image.height),
+        );
+        Some(Item {
+            content: ItemContent::Image {
+                image,
+                transform: t,
+            },
+            color,
+            opacity,
+            blur,
+            bounds: b,
+        })
+    }
+
+    /// `strokeText` as Skia draws it on macOS: each glyph's image generated
+    /// from its path with a stroke frame (`skpath`), at the glyph's
+    /// quarter-pixel position, through the path mask gamma of the stroke
+    /// color, composited like `fillText`'s masks. `false` (nothing pushed)
+    /// when a glyph is beyond the atlas (Skia strokes such text as paths).
+    #[cfg(feature = "cg-masks")]
+    #[allow(clippy::too_many_arguments)]
+    fn stroke_masks(
+        &mut self,
+        out: &mut Vec<Item>,
+        runs: &[Run<'_>],
+        origin: (f64, f64),
+        place: &Placement,
+        width: f64,
+        color: Rgba,
+        opacity: f64,
+    ) -> bool {
+        let frame = super::skpath::Frame {
+            width: width as f32,
+            fill: false,
+            join: pm_skia_path::LineJoin::Round,
+            miter_limit: 2.0,
+        };
+        // `SubRunContainer`: text at or beyond the 256 px maximum draws
+        // paths, not glyph images.
+        if runs
+            .iter()
+            .any(|r| f64::from(r.size) * place.scale >= 256.0)
+        {
+            return false;
+        }
+        let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
+        let mut sdf_quads: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
+        let mut images = Vec::new();
+        for run in runs {
+            let device_size = f64::from(run.size) * place.scale;
+            let skew = skew_of(run);
+            let bitmap_face = has_bitmaps(run.face);
+            let color_face = bitmap_face && super::bitmap::has_color_bitmaps(run.face);
+            let emoji_shift =
+                (color_face && super::bitmap::is_apple_color_emoji(run.face)).then(|| {
+                    let dsize = device_size as f32;
+                    super::bitmap::apple_emoji_shift(dsize, run.bitmap_size.unwrap_or(dsize)) as i32
+                });
+            for g in run.glyphs {
+                let bsize = run.bitmap_size.unwrap_or(device_size as f32);
+                let p = place.glyph_origin(origin, (g.x, g.y));
+                if bitmap_face
+                    && self
+                        .bitmaps
+                        .get(run.face, g.id, device_size as f32, bsize)
+                        .is_some()
+                {
+                    // A color glyph has no path to frame: Skia draws its
+                    // image in the stroke pass too (with the stroke paint's
+                    // alpha), so the fill pass draws it over itself.
+                    if color_face {
+                        let Some(item) =
+                            self.color_glyph(run, g.id, p, bsize, emoji_shift, color, opacity, 0.0)
+                        else {
+                            return false;
+                        };
+                        images.push(item);
+                    }
+                    continue;
+                }
+                let Coords::User(coords) = run.coords else {
+                    return false;
+                };
+                // A wide stroke from 162 to 256 px is distance-field text
+                // too (`SubRunControl::isSDFT`): the strike's A8 is the
+                // glyph's path framed with the stroke scaled into strike
+                // space (`dfPaint.setStrokeWidth(width / strikeToSourceScale)`).
+                if let Some(strike) = sdf_strike(run.size, place) {
+                    let to_source = run.size / strike;
+                    let mut sdf_frame = super::skpath::Frame {
+                        width: frame.width / to_source,
+                        ..frame
+                    };
+                    if run.synthetic_bold {
+                        sdf_frame.width += super::skpath::Frame::fake_bold(strike).width;
+                    }
+                    let Some(masks) = self.masks.as_deref_mut() else {
+                        return false;
+                    };
+                    let Some(field) = masks.sdf_glyph(
+                        run.face,
+                        coords,
+                        g.id as u16,
+                        strike,
+                        skew as f32,
+                        Some(sdf_frame),
+                    ) else {
+                        continue;
+                    };
+                    if field.width.max(field.height) > 256 {
+                        return false;
+                    }
+                    let (left_top, matrix) =
+                        place.sdf_placement(origin, (g.x, g.y), run.size, strike, &field);
+                    if let Some(cov) =
+                        super::sdf::draw(&field, left_top, matrix, super::sdf::APPLE_GPU)
+                    {
+                        sdf_quads.push(cov);
+                    }
+                    continue;
+                }
+                let (x, y) = self.profile.snap.apply(p.x, p.y);
+                let ix = x.floor();
+                let quarter = (((x - ix) * 4.0).round()).clamp(0.0, 3.0);
+                // A synthesized bold run strokes its emboldened path: the
+                // fake bold frame and the stroke add (Skia adds the widths).
+                let frame = if run.synthetic_bold {
+                    super::skpath::Frame {
+                        width: frame.width + super::skpath::Frame::fake_bold(run.size).width,
+                        ..frame
+                    }
+                } else {
+                    frame
+                };
+                let Some(masks) = self.masks.as_deref_mut() else {
+                    return false;
+                };
+                let Some(m) = masks.path_mask(
+                    run.face,
+                    coords,
+                    g.id as u16,
+                    run.size * place.strike_scale(),
+                    MaskStyle {
+                        quarter: quarter as u8,
+                        skew: skew as f32,
+                    },
+                    place.strike_scale(),
+                    frame,
+                ) else {
+                    continue;
+                };
+                // Glyph images beyond the atlas are drawn as paths.
+                if m.width > 256 || m.height > 256 {
+                    return false;
+                }
+                platform.push((ix as i64, y as i64, m, true));
+            }
+        }
+        if !platform.is_empty()
+            && let Some(masks) = self.masks.as_deref_mut()
+        {
+            let rgb = [color[0], color[1], color[2]];
+            out.extend(mask_image(
+                &platform,
+                [&masks.preblend(rgb), &masks.path_preblend(rgb)],
+                color,
+                opacity,
+                0.0,
+            ));
+        }
+        if !sdf_quads.is_empty() {
+            out.extend(sdf_image(sdf_quads, color, opacity, 0.0));
+        }
+        out.extend(images);
+        true
+    }
+}
+
+/// One RGBA8 canvas draw from whole-pixel color glyph images.
+fn flatten_color_glyphs(items: Vec<Item>, color: Rgba, opacity: f64, blur: f64) -> Vec<Item> {
+    if items.is_empty() {
+        return items;
+    }
+    let translated = items.iter().all(|item| match &item.content {
+        ItemContent::Image { transform, .. } => {
+            let [a, b, c, d, x, y] = transform.as_coeffs();
+            [a, b, c, d] == [1.0, 0.0, 0.0, 1.0] && x.fract() == 0.0 && y.fract() == 0.0
+        }
+        _ => false,
+    });
+    if !translated {
+        return items;
+    }
+    let bounds = items
+        .iter()
+        .map(|i| i.bounds)
+        .reduce(|a, b| a.union(b))
+        .unwrap();
+    let left = bounds.x0.floor() as i64;
+    let top = bounds.y0.floor() as i64;
+    let width = (bounds.x1.ceil() as i64 - left) as usize;
+    let height = (bounds.y1.ceil() as i64 - top) as usize;
+    if width > 8192 || height > 8192 {
+        return items;
+    }
+    let alpha = (color[3] * opacity).clamp(0.0, 1.0) as f32;
+    let mut data = vec![0u8; width * height * 4];
+    for item in items {
+        let ItemContent::Image { image, transform } = item.content else {
+            unreachable!()
+        };
+        let [_, _, _, _, x, y] = transform.as_coeffs();
+        let x = x as i64 - left;
+        let y = y as i64 - top;
+        for sy in 0..image.height as usize {
+            for sx in 0..image.width as usize {
+                let src = &image.data[(sy * image.width as usize + sx) * 4..][..4];
+                let dst = &mut data[((sy + y as usize) * width + sx + x as usize) * 4..][..4];
+                let a = src[3] as f32 / 255.0 * alpha;
+                for c in 0..4 {
+                    dst[c] = (src[c] as f32 * alpha + dst[c] as f32 * (1.0 - a))
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+    vec![Item {
+        content: ItemContent::Image {
+            image: Arc::new(Rgba8 {
+                width: width as u32,
+                height: height as u32,
+                data,
+            }),
+            transform: Affine::translate((left as f64, top as f64)),
+        },
+        color: [1.0; 4],
+        opacity: 1.0,
+        blur,
+        bounds,
+    }]
+}
+
+/// Distance-field glyph coverage (`sdf::draw`) as one image item, each
+/// glyph blended source-over into the 8-bit target with its unquantized
+/// coverage (the fragment's value), quantized after every glyph, as the GPU
+/// canvas blends glyph quads.
+fn sdf_image(
+    quads: Vec<(i64, i64, usize, usize, Vec<f32>)>,
+    color: Rgba,
+    opacity: f64,
+    blur: f64,
+) -> Option<Item> {
+    let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for (x, y, w, h, _) in &quads {
+        x0 = x0.min(*x);
+        y0 = y0.min(*y);
+        x1 = x1.max(x + *w as i64);
+        y1 = y1.max(y + *h as i64);
+    }
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return None;
+    }
+    let a = (color[3].clamp(0.0, 1.0) * opacity.clamp(0.0, 1.0)) as f32;
+    let rgb = [color[0], color[1], color[2]].map(|c| c as f32);
+    let mut data = vec![0u8; w * h * 4];
+    for (qx, qy, qw, qh, cov) in &quads {
+        let (ox, oy) = ((qx - x0) as usize, (qy - y0) as usize);
+        for row in 0..*qh {
+            let src = &cov[row * qw..(row + 1) * qw];
+            let start = ((oy + row) * w + ox) * 4;
+            let dst = &mut data[start..start + qw * 4];
+            for (d, &c) in dst.chunks_exact_mut(4).zip(src) {
+                if c <= 0.0 {
+                    continue;
+                }
+                let sa = c * a;
+                let keep = 1.0 - sa;
+                for k in 0..3 {
+                    let v = rgb[k] * sa + f32::from(d[k]) / 255.0 * keep;
+                    d[k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
+                let v = sa + f32::from(d[3]) / 255.0 * keep;
+                d[3] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    let image = Arc::new(Rgba8 {
+        width: w as u32,
+        height: h as u32,
+        data,
+    });
+    Some(Item {
+        content: ItemContent::Image {
+            image,
+            transform: Affine::translate((x0 as f64, y0 as f64)),
+        },
+        color: [1.0, 1.0, 1.0, 1.0],
+        opacity: 1.0,
+        blur,
+        bounds: Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64),
+    })
+}
+
+/// One image item holding the platform masks of a `fillText` call, each
+/// glyph composited over the earlier ones (Skia draws glyph quads one by
+/// one with source-over), in `color` through the preblend `table`.
+fn mask_image(
+    masks: &[(i64, i64, Arc<GlyphMask>, bool)],
+    tables: [&[u8; 256]; 2],
+    color: Rgba,
+    opacity: f64,
+    blur: f64,
+) -> Option<Item> {
+    let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for (x, y, m, _) in masks {
+        x0 = x0.min(x + i64::from(m.left));
+        y0 = y0.min(y + i64::from(m.top));
+        x1 = x1.max(x + i64::from(m.left) + i64::from(m.width));
+        y1 = y1.max(y + i64::from(m.top) + i64::from(m.height));
+    }
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return None;
+    }
+    // Each glyph quad is blended source-over into the 8-bit canvas with the
+    // paint's color and alpha (`globalAlpha` included): overlapping glyphs
+    // of a translucent paint build up, and the target is quantized after
+    // every glyph, as the GPU canvas blends them.
+    let a = (color[3].clamp(0.0, 1.0) * opacity.clamp(0.0, 1.0)) as f32;
+    // A CSS Color 4 paint outside sRGB stays unclamped (Skia's
+    // `SkColor4f`); the target clamps what is written.
+    let rgb = [color[0], color[1], color[2]].map(|c| c as f32);
+    let mut data = vec![0u8; w * h * 4];
+    for (x, y, m, path) in masks {
+        let table = tables[usize::from(*path)];
+        let ox = (x + i64::from(m.left) - x0) as usize;
+        let oy = (y + i64::from(m.top) - y0) as usize;
+        for row in 0..m.height as usize {
+            let src = &m.coverage[row * m.width as usize..(row + 1) * m.width as usize];
+            let start = ((oy + row) * w + ox) * 4;
+            let dst = &mut data[start..start + m.width as usize * 4];
+            for (d, &c) in dst.chunks_exact_mut(4).zip(src) {
+                if c == 0 {
+                    continue;
+                }
+                let sa = f32::from(table[c as usize]) / 255.0 * a;
+                let keep = 1.0 - sa;
+                for k in 0..3 {
+                    let v = rgb[k] * sa + f32::from(d[k]) / 255.0 * keep;
+                    d[k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
+                let v = sa + f32::from(d[3]) / 255.0 * keep;
+                d[3] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    let image = Arc::new(Rgba8 {
+        width: w as u32,
+        height: h as u32,
+        data,
+    });
+    let transform = Affine::translate((x0 as f64, y0 as f64));
+    Some(Item {
+        content: ItemContent::Image { image, transform },
+        // The image holds the color and `globalAlpha`.
+        color: [1.0, 1.0, 1.0, 1.0],
+        opacity: 1.0,
+        blur,
+        bounds: Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64),
+    })
 }
 
 /// The shear of a run's synthesized italic or oblique.
@@ -486,6 +1516,188 @@ pub fn fill_path(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<
         opacity,
         blur: 0.0,
         bounds,
+    })
+}
+
+/// The sample positions of a 4× multisampled pixel (the standard pattern
+/// of Metal, D3D, and Vulkan), in pixel units from its top-left corner.
+const MSAA4: [(f64, f64); 4] = [
+    (0.375, 0.125),
+    (0.875, 0.375),
+    (0.125, 0.625),
+    (0.625, 0.875),
+];
+
+/// `fill()` of a path as Chromium's GPU canvas fills it: 4× multisampled
+/// coverage (a quarter per sample inside the path, nonzero winding), as a
+/// premultiplied image item in `color` (measured on the caption boxes,
+/// whose edge pixels take only the values 0, 1/4, 1/2, 3/4, 1).
+pub fn fill_path_msaa(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<Item> {
+    let path = m * path;
+    msaa_item(
+        path.bounding_box(),
+        |p| path.winding(p) != 0,
+        color,
+        opacity,
+    )
+}
+
+/// [`fill_path_msaa`] of the canvas `roundedRect(x, y, w, h, r)` through
+/// `m` (a translation and uniform scale), with exact circular corners
+/// (Skia's `arcTo` makes conics, which are exact circles).
+pub fn fill_rounded_rect_msaa(
+    rect: (f64, f64, f64, f64, f64),
+    m: Affine,
+    color: Rgba,
+    opacity: f64,
+) -> Option<Item> {
+    let (x, y, w, h, r) = rect;
+    let [a, b, c, d, e, f] = m.as_coeffs();
+    if b != 0.0 || c != 0.0 || a <= 0.0 || (a - d).abs() > 1e-12 * a {
+        return fill_path_msaa(rounded_rect(x, y, w, h, r), m, color, opacity);
+    }
+    // `roundedRect` of `captions/render.ts`: `arcTo` corners, each a
+    // quarter conic (`SkPath::arcTo`), in user space as Skia gets them.
+    let radius = r.min(w / 2.0).min(h / 2.0).max(0.0) as f32;
+    let (fx, fy, fw, fh) = (x as f32, y as f32, w as f32, h as f32);
+    let weight = (0.5f32).sqrt();
+    let corners = [
+        (
+            (fx + fw, fy),
+            (fx + fw - radius, fy),
+            (fx + fw, fy + radius),
+        ),
+        (
+            (fx + fw, fy + fh),
+            (fx + fw, fy + fh - radius),
+            (fx + fw - radius, fy + fh),
+        ),
+        (
+            (fx, fy + fh),
+            (fx + radius, fy + fh),
+            (fx, fy + fh - radius),
+        ),
+        ((fx, fy), (fx, fy + radius), (fx + radius, fy)),
+    ];
+    let (a32, e32, f32_) = (a as f32, e as f32, f as f32);
+    // Graphite tessellates a conic at T = k / 2^L, L from Wang's formula for
+    // conics at precision 4 in device space, evaluated in local space.
+    let mut poly: Vec<(f64, f64)> = Vec::new();
+    for (p1, p0, p2) in corners {
+        let dev = |p: (f32, f32)| (p.0 * a32, p.1 * a32);
+        let (q0, q1, q2) = (dev(p0), dev(p1), dev(p2));
+        let cx = 0.5 * (q0.0.min(q1.0).min(q2.0) + q0.0.max(q1.0).max(q2.0));
+        let cy = 0.5 * (q0.1.min(q1.1).min(q2.1) + q0.1.max(q1.1).max(q2.1));
+        let c = |q: (f32, f32)| (q.0 - cx, q.1 - cy);
+        let (c0, c1, c2) = (c(q0), c(q1), c(q2));
+        let d = |q: (f32, f32)| q.0 * q.0 + q.1 * q.1;
+        let max_len = d(c0).max(d(c1)).max(d(c2)).sqrt();
+        let dp = (
+            -2.0 * weight * c1.0 + c0.0 + c2.0,
+            -2.0 * weight * c1.1 + c0.1 + c2.1,
+        );
+        let dw = (-2.0 * weight + 2.0).abs();
+        let rp = (max_len * 4.0 - 1.0).max(0.0);
+        let numer = d(dp).sqrt() * 4.0 + rp * dw;
+        let denom = 4.0 * weight.min(1.0);
+        let n2 = numer / denom;
+        let level = if n2 <= 1.0 {
+            0
+        } else {
+            ((n2.log2().ceil() as i32) + 1) >> 1
+        }
+        .clamp(0, 5);
+        let segments = 1 << level;
+        let p1w = (p1.0 * weight, p1.1 * weight);
+        let mix = |a: f32, b: f32, t: f32| (b - a).mul_add(t, a);
+        for k in 0..=segments {
+            let t = (k << (5 - level)) as f32 / 32.0;
+            let (lx, ly) = if k == 0 {
+                p0
+            } else if k == segments {
+                p2
+            } else {
+                let ab = (mix(p0.0, p1w.0, t), mix(p0.1, p1w.1, t));
+                let bc = (mix(p1w.0, p2.0, t), mix(p1w.1, p2.1, t));
+                let abc = (mix(ab.0, bc.0, t), mix(ab.1, bc.1, t));
+                let u = mix(1.0, weight, t);
+                let v = weight + 1.0 - u;
+                let uv = mix(u, v, t);
+                (abc.0 / uv, abc.1 / uv)
+            };
+            // The rasterizer snaps vertices to 1/256 px.
+            let snap = |v: f32| f64::from((v * 256.0).round() / 256.0);
+            poly.push((snap(lx.mul_add(a32, e32)), snap(ly.mul_add(a32, f32_))));
+        }
+    }
+    let (x0, y0, x1, y1) = (x * a + e, y * a + f, (x + w) * a + e, (y + h) * a + f);
+    let inside = |p: kurbo::Point| {
+        // Nonzero winding of the closed polygon.
+        let mut winding = 0i32;
+        for i in 0..poly.len() {
+            let (ax, ay) = poly[i];
+            let (bx, by) = poly[(i + 1) % poly.len()];
+            if ay <= p.y {
+                if by > p.y && (bx - ax) * (p.y - ay) - (p.x - ax) * (by - ay) > 0.0 {
+                    winding += 1;
+                }
+            } else if by <= p.y && (bx - ax) * (p.y - ay) - (p.x - ax) * (by - ay) < 0.0 {
+                winding -= 1;
+            }
+        }
+        winding != 0
+    };
+    msaa_item(Rect::new(x0, y0, x1, y1), inside, color, opacity)
+}
+
+fn msaa_item(
+    b: Rect,
+    inside: impl Fn(kurbo::Point) -> bool,
+    color: Rgba,
+    opacity: f64,
+) -> Option<Item> {
+    if !(b.width() > 0.0 && b.height() > 0.0) {
+        return None;
+    }
+    let (x0, y0) = (b.x0.floor() as i64, b.y0.floor() as i64);
+    let (x1, y1) = (b.x1.ceil() as i64, b.y1.ceil() as i64);
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return None;
+    }
+    let a = color[3].clamp(0.0, 1.0) as f32;
+    let mut data = Vec::with_capacity(w * h * 4);
+    for py in 0..h {
+        for px in 0..w {
+            let n = MSAA4
+                .iter()
+                .filter(|(sx, sy)| {
+                    inside(kurbo::Point::new(
+                        (x0 + px as i64) as f64 + sx,
+                        (y0 + py as i64) as f64 + sy,
+                    ))
+                })
+                .count();
+            let alpha = a * n as f32 / 4.0;
+            for c in &color[..3] {
+                data.push((c.clamp(0.0, 1.0) as f32 * alpha * 255.0).round() as u8);
+            }
+            data.push((alpha * 255.0).round() as u8);
+        }
+    }
+    Some(Item {
+        content: ItemContent::Image {
+            image: Arc::new(Rgba8 {
+                width: w as u32,
+                height: h as u32,
+                data,
+            }),
+            transform: Affine::translate((x0 as f64, y0 as f64)),
+        },
+        color: [1.0, 1.0, 1.0, 1.0],
+        opacity,
+        blur: 0.0,
+        bounds: Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64),
     })
 }
 
@@ -615,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn color_vector_glyphs_are_refused_not_drawn() {
+    fn color_vector_glyphs_draw_in_their_palette() {
         use skrifa::MetadataProvider;
         let Ok(arial) = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") else {
             eprintln!("Arial is not installed; skipped");
@@ -628,7 +1840,7 @@ mod tests {
         let face = FaceRef {
             data: &colr,
             index: 0,
-            id: colr.as_ptr() as usize,
+            id: 1,
         };
         assert!(super::super::bitmap::has_colr(face));
         assert!(super::super::bitmap::is_colr_glyph(face, a));
@@ -639,6 +1851,9 @@ mod tests {
             let mut painter = Painter {
                 outlines: &mut outlines,
                 bitmaps: &mut bitmaps,
+                masks: None,
+                viewport: None,
+                path_rasterizer: None,
                 profile: Profile::CANVAS2D,
                 unsupported: Vec::new(),
             };
@@ -668,8 +1883,11 @@ mod tests {
         // A plain glyph of the face draws.
         let (n, unsupported) = draw(&[glyph(b)]);
         assert!(n > 0 && unsupported.is_empty(), "{unsupported:?}");
-        // The color vector glyph is refused, not drawn as a monochrome outline.
-        let (_, unsupported) = draw(&[glyph(b), glyph(a)]);
-        assert_eq!(unsupported, vec!["color vector glyphs (COLR)".to_owned()]);
+        // A COLR glyph contributes its palette image, not the base outline.
+        let (n, unsupported) = draw(&[glyph(b), glyph(a)]);
+        #[cfg(feature = "cg-masks")]
+        assert!(n >= 2 && unsupported.is_empty(), "{unsupported:?}");
+        #[cfg(not(feature = "cg-masks"))]
+        assert!(!unsupported.is_empty());
     }
 }

@@ -4,7 +4,7 @@
  *   bun engine/corpus/src/capture.ts [--id <capture-id>] [--root <dir>]
  *        [--only <prefix,...>] [--skip-synthetic] [--skip-scenarios] [--skip-real]
  *        [--real <file.pmv>] [--real-step <seconds>] [--no-eval] [--restart-every <n>]
- *        [--label <text>]
+ *        [--label <text>] [--text-only]
  *
  * Writes to <root>/<capture-id>/ (default root: ~/Library/Application Support/
  * Powermove Engine Corpus). Never writes inside the repository. See
@@ -23,6 +23,7 @@ import { sha256, timeLabel, writeFile, writeFloat, writePng, straightTopDown, ty
 import { legacyScript } from './inject';
 import { installCorpusPage, renderingPerformanceScenarios } from './page';
 import { allProjects, type CorpusProject } from './projects';
+import { textOnly, textOnlyProjects } from './text-only';
 import { compareSubset, type Issue } from './validate';
 import { verifyCapture } from './verify';
 
@@ -32,6 +33,8 @@ export const DEFAULT_REAL = path.join(os.homedir(), 'Documents/Powermove ad.pmv'
 interface Options {
   id?: string; root: string; only: string[]; synthetic: boolean; scenarios: boolean; real: boolean;
   realPath: string; realStep: number; evaluate: boolean; restartEvery: number; label: string;
+  /** Text in isolation (`text-only.ts`). */
+  textOnly: boolean;
 }
 
 interface SampleRecord {
@@ -52,7 +55,7 @@ interface ProjectRecord {
 }
 
 function parseArgs(argv: string[]): Options {
-  const options: Options = { root: DEFAULT_ROOT, only: [], synthetic: true, scenarios: true, real: true, realPath: DEFAULT_REAL, realStep: 2, evaluate: true, restartEvery: 30, label: 'v0' };
+  const options: Options = { root: DEFAULT_ROOT, only: [], synthetic: true, scenarios: true, real: true, realPath: DEFAULT_REAL, realStep: 2, evaluate: true, restartEvery: 30, label: 'v0', textOnly: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!, next = () => { const value = argv[++i]; if (value === undefined) throw new Error(`${arg} needs a value`); return value; };
     if (arg === '--id') options.id = next();
@@ -65,6 +68,7 @@ function parseArgs(argv: string[]): Options {
     else if (arg === '--real-step') options.realStep = Number(next());
     else if (arg === '--no-eval') options.evaluate = false;
     else if (arg === '--label') options.label = next();
+    else if (arg === '--text-only') options.textOnly = true;
     else if (arg === '--restart-every') options.restartEvery = Math.max(1, Number(next()));
     else throw new Error(`Unknown argument ${arg}`);
   }
@@ -321,7 +325,7 @@ async function captureScenarios(session: Session, out: string): Promise<Record<s
   return summary;
 }
 
-async function captureReal(session: Session, out: string, file: string, step: number, evaluate: boolean): Promise<ProjectRecord> {
+async function captureReal(session: Session, out: string, file: string, step: number, evaluate: boolean, isolateText = false): Promise<ProjectRecord> {
   const started = performance.now();
   const slug = path.basename(file, path.extname(file)).toLowerCase().replace(/[^a-z0-9]+/g, '-');
   const dir = `real/${slug}`;
@@ -339,6 +343,11 @@ async function captureReal(session: Session, out: string, file: string, step: nu
     await session.legacy.waitFor((id: string) => (window as any).PM.proj.id !== id, before, 120_000);
     await session.legacy.evaluate(async () => { await (window as any).PM.projectAssetsReady; });
     record.mediaPending = await session.legacy.evaluate(() => (window as any).__corpus.waitForMedia(180000));
+    if (isolateText) {
+      const snapshot = await session.legacy.evaluate(() => JSON.stringify((window as any).PM.proj));
+      const isolated = textOnly(JSON.parse(snapshot));
+      await session.legacy.evaluate((doc: any) => { const PM = (window as any).PM; PM.replaceProject(doc); PM.invalidate(); }, isolated);
+    }
     const info = await session.legacy.evaluate(() => { const PM = (window as any).PM; return { w: PM.proj.w, h: PM.proj.h, dur: PM.proj.dur, fps: PM.proj.fps, name: PM.proj.name, layers: PM.proj.layers.length, comps: Object.keys(PM.proj.comps || {}).length, assets: Object.keys(PM.proj.assets || {}).length }; });
     record.title = info.name;
     record.covers = [`${info.layers} root layers`, `${info.comps} nested compositions`, `${info.assets} assets`, `${info.w}x${info.h} at ${info.fps} fps, ${info.dur}s`];
@@ -382,7 +391,7 @@ export async function capture(options: Options): Promise<string> {
   // Projects that install fixture extensions run last, in their own sessions, so extension
   // hooks (for example a text raster wrapper) never touch the plain projects' frames.
   const extensionKey = (item: CorpusProject) => [...(item.extensions ?? [])].sort().join(',');
-  const projects = allProjects()
+  const projects = (options.textOnly ? textOnlyProjects(allProjects()) : allProjects())
     .filter(item => !options.only.length || options.only.some(prefix => item.id.startsWith(prefix)))
     .map((item, index) => ({ item, index }))
     .sort((a, b) => extensionKey(a.item).localeCompare(extensionKey(b.item)) || a.index - b.index)
@@ -419,7 +428,7 @@ export async function capture(options: Options): Promise<string> {
       if (!existsSync(options.realPath)) log(`Real project ${options.realPath} not found; skipped`);
       else {
         await session.restart([]);
-        real = await captureReal(session, out, options.realPath, options.realStep, options.evaluate);
+        real = await captureReal(session, out, options.realPath, options.realStep, options.evaluate, options.textOnly);
         log(`Real project ${real.title ?? real.id}: ${real.samples.filter(s => !s.error).length}/${real.samples.length} samples${real.error ? `, ERROR ${real.error}` : ''} (${real.ms} ms)`);
       }
     }
@@ -483,5 +492,5 @@ export async function capture(options: Options): Promise<string> {
 }
 
 if (import.meta.main) {
-  capture(parseArgs(process.argv.slice(2))).then(out => console.log(out), error => { console.error(error); process.exit(1); });
+  capture(parseArgs(process.argv.slice(2))).then(out => { console.log(out); process.exit(0); }, error => { console.error(error); process.exit(1); });
 }

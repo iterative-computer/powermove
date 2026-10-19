@@ -1,4 +1,8 @@
 import { test, expect, chooseNativeMenu } from './helpers/app';
+import { expectEngineDrewText } from './helpers/engine-drew';
+
+// With the new engine on, the engine (not the legacy renderer) drew the text.
+test.afterEach(async ({ session }) => { await expectEngineDrewText(session); });
 import type { Page } from '@playwright/test';
 
 async function setup(page: Page) {

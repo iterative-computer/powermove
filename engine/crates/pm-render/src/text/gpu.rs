@@ -49,14 +49,6 @@ fn curve_slots(curve: &pm_text::render::profile::Curve) -> [[f32; 4]; 5] {
     out
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-struct BlurUniform {
-    dir: [f32; 4],
-    size: [f32; 4],
-    norm: [f32; 4],
-}
-
 /// How coverage is produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coverage {
@@ -85,10 +77,10 @@ pub struct TextGpu {
     vello_failed: Option<String>,
     coverage: Coverage,
     item_layout: wgpu::BindGroupLayout,
-    blur_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     paint: [wgpu::RenderPipeline; 2],
-    blur: [wgpu::RenderPipeline; 2],
+    paint_n32: wgpu::RenderPipeline,
+    filter: crate::composite::path_masks::PathMaskPipelines,
     sampler: wgpu::Sampler,
     images: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
     cache: HashMap<([u64; 2], Precision), Cached>,
@@ -132,10 +124,6 @@ impl TextGpu {
             label: Some("pm text item"),
             entries: &[uniform(0, true, size_of::<ItemUniform>() as u64)],
         });
-        let blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("pm text blur"),
-            entries: &[uniform(1, false, size_of::<BlurUniform>() as u64)],
-        });
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm text source"),
             entries: &[
@@ -167,7 +155,6 @@ impl TextGpu {
             })
         };
         let paint_layout = layout(&[&item_layout, &texture_layout]);
-        let blur_pl = layout(&[&blur_layout, &texture_layout]);
         let over = wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::One,
@@ -217,7 +204,13 @@ impl TextGpu {
         };
         let formats = [Precision::Float16, Precision::Float32].map(working_format);
         let paint = formats.map(|f| pipeline(&paint_layout, "vs", "fs_paint", f, Some(over)));
-        let blur = formats.map(|f| pipeline(&blur_pl, "vs_full", "fs_blur", f, None));
+        let paint_n32 = pipeline(
+            &paint_layout,
+            "vs",
+            "fs_paint",
+            wgpu::TextureFormat::Rgba8Unorm,
+            Some(over),
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pm text bilinear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -231,10 +224,10 @@ impl TextGpu {
             vello_failed: None,
             coverage: Coverage::Auto,
             item_layout,
-            blur_layout,
             texture_layout,
             paint,
-            blur,
+            paint_n32,
+            filter: crate::composite::path_masks::PathMaskPipelines::rgba(device),
             sampler,
             images: HashMap::new(),
             cache: HashMap::new(),
@@ -724,7 +717,11 @@ impl TextGpu {
             multiview_mask: None,
         });
         *cleared = true;
-        pass.set_pipeline(&self.paint[format_index(precision)]);
+        pass.set_pipeline(if target.format() == wgpu::TextureFormat::Rgba8Unorm {
+            &self.paint_n32
+        } else {
+            &self.paint[format_index(precision)]
+        });
         for (k, d) in draws.iter().enumerate() {
             let bind = match (d.page, d.image) {
                 (Some(p), _) => &page_binds[p],
@@ -737,8 +734,8 @@ impl TextGpu {
         }
     }
 
-    /// A blurred draw: painted alone into a layer the size of its reach,
-    /// blurred horizontally and vertically, then composited.
+    /// A draw painted into an N32 save layer, filtered through the shared
+    /// Canvas2D/Graphite image-filter executor, then composited.
     #[allow(clippy::too_many_arguments)]
     fn blurred(
         &self,
@@ -792,76 +789,35 @@ impl TextGpu {
         let ry0 = reach.y0.floor();
         let lw = (reach.x1.ceil() - rx0) as u32;
         let lh = (reach.y1.ceil() - ry0) as u32;
-        let a = pool.take_working(device, lw, lh, precision);
-        let b = pool.take_working(device, lw, lh, precision);
+        let a = pool.take(
+            device,
+            lw,
+            lh,
+            wgpu::TextureFormat::Rgba8Unorm,
+            pm_gpu::target::working_usage(),
+        );
         let draws = self.draws(scene, index..index + 1, [rx0, ry0], (lw, lh), cells, images);
         let mut fresh = false;
         self.pass(
             device, queue, encoder, &a, &draws, pages, images, precision, &mut fresh,
         );
-        let sigma = item.blur;
-        let radius = blur_radius(sigma);
-        let sum: f64 = (-(radius as i64)..=radius as i64)
-            .map(|i| (-(i * i) as f64 / (2.0 * sigma * sigma)).exp())
-            .sum();
-        for (dir, src, dst) in [([1.0f32, 0.0], &a, &b), ([0.0, 1.0], &b, &a)] {
-            let u = BlurUniform {
-                dir: [dir[0], dir[1], sigma as f32, radius as f32],
-                size: [lw as f32, lh as f32, lw as f32, lh as f32],
-                norm: [(1.0 / sum) as f32, 0.0, 0.0, 0.0],
-            };
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("pm text blur"),
-                size: size_of::<BlurUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&buffer, 0, bytes_of(&u));
-            let ub = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("pm text blur"),
-                layout: &self.blur_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buffer.as_entire_binding(),
-                }],
-            });
-            let sb = self.source_bind(device, &src.view);
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("pm text blur"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &dst.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.blur[format_index(precision)]);
-            pass.set_bind_group(0, &ub, &[]);
-            pass.set_bind_group(1, &sb, &[]);
-            pass.draw(0..4, 0..1);
-        }
-        // Composite the blurred layer over the raster (kind 2, 1:1).
+        let filtered = self.filter.blur_rgba(
+            device,
+            queue,
+            encoder,
+            &a,
+            [rx0 as i32, ry0 as i32],
+            (scene.width, scene.height),
+            plan.crop,
+            item.blur as f32,
+        );
         let (tw, th) = (plan.width() as f32, plan.height() as f32);
-        let x0 = rx0 - f64::from(plan.crop[0]);
-        let y0 = ry0 - f64::from(plan.crop[1]);
         let copy = Draw {
             page: Some(0),
             image: None,
             u: ItemUniform {
-                rect: [
-                    x0 as f32,
-                    y0 as f32,
-                    (x0 + f64::from(lw)) as f32,
-                    (y0 + f64::from(lh)) as f32,
-                ],
-                map: [-x0 as f32, -y0 as f32, 0.0, 0.0],
+                rect: [0.0, 0.0, tw, th],
+                map: [0.0; 4],
                 params: [2.0, 1.0, tw, th],
                 ..Default::default()
             },
@@ -872,13 +828,13 @@ impl TextGpu {
             encoder,
             raster,
             &[copy],
-            std::slice::from_ref(&a.view),
+            std::slice::from_ref(&filtered.view),
             images,
             precision,
             cleared,
         );
         taken.push(a);
-        taken.push(b);
+        // The encoder retains this non-pooled filter result until submission.
     }
 }
 
@@ -917,7 +873,46 @@ fn vello_page(scene: &TextScene, atlas: &Atlas, page: usize) -> vello::Scene {
 
 /// The CPU reference of a plan's raster (tests).
 pub fn render_cpu(plan: &TextPlan) -> pm_text::render::paint::Image {
-    let full = pm_text::render::paint::render_cpu(&plan.scene);
+    let full = pm_text::render::paint::render_cpu_with_filter(
+        &plan.scene,
+        Some(&|img, origin, canvas, sigma| {
+            use pm_vector::canvas2d::filter::{BlurPlan, Rect};
+            let rgba = img.to_rgba8();
+            let data = if let Some(filter) = BlurPlan::new(canvas.0, canvas.1, sigma as f32) {
+                filter.run_cpu_rgba_region(
+                    &rgba,
+                    Rect {
+                        x0: origin[0],
+                        y0: origin[1],
+                        w: img.width,
+                        h: img.height,
+                    },
+                    canvas.0,
+                    canvas.1,
+                )
+            } else {
+                let mut data = vec![0.0; (canvas.0 * canvas.1 * 4) as usize];
+                let x0 = origin[0].max(0);
+                let x1 = (origin[0] + img.width as i32).min(canvas.0 as i32);
+                for y in origin[1].max(0)..(origin[1] + img.height as i32).min(canvas.1 as i32) {
+                    for x in x0..x1 {
+                        let src = (((y - origin[1]) as u32 * img.width + (x - origin[0]) as u32)
+                            * 4) as usize;
+                        let dst = ((y as u32 * canvas.0 + x as u32) * 4) as usize;
+                        for c in 0..4 {
+                            data[dst + c] = f32::from(rgba[src + c]) / 255.0;
+                        }
+                    }
+                }
+                data
+            };
+            pm_text::render::paint::Image {
+                width: canvas.0,
+                height: canvas.1,
+                data,
+            }
+        }),
+    );
     let (w, h) = (plan.width(), plan.height());
     let mut out = pm_text::render::paint::Image::new(w, h);
     for y in 0..h as usize {

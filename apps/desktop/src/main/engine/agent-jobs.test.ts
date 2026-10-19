@@ -295,8 +295,13 @@ describe('export sheet jobs through the job engine', () => {
     const engine = new FakeEngine();
     const statuses: Array<[number, UserExportStatus]> = [];
     const delivered: Array<[number, string]> = [];
-    const jobs = new AgentJobs({ engine, onUserStatus: (o, s) => statuses.push([o, s]), onDelivered: (o, p) => delivered.push([o, p]) });
+    // The job engine learns the window of each export session before the
+    // job is submitted (its text measures with that window's seeds).
+    const owners: Array<[number, number | null, number]> = [];
+    const sessionOwner = async (session: number, owner: number | null) => void owners.push([session, owner, engine.of('submitJob').length]);
+    const jobs = new AgentJobs({ engine, onUserStatus: (o, s) => statuses.push([o, s]), onDelivered: (o, p) => delivered.push([o, p]), sessionOwner });
     const { jobId, frames } = await jobs.exportUser(5, project(), options, '/Users/x/Cut.mp4');
+    expect(owners).toEqual([[10, 5, 0]]);
     expect(frames).toBe(120);
     expect(engine.chosen).toEqual([['/Users/x/Cut.mp4', jobId, 10]]);
     const body = engine.of('submitJob')[0]!.body as Extract<Request, { type: 'submitJob' }>;
@@ -316,6 +321,26 @@ describe('export sheet jobs through the job engine', () => {
     expect(engine.of('cancelJobs')[0]!.body).toEqual({ type: 'cancelJobs', kind: 'job', job: second.jobId });
     engine.status(second.jobId, 'failed', { class: 'userJob', error: error('unsupported', 'text layers') });
     expect(statuses.at(-1)).toEqual([5, { jobId: second.jobId, state: 'failed', progress: 0.5, error: 'text layers', routed: true }]);
+  });
+
+  it('do not start an export whose window the job engine\'s font service never takes', async () => {
+    const engine = new FakeEngine();
+    const calls: Array<[number, number | null]> = [];
+    let failures = 1;
+    const sessionOwner = async (session: number, owner: number | null) => {
+      calls.push([session, owner]);
+      if (owner !== null && failures-- > 0) throw new Error('timed out');
+    };
+    const jobs = new AgentJobs({ engine, onUserStatus: () => undefined, onDelivered: () => undefined, sessionOwner });
+    // One miss is tried again.
+    await jobs.exportUser(5, project(), options, '/Users/x/Cut.mp4');
+    expect(calls).toEqual([[10, 5], [10, 5]]);
+    // Two misses: the session closes and nothing is submitted.
+    failures = 2;
+    const submitted = engine.of('submitJob').length;
+    await expect(jobs.exportUser(5, project(), options, '/Users/x/Cut 2.mp4')).rejects.toThrow(/could not lay text out as this window does/);
+    expect(engine.of('submitJob')).toHaveLength(submitted);
+    expect(engine.of('closeSession').length).toBeGreaterThan(0);
   });
 });
 
@@ -364,6 +389,14 @@ describe('Phase 3b delivery through the job engine', () => {
     expect([...statuses[1]![1].preview!.jpeg]).toEqual([0xff, 0xd8]);
     engine.status(jobId, 'done', { class: 'userJob', path: '/Users/x/Cut.mov' });
     expect(drafts).toEqual([[10, true], [10, false]]);
+  });
+
+  it('keeps queue font seeds scoped to the starting renderer', async () => {
+    const engine = new FakeEngine();
+    const sessionOwner = vi.fn(async () => {});
+    const jobs = new AgentJobs({ engine, sessionOwner });
+    await jobs.exportQueued(project(), sheet({ format: 'webm-vp9' }), '/Users/x/Queued.webm', 'uniqueName', [], 42);
+    expect(sessionOwner).toHaveBeenCalledWith(10, 42);
   });
 
   it('runs queue jobs without a window and reports to the queue', async () => {

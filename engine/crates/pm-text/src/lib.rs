@@ -11,6 +11,8 @@
 //!   fallback manifest).
 //! - `answers`: the registry boundary as data, so `pm-wasm` lays text out
 //!   from recorded answers and metrics-and-shaping subsets (`subset`).
+//! - `served`: a resolver answered synchronously by a registry on another
+//!   thread, over full fonts (the engines' render threads).
 //! - `corpus`: the S4 corpus and its comparison with Canvas2D captures.
 //! - `render` (feature `render`): glyph rendering with the engine-owned
 //!   stem-darkening profiles, the text scene, and the CPU coverage and paint
@@ -31,5 +33,6 @@ pub mod registry;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod sanitize;
+pub mod served;
 pub mod sfnt;
 pub mod subset;

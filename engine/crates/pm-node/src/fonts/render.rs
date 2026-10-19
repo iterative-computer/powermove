@@ -1,6 +1,11 @@
 //! Fonts for the engine's own text rendering (plan section 12; Phase 3c
 //! "full render fonts on the render and job threads"; RFC 16).
 //!
+//! The application host installs [`RenderFonts::with_hub`] over the existing
+//! scoped [`super::hub::FontHub`] / `ServedFonts` provider, retaining per-window
+//! cache seeds and replay readiness for views and snapshots. The independent
+//! broker API below remains available to callers without a window seed scope.
+//!
 //! The registry (`pm_text::registry::CoreTextRegistry`) uses AppKit's font
 //! manager, so it lives on the utility process's JavaScript thread (the
 //! process main thread, [`super::FontService`]). The threads that render
@@ -443,14 +448,54 @@ impl pm_render::text::TextFonts for EngineFonts {
     }
 }
 
+/// Reports scoped-provider failures through the presenter's font-health
+/// boundary too. After one unanswered query, the frame fails immediately
+/// rather than waiting once per subsequent fallback query.
+#[cfg(target_os = "macos")]
+struct ScopedServer {
+    hub: Arc<super::hub::FontHub>,
+    health: FontHealth,
+}
+
+#[cfg(target_os = "macos")]
+impl pm_text::served::FontServer for ScopedServer {
+    fn generation(&self) -> u64 {
+        pm_text::served::FontServer::generation(&*self.hub)
+    }
+
+    fn serve(&self, queries: &[Query]) -> Result<pm_text::served::Served, String> {
+        if self.health.failed() {
+            return Err("the frame already met an unanswered font query".into());
+        }
+        let reply = pm_text::served::FontServer::serve(&*self.hub, queries);
+        if let Err(why) = &reply {
+            self.health.fail(why.clone());
+        }
+        reply
+    }
+}
+
 /// A renderer's fonts and their state, as a rendering thread keeps them.
 #[cfg(target_os = "macos")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RenderFonts {
     pub broker: FontBroker,
     pub health: FontHealth,
+    /// Interactive layouts retain the originating window's font-cache seeds.
+    hub: Option<Arc<super::hub::FontHub>>,
     /// Set after a render met a failure: the next use installs fonts afresh.
     reinstall: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "macos")]
+impl std::fmt::Debug for RenderFonts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderFonts")
+            .field("broker", &self.broker)
+            .field("scoped", &self.hub.is_some())
+            .field("health", &self.health)
+            .finish()
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -459,19 +504,46 @@ impl RenderFonts {
         RenderFonts {
             broker,
             health: FontHealth::default(),
+            hub: None,
             reinstall: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Host rendering uses the same scoped provider as export/job layouts.
+    pub fn with_hub(broker: FontBroker, hub: Arc<super::hub::FontHub>) -> Self {
+        Self {
+            hub: Some(hub),
+            ..Self::new(broker)
+        }
+    }
+
+    /// Includes seed changes as well as registry changes.
+    pub fn generation(&self) -> u64 {
+        self.hub.as_ref().map_or_else(
+            || self.broker.generation(),
+            |hub| pm_text::served::FontServer::generation(&**hub),
+        )
     }
 
     /// Installs fonts at the broker's generation into `renderer` when it
     /// has none or older ones; true when it installed.
     pub fn sync(&self, renderer: &mut pm_render::Renderer, installed: &mut Option<u64>) -> bool {
-        let generation = self.broker.generation();
+        let generation = self.generation();
         let reinstall = self.reinstall.swap(false, Ordering::AcqRel);
         if *installed == Some(generation) && !reinstall {
             return false;
         }
-        renderer.set_text_fonts(Some(Box::new(EngineFonts::new(&self.broker, &self.health))));
+        let fonts: Box<dyn pm_render::text::TextFonts> = match &self.hub {
+            Some(hub) => Box::new(pm_render::text::served::ServedFonts::new(
+                Arc::new(ScopedServer {
+                    hub: hub.clone(),
+                    health: self.health.clone(),
+                }),
+                hub.clone(),
+            )),
+            None => Box::new(EngineFonts::new(&self.broker, &self.health)),
+        };
+        renderer.set_text_fonts(Some(fonts));
         *installed = Some(generation);
         true
     }
@@ -492,6 +564,30 @@ impl RenderFonts {
 mod tests {
     use super::*;
     use pm_text::answers::{Answer, FaceRecord};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scoped_font_failure_waits_only_once_per_frame_and_retries_next_frame() {
+        use pm_text::served::FontServer;
+        let hub = Arc::new(super::super::hub::FontHub::with_timeout(Duration::ZERO));
+        let health = FontHealth::default();
+        let server = ScopedServer {
+            hub: hub.clone(),
+            health: health.clone(),
+        };
+        assert!(server.serve(&[]).is_err());
+        assert!(health.failed());
+        assert_eq!(hub.stats().round_trips, 1);
+        assert!(server.serve(&[]).is_err());
+        assert_eq!(
+            hub.stats().round_trips,
+            1,
+            "later queries fail without waiting"
+        );
+        assert!(health.take_failure().is_some());
+        assert!(server.serve(&[]).is_err());
+        assert_eq!(hub.stats().round_trips, 2, "a fresh frame may retry");
+    }
 
     /// A registry stand-in: one family, served from bytes it owns.
     struct Fake {

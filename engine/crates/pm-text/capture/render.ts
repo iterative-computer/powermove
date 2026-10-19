@@ -2,7 +2,7 @@
    and runs the hidden Electron host (never shown, never focused, no Dock
    icon), which draws every case with today's Canvas2D code.
 
-   ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts [--set main|fit] [--out <dir>]
+   ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts [--set main|fit|closure|paths] [--out <dir>]
      -> <dir>/manifest.json, <dir>/<case>.rgba, <dir>/cases.json
 
    The default directory is a new `text-raster-<UTC stamp>` capture in the

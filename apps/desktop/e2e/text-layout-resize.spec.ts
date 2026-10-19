@@ -1,4 +1,8 @@
 import { expect, test } from './helpers/app';
+import { expectEngineDrewText } from './helpers/engine-drew';
+
+// With the new engine on, the engine (not the legacy renderer) drew the text.
+test.afterEach(async ({ session }) => { await expectEngineDrewText(session); });
 
 for (const paragraph of [false, true]) {
   test(`reflows ${paragraph ? 'paragraph' : 'point'} text under a transformed parent and restores layout with undo`, async ({ session }, testInfo) => {

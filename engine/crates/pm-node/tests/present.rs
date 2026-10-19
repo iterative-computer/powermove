@@ -260,7 +260,7 @@ fn child_engine() {
         inbox.push(actions);
     };
     // A host port with a lease, so the rgbaf16 pool fits.
-    host.attach(1, "host").unwrap();
+    host.attach(1, "host", None).unwrap();
     host.receive(1, &hello(PeerRole::Host));
     let grant = Envelope::new(Message::Request {
         id: RequestId::new(1).unwrap(),
@@ -273,7 +273,7 @@ fn child_engine() {
         }),
     });
     host.receive(1, &codec::encode(&grant).unwrap());
-    host.attach(WINDOW.0, "renderer").unwrap();
+    host.attach(WINDOW.0, "renderer", None).unwrap();
     inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
     let open = Envelope::new(Message::Request {
         id: RequestId::new(1).unwrap(),

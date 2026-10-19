@@ -79,21 +79,16 @@ pub struct EngineHost {
     #[cfg(target_os = "macos")]
     control: Option<present::PresenterControl>,
     jobs: Option<JobStats>,
-    process: EngineProcess,
-    /// The font service, created when main first attaches a font port.
+    /// The font service: created with the host when it runs on the
+    /// process's main thread (AppKit's font manager), else when main first
+    /// attaches a font port.
     fonts: Option<fonts::FontService>,
     font_ports: std::collections::BTreeSet<u32>,
+    /// Render threads' requests to the font service (`fonts::hub`).
+    font_hub: std::sync::Arc<fonts::hub::FontHub>,
     /// Where the engine's rendering threads ask the font service for
     /// registry answers and full fonts (`fonts::render`).
     broker: fonts::render::FontBroker,
-}
-
-impl Drop for EngineHost {
-    fn drop(&mut self) {
-        // A render thread waiting for fonts must not hold up the
-        // presenter's shutdown (this thread would never answer it).
-        self.broker.close();
-    }
 }
 
 impl EngineHost {
@@ -112,6 +107,19 @@ impl EngineHost {
         apply_process_qos(process)?;
         #[allow(unused_mut)]
         let mut engine = Engine::new(EngineConfig::new(process));
+        // Render threads lay text out over the font service (both engines:
+        // the viewer, and the job engine's exports and agent frames). Their
+        // requests wake this thread through the sink, which calls `pump`.
+        let font_hub = std::sync::Arc::new(fonts::hub::FontHub::new());
+        if let Some(sink) = sink.clone() {
+            font_hub.set_wake(std::sync::Arc::new(move || sink(Vec::new())));
+        }
+        // On the process's main thread the registry can start now. Elsewhere
+        // (unit tests, platforms without a registry) it can start only on a
+        // font port, and render threads get no fonts: their text and
+        // captions layers stay unsupported, as without a font service.
+        let font_service = fonts::FontService::new().ok();
+        let render_fonts = font_service.as_ref().map(|_| font_hub.clone());
         #[allow(unused_mut)]
         let mut presenter = None;
         #[allow(unused_mut)]
@@ -130,7 +138,9 @@ impl EngineHost {
                 sink.clone(),
                 present::PresenterConfig::from_env(process, &env),
             ) {
-                config.thread.fonts = Some(fonts::render::RenderFonts::new(broker.clone()));
+                config.thread.fonts = render_fonts
+                    .clone()
+                    .map(|hub| fonts::render::RenderFonts::with_hub(broker.clone(), hub));
                 let bridge = present::BridgePresenter::start(config, sink)?;
                 presenter = Some(bridge.stats_handle());
                 control = Some(bridge.control());
@@ -144,22 +154,22 @@ impl EngineHost {
                 && let Some(sink) = sink
             {
                 let wake: jobs::Wake = std::sync::Arc::new(move || sink(Vec::new()));
-                let service = jobs::JobEngineService::start(wake)?;
+                let service = jobs::JobEngineService::start_with_fonts(wake, render_fonts.clone())?;
                 job_stats = Some(service.stats_handle());
                 engine.set_job_service(Box::new(service));
             }
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = (sink, env);
+        let _ = (sink, env, render_fonts);
         Ok(Self {
             engine,
             presenter,
             #[cfg(target_os = "macos")]
             control,
             jobs: job_stats,
-            process,
-            fonts: None,
+            fonts: font_service,
             font_ports: Default::default(),
+            font_hub,
             broker,
         })
     }
@@ -168,7 +178,7 @@ impl EngineHost {
     /// AppKit's font manager needs). The service is created on the first ask
     /// when main has not attached a font port yet; main's port then opens
     /// it at its generation base and replays the project fonts.
-    fn serve_fonts(&mut self) {
+    fn serve_broker_fonts(&mut self) {
         let asks = self.broker.take_asks();
         if asks.is_empty() {
             return;
@@ -241,21 +251,29 @@ impl EngineHost {
         "[]".into()
     }
 
-    pub fn attach(&mut self, port: u32, peer: &str) -> Result<Vec<Action>, String> {
+    /// A port main connected. `owner` names the window a renderer client's
+    /// port belongs to (its layouts measure with that window's font cache
+    /// seeds).
+    pub fn attach(
+        &mut self,
+        port: u32,
+        peer: &str,
+        owner: Option<u32>,
+    ) -> Result<Vec<Action>, String> {
         if peer == FONTS_PEER {
             return self.attach_fonts(port);
         }
-        Ok(self.engine.attach(PortId(port), parse_peer(peer)?))
+        let actions = self.engine.attach(PortId(port), parse_peer(peer)?);
+        self.font_hub.set_port_owner(port, owner);
+        Ok(actions)
     }
 
-    /// Main's font port: only the interactive engine hosts the registry.
-    /// The service is created on the first attach (on this thread, the
-    /// process's main thread) and kept for the launch, so a reconnecting
-    /// main keeps its project fonts and face ids.
+    /// Main's font port. Both engines host the registry: the interactive
+    /// engine serves pm-wasm (through main) and its viewer, the job engine
+    /// its exports and agent frames; main replays project fonts and seeds to
+    /// each. The service is kept for the launch, so a reconnecting main keeps
+    /// its project fonts and face ids.
     fn attach_fonts(&mut self, port: u32) -> Result<Vec<Action>, String> {
-        if self.process != EngineProcess::Interactive {
-            return Err("only the interactive engine serves fonts".into());
-        }
         if self.fonts.is_none() {
             self.fonts = Some(fonts::FontService::new()?);
         }
@@ -264,20 +282,59 @@ impl EngineHost {
         Ok(Vec::new())
     }
 
+    /// Answers render threads' font requests (on this thread).
+    fn serve_fonts(&mut self) {
+        self.serve_broker_fonts();
+        if !self.font_hub.has_requests() {
+            return;
+        }
+        let service = &mut self.fonts;
+        self.font_hub.drain(|queries| match service.as_mut() {
+            Some(service) => service.serve(queries),
+            None => Err("this engine has no font registry".into()),
+        });
+    }
+
+    /// The render threads' font hub (tests and status).
+    pub fn font_hub(&self) -> &std::sync::Arc<fonts::hub::FontHub> {
+        &self.font_hub
+    }
+
     pub fn detach(&mut self, port: u32) -> Vec<Action> {
         if self.font_ports.remove(&port) {
             return Vec::new();
         }
+        self.font_hub.set_port_owner(port, None);
         self.engine.detach(PortId(port))
     }
 
     pub fn receive(&mut self, port: u32, bytes: &[u8]) -> Vec<Action> {
         if self.font_ports.contains(&port) {
+            let generation = pm_text::served::FontServer::generation(&*self.font_hub);
             let reply = match self.fonts.as_mut() {
-                Some(service) => service.handle(bytes),
+                Some(service) => {
+                    let reply = service.handle(bytes);
+                    // What render threads lay out with follows the service:
+                    // its generation (project fonts, a new generation base)
+                    // and main's seeds; the open lets their requests go out.
+                    self.font_hub.note_registry_generation(service.generation());
+                    self.font_hub.set_seeds(service.seeds().clone());
+                    if service.opened() {
+                        self.font_hub.opened();
+                    }
+                    reply
+                }
                 None => return Vec::new(),
             };
             self.fonts_changed();
+            #[cfg(target_os = "macos")]
+            if generation != pm_text::served::FontServer::generation(&*self.font_hub)
+                && let Some(control) = &self.control
+            {
+                control.fonts_changed();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = generation;
             self.serve_fonts();
             return vec![Action::Send {
                 port: PortId(port),
@@ -317,6 +374,10 @@ impl EngineHost {
         if let Some(object) = value.as_object_mut() {
             object.insert("qos".into(), current_qos().into());
             object.insert("fontPorts".into(), self.font_ports.len().into());
+            object.insert(
+                "fonts".into(),
+                serde_json::to_value(self.font_hub.stats()).unwrap_or_default(),
+            );
             let (asked, answered, failed) = self.broker.counts();
             object.insert(
                 "renderFonts".into(),
@@ -343,6 +404,15 @@ impl EngineHost {
     }
 }
 
+impl Drop for EngineHost {
+    /// Render threads waiting for fonts stop waiting before the presenter
+    /// and the job lanes are joined (the engine drops after this).
+    fn drop(&mut self) {
+        self.broker.close();
+        self.font_hub.shutdown();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,7 +433,7 @@ mod tests {
         // Run on a fresh thread so the test runner's thread keeps its class.
         let qos = std::thread::spawn(|| {
             let mut host = EngineHost::new(EngineProcess::Job).unwrap();
-            host.attach(1, "host").unwrap();
+            host.attach(1, "host", None).unwrap();
             let out = host.receive(1, &hello(PeerRole::Host));
             assert!(matches!(
                 sent(&out, PortId(1))[0].message,

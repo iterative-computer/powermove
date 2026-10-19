@@ -244,12 +244,108 @@ export function buildProbeCases(): RenderCase[] {
   return cases;
 }
 
+/** The closure set (`--set closure`, Phase 3c text closure): distance-field
+    text from 162 to 256 device px in every way a text layer reaches it
+    (sizes at the range's edges, densities, synthetic bold and italic,
+    colors, scripts, stroked and popping captions), `COLR` color glyphs
+    from project fonts (`colr-fonts.py` builds them into the corpus's
+    `fonts` directory), and the CSS colors of CSS Color 4 as text colors. */
+export function buildClosureCases(): RenderCase[] {
+  const cases: RenderCase[] = [];
+  const addText = (group: string, d: TextCase['d'], scale = 1) =>
+    cases.push({ id: `${group}-${String(cases.length).padStart(4, '0')}`, group, kind: 'text', d, scale });
+  const addCaption = (group: string, style: any, textValue: string, local: number, scale: number, w = 1920, h = 1080) =>
+    cases.push({
+      id: `${group}-${String(cases.length).padStart(4, '0')}`, group, kind: 'caption',
+      content: { cues: [cue(textValue)], style: { ...BASE_STYLE, ...style } }, local,
+      compositionWidth: w, compositionHeight: h, scale,
+    });
+  const WORD = 'Hamburgefonstiv';
+  for (const size of [161, 162, 163, 180, 210, 255, 256, 257]) addText('sdf-sizes', text({ text: WORD, size }));
+  for (const font of ['Georgia', 'Menlo', 'Helvetica Neue', 'Avenir Next', 'New York']) addText('sdf-families', text({ text: WORD, font, size: 200, weight: 400 }));
+  addText('sdf-density', text({ text: WORD, size: 100 }), 2);
+  addText('sdf-density', text({ text: WORD, size: 400 }), 0.5);
+  addText('sdf-density', text({ text: WORD, size: 60 }), 2.75);
+  addText('sdf-synthetic', text({ text: WORD, font: 'Chalkduster', size: 200, weight: 700 }));
+  addText('sdf-synthetic', text({ text: WORD, font: 'Chalkduster', size: 200, weight: 400, italic: true }));
+  for (const color of ['#FF3B30', '#00000080', '#3478F6', '#FFFFFF59']) addText('sdf-colors', text({ text: WORD, size: 200, color }));
+  addText('sdf-scripts', text({ text: '视频编辑 한국어', size: 200, weight: 400 }));
+  addText('sdf-scripts', text({ text: 'مرحبا', size: 200, weight: 400 }));
+  addText('sdf-scripts', text({ text: 'Hi 👋🏽 ❤️', size: 200, weight: 500 }));
+  addText('sdf-tracking', text({ text: WORD, size: 200, tracking: 12 }));
+  addText('sdf-paragraph', text({ text: 'Motion design brings graphics to life.', size: 180, boxWidth: 1400 }));
+  addCaption('sdf-caption', { size: 180, stroke: 6, maxWidth: 95 }, 'Big words', 1, 1);
+  addCaption('sdf-caption', { ...PRESETS.pop, size: 160, maxWidth: 95 }, 'Pop goes', 0.4, 1);
+  addCaption('sdf-caption', { ...PRESETS.boxed, size: 170, maxWidth: 95 }, 'Boxed', 1, 1);
+
+  for (const font of ['PM COLR Zero', 'PM COLR One']) {
+    for (const size of [14, 24, 48, 96, 200]) addText('colr', text({ text: 'Color glyphs', font, size, weight: 400 }));
+  }
+  addText('colr', text({ text: 'Color glyphs', font: 'PM COLR Zero', size: 48, weight: 400, color: '#00000080' }));
+  addText('colr', text({ text: 'Color glyphs', font: 'PM COLR Zero', size: 24, weight: 400 }), 2);
+
+  const COLORS = [
+    'lab(52.2345% 40.1645 59.9971)', 'lch(52.2345% 72.2 56.2)', 'oklab(59.686% 0.1009 0.1192)', 'oklch(59.69% 0.156 49.7)',
+    'oklch(70% 0.4 30)', 'lab(50% 0 0 / 0.5)', 'lch(none 50 120)', 'oklch(80% 0.12 none)',
+    'color(srgb 0.5 0.2 0.9)', 'color(srgb-linear 0.2 0.5 0.1)', 'color(display-p3 1 0.5 0)', 'color(display-p3 0 1 0 / 40%)',
+    'color(a98-rgb 0.8 0.2 0.3)', 'color(rec2020 0.7 0.3 0.2)', 'color(prophoto-rgb 0.6 0.4 0.2)', 'color(xyz-d65 0.3 0.2 0.1)',
+    'color(xyz-d50 0.3 0.2 0.1)', 'color(xyz 0.25 0.4 0.6)',
+    'color-mix(in srgb, #ff0000 30%, #0000ff)', 'color-mix(in oklch, red, blue)', 'color-mix(in lab, #34c759 40%, white)',
+    'color-mix(in hsl shorter hue, red, blue)', 'color-mix(in oklab, red 20%, transparent)', 'color-mix(in srgb-linear, #ff9500, #5856d6 75%)',
+    'rgb(from #3478f6 r g b / 50%)', 'hsl(from red calc(h + 120) s l)', 'oklch(from #ff3b30 calc(l - 0.1) c h)',
+    'rgb(calc(255 / 2) 0 calc(100 + 20))', 'rgb(127.5 64.25 0)', 'hsl(210.5 50.5% 40.25%)',
+    'currentcolor', 'CanvasText', 'Canvas', 'AccentColor', 'LinkText', 'GrayText',
+    'light-dark(red, blue)', 'light-dark(oklch(60% 0.2 30), #fff)',
+    'ActiveBorder', 'ActiveCaption', 'ActiveText', 'AppWorkspace', 'Background',
+    'ButtonBorder', 'ButtonFace', 'ButtonHighlight', 'ButtonShadow', 'ButtonText',
+    'CaptionText', 'Field', 'FieldText', 'Highlight', 'HighlightText', 'InactiveBorder',
+    'InactiveCaption', 'InactiveCaptionText', 'InfoBackground', 'InfoText', 'Mark', 'MarkText',
+    'Menu', 'MenuText', 'Scrollbar', 'SelectedItem', 'SelectedItemText', 'ThreeDDarkShadow',
+    'ThreeDFace', 'ThreeDHighlight', 'ThreeDLightShadow', 'ThreeDShadow', 'VisitedText',
+    'Window', 'WindowFrame', 'WindowText',
+
+  ];
+  for (const color of COLORS) addText('css-color', text({ text: 'Colors', size: 48, color }));
+  return cases;
+}
+
+/** Canonical path strikes: fill/synthesis and strokeText above 256px.
+ * Kept separate so recapturing them never replaces the main/closure references. */
+export function buildPathCases(): RenderCase[] {
+  const caption = (id: string, style: any, scale = 1): CaptionCase => ({
+    id, group: 'canonical-path-stroke', kind: 'caption',
+    content: { cues: [cue('HIR SO')], style: { ...BASE_STYLE, size: 320,
+      maxWidth: 95, placement: 'middle', stroke: 9, ...style } },
+    local: 2.0, compositionWidth: 1920, compositionHeight: 1080, scale,
+  });
+  return [
+    caption('path-stroke-0000', {}),
+    caption('path-stroke-0001', { weight: 900, italic: true, highlight: true,
+      highlightScale: 116, strokeColor: '#FF3B30' }, 1.25),
+    { id: 'path-synthetic-0002', group: 'canonical-path-synthetic', kind: 'text',
+      d: text({ text: 'Hi', font: 'Chalkduster', weight: 700, size: 300 }), scale: 1 },
+    { id: 'path-synthetic-0003', group: 'canonical-path-synthetic', kind: 'text',
+      d: text({ text: 'Hi', font: 'Chalkduster', weight: 400, italic: true, size: 300 }), scale: 1 },
+  ];
+}
+
+/** The project fonts of the closure set: the corpus's COLR test fonts. */
+export function closureProjectFonts(): typeof PROJECT_FONTS {
+  const root = process.env.PM_ENGINE_CORPUS_ROOT ?? `${process.env.HOME}/Library/Application Support/Powermove Engine Corpus`;
+  return [
+    ...PROJECT_FONTS,
+    { family: 'PM COLR Zero', path: `${root}/fonts/pm-colr-v0.ttf`, weight: '400', style: 'normal' },
+    { family: 'PM COLR One', path: `${root}/fonts/pm-colr-v1.ttf`, weight: '400', style: 'normal' },
+  ];
+}
+
 if (import.meta.main) {
   const out = process.argv[2];
-  if (!out) throw new Error('usage: bun render-cases.ts <out.json> [fit]');
+  if (!out) throw new Error('usage: bun render-cases.ts <out.json> [fit|probe|closure|paths]');
   const set = process.argv[3];
-  const cases = set === 'fit' ? buildFitCases() : set === 'probe' ? buildProbeCases() : buildRenderCases();
-  await Bun.write(out, JSON.stringify({ variableSources: VARIABLE_SOURCES, projectFonts: PROJECT_FONTS, cases }));
+  const cases = set === 'fit' ? buildFitCases() : set === 'probe' ? buildProbeCases() : set === 'closure' ? buildClosureCases() : set === 'paths' ? buildPathCases() : buildRenderCases();
+  const projectFonts = set === 'closure' ? closureProjectFonts() : PROJECT_FONTS;
+  await Bun.write(out, JSON.stringify({ variableSources: VARIABLE_SOURCES, projectFonts, cases }));
   const groups = new Map<string, number>();
   for (const item of cases) groups.set(item.group, (groups.get(item.group) ?? 0) + 1);
   console.log(`${cases.length} cases`, Object.fromEntries(groups));

@@ -16,6 +16,7 @@ into the engine". Spike: `docs/engine/spikes/S4.md`.
 | `level2` (feature `level2`) | Level 2 layout on Parley: grapheme-aware breaking, font-metric baselines, fallback from the registry's manifest |
 | `registry` (feature `system`, macOS) | `CoreTextRegistry`: Blink's macOS font matching, enumeration, project fonts (Blink's font selection algorithm), variable-font sources, the fallback manifest, subsets |
 | `answers` | The registry boundary as data (`Query`, `Answers`, `ReplayResolver`, `Recorder`, `answer_batch`) |
+| `served` | `ServedResolver`: a resolver answered synchronously by a registry on another thread, over full fonts (`FontServer`, `Served`, `DirectServer`) |
 | `subset` | Metrics-and-shaping subsets with the amended table list (adds `maxp`, `feat`, `STAT`, `ankr`; synthesizes `HVAR` for `gvar`-only fonts) |
 | `corpus` | The S4 corpus, its Canvas2D fixture, and the comparison |
 
@@ -80,8 +81,16 @@ was found on the corpus's real project and checked against Chromium itself
    rounding. At fractional sizes that is one 16.16 unit less about half the
    time (`BlinkFuncs::harfbuzz_advance`).
 3. **The renderer's font cache.** `FontPlatformDataCache` keys platform
-   data by family, effective size, and selection request (weight, width,
-   slope), not by specified size. Whoever creates an entry first fixes its
+   data by family, effective size, selection request (weight, width,
+   slope), and the full `FontDescription::CacheKey` options, not by
+   specified size. Those options include text rendering, optical sizing,
+   synthesis permissions and synthetic flags, orientation, subpixel
+   positioning, emoji variant, size adjustment, variation axes, palette,
+   variant alternates and unique-face matching. macOS uses a constant
+   device-scale component in this key. Kerning, feature settings and
+   shaping variants were checked against Blink: they affect shaping but
+   do not enter this platform-data cache key. Adding them here would
+   incorrectly prevent Chromium's real sharing. Whoever creates an entry first fixes its
    `opsz` for every later user in that renderer. DOM text is laid out at its
    CSS size times the zoom, and on macOS the device scale factor applies as
    zoom: UI text in `system-ui` at 12 px on a 2x display creates the 24 px
@@ -96,18 +105,164 @@ was found on the corpus's real project and checked against Chromium itself
    factor of 1.
 
    `Compat::set_font_cache_seeds` declares such entries (`FontCacheSeed`:
-   family, weight, italic, effective size, and the specified size that
-   created it), so level 1 can reproduce a renderer in that state. Without
+   family, weight, italic, effective size, full cache identity, and the
+   specified size that created it), so level 1 can reproduce a renderer in that state. Without
    seeds pm-text measures as a fresh renderer. The corpus test seeds the
    capture's renderer from its device pixel ratio. Today's layout of such
    text therefore depends on the display and on what the UI drew before;
-   the engine has to pick one answer for documents (open question for Jude:
-   fresh renderer, or the app's own UI state at 2x).
+   the decision below picks the app's own state.
 
-   Not modelled: when a canvas itself first creates an entry at a specified
-   size off the 1/100 px grid between 17 and 28 px, later canvas text in the
-   same 1/100 px bucket inherits that `opsz` (a difference below 0.01 px of
-   optical size).
+   Canvas-created entries matter on the 1/100 px grid too: a 30 px
+   canvas created before 15 px UI text at 2x must keep `opsz` 30 for the
+   shared 30 px key. Recording only the menu would instead use `opsz` 15
+   and change the width visibly (roughly 3.7%).
+
+   **Decided (Phase 1 T1, by the orchestrator under amendment 22): measure
+   as the running app's renderer does.** The seeds are the font cache
+   entries the window's own UI text has created (2026-10-18, third pass;
+   the second pass modelled only `--fs-sm` and `--fs-md` at 12 and 13 px,
+   which missed the density setting and every other UI size and weight):
+
+   - **The UI font census** (`renderer/src/engine-doc/ui-font-census.ts`,
+     started from `legacy/bootstrap.ts` with the new engine on) watches the
+     document for text it lays out (elements with client rects holding
+     non-blank text, form controls with a value or placeholder) and reports
+     each new description (computed family stack, CSS size, weight, slope,
+     with the device pixel ratio it was laid out at) on
+     `engine-fonts:ui-fonts`. It rescans everything when the device pixel
+     ratio changes (another display, page zoom: `devicePixelRatio`
+     includes it) or the root's attributes change (`data-density`, theme),
+     and otherwise only what mutations touched, when the renderer is idle.
+     So a comfy window on a 2x display reports `--fs-md` at 14 px (the 28 px
+     entry with `opsz` 14), and an open inspector or menu adds its 11, 15
+     and 18 px text at weights 400, 500 and 600 as it appears.
+   - **Main resolves each stack as Chromium does**
+     (`shared/engine-fonts-seeds.ts` `uiFontSeed`): the first family that
+     is a system font alias (`system-ui`, `-apple-system`,
+     `BlinkMacSystemFont`, one cache key, as the real project's capture
+     shows) creates the entry; an installed family before it (the
+     registry's available family names, hidden `.`-prefixed ones excluded,
+     fetched again when the registry's generation moves) or a named generic
+     (`sans-serif`, `ui-monospace`, ...) means the text is not in the
+     system font. `--f-ui` is `"SF Pro Text", -apple-system, ...`, so a user
+     who installs SF Pro Text has no system font entries, as in Chromium.
+   - **Each window keeps its entries in creation order**
+     (`FontSeedTracker`): the first description to create a key (effective
+     size, weight, slope and complete platform-data identity) fixes its `opsz`; a window keeps every display's
+     entries; a closed window or a new renderer process
+     (`render-process-gone`) forgets them.
+   - pm-text matches a seed for any of the system font aliases
+     (`blink::measure`, `same_cache_family`), so a canvas measuring
+     `-apple-system` finds the entries too.
+   - `app_ui_font_cache_seeds` (pm-text) and `appUiFontCacheSeeds` remain the
+     startup model at the default density for tools with no window (the
+     corpus test, `pm-cli parity`, `pm-cli render --ui-scale`).
+
+   Main answers `engine-fonts:seeds` with the window's seeds and sends
+   `engine-fonts:seeds-changed` when they change; the editor's pm-wasm
+   takes them through `pm_fonts_seeds`. The client caches an accepted table
+   only after the engine acknowledges it; an error reply rejects the update
+   and session-owner assignment. Startup replies cannot overwrite a newer
+   seeds-changed notification. Both engines' font services get
+   every window's seeds (`Op::Seeds` as `{ seeds, owners: [{ owner, seeds
+   }] }`, replayed last on every port). The round 4 typing measurement observed
+   11 and 12 seeds in a fresh editor window, where the static model had 2. With complete identity,
+   round 5 typing reports 18–19 distinct entries; the live comparison below
+   checks their effective sizes, weights and creation orders.
+
+   **Canvas creators (round 5).** Platform data is lazy: setting `font`
+   alone need not realize it, and a context can change `textRendering` or
+   stretch before measuring or drawing. The census wraps native
+   `measureText`, `fillText` and `strokeText` on main-thread Canvas2D and
+   OffscreenCanvas2D, keeps native parsing, and records the description
+   actually used by that operation at DPR 1. Each context keeps its
+   descriptions by state (round 8): font, text rendering and stretch, plus
+   a style generation for a connected canvas, which every font-relevant
+   mutation bumps, so its inherited style is read again only then. Pending
+   DOM descriptions are drained first, but only before a description not
+   yet recorded (one already recorded creates no cache entry); all
+   wrappers are removed when the census stops. Pure transform
+   and opacity updates do not trigger a tree walk; changes to cache-key
+   properties do. Aggregate scan costs remain exposed through
+   `EngineDoc.stats().fontCensus`.
+
+   Round 5 closes the live-seed failure. Global UI text uses
+   `optimizeLegibility`; Canvas2D defaults to `auto`. The previous reduced
+   key conflated those entries, producing 6.45–40.26 px advance errors.
+   Visible buttons and select labels instead use `auto` and legitimately
+   seed the 24/26 px keys; retaining those entries preserves their sharing.
+   Parked panels at -9999 px remain excluded, preserving the 24/560 fix.
+   The native seed matcher accepts only a complete identity equal to the
+   requested canvas description. Static captures without `cacheKey` keep
+   their original default-canvas interpretation.
+
+   The live e2e checks the census-derived seeds against the same page's
+   Canvas2D and pm-wasm. Its 23 rows agree within 0.00001526 px, including
+   20/400, 30/500/600, 24/560, valid 24/26 sharing, canvas-first 30/400 before
+   an `auto` 15 px menu at 2x, and UI-first `auto` weights 450/650. The latter
+   use distinct weights so the former startup failures remain independent
+   probes. Primary sources: [Blink platform-data cache key](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/platform/fonts/font_description.cc)
+   and [Canvas font state](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_state.cc).
+
+   Remaining unmodelled entries also include pseudo-element text,
+   font-cache purges under memory pressure and worker-owned canvases.
+   Offscreen text scrolling into view without a DOM mutation is not yet
+   observed. Arbitrary custom CSS still needs independent captures beyond
+   the default and differing text-rendering identities. The in-app
+   `native-engine-font-seeds.spec.ts` checks the census-derived seeds
+   against this renderer's actual Canvas2D and pm-wasm advances, including
+   the 30 px canvas before a visible 15 px menu at 2x (that first-creator
+   check passes), UI-first weights 450/650, and the formerly poisoned
+   descriptions even if the census leaves them out. It records fresh
+   resolver diagnostics and can capture failures outside Git with
+   `PM_FONT_SEEDS_CAPTURE`. Its failing rows must not be described as T1
+   closure. Playback cost and the separate typing measurement are in
+   `text-render.md`, round 4 verification.
+
+   **Seeds per window (2026-10-18).** Each BrowserWindow is its own
+   renderer with its own Chromium font cache, so the engines measure a
+   layout with the seeds of the window it is drawn for, never the union:
+   - main names the window of every renderer port when it connects it
+     (`connect` carries `owner`, the webContents id; `EngineHost::attach`
+     records it in the hub), so a view measures with its window's seeds;
+   - the job engine's sessions are opened by main: `AgentJobs` tells the
+     job engine's font client which window a session is for
+     (`EngineFontClient::setSessionOwner`, the `sessions` list of
+     `Op::Seeds`, job engine only) and waits for the engine to take it
+     before submitting the job, so an export measures with the seeds of
+     the window it was started from. A queued job keeps its starting
+     window while it remains open (runtime-only ownership, never a
+     persisted renderer id). If the engine does not take them
+     within 5 s, once more; then the export does not start (an error to
+     the window) rather than lay text out with every window's seeds;
+   - a render thread's `ServedFonts` takes the scope of each layer
+     (`Renderer::set_text_seed_scope`: the view's port in the presenter,
+     the work's port and session in the job lanes) and resolves it port
+     first, then session, then the fallback (every window's seeds, for
+     work of no known window: queue jobs after their window closes or the app
+     relaunches, `pm-cli`); it
+     parks one measurer per seed set, so windows on different displays
+     never rebuild each other's layouts.
+
+   Measured (`pm-cli parity eval --wasm`, corpus v1, 2026-10-18): pm-wasm
+   in Node with the seeds main sends gives 1,891,448 compared, 0
+   mismatched with the static startup seeds, exactly as natively; this
+   measurement did not validate the later census-derived seeds. Before,
+   1,260 `system-ui` layouts of the
+   real project differed (up to 18.2 px). Native and wasm32 replies: 0 of
+   1,815,420 differ.
+
+4. **Variable-font ink (Phase 1 T2, decided by the orchestrator).**
+   CoreText instances variable outlines with its own variation arithmetic;
+   skrifa's ink boxes differ by at most 1.19e-4 px (relative 4.3e-6) on the
+   real project. That is a named bounds tolerance class, "variable-font ink
+   (CoreText instances outlines)", bound 2e-4 px absolute: `pm-cli parity
+   eval` counts values within it as matched in the class and reports them
+   apart (`toleranceClasses` in the JSON; 405 text bounds and 405 raster
+   selections, max 1.191e-4 px), never as mismatches or questions;
+   pm-eval's corpus test uses the same bound (`VARIABLE_INK`). It covers
+   bounds and raster boxes of text in a variable font only, never positions
+   or advances.
 
 ## The engine's font service (Phase 2, "Use New Engine")
 
@@ -118,16 +273,17 @@ below are unchanged. Main relays them:
 - `installNativeEngine` registers the `engine-fonts:*` channels over an
   `EngineFontClient` and adds main as a client of every interactive launch
   with the `fonts` peer (`NativeEngine.addClient(FONT_CLIENT_ID, …, { peer:
-  'fonts', processes: ['interactive'] })`). The job engine gets no font
-  port. Main never loads a registry of its own on this path.
+  'fonts', processes: ['interactive'] })`), and a second client for the job
+  engine (`JOB_FONT_CLIENT_ID`, "Fonts on render threads"). Main never loads
+  a registry of its own on this path.
 - The font port is not a protocol peer. Each message is one request or one
   reply (`fonts::wire`): `id u32 LE | op u8 | json length u32 LE | JSON |
   binary tail` and `id u32 LE | status u8 | payload`, with status JSON,
   bytes, or error. Registry answers stay pm-text's JSON strings end to end;
   fonts and subsets travel as raw bytes.
-- The service is created on the first font port, on the utility process's
+- The service is created with the engine host on the utility process's
   JavaScript thread (the process main thread, which AppKit's font manager
-  needs), and lives for the launch. Requests run synchronously on that
+  needs), or on the first font port, and lives for the launch. Requests run synchronously on that
   thread, the one that also runs the engine protocol, so a slow request
   holds the engine's message handling: the first fallback manifest takes
   about 0.6 s. Only CoreText matching needs AppKit's thread; moving the
@@ -165,6 +321,74 @@ Measured through the real utility process
 manifest loads every CoreText substitute); after SIGKILL the restarted
 engine had a new font port, the replayed project font, and a higher
 generation 0.31 s later.
+
+## Fonts on render threads (Phase 3c)
+
+The engines draw text on render threads (the viewer presenter, the job
+engine's export, agent frame, and snapshot lanes), but the registry runs on
+the utility process's main thread (AppKit). Both meet in
+`pm_node::fonts::hub::FontHub`:
+
+- A render thread's renderer holds `pm_render::text::served::ServedFonts`:
+  level 1 layout (`Compat`, `CompatMeasure`) over a `ServedResolver`. A
+  query the resolver has not seen goes to the hub with its siblings (the
+  other families of the canvas font list and the standard font at the same
+  description, so an animated font size costs one round trip, not five);
+  the hub queues it and wakes the JavaScript thread through the action sink
+  (an empty action list makes `engine-process.ts` call `pump`).
+- `EngineHost::pump` and `tick` drain the queue: `FontService::serve`
+  answers each batch with the registry's `Answers` and the full bytes of
+  every face named (shared `FontBytes`, no copy), so outlines, color glyphs,
+  variable axes, hidden system fonts, and project fonts reach the renderer.
+  The render thread waits (30 s at most once open); nothing is guessed: an
+  unanswered query is a failure the layer reports (`Feature::Text`), never a
+  layout in another font.
+- Requests wait until main has finished its replay on a port: the open, the
+  project fonts, then the seeds, which go last (20 s at most; a host that
+  never opens a font port makes them fail). A frame is never laid out
+  without the project fonts and seeds main is about to send.
+- The hub's generation moves when the registry's does (project fonts,
+  sources, a new generation base after a restart) or when the seeds change.
+  `ServedFonts::sync`, called before each text layer, then starts over with
+  a fresh resolver and measurer, and the generation enters every raster's
+  content key. The text context drops every glyph cache then (outlines,
+  color bitmaps, CoreGraphics masks, path masks and their CTFonts), and
+  every glyph cache keys a face by `FontBytes::id`, a process-unique id
+  that new bytes never reuse (never by the buffer's address, which a
+  replaced font of the same size can land on).
+- `EngineHost` drops the hub's waits before the presenter and job lanes are
+  joined (shutdown never hangs on a render thread waiting for fonts).
+- Only a host whose registry starts (macOS, on the main thread) gives its
+  render threads fonts; elsewhere text stays unsupported, as before.
+
+Both engines host a registry now. Main keeps one `EngineFontClient` per
+engine: the job engine's (`JOB_FONT_CLIENT_ID`) mirrors every project font
+change and the seeds of the interactive one's, joining its replay directly
+while the job engine is down, so a restarted job engine replays them too.
+
+`pm-cli` renders on its main thread: `pm_cli::fonts::install` serves its
+renderer from a `DirectServer` over the CoreText registry, with the seeds of
+an editor at `--ui-scale` (default 2) on `render` and `scope`.
+
+Tests: `cargo test -p pm-node --test fonts` (the hub, on the main thread:
+three layouts on a render thread equal the registry's glyph for glyph,
+including the seeded `system-ui` case, a mixed-script line, and a hidden
+system font; a whole frame rendered on a render thread equals one rendered
+on the main thread; a project font changes the frame through the
+generation; new seeds move the generation; a 1x editor window and a 2x
+popout lay `system-ui` 24 px out differently, each view and the 1x
+window's export with its own window's seeds, switching without rebuilds;
+a restarted engine with main's replay lays text out the same; shutdown
+ends a waiting render thread), the hub's and `served`'s unit tests (seeds
+by port, session and fallback; a `DirectServer` never drops its registry
+off its thread), and main's (`engine-fonts.test.ts`: seeds replayed last,
+mirrors while down, session owners after the next replay;
+`engine-fonts-seeds.test.ts`: censuses in, installed fonts and closed or
+restarted renderers; `shared/engine-fonts-seeds.test.ts`: stack resolution
+and creation order; `renderer/src/engine-doc/ui-font-census.test.ts`: what
+the census reports, density changes;
+`native-engine.test.ts`: connects name the window; `agent-jobs.test.ts`:
+the session's window before the job).
 
 ## Main's registry ("Use New Engine" off)
 
@@ -247,3 +471,48 @@ process; wrap it in `pm-electron-lock`).
 Recapture the fixture (`capture/run.ts`, then `pm-text-corpus fixture`) after
 a macOS update changes the fonts; `tests/corpus.rs` detects font drift and
 says so.
+
+## Round 6 integration
+
+Canonical glyph paths and animator image filters now reuse pm-vector's
+Canvas2D renderer and Graphite filter executor; the source trace and raster
+results are in `text-render.md`, “Round 6”. Font selection and the full
+platform-cache identity retain the round 5 behavior. With the document-host
+integration, attaching or reviving a pm-wasm instance reapplies the latest
+received window seeds after synchronizing the document and before declaring
+it ready. An initial reply or notification arriving later still applies
+the seeds and invalidates cached answers through `FontLoader.applySeeds`.
+The paired typing harness remains committed and documented for the
+performance lane; round 6 does not attempt an edit-to-present optimization.
+
+The synchronous whole-face font provider carries the same initial seed
+callback and seeds-changed subscription as the asynchronous provider.
+The document-host integration introduced the synchronous branch; dropping
+these callbacks left the first 26 px/400 layout at opsz 26 instead of the
+window's seeded opsz 13. The provider regression test checks the initial
+application and a later notification against the actual pm-wasm wrapper.
+
+The fresh round 6 app matrix passes 22/22. Its live seed comparison includes
+23 rows and the first 26 px/400 query, with maximum native/Canvas2D width
+error 0.00001525879 px (unchanged bound 0.001 px). This validates the
+census-derived table as applied through the synchronous provider, in
+addition to the earlier static-startup parity run.
+
+## Round 7 gate policy
+
+Orchestrator decision **FONTS-R** (2026-10-19) places the 23 measured Round 6
+pixel residuals in an explicit downward-only ratchet; see `text-render.md`,
+“Round 7”. The ratchet leaves font selection, layout and the existing
+1-CV raster / 2-CV composition bounds unchanged. Unlisted failures and stale budgets after
+an improvement fail. The textexact follow-up owns the CPU AAA/SkStroke,
+Graphite stroke tessellation and Fontations COLR ports. The ratchet changes
+gate policy only; no glyph-rasterization port is started in this round.
+
+The bridge integration retains the scoped served-font provider for views
+and snapshots. Main-owned fallback snapshot sessions bind to their window's
+font seeds before resync, fail on a rejected binding and clear stale bindings
+before session ids are reused after a restart. Per-capture caption visibility
+is carried through the typed protocol and restored for later captures and
+viewer frames. See `text-render.md` and RFC 16. The fresh Round 7 app matrix
+passes 22/22; all 23 measured residuals match their FONTS-R budgets in debug
+and release, with every other case on its original strict bound.

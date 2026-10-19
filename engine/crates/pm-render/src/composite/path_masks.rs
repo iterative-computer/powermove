@@ -50,7 +50,7 @@ struct PassUniform {
     map_s: [f32; 2],
     map_t: [f32; 2],
     dir: [f32; 2],
-    pad: [f32; 2],
+    mode: [u32; 2],
     k: [[f32; 4]; 7],
     o: [[f32; 4]; 14],
 }
@@ -60,6 +60,7 @@ struct PassUniform {
 pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
 pub(crate) struct PathMaskPipelines {
+    format: wgpu::TextureFormat,
     /// Item rasters across frames.
     items: std::sync::Mutex<ItemCache>,
     layout: wgpu::BindGroupLayout,
@@ -73,6 +74,12 @@ pub(crate) struct PathMaskPipelines {
 
 impl PathMaskPipelines {
     pub fn new(device: &wgpu::Device) -> PathMaskPipelines {
+        Self::with_format(device, FORMAT)
+    }
+    pub(crate) fn rgba(device: &wgpu::Device) -> PathMaskPipelines {
+        Self::with_format(device, wgpu::TextureFormat::Rgba8Unorm)
+    }
+    fn with_format(device: &wgpu::Device, format: wgpu::TextureFormat) -> PathMaskPipelines {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render path masks"),
             source: wgpu::ShaderSource::Wgsl(include_str!("path_masks.wgsl").into()),
@@ -134,7 +141,7 @@ impl PathMaskPipelines {
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: FORMAT,
+                        format,
                         blend,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -162,6 +169,7 @@ impl PathMaskPipelines {
             ..Default::default()
         });
         PathMaskPipelines {
+            format,
             rescale: pipeline("fs_rescale", None),
             blur1d: pipeline("fs_blur1d", None),
             blur2d: pipeline("fs_blur2d", None),
@@ -183,7 +191,7 @@ struct Image {
 }
 
 impl Image {
-    fn new(device: &wgpu::Device, rect: Rect, ring: i32) -> Image {
+    fn new(device: &wgpu::Device, rect: Rect, ring: i32, format: wgpu::TextureFormat) -> Image {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pm path mask image"),
             size: wgpu::Extent3d {
@@ -194,7 +202,7 @@ impl Image {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_DST
@@ -286,7 +294,9 @@ impl PathMaskPipelines {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&buffer, 0, bytes_of(u));
+        let mut u = *u;
+        u.mode[0] = u32::from(self.format != FORMAT);
+        queue.write_buffer(&buffer, 0, bytes_of(&u));
         let view = src.texture.create_view(&Default::default());
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pm path mask pass"),
@@ -342,7 +352,7 @@ impl PathMaskPipelines {
         cov: &PathCoverage,
     ) -> Result<wgpu::Texture, String> {
         let (w, h) = (cov.width.max(1), cov.height.max(1));
-        let canvas = Image::new(device, Rect::ltrb(0, 0, w as i32, h as i32), 0);
+        let canvas = Image::new(device, Rect::ltrb(0, 0, w as i32, h as i32), 0, self.format);
         let canvas_view = canvas.texture.create_view(&Default::default());
         let start = if cov.masks.start_covered { 1.0 } else { 0.0 };
         // The canvas's starting state (`fillRect` in white when no mask adds).
@@ -373,7 +383,7 @@ impl PathMaskPipelines {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .item(m, cov.world, w, h)?;
-            let mut img = Image::new(device, Rect::ltrb(0, 0, w as i32, h as i32), 1);
+            let mut img = Image::new(device, Rect::ltrb(0, 0, w as i32, h as i32), 1, self.format);
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &img.texture,
@@ -436,6 +446,89 @@ impl PathMaskPipelines {
         Ok(canvas.texture)
     }
 
+    /// RGBA text save-layers share the mask planner, pass executor and
+    /// shader. The draw is clipped only after filtering: off-canvas glyph
+    /// pixels can contribute to pixels inside the canvas.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn blur_rgba(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        src: &pm_gpu::Target,
+        origin: [i32; 2],
+        canvas: (u32, u32),
+        crop: [u32; 4],
+        sigma: f32,
+    ) -> pm_gpu::Target {
+        assert_eq!(self.format, wgpu::TextureFormat::Rgba8Unorm);
+        let mut img = Image {
+            texture: src.texture.clone(),
+            ring: 0,
+            rect: Rect {
+                x0: origin[0],
+                y0: origin[1],
+                w: src.width(),
+                h: src.height(),
+            },
+        };
+        let plan = BlurPlan::new(canvas.0, canvas.1, sigma);
+        let (draw, linear) = if let Some(plan) = plan {
+            for pass in &plan.passes {
+                img = self.run_pass(device, queue, encoder, pass, &img);
+            }
+            (plan.draw, plan.linear)
+        } else {
+            (
+                Map {
+                    scale: [1.0; 2],
+                    translate: [0.0; 2],
+                },
+                false,
+            )
+        };
+        let out = Image::new(
+            device,
+            Rect::ltrb(
+                crop[0] as i32,
+                crop[1] as i32,
+                crop[2] as i32,
+                crop[3] as i32,
+            ),
+            0,
+            self.format,
+        );
+        let u = PassUniform {
+            src_org: img.origin(),
+            src_inv: img.inv_size(),
+            linear: u32::from(linear),
+            map_s: draw.scale,
+            map_t: [
+                draw.translate[0] + crop[0] as f32 * draw.scale[0],
+                draw.translate[1] + crop[1] as f32 * draw.scale[1],
+            ],
+            ..Default::default()
+        };
+        let view = out.texture.create_view(&Default::default());
+        self.pass(
+            device,
+            queue,
+            encoder,
+            &self.over,
+            &u,
+            &img,
+            &view,
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            [
+                0.0,
+                0.0,
+                (crop[2] - crop[0]) as f32,
+                (crop[3] - crop[1]) as f32,
+            ],
+        );
+        pm_gpu::Target::wrap(out.texture)
+    }
+
     fn run_pass(
         &self,
         device: &wgpu::Device,
@@ -445,7 +538,7 @@ impl PathMaskPipelines {
         src: &Image,
     ) -> Image {
         let dst = pass.dst();
-        let out = Image::new(device, dst, 1);
+        let out = Image::new(device, dst, 1, self.format);
         let mut u = PassUniform {
             dst_org: out.origin(),
             src_org: src.origin(),
@@ -537,4 +630,78 @@ pub fn coverage_bytes(
         out.extend_from_slice(&data[y * row as usize..y * row as usize + w as usize]);
     }
     Ok(out)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod filter_tests {
+    use super::*;
+
+    /// Independently measures Metal's UNORM8 bilinear sampler across all
+    /// 256 weight buckets, two axes and four different channel gradients.
+    #[test]
+    fn unorm_sampler_matches_the_cpu_model() {
+        let gpu = pm_gpu::Gpu::new("Canvas2D filter sampler").unwrap();
+        let (d, q) = (&gpu.device, &gpu.queue);
+        let pipes = PathMaskPipelines::with_format(d, wgpu::TextureFormat::Rgba32Float);
+        let src = Image::new(
+            d,
+            Rect::ltrb(0, 0, 2, 2),
+            1,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let rgba = [
+            0, 11, 234, 255, 255, 89, 124, 255, 67, 243, 3, 255, 184, 10, 128, 255,
+        ];
+        q.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &src.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 1, y: 1, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(2),
+            },
+            wgpu::Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+        );
+        let mut e = d.create_command_encoder(&Default::default());
+        let sample = Map {
+            scale: [1.0 / 4096.0, 0.0],
+            translate: [0.500123, 1.230123],
+        };
+        let out = pipes.run_pass(
+            d,
+            q,
+            &mut e,
+            &Pass::Rescale {
+                dst: Rect::ltrb(0, 0, 4096, 1),
+                sample,
+            },
+            &src,
+        );
+        q.submit([e.finish()]);
+        let data = pm_gpu::readback::read_f32(d, q, &out.texture).unwrap();
+        for c in 0..4 {
+            let reference = pm_vector::canvas2d::filter::Image {
+                rect: Rect::ltrb(0, 0, 2, 2),
+                px: rgba.chunks_exact(4).map(|p| p[c]).collect(),
+            };
+            for x in 0..4094usize {
+                let sx = (x as f32 + 0.5).mul_add(sample.scale[0], sample.translate[0]);
+                let expected = reference.bilinear(sx, sample.translate[1]);
+                let actual = data[((4098 + x + 1) * 4) + c];
+                assert!(
+                    (actual - expected).abs() < 1e-7,
+                    "x={x} channel={c}: {actual} vs {expected}"
+                );
+            }
+        }
+    }
 }
