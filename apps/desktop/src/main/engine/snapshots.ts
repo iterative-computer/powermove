@@ -294,7 +294,7 @@ export class SnapshotService {
     }
     if (outcome.outcome === 'needsRenderer') {
       this.stats.needsRenderer++;
-      return { status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat };
+      return { status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat, svg: outcome.svg ?? [] };
     }
     const expected = outcome.width * outcome.height * 4;
     let data: Uint8Array;

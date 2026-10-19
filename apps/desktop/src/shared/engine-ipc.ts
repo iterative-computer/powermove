@@ -281,6 +281,8 @@ export type EngineSnapshotReply =
       revision: number;
       fallback: import('./engine-protocol').ShaderFallbackRequest[];
       compat: import('./engine-protocol').CompatNeed[];
+      /** Level 1 SVG rasters to draw and post before asking again (decision S1). */
+      svg?: import('./engine-protocol').SvgRasterRequest[];
     }
   | { status: 'empty'; revision: number }
   | { status: 'failed'; code: string; message: string };

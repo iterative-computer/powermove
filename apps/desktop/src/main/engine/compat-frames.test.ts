@@ -48,6 +48,20 @@ describe('CompatFrames', () => {
     await expect(setup([]).frames.serve(request)).rejects.toMatchObject({ code: 'notHeadlessRenderable' });
   });
 
+  it('names the window SVG images need when none has the project open', async () => {
+    const svg: CompatFrameRequest = { ...request, source: 'svgImage', svg: { key: { content: 'ab'.repeat(32), width: 2, height: 2 }, asset: 'a1' } };
+    await expect(setup([]).frames.serve(svg)).rejects.toMatchObject({
+      code: 'notHeadlessRenderable',
+      message: 'SVG images are drawn by the editor window that has this project open; open the project in a window to export it.'
+    });
+    // A window that has it answers with the bucket's pixels.
+    const { frames, asks } = setup([3]);
+    const answer = frames.serve(svg);
+    expect(asks.get(3)![0]!.request.svg?.key.width).toBe(2);
+    frames.answer(3, { ...pixels(asks.get(3)![0]!.ask), key: `${'ab'.repeat(32)}:2x2` });
+    expect(await answer).toMatchObject({ type: 'compatFrame', key: `${'ab'.repeat(32)}:2x2`, width: 2, height: 2 });
+  });
+
   it('only the asked windows answer, and a closed window stops being waited for', async () => {
     const { frames, asks } = setup([1, 2]);
     const answer = frames.serve(request);
