@@ -3215,6 +3215,7 @@ impl Thread {
                     revision,
                     fallback,
                     compat: Vec::new(),
+                    svg: Vec::new(),
                 };
                 let mut envelope = Envelope::new(Message::Response {
                     id: job.id,

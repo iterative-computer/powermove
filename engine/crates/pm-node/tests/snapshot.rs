@@ -890,9 +890,11 @@ fn child_fallback() {
             revision,
             fallback,
             compat,
+            svg,
         }) => {
             assert_eq!(revision.get(), 1);
             assert!(compat.is_empty());
+            assert!(svg.is_empty());
             fallback
         }
         other => panic!("expected needsRenderer, got {other:?}"),
