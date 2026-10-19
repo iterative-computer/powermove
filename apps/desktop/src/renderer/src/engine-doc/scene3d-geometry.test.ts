@@ -47,7 +47,7 @@ function rng(seed: number) {
   };
 }
 
-async function editor(mode = 'audit') {
+async function editor(mode = 'audit', strict = false) {
   const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing', 'gl/compositor');
   PM.layerDefinition = (id: string) => Object.values(LAYER3D_DEFINITIONS).includes(id as any)
     ? { id, label: '3D', version: 1, params: [], defaults: {}, renderer: { kind: 'layer3d' } }
@@ -60,7 +60,7 @@ async function editor(mode = 'audit') {
   // The asset store's shape (`legacy/gl/raster.ts`): records by id.
   const store = new Map<string, any>();
   PM.assets = { map: store, get: (id: string) => store.get(id) ?? null, set: (id: string, a: any) => store.set(id, a), delete: (id: string) => store.delete(id) };
-  const doc: EngineDoc = installEngineDoc(PM, { mode: parseMode(mode), loadModule, sink: () => {}, auditMs: 1e9 });
+  const doc: EngineDoc = installEngineDoc(PM, { mode: parseMode(mode), loadModule, sink: () => {}, auditMs: 1e9, strict });
   PM.proj = PM.mkProject({ name: '3D', fps: 30, dur: 6, w: 1280, h: 720 });
   PM.time = 0;
   expect(await doc.whenReady).toBe(true);
@@ -565,5 +565,39 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     } finally { console.warn = warn; }
     expect(fellBack(doc).map(([k]) => k).sort()).toEqual(['gl.bounds:unsupported', 'gl.pick:unsupported']);
     expect(warned.some(w => w.includes('cannot load the 3D model cube'))).toBe(true);
+  });
+
+  it("with Use New Engine on, never answers a 3D question with three.js: what the engine cannot answer is a named, visible failure", async () => {
+    // The renderer's install with the setting on (legacy/bootstrap.ts): mode `on`, strict.
+    const { PM, doc } = await editor('on', true);
+    const toasts: string[] = [];
+    PM.toast = (message: string) => { toasts.push(message); };
+    await addModels(PM);
+    editScene(PM, { operation: 'add_camera', camera: { p: { x: 0, y: 0, z: 6 } } });
+    editScene(PM, { operation: 'add_object', object: { id: 'ok', source: { assetId: 'cube' } } });
+    PM.touch();
+    let legacy = 0;
+    const today = () => { legacy++; return {}; };
+    // Answered natively: the three.js closures are never called.
+    doc.api!.pick(PM.proj.w / 2, PM.proj.h / 2, 0);
+    expect(doc.api!.bounds(PM.L('ok'), 0)).not.toBeNull();
+    doc.api!.objectBoxes3d(['ok'], 0, today);
+    doc.api!.objectWorlds3d(['ok'], 0, today);
+    doc.api!.camera3d(0, () => { legacy++; return runtimeCameraFacts(PM, 0); });
+    expect(legacy).toBe(0);
+    expect(doc.api!.stats.fallbacks).toEqual({});
+    // A model three.js holds that the engine cannot load: refused by name, never three.js.
+    const record = PM.assets.get('cube');
+    PM.assets.set('cube', { ...record, object3d: record.object3d.clone() });
+    PM.touch();
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      expect(() => doc.api!.pick(PM.proj.w / 2, PM.proj.h / 2, 0)).toThrow(/could not answer gl\.pick \(unsupported\)/);
+      expect(() => doc.api!.objectBoxes3d(['ok'], 0, today)).toThrow(/could not answer objectBoxes3d \(unsupported\)/);
+    } finally { console.warn = warn; }
+    expect(legacy).toBe(0);
+    expect(doc.failures().map(f => f.code)).toContain('native-answer-unavailable');
+    expect(toasts.some(t => t.includes('could not answer gl.pick (unsupported)'))).toBe(true);
   });
 });

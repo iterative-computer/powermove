@@ -460,7 +460,8 @@ export class NativeApi {
     }
     if (typeof reply.unsupported === 'string') {
       // Content the engine cannot answer for (a 3D model it cannot load):
-      // named, counted, and refused by strict hosts; never the missing box.
+      // named and counted; with "Use New Engine" on (strict) a visible
+      // failure, never three.js; never the missing box.
       console.warn(`[engine-doc] ${op}: ${reply.unsupported}`);
       return { fallback: 'unsupported' };
     }
@@ -1044,8 +1045,9 @@ export class NativeApi {
    * runtime at `T` (`viewportBounds`), from pm-wasm's geometry: `[minX,
    * minY, minZ, maxX, maxY, maxZ]` per id, null for an id without one.
    * `legacy` is today's three.js answer: it runs only where every other
-   * query's legacy fallback runs (counted in `stats.fallbacks`, refused by
-   * strict hosts), and in dual mode as the reference.
+   * query's legacy fallback runs (counted in `stats.fallbacks`; with "Use New
+   * Engine" on `onFallback` refuses it with a named failure instead), and in
+   * dual mode as the reference.
    */
   objectBoxes3d(ids: readonly string[], T: number, legacy: () => Record<string, number[] | null>): Record<string, number[] | null> {
     return this.answer('objectBoxes3d', () => {
@@ -1072,7 +1074,8 @@ export class NativeApi {
    * `compositionRuntime(PM, T).camera` of the composition being viewed
    * (core/scene3d/render-camera.ts): lens and `matrixWorld` from pm-wasm.
    * `legacy` is today's runtime camera, run only where every legacy
-   * fallback runs (counted, refused by strict hosts) and in dual mode.
+   * fallback runs (counted; refused by name with "Use New Engine" on) and in
+   * dual mode.
    */
   camera3d(T: number, legacy: () => { orthographic: boolean; fov: number | null; zoom: number; near: number; far: number; world: number[] }): { orthographic: boolean; fov: number | null; zoom: number; near: number; far: number; world: number[] } {
     return this.answer('camera3d', () => {

@@ -4,9 +4,12 @@
  * for a flat group's pivot, its members' boxes (core/scene3d/targets.ts).
  *
  * With the native evaluator on, pm-wasm answers both (`objectWorlds3d`,
- * `objectBoxes3d`) through the engine document's answer path; a fallback to
- * today's three.js runtime is counted there and refused by strict hosts.
- * Off, the composition's three.js runtime answers, as today.
+ * `objectBoxes3d`) through the engine document's answer path. With "Use New
+ * Engine" on the engine document is strict (legacy/bootstrap.ts): a
+ * question pm-wasm cannot answer is a named, visible failure
+ * (`EngineFailure`, the editor's toast) and three.js is never asked. The
+ * three.js closure runs only in the development modes (dual answers, as
+ * the reference). Off, the composition's three.js runtime answers, as today.
  */
 import * as THREE from 'three';
 import { compositionRuntime } from './service';

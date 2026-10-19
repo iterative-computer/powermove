@@ -6,8 +6,10 @@
  * With the native evaluator on, pm-wasm answers it (`camera3d`, from
  * `compositionScene` like every other 3D question) through the engine
  * document's answer path, so the viewport does not build the three.js
- * runtime for it; a fallback to the runtime's camera is counted there and
- * refused by strict hosts. Off, the runtime's camera is returned as today.
+ * runtime for it. With "Use New Engine" on the engine document is strict: a
+ * question pm-wasm cannot answer is a named, visible failure, never the
+ * runtime's camera (which only the development modes' dual answers read, as
+ * the reference). Off, the runtime's camera is returned as today.
  */
 import * as THREE from 'three';
 import { compositionRuntime } from './service';

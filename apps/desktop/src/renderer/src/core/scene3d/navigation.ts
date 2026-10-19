@@ -55,9 +55,10 @@ export function viewportBounds(PM:any,selected=true,exclude:string|null=null):TH
     return !selected||ids.has(layer.id)||(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id));
   });
   // With the native evaluator the objects' boxes come from the engine's
-  // geometry (pm-wasm; a fallback to the three.js boxes is counted and
-  // refused by strict hosts like every other query); otherwise from the
-  // composition's three.js runtime.
+  // geometry (pm-wasm; with "Use New Engine" on a question it cannot answer
+  // is a named failure, never the three.js boxes, which only the
+  // development modes' dual answers read); otherwise from the composition's
+  // three.js runtime.
   const objects=members.filter((layer:any)=>layer3DRole(layer)==='object').map((layer:any)=>layer.id);
   const engine=PM.EngineDoc?.enabled?PM.EngineDoc.api:null;
   const boxes=!objects.length?{}:engine?engine.objectBoxes3d(objects,PM.time,()=>runtimeBoxes(PM,objects,PM.time)):runtimeBoxes(PM,objects,PM.time);

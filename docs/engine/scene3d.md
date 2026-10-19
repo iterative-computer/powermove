@@ -432,8 +432,14 @@ orchestrator with the evidence above.
   that `pm_geom3d::gltf::load` rejects, or an `object3d` without the bytes
   it was loaded from, is `ModelAsset::Unloadable`: every question about its
   scene replies `{unsupported: why}` (`MODEL_UNLOADABLE`), which the
-  renderer counts as `<op>:unsupported`, warns with the reason, and strict
-  hosts refuse. It is never answered with the missing-model box.
+  renderer counts as `<op>:unsupported` and warns with the reason. It is
+  never answered with the missing-model box. (Corrected in round 3: this
+  said "strict hosts refuse", which no code did in round 2. Since the
+  document host's round 5 merge, the renderer and the document host install
+  the engine document strict whenever "Use New Engine" is on
+  (`legacy/bootstrap.ts`, `document-host/chain.ts`): `onFallback` turns any
+  fallback into a named `EngineFailure` with the editor's toast, so three.js
+  never answers. Round 3 adds the test.)
 - **Third-party mesh definitions and overrides by id.** Geometry requests
   carry `meshFields` (definition id to `renderer.assetField`, from the
   host's `PM.layerDefinition`, as `sceneForLayer` reads it), so a user's
@@ -443,7 +449,7 @@ orchestrator with the evidence above.
   layer.
 - **Viewport boxes go through the answer path.** `viewportBounds` asks
   `objectBoxes3d` through `NativeApi.answer` (counted fallbacks, dual
-  compared, refused by strict hosts) with the composition being viewed; it
+  compared, a named failure with the setting on) with the composition being viewed; it
   no longer builds the three.js runtime itself when the engine is on.
 - **3D maps on level 1 bitmaps** (Textures, above). Measured through the
   app (`e2e/tools/threed-maps-capture.ts`, the uploads three.js r180 makes,
