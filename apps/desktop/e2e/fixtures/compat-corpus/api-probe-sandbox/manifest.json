@@ -1,0 +1,10 @@
+{
+  "id": "api-probe-sandbox",
+  "name": "API probe (sandbox)",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Calls the sandbox-safe members of today's API (section 20) the way a Store extension at apiVersion 1 to 3 does, with the sandbox's Promise semantics.",
+  "entry": "index.ts",
+  "contributes": ["commands"],
+  "permissions": []
+}

@@ -1,0 +1,10 @@
+{
+  "id": "override-builtins",
+  "name": "Override built-ins",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Overrides every built-in contribution by id, the way user extensions do: same ids, its own definitions.",
+  "entry": "index.ts",
+  "contributes": ["effects", "transitions", "panels", "commands", "keybindings", "themes", "layers", "inspector", "palette"],
+  "author": "user"
+}
