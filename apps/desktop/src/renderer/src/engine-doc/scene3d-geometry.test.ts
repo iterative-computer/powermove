@@ -97,7 +97,7 @@ function cubeGlb(): ArrayBuffer {
     ],
     animations: [{ channels: [{ sampler: 0, target: { node: 1, path: 'rotation' } }], samplers: [{ input: 2, output: 3, interpolation: 'LINEAR' }] }]
   };
-  let text = new TextEncoder().encode(JSON.stringify(json));
+  let text: Uint8Array = new TextEncoder().encode(JSON.stringify(json));
   const pad = (b: Uint8Array, v: number) => b.length % 4 ? new Uint8Array([...b, ...new Array(4 - b.length % 4).fill(v)]) : b;
   text = pad(text, 0x20);
   const total = 12 + 8 + text.length + 8 + bin.length;
@@ -446,7 +446,7 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     // A relinked asset (a new record) is fetched again; a removed one draws the missing box.
     PM.assets.set('cube', { ...PM.assets.get('cube') });
     doc.api!.pick(center[0], center[1], 0.5);
-    expect(doc.wasm!.stats().unanswered).toBe(before + 1);
+    expect(doc.wasm!.stats().unanswered).toBe(before! + 1);
     PM.assets.delete('cube');
     exercise(PM, doc, rng(9), 40);
     expect(mismatches(doc)).toEqual([]);

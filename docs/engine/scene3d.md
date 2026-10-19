@@ -507,18 +507,75 @@ orchestrator with the evidence above.
 | same with `POWERMOVE_NEW_ENGINE=0` | `scene3d`, `blender-motion`, `viewport3d` with the adapted specs | 15 of 15 |
 | `scripts/frame-bridge-measure.mjs` `p3c-orbit-*` r1 (`docs/engine/phase3c-measurements/`): MMB orbit in the editor view of the primitives scene with a sun casting shadows, 1920 × 1080, 120 Hz panel, 2,401 events; load average 25 to 68 from other lanes during the runs | Pointer-to-pixel p50 / p95 / p99 | Today idle 25.7 / 38.5 / 42.6 ms (56 unpresented); engine idle 28.2 / 44.9 / 53.3 ms; today under the gate load 26.0 / 88.2 / 113.3 ms; engine under load 26.6 / 84.9 / 101.6 ms. The p95 ≤ 33 ms row is not met by either path; idle the engine is 2.5 ms worse at p50 and 10.7 ms at p99 (amendment 5's comparison fails idle, passes under load) |
 
+### Phase 3c round 3 (review fixes, 2026-10-19)
+
+- **No three.js answer with the setting on.** The renderer
+  (`legacy/bootstrap.ts`) and the document host (`document-host/chain.ts`)
+  install the engine document strict whenever "Use New Engine" is on (the
+  document host lane's round 5): `onFallback` turns every fallback of a
+  query (`unsupported`, `context`, `exception`, `host`, `unavailable`, a
+  trap) into a named `EngineFailure` with the editor's toast, so the
+  three.js closures passed to `answer` (picks, bounds, `objectBoxes3d`,
+  `objectWorlds3d`, `camera3d`, and round 3's `objectMesh3d` and
+  `cursorHit3d`) run only in the development modes (dual answers, as the
+  reference). A test installs the renderer's flag-on configuration (mode
+  `on`, strict) and checks that the 3D questions are answered natively
+  with none of the closures called, and that a model the engine cannot
+  load throws `The new engine could not answer gl.pick (unsupported)` with
+  the toast, never three.js. The round 2 wording "refused by strict hosts"
+  (false then) is corrected throughout.
+- **Edit Mode and the 3D cursor on pm-wasm.** `objectMesh3d` answers what
+  `runtime.objects.get(id)` holds for Edit Mode's `currentMesh` (missing,
+  not a mesh, or its geometry's buffers: f32 positions and uvs, the index
+  when it has one; the missing-model box and OBJ models included), and
+  `cursorHit3d` answers `placeCursor`'s surface point
+  (`pm_geom3d::query::Scene::cursor_hit`: the first visible mesh hit by
+  distance, no material filter, a model's meshes by their own visibility,
+  points and lines skipped). `core/scene3d/engine-edit.ts` builds a
+  `BufferGeometry` with today's buffers from the answer, so `meshFromGeometry`
+  runs unchanged; Edit Mode's point targets, overlay and extrude normal
+  read the object's world matrix through `targetScene` (pm-wasm's
+  `objectWorlds3d`). Box select of models uses `render.gl.bounds`
+  (`layerWorldBounds`), which is pm-wasm's bounds with the editor camera;
+  Edit Mode's box select tests the overlay's projected points, which now
+  come from pm-wasm's mesh and world matrix.
+- **The import race.** A model imported with the engine on was drawn as
+  the orange missing-model box for its first frames. Cause: the import
+  writes the asset record into the document before its window binds the
+  file (`flushBindings` follows), the engine asks main for the new asset at
+  once, main has no binding yet and answers offline, and the engine's first
+  retry is 250 ms later, so the layer that arrives after the bind draws
+  with offline media. Main's media store now holds the viewer engine's
+  read of an asset no window binds yet until a binding names it (up to
+  2 s; `MediaStoreService.resolveAsset` with the interactive process); the
+  engine shows nothing missing while a read is outstanding (its route stays
+  pending). Jobs and other callers never wait, and a bound but missing file
+  is offline at once. The e2e helper that waited for frames to settle is
+  replaced by one that requires the engine's frame to be stable at once.
+- **Document host 3D geometry (issue D1).** A worker test adds 3D
+  objects, groups them into a model group and a mixed group (group
+  placement measures 3D bounds), reads the state and the 3D scene: 0
+  fallbacks, 0 failures, 0 dual mismatches, with `edit.groupPlacement` and
+  `camera3d` answered by pm-wasm (`hosts.test.ts`).
+
+| Check | Scope | Result (2026-10-19) |
+|---|---|---|
+| `scene3d-geometry.test.ts` (real pm-wasm, `PM_WASM_REQUIRED=1`) | 10 cases: the round 2 suite, Edit Mode meshes and cursor rays on 4 seeded compositions with models (skinned, morphed, instanced Khronos models, OBJ, the missing box, every primitive, lathe, extrude, mesh sources with slots) at 3 times, transform targets on 10 seeds, the flag-on strict configuration | 246 meshes and 480 rays (134 hits) exactly equal to three.js; transform targets 339 compared, 29 numbers 1 ulp apart (worst relative 2.2e-16), 939 gesture edits identical; strict: 0 closures called, the unloadable model a named failure |
+| `document-host/hosts.test.ts` 3D case | apply_commands with 3D objects, model and mixed groups, get_project_state, get_3d_scene, in `audit` mode | 0 fallbacks, 0 failures, 0 mismatches |
+| `media-store/service.test.ts` | the viewer read before the bind, an unbound asset, jobs, a bound missing file | 15 of 15 |
+| e2e `POWERMOVE_NEW_ENGINE=1` (Electron lock) | `scene3d` 8, `viewport3d` 4, `blender-motion` 3, `engine-blender` 2, `comp-thumbnails` 1 | **18 of 18**; the OBJ import gizmo spec (stable engine frame at once) 6 of 6 more with `--repeat-each=6` |
+| e2e `POWERMOVE_NEW_ENGINE=0` | `scene3d`, `viewport3d`, `blender-motion` | 15 of 15 |
+| `pm-render` `blender_snapshots` (v1 and `threed-20261019-roles-maps`; nothing allowed) | every Blender snapshot and frame list | 182 compared, 153 equal, 29 failures (23 glTF snapshots not built, 6 converted textures); fails by design until closed |
+
 ### What remains (3D lane, Phase 3c)
 
-- Viewport framing, the render camera, and transform targets read pm-wasm
-  with the native evaluator on. Edit Mode (`editmode.ts`: the edited
-  mesh's points), the 3D cursor (`operators.ts` `placeCursor`: a raycast
-  for the hit point), and the chrome below still read the three.js
-  `compositionRuntime`, so the runtime is still synced while the 3D
-  viewport is open.
 - The 3D viewport chrome (`core/scene3d/overlay.ts`) still renders the
-  scene with three.js for grid occlusion and selection outlines. Drawing it
-  over the bridge's depth and id surface as specified would change what the
-  chrome shows, which amendment 22 forbids without Jude's decision:
+  scene with three.js for grid occlusion and selection outlines, so the
+  composition's three.js runtime is still synced while the 3D viewport is
+  open (for the chrome only; no answer comes from it with the setting on).
+  Drawing it over the bridge's depth and id surface as specified would
+  change what the chrome shows, which amendment 22 forbids without Jude's
+  decision:
   - the surface's depth is view-space depth in `rgbaf16` (about 11 bits
     of mantissa: 0.008 world units at 10 units away), where today's grid
     is depth-tested against a 24-bit depth buffer of the same scene, so the
@@ -533,19 +590,23 @@ orchestrator with the evidence above.
   Matching today needs a selection-mask surface (selected objects' coverage
   without depth against others) and a full-precision depth surface from the
   engine (a contract 2 change, the bridge's), or keeping the three.js
-  chrome; escalated.
-- A 3D model imported with the engine on is drawn as the missing-model box
-  by a snapshot taken right after the import (176 ms after it in a probe;
-  the model 486 ms after), where today draws the model at once: the
-  engine's media answer for a new model asset arrives after its first
-  frames. Found by `scene3d.spec.ts`; not fixed here.
-- The `scene3d` API members are still assembled by `makeScene3DAPI` over
-  today's modeling, rendering, and controller code; `assets.get().object3d`
-  is still the importer's three.js object.
+  chrome; escalated. The light and camera glyphs box select reads
+  (`glyphsIn`) are drawn by the same chrome.
+- The `scene3d` API is still assembled by `makeScene3DAPI` over today's
+  modeling, rendering, and controller code. Its geometry questions are
+  pm-wasm's (above), and `describe` evaluates through the engine document,
+  but with the engine drawing the viewer `renderFrame` and `cancelRender`
+  still run and cancel today's renderer-side Blender preview, and
+  `previewState` reports that preview, not the engine's (whose jobs are in
+  the presenter's `blenderPreview` status, which no renderer channel
+  carries yet). `assets.get().object3d` is still the importer's three.js
+  object, not one built from the engine's geometry.
 - Blender: snapshots of imported glTF models are not built (23 v1
   snapshots); converted 16-bit TIFF, CMYK-alpha TIFF, and HDR AVIF
-  textures differ from today's (docs/engine/blender.md); `previewState`,
-  cancel and restart, and agent stills are as in docs/engine/blender.md.
-  Recipe parts are built into snapshots (Phase 3c, above).
-- SVG maps stay listed (`SVG texture maps`).
-- The 3D orbit row misses p95 ≤ 33 ms on both paths (measured above).
+  textures differ from today's (docs/engine/blender.md). Recipe parts are
+  built into snapshots (Phase 3c, above).
+- SVG maps stay listed (`SVG texture maps`): level 1 SVG is rasterized by
+  Chromium through the compatibility upload channel (decision S1), which
+  the 2D `SVG images` reason waits on as well. The no-media static check
+  still lists `imported models` and map containers conservatively.
+- The 3D orbit row (measured below).
