@@ -334,13 +334,12 @@ pub fn consumes_short_attribute(p: &Parameters, name: &str) -> bool {
         p.shader_type.as_str(),
         "MeshDepthMaterial" | "MeshDistanceMaterial"
     );
-    // Depth/distance fragments read the map's alpha only when testing or
-    // hashing it. An opaque map is copied onto WebGLShadowMap's material,
-    // but its sample and UV varyings are dead code in the final program.
-    let alpha_map_active = p.alpha_test || p.alpha_hash;
+    // Chromium keeps the copied map's vertex UV input active in a depth
+    // program even without alpha testing. Fragment-only dead-code reasoning
+    // does not predict the linked WebGL attributes (capture regression).
     let uv0 = if shadow {
-        (alpha_map_active
-            && (p.map_uv.as_deref() == Some("uv") || p.alpha_map_uv.as_deref() == Some("uv")))
+        p.map_uv.as_deref() == Some("uv")
+            || p.alpha_map_uv.as_deref() == Some("uv")
             || p.displacement_map_uv.as_deref() == Some("uv")
     } else {
         [
@@ -373,9 +372,8 @@ pub fn consumes_short_attribute(p: &Parameters, name: &str) -> bool {
     };
     let secondary_uv = |channel: &str| {
         if shadow {
-            (alpha_map_active
-                && (p.map_uv.as_deref() == Some(channel)
-                    || p.alpha_map_uv.as_deref() == Some(channel)))
+            p.map_uv.as_deref() == Some(channel)
+                || p.alpha_map_uv.as_deref() == Some(channel)
                 || p.displacement_map_uv.as_deref() == Some(channel)
         } else {
             match channel {

@@ -479,3 +479,19 @@ equal, geometry max |Δ| 3.5e-16, 15,070 exact values. Regenerating the five
 AVIF inputs from scratch into an empty directory with the command above
 produced five PNGs byte-identical to the stored ones (`cmp`), so the stored
 inputs are reproducible from the original media.
+
+## Phase 3c round 7: preview API captures
+
+`scene3d.renderFrame` leaves transport time, playback and shading unchanged.
+A paused Material/Rendered view waits for its matching native presented
+frame. Solid, Wireframe, playback, viewerless and precomp-only roots prepare
+the engine's Blender cache instead, using the engine document, headless GPU
+setup and the same Chromium PNG resolver. No legacy preview supplies it.
+
+Only an explicit Interactive cache capture sets `foregroundCapture` on the
+typed Blender job. Main resumes its serialized worker while that capture is
+queued or running, then restores the playback pause on completion or cancel.
+Automatic previews, snapshots and export jobs retain their ordinary pause
+policy. Session startup refusal, cancellation and disposal settle pending
+captures even if the renderer wake never resolves. The final preview API
+tests, nested Blender motion test, and 182-snapshot/TIFF comparison all pass.

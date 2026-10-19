@@ -39,10 +39,19 @@ test('Chromium binds only final-program attributes and packs short morphs in JS'
   // Chromium r180 keeps NORMAL active even with no lights or ambient only.
   for (const name of ['normalLitNoLights', 'normalLitAmbientOnly'] as const)
     expect(result[name].activeAttributes, name).toContain('normal');
-  // The depth cases are recorded with active attributes and pixels before
-  // assigning expected verdicts for r180's optimized map/normal shader.
-  for (const name of ['uvDepthNoMap', 'uvDepthMapOpaque',
-    'uvDepthMapAlphaTest', 'normalDepth', 'colorDepth'] as const)
-    expect(result[name].activeAttributes, name).toBeDefined();
+  // Chromium retains the opaque map's UV vertex input, even though its
+  // fragment color is discarded. Unmapped UV, normals and colors are inactive.
+  for (const name of ['uvDepthNoMap', 'normalDepth', 'colorDepth',
+    'normalDistance', 'colorDistance'] as const) {
+    expect(result[name].exception, name).toBeNull();
+    expect(result[name].error, name).toBe(0);
+    expect(result[name].activeAttributes, name).toEqual(['position']);
+  }
+  for (const name of ['uvDepthMapOpaque', 'uvDepthMapAlphaTest', 'uvDistanceMapOpaque'] as const) {
+    expect(result[name].exception, name).toBeNull();
+    expect(result[name].error, name).toBe(1282);
+    expect(result[name].activeAttributes, name).toEqual(['position', 'uv']);
+    expect(result[name].rgb, name).toEqual([0, 0, 0]);
+  }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

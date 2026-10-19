@@ -321,7 +321,10 @@ Basic-to-Standard replacement, and after scene maps that failed to decode
 have been removed. A missing override map can therefore leave a short UV
 inactive and let the mesh draw. The shadow depth/distance pass applies its
 own program's inputs; a short normal can reject a Standard color draw yet
-still cast a shadow. The rule considers active map UV
+still cast a shadow. Chromium keeps the UV input active for a mapped depth
+material even when its map is opaque and alpha testing is off; the fragment
+color being unused does not make that vertex input inactive. The rule
+considers active map UV
 channels 0–3, lighting normals, tangents, and vertex colors. The
 compatibility `Object3D` exposes `uv2` and `uv3`, too. Morph targets are
 packed into the GPU array texture as `WebGLMorphtargets` does: a short
@@ -352,8 +355,8 @@ with no position target hits an unconditional `morphTargets[i].count`
 read in r180's texture packer and fails the legacy render. The native
 renderer now returns that error when the mesh reaches a draw, while
 import, geometry queries, and Blender scene construction still accept it.
-The added native render and Chromium exception checks await the central
-test run.
+Native render regressions and Chromium captures verify that draw-time
+exception without turning the accepted import into a missing-model box.
 
 As of 2026-10-19, a fresh WASM comparison against three.js r180's
 `GLTFLoader` passes nine hand-selected shared-node cases, 192 generated
@@ -364,9 +367,14 @@ default scene, and data-URI/GLB cases with instancing, geometry cache
 sharing, Standard/Physical/Unlit material chains, and an off-scene
 animation target. The round 7 parent-order and acceptance tests pass
 8/8 against the rebuilt WASM, including the decoded-image policy oracle.
-The Chromium r180 short-attribute capture passed all 20 cases and saved
+The Chromium r180 short-attribute capture passed all 28 cases and saved
 an image and active-program attribute list for each. In particular,
 Standard material keeps `NORMAL` active with no lights and with only an
 ambient light; both short-normal draws produced `INVALID_OPERATION`.
-Native short-morph and late-map regressions, and the corrected paired
-legacy/native capture, are checked by the central run's evidence.
+Depth and distance materials keep the copied opaque map's UV active but
+leave short normals and vertex colors inactive. Native pixel regressions
+verify both a short-normal caster's retained shadow and a mapped short-UV
+caster's rejected shadow, as well as drawing after a late map failure.
+The paired legacy/native shared-node and final-material capture is 100%
+within 2 CV. Applying the production 3D bar to its PNGs, without any edge
+exclusion, gives max 2 CV and object SSIM 0.99999768.

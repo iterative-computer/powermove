@@ -3,6 +3,7 @@ import * as THREE from 'three';
 type Case = 'uvUnused' | 'uvUsed' | 'uvUsedIndexedTail' | 'uv1Unused' | 'uv1Used' |
   'uv2Unused' | 'uv2Used' | 'uv3Unused' | 'uv3Used' |
   'uvDepthNoMap' | 'uvDepthMapOpaque' | 'uvDepthMapAlphaTest' |
+  'uvDistanceMapOpaque' | 'normalDistance' | 'colorDistance' |
   'normalUnlit' | 'normalLit' | 'normalLitNoLights' | 'normalLitAmbientOnly' | 'normalOverride' |
   'normalDepth' | 'colorDepth' |
   'tangentUnused' | 'tangentUsed' | 'shortMorph' | 'badIndex' |
@@ -37,6 +38,7 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
   const cases: Case[] = ['uvUnused', 'uvUsed', 'uvUsedIndexedTail', 'uv1Unused', 'uv1Used',
     'uv2Unused', 'uv2Used', 'uv3Unused', 'uv3Used',
     'uvDepthNoMap', 'uvDepthMapOpaque', 'uvDepthMapAlphaTest',
+    'uvDistanceMapOpaque', 'normalDistance', 'colorDistance',
     'normalUnlit', 'normalLit',
     'normalLitNoLights', 'normalLitAmbientOnly', 'normalOverride',
     'normalDepth', 'colorDepth',
@@ -56,7 +58,7 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
     }
     if (name.startsWith('normal')) geometry.setAttribute('normal',
       new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1], 3));
-    if (name === 'colorDepth') geometry.setAttribute('color',
+    if (name === 'colorDepth' || name === 'colorDistance') geometry.setAttribute('color',
       new THREE.Float32BufferAttribute([1, 0, 0, 1, 0, 0], 3));
     if (name.startsWith('tangent')) {
       geometry.setAttribute('normal', new THREE.Float32BufferAttribute([
@@ -79,7 +81,11 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
       ];
       geometry.morphTargetsRelative = true;
     }
-    const material = name.startsWith('uvDepth') || name === 'normalDepth' || name === 'colorDepth'
+    const material = name.includes('Distance')
+      ? new THREE.MeshDistanceMaterial({ side: THREE.DoubleSide,
+        map: name === 'uvDistanceMapOpaque' ? white : null,
+        vertexColors: name === 'colorDistance' })
+      : name.startsWith('uvDepth') || name === 'normalDepth' || name === 'colorDepth'
       ? new THREE.MeshDepthMaterial({ side: THREE.DoubleSide, depthPacking: THREE.RGBADepthPacking,
         map: name === 'uvDepthMapOpaque' || name === 'uvDepthMapAlphaTest' ? white : null,
         alphaTest: name === 'uvDepthMapAlphaTest' ? .5 : 0,
@@ -90,6 +96,16 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
       : new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide,
         map: name.startsWith('uv') && (name.endsWith('Used') || name === 'uvUsedIndexedTail') ? white : null });
     if (name.startsWith('uv')) white.channel = Number(name.match(/^uv([123])/)?.[1] ?? 0);
+    if (material instanceof THREE.MeshDistanceMaterial) {
+      // WebGLShadowMap normally installs this per-material light before
+      // WebGLMaterials refreshes the distance uniforms.
+      const light = new THREE.PointLight();
+      light.position.z = 3;
+      light.shadow.camera.near = .1;
+      light.shadow.camera.far = 10;
+      light.updateMatrixWorld();
+      (renderer.properties.get(material) as any).light = light;
+    }
     const mesh = new THREE.Mesh(geometry, material);
     if (name === 'normalOverride') mesh.material = new THREE.MeshStandardMaterial({
       color: 0xff0000, side: THREE.DoubleSide,

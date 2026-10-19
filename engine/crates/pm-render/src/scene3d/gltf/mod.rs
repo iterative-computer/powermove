@@ -799,7 +799,7 @@ pub fn instantiate(
 
 /// Apply WebGL's active short-attribute rule to the resolved draw scene.
 /// The model and plan retain this mesh for queries, snapshots, and a map
-/// whose image fails only after planning. `resolve_maps` calls this after
+/// whose image fails only after planning. GPU preparation calls this after
 /// removing any late-failed scene maps from the final materials.
 pub(crate) fn short_attribute_blocks_draw(mesh: &Mesh3d, params: &Parameters) -> bool {
     let Some(extra) = mesh.geometry.extra.as_deref() else {

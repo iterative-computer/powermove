@@ -1116,8 +1116,8 @@ impl Scene3dRenderer {
             ));
         }
         // WebGL rejects a short bound attribute at renderBufferDirect. Use
-        // this pass's final program: an opaque color map can fail the color
-        // draw while its shadow depth program optimizes that UV away.
+        // this pass's final program: a short normal can reject the color
+        // draw while remaining inactive in its shadow depth program.
         if super::gltf::short_attribute_blocks_draw(mesh_desc, &draw.params) {
             return Ok(None);
         }

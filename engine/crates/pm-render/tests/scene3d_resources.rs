@@ -569,6 +569,36 @@ fn short_uv_model_draws_when_override_map_fails_after_planning() {
     let hidden = render_plan(&gpu, &mut Scene3dRenderer::default(), &mapped).unwrap();
     assert_ne!(hidden, expected, "a loaded map binds the short UV");
 
+    // Chromium's depth program also binds an opaque map's UV. A short
+    // mapped caster therefore contributes neither color nor a shadow.
+    let mut shadow_doc = doc.clone();
+    shadow_doc["layers"][0]["d"]["data"]["environment"]["shadows"] = json!(true);
+    shadow_doc["layers"][1]["d"]["data"]["light"]["castShadow"] = json!(true);
+    set(&mut shadow_doc["layers"][1], "position.x", json!(0));
+    set(&mut shadow_doc["layers"][1], "position.y", json!(0));
+    set(&mut shadow_doc["layers"][1], "position.z", json!(4));
+    set(&mut shadow_doc["layers"][2], "rotation.y", json!(0));
+    let mut receiver = object3d("receiver", "plane", json!({}), "#FFFFFF", W, H, 2.0);
+    set(&mut receiver, "position.z", json!(-0.7));
+    receiver["d"]["data"]["object"]["castShadow"] = json!(false);
+    shadow_doc["layers"].as_array_mut().unwrap().push(receiver);
+    let receiver_plan = |planner: &mut Renderer, doc: &Value| {
+        object_plans(planner, doc, &assets)
+            .into_iter()
+            .find(|plan| plan.layer == "receiver")
+            .unwrap()
+    };
+    let cast = receiver_plan(&mut planner, &shadow_doc);
+    shadow_doc["layers"][2]["d"]["data"]["object"]["castShadow"] = json!(false);
+    let no_cast = receiver_plan(&mut planner, &shadow_doc);
+    let cast = render_plan(&gpu, &mut Scene3dRenderer::default(), &cast).unwrap();
+    let no_cast = render_plan(&gpu, &mut Scene3dRenderer::default(), &no_cast).unwrap();
+    assert!(no_cast.iter().any(|v| *v != 0), "receiver is visible");
+    assert!(
+        cast == no_cast,
+        "opaque mapped short UV cannot cast a depth shadow"
+    );
+
     std::fs::remove_file(&map_path).unwrap();
     let recovered = render_plan(&gpu, &mut Scene3dRenderer::default(), &mapped).unwrap();
     assert_eq!(recovered, expected, "late map failure leaves UV inactive");
@@ -638,11 +668,30 @@ fn short_normal_model_still_casts_a_shadow() {
     without_doc["layers"][2]["d"]["data"]["object"]["castShadow"] = json!(false);
     let without_shadow = object_plans(&mut planner, &without_doc, &assets);
     let gpu = pm_gpu::Gpu::new("pm-render short normal shadow test").unwrap();
-    let lit = render_plan(&gpu, &mut Scene3dRenderer::default(), &with_shadow[1]).unwrap();
-    let unshadowed =
-        render_plan(&gpu, &mut Scene3dRenderer::default(), &without_shadow[1]).unwrap();
-    assert_ne!(
-        lit, unshadowed,
+    // Plans are in compositor draw order, not source-layer order. Select
+    // the receiver explicitly; the rejected caster's own output is blank.
+    let receiver = |plans: &[Object3dPlan]| {
+        plans
+            .iter()
+            .find(|plan| plan.layer == "receiver")
+            .unwrap()
+            .clone()
+    };
+    let lit = render_plan(
+        &gpu,
+        &mut Scene3dRenderer::default(),
+        &receiver(&with_shadow),
+    )
+    .unwrap();
+    let unshadowed = render_plan(
+        &gpu,
+        &mut Scene3dRenderer::default(),
+        &receiver(&without_shadow),
+    )
+    .unwrap();
+    assert!(unshadowed.iter().any(|v| *v != 0), "receiver is visible");
+    assert!(
+        lit != unshadowed,
         "short NORMAL color draw still casts a depth shadow"
     );
 }
