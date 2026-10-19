@@ -1386,13 +1386,15 @@ engine's line (how far `transport.now()` strays from wall time across the
 mount: at most 0.1 ms) and `PM.time` (how far the playhead strays: the
 page's main thread mounting the viewer). The playhead is back on the line
 within two animation frames (at most 0.4 ms off). The same probe on the
-current engine (flag off) is the baseline, run in the same session of the
-suite: playhead error 22.3 to 23.7 ms there against 21.6 to 34.1 ms with the
-engine in 4 runs, and 56.3 against 70.3 ms in the loaded batch run. The
-mount of the engine viewer (its presentation worker and painter) costs the
-main thread up to about 11 to 14 ms more than today's; this is recorded, not
-bounded, and listed as an open difference. The engine's line itself does not
-move (0.1 ms), and no render-thread stall was recorded (`stalls` 0).
+current engine (flag off) is the baseline, run in the same invocation of
+the suite. Playhead error, engine against today, per invocation: 21.6 to
+34.1 ms against 22.3 to 23.7 ms (4 runs), 70.3 against 56.3 ms (the loaded
+batch run), and 33.2 to 38.2 ms against 27.3 to 44.8 ms (3 runs after the
+compclose merge). The engine viewer's mount (its presentation worker and
+painter) is at times about 10 to 14 ms longer than today's and at times
+shorter; this is recorded, not bounded, and listed as an open difference.
+The engine's line itself does not move (at most 0.1 ms), and no
+render-thread stall was recorded (`stalls` 0 in every run).
 
 Smaller items: rustfmt is clean on pm-node; the viewer's version lock entry
 matches 1.2.2 (inspector, keymap-default and timeline remain stale on the
