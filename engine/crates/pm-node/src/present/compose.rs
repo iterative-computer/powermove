@@ -170,6 +170,9 @@ pub struct Composer {
     /// The viewer is playing: today's playing motion-blur count and the
     /// playback resampler (`set_playing`).
     playing: bool,
+    /// Whether viewer frames reuse kept layer draws (on; `compose_bench`
+    /// turns it off to compare).
+    draw_reuse: bool,
     /// The view (hashed) whose definition set is in the renderer, and the
     /// identity and version of the set it was loaded from.
     definitions: Option<(u64, Option<(usize, u64)>)>,
@@ -282,6 +285,7 @@ impl Composer {
             parked: HashMap::new(),
             blender: pm_render::blender::BlenderRender::Native,
             playing: false,
+            draw_reuse: true,
         }
     }
 
@@ -346,6 +350,15 @@ impl Composer {
             self.definitions = None;
             let mut empty = self.renderer.effects().sibling();
             self.renderer.swap_effects(&mut empty);
+        }
+    }
+
+    /// Whether viewer frames reuse the draws of layers nothing changed
+    /// since the last frame (`pm_render::reuse`; on by default).
+    pub fn set_draw_reuse(&mut self, enabled: bool) {
+        self.draw_reuse = enabled;
+        if !enabled {
+            self.renderer.clear_draw_reuse();
         }
     }
 
@@ -547,6 +560,10 @@ impl Composer {
                 ));
             }
             let depth_target = depth.and(self.depth_scratch.as_ref());
+            // The viewer's documents live as long as their view and change
+            // in place: frames of a paused time reuse the draws of layers
+            // nothing changed (docs/engine/perf.md, "Draw reuse").
+            self.renderer.set_draw_reuse(self.draw_reuse);
             let rendered = self.renderer.render_into(
                 doc,
                 composition,
@@ -555,7 +572,9 @@ impl Composer {
                 media,
                 scratch,
                 depth_target,
-            )?;
+            );
+            self.renderer.set_draw_reuse(false);
+            let rendered = rendered?;
             failures = rendered.failures;
             quads = rendered.quads;
             stand_ins = rendered.stand_ins;

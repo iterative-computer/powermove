@@ -8,6 +8,7 @@
 //!
 //! `PM_BENCH_EDIT=drag` makes every frame a new revision that moves one
 //! layer (a layer drag: one leaf edit per frame at a fixed time);
+//! `PM_BENCH_REUSE=0` plans every layer of every frame (no draw reuse).
 //! `PM_BENCH_EDIT=playback` edits one layer's opacity per frame while the
 //! time advances (inspector edits during playback, at the worst rate).
 //! docs/engine/perf.md records the runs.
@@ -82,6 +83,10 @@ fn main() {
     let gpu = pm_gpu::Gpu::new("compose bench").expect("a GPU");
     let working = WorkingTexture::new(&gpu.device, Size::new(width, height));
     let mut composer = Composer::new(&gpu.device, &gpu.queue);
+    // PM_BENCH_REUSE=0: every frame plans every layer (no draw reuse).
+    if std::env::var("PM_BENCH_REUSE").is_ok_and(|v| v == "0") {
+        composer.set_draw_reuse(false);
+    }
     let media = MediaMap::default();
     let mut cpu = Vec::new();
     let mut wall = Vec::new();
@@ -174,6 +179,7 @@ fn main() {
     println!("document copy: {}", summary(&mut clone_ms));
     println!("compose CPU: {}", summary(&mut cpu));
     println!("compose + GPU: {}", summary(&mut wall));
+    println!("draw reuse: {:?}", composer.renderer().draw_reuse_stats());
     if let Some(mode) = &edit {
         println!("edits ({mode}, one per frame): {apply_summary}");
     }
