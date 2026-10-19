@@ -123,6 +123,8 @@ export async function runHeadlessMcp(options: ServeOptions): Promise<void> {
     await context.addCookies([{ name: 'pm_session', value: host.token, url: new URL(host.url).origin }]);
     await page.goto(new URL(host.url).origin, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => { const PM = (window as any).PM; return PM?.newBlankProject && PM?.Export && PM?.Edit && PM?.GL; }, { timeout: 60000 });
+    await page.waitForFunction(() => !!(window as any).PM?.Kernel?.loader, { timeout: 60000 });
+    await page.evaluate(async () => { const PM = (window as any).PM; await PM.EngineDoc?.whenReady; await PM.Kernel.loader.boot(); await PM.Kernel.loader.whenIdle(); });
     await Promise.race([ready, new Promise<never>((_resolve, reject) => { const timer = setTimeout(() => reject(new Error('The local MCP bridge did not start.')), 10000); timer.unref(); })]);
     const client = await connectMcpHost(options.userData);
     await startMcpStdio({ ...client, instructions: EXTERNAL_MCP_INSTRUCTIONS, close: async () => { await client.close(); await close(); } });

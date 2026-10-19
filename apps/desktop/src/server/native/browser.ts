@@ -36,7 +36,14 @@ export class LazyNativeBrowser implements NativeBrowser {
         page.on('dialog', dialog => { void dialog.dismiss(); });
         page.on('console', event => { if (event.type() === 'error') this.log(`[native DOM] ${event.text()}`); });
         await page.goto(new URL(this.host().url).origin, { waitUntil: 'domcontentloaded' });
-        await page.waitForFunction(() => !!(window as any).PM?.AgentHarness?.dispatch && !!(window as any).PM?.openProjectHere && !!(window as any).PM?.RemoteSync, { timeout: 60_000 });
+        await page.waitForFunction(() => !!(window as any).PM?.AgentHarness?.dispatch && !!(window as any).PM?.openProjectHere && !!(window as any).PM?.RemoteSync && !!(window as any).PM?.Kernel?.loader, { timeout: 60_000 });
+        // The dispatcher is installed synchronously; extensions and the initial
+        // document boot are asynchronous and can still replace the project.
+        await page.evaluate(async () => {
+          const PM = (window as any).PM;
+          await PM.EngineDoc?.whenReady;
+          await PM.Kernel.loader.boot(); await PM.Kernel.loader.whenIdle();
+        });
         if (project !== 'powermove-home') {
           const snapshot = await this.host().native!.snapshot(project);
           await page.evaluate(async doc => {
