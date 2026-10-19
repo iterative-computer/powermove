@@ -24,10 +24,11 @@ pub const INLINE_DEPTH: usize = 128;
 /// attribute values (entity expansions are not counted).
 pub fn element_depth(data: &[u8]) -> usize {
     let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
-    let skip_past = |i: &mut usize, end: &[u8]| match data[*i..].windows(end.len()).position(|w| w == end) {
-        Some(at) => *i += at + end.len(),
-        None => *i = data.len(),
-    };
+    let skip_past =
+        |i: &mut usize, end: &[u8]| match data[*i..].windows(end.len()).position(|w| w == end) {
+            Some(at) => *i += at + end.len(),
+            None => *i = data.len(),
+        };
     while i < data.len() {
         let Some(lt) = data[i..].iter().position(|&b| b == b'<') else {
             break;
@@ -154,7 +155,10 @@ mod tests {
     #[test]
     fn stacks_grow_with_depth_and_stop_at_the_limit() {
         assert_eq!(stack_bytes(0), 16 << 20);
-        assert_eq!(stack_bytes(MAX_ELEMENT_DEPTH), stack_bytes(MAX_ELEMENT_DEPTH * 4));
+        assert_eq!(
+            stack_bytes(MAX_ELEMENT_DEPTH),
+            stack_bytes(MAX_ELEMENT_DEPTH * 4)
+        );
         assert_eq!(with_stack(1, || 7), 7);
         assert_eq!(
             with_stack(4000, || std::thread::current().name().map(str::to_owned)),
