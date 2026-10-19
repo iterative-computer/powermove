@@ -440,9 +440,28 @@ describe('ViewerPresentation', () => {
     second.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
     runFrames(rafs, performance.now() + 40);
     expect(presentation.status).toBeNull();
-    // Capability routing (scaffolding until it is removed) still hands back.
-    second.handlers.message({ type: 'routed', route: 'legacy', reason: 'x', revision: 9 } as never, performance.now());
-    expect(hidden).toEqual([1]);
+    // A composition the engine cannot draw (amendment 21): the stage says
+    // why and is never handed back; frames of that revision or older that
+    // land late stay off it; the next frame the engine draws clears it.
+    const why = 'The new engine cannot draw this composition yet: path masks (layer box in C).';
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: why, revision: 9 } as never, performance.now());
+    expect(hidden).toEqual([]);
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.latest).toBeNull();
+    expect(presentation.status).toBe(why);
+    expect(stage.querySelector('[data-engine-status]')?.getAttribute('role')).toBe('status');
+    second.handlers.message({ type: 'frame', frame: { ...desc(2, 1), revision: 9 } }, performance.now());
+    runFrames(rafs, performance.now() + 60);
+    expect(presentation.presenting).toBe(false);
+    expect(presentation.status).toBe(why);
+    second.handlers.message({ type: 'routed', route: 'legacy', reason: '', revision: 9 } as never, performance.now());
+    expect(presentation.status).toBe(PRESENTATION_STATUS.unsupported);
+    second.handlers.message({ type: 'frame', frame: { ...desc(3, 1), revision: 10 } }, performance.now());
+    runFrames(rafs, performance.now() + 80);
+    runFrames(rafs, performance.now() + 100);
+    expect(presentation.presenting).toBe(true);
+    expect(presentation.status).toBeNull();
+    expect(hidden).toEqual([]);
     presentation.dispose();
     expect(stage.querySelector('[data-engine-status]')).toBeNull();
   });

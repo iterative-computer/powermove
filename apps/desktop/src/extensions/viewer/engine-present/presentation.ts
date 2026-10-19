@@ -120,8 +120,16 @@ export const PRESENTATION_STATUS = {
   starting: 'Starting the engine…',
   reconnecting: 'Reconnecting to the engine…',
   gpuFailed: 'The viewer cannot draw: the GPU keeps failing. Restart Powermove.',
-  unavailable: 'The viewer cannot draw engine frames:'
+  unavailable: 'The viewer cannot draw engine frames:',
+  unsupported: 'The new engine cannot draw this composition yet.'
 } as const;
+
+/** The stage's status for a composition the engine cannot draw: the
+ *  engine's sentence (it names what), or a generic one without it. */
+export function routedStatus(reason: string | null | undefined): string {
+  const text = (reason ?? '').trim();
+  return text || PRESENTATION_STATUS.unsupported;
+}
 
 /** What the viewer decides; the presentation adds what the window knows. */
 export type ViewParams = Omit<ViewInput, 'composition' | 'cssWidth' | 'cssHeight' | 'devicePixelRatio' | 'edr' | 'colorSpace'>;
@@ -248,7 +256,7 @@ export class ViewerPresentation {
       const el = this.options.stage.ownerDocument.createElement('div');
       el.dataset['engineStatus'] = '';
       el.setAttribute('role', 'status');
-      el.style.cssText = 'position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:5;max-width:calc(100% - 24px);padding:4px 10px;border-radius:var(--r-sm);background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+      el.style.cssText = 'position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:5;width:max-content;max-width:calc(100% - 24px);box-sizing:border-box;padding:4px 10px;border-radius:var(--r-sm);background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);text-align:center;pointer-events:none;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3';
       this.options.stage.append(el);
       this.statusElement = el;
     }
@@ -697,16 +705,21 @@ export class ViewerPresentation {
       message: (message, arrivedMs) => {
         if (this.channel !== opened) return;
         if (message.type === 'routed') {
-          // The current engine draws this composition now: its canvas
-          // shows until the engine presents again.
+          // The engine cannot draw this composition at this revision: its
+          // frames (older ones still in flight too) leave the stage.
           this.routedRevision = typeof message.revision === 'number' ? message.revision : null;
           this.latestFrame = null;
-          // Capability routing is development scaffolding (amendment 21):
-          // until it is removed it hands the stage back even when exclusive.
+          if (this.exclusive) {
+            // "Use New Engine" on (amendment 21): nothing else draws it, so
+            // the stage says why, and stays the engine's (no hand-back; the
+            // transport keeps running on the engine's clock). The next
+            // frame the engine draws clears it.
+            this.setStatus(routedStatus(message.reason));
+            this.hide(this.canvasElement, false);
+            return;
+          }
           this.setStatus(null);
-          // An exclusive viewer hid what is under the canvas from the
-          // start, so it hands back even before its first frame.
-          this.hide(this.canvasElement, true, this.exclusive);
+          this.hide(this.canvasElement);
           return;
         }
         if (this.presenter) this.presenter.receive(message, arrivedMs);
