@@ -1396,6 +1396,25 @@ shorter; this is recorded, not bounded, and listed as an open difference.
 The engine's line itself does not move (at most 0.1 ms), and no
 render-thread stall was recorded (`stalls` 0 in every run).
 
+**Paused audio after an undecided route.** `native-engine-transport.spec.ts`
+"paused exact and silent scrub seeks prepare audio before Play" failed 1 in 3
+to 2 in 4 runs this round, with round 4's TypeScript too (prepared starts
+`[0, 384000]`: the work-area edges, not the 0.4 s playhead). A paused exact
+seek while the view's route was undecided (right after the test's project
+load) moved only the line, and the audio link the session already had kept
+its old position. When the route becomes decided, a paused link now seeks
+to the line (`document_step`). After the fix: 5 of 5 isolated runs and the
+suite run pass.
+
+**Final run (after the compclose merge, one lock).** pm-node document (4)
+and snapshot (7) integrations, 87 library tests; e2e
+`native-engine-transport`, `native-engine-tracer`, `engine-headless-playback`,
+`engine-render-transport`, `engine-present-recovery`: 27 of 27 pass,
+including the J/K/L A/V gate this time (it failed in an earlier batch this
+round on 2x reverse, 20 samples over 10 ms, the documented sawtooth; audio
+and performance owners). Headless: 706 device callbacks, no host-clock run,
+no stall, join playhead error 31.5 ms against today's 30.4 ms.
+
 Smaller items: rustfmt is clean on pm-node; the viewer's version lock entry
 matches 1.2.2 (inspector, keymap-default and timeline remain stale on the
 base, other lanes).
