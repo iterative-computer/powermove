@@ -170,6 +170,24 @@ S4's CoreGraphics fit (expansion `min(0.0175 × size, 0.34)`, the ink up by
 the same, exact positions) plus a dark-paint curve `1 − (1 − c)^0.55` mixed by
 `luma^1.4`, measured against CoreText on the `colors` cases.
 
+Posed glyphs (textl2 round 2, `device_space_offset`): under a rotated,
+skewed or scaled matrix the smoothing's upward ink offset stays in device
+space, as CoreText grows glyphs toward the top of the bitmap whatever their
+orientation. Measured with `render_posed` on Georgia 40 px "Motion type"
+rotated by the layer (ink SSIM against CoreText, before → after):
+
+| rotation | 0° | 10° | 20° | 30° | 40° | 90° | 180° |
+|---|---|---|---|---|---|---|---|
+| before | 0.9963 | 0.9942 | 0.9881 | 0.9776 | 0.9743 | 0.8974 | 0.8426 |
+| after | 0.9963 | 0.9961 | 0.9950 | 0.9926 | 0.9967 | 0.9961 | 0.9962 |
+
+CoreGraphics also weakens its smoothing toward 45° and drops it at 45°
+(coverage ratio smoothed/unsmoothed 1.29 at 37.5°, 1.18 at 42.5°, 1.00 at
+45°, symmetric about 45°). The engine keeps its smoothing continuous, so an
+animated rotation never pops; at 45° its ink is 24% heavier than CoreText's
+(ink SSIM 0.832, 42.5° 0.983). This is a level 2 decision, not a fitted
+behaviour; see Gaps.
+
 ## Color bitmap glyphs (emoji)
 
 Canvas2D placement is the rule for both levels (amendment 10). Measured on
@@ -185,6 +203,11 @@ Canvas2D placement is the rule for both levels (amendment 10). Measured on
 - The strike image is downscaled with Lanczos-2, the closest of area,
   linear, Mitchell, Lanczos-2, and Lanczos-3: SSIM ≥ 0.98 from 10 px; 0.92 to
   0.96 at 6 to 9 px.
+- Level 2 (CoreText profile, `bitmap_snap`): CoreText draws color bitmap
+  glyphs at the nearest device pixel (measured on Apple Color Emoji at 24,
+  37, 40 and 64 px with quarter-pixel phases: centroid error 0.25 to 0.5 px
+  with exact positions, under 0.01 px rounded). The amendment's Canvas2D
+  shift still applies.
 
 ## Glyph masks (level 1, macOS)
 
@@ -1178,6 +1201,39 @@ Canvas2D level 1 references remain the legacy-reference catalog. Range
 indices are UTF-16 and snap to grapheme starts; a shaped ligature follows
 its first logical grapheme's pose. Those are deliberate level 2 semantics.
 
+### Round 2 (review fixes, 2026-10-19)
+
+- Split glyph runs: Parley cuts a run where only line height (or another
+  non-shaping style) changes; every glyph run took the whole run's sources
+  from the start, so range colors and poses landed on the wrong characters.
+  Fixed in `pm_text::level2` (see `text.md`); covered by layout tests and
+  the `range-leading` project (color bands from caret edges, per-character
+  selector lifts against the frame without animators).
+- Selection: bounds and picks use the resting styled box again (today's
+  animated-text selection), so stagger-in text is selectable at its first
+  frame; the posed ink sizes the compatibility raster.
+- Anchor edits start from the resting box (`text_anchor_box`); Pan Behind
+  keeps the resting text in place under any animator.
+- Posed glyphs keep CoreText's upward smoothing offset in device space;
+  color bitmap glyphs sit at whole device pixels (both CoreText profile
+  only; level 1 profiles unchanged).
+- The semantic gate draws every frame with CoreText through each run's
+  pose (`CoreTextReference::render_posed`), opacity, color and blur and
+  holds all 52 frames to the unchanged 0.98 ink SSIM floor.
+
+Verification on macOS (debug unless stated):
+
+- `text_level2_semantics`: 13 projects × 4 times = **52 frames** pass. Minimum
+  CoreText ink SSIM by pose class: rotation/scale/skew **0.9924** (57 frame
+  classes), blur **0.9966**, partial opacity **0.9965**, translation
+  **0.9894**, resting **0.9905**. Unturned 2.5D plane against flat: maximum
+  mean alpha difference **0.0014 CV**, boxes within 1 px. Pan Behind keeps
+  the resting text in place on **8** anchored frames. Every frame picks at
+  its selection's center, the hidden stagger frame included.
+  Log: `/tmp/ne-w5/textl2-r2/semantics-debug-10.log`.
+- `pm-text` level 2 layout: **12** tests (two new: split glyph runs by line
+  height and tracking, split RTL runs and the lam-alef ligature).
+
 ## Gaps
 
 FONTS-R governs the 23 nonzero Round 6 residual checks. They pass only at
@@ -1227,6 +1283,16 @@ captures unchanged. The separate capture-transport fixes are described above.
 - Level 2 semantics are implemented by **textl2** (see `text.md`). Its
   native-only corpus and app checks are separate from the level 1 captures;
   existing projects retain their compatibility level and FONTS-R budgets.
+- Level 2 decision (for the orchestrator): CoreGraphics fades its font
+  smoothing out toward 45° rotations and drops it at 45° (and 135°); the
+  CoreText profile keeps smoothing continuous so animated rotation never
+  pops. Level 2 text posed near 45° is therefore heavier than CoreText's
+  (ink SSIM 0.832 at 45°, 0.983 at 42.5°; side-by-side
+  `/tmp/ne-w5/textl2-r2/rot45-side.png`, probe table
+  `/tmp/ne-w5/textl2-r2/rotation-probe.txt`). No corpus project poses text
+  there; matching CoreText would need a fitted angle-dependent smoothing.
+- Level 2 per-frame cost, the typing-latency gate for level 2 text, and the
+  split-face cache's memory are unmeasured (see `text.md`).
 - `Feature::Text` remains for a renderer without fonts, unparsed styles or
   an unanswered registry query; the derouter owns retiring that machinery.
 - Font-cache entries from pseudo-element text and cache purges under
@@ -1249,6 +1315,20 @@ captures unchanged. The separate capture-transport fixes are described above.
   reports missing bitcode.
 
 ## Changes outside the lane
+
+2026-10-19 (lane ne-textl2, round 2):
+
+- `pm-text/src/render/{profile,scene}.rs`: CoreText-profile-only flags
+  (`device_space_offset`, `bitmap_snap`, `Snap::Round`); the Canvas2D and
+  plain profiles keep their behaviour. `pm-render/examples/text_fit.rs`
+  fills the new fields from its base profile.
+- `pm-text/src/render/coretext.rs`: `CoreTextReference::render_posed`
+  (additive; `render` is unchanged and delegates with no transforms).
+- `pm-render/Cargo.toml`: `pm-edit` dev-dependency (anchor edits in the
+  semantic gate).
+- `apps/desktop/src/renderer/src/core/validate/project.ts`: explicit
+  `compat` is kept on text layers only.
+- `engine/corpus/test/corpus.test.ts`: the native catalog has 13 projects.
 
 2026-10-19 (lane ne-textl2):
 

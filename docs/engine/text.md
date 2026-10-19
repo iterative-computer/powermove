@@ -453,28 +453,72 @@ rebuilds invalidate the split-face cache.
 
 Ranges retain UTF-16 indices and authored overlap order, snap to grapheme
 starts, and affect shaping, wrapping and metric baselines (including spaces).
-Parley records each shaped glyph's source. Ligatures remain shaped; their
-glyphs follow the first logical grapheme's pose. Selectors retain stagger,
-range and wave modes, character/word/line units, ordering, easing and split
-offsets. Equal poses share one paint operation. Typography anchoring uses
-resting styled bounds, so it never cancels animator movement. Bounds and
-picks follow posed glyphs and blur reach.
+A range normalizes exactly as the base style does (`d.leading || 1.15`,
+`d.weight || 500`, the base family after the range's), so a range that
+restates the base lays out identically to none. Parley records each shaped
+glyph's source. Parley cuts one shaped run into several glyph runs where only
+a non-shaping style changes (a range that differs only in line height, say);
+`Level2::collect` walks each run's visual clusters once per line and hands
+every glyph run the clusters its own glyphs come from, so range colors and
+animator poses stay on their characters and a missing glyph counts once.
+Ligatures remain shaped; their glyphs follow the first logical grapheme's
+pose. Selectors retain stagger, range and wave modes, character/word/line
+units, ordering, easing and split offsets. Equal poses share one paint
+operation. The `textAnimation` query poses level 2 units with the level 2
+poses the renderer draws (a pure translation is the authored offset).
+
+Geometry (round 2). The frame reports three boxes, typography anchoring
+applied to each:
+
+- `resting`: the unposed styled ink, hidden glyphs included. Typography
+  anchoring measures it, so an animator's movement is never canceled.
+- `ink`: the posed visible ink with blur reach (`None` while nothing is
+  visible). It sizes the compatibility raster with the selection, so moved
+  glyphs are never clipped.
+- `selection`: what bounds and picks use. Like today's animated text
+  (`raster.ts`, "select the resting text box"), it is the resting box and
+  never collapses while animators hide every glyph or jumps as they settle;
+  stagger-in text is selectable and pickable at its first frame. With range
+  styles it also covers the posed ink, as today's styled path selects.
+
+Anchor edits (`anchor_reference`, `capture_font_anchor`, `font_offset`)
+share `Scope::text_anchor_box`: today's raster selection at level 1 and the
+resting styled box at level 2, the box `level2_text` anchors against. Pan
+Behind on font-anchored level 2 text therefore keeps the resting text in
+place whatever the animators do at that time.
 
 Cold WASM queries return `fonts` before reporting a failed level 2 shape,
 allowing the normal font handshake to converge. No provisional geometry is
 returned. Carets use Parley's UTF-16 boundaries and metric baselines. The
-sanitizer preserves explicit layer `compat` 1/2 without adding it to old layers.
+sanitizer preserves explicit `compat` 1/2 on text layers without adding it
+to old layers; other layer types drop it, as before this lane.
 
-Eight `text-level2/*` corpus projects share a synthetic fixture with the
-native semantic gate and native-on app e2e. The semantic gate invokes the
-actual `support::routing_forbidden` predicate and refuses any escape. Level 2
-uses its CoreText comparison and semantic invariants; the level 1 Canvas2D
+Thirteen `text-level2/*` corpus projects share a synthetic fixture with the
+native semantic gate and native-on app e2e: range position, word transform,
+line wave, stagger, styled wrap, anchor, unicode, variable, range leading
+(line-height and tracking ranges with colors under a partial selector),
+ligature (lam-alef under a rotating stagger), styled anchor (ranges and
+anchoring without animators), and centered and right-aligned tracking.
+Range-position, anchor and styled-wrap values are keyframed so their four
+samples differ. The semantic gate invokes the actual
+`support::routing_forbidden` predicate and refuses any escape. Level 2 uses
+its CoreText comparison and semantic invariants; the level 1 Canvas2D
 references and FONTS-R fixture remain unchanged.
 Generate their standalone corpus with
 `bun engine/corpus/src/generate.ts --native-text --out <outside-repo-dir>`.
 `textLevel2Projects` is the native-reference catalog; `allProjects` is the
-legacy-reference catalog. All eight native projects run unconditionally in
-`text_level2_semantics`, without private captures or a routing exemption.
+legacy-reference catalog. All thirteen native projects run unconditionally
+in `text_level2_semantics`, without private captures or a routing exemption.
+The every-corpus routing and unsupported gates iterate `allProjects` only,
+so the integration gate must run `text_level2_semantics` and
+`native-engine-text-level2.spec.ts` explicitly.
+
+Remaining (not measured this lane): `TextMeasure::level2` builds a fresh
+Parley context and re-registers faces per frame and query, and runs
+`text_animation_state` twice; the split-face cache (`CompatMeasure`) has no
+eviction and copies whole collection faces on native hosts (Appendix A #21).
+Per-frame level 2 cost and the typing-latency gate for level 2 text are
+unmeasured. `TextFonts::level2`/`Level2Fonts` remain for tests only.
 
 ## Gates and how to run them
 
