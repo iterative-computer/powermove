@@ -42,6 +42,25 @@ describe('installKernel', () => {
     expect(PM.raster).toBe(native);
   });
 
+  it('preserves a wrapper’s geometry instead of placing it using the original text', async () => {
+    const PM = fakePM();
+    PM.raster = vi.fn(() => ({ cv: document.createElement('canvas'), w: 80, h: 30, anchorX: 40, anchorY: 10 }));
+    const rasterSurface = vi.fn((surface: any) => ({ ...surface, anchorX: 93 }));
+    PM.EngineDoc = { enabled: true, api: { rasterSurface } };
+    installed = installKernel(PM);
+    const api = installed.api('dynamic-label');
+    const layer = { id: 'label', type: 'text', d: { text: 'Original' } } as any;
+    expect(api.render.raster(layer, 1, .5)?.anchorX).toBe(93);
+    rasterSurface.mockClear();
+    const previous = api.services.get<(...args: any[]) => any>('raster')!;
+    const registration = api.services.register('raster', (...args: any[]) => ({ ...previous(...args), w: 32, anchorX: 16 }));
+    expect(api.render.raster(layer, 1, .5)).toMatchObject({ w: 32, anchorX: 16 });
+    expect(await (api.render as any).rasterAsync(layer, 1, .5)).toMatchObject({ w: 32, anchorX: 16 });
+    expect(rasterSurface).not.toHaveBeenCalled();
+    registration.dispose();
+    expect(api.render.raster(layer, 1, .5)?.anchorX).toBe(93);
+  });
+
   it('rasterAsync has raster’s shape and passes the crop as raster’s fifth argument (engine off)', async () => {
     const PM = fakePM();
     const native = vi.fn(() => ({ cv: document.createElement('canvas'), w: 20, h: 10, anchorX: 1, anchorY: 2 }));

@@ -430,7 +430,9 @@ function makeRender(PM: LegacyPM): RenderAPI {
      off; the pixels are the engine's with "Use New Engine" on. */
   const placed = (surface: ReturnType<RenderAPI['raster']>, args: Parameters<RenderAPI['raster']>) => {
     const n = native(PM);
-    if (!n || !surface || (args[1] ?? 1) !== 1) return surface;
+    // A wrapper owns its returned geometry: it may have rasterized a
+    // detached layer with different content or deliberately moved its anchor.
+    if (!n || !surface || (args[1] ?? 1) !== 1 || PM?.RasterCompat?.wrapped?.()) return surface;
     return n.rasterSurface(surface, args[0], args[2] ?? PM?.time ?? 0);
   };
   const raster = (...args: Parameters<RenderAPI['raster']>) => {
