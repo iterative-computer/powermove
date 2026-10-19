@@ -29,7 +29,7 @@ import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
-import { EngineRenderTransport } from './render-transport';
+import { EngineRenderTransport, EngineSnapshotError } from './render-transport';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
 import { resolveFrameRate, TICKS_PER_SECOND } from '../../../shared/frame-rate';
@@ -349,7 +349,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const ticks = rate ? (TICKS_PER_SECOND * rate.den) / rate.num : 0;
       return Number.isInteger(ticks) && ticks > 0 ? ticks : null;
     },
+    onFailure: (code, message) => current?.reportFailure(code, message),
     onProducerError: (error) => {
+      current?.reportFailure(error instanceof EngineSnapshotError ? error.code : 'internal', error instanceof Error ? error.message : String(error));
       const now = performance.now();
       if (now - lastProducerFailure <= 2000) return;
       lastProducerFailure = now;

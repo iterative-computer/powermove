@@ -211,6 +211,8 @@ export type RenderTransportOptions = {
   session: () => TransportSession | null;
   /** A producer threw while answering a frame's need (today's failed frame). */
   onProducerError?: (error: unknown, need: CompatNeed) => void;
+  /** Named snapshot failures also reach the connection status and viewer. */
+  onFailure?: (code: string, message: string) => void;
   /** Whether the editor plays (compatibility answers then run ahead of the clock). */
   playing?: () => boolean;
   /** The open composition's frame duration in ticks (the first lookahead step). */
@@ -437,6 +439,7 @@ export class EngineRenderTransport {
     let answer: CompatAnswerResult;
     this.answering++;
     try {
+      if (!(Number.isFinite(need.scale) && need.scale > 0 && need.scale <= 32)) throw new EngineSnapshotError('invalidMessage', `Compatibility raster scale ${need.scale} for layer ${need.layer} is outside 0..32.`);
       answer = answerer(need, revision, fresh ? { fresh: true } : undefined);
     } catch (error) {
       // Today a throwing wrapper fails the compositor's frame: the frame is
@@ -552,6 +555,7 @@ export class EngineRenderTransport {
     const e = error instanceof EngineSnapshotError ? error : new EngineSnapshotError('internal', error instanceof Error ? error.message : String(error));
     this.stats.failed++;
     this.stats.lastFailure = `${e.code}: ${e.message}`;
+    this.options.onFailure?.(e.code, e.message);
     this.options.log('warn', `engine ${where} failed (${e.code}): ${e.message}`);
     return e;
   }
@@ -814,6 +818,7 @@ export class EngineRenderTransport {
   }
 
   private rasterOptions(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null, options: RasterOptions): EngineSnapshotOptions {
+    if (!(Number.isFinite(scale) && scale >= .01 && scale <= 32)) throw this.fail(new EngineSnapshotError('invalidMessage', `Raster scale ${scale} for layer ${layer} is outside 0.01..32.`), 'raster');
     const edge = options.maxEdge ?? MAX_RASTER_EDGE;
     return { time, width: edge, height: edge, pixels: 'premultiplied', composition: options.composition, layer: { id: layer, scale, crop, content: options.content ?? null } };
   }

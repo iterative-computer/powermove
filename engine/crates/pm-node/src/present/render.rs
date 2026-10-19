@@ -3260,20 +3260,11 @@ impl Thread {
                     // override): ask the view's renderer, and render the
                     // frame again when every answer arrived.
                     let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
-                    let fresh = self.compat_store().to_ask(
-                        key,
-                        revision,
-                        needs,
-                        std::time::Instant::now(),
-                    );
+                    let fresh =
+                        self.compat_store()
+                            .to_ask(key, revision, needs, std::time::Instant::now());
                     for chunk in fresh.chunks(pm_protocol::snapshot::MAX_COMPAT_NEEDS) {
-                        let body = Event::Compat(pm_protocol::snapshot::CompatMessage::Needs {
-                            revision,
-                            needs: chunk.to_vec(),
-                        });
-                        let mut envelope =
-                            Envelope::new(Message::Event { body }).with_session(key.1);
-                        envelope.revision = Some(revision);
+                        let envelope = super::compat::needs_event(key.1, revision, chunk.to_vec());
                         if let Ok(bytes) = codec::encode(&envelope) {
                             (self.sink)(vec![Action::Send { port: key.0, bytes }]);
                         }

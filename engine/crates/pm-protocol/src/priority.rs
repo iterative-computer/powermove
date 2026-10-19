@@ -553,7 +553,10 @@ pub struct DeliveryOptions {
     /// override): the job asks the host for those layers' pixels at each
     /// frame (`Request::CompatFrame`). Empty: every layer is the engine's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<crate::snapshot::CompatSource>>", optional))]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::snapshot::CompatSource>>", optional)
+    )]
     pub compat: Vec<crate::snapshot::CompatSource>,
 }
 

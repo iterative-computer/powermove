@@ -575,6 +575,22 @@ describe('ViewerPresentation', () => {
     presentation.dispose();
   });
 
+  it('shows a named compatibility failure on the stage and clears it on a rendered frame', async () => {
+    const service = new Service();
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createWorker: () => null, createPainter: async () => new Painter() });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'failure', reason: 'invalidMessage: compatibility raster scale 33 outside 0..=32' }, performance.now());
+    expect(stage.querySelector('[data-engine-status]')?.textContent).toContain('compatibility raster scale 33');
+    expect(presentation.presenting).toBe(false);
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    expect(presentation.status).toBeNull();
+    presentation.dispose();
+  });
+
   it('presents from a worker when the viewer can start one: frames, tags, releases, and teardown', async () => {
     const service = new Service();
     const { stage, overlay } = stageIn(window as unknown as Window);

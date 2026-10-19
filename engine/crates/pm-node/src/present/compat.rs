@@ -24,6 +24,34 @@ use pm_protocol::snapshot::{CompatFormat, CompatKey, CompatMessage, CompatNeed, 
 
 use super::render::Key;
 
+/// A malformed need must reach the window as a named failure, rather
+/// than leave its last frame silently on screen. Validate before encoding;
+/// the replacement report itself contains no untrusted scale/crop values.
+pub fn needs_event(
+    session: pm_protocol::common::SessionId,
+    revision: Revision,
+    needs: Vec<CompatNeed>,
+) -> pm_protocol::envelope::Envelope {
+    use pm_protocol::envelope::{Envelope, Event, Message};
+    use pm_protocol::error::{EngineError, ErrorCode, ErrorScope, FailureReport};
+    use pm_protocol::validate::Validate;
+    let message = CompatMessage::Needs { revision, needs };
+    let body = match message.validate() {
+        Ok(()) => Event::Compat(message),
+        Err(why) => Event::Failure(FailureReport {
+            revision,
+            error: EngineError::new(
+                ErrorCode::InvalidMessage,
+                ErrorScope::Session { session },
+                format!("The compatibility raster request could not be sent: {why}."),
+            ),
+        }),
+    };
+    let mut envelope = Envelope::new(Message::Event { body }).with_session(session);
+    envelope.revision = Some(revision);
+    envelope
+}
+
 /// Most bytes of assembled and partial rasters one engine keeps.
 pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
 /// Most rasters being assembled at once (bands still missing).
@@ -653,6 +681,46 @@ mod tests {
     use pm_protocol::common::{Bytes, SessionId, Ticks};
     use pm_protocol::host::PortId;
     use pm_protocol::snapshot::{CompatPixels, CompatSource};
+
+    #[test]
+    fn an_invalid_density_is_a_named_failure_instead_of_a_silent_missing_need() {
+        use pm_protocol::{
+            codec,
+            envelope::{Event, Message},
+        };
+        for scale in [24.0, 32.0, 33.0, f64::NAN] {
+            let event = needs_event(
+                session(1).1,
+                Revision::ZERO,
+                vec![CompatNeed {
+                    composition: "c".into(),
+                    layer: "L".into(),
+                    time: Ticks::ZERO,
+                    source: CompatSource::RasterOverride,
+                    scale,
+                    crop: None,
+                }],
+            );
+            let decoded = codec::decode(&codec::encode(&event).unwrap()).unwrap();
+            match decoded.message {
+                Message::Event {
+                    body: Event::Compat(_),
+                } => assert!(scale <= 32.0),
+                Message::Event {
+                    body: Event::Failure(report),
+                } => {
+                    assert!(scale > 32.0 || scale.is_nan());
+                    assert_eq!(
+                        report.error.code,
+                        pm_protocol::error::ErrorCode::InvalidMessage
+                    );
+                    assert!(report.error.message.contains("compatibility raster"));
+                    assert!(report.error.message.contains("scale"));
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
 
     fn session(n: u64) -> Key {
         (PortId(7), SessionId::new(n).unwrap())

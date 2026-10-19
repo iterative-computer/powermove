@@ -54,6 +54,12 @@ function engine(answer: (body: Request, revision: number | null) => Promise<Resp
 }
 
 describe('snapshot requests', () => {
+  it('accepts today’s layer raster densities through 32, independently of output scale', () => {
+    for (const scale of [16.25, 24, 32, 32.01, 0, NaN, Infinity]) {
+      expect(validSnapshotRequest(request({ target: { kind: 'layer', layer: 'L1', scale, crop: null } })), String(scale)).toBe(Number.isFinite(scale) && scale > 0 && scale <= 32);
+    }
+  });
+
   it('accept the shapes the renderer sends and refuse the rest', () => {
     expect(validSnapshotRequest(request())).toBe(true);
     expect(validSnapshotRequest(request({ target: { kind: 'layer', layer: 'L1', scale: 2, crop: { x: 0, y: 0, width: 8, height: 8 } } }))).toBe(true);

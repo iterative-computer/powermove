@@ -27,6 +27,12 @@ function setup(windowIds: number[]) {
 const pixels = (ask: number, w = 2, h = 2) => ({ ask, status: 'pixels' as const, key: 'k', width: w, height: h, format: 'rgba8Premultiplied' as const, origin: [0, 0] as [number, number], scale: 1, data: new Uint8Array(w * h * 4).fill(9) });
 
 describe('CompatFrames', () => {
+  it('accepts compatibility answers at today’s raster density through 32', () => {
+    for (const scale of [16.25, 24, 32, 32.01, 0, NaN, Infinity]) {
+      expect(validCompatAnswer({ ...pixels(1), scale }), String(scale)).toBe(Number.isFinite(scale) && scale > 0 && scale <= 32);
+    }
+  });
+
   it('sends the export snapshot\'s layer with the ask when main has it', async () => {
     const { frames, asks } = setup([1]);
     const answer = frames.serve(request, '{"id":"L7"}');

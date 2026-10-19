@@ -134,7 +134,7 @@ export type EngineFrameMessage =
  * current engine. `seq` is the newest frame seq the engine had given the
  * view when it decided: frames at or below it are stale.
  */
-export type EngineRouteMessage = { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number };
+export type EngineRouteMessage = { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number } | { type: 'failure'; reason: string };
 
 /** Whether a clock sample's line is moving. */
 export function running(sample: ClockSample | null): boolean {

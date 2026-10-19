@@ -56,6 +56,9 @@ pub const MAX_SHARED_NAME: usize = 31;
 pub const MAX_COMPAT_BAND_BYTES: usize = 8 * 1024 * 1024;
 /// Largest compatibility raster edge.
 pub const MAX_COMPAT_EDGE: u32 = 16384;
+/// Today's continuousRasterScale reaches 32 for text/shape/captions.
+/// This is raster density, independent of the output frame's scale limit.
+pub const MAX_RASTER_SCALE: f64 = 32.0;
 /// Longest compatibility cache key (UTF-8 bytes).
 pub const MAX_COMPAT_KEY: usize = 512;
 /// Largest layer object a `Layer` snapshot may carry (canonical JSON).
@@ -257,9 +260,9 @@ impl Validate for SnapshotRequest {
                 )?;
                 ensure(
                     scale.is_finite()
-                        && (crate::frame::MIN_SCALE..=crate::frame::MAX_SCALE).contains(scale),
+                        && (crate::frame::MIN_SCALE..=MAX_RASTER_SCALE).contains(scale),
                     C,
-                    || format!("raster scale {scale} outside 0.01..16"),
+                    || format!("raster scale {scale} outside 0.01..32"),
                 )?;
                 ensure(crop.is_none_or(|c| !c.is_empty()), C, || {
                     "an empty raster crop".into()
@@ -745,14 +748,10 @@ impl Validate for CompatMessage {
                         )
                     },
                 )?;
-                ensure(
-                    p.origin.iter().all(|v| v.is_finite())
-                        && p.scale.is_finite()
-                        && p.scale > 0.0
-                        && p.scale <= crate::frame::MAX_SCALE,
-                    C,
-                    || "compatibility origin and scale must be finite".into(),
-                )?;
+                ensure(p.origin.iter().all(|v| v.is_finite()), C, || {
+                    "compatibility origin must be finite".into()
+                })?;
+                valid_scale(p.scale)?;
                 ensure(
                     p.size
                         .is_none_or(|s| s.iter().all(|v| v.is_finite() && *v > 0.0))
@@ -834,9 +833,9 @@ pub const MAX_COMPAT_CROP: u64 = 8192;
 
 fn valid_scale(scale: f64) -> Result<(), Violation> {
     ensure(
-        scale.is_finite() && scale > 0.0 && scale <= crate::frame::MAX_SCALE,
+        scale.is_finite() && scale > 0.0 && scale <= MAX_RASTER_SCALE,
         ContractId::Frame,
-        || format!("compatibility scale {scale}"),
+        || format!("compatibility raster scale {scale} outside 0..=32 (exclusive zero)"),
     )
 }
 
@@ -945,9 +944,14 @@ impl Validate for CompatFrameRequest {
             frame.validate()?;
         }
         ensure(
-            self.scale.is_finite() && self.scale > 0.0 && self.scale <= crate::frame::MAX_SCALE,
+            self.scale.is_finite() && self.scale > 0.0 && self.scale <= MAX_RASTER_SCALE,
             C,
-            || format!("compatibility scale {}", self.scale),
+            || {
+                format!(
+                    "compatibility raster scale {} outside 0..=32 (exclusive zero)",
+                    self.scale
+                )
+            },
         )
     }
 }
@@ -982,6 +986,16 @@ pub struct CompatFrame {
 impl Validate for CompatFrame {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::HostServices;
+        ensure(
+            self.scale.is_finite() && self.scale > 0.0 && self.scale <= MAX_RASTER_SCALE,
+            C,
+            || {
+                format!(
+                    "compatibility raster scale {} outside 0..=32 (exclusive zero)",
+                    self.scale
+                )
+            },
+        )?;
         if self.native {
             return ensure(self.payload.is_empty(), C, || {
                 "a pass-through carries no pixels".into()
@@ -1237,6 +1251,112 @@ mod tests {
                 .is_err()
         );
         assert!(frame(CompatSource::RasterOverride, None).validate().is_ok());
+    }
+
+    #[test]
+    fn raster_density_matches_todays_continuous_scale_through_32() {
+        let id = CompatKey {
+            composition: "c".into(),
+            layer: "L".into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            key: "k".into(),
+        };
+        for scale in [16.01, 24.0, 32.0, 32.01, 0.0, f64::NAN, f64::INFINITY] {
+            let good = scale.is_finite() && scale > 0.0 && scale <= 32.0;
+            let mut layer = request(8, 8);
+            layer.target = SnapshotTarget::Layer {
+                layer: "L".into(),
+                scale,
+                crop: None,
+                content: None,
+            };
+            let need = CompatNeed {
+                composition: "c".into(),
+                layer: "L".into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale,
+                crop: None,
+            };
+            let messages = [
+                CompatMessage::Needs {
+                    revision: Revision::ZERO,
+                    needs: vec![need],
+                },
+                CompatMessage::Native(CompatNative {
+                    composition: "c".into(),
+                    layer: "L".into(),
+                    time: Ticks::ZERO,
+                    source: CompatSource::RasterOverride,
+                    scale,
+                    revision: Revision::ZERO,
+                    crop: None,
+                }),
+                CompatMessage::Reuse {
+                    id: id.clone(),
+                    scale,
+                    revision: Revision::ZERO,
+                    crop: None,
+                },
+                CompatMessage::Pixels(CompatPixels {
+                    id: id.clone(),
+                    revision: Revision::ZERO,
+                    width: 1,
+                    height: 1,
+                    format: CompatFormat::Rgba8Straight,
+                    origin: [0.0, 0.0],
+                    scale,
+                    row: 0,
+                    rows: 1,
+                    data: Bytes(vec![0; 4]),
+                    size: None,
+                    uv: None,
+                    crop: None,
+                }),
+            ];
+            assert_eq!(layer.validate().is_ok(), good, "layer {scale}");
+            for message in messages {
+                assert_eq!(message.validate().is_ok(), good, "{message:?}");
+            }
+            let frame_request = CompatFrameRequest {
+                document: "doc".into(),
+                composition: "c".into(),
+                layer: "L".into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale,
+                revision: Revision::ZERO,
+                svg: None,
+                frame: None,
+            };
+            assert_eq!(
+                frame_request.validate().is_ok(),
+                good,
+                "export request {scale}"
+            );
+            for native in [false, true] {
+                let frame = CompatFrame {
+                    key: "k".into(),
+                    width: 1,
+                    height: 1,
+                    format: CompatFormat::Rgba8Straight,
+                    origin: [0.0, 0.0],
+                    scale,
+                    payload: PixelPayload::Inline {
+                        bytes: Bytes(vec![0; if native { 0 } else { 4 }]),
+                    },
+                    native,
+                    size: None,
+                    uv: None,
+                };
+                assert_eq!(
+                    frame.validate().is_ok(),
+                    good,
+                    "export answer {scale} {native}"
+                );
+            }
+        }
     }
 
     #[test]

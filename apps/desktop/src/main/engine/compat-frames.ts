@@ -69,7 +69,7 @@ export function validCompatAnswer(value: unknown): value is EngineCompatAnswer {
   const origin = v['origin'];
   return typeof v['key'] === 'string' && v['key'].length > 0 && v['key'].length <= 512 &&
     Array.isArray(origin) && origin.length === 2 && origin.every((n) => Number.isFinite(n)) &&
-    typeof v['scale'] === 'number' && Number.isFinite(v['scale']) && v['scale'] > 0 && v['scale'] <= 16;
+    typeof v['scale'] === 'number' && Number.isFinite(v['scale']) && v['scale'] > 0 && v['scale'] <= 32;
 }
 
 export class CompatFrames {

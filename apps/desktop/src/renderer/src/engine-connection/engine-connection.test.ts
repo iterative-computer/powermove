@@ -121,6 +121,21 @@ describe('the engine connection', () => {
     await expect(new EngineConnection(1, wrong, () => {}).open()).rejects.toThrow(/interactiveEngine/);
   });
 
+  it('keeps an invalid raster density in failures and sends the named report to the viewer', async () => {
+    const { connection, port } = await connected();
+    const messages: unknown[] = [];
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {},
+      handlers: { message: (m) => messages.push(m), closed: () => {} } });
+    await session.start();
+    const reason = 'The compatibility raster request could not be sent: compatibility raster scale 33 outside 0..=32.';
+    port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 3,
+      error: { code: 'invalidMessage', scope: { kind: 'session', session: 5 }, message: reason, retry: { kind: 'never' }, detail: null } } } as never, 5));
+    expect(session.failures).toEqual([`invalidMessage: ${reason}`]);
+    expect(messages).toContainEqual({ type: 'failure', reason: `invalidMessage: ${reason}` });
+    session.close();
+    connection.close();
+  });
+
   it('opens a session, resyncs the document, and follows the patch stream in order', async () => {
     const { connection, port } = await connected();
     const doc = stream();

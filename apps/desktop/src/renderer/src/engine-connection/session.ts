@@ -61,7 +61,8 @@ export type ViewerMessage =
   | { type: 'frame'; frame: FrameDescriptor }
   | { type: 'surfacePool'; pool: SurfacePool }
   | { type: 'clock'; sample: ClockSample }
-  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number };
+  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number }
+  | { type: 'failure'; reason: string };
 
 /** The kernel's definition stream (`PM.EngineDefinitions`, kernel/engine-definitions.ts; contract 10). */
 export interface DefinitionsSource {
@@ -441,10 +442,6 @@ export class DocumentSession {
       case 'patchesApplied':
         this.applied = Math.max(this.applied, Number(event['revision']) || 0);
         return;
-      case 'compat': {
-        if (event['compat'] === 'needs') this.options.onCompat?.(event);
-        return;
-      }
       case 'shaderFallback': {
         if (event['fallback'] === 'input') {
           this.fallbackInput(event);
@@ -477,6 +474,7 @@ export class DocumentSession {
         return;
       }
       case 'compat': {
+        if (event['compat'] === 'needs') { this.options.onCompat?.(event); return; }
         // Level 1 SVG rasters a frame drew without (decision S1).
         if (event['compat'] !== 'svgRequests') return;
         const requests = (event['requests'] as SvgRasterRequest[]) ?? [];
@@ -500,8 +498,7 @@ export class DocumentSession {
           this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision, seq }, arrivedMs);
           return;
         }
-        this.failures.push(`${error.code}: ${error.message}`);
-        if (this.failures.length > 32) this.failures.shift();
+        this.reportFailure(error.code, error.message, arrivedMs);
         // Shader meta and compile errors at the report's revision.
         this.options.definitions?.()?.failure(event as unknown as FailureReport, this.definitions);
         if (error.retry.kind === 'afterResync' || error.code === 'staleRevision') {
@@ -568,6 +565,14 @@ export class DocumentSession {
       const rows = Math.min(rowsPerBand, pixels.height - row);
       this.options.connection.event({ type: 'shaderFallback', fallback: 'pixels', key: pixels.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: bytes.slice(row * rowBytes, (row + rows) * rowBytes) } as never, session);
     }
+  }
+
+  /** Local compatibility failures and engine reports share one diagnostic surface. */
+  reportFailure(code: string, message: string, arrivedMs = performance.now()): void {
+    const reason = `${code}: ${message}`;
+    if (this.failures.at(-1) !== reason) this.failures.push(reason);
+    if (this.failures.length > 32) this.failures.shift();
+    if (code === 'invalidMessage') this.options.handlers.message({ type: 'failure', reason }, arrivedMs);
   }
 
   /** Posts an event on the session's port (compatibility uploads). */
