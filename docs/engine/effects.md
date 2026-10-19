@@ -162,8 +162,34 @@ including HDR values: one channel beyond it pins the program to ANGLE.
 Matching programs become native-verified. No pixel-count allowance or
 perturbation exemption participates in this decision. Effects compare
 before `clamp`, and every ping-pong pass is included. A failed comparison
-readback never verifies the program. A probe whose reference fails does
-not present the incomplete native frame.
+readback never verifies the program. A probe whose reference fails never
+presents the unverified native frame:
+
+- A lasting failure (`FallbackFailure::is_final`: WebGL refuses the
+  program (`compile`), its draw passes the runner's deadline (`watchdog`),
+  or its target is past the GPU's WebGL size limit (`tooLarge`)) pins the
+  program to the runner (`Parity::failed`, and `Parity::pin` when the
+  failure was learned from another request of the program). From then on
+  the runner's own failure handling decides, as for any runner program and
+  as today's compositor does: an effect or transition is skipped and
+  reported once, a shader layer draws nothing and is reported once, a
+  runaway is turned off by the watchdog, and a job stops by name for every
+  failure but `compile`. A `tooLarge` pin applies at every size (the
+  runner draws the program at smaller sizes, as WebGL does today); it
+  costs runner throughput only. Pins are never cleared.
+- A transient failure (`contextLost`, the compile `deadline`,
+  `unavailable`, `size`) leaves the program unknown and goes through the
+  runner's retry and backoff (`Retries`): asked for again at once, then
+  drawn without it and reported once until the backoff passes, then
+  probed again. Effects and transitions get this from `runner_step`;
+  shader layers route through the fallback branch of `shader_source`
+  while the program has a retry streak, so no request is sent during a
+  backoff. A job retries in place and then stops naming the program.
+
+Before 2026-10-19 both cases left the program unknown: effects and
+transitions failed every frame with "first-use shader parity is waiting
+for its WebGL reference" (the viewer never presented, a job stopped), and
+shader layers re-probed every frame without backoff.
 
 Decisions persist as small, content-addressed markers in
 `Engine Cache/Shader Cache/angle-parity`, without source, parameters or
@@ -172,7 +198,12 @@ simultaneous native verification cannot overwrite a pin. The fingerprint
 covers the exact wrapped vertex/fragment source (constants included), the
 engine build identity, pipeline revision, adapter/backend and driver
 identity, OS build, Electron and Chromium versions. Corrupt markers cause
-a re-probe. The desktop sets `POWERMOVE_ENGINE_PARITY_ENV` for both engine
+a re-probe. Two limits of the key, open: the GPU and driver are wgpu's
+adapter, not the GPU Chromium's ANGLE runs on (they can differ on a
+dual-GPU Mac); and the engine build is identified by the addon's mtime and
+size, not a content hash or build id (every install or rebuild changes
+the mtime, so this only matters for a byte-different addon with an equal
+mtime and size). The desktop sets `POWERMOVE_ENGINE_PARITY_ENV` for both engine
 processes; standalone `pm-cli` has no browser reference and does not probe.
 
 The cost is bounded to first contact per program/environment. The existing
@@ -182,8 +213,13 @@ cost. Up to 32 native first-frame results stay paired with their request
 keys in memory (the transport's request bound). The reply is judged when
 it arrives, even if playback has moved on; repeated frames do not redraw
 the native probe while it is in flight. A paused redraw presents ANGLE's
-probed frame after verification. Cached native verifications also observe
-pins written by other renderer processes before drawing. This verifies
+probed frame after verification. Cached native verifications look for a
+pin written by another renderer process at most every 500 ms
+(`PIN_CHECK`; at once after a decision), not with a file read on every
+draw. If a probe's reply never arrives (its request is dropped past the
+transport's bound, or its session parks or closes), the program stays
+pending in that definition set and draws through the runner for the
+session's lifetime: exact, at the runner's cost. This verifies
 the actual first frame; future parameter/input combinations need their
 own corpus coverage.
 
@@ -200,16 +236,29 @@ silently remove a shader from the inventory. Identical missing bundled
 dependencies remain visible in the private health report.
 
 The gate uses the production runtime probe for user programs and writes
-per-program outcomes with `PM_SHADER_GATE_REPORT`. Its older undefined-
+per-program outcomes with `PM_SHADER_GATE_REPORT`. Since 2026-10-19 it
+also asserts the outcome: every user-setups program must end
+`NativeVerified`, pinned to the runner, on the static `ANGLE_ONLY` seed,
+or refused by both; one the probe never judged (`Unknown`) fails the gate
+(`settle_user_verdict`, tested by
+`a_user_program_the_probe_never_judged_fails_the_gate`). For user effects
+and transitions the "Match WebGL" rows compare the runner's output with
+the WebGL capture; the native evidence is this verdict. Its older undefined-
 behavior exemption now names only the three generated probes exactly;
 a user's id containing `sub-` or `hub-` cannot bypass comparison. Effects
 whose WebGL draw raises a GL error are judged by the cleared target,
 just as layers already were.
 
 Tests: `effects::parity` (strict channel bound, HDR, version/source
-invalidation, persistent decisions, pin precedence), `effects_fallback`
-(first-frame hold and presentation, verification and pinning across a
-fresh renderer, transitions and fragment layers), and
+invalidation, persistent decisions, pin precedence, lasting versus
+transient reference failures, the bounded concurrent-pin check),
+`effects_fallback` (first-frame hold and presentation, verification and
+pinning across a fresh renderer, transitions and fragment layers; an
+effect, a shader layer and a transition whose reference fails for good
+are pinned and skipped or draw nothing as today, also in a job; an effect
+and a shader layer whose reference fails transiently follow the runner's
+backoff and are judged once the runner draws them; a job stops naming
+the effect), and
 `e2e/engine-shader-parity.spec.ts` (actual native/ANGLE draws and app
 restart and asynchronous snapshots).
 
@@ -228,7 +277,15 @@ On the qualification machine, 239×137 debug-build snapshots measured
 822 ms on first use for the stable program and 556 ms for the unseeded
 ill-conditioned program. Both presented pixels exactly equal to the
 legacy compositor. Five subsequent snapshots averaged 202 ms and 423 ms,
-respectively, with zero and five runner rounds. After app restart, the
+respectively, with zero and five runner rounds. The stable program's
+202 ms is not its steady state: the review (2026-10-19) measured the same
+program at about 193 ms per snapshot right after its probe and 5 ms per
+snapshot after waiting 3 s, and a second program probed later showed the
+same window. The cause is not established (a candidate is the viewer
+session's own asynchronous probe of the program, which cannot be answered
+while the window's thread is blocked in synchronous snapshots); it affects
+an extension that calls `render.renderFrameTo` in a loop right after first
+use, and is recorded for PERF3. After app restart, the
 stable program needed no probe (five steady snapshots averaged 5.2 ms);
 the persisted pin averaged 409 ms and continued to use ANGLE. These are
 end-to-end snapshot times under shared machine load, not GPU timings or a
