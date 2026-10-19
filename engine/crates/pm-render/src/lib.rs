@@ -30,6 +30,7 @@ mod error;
 mod exec;
 pub mod expr;
 pub mod footage;
+pub mod glsl;
 pub mod js;
 pub mod media;
 pub mod motion;
