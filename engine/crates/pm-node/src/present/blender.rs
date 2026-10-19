@@ -1346,8 +1346,13 @@ mod tests {
         // A paused frame of the same view wants something else: the capture
         // keeps running (a preview only cancels previews).
         paint(&r, &material(), &[snapshot(&["box"], 2.0)]);
+        // A headless transition removes preview demand, not the session's
+        // capture. Only ending the session (`forget`) cancels both.
+        r.blender.submit(KEY, None, Revision::ZERO, None);
         std::thread::sleep(Duration::from_millis(80));
         assert!(r.host.seen.lock().unwrap().cancels.is_empty());
+        // A viewer joins again while the capture still runs.
+        paint(&r, &material(), &[snapshot(&["box"], 2.0)]);
         // The snapshot gave up: Blender stops, the answer is `Cancelled`.
         r.blender.cancel_capture(5);
         wait("cancelled", || !r.captured.lock().unwrap().is_empty());

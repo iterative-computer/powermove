@@ -1634,7 +1634,8 @@ impl Thread {
         self.warm_audio(key);
         if self.views[&key].state.headless == Some(true) {
             if let Some(blender) = &self.blender {
-                blender.forget(key);
+                // Presentation leaves; captures still belong to this session.
+                blender.submit(key, None, self.views[&key].revision, None);
             }
             if let Some(old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
                 self.retire_pool(key, old);
