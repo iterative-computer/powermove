@@ -453,8 +453,21 @@ mod tests {
         let mut wide = effect.clone();
         wide.width = 7680;
         wide.height = 4320;
-        assert!(HostShaderFallback { request: wide.clone(), ..host(vec!["a", "b"]) }.validate().is_ok());
-        assert!(ShaderFallbackMessage::Requests { requests: vec![wide] }.validate().is_ok());
+        assert!(
+            HostShaderFallback {
+                request: wide.clone(),
+                ..host(vec!["a", "b"])
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            ShaderFallbackMessage::Requests {
+                requests: vec![wide]
+            }
+            .validate()
+            .is_ok()
+        );
         let band = ShaderFallbackMessage::Input(ShaderFallbackInput {
             key: key(),
             texture: 0,

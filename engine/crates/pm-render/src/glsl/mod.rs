@@ -77,14 +77,15 @@ fn single_call(function: &str, call: &str) -> String {
         return function.to_owned();
     };
     let params = &function[open + 1..close];
-    let Some(param) = params
-        .split_whitespace()
-        .last()
-        .filter(|p| !params.contains(',') && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-    else {
+    let Some(param) = params.split_whitespace().last().filter(|p| {
+        !params.contains(',') && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }) else {
         return function.to_owned();
     };
-    format!("{}    return {call}({param});\n}}\n", &function[..close + 4])
+    format!(
+        "{}    return {call}({param});\n}}\n",
+        &function[..close + 4]
+    )
 }
 
 /// `msl` with `edit` applied to every function whose name starts with
@@ -315,8 +316,14 @@ mod tests {
     fn round_is_angles_only_inside_the_round_polyfill() {
         let msl = "float pm_round_u0028_f1_u003b(\n    thread float& x\n) {\n    float _e1 = x;\n    return metal::rint(_e1);\n}\n\nfragment main_(){\n    float r = metal::rint(y);\n}\n";
         let out = angle_calls(msl);
-        assert!(out.contains(") {\n    return metal::round(x);\n}\n"), "{out}");
-        assert!(!out.contains("_e1"), "the polyfill's own body is replaced: {out}");
+        assert!(
+            out.contains(") {\n    return metal::round(x);\n}\n"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("_e1"),
+            "the polyfill's own body is replaced: {out}"
+        );
         assert!(
             out.contains("float r = metal::rint(y);"),
             "roundEven stays: {out}"
@@ -345,7 +352,10 @@ mod tests {
             let body = &f[f.find(") {\n").expect("naga's signature") + 4..];
             let lines: Vec<&str> = body.lines().map(str::trim).collect();
             assert_eq!(lines.len(), 2, "{f}");
-            assert!(lines[0].starts_with("return metal::round(") && lines[0].ends_with(");"), "{f}");
+            assert!(
+                lines[0].starts_with("return metal::round(") && lines[0].ends_with(");"),
+                "{f}"
+            );
             assert_eq!(lines[1], "}", "{f}");
         }
     }
@@ -357,7 +367,8 @@ mod tests {
             single_call(f, "metal::round"),
             "float pm_round_u0028_f1_u0029_(\n    float x\n) {\n    return metal::round(x);\n}\n"
         );
-        let two = "float pm_round_u0028_f1_u0029_(\n    float x,\n    float y\n) {\n    return x;\n}\n";
+        let two =
+            "float pm_round_u0028_f1_u0029_(\n    float x,\n    float y\n) {\n    return x;\n}\n";
         assert_eq!(single_call(two, "metal::round"), two);
         let odd = "float pm_round_u0028_f1_u0029_(float x) { return x; }\n";
         assert_eq!(single_call(odd, "metal::round"), odd);

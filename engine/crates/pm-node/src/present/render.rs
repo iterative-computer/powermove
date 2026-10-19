@@ -4070,7 +4070,6 @@ fn blender_frames(
     BlenderFrames::Prepare(snaps.snapshots)
 }
 
-
 /// The texture bands of the fallback requests that sample textures (effects
 /// and transitions), as `ShaderFallback(Input)` events of `session`.
 fn fallback_inputs(
@@ -4087,15 +4086,16 @@ fn fallback_inputs(
                 pixels,
                 pm_protocol::shader_fallback::MAX_BAND_BYTES,
             ) {
-                let body = Event::ShaderFallback(ShaderFallbackMessage::Input(ShaderFallbackInput {
-                    key: r.key.clone(),
-                    texture: texture as u32,
-                    width: pixels.width,
-                    height: pixels.height,
-                    row,
-                    rows,
-                    rgba16f: pm_protocol::common::Bytes(bytes),
-                }));
+                let body =
+                    Event::ShaderFallback(ShaderFallbackMessage::Input(ShaderFallbackInput {
+                        key: r.key.clone(),
+                        texture: texture as u32,
+                        width: pixels.width,
+                        height: pixels.height,
+                        row,
+                        rows,
+                        rgba16f: pm_protocol::common::Bytes(bytes),
+                    }));
                 out.push(Envelope::new(Message::Event { body }).with_session(session));
             }
         }

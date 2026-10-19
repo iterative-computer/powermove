@@ -835,7 +835,11 @@ fn a_difference_webgl_is_unstable_under_fails_the_gate() {
     );
     assert_eq!(tally.matched, 0);
     assert_eq!(tally.failures.len(), 1, "{:?}", tally.failures);
-    assert!(tally.failures[0].contains("ANGLE_ONLY"), "{}", tally.failures[0]);
+    assert!(
+        tally.failures[0].contains("ANGLE_ONLY"),
+        "{}",
+        tally.failures[0]
+    );
     // Through the runner too (an ANGLE-only program the runner drew
     // differently).
     let mut tally = Tally::default();
@@ -860,8 +864,19 @@ fn a_difference_webgl_is_unstable_under_fails_the_gate() {
     };
     let mut tally = Tally::default();
     record(&mut tally, "x", "x", "v", same, false, None);
-    record(&mut tally, "probe/ub-shift", "probe/ub-shift", "v", differs, false, None);
-    assert_eq!((tally.matched, tally.known.len(), tally.failures.len()), (1, 1, 0));
+    record(
+        &mut tally,
+        "probe/ub-shift",
+        "probe/ub-shift",
+        "v",
+        differs,
+        false,
+        None,
+    );
+    assert_eq!(
+        (tally.matched, tally.known.len(), tally.failures.len()),
+        (1, 1, 0)
+    );
 }
 
 #[test]

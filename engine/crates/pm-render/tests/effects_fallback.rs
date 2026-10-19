@@ -594,7 +594,9 @@ fn a_job_whose_program_never_finishes_compiling_stops_naming_it() {
     job.set_fallback_host(Some(host.clone()));
     match render(&mut job, &doc) {
         Err(RenderError::Fallback(m)) => assert!(
-            m.contains("acme.cube-invert") && m.contains("still compiling") && m.contains("60 waits for its compile"),
+            m.contains("acme.cube-invert")
+                && m.contains("still compiling")
+                && m.contains("60 waits for its compile"),
             "{m}"
         ),
         other => panic!("expected a named failure, got {:?}", other.map(|_| ())),

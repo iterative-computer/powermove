@@ -523,7 +523,13 @@ mod tests {
     /// `pm_round`'s arithmetic in f32, as the GPU evaluates it.
     fn pm_round(x: f32) -> f32 {
         let t = x.trunc();
-        let sign = if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 };
+        let sign = if x > 0.0 {
+            1.0
+        } else if x < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
         t + if (x - t).abs() >= 0.5 { sign } else { 0.0 }
     }
 
@@ -535,9 +541,27 @@ mod tests {
         // (the Metal MSL writer gives it ANGLE's call, the same value).
         let below_half = f32::from_bits(0.5f32.to_bits() - 1);
         let mut values = vec![
-            0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, below_half, -below_half,
-            0.49999997, 1.4999999, 8388607.5, -8388607.5, 8388608.0, 16777217.0,
-            f32::MAX, f32::MIN, f32::MIN_POSITIVE, 1e-45, 3.4e38,
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.5,
+            -1.5,
+            2.5,
+            -2.5,
+            below_half,
+            -below_half,
+            0.49999997,
+            1.4999999,
+            8388607.5,
+            -8388607.5,
+            8388608.0,
+            16777217.0,
+            f32::MAX,
+            f32::MIN,
+            f32::MIN_POSITIVE,
+            1e-45,
+            3.4e38,
         ];
         let mut bits = 0x9E37_79B9u32;
         for _ in 0..200_000 {
@@ -554,7 +578,11 @@ mod tests {
         // `+0.0` where `metal::round(-0.3)` is `-0.0`): it changes no value
         // a program writes but `1.0 / x`, and only off Metal.
         for x in values {
-            assert_eq!(pm_round(x).to_bits() & !0x8000_0000, x.round().to_bits() & !0x8000_0000, "round({x})");
+            assert_eq!(
+                pm_round(x).to_bits() & !0x8000_0000,
+                x.round().to_bits() & !0x8000_0000,
+                "round({x})"
+            );
         }
         // `floor(x + 0.5)` would round the largest float below 0.5 up.
         assert_eq!((below_half + 0.5).floor(), 1.0);

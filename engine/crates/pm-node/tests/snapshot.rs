@@ -1080,9 +1080,11 @@ fn cube_effect_definitions() -> pm_protocol::definitions::DefinitionsUpdate {
     cube.origin = pm_protocol::definitions::DefinitionOrigin::Store;
     cube.flags.backdrop = true;
     let glsl = cube.glsl.as_mut().unwrap();
-    glsl.source = glsl
-        .source
-        .replacen("void main(){", "uniform samplerCube u_env;\nvoid main(){", 1);
+    glsl.source = glsl.source.replacen(
+        "void main(){",
+        "uniform samplerCube u_env;\nvoid main(){",
+        1,
+    );
     let end = glsl.source.rfind('}').unwrap();
     glsl.source
         .insert_str(end, "  o += texture(u_env, vec3(0.0, 0.0, 1.0)) * 0.0;\n");

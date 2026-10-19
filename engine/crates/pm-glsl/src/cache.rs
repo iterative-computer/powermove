@@ -329,7 +329,10 @@ mod tests {
     ];
 
     /// The revision and the SHA-256 of what [`EMITTED_PROGRAMS`] prepare to.
-    const EMITTED: (u32, &str) = (2, "981e3be32ecc0f78f4c9bbf902a177afe0859b0fa0b84f3cdaae2c072583aa28");
+    const EMITTED: (u32, &str) = (
+        2,
+        "981e3be32ecc0f78f4c9bbf902a177afe0859b0fa0b84f3cdaae2c072583aa28",
+    );
 
     #[test]
     fn emitted_programs_match_the_pipeline_revision() {
