@@ -57,11 +57,11 @@ pub fn item(mask: &PathMask, world: [f64; 6], width: u32, height: u32) -> Result
         }
     }
     c.fill()?;
-    let rgba = c.finish();
+    let alpha = c.finish_fill_alpha()?;
     Ok(Item {
         width,
         height,
-        alpha: rgba.chunks_exact(4).map(|p| p[3]).collect(),
+        alpha,
     })
 }
 

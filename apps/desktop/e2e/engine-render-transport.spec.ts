@@ -263,9 +263,9 @@ test.describe('Use New Engine: the render transport', () => {
       const before = { ...PM.EngineRender.stats };
       // A size the viewer never drew: the program is asked for again.
       const url = api.render.snapshot(0.5, 300);
-      return { url, rounds: PM.EngineRender.stats.rounds - before.rounds, failed: PM.EngineRender.stats.failed - before.failed };
+      return { url, rounds: PM.EngineRender.stats.rounds - before.rounds, failed: PM.EngineRender.stats.failed - before.failed, lastFailure: PM.EngineRender.stats.lastFailure };
     });
-    expect(result.failed).toBe(0);
+    expect(result.failed, String(result.lastFailure)).toBe(0);
     expect(result.rounds).toBeGreaterThanOrEqual(1);
     expect(result.url.startsWith('data:image/jpeg')).toBe(true);
     // The program's pixels where the layer is (what the runner drew on this

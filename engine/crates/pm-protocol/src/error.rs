@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::common::{
-    AssetId, DefinitionId, EffectInstanceId, JobId, LayerId, RequestId, Revision, SessionId,
+    AssetId, DefinitionId, EffectInstanceId, JobId, LayerId, RequestId, Revision, Seq, SessionId,
 };
 use crate::version::ContractId;
 
@@ -186,6 +186,14 @@ pub enum ErrorDetail {
     },
     Offline {
         assets: Vec<AssetId>,
+    },
+    /// A session `unsupported` report (the engine cannot draw the view's
+    /// composition): the newest frame `seq` the engine had given the
+    /// session's view when it decided (0: none yet). The engine sends every
+    /// frame up to it before the report, so a frame with a seq at or below
+    /// it is an older decision, and one above it a later one.
+    Unsupported {
+        last_frame: Seq,
     },
 }
 

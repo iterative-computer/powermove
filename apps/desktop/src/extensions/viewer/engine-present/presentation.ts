@@ -118,13 +118,31 @@ export const MAX_REVEAL_FRAMES = 30;
 /** Dispatched (bubbling) by a viewer's own presentation on its stage. */
 export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
 
+/**
+ * The stage attribute (dataset key `engineSelfPresents`) of a viewer that
+ * presents engine frames by itself, set for as long as it is mounted, so a
+ * `render.gl.init` binding never presents over its canvas, before its own
+ * presentation exists (the engine connection comes up after the viewer
+ * mounts) and after it is gone (the built-in viewer's WebGL canvas outlives
+ * it in the panel skeleton).
+ */
+export const ENGINE_SELF_PRESENTS_ATTRIBUTE = 'data-engine-self-presents';
+
 /** The visible states of an exclusive presentation without a frame to show. */
 export const PRESENTATION_STATUS = {
   starting: 'Starting the engine…',
   reconnecting: 'Reconnecting to the engine…',
   gpuFailed: 'The viewer cannot draw: the GPU keeps failing. Restart Powermove.',
-  unavailable: 'The viewer cannot draw engine frames:'
+  unavailable: 'The viewer cannot draw engine frames:',
+  unsupported: 'The new engine cannot draw this composition yet.'
 } as const;
+
+/** The stage's status for a composition the engine cannot draw: the
+ *  engine's sentence (it names what), or a generic one without it. */
+export function routedStatus(reason: string | null | undefined): string {
+  const text = (reason ?? '').trim();
+  return text || PRESENTATION_STATUS.unsupported;
+}
 
 /** What the viewer decides; the presentation adds what the window knows. */
 export type ViewParams = Omit<ViewInput, 'composition' | 'cssWidth' | 'cssHeight' | 'devicePixelRatio' | 'edr' | 'colorSpace'>;
@@ -195,10 +213,29 @@ export class ViewerPresentation {
   private readonly states: ViewerState[] = [];
   private params: ViewParams | null = null;
   private host: Window | null = null;
+  /** Keep the configured surface colors when a host's capability queries change. */
+  private displayColor: {
+    host: Window;
+    colorSpace: ViewerState['colorSpace'];
+    edr: boolean;
+    observedColorSpace: ViewerState['colorSpace'];
+    observedEdr: boolean;
+  } | null = null;
   private mediaOffs: (() => void)[] = [];
   private latestFrame: PresentedFrame | null = null;
-  /** The revision the engine routed the composition away at (`routed`). */
-  private routedRevision: number | null = null;
+  /** The frame `seq` at or below which frames are stale since the engine
+   *  said it cannot draw the composition (`routed`): the newest seq the
+   *  engine had given the view when it decided (`message.seq`), and at
+   *  least the newest the channel had delivered (frames still in the
+   *  presenter). A frame above it is a later decision even at the same
+   *  revision (a composition switch: the document batch reaches the engine
+   *  before the viewer state). Arrival order alone does not decide it:
+   *  paused frames leave from the engine's completion thread, so a frame
+   *  drawn before the report can arrive after it with a higher seq than
+   *  any delivered so far. */
+  private routedSeq: number | null = null;
+  /** The newest frame `seq` the current channel delivered. */
+  private deliveredSeq = 0;
   private readonly listeners = new Set<(frame: PresentedFrame) => void>();
   private readonly hiddenListeners = new Set<() => void>();
   private readonly offReady: () => void;
@@ -211,6 +248,7 @@ export class ViewerPresentation {
   /** The CSS size the engine last got, and the pending settle. */
   private appliedSize: { width: number; height: number } | null = null;
   private settleTimer = 0;
+  private pendingSize: { width: number; height: number } | null = null;
   private settleDue = false;
   /** The display's refresh grid, sent with every state (amendment 18). */
   private vsync: VsyncHint | null = null;
@@ -252,7 +290,7 @@ export class ViewerPresentation {
       const el = this.options.stage.ownerDocument.createElement('div');
       el.dataset['engineStatus'] = '';
       el.setAttribute('role', 'status');
-      el.style.cssText = 'position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:5;max-width:calc(100% - 24px);padding:4px 10px;border-radius:var(--r-sm);background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+      el.style.cssText = 'position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:5;width:max-content;max-width:calc(100% - 24px);box-sizing:border-box;padding:4px 10px;border-radius:var(--r-sm);background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);text-align:center;pointer-events:none;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3';
       this.options.stage.append(el);
       this.statusElement = el;
     }
@@ -412,19 +450,36 @@ export class ViewerPresentation {
     if (rect.width < 1 || rect.height < 1) return;
     const size = this.settledSize(view, rect.width, rect.height);
     const dpr = Math.min(view.devicePixelRatio || 1, this.options.maxDpr ?? 2);
+    const display = this.configuredDisplay(view);
     const { state, changed } = this.sequencer.next({
       ...params,
       composition: this.options.service.composition(),
       cssWidth: size.width,
       cssHeight: size.height,
       devicePixelRatio: dpr,
-      edr: this.options.edr !== 'off' && displayIsEdr(view),
-      colorSpace: canvasColorSpace(view)
+      edr: display.edr,
+      colorSpace: display.colorSpace
     });
     if (!changed) return;
     this.states.push(state);
     if (this.states.length > STATE_HISTORY) this.states.shift();
     this.presenter?.setViewerState(this.withHint(state));
+  }
+
+  private configuredDisplay(host: Window): NonNullable<ViewerPresentation['displayColor']> {
+    const colorSpace = canvasColorSpace(host);
+    const edr = displayIsEdr(host);
+    if (!this.displayColor || this.displayColor.host !== host) {
+      this.displayColor = { host, colorSpace, edr: this.options.edr !== 'off' && edr, observedColorSpace: colorSpace, observedEdr: edr };
+    } else if (colorSpace !== this.displayColor.observedColorSpace || edr !== this.displayColor.observedEdr) {
+      // Legacy GL never reconfigures its drawing buffer for media-query
+      // changes. Match that lifetime, including later geometry updates:
+      // a first-show capability change must not rebuild a playing pool.
+      this.options.log?.('info', `engine presentation display capabilities changed to ${colorSpace}, edr=${edr}; keeping configured ${this.displayColor.colorSpace}, edr=${this.displayColor.edr}`);
+      this.displayColor.observedColorSpace = colorSpace;
+      this.displayColor.observedEdr = edr;
+    }
+    return this.displayColor;
   }
 
   /** A state as sent: with the newest vsync hint, which is not part of the view. */
@@ -447,10 +502,16 @@ export class ViewerPresentation {
       this.settleDue = false;
       if (this.settleTimer) this.clearTimer(view, this.settleTimer);
       this.settleTimer = 0;
+      this.pendingSize = null;
       this.appliedSize = { width, height };
       return this.appliedSize;
     }
+    // Param/overlay updates repeat during playback. They do not mean the
+    // stage resized again: extending this deadline on every repeat can leave
+    // the old pool alive for seconds, then reallocate it in steady playback.
+    if (this.settleTimer && this.pendingSize?.width === width && this.pendingSize.height === height) return applied;
     if (this.settleTimer) this.clearTimer(view, this.settleTimer);
+    this.pendingSize = { width, height };
     const fire = (): void => {
       this.settleTimer = 0;
       this.settleDue = true;
@@ -488,6 +549,14 @@ export class ViewerPresentation {
     const view = this.options.stage.ownerDocument.defaultView;
     if (!view || view === this.host) return view;
     const moved = this.host !== null;
+    if (this.host) {
+      // A popout owns a different timer queue; closing the old host cancels
+      // its timer, so a pending size must start a fresh deadline here.
+      if (this.settleTimer) this.clearTimer(this.host, this.settleTimer);
+      this.settleTimer = 0;
+      this.pendingSize = null;
+      this.settleDue = false;
+    }
     this.host = view;
     for (const off of this.mediaOffs.splice(0)) off();
     const refresh = (): void => {
@@ -692,8 +761,8 @@ export class ViewerPresentation {
       // A frame drawn before the engine routed the composition to the
       // current engine, presented late: it must not cover the current
       // engine's canvas.
-      if (this.routedRevision !== null && Number(frame.revision) <= this.routedRevision) return;
-      this.routedRevision = null;
+      if (this.routedSeq !== null && frame.seq <= this.routedSeq) return;
+      this.routedSeq = null;
       // A canvas that was hidden shows a frame only once the GPU finished
       // it and the display took it (the drawing's canvas and this page
       // commit separately; at a cold start the drawing's pipelines compile
@@ -735,18 +804,24 @@ export class ViewerPresentation {
       message: (message, arrivedMs) => {
         if (this.channel !== opened) return;
         if (message.type === 'routed') {
-          // The current engine draws this composition now: its canvas
-          // shows until the engine presents again.
-          this.routedRevision = typeof message.revision === 'number' ? message.revision : null;
+          // The engine cannot draw this composition at this revision: its
+          // frames (older ones still in flight too) leave the stage.
+          this.routedSeq = Math.max(this.deliveredSeq, Number(message.seq) || 0);
           this.latestFrame = null;
-          // Capability routing is development scaffolding (amendment 21):
-          // until it is removed it hands the stage back even when exclusive.
+          if (this.exclusive) {
+            // "Use New Engine" on (amendment 21): nothing else draws it, so
+            // the stage says why, and stays the engine's (no hand-back; the
+            // transport keeps running on the engine's clock). The next
+            // frame the engine draws clears it.
+            this.setStatus(routedStatus(message.reason));
+            this.hide(this.canvasElement, false);
+            return;
+          }
           this.setStatus(null);
-          // An exclusive viewer hid what is under the canvas from the
-          // start, so it hands back even before its first frame.
-          this.hide(this.canvasElement, true, this.exclusive);
+          this.hide(this.canvasElement);
           return;
         }
+        if (message.type === 'frame') this.deliveredSeq = Math.max(this.deliveredSeq, Number(message.frame.seq) || 0);
         if (this.presenter) this.presenter.receive(message, arrivedMs);
         else this.hold(opened!, message, arrivedMs);
       },
@@ -755,6 +830,9 @@ export class ViewerPresentation {
     if (!channel) return;
     opened = channel;
     this.channel = channel;
+    // A new session numbers its frames from 1.
+    this.deliveredSeq = 0;
+    this.routedSeq = null;
     this.sessions++;
     this.startPresenter(channel);
   }

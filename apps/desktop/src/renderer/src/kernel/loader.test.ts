@@ -209,6 +209,51 @@ describe('planLoad', () => {
 /* ── boot / activate ─────────────────────────────────────── */
 
 describe('loader boot', () => {
+  it('waits for the mirror before importing or activating an extension, without blocking the caller', async () => {
+    const { deps } = fakeDeps();
+    let release!: (ok: boolean) => void;
+    const doc = { enabled: true, ready: false, whenReady: new Promise<boolean>(r => { release = r; }) };
+    (deps.pm as any).EngineDoc = doc;
+    const imported = vi.fn(async () => ({ default: vi.fn(() => { expect(doc.ready).toBe(true); }) }));
+    const loader = createLoader({ kernel, bridge: null, deps, builtins: { early: imported } });
+    const booting = loader.boot();
+    await new Promise(r => setTimeout(r, 0));
+    expect(imported).not.toHaveBeenCalled();
+    expect(loader.activeIds()).toEqual([]);
+    doc.ready = true;
+    release(true);
+    await booting;
+    expect(loader.activeIds()).toEqual(['early']);
+    expect(imported).toHaveBeenCalledOnce();
+    await loader.dispose();
+  });
+
+  it('keeps the named module failure out of extension code, and activates what waited once a retry succeeds', async () => {
+    const { deps, toasts } = fakeDeps();
+    let ready: (() => void) | null = null;
+    const doc = { enabled: true, ready: false, whenReady: Promise.resolve(false), onReady: (fn: () => void) => { ready = fn; return () => { ready = null; }; } };
+    (deps.pm as any).EngineDoc = doc;
+    const order: string[] = [];
+    const early = vi.fn(async () => ({ default: () => { expect(doc.ready).toBe(true); order.push('early'); } }));
+    const late = vi.fn(async () => ({ default: () => { order.push('late'); } }));
+    const loader = createLoader({ kernel, bridge: null, deps, builtins: { early, late } });
+    await loader.boot();
+    expect(early).not.toHaveBeenCalled();
+    expect(loader.activeIds()).toEqual([]);
+    expect(loader.records()[0]?.health).toMatchObject({ state: 'activation-error', error: expect.stringContaining('pm-wasm-unavailable') });
+    // The engine names the failure once; extensions add no toast of their own.
+    expect(toasts).toEqual([]);
+    // EngineDoc.retry() succeeded.
+    doc.ready = true;
+    ready!();
+    await loader.whenIdle();
+    expect(order).toEqual(['early', 'late']);
+    expect(loader.activeIds()).toEqual(['early', 'late']);
+    expect(loader.records()[0]?.health).toEqual({ state: 'ok' });
+    expect(ready).toBeNull();
+    await loader.dispose();
+  });
+
   it('does not activate a second timeline when health notifications arrive during boot', async () => {
     const bridge = fakeBridge([builtinRec('theme'), builtinRec('timeline')]);
     const { deps } = fakeDeps();

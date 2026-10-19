@@ -547,11 +547,13 @@ impl Painter<'_> {
         let mut mask = (Vec::new(), None::<Rect>);
         let mut path = (Vec::new(), None::<Rect>);
         let mut images = Vec::new();
+        #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
         let mut canonical_glyphs = Vec::new();
         // Platform masks of this call, at whole device pixels; `true` for
         // masks Skia generates from paths (their own gamma table).
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
         // Glyphs drawn as distance-field text (coverage per pixel).
+        #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
         let mut sdf_glyphs: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
         let mut curve_size = 0.0f64;
         for run in runs {
@@ -979,6 +981,7 @@ impl Painter<'_> {
             .with_miter_limit(2.0);
         let half = device_width / 2.0 + 1.0;
         let mut paths = Vec::new();
+        #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
         let mut canonical_glyphs = Vec::new();
         let mut bounds: Option<Rect> = None;
         for run in runs {
