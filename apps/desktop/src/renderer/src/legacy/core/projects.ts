@@ -88,6 +88,11 @@ R.unwrap = (raw: any) => {
   return raw && raw.proj && typeof raw.proj === 'object' ? raw.proj : raw;
 };
 
+/** Whether a project's slot is stored, without reading (and cloning) it. */
+function slotExists(id: string): boolean {
+  return typeof PM.store.has === 'function' ? PM.store.has(R.SLOT + id) : PM.store.get(R.SLOT + id, null) != null;
+}
+
 /** Upsert registry metadata for a project and persist its data. */
 R.put = (proj: any, thumb: any) => {
   if (!proj || !proj.id) return;
@@ -96,7 +101,7 @@ R.put = (proj: any, thumb: any) => {
   /* A project written for a newer reader is stored once, as opened, so its
      tab and restart still work. Later writes keep only the library metadata:
      this build never autosaves a document it may not fully understand. */
-  const frozen = needsNewerReader(proj) && PM.store.get(R.SLOT + proj.id, null) != null;
+  const frozen = needsNewerReader(proj) && slotExists(proj.id);
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== proj.id));
   if (frozen) return meta;
@@ -115,9 +120,8 @@ R.recover = (proj: any, thumb: any) => {
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
-  const raw = PM.store.get(R.SLOT + proj.id, null);
   const entries = journal(proj.id);
-  if (!raw || !entries.length || journalBytes(entries) > MAX_JOURNAL_BYTES
+  if (!slotExists(proj.id) || !entries.length || journalBytes(entries) > MAX_JOURNAL_BYTES
       || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
     return R.put(proj, thumb);
   }
