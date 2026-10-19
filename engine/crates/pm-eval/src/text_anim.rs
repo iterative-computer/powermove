@@ -753,7 +753,11 @@ impl<'d> Scope<'_, 'd> {
         self.posed_glyphs(d, layout, state, false)
     }
 
-    pub(crate) fn level2_glyphs(
+    /// [`Self::animated_glyphs`] as `compat` level 2 poses them: a pure
+    /// translation is the authored offset itself (no pivot round trip), so
+    /// integer selector movement stays exact. What the level 2 renderer
+    /// draws and what `textAnimation` reports for level 2 layers.
+    pub fn level2_glyphs(
         &mut self,
         d: &Content,
         layout: &GlyphLayout,

@@ -337,6 +337,26 @@ impl<'d> Scope<'_, 'd> {
         self.text_raster_with(layer, time, measure, true, true)
     }
 
+    /// The box an anchor edit on a font-anchored text layer starts from:
+    /// the text as typography anchoring measures it, anchor applied. Level 1
+    /// keeps today's raster selection; level 2 is its resting styled ink,
+    /// the same box `level2_text` anchors against, so an edit never folds
+    /// an animator's displacement into the recorded font bounds.
+    pub fn text_anchor_box(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        measure: &mut dyn TextMeasure,
+    ) -> JsResult<Selection> {
+        if crate::text_level2::is_level2(layer) {
+            measure.require_ink();
+            return self
+                .level2_text(layer, time, measure, true, true)
+                .map(|f| f.resting);
+        }
+        Ok(self.text_raster(layer, time, measure)?.selection)
+    }
+
     /// [`Self::text_raster`] with character animators and typography
     /// anchoring each on or off (the unanchored placement gives
     /// `PM.raster`'s `fontOffset`).

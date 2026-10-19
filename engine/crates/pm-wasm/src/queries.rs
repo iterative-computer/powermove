@@ -211,7 +211,11 @@ pub(crate) fn dispatch<'d>(
             text_checks!(probe);
             let layout = try_js!(layout);
             let state = try_js!(scope.text_animation_state(l, t, &layout));
-            let glyphs = scope.animated_glyphs(&d, &layout, &state);
+            let glyphs = if pm_eval::text_level2::is_level2(l) {
+                scope.level2_glyphs(&d, &layout, &state)
+            } else {
+                scope.animated_glyphs(&d, &layout, &state)
+            };
             // The style keys every glyph reports: base typography plus every
             // key a range style sets (the capture's `styleKeys`).
             let mut keys: Vec<pm_model::JsString> =

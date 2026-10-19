@@ -40,7 +40,18 @@ pub struct Draw {
 pub struct Frame {
     pub layout: Level2Layout,
     pub draws: Vec<Draw>,
+    /// The selection box that bounds and picks use: the resting styled
+    /// text, so it neither collapses while animators hide every glyph nor
+    /// jumps as they settle (today's animated-text selection). With range
+    /// styles it also grows over the posed visible ink, as today's styled
+    /// path selects. Typography anchoring is applied.
     pub selection: Selection,
+    /// The resting styled ink box with typography anchoring applied: what
+    /// the anchor measures and what anchor edits start from.
+    pub resting: Selection,
+    /// The posed visible ink (blur reach included, hidden glyphs left out)
+    /// with typography anchoring applied; `None` while nothing is visible.
+    pub ink: Option<Selection>,
     pub offset: Offset,
     pub size: f64,
 }
@@ -75,13 +86,16 @@ impl Frame {
             box_height: content.box_height.unwrap_or(0.0),
         }
     }
+    /// The compatibility raster covers the posed ink and the selection, so
+    /// moved glyphs are never clipped and the canvas never collapses.
     pub fn raster(&self) -> TextRaster {
         let s = self.selection;
+        let r = self.ink.map_or(s, |ink| union(&s, &ink));
         TextRaster {
-            w: s.w.max(1.0),
-            h: s.h.max(1.0),
-            anchor_x: -s.x0,
-            anchor_y: -s.y0,
+            w: r.w.max(1.0),
+            h: r.h.max(1.0),
+            anchor_x: -r.x0,
+            anchor_y: -r.y0,
             selection: s,
         }
     }
@@ -265,7 +279,20 @@ impl<'d> Scope<'_, 'd> {
                 }
             }
         }
-        let mut selection = bounds(&draws, &layout, false);
+        let empty = Selection {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 0.0,
+            y1: layout.height,
+            w: 0.0,
+            h: layout.height,
+        };
+        let mut resting = bounds(&draws, true).unwrap_or(empty);
+        let mut ink = bounds(&draws, false);
+        let mut selection = match (&ink, state.styles.is_empty()) {
+            (Some(ink), false) => union(&resting, ink),
+            _ => resting,
+        };
         let mut offset = Offset::default();
         if anchor
             && let Some(reference) = BoundsValues::of(node::member(
@@ -275,35 +302,39 @@ impl<'d> Scope<'_, 'd> {
         {
             // Typography anchoring measures the resting styled text. An
             // animator's movement must never be canceled by the anchor.
-            let resting = if !state.animators.is_empty() {
-                bounds(&draws, &layout, true)
-            } else {
-                selection
-            };
             offset = font_anchor_offset(
                 Some(&reference),
                 Some(&BoundsValues::from(resting.rect())),
                 &self.channel(layer, "anchor.x", time)?,
                 &self.channel(layer, "anchor.y", time)?,
             );
-            selection.x0 += offset.x;
-            selection.x1 += offset.x;
-            selection.y0 += offset.y;
-            selection.y1 += offset.y;
+            for b in [&mut selection, &mut resting]
+                .into_iter()
+                .chain(ink.as_mut())
+            {
+                b.x0 += offset.x;
+                b.x1 += offset.x;
+                b.y0 += offset.y;
+                b.y1 += offset.y;
+            }
         }
         Ok(Frame {
             layout,
             draws,
             selection,
+            resting,
+            ink,
             offset,
             size: tc.size(),
         })
     }
 }
 
-/// Transformed outline control boxes, including blur reach. Empty text has
-/// a finite caret-height box; invisible animators contribute no ink.
-fn bounds(draws: &[Draw], layout: &Level2Layout, resting: bool) -> Selection {
+/// Transformed outline control boxes, including blur reach (`resting`
+/// measures the unposed styled ink instead, hidden glyphs included). `None`
+/// when no glyph has ink: empty or whitespace-only text, or every glyph
+/// hidden by an animator.
+fn bounds(draws: &[Draw], resting: bool) -> Option<Selection> {
     let mut b = [
         f64::INFINITY,
         f64::INFINITY,
@@ -339,9 +370,10 @@ fn bounds(draws: &[Draw], layout: &Level2Layout, resting: bool) -> Selection {
             }
         }
     }
-    if !b.iter().all(|v| v.is_finite()) {
-        b = [0.0, 0.0, 0.0, layout.height];
-    }
+    b.iter().all(|v| v.is_finite()).then(|| rect(b))
+}
+
+fn rect(b: [f64; 4]) -> Selection {
     Selection {
         x0: b[0],
         y0: b[1],
@@ -350,4 +382,13 @@ fn bounds(draws: &[Draw], layout: &Level2Layout, resting: bool) -> Selection {
         w: b[2] - b[0],
         h: b[3] - b[1],
     }
+}
+
+fn union(a: &Selection, b: &Selection) -> Selection {
+    rect([
+        a.x0.min(b.x0),
+        a.y0.min(b.y0),
+        a.x1.max(b.x1),
+        a.y1.max(b.y1),
+    ])
 }
