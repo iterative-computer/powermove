@@ -1332,3 +1332,87 @@ it belongs with the perf3 lane's items and is reported to the orchestrator.
 Exactness for these paths is in `strict.test.ts` (wrapper members, held and
 changed wrappers, stale wrappers, the stored form, a scope object made anew per
 call with scope and channel edits) and `detached.test.ts`.
+
+## P6/B3 fixups: expression frames and async boot readiness (2026-10-19)
+
+P6 removes the unconditional error-string crossing, compiles pm-expr bytecode
+once per source and retains it in each resident static/keyed expression plan.
+pm-wasm omits unused expression dependency tracing while keeping model-host
+reads and exact revision/time invalidation. It interns literal host keys and
+avoids computing legacy-inaccessible `frame` and unused `ch` inputs.
+
+`ExpressionFrames` batches the resident expression ids of each composition at
+one exact time in one wasm call, and serves the channel reads from that frame.
+The first address read still interns/evaluates the channel. Separate scope
+copies prevent one composition's ABI buffers overwriting another's memo.
+Errors are read only when the scalar status word or batch status flags them;
+error recovery deletes the old live-channel entry. Nonnumeric values and throws
+use the original decoder. `expression-frame.test.ts` exercises 120 channels,
+exact answers after edits, errors/recovery, signed zero, scopes and memory growth.
+
+`engine-expression-performance.spec.ts` is the paired P6 gate: 100 layers with
+four expression channels each, including arithmetic, params/comp/layer reads,
+Math and idx; five alternating pairs of 2,000 frames. It separately measures a
+single-channel fixture, asserts exact results and sums, writes every sample and
+checks load average <=8 before and after. It never turns a slow result into an
+allowed difference. Run it with `PM_FIXUPS3_MEASURE=1` and
+`PM_FIXUPS3_EVIDENCE=/tmp/ne-w5/fixups3-evidence` under pm-electron-lock.
+
+B3 queues async agent/MCP/CLI tool requests, scripts, native menu and kernel
+input and project opens until EngineDoc is ready. Parsing/media restoration
+continue during compilation; first frame and blank-project creation wait too.
+The boot e2e holds the real wasm fetch over reload, dispatches an agent read
+while readiness is false, then releases it and requires the exact keyed answer
+10 with no native fallbacks. Direct synchronous APIs keep their signatures;
+callers outside these async boundaries still must wait for readiness.
+
+The existing five-pair boot harness now alternates launch order by pair, waits
+for load <=8 outside each timing span and records every UI/editor/open value.
+Each app launch checks the data volume for >=40 GiB free. Measurements and final
+validation results are appended after the runs; no timing pass is inferred from
+functional tests.
+
+### Observed results and the remaining performance gate
+
+- Final correctness: native and production `js-pow` wasm each match all 42,498
+  V8 cases, including 200 corpus cases, and 13 × 400,000 math samples. The same
+  vectors compare tracked/untracked evaluation and bound numeric plans with
+  changed time/frame/keyed inputs. No references or tolerances changed. The
+  non-production no-`js-pow` fallback retains its established seven pow-only
+  case differences; production uses V8's Math.pow import.
+- The final renderer/kernel selection passes 155 tests with two opt-in skips;
+  the held-real-wasm agent and activation e2es both pass. Clippy is clean and
+  renderer typecheck reports zero errors and the existing IconCropper warning.
+- First completed quiet-machine expression pairs: 400 channels, median native
+  191.700 µs/frame versus today 65.400 µs/frame. The intermediate numeric/slot
+  pass measured 113.750 versus 65.050 µs/frame (284.375 versus 162.625 ns/call).
+  Intermediate scalar calls measured 371.500 versus 90.000 ns. Those rows fail
+  the no-slower target. They precede the final source/module freeze and removal
+  of per-channel error-string conversions, and are not final-code timing claims.
+- The final timing retry passed the load <=8 guard, but never acquired the
+  shared Electron lock. The expression job waited over ten minutes; the fresh
+  boot-pair job also remained queued. The lock was held by other lanes' native
+  text harnesses. Only this worktree's verified waiting wrappers were stopped;
+  no other lane or lock was changed. Final-code P6 timing is **unverified**, and
+  its performance gate stays open. Own `engine/target` was removed.
+- Five alternating boot pairs were captured earlier with load <=8 before each
+  launch. Today UI median/max: 608.318/806.402 ms; native: 617.971/662.866 ms.
+  Editor median/max: 889.924/1093.429 versus 922.988/940.655 ms. Editor-open span
+  median/max: 114.364/116.636 versus 116.236/120.156 ms. All launches returned
+  activation value 10 with no native failure/fallback. The medians regress, so
+  this is not a performance pass. That first capture included a redundant df
+  call inside the startup timing span; the harness now checks disk entirely
+  outside that span, and the corrected final rerun was blocked by the lock.
+- App runs reused fixups2's matching-protocol native addons through explicit
+  absolute overrides; pm-wasm was rebuilt from this branch. The expression
+  results concern the renderer's actual pm-wasm facade. Rebuild integration's
+  addons before treating a new startup run as the full Phase 3c timing gate.
+
+Evidence is outside Git: `/tmp/ne-w5/fixups3-evidence/` (first pairs),
+`/tmp/ne-w5/fixups3-profile/` (intermediate diagnostics),
+`/tmp/ne-w5/fixups3-final-expression-parity.log`,
+`/tmp/ne-w5/fixups3-boot-native-e2e.log`, the final unit/typecheck/clippy logs,
+and `fixups3-resource-block.json` plus the load retry records. No final
+performance pass is inferred from correctness. Cold address interning remains
+separate from the warm resident-frame measurement; arbitrary direct synchronous
+compatibility calls outside the readiness boundaries still require a ready host.
