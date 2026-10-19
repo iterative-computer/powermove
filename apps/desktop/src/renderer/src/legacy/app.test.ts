@@ -27,7 +27,9 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
   timers: Map<number, any>;
   clearedTimers: number[];
   toasts: string[];
+  frames: Array<() => unknown>;
 } {
+  const frames: Array<() => unknown> = [];
   const memory = new Map<string, any>();
   const listeners = new Map<string, any[]>();
   const timers = new Map<number, any>();
@@ -88,7 +90,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
       listeners.set(name, bucket);
     },
     removeEventListener() {},
-    requestAnimationFrame() { return 1; },
+    requestAnimationFrame(callback: () => unknown) { frames.push(callback); return frames.length; },
     setTimeout(callback: any) {
       const id = ++timerId;
       timers.set(id, callback);
@@ -211,7 +213,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
   }
 
   install(PM);
-  return { PM, memory, listeners, timers, clearedTimers, toasts };
+  return { PM, memory, listeners, timers, clearedTimers, toasts, frames };
 }
 
 describe('legacy app install', () => {
@@ -594,6 +596,83 @@ describe('legacy app install', () => {
   });
   it('boots before viewer, timeline, and inspector extensions activate', () => {
     expect(() => appRegistry(false)).not.toThrow();
+  });
+
+  /** The editor's first-frame hooks, observed through the services and bus it calls. */
+  function firstFrameProbe(PM: PMRegistry, frames: Array<() => unknown>) {
+    const services = PM.Kernel.services;
+    const layout = vi.fn(), frameView = vi.fn(), refresh = vi.fn(), init = vi.fn();
+    Object.assign(services.get('viewer'), { layout });
+    Object.assign(services.get('timeline'), { frameView });
+    Object.assign(services.get('inspector'), { refresh });
+    PM.SpatialAssistant = { init };
+    // Boot's asset restore also refreshes and announces 'assets'; only the
+    // first frame's own announcements are recorded.
+    const emitted: string[] = [];
+    PM.bus.emit = (name: string) => { if (['layers', 'sel', 'projects:open'].includes(name)) emitted.push(name); };
+    const runFrames = () => { while (frames.length) frames.shift()!(); };
+    return { layout, frameView, refresh, init, emitted, runFrames };
+  }
+
+  it('sets the editor up in the first frame when the document can answer', () => {
+    const { PM, frames } = appRegistry();
+    PM.EngineDoc = { enabled: true, strict: true, ready: true };
+    const probe = firstFrameProbe(PM, frames);
+    probe.runFrames();
+    expect(probe.layout).toHaveBeenCalledOnce();
+    expect(probe.frameView).toHaveBeenCalledOnce();
+    expect(probe.refresh).toHaveBeenCalledOnce();
+    expect(probe.init).toHaveBeenCalledOnce();
+    expect(probe.emitted).toEqual(['layers', 'sel', 'projects:open']);
+  });
+
+  it('finishes the first-frame setup once when a Retry recovers a failed document load', async () => {
+    const { PM, frames } = appRegistry();
+    const listeners = new Set<() => void>();
+    let loading: Promise<boolean> | null = null;
+    const doc: any = {
+      enabled: true, strict: true, ready: false, whenReady: Promise.resolve(false),
+      settled: () => loading ?? Promise.resolve(doc.ready),
+      showFailure: vi.fn(),
+      onReady(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn); }; },
+      retry() {
+        loading = Promise.resolve().then(() => {
+          doc.ready = true; loading = null;
+          for (const fn of [...listeners]) fn();
+          return true;
+        });
+        return loading;
+      },
+    };
+    PM.EngineDoc = doc;
+    const probe = firstFrameProbe(PM, frames);
+    probe.runFrames();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    // The load failed: layout ran, nothing that reads the document did, and the
+    // named failure was shown rather than the frame disappearing.
+    expect(probe.layout).toHaveBeenCalledOnce();
+    expect(probe.frameView).toHaveBeenCalledOnce();
+    expect(probe.init).not.toHaveBeenCalled();
+    // Boot's own asynchronous work may announce the projects screen; the
+    // panels were not told about layers or selection.
+    expect(probe.emitted.filter(name => name !== 'projects:open')).toEqual([]);
+    const refreshes = probe.refresh.mock.calls.length;
+    const before = probe.emitted.length;
+    expect(doc.showFailure).toHaveBeenCalled();
+    expect(listeners.size).toBe(1);
+
+    expect(await doc.retry()).toBe(true);
+    probe.runFrames();
+    expect(probe.init).toHaveBeenCalledOnce();
+    expect(probe.refresh).toHaveBeenCalledTimes(refreshes + 1);
+    expect(probe.emitted.slice(before)).toEqual(['layers', 'sel', 'projects:open']);
+    expect(listeners.size).toBe(0);
+    // A later revival does not set the editor up a second time.
+    doc.ready = false;
+    await doc.retry();
+    probe.runFrames();
+    expect(probe.init).toHaveBeenCalledOnce();
+    expect(probe.emitted.slice(before)).toEqual(['layers', 'sel', 'projects:open']);
   });
 
   it('persists appearance changes', () => {

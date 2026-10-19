@@ -117,6 +117,7 @@ import { touchedDocument, writeDocument } from '../engine-doc/write';
 import { assetAudio, assetSource } from './live-media';
 import { createRasterCompat, TICKS_PER_SECOND } from './raster-compat';
 import { compatContext, createCompatContextHost } from './compat-context';
+import { runCommandWhenReady } from '../engine-doc/readiness';
 
 type LegacyPM = Record<string, any>;
 type ExtensionsHostBridge = ExtensionsBridge & Partial<Pick<PowermoveExtensionsBridge, 'fork'>>;
@@ -1066,9 +1067,18 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
 
   /* Route through PM.cmd when present: it is the app's public command seam
      (native menu IPC and tests interpose on it). Falls back to the kernel. */
-  const keyListener = kernel.installKeyListener((command, args) =>
-    typeof PM?.cmd === 'function' ? PM.cmd(command, ...(args ?? [])) : runKernelCommand(kernel, command, args)
-  );
+  let inputActive = true;
+  subscriptions.push(() => { inputActive = false; });
+  /* App commands (Settings, the palette, windows and tabs, opening another
+     project) always run. A document command waits while the document module
+     loads (boot, Retry or revival) and runs once it settles; if the load
+     failed it does not run and the engine's named failure shows again
+     (engine-doc/readiness.ts). Trusted keys from sandboxed panels resolve
+     their binding through this same runner. */
+  const keyListener = kernel.installKeyListener((command, args) => runCommandWhenReady(PM, command, () => {
+    if (!inputActive) return undefined;
+    return typeof PM?.cmd === 'function' ? PM.cmd(command, ...(args ?? [])) : runKernelCommand(kernel, command, args);
+  }));
   subscriptions.push(() => keyListener.dispose());
   const inputKeyOff = hostBridge()?.onInputKey?.(input => kernel.dispatchTrustedKey(input));
   if (inputKeyOff) subscriptions.push(inputKeyOff);
