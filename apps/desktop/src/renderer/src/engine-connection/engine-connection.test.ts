@@ -133,7 +133,20 @@ describe('the engine connection', () => {
     expect(session.failures).toEqual([`invalidMessage: ${reason}`]);
     expect(messages).toContainEqual({ type: 'failure', reason: `invalidMessage: ${reason}` });
     session.close();
-    connection.close();
+    connection.close('test done');
+  });
+
+  it('records a failed extension snapshot without taking the viewer\'s frame off the stage', async () => {
+    const { connection } = await connected();
+    const messages: unknown[] = [];
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {},
+      handlers: { message: (m) => messages.push(m), closed: () => {} } });
+    await session.start();
+    session.reportFailure('invalidMessage', 'The layer raster could not be made: no layer L1.', performance.now(), false);
+    expect(session.failures).toEqual(['invalidMessage: The layer raster could not be made: no layer L1.']);
+    expect(messages.filter((m) => (m as { type: string }).type === 'failure')).toEqual([]);
+    session.close();
+    connection.close('test done');
   });
 
   it('opens a session, resyncs the document, and follows the patch stream in order', async () => {

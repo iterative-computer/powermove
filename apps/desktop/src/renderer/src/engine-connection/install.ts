@@ -375,7 +375,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const ticks = rate ? (TICKS_PER_SECOND * rate.den) / rate.num : 0;
       return Number.isInteger(ticks) && ticks > 0 ? ticks : null;
     },
-    onFailure: (code, message) => current?.reportFailure(code, message),
+    // A snapshot's own failure (an extension's request): recorded, never on the stage.
+    onFailure: (code, message) => current?.reportFailure(code, message, undefined, false),
     onProducerError: (error) => {
       current?.reportFailure(error instanceof EngineSnapshotError ? error.code : 'internal', error instanceof Error ? error.message : String(error));
       const now = performance.now();

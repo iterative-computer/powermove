@@ -567,12 +567,20 @@ export class DocumentSession {
     }
   }
 
-  /** Local compatibility failures and engine reports share one diagnostic surface. */
-  reportFailure(code: string, message: string, arrivedMs = performance.now()): void {
+  /**
+   * Local compatibility failures and engine reports share one diagnostic
+   * surface. A failure of the viewer's own frame (`frame`: the engine's
+   * report on the session, a raster producer answering the compositor) that
+   * is an invalid request also names itself on the stage. A failure of a
+   * snapshot an extension asked for (`render.raster`, `render.snapshot`,
+   * `renderFrameTo`) is the caller's: it is recorded and logged, and the
+   * viewer keeps its frame, as today's viewer never hears of it.
+   */
+  reportFailure(code: string, message: string, arrivedMs = performance.now(), frame = true): void {
     const reason = `${code}: ${message}`;
     if (this.failures.at(-1) !== reason) this.failures.push(reason);
     if (this.failures.length > 32) this.failures.shift();
-    if (code === 'invalidMessage') this.options.handlers.message({ type: 'failure', reason }, arrivedMs);
+    if (frame && code === 'invalidMessage') this.options.handlers.message({ type: 'failure', reason }, arrivedMs);
   }
 
   /** Posts an event on the session's port (compatibility uploads). */
