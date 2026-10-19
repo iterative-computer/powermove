@@ -449,8 +449,9 @@ pub extern "C" fn pm_heap_reset_peak() {
 pub extern "C" fn pm_stats() -> usize {
     with(|s| {
         let st = s.engine.stats;
+        let cache = s.engine.evaluation_cache_stats();
         let text = format!(
-            "{{\"batches\":{},\"ops\":{},\"resyncs\":{},\"queries\":{},\"unanswered\":{},\"detachedHits\":{},\"detachedMisses\":{},\"revision\":{}}}",
+            "{{\"batches\":{},\"ops\":{},\"resyncs\":{},\"queries\":{},\"unanswered\":{},\"detachedHits\":{},\"detachedMisses\":{},\"revision\":{},\"evalPlans\":{},\"evalReused\":{},\"evalMemoHits\":{}}}",
             st.batches,
             st.ops,
             st.resyncs,
@@ -458,7 +459,10 @@ pub extern "C" fn pm_stats() -> usize {
             st.unanswered,
             st.detached_hits,
             st.detached_misses,
-            s.engine.revision()
+            s.engine.revision(),
+            cache.plans,
+            cache.reused,
+            cache.memo_hits,
         );
         reply(s, &text, false)
     })

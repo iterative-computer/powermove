@@ -73,6 +73,12 @@ pub trait CompiledExpression: Send + Sync {
         None
     }
 
+    /// Whether a bound plan's fixed inputs still equal this context exactly.
+    /// `None` cannot prove a binding valid; callers rebind via the source.
+    fn binding_matches(&self, _cx: &ExprContext<'_>) -> Option<bool> {
+        None
+    }
+
     /// Optional revision-bound numeric plan needing no document context.
     /// The caller uses only finite answers; all other cases keep `evaluate`.
     fn evaluate_scalars(&self, _t: f64, _time: f64, _value: f64) -> Option<f64> {

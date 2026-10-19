@@ -115,6 +115,19 @@ pub fn evaluate_case(source: &[u16], spec: &Json, dialect: Dialect) -> Json {
             _ => panic!("tracked and untracked disagree"),
         }
         if let Some(bound) = expr.bind_numeric(&JsonHost::new(), &ctx) {
+            let fixed_bits = expr.numeric_fixed_bits(&JsonHost::new(), &ctx);
+            if let Some(bits) = &fixed_bits {
+                assert!(
+                    expr.numeric_fixed_matches(&JsonHost::new(), &ctx, bits),
+                    "fixed numeric binding must match its source"
+                );
+                let mut extra = bits.clone();
+                extra.push(0);
+                assert!(
+                    !expr.numeric_fixed_matches(&JsonHost::new(), &ctx, &extra),
+                    "an extra fixed binding input must not match"
+                );
+            }
             for alternate in [false, true] {
                 let mut at = ctx.clone();
                 if alternate {
@@ -125,6 +138,9 @@ pub fn evaluate_case(source: &[u16], spec: &Json, dialect: Dialect) -> Json {
                 }
                 let original = expr.evaluate_untracked(&JsonHost::new(), &at);
                 let prepared = bound.evaluate_untracked(&JsonHost::new(), &at);
+                if let Some(bits) = &fixed_bits {
+                    assert!(expr.numeric_fixed_matches(&JsonHost::new(), &at, bits));
+                }
                 if let Some(base) = at.value.as_number()
                     && let Some(n) = bound.evaluate_scalars(at.t, at.time, base)
                 {

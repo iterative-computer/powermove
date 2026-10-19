@@ -302,6 +302,8 @@ enum Plan {
 
 #[derive(Clone)]
 struct ExpressionPlan {
+    source: Option<Arc<dyn CompiledExpression>>,
+    bound: bool,
     compiled: Option<Arc<dyn CompiledExpression>>,
     value: Option<JsValue>,
 }
@@ -1140,15 +1142,39 @@ impl Evaluator {
             self.slots[index].state = None;
             return Ok(JsValue::Undefined);
         };
-        let mut found = layer_index.strings.get(&address.layer).copied();
         let mut layers = cx.layers();
-        // The layer's `id` node, read once: checked here and reused below.
-        let mut id_node = found.and_then(|(pos, _)| node::member(layers.get(pos), "id"));
+        // An edit outside the layer list preserves every validated address,
+        // owner, base and local-time offset in that list. No id/property walk
+        // is needed just to revise a parameter at the project root.
+        let stable_layers = self.slots[index].state.as_ref().is_some_and(|state| {
+            state.unique
+                && state.at_root == cx.at_root()
+                && state.validated <= revision
+                && state.position < layers.len()
+                && cx.layers_node().is_some_and(|n| n.rev() <= state.validated)
+        });
+        let mut found = if stable_layers {
+            Some((
+                self.slots[index].state.as_ref().expect("stable").position,
+                false,
+            ))
+        } else {
+            layer_index.strings.get(&address.layer).copied()
+        };
+        // A changed list uses the shared current index and verifies its id.
+        let mut id_node = if stable_layers {
+            None
+        } else {
+            found.and_then(|(pos, _)| node::member(layers.get(pos), "id"))
+        };
         // The index belongs to this `layers` node (see `layer_index`), so the
         // layer at `pos` has the addressed id. Check anyway: a caller that
         // breaks the one-document contract gets a rebuilt index, not another
         // layer's answer.
-        if found.is_some() && node::string(id_node).is_none_or(|s| *s != address.layer) {
+        if !stable_layers
+            && found.is_some()
+            && node::string(id_node).is_none_or(|s| *s != address.layer)
+        {
             self.stats.stale_indexes += 1;
             let rebuilt = self.build_layer_index(cx);
             found = rebuilt.strings.get(&address.layer).copied();
@@ -1180,7 +1206,9 @@ impl Evaluator {
                 let same_layer = unique
                     && state.unique
                     && state.at_root == at_root
-                    && id_node.is_some_and(|n| n.rev() <= state.validated);
+                    && (stable_layers
+                        || layer.rev() <= state.validated
+                        || id_node.is_some_and(|n| n.rev() <= state.validated));
                 let unchanged = same_layer
                     && (layer.rev() <= state.validated
                         || match &address.via {
@@ -1197,16 +1225,66 @@ impl Evaluator {
                     state.plan,
                     Plan::Live { expression: true } | Plan::Expression(_)
                 );
-                if expression && cx.root().rev() > state.validated {
-                    None // revision-local expression bindings cannot survive any document edit
-                } else if unchanged {
-                    let from = node::to_number(node::member(Some(layer), "from"));
-                    let memo_ok = if expression {
-                        cx.root().rev() <= state.validated
+                if unchanged {
+                    let from = if layer.rev() <= state.validated {
+                        state.from
                     } else {
-                        from.to_bits() == state.from.to_bits()
+                        node::to_number(node::member(Some(layer), "from"))
                     };
-                    Some((memo_ok, from))
+                    let same_from = from.to_bits() == state.from.to_bits();
+                    match &state.plan {
+                        Plan::Expression(plan) if cx.root().rev() > state.validated => {
+                            if plan.bound {
+                                let fps = cx.expression_fps();
+                                let value = JsValue::Undefined;
+                                let context = ExprContext {
+                                    t: 0.0,
+                                    time: 0.0,
+                                    fps: &fps,
+                                    frame: None,
+                                    value: &value,
+                                    layer: Some(layer),
+                                    comp: cx,
+                                    channel: &address.key,
+                                    idx: if plan.source.as_ref().is_some_and(|s| s.needs_idx()) {
+                                        pos as f64
+                                    } else {
+                                        0.0
+                                    },
+                                };
+                                if plan
+                                    .compiled
+                                    .as_ref()
+                                    .and_then(|c| c.binding_matches(&context))
+                                    == Some(true)
+                                {
+                                    Some((same_from, from, None))
+                                } else {
+                                    let bound = plan.source.as_ref().and_then(|s| s.bind(&context));
+                                    let rebound = ExpressionPlan {
+                                        compiled: bound.clone().or_else(|| plan.source.clone()),
+                                        source: plan.source.clone(),
+                                        bound: bound.is_some(),
+                                        value: plan.value.clone(),
+                                    };
+                                    Some((false, from, Some(rebound)))
+                                }
+                            } else {
+                                // No fixed binding exists. Keep the immutable source;
+                                // unknown document reads invalidate its last answer.
+                                Some((false, from, None))
+                            }
+                        }
+                        Plan::Live { expression: true } if cx.root().rev() > state.validated => {
+                            None
+                        }
+                        _ => Some((
+                            !expression || cx.root().rev() <= state.validated,
+                            from,
+                            None,
+                        ))
+                        .map(|(memo, from, plan)| (memo && same_from, from, plan)),
+                    }
                 } else {
                     None
                 }
@@ -1214,20 +1292,26 @@ impl Evaluator {
             _ => None,
         };
         match keep {
-            Some((memo_ok, from)) => {
+            Some((memo_ok, from, rebound)) => {
+                if rebound.is_some() {
+                    self.stats.plans += 1;
+                }
                 self.stats.reused += 1;
                 let state = self.slots[index].state.as_mut().expect("state");
                 state.validated = revision;
                 state.position = pos;
                 state.unique = unique;
                 state.from = from;
+                if let Some(plan) = rebound {
+                    state.plan = Plan::Expression(plan);
+                }
                 if !memo_ok {
                     state.memo = None;
                 }
             }
             None => {
                 self.stats.plans += 1;
-                let (plan, from) = self.plan(cx, layer, &address);
+                let (plan, from) = self.plan(cx, layer, &address, pos);
                 self.slots[index].state = Some(SlotState {
                     validated: revision,
                     position: pos,
@@ -1257,6 +1341,16 @@ impl Evaluator {
                 })
             }
             Plan::Expression(plan) => {
+                // Revalidation must retain the numeric execution path too:
+                // a drag revises the document on every evaluated frame.
+                if self.errors.is_empty()
+                    && let (Some(compiled), Some(JsValue::Number(base))) =
+                        (&plan.compiled, &plan.value)
+                    && let Some(n) = compiled.evaluate_scalars(time - state.from, time, *base)
+                    && n.is_finite()
+                {
+                    return Ok(JsValue::Number(n));
+                }
                 let plan = plan.clone();
                 let from = state.from;
                 self.eval_expression_plan(cx, layer, &address, plan, from, time)
@@ -1325,7 +1419,13 @@ impl Evaluator {
     }
 
     /// Decides how an address evaluates at this revision.
-    fn plan(&mut self, cx: &Comp<'_>, layer: &Node, address: &PropAddress) -> (Plan, f64) {
+    fn plan(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        address: &PropAddress,
+        position: usize,
+    ) -> (Plan, f64) {
         let from = node::to_number(node::member(Some(layer), "from"));
         if self.hooks.overrides_channels() {
             return (Plan::Live { expression: true }, from);
@@ -1374,33 +1474,35 @@ impl Evaluator {
             // still answers nonempty tracks at the exact requested local time.
             let keyed =
                 node::array(node::member(Some(p), "kf")).is_some_and(|keys| !keys.is_empty());
-            let compiled = expr
+            let source = expr
                 .node()
                 .and_then(|n| node::string(Some(n)))
-                .and_then(|source| self.compiled.get(self.expressions.as_deref(), source))
-                .map(|compiled| {
-                    let fps = cx.expression_fps();
-                    let value = JsValue::Undefined;
-                    let context = ExprContext {
-                        t: 0.0,
-                        time: 0.0,
-                        fps: &fps,
-                        frame: None,
-                        value: &value,
-                        layer: Some(layer),
-                        comp: cx,
-                        channel: &address.key,
-                        idx: if compiled.needs_idx() {
-                            cx.index_of_layer(Some(layer))
-                        } else {
-                            0.0
-                        },
-                    };
-                    compiled.bind(&context).unwrap_or(compiled)
-                });
+                .and_then(|source| self.compiled.get(self.expressions.as_deref(), source));
+            let bound = source.as_ref().and_then(|compiled| {
+                let fps = cx.expression_fps();
+                let value = JsValue::Undefined;
+                let context = ExprContext {
+                    t: 0.0,
+                    time: 0.0,
+                    fps: &fps,
+                    frame: None,
+                    value: &value,
+                    layer: Some(layer),
+                    comp: cx,
+                    channel: &address.key,
+                    idx: if compiled.needs_idx() {
+                        position as f64
+                    } else {
+                        0.0
+                    },
+                };
+                compiled.bind(&context)
+            });
             return (
                 Plan::Expression(ExpressionPlan {
-                    compiled,
+                    compiled: bound.clone().or_else(|| source.clone()),
+                    bound: bound.is_some(),
+                    source,
                     value: (!keyed).then(|| node::get(p, b"v").to_js()),
                 }),
                 from,

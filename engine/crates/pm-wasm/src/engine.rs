@@ -534,6 +534,11 @@ impl Engine {
         }
     }
 
+    /// Diagnostics for incremental plan reuse (not on the evaluation path).
+    pub fn evaluation_cache_stats(&self) -> pm_eval::CacheStats {
+        self.ev.cache_stats()
+    }
+
     /// The expression error recorded for an id's channel, if any.
     pub fn expression_error(&self, id: PropId) -> Option<&str> {
         let a = self.ev.address(id)?;

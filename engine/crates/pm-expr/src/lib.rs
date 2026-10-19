@@ -72,6 +72,7 @@ pub use value::{
 
 use bytecode::Program;
 use eval::Evaluator;
+use std::sync::Arc;
 
 /// Which names exist.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -114,8 +115,8 @@ pub struct Context<O> {
 /// cheap to evaluate many times.
 #[derive(Clone, Debug)]
 pub struct Expression {
-    program: Program,
-    numeric: Option<numeric::Numeric>,
+    program: Arc<Program>,
+    numeric: Option<Arc<numeric::Numeric>>,
     needs_idx: bool,
     dialect: Dialect,
 }
@@ -203,8 +204,8 @@ impl Expression {
         }
         let tree = parser::parse(units).map_err(CompileError::Syntax)?;
         Ok(Expression {
-            program: Program::compile(&tree),
-            numeric: numeric::Numeric::compile(&tree, dialect),
+            program: Arc::new(Program::compile(&tree)),
+            numeric: numeric::Numeric::compile(&tree, dialect).map(Arc::new),
             needs_idx: needs_idx(units),
             dialect,
         })
@@ -248,8 +249,37 @@ impl Expression {
     /// bytecode remains available for any runtime type requiring coercion.
     pub fn bind_numeric<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Option<Self> {
         let mut out = self.clone();
-        out.numeric = Some(self.numeric.as_ref()?.bind(host, ctx));
+        out.numeric = Some(Arc::new(self.numeric.as_ref()?.bind(host, ctx)));
         Some(out)
+    }
+
+    /// Whether the fixed numeric inputs read the current layer object.
+    pub fn numeric_fixed_uses_layer(&self) -> bool {
+        self.numeric.as_ref().is_some_and(|n| n.fixed_uses_layer())
+    }
+
+    /// Exact bits of every fixed numeric input in the original typed plan.
+    /// `None` means a field or parameter is not numeric, so a document-bound
+    /// plan cannot be safely reused. Dynamic time, frame and value are omitted.
+    pub fn numeric_fixed_bits<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Option<Vec<u64>> {
+        let mut bits = Vec::new();
+        self.numeric.as_ref()?.fixed_bits(host, ctx, &mut bits)?;
+        Some(bits)
+    }
+
+    /// Allocation-free comparison with the original plan's fixed inputs.
+    /// This must be called on the source expression, never on a folded binding.
+    pub fn numeric_fixed_matches<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+        bits: &[u64],
+    ) -> bool {
+        let Some(numeric) = &self.numeric else {
+            return false;
+        };
+        let mut position = 0;
+        numeric.fixed_matches(host, ctx, bits, &mut position) && position == bits.len()
     }
 
     /// A revision-bound numeric plan with no remaining document/context reads.

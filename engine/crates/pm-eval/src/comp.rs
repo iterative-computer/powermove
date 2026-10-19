@@ -6,6 +6,8 @@
 //! revision.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+static NEXT_BINDING_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 use pm_model::ingest::IngestRate;
 use pm_model::{Document, JsString, Node, NodeKind};
@@ -54,6 +56,8 @@ pub struct Comp<'d> {
     node: &'d Node,
     revision: u64,
     rate: std::cell::OnceCell<Option<IngestRate>>,
+    expression_fps: std::cell::OnceCell<JsValue>,
+    binding_token: u64,
     /// The open composition of a canonical document (see above).
     open_canonical: bool,
     /// The open composition seen through `rootComp(PM.proj)` (see
@@ -127,6 +131,8 @@ impl<'d> Comp<'d> {
             node,
             revision,
             rate: std::cell::OnceCell::new(),
+            expression_fps: std::cell::OnceCell::new(),
+            binding_token: NEXT_BINDING_TOKEN.fetch_add(1, Ordering::Relaxed),
             open_canonical,
             stored_root_view: false,
         })
@@ -141,6 +147,8 @@ impl<'d> Comp<'d> {
             id: JsString::from(id),
             revision,
             rate: std::cell::OnceCell::new(),
+            expression_fps: std::cell::OnceCell::new(),
+            binding_token: NEXT_BINDING_TOKEN.fetch_add(1, Ordering::Relaxed),
             open_canonical: false,
             stored_root_view: false,
         }
@@ -167,6 +175,12 @@ impl<'d> Comp<'d> {
     /// copy), so caches keyed by composition id also key on this.
     pub fn at_root(&self) -> bool {
         std::ptr::eq(self.node, self.root)
+    }
+
+    /// Identity of this immutable resolved view. Binding validation can share
+    /// work inside one batch without retaining document-pointer assumptions.
+    pub fn binding_token(&self) -> u64 {
+        self.binding_token
     }
 
     /// The document revision this composition was resolved at.
@@ -254,12 +268,16 @@ impl<'d> Comp<'d> {
 
     /// `comp.fps || PM.proj.fps`, the `fps` expressions see.
     pub fn expression_fps(&self) -> JsValue {
-        let fps = self.member("fps");
-        if node::truthy(fps) {
-            node::js_value_opt(fps)
-        } else {
-            self.project_fps()
-        }
+        self.expression_fps
+            .get_or_init(|| {
+                let fps = self.member("fps");
+                if node::truthy(fps) {
+                    node::js_value_opt(fps)
+                } else {
+                    self.project_fps()
+                }
+            })
+            .clone()
     }
 
     /// `Number(comp.dur)`.

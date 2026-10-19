@@ -27,6 +27,81 @@ pub(crate) enum Input {
 }
 
 impl Numeric {
+    /// Traverse fixed leaves in syntax order. A nonnumeric document leaf must
+    /// decline the entire reusable binding, including if another leaf is
+    /// numeric: partial folding could otherwise leave stale constants.
+    pub fn fixed_bits<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+        bits: &mut Vec<u64>,
+    ) -> Option<()> {
+        if self.is_fixed_leaf() {
+            bits.push(self.evaluate(host, ctx)?.to_bits());
+            return Some(());
+        }
+        match self {
+            Self::Negate(n) => n.fixed_bits(host, ctx, bits)?,
+            Self::Binary(_, l, r) => {
+                l.fixed_bits(host, ctx, bits)?;
+                r.fixed_bits(host, ctx, bits)?;
+            }
+            Self::Math(_, args) => {
+                for arg in args {
+                    arg.fixed_bits(host, ctx, bits)?;
+                }
+            }
+            _ => {}
+        }
+        Some(())
+    }
+
+    pub fn fixed_matches<H: Host>(
+        &self,
+        host: &H,
+        ctx: &Context<H::Obj>,
+        bits: &[u64],
+        position: &mut usize,
+    ) -> bool {
+        if self.is_fixed_leaf() {
+            let expected = bits.get(*position);
+            *position += 1;
+            return self
+                .evaluate(host, ctx)
+                .is_some_and(|n| expected == Some(&n.to_bits()));
+        }
+        match self {
+            Self::Negate(n) => n.fixed_matches(host, ctx, bits, position),
+            Self::Binary(_, l, r) => {
+                l.fixed_matches(host, ctx, bits, position)
+                    && r.fixed_matches(host, ctx, bits, position)
+            }
+            Self::Math(_, args) => args
+                .iter()
+                .all(|arg| arg.fixed_matches(host, ctx, bits, position)),
+            _ => true,
+        }
+    }
+
+    pub fn fixed_uses_layer(&self) -> bool {
+        match self {
+            Self::Field(Input::Layer, _) => true,
+            Self::Negate(n) => n.fixed_uses_layer(),
+            Self::Binary(_, l, r) => l.fixed_uses_layer() || r.fixed_uses_layer(),
+            Self::Math(_, args) => args.iter().any(Self::fixed_uses_layer),
+            _ => false,
+        }
+    }
+
+    fn is_fixed_leaf(&self) -> bool {
+        matches!(
+            self,
+            Self::Input(Input::Fps | Input::Index)
+                | Self::Field(Input::Layer | Input::Comp, _)
+                | Self::Param(..)
+        )
+    }
+
     pub fn compile(node: &Node, dialect: Dialect) -> Option<Self> {
         Some(match node {
             Node::Literal(Literal::Number(n)) => Self::Number(*n),

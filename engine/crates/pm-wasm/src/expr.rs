@@ -9,7 +9,7 @@
 //! revisioned tree, and object identity (`comp.layers[0] === layer`) is node
 //! identity.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use pm_eval::{Comp, CompiledExpression, ExprContext, ExprError, ExpressionEngine, JsValue};
 use pm_expr::{Context, Dialect, Expression, Host, JsStr, Object, Shape, Value};
@@ -30,23 +30,105 @@ impl ExpressionEngine for PmExpressions {
             keys.extend(
                 ["params", "value", "toString"].map(|s| (JsStr::from(s), JsString::from(s))),
             );
-            Arc::new(Compiled {
+            let uses_layer = e.numeric_fixed_uses_layer();
+            let source = Arc::new(Source {
                 expression: e,
                 channel,
                 keys,
                 empty: JsStr::default(),
+                uses_layer,
+                bindings: Mutex::new(Vec::new()),
+                latest: Mutex::new(None),
+            });
+            Arc::new(Compiled {
+                source,
+                bound: None,
+                binding_bits: None,
                 index: None,
+                verified: Mutex::new(None),
             }) as Arc<dyn CompiledExpression>
         })
     }
 }
 
-struct Compiled {
+type BindingPool = Vec<(Arc<[u64]>, Weak<Compiled>)>;
+
+struct Source {
     expression: Expression,
     channel: bool,
     keys: Vec<(JsStr, JsString)>,
     empty: JsStr,
+    // Weak entries avoid a Source -> Compiled -> Source ownership cycle.
+    bindings: Mutex<BindingPool>,
+    uses_layer: bool,
+    latest: Mutex<Option<(BindingStamp, Weak<Compiled>)>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BindingStamp {
+    view: u64,
+    layer: usize,
+    idx: u64,
+    fps: u64,
+}
+
+impl Source {
+    fn stamp(&self, cx: &ExprContext<'_>) -> BindingStamp {
+        BindingStamp {
+            view: cx.comp.binding_token(),
+            layer: if self.uses_layer {
+                cx.layer.map_or(0, |n| n as *const Node as usize)
+            } else {
+                0
+            },
+            idx: if self.expression.needs_idx() {
+                cx.idx.to_bits()
+            } else {
+                0
+            },
+            fps: cx.fps.to_number().to_bits(),
+        }
+    }
+}
+
+struct Compiled {
+    source: Arc<Source>,
+    bound: Option<Expression>,
+    binding_bits: Option<Arc<[u64]>>,
     index: Option<f64>,
+    verified: Mutex<Option<(BindingStamp, bool)>>,
+}
+
+impl Compiled {
+    fn expression(&self) -> &Expression {
+        self.bound.as_ref().unwrap_or(&self.source.expression)
+    }
+
+    fn binding_context<'a>(&self, cx: &ExprContext<'a>) -> Context<Obj<'a>> {
+        Context {
+            t: 0.0,
+            time: 0.0,
+            fps: cx.fps.to_number(),
+            frame: f64::NAN,
+            value: Value::Undefined,
+            layer: cx.layer.map_or(Value::Undefined, NodeHost::node),
+            comp: Value::Object(Object::Doc(Obj::Comp(cx.comp))),
+            channel: self.source.empty.clone(),
+            idx: cx.idx,
+        }
+    }
+
+    fn binding_bits(&self, cx: &ExprContext<'_>) -> Option<Vec<u64>> {
+        let host = NodeHost(&self.source.keys);
+        let ctx = self.binding_context(cx);
+        let mut bits = self.source.expression.numeric_fixed_bits(&host, &ctx)?;
+        // `needsIdx` is a source regex, including mentions inside literals.
+        // Preserve the exact captured index for bytecode fallback too.
+        if self.source.expression.needs_idx() {
+            bits.push(cx.idx.to_bits());
+        }
+        Some(bits)
+    }
 }
 
 /// A document object as an expression sees it.
@@ -172,7 +254,7 @@ impl<'a> Host for NodeHost<'a> {
 
 impl CompiledExpression for Compiled {
     fn needs_idx(&self) -> bool {
-        self.index.is_none() && self.expression.needs_idx()
+        self.index.is_none() && self.source.expression.needs_idx()
     }
 
     fn needs_frame(&self) -> bool {
@@ -180,33 +262,107 @@ impl CompiledExpression for Compiled {
     }
 
     fn bind(&self, cx: &ExprContext<'_>) -> Option<Arc<dyn CompiledExpression>> {
-        let host = NodeHost(&self.keys);
-        let ctx = Context {
-            t: 0.0,
-            time: 0.0,
-            fps: cx.fps.to_number(),
-            frame: f64::NAN,
-            value: Value::Undefined,
-            layer: cx.layer.map_or(Value::Undefined, NodeHost::node),
-            comp: Value::Object(Object::Doc(Obj::Comp(cx.comp))),
-            channel: self.empty.clone(),
-            idx: self.index.unwrap_or(cx.idx),
-        };
-        Some(Arc::new(Self {
-            expression: self.expression.bind_numeric(&host, &ctx)?,
-            channel: self.channel,
-            keys: self.keys.clone(),
-            empty: self.empty.clone(),
+        let stamp = self.source.stamp(cx);
+        if let Some((previous, plan)) = &*self
+            .source
+            .latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            && *previous == stamp
+            && let Some(plan) = plan.upgrade()
+        {
+            return Some(plan);
+        }
+        let bits: Arc<[u64]> = self.binding_bits(cx)?.into();
+        let mut pool = self
+            .source
+            .bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pool.retain(|(_, binding)| binding.strong_count() != 0);
+        if let Some(existing) = pool
+            .iter()
+            .find(|(key, _)| key.as_ref() == bits.as_ref())
+            .and_then(|(_, binding)| binding.upgrade())
+        {
+            *self
+                .source
+                .latest
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some((stamp, Arc::downgrade(&existing)));
+            return Some(existing);
+        }
+        let host = NodeHost(&self.source.keys);
+        let ctx = self.binding_context(cx);
+        let compiled = Arc::new(Self {
+            source: self.source.clone(),
+            bound: Some(self.source.expression.bind_numeric(&host, &ctx)?),
+            binding_bits: Some(bits.clone()),
             index: Some(cx.idx),
-        }))
+            verified: Mutex::new(None),
+        });
+        // The cache is only a reuse hint; live slots retain their own plans.
+        if pool.len() == 64 {
+            pool.remove(0);
+        }
+        pool.push((bits, Arc::downgrade(&compiled)));
+        *self
+            .source
+            .latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((stamp, Arc::downgrade(&compiled)));
+        Some(compiled)
+    }
+
+    fn binding_matches(&self, cx: &ExprContext<'_>) -> Option<bool> {
+        let bits = self.binding_bits.as_ref()?;
+        if bits.is_empty() {
+            return Some(true);
+        }
+        let stamp = self.source.stamp(cx);
+        if let Some((previous, result)) = *self
+            .verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            && previous == stamp
+        {
+            return Some(result);
+        }
+        let host = NodeHost(&self.source.keys);
+        let ctx = self.binding_context(cx);
+        let fixed = if self.source.expression.needs_idx() {
+            let (fixed, index) = bits.split_last()?;
+            // split_last returns (last, prefix).
+            if *fixed != cx.idx.to_bits() {
+                *self
+                    .verified
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((stamp, false));
+                return Some(false);
+            }
+            index
+        } else {
+            bits.as_ref()
+        };
+        let result = self
+            .source
+            .expression
+            .numeric_fixed_matches(&host, &ctx, fixed);
+        *self
+            .verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((stamp, result));
+        Some(result)
     }
 
     fn evaluate_scalars(&self, t: f64, time: f64, value: f64) -> Option<f64> {
-        self.expression.evaluate_scalars(t, time, value)
+        self.expression().evaluate_scalars(t, time, value)
     }
 
     fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
-        let host = NodeHost(&self.keys);
+        let host = NodeHost(&self.source.keys);
         let ctx = Context {
             t: cx.t,
             time: cx.time,
@@ -215,14 +371,14 @@ impl CompiledExpression for Compiled {
             value: NodeHost::js(cx.value),
             layer: cx.layer.map_or(Value::Undefined, NodeHost::node),
             comp: Value::Object(Object::Doc(Obj::Comp(cx.comp))),
-            channel: if self.channel {
+            channel: if self.source.channel {
                 js_str(cx.channel)
             } else {
-                self.empty.clone()
+                self.source.empty.clone()
             },
             idx: self.index.unwrap_or(cx.idx),
         };
-        let out = self.expression.evaluate_untracked(&host, &ctx);
+        let out = self.expression().evaluate_untracked(&host, &ctx);
         match out {
             Ok(Value::Number(n)) => Ok(JsValue::Number(n)),
             Ok(Value::Bool(b)) => Ok(JsValue::Bool(b)),
@@ -235,6 +391,90 @@ impl CompiledExpression for Compiled {
             Err(e) => Err(ExprError {
                 message: Some(e.message()),
             }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use pm_model::{Document, Patch};
+
+    #[test]
+    fn equal_source_and_numeric_shape_share_a_plan_and_revalidate_exactly() {
+        let json = r#"{"id":"P","compId":"C","params":{"amp":{"value":7}},"comps":{"C":{"id":"C","fps":30,"layers":[{"id":"A"},{"id":"B"}]}}}"#;
+        let mut doc = Document::new(Some(pm_model::json::parse(json).unwrap()), 1);
+        let source = PmExpressions
+            .compile(&"param(\"amp\") + comp.layers.length + value".into())
+            .unwrap();
+        let bound = {
+            let cx = Comp::resolve(&doc, "C").unwrap();
+            let fps = cx.expression_fps();
+            let base = JsValue::Number(1.0);
+            let key = JsString::from("opacity");
+            let context = ExprContext {
+                t: 0.0,
+                time: 0.0,
+                fps: &fps,
+                frame: None,
+                value: &base,
+                layer: Some(&cx.layers()[0]),
+                comp: &cx,
+                channel: &key,
+                idx: 0.0,
+            };
+            let first = source.bind(&context).unwrap();
+            let other = ExprContext {
+                layer: Some(&cx.layers()[1]),
+                idx: 1.0,
+                ..context
+            };
+            assert!(Arc::ptr_eq(&first, &source.bind(&other).unwrap()));
+            assert_eq!(first.binding_matches(&context), Some(true));
+            assert_eq!(first.evaluate_scalars(0.0, 0.0, 4.0), Some(13.0));
+            first
+        };
+        for value in [
+            pm_model::Value::Number(-0.0),
+            pm_model::Value::String("bad".into()),
+        ] {
+            doc.apply(&[Patch {
+                path: vec!["params".into(), "amp".into(), "value".into()],
+                exists: true,
+                value: Some(value.clone()),
+            }])
+            .unwrap();
+            let cx = Comp::resolve(&doc, "C").unwrap();
+            let fps = cx.expression_fps();
+            let base = JsValue::Number(1.0);
+            let key = JsString::from("opacity");
+            let context = ExprContext {
+                t: 0.0,
+                time: 0.0,
+                fps: &fps,
+                frame: None,
+                value: &base,
+                layer: Some(&cx.layers()[0]),
+                comp: &cx,
+                channel: &key,
+                idx: 0.0,
+            };
+            assert_eq!(bound.binding_matches(&context), Some(false));
+            if matches!(value, pm_model::Value::String(_)) {
+                assert!(
+                    source.bind(&context).is_none(),
+                    "nonnumeric fixed input stays unbound"
+                );
+                assert_eq!(
+                    source.evaluate(&context).unwrap(),
+                    JsValue::String("bad21".into())
+                );
+            } else {
+                let next = source.bind(&context).unwrap();
+                assert!(!Arc::ptr_eq(&bound, &next));
+                assert_eq!(next.binding_matches(&context), Some(true));
+                assert_eq!(next.evaluate_scalars(0.0, 0.0, 1.0), Some(3.0));
+            }
         }
     }
 }
