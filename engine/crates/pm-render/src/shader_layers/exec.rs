@@ -440,7 +440,7 @@ impl crate::exec::Exec<'_> {
             None
         };
         let probe = probe_code.as_ref().and_then(|code| {
-            let verdict = self.effects.parity.verdict(code);
+            let mut verdict = self.effects.parity.verdict(code);
             let request = Arc::new(super::fallback::request(
                 source.layer.clone(),
                 code.clone(),
@@ -449,6 +449,23 @@ impl crate::exec::Exec<'_> {
                 &source.calls,
                 &crate::effects::exec::parity_failure(),
             ));
+            if verdict == crate::effects::parity::Verdict::Unknown {
+                let program = super::fallback::program_id(&request);
+                if self.shaders.failed.contains_key(&program) {
+                    // Its reference can never be drawn (a lasting runner
+                    // failure): pinned, and the runner's failure handling
+                    // below decides what today's app shows.
+                    self.effects.parity.pin(code);
+                    verdict = crate::effects::parity::Verdict::Runner;
+                } else if self.effects.fallback.retries.last(&program).is_some() {
+                    // Its reference failed transiently: the runner's retry
+                    // and backoff below decide when it is asked for again
+                    // (drawing nothing until then, as a pinned program).
+                    // Once the runner draws it, its streak ends and the
+                    // next frame probes it.
+                    return Some((crate::effects::parity::Verdict::Runner, request));
+                }
+            }
             if verdict == crate::effects::parity::Verdict::NativeVerified {
                 if self.effects.parity.take_present(code).as_deref() == Some(request.key.as_str()) {
                     return Some((verdict, request));
@@ -461,18 +478,11 @@ impl crate::exec::Exec<'_> {
             && (*verdict != crate::effects::parity::Verdict::Unknown
                 || self.effects.parity.pending(&request.fragment))
         {
+            // The runner's outcome, with its retry, backoff and failure
+            // handling (a program it cannot draw draws nothing, as today).
             let mut fallback = source.clone();
             fallback.program = ProgramRef::Fallback(request.clone());
-            let drawn = self.shader_source(encoder, &fallback);
-            if matches!(drawn, Err(Missed::Disabled)) {
-                self.effects.fallback.fatal.get_or_insert_with(|| {
-                    format!(
-                        "Layer {}: shader parity is waiting for its WebGL reference",
-                        source.layer
-                    )
-                });
-            }
-            return drawn;
+            return self.shader_source(encoder, &fallback);
         }
         let out = self
             .pool

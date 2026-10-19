@@ -525,7 +525,10 @@ impl Renderer {
         failure: crate::shader_layers::FallbackFailure,
     ) -> Option<std::time::Duration> {
         let now = self.effects.watchdog.now();
-        self.effects.parity.forget(key);
+        // A probe whose WebGL reference fails for good pins its program to
+        // the runner, whose failure handling below reproduces today's
+        // outcome; a transient one is probed again when its retry is due.
+        self.effects.parity.failed(key, &failure);
         if self.effects.fallback.expects(key) {
             self.effects.fallback.put_failure(key, failure, now)
         } else if let Some(program) = self.shaders.waiting.remove(key) {

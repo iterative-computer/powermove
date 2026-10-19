@@ -461,14 +461,9 @@ impl<'c> Gpu<'c> {
                 Some(&result),
             );
             self.taken.push(result);
-            if answer.is_none() && !self.effects.fallback.blocked {
-                self.effects.fallback.fatal.get_or_insert_with(|| {
-                    format!(
-                        "{}: first-use shader parity is waiting for its WebGL reference",
-                        step.definition
-                    )
-                });
-            }
+            // `None` is the runner's own outcome for the step (its request
+            // waits, or its failure is handled as for a pinned program):
+            // the unverified native frame is never presented.
             result = answer?;
         }
         if step.clamp {
@@ -588,14 +583,8 @@ impl<'c> Gpu<'c> {
                 Some(&out),
             );
             self.taken.push(out);
-            if answer.is_none() && !self.effects.fallback.blocked {
-                self.effects.fallback.fatal.get_or_insert_with(|| {
-                    format!(
-                        "{}: first-use shader parity is waiting for its WebGL reference",
-                        step.definition
-                    )
-                });
-            }
+            // As for an effect: the runner's outcome, never the unverified
+            // native frame.
             return answer;
         }
         Some(out)
@@ -760,6 +749,14 @@ impl<'c> Gpu<'c> {
         let program = super::fallback::program_id_of(pm_glsl::VERTEX, &source);
         let (w, h) = (textures[0].width(), textures[0].height());
         if let Some(why) = self.effects.fallback.failure(&program, w, h).cloned() {
+            // A probe whose reference can never be drawn (the failure was
+            // learned from another request of the program): pinned, so
+            // later frames take the runner's path without a native draw.
+            if native.is_some()
+                && self.effects.parity.verdict(&source) == super::parity::Verdict::Unknown
+            {
+                self.effects.parity.pin(&source);
+            }
             self.runner_failed(&span, &program, &why);
             return None;
         }

@@ -3,10 +3,23 @@
 //! Decisions are immutable, content-addressed files, so independent viewer
 //! and job processes cannot overwrite each other's pins. A damaged entry is
 //! unknown and is probed again. Unknown programs always present ANGLE's frame.
+//!
+//! A reference the runner can never draw (a lasting failure,
+//! [`FallbackFailure::is_final`]: WebGL refused the program, its draw passed
+//! the runner's deadline, or its target is past the WebGL size limit) pins
+//! the program to the runner, so the runner's own failure handling
+//! reproduces today's ANGLE outcome (skipped and reported, turned off, or a
+//! named job error). A transient failure leaves it unknown; the runner's
+//! retry and backoff decide when it is asked for again.
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use crate::shader_layers::FallbackPixels;
+use crate::shader_layers::{FallbackFailure, FallbackPixels};
+
+/// How often a cached native verification looks for a pin another process
+/// wrote (one `stat`-sized read per program per period, not per draw).
+const PIN_CHECK: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -25,6 +38,8 @@ pub struct Parity {
     pending: HashMap<String, (String, FallbackPixels)>,
     pending_order: VecDeque<String>,
     present: HashMap<String, String>,
+    /// When each cached native verification last looked for a pin on disk.
+    checked: HashMap<String, Instant>,
 }
 
 impl Parity {
@@ -37,6 +52,7 @@ impl Parity {
         self.pending.clear();
         self.pending_order.clear();
         self.present.clear();
+        self.checked.clear();
     }
 
     pub fn environment(&self) -> Option<&str> {
@@ -61,45 +77,54 @@ impl Parity {
         hash.finalize().to_hex().to_string()
     }
 
+    fn marker(&self, key: &str, suffix: &str, payload: &[u8]) -> bool {
+        self.directory.as_ref().is_some_and(|dir| {
+            std::fs::read(dir.join(format!("{key}.{suffix}")))
+                .ok()
+                .as_deref()
+                == Some(payload)
+        })
+    }
+
     pub fn verdict(&mut self, source: &str) -> Verdict {
         if !self.enabled() {
             return Verdict::NativeVerified;
         }
         let key = self.key(source);
-        // Another renderer/process may have pinned a concurrent first use.
-        // A cached native verification must never conceal that pin.
-        if self.decisions.get(&key) == Some(&Verdict::NativeVerified)
-            && self.directory.as_ref().is_some_and(|dir| {
-                std::fs::read(dir.join(format!("{key}.runner")))
-                    .ok()
-                    .as_deref()
-                    == Some(b"runner\n")
-            })
-        {
-            self.decisions.insert(key.clone(), Verdict::Runner);
+        match self.decisions.get(&key) {
+            Some(Verdict::Runner) => return Verdict::Runner,
+            Some(Verdict::NativeVerified) => {
+                // Another renderer/process may have pinned a concurrent
+                // first use. A cached native verification must never
+                // conceal that pin for long; it is looked for at most once
+                // per `PIN_CHECK` (it was looked for when first cached).
+                let now = Instant::now();
+                if self
+                    .checked
+                    .get(&key)
+                    .is_some_and(|at| now.duration_since(*at) < PIN_CHECK)
+                {
+                    return Verdict::NativeVerified;
+                }
+                self.checked.insert(key.clone(), now);
+                if self.marker(&key, "runner", b"runner\n") {
+                    self.decisions.insert(key, Verdict::Runner);
+                    return Verdict::Runner;
+                }
+                return Verdict::NativeVerified;
+            }
+            Some(Verdict::Unknown) | None => {}
         }
-        *self.decisions.entry(key.clone()).or_insert_with(|| {
-            self.directory
-                .as_ref()
-                .map(|dir| {
-                    if std::fs::read(dir.join(format!("{key}.runner")))
-                        .ok()
-                        .as_deref()
-                        == Some(b"runner\n")
-                    {
-                        Verdict::Runner
-                    } else if std::fs::read(dir.join(format!("{key}.native")))
-                        .ok()
-                        .as_deref()
-                        == Some(b"native-verified\n")
-                    {
-                        Verdict::NativeVerified
-                    } else {
-                        Verdict::Unknown
-                    }
-                })
-                .unwrap_or(Verdict::Unknown)
-        })
+        let verdict = if self.marker(&key, "runner", b"runner\n") {
+            Verdict::Runner
+        } else if self.marker(&key, "native", b"native-verified\n") {
+            self.checked.insert(key.clone(), Instant::now());
+            Verdict::NativeVerified
+        } else {
+            Verdict::Unknown
+        };
+        self.decisions.insert(key, verdict);
+        verdict
     }
 
     /// Diagnostic corpus sweeps exercise every parameter set. Re-probe a
@@ -145,6 +170,29 @@ impl Parity {
         self.pending_order.retain(|key| key != request);
     }
 
+    /// The runner could not draw a request. If it was a probe's reference
+    /// and the failure is lasting, the program is pinned to the runner (the
+    /// runner's failure handling then decides what today's app shows);
+    /// otherwise the probe is forgotten and asked for again once the
+    /// runner's retry is due.
+    pub fn failed(&mut self, request: &str, failure: &FallbackFailure) {
+        let probed = self.pending.remove(request);
+        self.pending_order.retain(|key| key != request);
+        if let Some((source, _)) = probed
+            && failure.is_final()
+        {
+            self.pin(&source);
+        }
+    }
+
+    /// Pins a program to the runner: its WebGL reference can never be
+    /// compared (a lasting runner failure). Pins are never cleared.
+    pub fn pin(&mut self, source: &str) {
+        if self.enabled() {
+            self.decide(source, Verdict::Runner);
+        }
+    }
+
     /// Judge the actual first frame when its answer lands, rather than
     /// waiting for playback to request that exact time/input a second time.
     pub fn answer(&mut self, request: &str, angle: &FallbackPixels) {
@@ -171,40 +219,50 @@ impl Parity {
         } else {
             Verdict::Runner
         };
+        self.decide(source, verdict);
+        verdict
+    }
+
+    fn decide(&mut self, source: &str, verdict: Verdict) {
         let key = self.key(source);
         self.decisions.insert(key.clone(), verdict);
-        if let Some(dir) = &self.directory {
-            let bytes: &[u8] = if verdict == Verdict::Runner {
-                b"runner\n"
-            } else {
-                b"native-verified\n"
-            };
-            // Atomic markers with exact payloads: an interrupted write
-            // cannot be accepted as native verification.
-            let write = || -> std::io::Result<()> {
-                std::fs::create_dir_all(dir)?;
-                // Separate markers: a simultaneous native verification can
-                // never overwrite an ANGLE pin from another process.
-                static WRITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let suffix = if verdict == Verdict::Runner {
-                    "runner"
-                } else {
-                    "native"
-                };
-                let serial = WRITE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let temp = dir.join(format!(".{key}.{}.{serial}", std::process::id()));
-                std::fs::write(&temp, bytes)?;
-                let result = std::fs::rename(&temp, dir.join(format!("{key}.{suffix}")));
-                if result.is_err() {
-                    let _ = std::fs::remove_file(temp);
-                }
-                result
-            };
-            if let Err(error) = write() {
-                eprintln!("shader parity decision could not be persisted: {error}");
-            }
+        // The next verdict looks for a concurrent pin on disk at once.
+        self.checked.remove(&key);
+        if verdict == Verdict::Runner {
+            self.present.remove(&key);
         }
-        verdict
+        let Some(dir) = &self.directory else {
+            return;
+        };
+        let bytes: &[u8] = if verdict == Verdict::Runner {
+            b"runner\n"
+        } else {
+            b"native-verified\n"
+        };
+        // Atomic markers with exact payloads: an interrupted write cannot
+        // be accepted as native verification.
+        let write = || -> std::io::Result<()> {
+            std::fs::create_dir_all(dir)?;
+            // Separate markers: a simultaneous native verification can
+            // never overwrite an ANGLE pin from another process.
+            static WRITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let suffix = if verdict == Verdict::Runner {
+                "runner"
+            } else {
+                "native"
+            };
+            let serial = WRITE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let temp = dir.join(format!(".{key}.{}.{serial}", std::process::id()));
+            std::fs::write(&temp, bytes)?;
+            let result = std::fs::rename(&temp, dir.join(format!("{key}.{suffix}")));
+            if result.is_err() {
+                let _ = std::fs::remove_file(temp);
+            }
+            result
+        };
+        if let Err(error) = write() {
+            eprintln!("shader parity decision could not be persisted: {error}");
+        }
     }
 }
 
@@ -252,6 +310,62 @@ mod tests {
         p.forget("failed");
         assert!(!p.pending("retry"));
         assert_eq!(p.verdict("retry"), Verdict::Unknown);
+    }
+
+    #[test]
+    fn a_lasting_reference_failure_pins_and_a_transient_one_leaves_it_unknown() {
+        let failure = |reason: &str| FallbackFailure {
+            reason: reason.into(),
+            message: String::new(),
+        };
+        let dir = std::env::temp_dir().join(format!("pm-parity-fail-{}", std::process::id()));
+        let mut p = Parity::default();
+        p.configure(Some("failures".into()), Some(dir.clone()));
+        for (reason, pinned) in [
+            ("compile", true),
+            ("watchdog", true),
+            ("tooLarge", true),
+            ("contextLost", false),
+            ("deadline", false),
+            ("unavailable", false),
+            ("size", false),
+        ] {
+            let source = format!("program failing with {reason}");
+            p.start(reason, &source, pixels(0.5));
+            p.failed(reason, &failure(reason));
+            assert!(!p.pending(&source), "{reason}");
+            let expected = if pinned {
+                Verdict::Runner
+            } else {
+                Verdict::Unknown
+            };
+            assert_eq!(p.verdict(&source), expected, "{reason}");
+            let mut restarted = Parity::default();
+            restarted.configure(Some("failures".into()), Some(dir.clone()));
+            assert_eq!(restarted.verdict(&source), expected, "{reason} persisted");
+        }
+        // A failure of a request that was not a probe changes nothing.
+        p.failed("not a probe", &failure("compile"));
+        assert_eq!(p.verdict("unrelated"), Verdict::Unknown);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_cached_verification_looks_for_concurrent_pins_at_a_bounded_rate() {
+        let dir = std::env::temp_dir().join(format!("pm-parity-rate-{}", std::process::id()));
+        let mut viewer = Parity::default();
+        viewer.configure(Some("rate".into()), Some(dir.clone()));
+        viewer.judge("stable", &pixels(0.5), &pixels(0.5));
+        assert_eq!(viewer.verdict("stable"), Verdict::NativeVerified);
+        let mut job = Parity::default();
+        job.configure(Some("rate".into()), Some(dir.clone()));
+        job.pin("stable");
+        // Within the period the cached verification stands (no disk read
+        // per draw); after it, the other process's pin is seen.
+        assert_eq!(viewer.verdict("stable"), Verdict::NativeVerified);
+        std::thread::sleep(PIN_CHECK);
+        assert_eq!(viewer.verdict("stable"), Verdict::Runner);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

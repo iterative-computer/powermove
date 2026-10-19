@@ -1152,3 +1152,316 @@ fn parity_probe_covers_transitions_and_fragment_layers() {
         render(&mut r, &doc).unwrap();
     }
 }
+
+/// A user effect native draws (its input with red and blue swapped, exact
+/// in binary16), unknown to the parity probe: the definitions and its
+/// wrapped source.
+fn probe_swap() -> (DefinitionSetSnapshot, String) {
+    let mut set = builtin_definitions();
+    let mut def = set
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap()
+        .clone();
+    def.id = "probe.swap".into();
+    def.origin = DefinitionOrigin::Local;
+    let g = def.glsl.as_mut().unwrap();
+    let start = g.source.find("void main()").unwrap();
+    g.source.truncate(start);
+    g.source
+        .push_str("void main(){o=texture(u_tex,v_st).bgra;}");
+    let code = g.source.clone();
+    set.definitions.push(def);
+    (set, code)
+}
+
+fn refused() -> FallbackFailure {
+    FallbackFailure {
+        reason: "compile".into(),
+        message: "ERROR: 0:7: 'probe' : WebGL refuses this".into(),
+    }
+}
+
+/// The probe's WebGL reference fails for good (WebGL refuses the program
+/// natively drawn): the program is pinned to the runner, whose failure
+/// handling reproduces today's outcome (skipped and reported once, as
+/// `runEffects` skips a program WebGL refuses), frames keep presenting,
+/// nothing is asked for again, and the pin survives a restart. A job
+/// whose host refuses it renders the same frame.
+#[test]
+fn an_effect_whose_parity_reference_fails_for_good_is_pinned_and_skipped_as_today() {
+    use pm_render::effects::parity::Verdict;
+    let _gpu = gpu();
+    let (set, code) = probe_swap();
+    let doc = stack(
+        json!([{ "id": "fx", "type": "probe.swap", "on": true, "p": {} }]),
+        Value::Null,
+    );
+    let dir = std::env::temp_dir().join(format!("pm-render-parity-fail-{}", std::process::id()));
+    let make = |env: &str| {
+        let mut r = Renderer::headless().unwrap();
+        r.set_definitions(&set).unwrap();
+        r.set_shader_fallback_runner(true);
+        r.effects_mut()
+            .parity
+            .configure(Some(env.into()), Some(dir.clone()));
+        r
+    };
+    let mut r = make("refused");
+    let without = render(&mut r, &stack(json!([]), Value::Null)).unwrap();
+    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
+        panic!("the probed frame waits for its reference")
+    };
+    assert_eq!(r.put_fallback_failure(&q[0].key, refused()), None);
+    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Runner);
+    for _ in 0..3 {
+        assert_eq!(
+            render(&mut r, &doc).unwrap(),
+            without,
+            "presented without the effect, as WebGL skips it today"
+        );
+    }
+    let reports = r.watchdog_reports(true);
+    assert_eq!(reports.len(), 1, "reported once: {reports:?}");
+    assert_eq!(reports[0].code, ErrorCode::ShaderCompile);
+    assert!(
+        reports[0].message.contains("WebGL refuses"),
+        "{}",
+        reports[0].message
+    );
+    assert_eq!(r.fallback_retry_at(), None, "never asked for again");
+    let mut restarted = make("refused");
+    assert_eq!(
+        restarted.effects_mut().parity.verdict(&code),
+        Verdict::Runner,
+        "the pin persists"
+    );
+    // A job: its host refuses the probe's reference; the frame is the
+    // same, never a native frame without its reference.
+    let mut job = Renderer::headless().unwrap();
+    job.set_definitions(&set).unwrap();
+    job.effects_mut().watchdog.set_policy(Policy::Job);
+    job.effects_mut()
+        .parity
+        .configure(Some("job refused".into()), None);
+    let host = Arc::new(Cpu::default());
+    *host.fail.lock().unwrap() = Some(refused());
+    job.set_fallback_host(Some(host.clone()));
+    assert_eq!(render(&mut job, &doc).unwrap(), without);
+    assert_eq!(render(&mut job, &doc).unwrap(), without);
+    assert_eq!(host.seen.lock().unwrap().len(), 1, "not asked for again");
+    assert_eq!(job.effects_mut().parity.verdict(&code), Verdict::Runner);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The probe's reference fails transiently (the runner's context was
+/// lost): the program stays unknown and goes through the runner's retry
+/// and backoff (asked for again at once, then drawn without it and
+/// reported once until the backoff passes), never a stuck frame or an
+/// unbounded request loop; once the runner draws it, the probe judges it.
+/// A job whose runner keeps losing its context stops naming the effect.
+#[test]
+fn an_effect_whose_parity_reference_fails_transiently_is_retried_with_backoff() {
+    use pm_render::effects::parity::Verdict;
+    let _gpu = gpu();
+    let (set, code) = probe_swap();
+    let doc = stack(
+        json!([{ "id": "fx", "type": "probe.swap", "on": true, "p": {} }]),
+        Value::Null,
+    );
+    let mut r = Renderer::headless().unwrap();
+    r.set_definitions(&set).unwrap();
+    r.set_shader_fallback_runner(true);
+    r.effects_mut()
+        .parity
+        .configure(Some("transient".into()), None);
+    let (offset, clock) = movable_clock();
+    r.effects_mut().watchdog.set_clock(Some(clock));
+    let without = render(&mut r, &stack(json!([]), Value::Null)).unwrap();
+    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
+        panic!("the probed frame waits for its reference")
+    };
+    assert_eq!(
+        r.put_fallback_failure(&q[0].key, lost()),
+        Some(std::time::Duration::ZERO)
+    );
+    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Unknown);
+    let Err(RenderError::ShaderFallbackPending(again)) = render(&mut r, &doc) else {
+        panic!("asked for again at once")
+    };
+    assert_eq!(again[0].key, q[0].key);
+    assert_eq!(
+        r.put_fallback_failure(&again[0].key, lost()),
+        Some(std::time::Duration::from_millis(250))
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            render(&mut r, &doc).unwrap(),
+            without,
+            "drawn without it during the backoff, as a runner program"
+        );
+    }
+    let reports = r.watchdog_reports(true);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].code, ErrorCode::NotHeadlessRenderable);
+    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Unknown);
+    offset.store(250, std::sync::atomic::Ordering::Relaxed);
+    let Err(RenderError::ShaderFallbackPending(third)) = render(&mut r, &doc) else {
+        panic!("asked for again after the backoff")
+    };
+    // WebGL's answer: the same swap of the input it was sent.
+    let mut reference = r.fallback_textures(&third[0].key).unwrap()[0]
+        .as_ref()
+        .clone();
+    for p in reference.rgba16f.chunks_exact_mut(4) {
+        p.swap(0, 2);
+    }
+    r.put_fallback_pixels(third[0].key.clone(), reference);
+    assert_eq!(
+        r.effects_mut().parity.verdict(&code),
+        Verdict::NativeVerified
+    );
+    let drawn = render(&mut r, &doc).unwrap();
+    assert_ne!(drawn, without);
+    assert_eq!(render(&mut r, &doc).unwrap(), drawn);
+    assert_eq!(r.fallback_retry_at(), None);
+    // A job: retried in place, then stopped by name; never a native frame
+    // without its reference.
+    let mut job = Renderer::headless().unwrap();
+    job.set_definitions(&set).unwrap();
+    job.effects_mut().watchdog.set_policy(Policy::Job);
+    job.effects_mut()
+        .parity
+        .configure(Some("job transient".into()), None);
+    let host = Arc::new(Cpu::default());
+    *host.fail.lock().unwrap() = Some(lost());
+    job.set_fallback_host(Some(host));
+    match render(&mut job, &doc) {
+        Err(RenderError::Fallback(m)) => {
+            assert!(m.contains("probe.swap") && m.contains("contextLost"), "{m}")
+        }
+        other => panic!("expected a named failure, got {:?}", other.map(|_| ())),
+    }
+    assert_eq!(job.effects_mut().parity.verdict(&code), Verdict::Unknown);
+}
+
+/// A shader layer (and a transition) whose probe reference fails: for
+/// good, it is pinned and draws nothing, reported once, as WebGL draws
+/// nothing for a program it refuses; transiently, the runner's backoff
+/// bounds its requests (none while it waits) and the probe judges it once
+/// the runner draws it.
+#[test]
+fn a_layer_and_a_transition_whose_parity_reference_fails_follow_the_runner() {
+    use pm_render::effects::parity::Verdict;
+    let _gpu = gpu();
+    let body = "void main(){fragColor=vec4(0.25,0.5,0.75,1.0);}";
+    let code = format!("{}\n{body}", pm_render::shader_layers::header());
+    let mut l = layer("fragment", "#000000", json!([]), Value::Null);
+    l["type"] = json!("shader");
+    l["d"] = json!({"code": body, "uniforms": {}, "w": 64, "h": 32});
+    let doc = document(vec![l]);
+    let make = |env: &str| {
+        let mut r = Renderer::headless().unwrap();
+        r.set_definitions(&builtin_definitions()).unwrap();
+        r.set_shader_fallback_runner(true);
+        r.effects_mut().parity.configure(Some(env.into()), None);
+        r
+    };
+    let empty = render(&mut make("none"), &document(vec![])).unwrap();
+    // For good.
+    let mut r = make("layer refused");
+    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
+        panic!("the probed layer waits for its reference")
+    };
+    assert_eq!(r.put_fallback_failure(&q[0].key, refused()), None);
+    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Runner);
+    for _ in 0..3 {
+        assert_eq!(render(&mut r, &doc).unwrap(), empty, "draws nothing");
+    }
+    let reports = r.watchdog_reports(true);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].code, ErrorCode::ShaderCompile);
+    // Transiently.
+    let mut r = make("layer transient");
+    let (offset, clock) = movable_clock();
+    r.effects_mut().watchdog.set_clock(Some(clock));
+    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
+        panic!("the probed layer waits for its reference")
+    };
+    assert_eq!(
+        r.put_fallback_failure(&q[0].key, lost()),
+        Some(std::time::Duration::ZERO)
+    );
+    let Err(RenderError::ShaderFallbackPending(again)) = render(&mut r, &doc) else {
+        panic!("asked for again at once")
+    };
+    assert_eq!(again[0].key, q[0].key);
+    assert_eq!(
+        r.put_fallback_failure(&again[0].key, lost()),
+        Some(std::time::Duration::from_millis(250))
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            render(&mut r, &doc).unwrap(),
+            empty,
+            "no request while the backoff runs"
+        );
+    }
+    assert_eq!(r.watchdog_reports(true).len(), 1);
+    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Unknown);
+    offset.store(250, std::sync::atomic::Ordering::Relaxed);
+    let Err(RenderError::ShaderFallbackPending(third)) = render(&mut r, &doc) else {
+        panic!("asked for again after the backoff")
+    };
+    let reference = FallbackPixels {
+        width: third[0].width,
+        height: third[0].height,
+        rgba16f: (0..third[0].width * third[0].height)
+            .flat_map(|_| [0x3400, 0x3800, 0x3a00, 0x3c00])
+            .collect(),
+    };
+    r.put_fallback_pixels(third[0].key.clone(), reference);
+    let drawn = render(&mut r, &doc).unwrap();
+    assert_ne!(drawn, empty);
+    assert_eq!(
+        r.effects_mut().parity.verdict(&code),
+        Verdict::NativeVerified
+    );
+    assert_eq!(render(&mut r, &doc).unwrap(), drawn);
+    assert_eq!(r.fallback_retry_at(), None);
+    // A transition refused for good: pinned, skipped as WebGL skips it.
+    let mut set = builtin_definitions();
+    let mut def = set
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "crossfade")
+        .unwrap()
+        .clone();
+    def.id = "probe.fade".into();
+    def.origin = DefinitionOrigin::Local;
+    let g = def.glsl.as_mut().unwrap();
+    let start = g.source.find("void main()").unwrap();
+    g.source.truncate(start);
+    g.source
+        .push_str("void main(){o=mix(texture(u_from,v_st),texture(u_to,v_st),u_prog);}");
+    let fade = g.source.clone();
+    set.definitions.push(def);
+    let mut r = Renderer::headless().unwrap();
+    r.set_definitions(&set).unwrap();
+    r.set_shader_fallback_runner(true);
+    r.effects_mut()
+        .parity
+        .configure(Some("transition refused".into()), None);
+    let doc = stack(json!([]), json!({"type": "probe.fade", "dur": 1, "p": {}}));
+    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
+        panic!("the probed transition waits for its reference")
+    };
+    assert_eq!(r.put_fallback_failure(&q[0].key, refused()), None);
+    assert_eq!(r.effects_mut().parity.verdict(&fade), Verdict::Runner);
+    render(&mut r, &doc).unwrap();
+    render(&mut r, &doc).unwrap();
+    let reports = r.watchdog_reports(true);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].code, ErrorCode::ShaderCompile);
+}
