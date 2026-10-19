@@ -146,9 +146,14 @@ async function viewerPixels(page: Page, engine: boolean): Promise<{ width: numbe
     const c = document.createElement('canvas');
     c.width = source.width; c.height = source.height;
     const c2 = c.getContext('2d')!;
-    // Use the compatibility API's preserved presented frame. A later read
-    // of the WebGPU swapchain can see its cleared surface instead.
-    const pixels = engine ? PM.Kernel.api('zoom-probe').render.gl.context.canvas : source;
+    // Read the exact surface the presenter selected, preserved before its
+    // pool slot was released. The WebGPU swapchain clears after compositing.
+    // At the custom 16x request the built-in's legacy bound canvas still has
+    // its 8x layout, so that canvas is not the engine presentation's viewport.
+    const tag = engine ? PM.Kernel.services.get('viewer').enginePresentation.latest : null;
+    const pixels = engine ? PM.CompatContext.state?.copies.get(`${tag.revision}:${tag.viewSeq}:${tag.seq}`) : source;
+    if (!pixels) throw new Error('The presented engine surface was not preserved');
+    if (pixels.width !== c.width || pixels.height !== c.height) throw new Error(`Presented surface ${pixels.width}x${pixels.height} differs from canvas ${c.width}x${c.height}`);
     c2.drawImage(pixels, 0, 0, c.width, c.height);
     const bytes = c2.getImageData(0, 0, c.width, c.height).data;
     let raw = ''; for (let i = 0; i < bytes.length; i += 32768) raw += String.fromCharCode(...bytes.subarray(i, i + 32768));
@@ -255,6 +260,8 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       const pixels = (c: HTMLCanvasElement) => c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
       const rows = [];
       for (const time of [.2, 1.2]) {
+        PM.pause(); PM.setTime(time, { force: true });
+        await PM.prepareFrame?.(time); await PM.HostMedia?.flushBindings?.();
         const live = PM.L('dynamic-label');
         const changed = { ...live, id: 'detached-label', d: { ...api.anim.resolveContent(live, time), text: time < 1 ? 'I' : 'Wide label' } };
         const reference = PM.__rasterBase(changed, 1, time);
@@ -265,11 +272,16 @@ test.describe('Use New Engine: the customization moat, round two', () => {
         const a = pixels(engine), b = pixels(today);
         let max = 0, over1 = 0, values = 0;
         for (let i = 0; i < a.length; i++) if (i % 4 !== 3) { const d = Math.abs(a[i]! - b[i]!); max = Math.max(max, d); over1 += Number(d > 1); values++; }
-        rows.push({ time, sync: geometry(sync), async: geometry(asyncSurface), today: geometry(reference), max, over1, values });
+        rows.push({ time, sync: geometry(sync), async: geometry(asyncSurface), today: geometry(reference), max, over1, values, enginePng: engine.toDataURL(), todayPng: today.toDataURL() });
       }
       return rows;
     });
-    console.log(JSON.stringify({ substitutedLabel: rows }));
+    await mkdir(EVIDENCE, { recursive: true });
+    for (const row of rows) {
+      await writeFile(path.join(EVIDENCE, `substituted-label-${row.time}-engine.png`), Buffer.from(row.enginePng.split(',')[1]!, 'base64'));
+      await writeFile(path.join(EVIDENCE, `substituted-label-${row.time}-today.png`), Buffer.from(row.todayPng.split(',')[1]!, 'base64'));
+    }
+    console.log(JSON.stringify({ substitutedLabel: rows.map(({ enginePng, todayPng, ...row }) => row) }));
     for (const row of rows) {
       expect(row.sync).toEqual(row.today); expect(row.async).toEqual(row.today);
       expect(row.max).toBeLessThanOrEqual(4); expect(row.over1).toBeLessThanOrEqual(row.values * .001);
@@ -294,7 +306,10 @@ test.describe('Use New Engine: the customization moat, round two', () => {
     await mkdir(EVIDENCE, { recursive: true });
     const presentedAt = async (zoom: number, time: number) => {
       try {
-        await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').enginePresentation.latest?.pts)).toBe(Math.round(time * TICKS_PER_SECOND));
+        await expect.poll(() => page.evaluate(() => {
+          const view = (window as any).PM.Kernel.services.get('viewer').enginePresentation;
+          return [view.latest?.pts, view.latest?.viewSeq === Number(view.state.viewSeq)];
+        })).toEqual([Math.round(time * TICKS_PER_SECOND), true]);
       } catch (error) {
         const state = await page.evaluate(() => {
           const PM = (window as any).PM, view = PM.Kernel.services.get('viewer').enginePresentation;
@@ -317,17 +332,18 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       await expect.poll(() => page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'plain' && c.scale > 16).length)).toBeGreaterThan(0);
       await presentedAt(zoom, .2);
       const first = await viewerPixels(page, true);
-      expect(first.data.some((v, i) => i % 4 !== 3 && v > 180), 'the presented frame contains text pixels').toBe(true);
+      await writeFile(path.join(EVIDENCE, `zoom-${zoom}-time-0.2.png`), Buffer.from(first.png.split(',')[1]!, 'base64'));
       const plan = await page.evaluate(() => {
         const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
         const state = viewer.enginePresentation.state;
         const crops = (window as any).__crops.filter((c: any) => c.layer === 'plain' && c.scale > 16);
         const typed = (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 16);
-        return { state, crops, typed, world: PM.worldMatrix(PM.L('plain'), PM.time),
+        return { state, latest: viewer.enginePresentation.latest, crops, typed, world: PM.worldMatrix(PM.L('plain'), PM.time),
           geometry: PM.textRasterGeometry(PM.L('plain'), crops[crops.length - 1].scale, PM.time),
           size: [PM.proj.w, PM.proj.h], failures: PM.EngineConnection.status().failures };
       });
       console.log(JSON.stringify({ zoomPlan: plan }));
+      expect(first.data.some((v, i) => i % 4 !== 3 && v > 180), 'the presented frame contains text pixels').toBe(true);
       const { state, size, world } = plan;
       expect(state.zoom, 'the requested engine zoom was reached').toBe(zoom);
       expect(plan.crops.every((c: any) => c.scale === Math.min(32, zoom * 3))).toBe(true);
