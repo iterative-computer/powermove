@@ -8,7 +8,8 @@
 //!
 //! `PM_BENCH_EDIT=drag` makes every frame a new revision that moves one
 //! layer (a layer drag: one leaf edit per frame at a fixed time);
-//! `PM_BENCH_REUSE=0` plans every layer of every frame (no draw reuse).
+//! `PM_BENCH_LAYER=<n>` edits the n-th solid layer every frame (one layer
+//! dragged; layers are listed top first). `PM_BENCH_REUSE=0` plans every layer of every frame (no draw reuse).
 //! `PM_BENCH_EDIT=playback` edits one layer's opacity per frame while the
 //! time advances (inspector edits during playback, at the worst rate).
 //! docs/engine/perf.md records the runs.
@@ -91,6 +92,9 @@ fn main() {
     let mut cpu = Vec::new();
     let mut wall = Vec::new();
     let mut apply_ms = Vec::new();
+    let fixed: Option<usize> = std::env::var("PM_BENCH_LAYER")
+        .ok()
+        .and_then(|v| v.parse().ok());
     for k in 0..frames {
         let at = match edit.as_deref() {
             Some("drag") => 0,
@@ -101,7 +105,12 @@ fn main() {
         if let (Some(mode), false) = (edit.as_deref(), solids.is_empty()) {
             use pm_model::json::Value;
             use pm_model::patch::{Patch, PathPart};
-            let layer = solids[(k as usize * 37) % solids.len()];
+            // PM_BENCH_LAYER=<n>: every frame edits the n-th solid (a
+            // drag of one layer); else a different solid each frame.
+            let layer = match fixed {
+                Some(n) => solids[n.min(solids.len() - 1)],
+                None => solids[(k as usize * 37) % solids.len()],
+            };
             let (key, value) = match mode {
                 "drag" => ("position.x", 100.0 + f64::from(k)),
                 _ => ("opacity", 30.0 + f64::from(k % 60)),
