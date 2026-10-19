@@ -133,6 +133,9 @@ pub struct Composed {
     /// Video layers drawn with a stand-in while their exact frame decodes
     /// (scrub renders, docs/engine/scrub.md): the source frame each shows.
     pub stand_ins: Vec<usize>,
+    /// Level 1 SVG rasters the frame drew without (decision S1): another
+    /// bucket stood in, or the layer drew nothing (`super::svg`).
+    pub svg_misses: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
 }
 
 const BLIT_WGSL: &str = r#"
@@ -487,6 +490,7 @@ impl Composer {
         let mut failures = Vec::new();
         let mut quads = Vec::new();
         let mut stand_ins = Vec::new();
+        let mut svg_misses = Vec::new();
         if let Some(region) = place.region {
             let request = RenderRequest {
                 output_size: place.output,
@@ -559,6 +563,7 @@ impl Composer {
             failures = rendered.failures;
             quads = rendered.quads;
             stand_ins = rendered.stand_ins;
+            svg_misses = rendered.svg_misses;
         }
         // Place the region (or only clear when nothing is visible).
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -592,6 +597,7 @@ impl Composer {
             failures,
             cpu_us: super::render::now_us() - start,
             stand_ins,
+            svg_misses,
         })
     }
 }

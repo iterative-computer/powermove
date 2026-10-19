@@ -572,6 +572,8 @@ struct Thread {
     compat: super::compat::CompatStore,
     /// Waveform requests waiting for the host's media answer.
     peaks_waiting: BTreeSet<(Key, String)>,
+    /// Level 1 SVG rasters asked of the renderers (decision S1).
+    svg: super::svg::SvgState,
 }
 
 /// Most waveform requests that wait for media answers at once.
@@ -635,6 +637,7 @@ pub fn run(
         snapshot_costs: BTreeMap::new(),
         compat: super::compat::CompatStore::default(),
         peaks_waiting: BTreeSet::new(),
+        svg: super::svg::SvgState::default(),
     };
     thread.check_in();
     loop {
@@ -979,6 +982,13 @@ impl Thread {
                     self.snapshot_error(&job, ErrorCode::BudgetExceeded, &refused.message());
                 }
             }
+            Command::Compat {
+                key,
+                message:
+                    message @ (pm_protocol::snapshot::CompatMessage::SvgPixels(_)
+                    | pm_protocol::snapshot::CompatMessage::SvgFailed { .. }
+                    | pm_protocol::snapshot::CompatMessage::SvgRequests { .. }),
+            } => self.svg_message(key, message),
             Command::Compat { key, message } => {
                 let applied = self.compat.apply(key, message);
                 let (rasters, bytes) = self.compat.usage();
@@ -1007,6 +1017,88 @@ impl Thread {
             Command::BlenderCaptured { token, result } => self.blender_captured(token, result),
         }
         true
+    }
+
+    /// A renderer's level 1 SVG raster band or failure (decision S1). A
+    /// complete raster goes into the renderer every session on this thread
+    /// shares, and every view draws again (any of them may show it).
+    fn svg_message(&mut self, key: Key, message: pm_protocol::snapshot::CompatMessage) {
+        use pm_protocol::snapshot::CompatMessage as M;
+        match message {
+            M::SvgPixels(band) => match self.svg.band(key, band, now()) {
+                super::svg::Band::Partial => {}
+                super::svg::Band::Complete(raster, data) => {
+                    let (w, h) = (raster.width, raster.height);
+                    let stored = match self.gpu.as_mut() {
+                        Some(gpu) => gpu
+                            .composer_with(&self.config, self.frame_cache)
+                            .renderer()
+                            .put_svg_raster(raster, data),
+                        None => Err("the engine has no GPU device".into()),
+                    };
+                    if let Err(why) = stored {
+                        (self.sink)(vec![Action::Log {
+                            level: LogLevel::Warn,
+                            message: format!(
+                                "viewer: an SVG raster ({w}x{h}) was not stored: {why}"
+                            ),
+                        }]);
+                    }
+                    for view in self.views.values_mut() {
+                        view.dirty = true;
+                    }
+                }
+                super::svg::Band::Refused => (self.sink)(vec![Action::Log {
+                    level: LogLevel::Warn,
+                    message:
+                        "viewer: too many SVG rasters are arriving at once; a band was dropped"
+                            .into(),
+                }]),
+            },
+            M::SvgFailed {
+                key: raster,
+                reason,
+                message,
+            } if self.svg.failed(&raster, now()) => {
+                (self.sink)(vec![Action::Log {
+                    level: LogLevel::Warn,
+                    message: format!(
+                        "viewer: the renderer could not draw an SVG raster {}x{} ({reason}: {message})",
+                        raster.width, raster.height
+                    ),
+                }]);
+            }
+            // Logged failures, and requests (they travel the other way).
+            _ => {}
+        }
+    }
+
+    /// Asks `key`'s renderer for the level 1 SVG rasters a frame drew
+    /// without; returns whether one of them arrived meanwhile (the view
+    /// draws again).
+    fn ask_svg(
+        svg: &mut super::svg::SvgState,
+        sink: &Sink,
+        renderer: &pm_render::Renderer,
+        key: Key,
+        revision: Option<Revision>,
+        misses: &[pm_render::vector::svg_rasters::SvgRasterNeed],
+    ) -> bool {
+        let arrived = misses
+            .iter()
+            .any(|m| renderer.has_svg_raster(&m.request.key));
+        let requests = svg.wanted(key, misses, now(), |k| renderer.has_svg_raster(k));
+        for chunk in requests.chunks(pm_protocol::svg_raster::MAX_SVG_REQUESTS) {
+            let body = Event::Compat(pm_protocol::snapshot::CompatMessage::SvgRequests {
+                requests: chunk.to_vec(),
+            });
+            let mut envelope = Envelope::new(Message::Event { body }).with_session(key.1);
+            envelope.revision = revision;
+            if let Ok(bytes) = codec::encode(&envelope) {
+                sink(vec![Action::Send { port: key.0, bytes }]);
+            }
+        }
+        arrived
     }
 
     /// The runner's answer: a band of pixels (the frame renders again once
@@ -1090,6 +1182,7 @@ impl Thread {
             *k != key
         });
         fallback.logged.retain(|(k, _)| *k != key);
+        self.svg.forget_session(key);
         self.docs.remove(&key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
@@ -2659,6 +2752,23 @@ impl Thread {
                     stand_in = !composed.stand_ins.is_empty();
                     view.stand_in = stand_in.then_some(landed_before);
                     stand_in_shown = composed.stand_ins.first().copied();
+                    // Level 1 SVG rasters this frame drew without (another
+                    // bucket, or nothing): ask the view's renderer, and
+                    // draw again when they arrive (at most a frame late,
+                    // as today's asynchronous `<img>` decode).
+                    if !composed.svg_misses.is_empty() {
+                        stand_in = true;
+                        if Self::ask_svg(
+                            &mut self.svg,
+                            &self.sink,
+                            composer.renderer(),
+                            key,
+                            Some(view.revision),
+                            &composed.svg_misses,
+                        ) {
+                            view.dirty = true;
+                        }
+                    }
                     let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
                     stats.document_frames += 1;
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
@@ -3039,7 +3149,8 @@ impl Thread {
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
-            let outstanding = |k: &str| asked.contains_key(k);
+            let svg = &self.svg;
+            let outstanding = |k: &str| asked.contains_key(k) || svg.outstanding(k);
             let Some(job) = self.snapshots.next(revision, outstanding, pressure, now) else {
                 return;
             };
@@ -3128,13 +3239,7 @@ impl Thread {
             video_end: pm_render::VideoEnd::of(purpose),
         };
         if needs_blender {
-            match blender_frames(
-                renderer,
-                doc,
-                &job,
-                &request,
-                self.blender.as_deref(),
-            ) {
+            match blender_frames(renderer, doc, &job, &request, self.blender.as_deref()) {
                 BlenderFrames::Draw(surfaces) => {
                     request.blender = pm_render::blender::BlenderRender::Final(surfaces);
                 }
@@ -3159,6 +3264,9 @@ impl Thread {
             }
         }
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        // A snapshot never draws an SVG bucket's stand-in: it waits for the
+        // renderer's raster (decision S1).
+        renderer.set_svg_wait(true);
         let rendered = renderer
             .render(
                 doc.document(),
@@ -3184,8 +3292,56 @@ impl Thread {
             );
             return;
         }
+        renderer.set_svg_wait(false);
         let (width, height, raw) = match rendered {
             Ok(done) => done,
+            Err(pm_render::RenderError::SvgRastersPending(needs)) => {
+                // As for fallback pixels: what the renderer posted is on
+                // its way (wait for it); the rest is named for it to draw.
+                let (posted, missing): (Vec<_>, Vec<_>) = needs
+                    .into_iter()
+                    .partition(|n| job.request.uploaded.contains(&n.request.key.upload_key()));
+                if let Some(failed) = posted.iter().find(|n| self.svg.has_failed(&n.request.key)) {
+                    let k = &failed.request.key;
+                    self.stats().snapshot_failures += 1;
+                    self.snapshot_error(
+                        &job,
+                        ErrorCode::Internal,
+                        &format!(
+                            "The window could not draw an SVG image's {}x{} raster for this frame.",
+                            k.width, k.height
+                        ),
+                    );
+                    return;
+                }
+                if missing.is_empty() {
+                    let mut job = job;
+                    job.waiting_for = posted.iter().map(|n| n.request.key.upload_key()).collect();
+                    for n in &posted {
+                        self.svg.expect(job.key, &n.request.key, now());
+                    }
+                    self.snapshots.requeue(job);
+                    return;
+                }
+                self.stats().snapshot_needs += 1;
+                let outcome = SnapshotOutcome::NeedsRenderer {
+                    revision,
+                    fallback: Vec::new(),
+                    compat: Vec::new(),
+                    svg: missing
+                        .into_iter()
+                        .take(pm_protocol::svg_raster::MAX_SVG_REQUESTS)
+                        .map(|n| n.request)
+                        .collect(),
+                };
+                let mut envelope = Envelope::new(Message::Response {
+                    id: job.id,
+                    body: Response::Snapshot(Box::new(outcome)),
+                });
+                envelope.revision = Some(revision);
+                self.send(job.host, envelope);
+                return;
+            }
             Err(pm_render::RenderError::ShaderFallbackPending(requests)) => {
                 // Pixels the caller says it already posted are on their way
                 // (the session's port, ahead of this request): wait for
@@ -3632,7 +3788,9 @@ fn blender_frames(
     let hashes: Vec<[u8; 32]> = snaps.snapshots.iter().map(|s| s.hash().0).collect();
     let own = match &job.blender {
         Some(BlenderPrep::Ready(frames))
-            if hashes.iter().all(|h| frames.iter().any(|(fh, _, _)| fh == h)) =>
+            if hashes
+                .iter()
+                .all(|h| frames.iter().any(|(fh, _, _)| fh == h)) =>
         {
             Some(frames.clone())
         }
