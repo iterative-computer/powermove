@@ -120,6 +120,31 @@ impl Numeric {
         })
     }
 
+    /// Revision-bound plans that need only the three changing numeric inputs.
+    /// Any document read or unavailable input declines to the full evaluator.
+    pub fn scalars(&self, t: f64, time: f64, value: f64) -> Option<f64> {
+        Some(match self {
+            Self::Number(n) => *n,
+            Self::Input(Input::Time) => time,
+            Self::Input(Input::LocalTime) => t,
+            Self::Input(Input::Value) => value,
+            Self::Negate(n) => -n.scalars(t, time, value)?,
+            Self::Binary(op, l, r) => {
+                let l = l.scalars(t, time, value)?;
+                let r = r.scalars(t, time, value)?;
+                binary(*op, l, r)
+            }
+            Self::Math(f, args) => {
+                let mut values: smallvec::SmallVec<[f64; 12]> = smallvec::SmallVec::new();
+                for arg in args {
+                    values.push(arg.scalars(t, time, value)?);
+                }
+                crate::eval::apply_math(*f, &values)
+            }
+            _ => return None,
+        })
+    }
+
     fn input<O: Clone>(input: Input, ctx: &Context<O>) -> Value<O> {
         match input {
             Input::Time => Value::Number(ctx.time),
@@ -185,15 +210,7 @@ impl Numeric {
             Self::Binary(op, l, r) => {
                 let l = l.evaluate(host, ctx)?;
                 let r = r.evaluate(host, ctx)?;
-                match op {
-                    BinaryOp::Add => l + r,
-                    BinaryOp::Sub => l - r,
-                    BinaryOp::Mul => l * r,
-                    BinaryOp::Div => l / r,
-                    BinaryOp::Rem => l % r,
-                    BinaryOp::Pow => crate::jsmath::pow(l, r),
-                    _ => unreachable!("numeric compiler limits operators"),
-                }
+                binary(*op, l, r)
             }
             Self::Field(input, keys) => {
                 let mut value = Self::input(*input, ctx);
@@ -252,5 +269,17 @@ impl Numeric {
                 crate::eval::apply_math(*f, &values)
             }
         })
+    }
+}
+
+fn binary(op: BinaryOp, l: f64, r: f64) -> f64 {
+    match op {
+        BinaryOp::Add => l + r,
+        BinaryOp::Sub => l - r,
+        BinaryOp::Mul => l * r,
+        BinaryOp::Div => l / r,
+        BinaryOp::Rem => l % r,
+        BinaryOp::Pow => crate::jsmath::pow(l, r),
+        _ => unreachable!("numeric compiler limits operators"),
     }
 }

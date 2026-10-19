@@ -201,6 +201,10 @@ impl CompiledExpression for Compiled {
         }))
     }
 
+    fn evaluate_scalars(&self, t: f64, time: f64, value: f64) -> Option<f64> {
+        self.expression.evaluate_scalars(t, time, value)
+    }
+
     fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
         let host = NodeHost(&self.keys);
         let ctx = Context {

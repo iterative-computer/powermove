@@ -455,3 +455,58 @@ fn batched_expression_status_distinguishes_errors_without_reading_messages() {
         assert_eq!(kinds, [0, 0x80]);
     }
 }
+
+#[test]
+fn bound_scalar_plans_keep_revision_type_and_error_guards() {
+    let project = |base: &str, source: &str| {
+        parse(&format!(
+            r#"{{"id":"P","compId":"C","assets":{{}},"comps":{{"C":{{"id":"C","fps":30,"layers":[{{"id":"L","from":0,"p":{{"opacity":{{"v":{base},"kf":[],"expr":"{source}"}}}}}}]}}}}}}"#
+        )).unwrap()
+    };
+    let mut before = project("4", "value + time * 40");
+    let mut e = Engine::new();
+    e.resync(
+        pm_model::json::write::to_canonical_string(&before).as_bytes(),
+        1,
+    )
+    .unwrap();
+    let id = e
+        .intern(&parse(r#"{"comp":"C","layer":"L","key":"opacity","via":"channel"}"#).unwrap())
+        .unwrap();
+    let mut values = [0.0];
+    let mut kinds = [0];
+    for time in [0.0, 1.0, 2.0, -0.0] {
+        e.ev_batch(&[id.index()], time, &mut values, &mut kinds);
+        assert_eq!(values[0].to_bits(), (4.0 + time * 40.0).to_bits());
+        assert_eq!(kinds, [0]);
+    }
+    for (base, source, time, expected, kind) in [
+        ("4", "value / time", 0.0, 4.0, 0x80),
+        ("4", "value / time", 1.0, 4.0, 0),
+        ("4", "value / time", 2.0, 2.0, 0),
+        (r#""4""#, "value + time * 40", 1.0, f64::NAN, 1),
+        ("9", "value + time * 40", 1.0, 49.0, 0),
+    ] {
+        let after = project(base, source);
+        let body = binary::encode(&ops::diff_ops(Some(&before), Some(&after))).unwrap();
+        let revision = e.revision();
+        e.apply(&body, revision, revision + 1).unwrap();
+        // Evaluate twice, including the now-warm plan at the same revision.
+        for _ in 0..2 {
+            e.ev_batch(&[id.index()], time, &mut values, &mut kinds);
+            assert_eq!(values[0].to_bits(), expected.to_bits());
+            assert_eq!(kinds, [kind]);
+        }
+        if kind == 1 {
+            assert_eq!(
+                ok(
+                    &mut e,
+                    r#"{"op":"ev","comp":"C","layer":0,"key":"opacity","t":1}"#
+                )
+                .as_str(),
+                Some("440")
+            );
+        }
+        before = after;
+    }
+}

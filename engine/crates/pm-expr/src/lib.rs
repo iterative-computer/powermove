@@ -252,6 +252,12 @@ impl Expression {
         Some(out)
     }
 
+    /// A revision-bound numeric plan with no remaining document/context reads.
+    /// `None` retains the complete evaluator, including all coercion and errors.
+    pub fn evaluate_scalars(&self, t: f64, time: f64, value: f64) -> Option<f64> {
+        self.numeric.as_ref()?.scalars(t, time, value)
+    }
+
     /// Runs without allocating a dependency trace. Callers must invalidate on
     /// every document revision (or track reads in the host itself).
     pub fn evaluate_untracked<H: Host>(

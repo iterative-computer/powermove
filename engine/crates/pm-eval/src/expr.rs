@@ -73,6 +73,12 @@ pub trait CompiledExpression: Send + Sync {
         None
     }
 
+    /// Optional revision-bound numeric plan needing no document context.
+    /// The caller uses only finite answers; all other cases keep `evaluate`.
+    fn evaluate_scalars(&self, _t: f64, _time: f64, _value: f64) -> Option<f64> {
+        None
+    }
+
     /// Runs the expression. An `Err` is a thrown error; its text becomes the
     /// channel's expression error (`e.message`, or `Expression failed.` when
     /// the engine has none).

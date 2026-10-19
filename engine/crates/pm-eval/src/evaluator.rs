@@ -1006,6 +1006,20 @@ impl Evaluator {
                     return value;
                 }
                 Plan::Expression(plan) => {
+                    // A bound numeric plan reads only time/local time/base.
+                    // With no outstanding errors, it needs no layer, scope,
+                    // channel string or context construction on a warm frame.
+                    if self.errors.is_empty()
+                        && let (Some(compiled), Some(JsValue::Number(base))) =
+                            (&plan.compiled, &plan.value)
+                        && let Some(n) = compiled.evaluate_scalars(time - state.from, time, *base)
+                        && n.is_finite()
+                    {
+                        let value = Ok(JsValue::Number(n));
+                        self.slots[index].state.as_mut().expect("state").memo =
+                            Some((time_bits, value.clone()));
+                        return value;
+                    }
                     // At the same document revision, the slot's resolved layer
                     // position and compiled plan are already proven. Resolve the
                     // composition once for the batch, without revalidating every

@@ -125,6 +125,18 @@ pub fn evaluate_case(source: &[u16], spec: &Json, dialect: Dialect) -> Json {
                 }
                 let original = expr.evaluate_untracked(&JsonHost::new(), &at);
                 let prepared = bound.evaluate_untracked(&JsonHost::new(), &at);
+                if let Some(base) = at.value.as_number()
+                    && let Some(n) = bound.evaluate_scalars(at.t, at.time, base)
+                {
+                    let Ok(expected) = &original else {
+                        panic!("scalar plan swallowed an error")
+                    };
+                    assert_eq!(
+                        encode(&Value::<JsonRef<'_>>::Number(n)),
+                        encode(expected),
+                        "scalar plan result"
+                    );
+                }
                 match (&original, &prepared) {
                     (Ok(a), Ok(b)) => assert_eq!(encode(a), encode(b), "bound numeric result"),
                     (Err(a), Err(b)) => assert_eq!(a, b, "bound numeric exception"),
