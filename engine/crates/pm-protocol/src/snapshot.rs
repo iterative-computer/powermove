@@ -58,7 +58,19 @@ pub const MAX_COMPAT_BAND_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COMPAT_EDGE: u32 = 16384;
 /// Today's continuousRasterScale reaches 32 for text/shape/captions.
 /// This is raster density, independent of the output frame's scale limit.
+/// It bounds the compositor's compatibility rasters (needs, answers, export
+/// requests), which only ever ask for `continuousRasterScale`; a public
+/// layer raster ([`SnapshotTarget::Layer`]) has no upper bound.
 pub const MAX_RASTER_SCALE: f64 = 32.0;
+
+/// A public layer raster's scale (`render.raster(layer, scale)` at
+/// apiVersion 1 to 3): any positive finite number. Today's `PM.raster`
+/// (legacy `gl/raster.ts`) takes any scale and caps only the density, at
+/// `min(scale, 8192 / w, 8192 / h)`, which the engine's rasterizers apply
+/// themselves, so a small layer at scale 50 or 0.005 is a valid surface.
+pub fn valid_layer_raster_scale(scale: f64) -> bool {
+    scale.is_finite() && scale > 0.0
+}
 /// Longest compatibility cache key (UTF-8 bytes).
 pub const MAX_COMPAT_KEY: usize = 512;
 /// Largest layer object a `Layer` snapshot may carry (canonical JSON).
@@ -121,7 +133,9 @@ pub enum SnapshotTarget {
     },
     /// One layer's raster (the base pixels `render.raster()` returns at
     /// apiVersion 1 to 3), at `scale` output pixels per layer pixel,
-    /// optionally cropped to `crop` (in the raster's pixels).
+    /// optionally cropped to `crop` (in the raster's pixels). Any positive
+    /// finite `scale` ([`valid_layer_raster_scale`]): today's `PM.raster`
+    /// has no upper bound, its density is `min(scale, 8192 / w, 8192 / h)`.
     Layer {
         layer: LayerId,
         scale: f64,
@@ -263,12 +277,9 @@ impl Validate for SnapshotRequest {
                     C,
                     || "layer content outside 1 byte..4 MiB".into(),
                 )?;
-                ensure(
-                    scale.is_finite()
-                        && (crate::frame::MIN_SCALE..=MAX_RASTER_SCALE).contains(scale),
-                    C,
-                    || format!("raster scale {scale} outside 0.01..32"),
-                )?;
+                ensure(valid_layer_raster_scale(*scale), C, || {
+                    format!("layer raster scale {scale} is not a positive finite number")
+                })?;
                 ensure(crop.is_none_or(|c| !c.is_empty()), C, || {
                     "an empty raster crop".into()
                 })
@@ -1273,6 +1284,41 @@ mod tests {
     }
 
     #[test]
+    fn a_public_layer_raster_takes_any_positive_scale_as_today() {
+        for scale in [
+            1e-9,
+            0.005,
+            0.01,
+            1.0,
+            32.0,
+            33.0,
+            40.0,
+            50.0,
+            1_000.0,
+            f64::MAX,
+        ] {
+            let mut layer = request(8, 8);
+            layer.target = SnapshotTarget::Layer {
+                layer: "L".into(),
+                scale,
+                crop: None,
+                content: None,
+            };
+            assert!(layer.validate().is_ok(), "layer raster at scale {scale}");
+        }
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut layer = request(8, 8);
+            layer.target = SnapshotTarget::Layer {
+                layer: "L".into(),
+                scale,
+                crop: None,
+                content: None,
+            };
+            assert!(layer.validate().is_err(), "layer raster at scale {scale}");
+        }
+    }
+
+    #[test]
     fn raster_density_matches_todays_continuous_scale_through_32() {
         let id = CompatKey {
             composition: "c".into(),
@@ -1290,6 +1336,12 @@ mod tests {
                 crop: None,
                 content: None,
             };
+            // A public layer raster takes any positive finite scale.
+            assert_eq!(
+                layer.validate().is_ok(),
+                scale.is_finite() && scale > 0.0,
+                "layer {scale}"
+            );
             let need = CompatNeed {
                 composition: "c".into(),
                 layer: "L".into(),
@@ -1334,7 +1386,6 @@ mod tests {
                     crop: None,
                 }),
             ];
-            assert_eq!(layer.validate().is_ok(), good, "layer {scale}");
             for message in messages {
                 assert_eq!(message.validate().is_ok(), good, "{message:?}");
             }

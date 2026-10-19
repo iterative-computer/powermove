@@ -119,7 +119,9 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
     const cropOk = crop === null || (crop && typeof crop === 'object' && ['x', 'y', 'width', 'height'].every((k) => safeUint(crop[k])) && (crop['width'] as number) > 0 && (crop['height'] as number) > 0);
     const content = target['content'];
     const contentOk = content === undefined || content === null || (content instanceof Uint8Array && content.byteLength > 0 && content.byteLength <= MAX_LAYER_CONTENT_BYTES);
-    return id(target['layer']) && finite(target['scale']) && (target['scale'] as number) >= 0.01 && (target['scale'] as number) <= 32 && !!cropOk && contentOk;
+    // Any positive scale, as today's `PM.raster` (its density is capped by
+    // the 8192-pixel edge, not by the scale; pm_protocol's `valid_layer_raster_scale`).
+    return id(target['layer']) && finite(target['scale']) && (target['scale'] as number) > 0 && !!cropOk && contentOk;
   }
   return false;
 }

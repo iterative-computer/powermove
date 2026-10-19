@@ -405,9 +405,11 @@ function rasterHost(PM: LegacyPM): RasterHost {
 
 /** The engine's raster in today's shape, or null (logged) when it fails. */
 function engineRasterBase(PM: LegacyPM, engine: NonNullable<ReturnType<typeof engineRender>>, args: Parameters<RenderAPI['raster']>): ReturnType<RenderAPI['raster']> {
+  // Today's `PM.raster(L, scale = 1, ...)` uses any other scale as given
+  // (zero and negatives too); the transport maps it (`layerRasterScale`).
   const [layer, scale = 1, time, , crop] = args;
   try {
-    return engineRasterSync(engine, rasterHost(PM), layer, Number(scale) || 1, time ?? PM?.time ?? 0, crop as RasterCrop) as ReturnType<RenderAPI['raster']>;
+    return engineRasterSync(engine, rasterHost(PM), layer, Number(scale), time ?? PM?.time ?? 0, crop as RasterCrop) as ReturnType<RenderAPI['raster']>;
   } catch (error) {
     console.warn(`[engine] render.raster(${String((layer as any)?.id ?? '')}) failed: ${error instanceof Error ? error.message : String(error)}`);
     return null;
