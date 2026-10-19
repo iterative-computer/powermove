@@ -1740,14 +1740,13 @@ PM.bus.on('store:external', (keys: string[]) => {
   if (shared) PM.bus.emit('projects:open');
 });
 
-/* first full frame after persistent panels have measured */
-window.requestAnimationFrame(() => window.requestAnimationFrame(async () => {
-  if (documentPending(PM)) {
-    try { await waitForDocumentReady(PM); }
-    catch { return; } // The document module reported its named load failure.
-  }
-  viewerService(PM)?.layout();
-  timelineService(PM)?.frameView();
+/* The part of the first full frame that reads the document: panels, the
+   inspector, the first render, the agent assistant and the projects screen.
+   It runs once, when the document can answer. */
+let documentFrameDone = false;
+function firstDocumentFrame() {
+  if (documentFrameDone) return;
+  documentFrameDone = true;
   PM.bus.emit('layers');
   PM.bus.emit('sel');
   inspectorService(PM)?.refresh();
@@ -1762,5 +1761,18 @@ window.requestAnimationFrame(() => window.requestAnimationFrame(async () => {
     persistCurrent(true);
     PM.bus.emit('projects:open');
   });
+}
+
+/* first full frame after persistent panels have measured */
+window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+  // Layout reads only the panels' measured sizes and always runs now.
+  viewerService(PM)?.layout();
+  timelineService(PM)?.frameView();
+  if (!documentPending(PM)) { firstDocumentFrame(); return; }
+  /* The document module is still loading. Finish when it is ready. If the
+     load fails, EngineDoc shows its named failure with Retry, and a Retry (or
+     a revival) that succeeds later finishes the frame instead. */
+  const stop = PM.EngineDoc?.onReady?.(() => { stop?.(); firstDocumentFrame(); });
+  void waitForDocumentReady(PM).then(() => { stop?.(); firstDocumentFrame(); }, () => {});
 }));
 }
