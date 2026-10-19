@@ -1706,7 +1706,12 @@ A second complete run (load 6.37 before / 6.53 after,
 suite rows pass median and p95; warm frames 46.154 / 47.492 against 76.391 /
 76.993; drag 82.916 / 98.125 against 87.291 / 105.667; cold maximum 4.739 ms;
 scalar 0.144 against 0.112; source edit 473.6 against 421.5; layer add/remove
-4255 / 4227 against 3687 / 3687 (medians, µs).
+4255 / 4227 against 3687 / 3687 (medians, µs). A third run on a quiet machine
+(load 2.13 / 2.74, `node-full-run3.json`) agrees: every suite row passes
+(the closest, conditionals static window, 4.864 / 4.998 against 6.448 /
+6.713); warm frames 44.036 / 44.432 against 73.990 / 74.822; drag 80.417 /
+95.167 against 85.459 / 106.000; cold maximum 4.567 ms; scalar 0.138 against
+0.110.
 
 Native Rust alone (`ev_batch` over 400 ids, no JS) for orientation: numeric
 9.4 µs, helpers 12.4 µs, general 11.7 µs (was 119.4), keyed numeric 10.3 µs
