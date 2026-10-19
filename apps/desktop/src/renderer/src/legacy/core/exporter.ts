@@ -726,6 +726,10 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
       X.cancel = cancelled;
     }
     if (final.routed) {
+      // Never silent: the reason the engine refused goes to the console and
+      // stays readable (`PM.Export.lastRouted`) until the routing is retired.
+      X.lastRouted = { format: opts.format, reason: String(final.error ?? '') };
+      console.warn(`[engine] the export went to the current exporter: ${final.error}`);
       if (legacyFormatId(opts.format)) return null;
       throw new Error(`The new engine can’t export this project yet (${final.error}), and the current exporter doesn’t write ${formatInfo(opts.format).label}.`);
     }

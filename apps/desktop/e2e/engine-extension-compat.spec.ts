@@ -263,13 +263,15 @@ test.describe('Use New Engine: existing extensions', () => {
       const run = await page.evaluate(async () => {
         const PM = (window as any).PM;
         const before = PM.EngineRender.compatStats.exportAsks;
+        PM.Export.lastRouted = null;
         const result = await PM.Export.run({ format: 'png', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false, alpha: false });
-        return { result, exportAsks: PM.EngineRender.compatStats.exportAsks - before };
+        return { result, exportAsks: PM.EngineRender.compatStats.exportAsks - before, routed: PM.Export.lastRouted };
       });
       console.log(JSON.stringify(run));
       expect(run.result).toEqual({ cancelled: false });
       // The job engine drew it (amendment 21: never the current exporter),
       // asking this window for the typed layer at each frame.
+      expect(run.routed, 'the engine refused the export (its reason)').toBeNull();
       expect(run.exportAsks, 'export asks (0: the export went to the current exporter)').toBeGreaterThanOrEqual(90);
       const files = (await readdir(folder)).filter((f) => f.endsWith('.png')).sort();
       expect(files.length).toBe(90);
