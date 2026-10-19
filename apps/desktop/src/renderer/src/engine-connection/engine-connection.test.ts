@@ -450,7 +450,8 @@ describe('the transport driver', () => {
 
   it('wakes a headless session and replays Play without requiring a frame', async () => {
     const { connection, port } = await connected();
-    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    const doc = stream(); doc.set(0);
+    const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
     await session.start();
     session.sendHeadless('C');
     const wake = vi.fn();
@@ -460,6 +461,9 @@ describe('the transport driver', () => {
     expect(wake).toHaveBeenCalledOnce();
     expect(port.events('transport')).toHaveLength(0);
     port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    driver.refresh();
+    expect(session.route).toBe('pending'); // an untagged in-flight clock is not readiness
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5, 0));
     driver.refresh();
     expect(session.route).toBe('engine');
     expect(session.frames).toBe(0);

@@ -375,7 +375,7 @@ export class DocumentSession {
       case 'clock': {
         const { type: _t, ...sample } = event;
         this.clock = sample as unknown as ClockSample;
-        if (this.headless && this.applied > 0) {
+        if (this.headless && message.revision !== null && Number(message.revision) >= this.applied) {
           // Headless clocks are published only once the engine has the
           // document/media and accepts transport, tagged with that revision.
           const revision = Number(message.revision) || 0;
