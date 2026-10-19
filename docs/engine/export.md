@@ -665,18 +665,18 @@ Undo. `e2e/engine-agent-observation.spec.ts` measures twenty five-frame 720 px
 observations during a UHD project's playback. Only measured runs establish its
 performance result.
 
-The native hidden host and its per-machine GLSL pin runner are not integrated.
-Its current refusal and remaining gates are in [hidden-host.md](hidden-host.md).
-CLI artifact assembly supports both macOS architectures, but distributing them
-requires separate matching FFmpeg artifacts and Node 22 load tests for each.
+The macOS native hidden host now embeds host services and the production
+per-project document workers. Its render jobs, batches and saves use the same
+`NativeEngine` and `AgentJobs` as the desktop, over Node child-process ports.
+The desktop persists its probe namespace beside the per-machine shader cache;
+the hidden host, Node render command and direct bundled `pm-cli` read it. Unknown
+and pinned user programs request the desktop's WebGL runner in on-demand
+Chromium. This is the shader runner only; composition frames remain native.
+The hidden tabs present CPU snapshots from `pm-node`.
 
-After the definitions-lane merge, standalone CLI renders explicitly require a
-shader reference. An absent runner no longer disables parity checks: user effect,
-transition and shader-layer programs with unknown or runner-pinned verdicts fail
-naming the GLSL fallback runner, without delivering a native frame. Built-ins keep
-their proved native path. An embedder-provided desktop parity environment retains
-its persisted decisions. This is a safety boundary, not completion of the required
-CLI Chromium runner: unverified custom definitions still cannot export there.
-The CLI regression retains the fork/override case as an explicit missing-reference
-failure and checks the same refusal for a shader layer; it does not claim parity
-for a render that did not run.
+See [hidden-host.md](hidden-host.md) for runtime wiring, reproducible gates and
+remaining compatibility dependencies. Both macOS architectures build through
+`pm-node-addon`, `pm-bridge-addon` and the shipping release profile; no LTO
+profile override is required after the release-build repair. Assembly requires
+matching LGPL FFmpeg and native image-decoder licenses, matching architecture
+checks, and clean Node 22 load tests before distributing artifacts.

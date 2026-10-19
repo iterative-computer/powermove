@@ -1,59 +1,98 @@
-# Hidden MCP host integration status
+# Native hidden MCP host
 
-The macOS native hidden host is incomplete. `server/mcp.ts` still embeds the
-Chromium production editor through `serve`; it does not embed the per-project
-`DocumentHostPool` or a supervised `pm-node` job engine. That path must not be
-mistaken for native delivery.
+On macOS, `powermove mcp` reads the launch-time Use New Engine setting from the
+profile and selects `server/native/mcp.ts` when enabled. Host services run inside
+the CLI process. `server/native/host.ts` embeds the production `DocumentHostPool`,
+with one process, pm-wasm document, kernel, extension registry and Undo history
+per project. The host persists worker edits before answering tools.
 
-`hidden-engine-policy.ts` reads the persisted `useNewEngine` setting using the
-store's key mapping and the launch-time environment override. On macOS an enabled
-profile fails with `native-hidden-host-unavailable` before the profile lock or
-Chromium startup. An unreadable setting fails with
-`native-engine-setting-unreadable`. Linux retains its Chromium host. A missing
-Chromium launch is named `chromium-unavailable`. Native desktop connections remain
-available through `mcp --connect`.
+The interactive and job `pm-node` children use the desktop `NativeEngine`
+supervisor, restart ledger, attribution, backoff, host capabilities, budgets,
+font service and Blender supervision. `main/engine/engine-runtime.ts` is shared
+with Electron's utility process; `server/native/ports.ts` transports its existing
+port protocol over Node IPC. The native bridge supplies the same host clock and
+shared pixel storage. Job definitions and CPU snapshot definitions have separate
+owners and increasing generations.
 
-`RunHub` now chooses a tab belonging to the run's pinned project for DOM tools and
-for document tools when no worker is available. It never uses another project's
-first tab. `set_panel_layout` is a DOM tool. `get_workspace_state` requires the
-production tab: a document worker's null workspace and empty panel registry are
-not an equivalent answer. Without that tab the call fails, rather than returning
-invented layout or panel data.
+## Media, jobs and persistence
 
-## Required integration before native hidden delivery
+Agent imports stream into the host's immutable content store, use the desktop's
+sampled fingerprint plus the full content hash, and ask the job engine to probe
+the stored object. Numeric audio facts retain channel counts for named and custom
+layouts. The production agent harness keeps validation, cancellation, locked
+references and transactions; the worker import adapter commits the shared asset
+identity and preserves replacement bytes for Undo. Workers resolve availability
+through host media paths. Existing CLI flat media copies are promoted into host
+objects when first needed, without removing their source files.
 
-- Embed `DocumentHostPoolApi` in the CLI host with profile-store, project-session,
-  extension, transcription and host-media services. Preserve each project's Undo.
-- Drive `pm-node` in a child using the desktop supervisor, crash attribution,
-  backoff, host services, full fonts and acknowledged winning definition sets.
-- Import and replace through the media store and engine probes without a file
-  input. Worker `media.ts` currently provides availability, not import decoding.
-- Start Chromium on demand for DOM tools, compatibility raster/SVG inputs and
-  pinned or unverified level 1 user GLSL. Persisted per-machine shader pins must
-  reach this host and the CLI; native translation alone does not verify parity.
-- Pin each Chromium tab to its session project and present CPU frames from
-  `pm-node`. Return the production hidden editor's persisted workspace/layout,
-  viewport and complete built-in/user panel registry, byte for byte.
-- Gate desktop/hidden tool document bytes, pinned-program export pixels,
-  publish-then-render, video import, on-demand panels, missing Chromium, FFmpeg
-  verification, launchd and SSH without a GUI session. These native hidden gates
-  are not passed by the Chromium-only smoke test.
+Frames and all agent exports use `AgentJobs`, pinned to the worker's revision
+and winning definitions. Save uses the host-services PMV4 packer, including
+original media and Undo history. Project-specific run owners and media bindings
+keep an export independent of another project or tab.
 
-Native artifact assembly is in `packages/cli/scripts/assemble-native.mjs`. It
-checks architecture, relocates dylibs, includes FFmpeg license/provenance files,
-requires Node 22 for addon loading, and launches `pm-cli`. The package build copies
-ignored `packages/cli/prebuilds` into `dist/native`. Both darwin-arm64 and darwin-x64
-need their own matching LGPL FFmpeg artifacts and clean Node 22 load test.
+## Chromium and shader pins
 
-Shipping-profile validation remains blocked on the LTO repair. With the current
-thin-LTO release profile, `pm-cli` fails to link with
-`failed to get bitcode from object file for LTO (Can't find section __bitcode)`.
-Debug-profile Node 22 loading does not establish that a release prebuild can ship.
-Rebuild and load-test the CLI and both addons with the shipping profile after the
-hybrid-crate/LTO fix lands; do not change the release profile to bypass this gate.
+`LazyNativeBrowser` starts Chromium only for DOM tools, a compatibility raster
+request, or an ANGLE shader request. A DOM page opens the session's project,
+joins its remote project session and flushes edits before answering. Workspace
+tools invoke the production dispatcher, retaining persisted layout, workspace,
+viewport and the complete built-in/user panel registry. They do not return the
+worker's reduced workspace answer. The page's compositor output is replaced by
+CPU snapshots from `pm-node` over authenticated binary HTTP requests.
 
-`pm-cli render` now calls `Renderer::require_shader_reference`. The shared effect,
-transition and shader-layer gates consult a configured parity service even when no
-runner is attached. Unknown and pinned programs then fail by name, rather than
-using an unverified native frame. The CLI still needs the desktop environment/pin
-store integration and the on-demand ANGLE runner to export those projects.
+The desktop writes `desktop-environment.json` beside `Engine Cache/Shader Cache`.
+Hidden engines and CLI renders read this namespace and the same `angle-parity`
+pins. A profile without desktop probes uses a fresh namespace: user programs
+must pass through ANGLE before native verification. The browser module uses
+`ShaderFallbackRunner`, with the desktop's F16 texture, uniform and watchdog
+contract. `powermove render` starts an authenticated loopback service; direct
+bundled `pm-cli` starts the same Node helper and closes it on stdin EOF.
+
+Missing native addons are `native-runtime-unavailable`; missing Chromium is
+`chromium-unavailable` at the first browser-dependent call. Corrupt persisted
+probe data is `shader-probe-store-unreadable`. The enabled host has no blanket
+refusal and no Chromium composition fallback. Linux and the setting-off macOS
+host keep the previous behavior.
+
+## Validation commands
+
+Build the matching native wrappers, pm-wasm and CLI host first. Run these under
+`pm-electron-lock`, with Playwright workers set to one:
+
+- `node apps/desktop/scripts/test-mcp.mjs --desktop`
+- `node apps/desktop/scripts/test-mcp.mjs --native`
+- `node apps/desktop/scripts/test-mcp.mjs --missing-browser`
+- `node apps/desktop/scripts/test-native-hidden-parity.mjs`
+- `node apps/desktop/scripts/test-native-hidden-services.mjs --launchd`
+- `node apps/desktop/scripts/test-native-hidden-services.mjs --ssh`
+- In `apps/desktop`, set `POWERMOVE_NATIVE_HOST_DIST` to the built CLI `dist`
+  and run `bunx playwright test e2e/document-host-contract.spec.ts --workers=1`.
+
+The parity harness captures a real desktop runner pin, compares every decoded
+PNG frame with the hidden export, and compares complete workspace JSON bytes
+with today's hidden host, including a user panel. The contract gate compares
+answers and document bytes after every call, using only the existing deterministic
+id normalization. Service tests create temporary user-domain launchd jobs and a
+loopback-only SSH service with temporary keys outside the repository; they do
+not change login or authorized-key settings.
+
+## Remaining integration gates
+
+The current integration branch does not yet include the extension-compatibility
+lane's raster override/context producers and corresponding snapshot events.
+The host's on-demand compatibility relay is wired, but those projects require
+that integration and parity validation; this lane does not claim their pixels
+are proved. Native importer format parity for animated images, SVG metadata and
+models also needs the corresponding media/extension integrations and corpus
+coverage. Desktop-encrypted extension variables and on-device captions are not
+yet provided by this embedder.
+
+## macOS artifacts
+
+`packages/cli/scripts/assemble-native.mjs` consumes `pm-node-addon`,
+`pm-bridge-addon` and `pm-cli` release artifacts, matching LGPL FFmpeg, and the
+native image-decoder license directory. It checks architecture, relocates and
+signs dylibs, constructs/ticks/pumps `EngineHost` on clean Node 22, and launches
+`pm-cli`. ARM64 and x64 require separate FFmpeg/native libraries; x64 loads under
+Rosetta on an ARM64 machine. The FFmpeg cross build uses the same pinned sources,
+component selection and LGPL policy as ARM64. These commands never publish.

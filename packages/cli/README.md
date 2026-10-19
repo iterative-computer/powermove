@@ -108,9 +108,15 @@ addons plus `pm-cli` with Node 22. It writes ignored `prebuilds/`; the package b
 copies those into `dist/native`. This does not create a release or publish.
 Both architecture gates are required before distributing native CLI support.
 
-On macOS, `mcp` with Use New Engine enabled currently returns
-`native-hidden-host-unavailable`; connect to the native desktop with `--connect`
-until the per-project native hidden host is integrated.
+On macOS, `mcp` with Use New Engine enabled embeds host services, supervised
+native engines and one document worker per project. Chromium starts on demand
+for workspace/panel tools and pinned or unverified user shaders. Missing
+Chromium returns `chromium-unavailable` when first needed. The native runtime
+must match the bundled protocol; missing addons are `native-runtime-unavailable`.
+`render` and direct bundled `pm-cli` use the desktop profile’s shader pins and
+the same on-demand ANGLE runner. Set `POWERMOVE_USER_DATA` to select another
+profile. See [native hidden-host integration](../../docs/engine/hidden-host.md)
+for compatibility and validation status.
 
 ## Requirements
 

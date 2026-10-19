@@ -29,9 +29,9 @@ Add this stdio MCP server to your agent's configuration, replacing the path with
 }
 ```
 
-The MCP client starts and stops the host. Chromium runs invisibly; no Powermove window or agent-provider login is required for editing and export. The default profile is `~/.powermove-headless`, separate from desktop projects. Exports go to `~/Powermove`. Use `--user-data /absolute/profile` and `--exports /absolute/output` to choose other folders. Concurrent independent hosts need different profiles.
+The MCP client starts and stops the host. Any Chromium processes run invisibly; no Powermove window or agent-provider login is required for editing and export. The default profile is `~/.powermove-headless`, separate from desktop projects. Exports go to `~/Powermove`. Use `--user-data /absolute/profile` and `--exports /absolute/output` to choose other folders. Concurrent independent hosts need different profiles.
 
-The macOS native hidden-host service is not complete in this build. A profile with Use New Engine enabled returns `native-hidden-host-unavailable` before Chromium starts. Use the desktop connection below for native renders. The Chromium hidden host remains available with the setting off; Linux keeps that host through cutover.
+On macOS, Use New Engine selects the native hidden host: host services run in the CLI, with supervised native engines and a document worker for each project. Document edits, media import, frames, export and save work without Chromium. Workspace and panel tools start Chromium on demand, pinned to the session’s project; its canvas receives CPU frames from the native engine. Pinned and unverified user shaders use the same ANGLE runner as the desktop. A missing browser returns `chromium-unavailable` when a tool first needs it. The setting-off host and Linux retain their existing Chromium host. Build status and remaining compatibility gates are recorded in [the hidden-host design note](../../../docs/engine/hidden-host.md).
 
 ## Connect to the desktop app
 
