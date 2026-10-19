@@ -31,6 +31,20 @@ fn main() {
         Arc::new(pm_render::text::served::NoSeeds),
     ))));
     let mut measure = CompatMeasure::new(CoreTextRegistry::new());
+    {
+        use pm_eval::text_geom::TextMeasure;
+        let normal = pm_text::compat::TextContent::from_json(
+            &json!({"text":"Default weight","font":"Avenir Next","size":32}),
+        );
+        let mut zero = normal.clone();
+        zero.weight = Some(0.0);
+        let expected = measure.level2(&normal, &[]).unwrap().layout;
+        let actual = measure.level2(&zero, &[]).unwrap().layout;
+        assert_eq!(
+            actual, expected,
+            "font resolution and layout must use the same default weight"
+        );
+    }
     let mut request = RenderRequest::sized(Size::new(640, 360), Precision::Float32);
     request.background = false;
     let assets = MapResolver::default();

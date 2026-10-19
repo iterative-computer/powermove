@@ -338,7 +338,10 @@ impl Level2 {
             builder.push(StyleProperty::FontSize(s.size() as f32), range.clone());
             builder.push(
                 StyleProperty::FontWeight(FontWeight::new(
-                    s.weight.unwrap_or(500.0).clamp(1.0, 1000.0) as f32,
+                    s.weight
+                        .filter(|w| *w != 0.0 && !w.is_nan())
+                        .unwrap_or(500.0)
+                        .clamp(1.0, 1000.0) as f32,
                 )),
                 range.clone(),
             );

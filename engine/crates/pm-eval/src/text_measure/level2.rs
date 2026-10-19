@@ -29,7 +29,11 @@ pub(super) fn shape<R: FontResolver>(
         let family = content.font.as_deref().unwrap_or("system-ui");
         let desc = FontDesc {
             size: content.size() as f32,
-            weight: content.weight.unwrap_or(500.0) as f32,
+            weight: content
+                .weight
+                .filter(|w| *w != 0.0 && !w.is_nan())
+                .unwrap_or(500.0)
+                .clamp(1.0, 1000.0) as f32,
             italic: content.italic.unwrap_or(false),
         };
         let variable = (!content.axes.is_empty())
