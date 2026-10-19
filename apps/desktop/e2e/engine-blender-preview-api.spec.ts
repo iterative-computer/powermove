@@ -61,6 +61,58 @@ test('native scene3d preview API renders, reports, and cancels the engine viewer
     });
     expect(cancelled.result).toBe('EnginePreviewCancelled');
     expect(cancelled.state).toMatchObject({ mode: 'draft', busy: false, error: null });
+
+    const beforeOrbit = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const presentation = PM.Kernel.services.get('viewer').enginePresentation;
+      return { seq: presentation.latest?.seq ?? 0, viewSeq: presentation.state?.viewSeq ?? 0 };
+    });
+    const jobsBeforeOrbit = await app.evaluate(() =>
+      (globalThis as any).__powermoveNativeEngine.engine.blender.completedRenders().length,
+    );
+    const orbit = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const viewport = PM.Kernel.api('native-preview-api').scene3d.viewport;
+      PM.setTime(0);
+      if (!viewport.run('view.orbit', 55, -20)) throw Error('Editor orbit was rejected');
+      const state = viewport.state();
+      return { mode: state.view.mode, camera: state.engineCamera };
+    });
+    expect(orbit.mode).toBe('editor');
+    expect(orbit.camera).not.toBeNull();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).PM.Kernel.services.get('viewer').enginePresentation?.state?.viewSeq ?? 0,
+    ), { timeout: 30_000 }).toBeGreaterThan(beforeOrbit.viewSeq);
+
+    const restarted = await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const api = PM.Kernel.api('native-preview-api');
+      api.scene3d.setPreviewMode('rendered');
+      await api.scene3d.renderFrame();
+      const presentation = PM.Kernel.services.get('viewer').enginePresentation;
+      const frame = presentation.latest;
+      const snapshot = PM.EngineRender.snapshotSync({
+        time: 0, width: 192, height: 108, pixels: 'premultiplied',
+        background: false, motionBlurSamples: 0, draft3d: false,
+      });
+      return {
+        frame: frame && { seq: frame.seq, viewSeq: frame.viewSeq, revision: frame.revision, pts: frame.pts },
+        state: presentation.state && { viewSeq: presentation.state.viewSeq, camera: presentation.state.view?.camera },
+        revision: PM.EngineDoc.barrier.revision,
+        preview: api.scene3d.previewState(),
+        pixels: snapshot.data.some((v: number, i: number) => i % 4 !== 3 && v > 8 && snapshot.data[i + (3 - i % 4)] > 0),
+      };
+    });
+    expect(restarted.frame?.seq).toBeGreaterThan(beforeOrbit.seq);
+    expect(restarted.frame?.pts).toBe(0);
+    expect(restarted.frame?.viewSeq).toBe(restarted.state?.viewSeq);
+    expect(restarted.frame?.revision).toBeGreaterThanOrEqual(restarted.revision);
+    expect(restarted.state?.camera).toEqual(orbit.camera);
+    expect(restarted.preview).toMatchObject({ mode: 'rendered', busy: false, error: null });
+    expect(restarted.pixels).toBe(true);
+    expect(await app.evaluate(() =>
+      (globalThis as any).__powermoveNativeEngine.engine.blender.completedRenders().length,
+    )).toBeGreaterThan(jobsBeforeOrbit);
     expect(await app.evaluate(() => (globalThis as any).__legacyPreviewJobs)).toBe(0);
     await page.evaluate(() => (window as any).__offPreview?.dispose());
     expect(session.diagnostics.pageErrors).toEqual([]);
