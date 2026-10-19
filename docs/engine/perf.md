@@ -744,3 +744,22 @@ PM_REUSE_FUZZ=30 PM_REUSE_FRAMES=1500 cargo test --release -p pm-render --test d
 cd ../../engine && cargo build --release -p pm-node --example compose_bench
 PM_BENCH_EDIT=drag target/release/examples/compose_bench doc.json <composition> 240
 ```
+
+## Perf3 implementation (2026-10-19, in progress)
+
+- `pm-eval` retains the ID index across value edits after validating each
+  indexed member by address and node revision. Reorders, duplicate-ID edits,
+  different documents and composition resolution paths still rebuild it.
+  `index_identity`: 3 tests pass, including property edits followed by a
+  reorder and a duplicate-ID edit; no stale-index lookup is needed.
+- The viewer's `DrawReuse` also retains `LayerOwners`, the matte-source set
+  and the solo flag across frames. Validation reads only the exact three
+  fields those facts depend on, in order, and invalidates on a document
+  replacement or backward revision. The bounded cache holds at most 128
+  composition lists, independently of time and layer draw reuse.
+- A pass with no scene objects skips 2.5D ordering only when no layer of
+  its entire composition has `threeD` set (including enclosing groups).
+  Malformed nullish lists retain the original throwing lookup path.
+- `pm-render --test draw_reuse`: all 5 tests pass (seeded edited plans,
+  corpus plans, pixel-exact frames, on-disk image changes, and drag reuse).
+  These are correctness checks; no performance gate is claimed from them.

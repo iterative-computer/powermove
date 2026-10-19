@@ -135,3 +135,60 @@ fn by_node_calls_on_two_documents_at_one_revision_do_not_share_an_index() {
     assert_eq!(ev.ev_id(&on_flag, id, 1.0).unwrap(), JsValue::Number(1.0));
     assert_eq!(ev.ev_id(&on, id, 1.0).unwrap(), JsValue::Null);
 }
+
+#[test]
+fn property_edits_keep_the_id_index_but_reorders_and_id_edits_rebuild_it() {
+    let mut doc = Document::new(Some(parse(STORED).unwrap()), 1);
+    let mut ev = Evaluator::new();
+    let a = ev.intern(PropAddress::channel("C", "A", "opacity"));
+    assert_eq!(ev.ev_id(&doc, a, 1.0).unwrap(), JsValue::Number(11.0));
+    let builds = ev.cache_stats().indexes;
+    for value in [12.0, 13.0, 14.0] {
+        doc.apply(&[Patch::set(
+            vec![
+                "layers".into(),
+                0usize.into(),
+                "p".into(),
+                "opacity".into(),
+                "v".into(),
+            ],
+            Value::from(value),
+        )])
+        .unwrap();
+        assert_eq!(ev.ev_id(&doc, a, 1.0).unwrap(), JsValue::Number(value));
+        assert_eq!(
+            ev.cache_stats().indexes,
+            builds,
+            "a value edit leaves every indexed id in place"
+        );
+    }
+    let mut layers = doc.root().unwrap().get("layers").unwrap().to_value();
+    layers.as_array_mut().unwrap().reverse();
+    doc.apply(&[Patch::set(vec!["layers".into()], layers)])
+        .unwrap();
+    assert_eq!(ev.ev_id(&doc, a, 1.0).unwrap(), JsValue::Number(14.0));
+    assert!(ev.cache_stats().indexes > builds);
+    assert_eq!(
+        ev.cache_stats().stale_indexes,
+        0,
+        "the structural validation catches a reorder before lookup"
+    );
+    let builds = ev.cache_stats().indexes;
+    doc.apply(&[Patch::set(
+        vec!["layers".into(), 0usize.into(), "id".into()],
+        Value::from("A"),
+    )])
+    .unwrap();
+    let cx = Comp::resolve(&doc, "C").unwrap();
+    let index = pm_eval::Scope::open(&mut ev, &cx).layer_index();
+    assert_eq!(
+        index.first.get(&pm_eval::comp::IdKey::String("A".into())),
+        Some(&0)
+    );
+    assert!(
+        index
+            .duplicated
+            .contains(&pm_eval::comp::IdKey::String("A".into()))
+    );
+    assert!(ev.cache_stats().indexes > builds);
+}
