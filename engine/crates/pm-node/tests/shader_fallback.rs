@@ -572,9 +572,9 @@ fn child_engine() {
 
 /// Opens the window's interactive session on `host`.
 fn open_session(host: &mut EngineHost, inbox: &Inbox) -> pm_protocol::common::SessionId {
-    host.attach(1, "host").unwrap();
+    host.attach(1, "host", None).unwrap();
     host.receive(1, &hello(PeerRole::Host));
-    host.attach(WINDOW.0, "renderer").unwrap();
+    host.attach(WINDOW.0, "renderer", None).unwrap();
     inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
     let open = Envelope::new(Message::Request {
         id: RequestId::new(1).unwrap(),
