@@ -865,6 +865,59 @@ pub struct CompatFrameRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub svg: Option<crate::svg_raster::SvgRasterRequest>,
+    /// For [`CompatSource::CompatContext`] (and only then): the export
+    /// frame as today's compositor canvas held it before `frame:rendered`
+    /// (RGBA8, top-down, opaque, display-encoded). The window runs its
+    /// `frame:rendered` handlers over it in the compatibility context and
+    /// answers the frame they leave, or a pass-through when none drew
+    /// (docs/engine/extensions-compat.md, "Exports"). `layer` names the
+    /// composition then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub frame: Option<CompatFrameInput>,
+}
+
+/// An export frame a compatibility context draws over
+/// ([`CompatFrameRequest::frame`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct CompatFrameInput {
+    pub width: u32,
+    pub height: u32,
+    /// `width × height × 4` bytes.
+    pub payload: PixelPayload,
+}
+
+impl Validate for CompatFrameInput {
+    fn validate(&self) -> Result<(), Violation> {
+        const C: ContractId = ContractId::HostServices;
+        ensure(
+            (1..=MAX_OUTPUT_DIMENSION).contains(&self.width)
+                && (1..=MAX_OUTPUT_DIMENSION).contains(&self.height),
+            C,
+            || format!("compatibility frame {}×{}", self.width, self.height),
+        )?;
+        let expected = u64::from(self.width) * u64::from(self.height) * 4;
+        ensure(self.payload.len() == expected, C, || {
+            format!(
+                "{} bytes for a {}×{} compatibility frame",
+                self.payload.len(),
+                self.width,
+                self.height
+            )
+        })?;
+        match &self.payload {
+            PixelPayload::Inline { bytes } => {
+                ensure(bytes.0.len() <= INLINE_PIXEL_BYTES, C, || {
+                    "inline pixels over the inline limit".into()
+                })
+            }
+            PixelPayload::SharedMemory { name, .. } => ensure(shared_name_ok(name), C, || {
+                "invalid shared-memory name".into()
+            }),
+        }
+    }
 }
 
 impl Validate for CompatFrameRequest {
@@ -882,6 +935,14 @@ impl Validate for CompatFrameRequest {
         )?;
         if let Some(svg) = &self.svg {
             svg.validate()?;
+        }
+        ensure(
+            (self.source == CompatSource::CompatContext) == self.frame.is_some(),
+            C,
+            || "a compatContext frame carries the export frame, and only it".into(),
+        )?;
+        if let Some(frame) = &self.frame {
+            frame.validate()?;
         }
         ensure(
             self.scale.is_finite() && self.scale > 0.0 && self.scale <= crate::frame::MAX_SCALE,
@@ -1132,6 +1193,50 @@ mod tests {
         ] {
             assert!(result(1024, 1024, shm(bad)).validate().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_compat_context_frame_carries_the_export_frame_and_only_it() {
+        let frame = |source, frame| CompatFrameRequest {
+            document: "doc".into(),
+            composition: "c".into(),
+            layer: "c".into(),
+            time: Ticks::ZERO,
+            source,
+            scale: 1.0,
+            revision: Revision::ZERO,
+            svg: None,
+            frame,
+        };
+        let input = |w: u32, h: u32, len: usize| CompatFrameInput {
+            width: w,
+            height: h,
+            payload: PixelPayload::Inline {
+                bytes: Bytes(vec![0; len]),
+            },
+        };
+        assert!(
+            frame(CompatSource::CompatContext, Some(input(4, 2, 32)))
+                .validate()
+                .is_ok()
+        );
+        assert!(frame(CompatSource::CompatContext, None).validate().is_err());
+        assert!(
+            frame(CompatSource::CompatContext, Some(input(4, 2, 31)))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            frame(CompatSource::CompatContext, Some(input(0, 2, 0)))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            frame(CompatSource::RasterOverride, Some(input(4, 2, 32)))
+                .validate()
+                .is_err()
+        );
+        assert!(frame(CompatSource::RasterOverride, None).validate().is_ok());
     }
 
     #[test]

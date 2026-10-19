@@ -16,9 +16,16 @@
  *    canvas's size (`GL.render` "present"), so `readPixels` there reads the
  *    finished composite;
  * 4. drawing into the default framebuffer shows in the viewer on top of the
- *    composite until the next frame replaces it; exports and captures render
- *    in their own passes and never include it (exporter.ts `renderInto`,
- *    `GL.renderToPixels`);
+ *    composite until the next frame replaces it. WebM exports (the shipped
+ *    exporter's `exportWebCodecs` and `exportRecorder`) render each frame
+ *    with `GL.render` into that canvas (`renderInto`), which emits
+ *    `preview:presented` → `frame:rendered`, then encode the canvas: what a
+ *    handler draws there is in the exported frame. Every other export, and
+ *    captures, read their own pass (`GL.renderToPixels`) and never include
+ *    it;
+ * 6. `context.canvas` holds the composite and any drawing over it
+ *    (`preserveDrawingBuffer`): `drawImage(context.canvas)`, `toDataURL()`,
+ *    `toBlob()` and texture uploads from it read them;
  * 5. its own textures, framebuffers and programs, as in any WebGL2 context.
  *
  * With "Use New Engine" on there is no compositor context. The engine
@@ -40,8 +47,17 @@
  *   layer of the viewer's presentation stack, right above the engine's
  *   canvas and under the viewer's overlay, at the bound canvas's place,
  *   until the next engine frame is presented (the frame that replaces the
- *   drawing today). Exports and captures do not include it, as today.
+ *   drawing today). WebM exports: each frame the job engine renders comes
+ *   to this window before it is encoded ([`exportFrame`]); the default
+ *   framebuffer holds it at the export's size, `frame:rendered` is
+ *   emitted for it, and when a handler drew, the frame encoded is what
+ *   the default framebuffer then holds (else the engine's own). Other
+ *   exports and captures never include it, as today.
  * - (5) holds: it is an ordinary WebGL2 context.
+ * - (6) The bound canvas gets today's pixels: each presented frame is
+ *   copied into it (a 2D context of its own, opaque), then any drawing
+ *   over it, so reads of `context.canvas` see what today's canvas held.
+ *   It rests hidden under the presentation, so nothing on screen changes.
  *
  * The context stays the same object while the same canvas is bound; a new
  * `init` with another canvas makes a new one, as `GL.init` did.
@@ -94,10 +110,14 @@ type CompatState = {
   layer: HTMLCanvasElement | null;
   upload: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null;
   lost: boolean;
+  /** An export frame the default framebuffer holds instead of the frame on screen ([`exportFrame`]). */
+  exporting: ImageData | null;
+  /** The bound canvas's 2D context mirroring today's canvas pixels (`context.canvas` reads). */
+  mirror: CanvasRenderingContext2D | null | undefined;
 };
 
 /** Counters for tests and diagnostics. */
-export type CompatContextStats = { made: number; uploads: number; shown: number; hidden: number };
+export type CompatContextStats = { made: number; uploads: number; shown: number; hidden: number; mirrored: number; exportFrames: number };
 
 function defaultCanvas(width: number, height: number): OffscreenCanvas | HTMLCanvasElement {
   if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(width, height);
@@ -119,7 +139,7 @@ export function presentationCanvas(bound: HTMLCanvasElement): HTMLCanvasElement 
 
 export class CompatContextHost {
   private state: CompatState | null = null;
-  readonly stats: CompatContextStats = { made: 0, uploads: 0, shown: 0, hidden: 0 };
+  readonly stats: CompatContextStats = { made: 0, uploads: 0, shown: 0, hidden: 0, mirrored: 0, exportFrames: 0 };
 
   constructor(private readonly env: CompatContextEnv) {}
 
@@ -161,6 +181,122 @@ export class CompatContextHost {
     state.stale = true;
     state.dirty = false;
     this.hideLayer(state);
+    // `context.canvas` is the bound canvas; today it held the composite
+    // (`preserveDrawingBuffer`), so `drawImage(context.canvas)`,
+    // `toDataURL()`, `toBlob()` and texture uploads from it read the frame.
+    // The bound canvas rests hidden under the engine's presentation: it
+    // gets the frame on screen, then any drawing over it ([`showLayer`]).
+    const source = (this.env.presentation ?? presentationCanvas)(state.bound);
+    if (source) {
+      const from = sourceRect(source, state.bound);
+      if (from) this.mirror(state, source, from);
+    }
+  }
+
+  /**
+   * Runs `emit` (today's `preview:presented` → `frame:rendered` of an
+   * export frame) with the default framebuffer holding `frame` at its
+   * size, as today's `renderInto` left the compositor's canvas for the
+   * handlers, and returns what the default framebuffer holds after them
+   * when any of them drew into it (RGBA8, top-down, opaque), else null:
+   * the frame is the engine's. Only WebM exports call it (the exports
+   * whose frames today's exporter read from that canvas).
+   */
+  exportFrame(frame: { width: number; height: number; data: Uint8Array }, emit: () => void): Uint8Array | null {
+    const state = this.state;
+    if (!state || state.lost || !this.env.engine()) {
+      emit();
+      return null;
+    }
+    const { width, height } = frame;
+    if (!(width >= 1 && height >= 1) || frame.data.byteLength !== width * height * 4) throw new Error(`The export frame is not ${width}×${height} RGBA.`);
+    const image = new ImageData(new Uint8ClampedArray(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength), width, height);
+    const before = { width: state.canvas.width, height: state.canvas.height };
+    state.exporting = image;
+    state.canvas.width = width;
+    state.canvas.height = height;
+    state.stale = true;
+    state.dirty = false;
+    try {
+      emit();
+      if (!state.dirty || state.lost) return null;
+      const gl = state.gl;
+      const raw = state.raw;
+      const rows = new Uint8Array(width * height * 4);
+      raw.bindFramebuffer!(gl.READ_FRAMEBUFFER, null);
+      const pack = { buffer: gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING), alignment: gl.getParameter(gl.PACK_ALIGNMENT), rowLength: gl.getParameter(gl.PACK_ROW_LENGTH), skipPixels: gl.getParameter(gl.PACK_SKIP_PIXELS), skipRows: gl.getParameter(gl.PACK_SKIP_ROWS) };
+      try {
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        gl.pixelStorei(gl.PACK_ALIGNMENT, 4);
+        gl.pixelStorei(gl.PACK_ROW_LENGTH, 0);
+        gl.pixelStorei(gl.PACK_SKIP_PIXELS, 0);
+        gl.pixelStorei(gl.PACK_SKIP_ROWS, 0);
+        raw.readPixels!(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, rows);
+      } finally {
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pack.buffer);
+        gl.pixelStorei(gl.PACK_ALIGNMENT, pack.alignment);
+        gl.pixelStorei(gl.PACK_ROW_LENGTH, pack.rowLength);
+        gl.pixelStorei(gl.PACK_SKIP_PIXELS, pack.skipPixels);
+        gl.pixelStorei(gl.PACK_SKIP_ROWS, pack.skipRows);
+        raw.bindFramebuffer!(gl.READ_FRAMEBUFFER, state.readFb);
+      }
+      // Bottom row first in GL: flip to top-down; the canvas is opaque.
+      const out = new Uint8Array(rows.length);
+      const stride = width * 4;
+      for (let y = 0; y < height; y++) out.set(rows.subarray((height - 1 - y) * stride, (height - y) * stride), y * stride);
+      for (let i = 3; i < out.length; i += 4) out[i] = 255;
+      this.stats.exportFrames++;
+      return out;
+    } finally {
+      state.exporting = null;
+      state.canvas.width = before.width;
+      state.canvas.height = before.height;
+      state.stale = true;
+      state.dirty = false;
+    }
+  }
+
+  /** Whether an extension holds the compatibility context (export frames then go through it). */
+  get active(): boolean {
+    return !!this.state && !this.state.lost;
+  }
+
+  /**
+   * Copies `source` (the frame on screen, or the context's drawing over
+   * it) into the bound canvas's own pixels, opaque as today's canvas
+   * (`alpha: false`). A bound canvas that already has another kind of
+   * context is left alone.
+   */
+  private mirror(state: CompatState, source: CanvasImageSource, from?: { sx: number; sy: number; sw: number; sh: number }): void {
+    if (state.mirror === undefined) {
+      try {
+        state.mirror = state.bound.getContext('2d', { alpha: false }) as CanvasRenderingContext2D | null;
+      } catch {
+        state.mirror = null;
+      }
+    }
+    const c2 = state.mirror;
+    if (!c2) return;
+    const width = state.bound.width, height = state.bound.height;
+    try {
+      c2.setTransform(1, 0, 0, 1, 0, 0);
+      c2.globalCompositeOperation = 'copy';
+      if (from) {
+        const same = Math.abs(from.sw - width) <= 1 && Math.abs(from.sh - height) <= 1;
+        c2.imageSmoothingEnabled = !same;
+        c2.fillStyle = '#000';
+        c2.fillRect(0, 0, width, height);
+        c2.globalCompositeOperation = 'source-over';
+        if (same) c2.drawImage(source, Math.round(from.sx), Math.round(from.sy), width, height, 0, 0, width, height);
+        else c2.drawImage(source, from.sx, from.sy, from.sw, from.sh, 0, 0, width, height);
+      } else {
+        c2.imageSmoothingEnabled = false;
+        c2.drawImage(source, 0, 0, width, height);
+      }
+      this.stats.mirrored++;
+    } catch {
+      // A canvas that cannot be read (lost device): today's would be black too.
+    }
   }
 
   dispose(): void {
@@ -180,7 +316,7 @@ export class CompatContextHost {
     if (!gl) return null;
     const state: CompatState = {
       bound, canvas, gl, raw: {}, drawFb: null, readFb: null,
-      stale: true, dirty: false, flushQueued: false, layer: null, upload: null, lost: false
+      stale: true, dirty: false, flushQueued: false, layer: null, upload: null, lost: false, exporting: null, mirror: undefined
     };
     this.instrument(state);
     (canvas as any).addEventListener?.('webglcontextlost', (event: Event) => {
@@ -194,6 +330,8 @@ export class CompatContextHost {
 
   /** Follows the bound canvas's size (today `GL.resize` sized the compositor's canvas). */
   private fit(state: CompatState): void {
+    // An export frame keeps the export's size until its handlers ran.
+    if (state.exporting) return;
     const width = Math.max(1, state.bound.width | 0), height = Math.max(1, state.bound.height | 0);
     if (state.canvas.width !== width || state.canvas.height !== height) {
       state.canvas.width = width;
@@ -265,7 +403,7 @@ export class CompatContextHost {
     const gl = state.gl;
     const raw = state.raw;
     const width = state.canvas.width, height = state.canvas.height;
-    const source = (this.env.presentation ?? presentationCanvas)(state.bound);
+    const source = state.exporting ? null : (this.env.presentation ?? presentationCanvas)(state.bound);
     // The frame under the bound canvas, scaled to its backing store, over black.
     const scratch = this.scratch(width, height);
     const c2 = scratch?.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
@@ -275,6 +413,9 @@ export class CompatContextHost {
     c2.fillStyle = '#000';
     c2.fillRect(0, 0, width, height);
     c2.globalCompositeOperation = 'source-over';
+    // An export frame (opaque, at the export's size: today's `renderInto`
+    // resized the compositor's canvas to it).
+    if (state.exporting) c2.putImageData(state.exporting, 0, 0);
     if (source) {
       const from = sourceRect(source, state.bound);
       if (from) {
@@ -363,6 +504,8 @@ export class CompatContextHost {
   /** The extension drew into the default framebuffer: show it after this task. */
   private drew(state: CompatState): void {
     state.dirty = true;
+    // An export frame's drawing goes to the export, not the viewer.
+    if (state.exporting) return;
     if (state.flushQueued) return;
     state.flushQueued = true;
     (this.env.defer ?? queueMicrotask)(() => {
@@ -403,6 +546,8 @@ export class CompatContextHost {
     c2.drawImage(state.canvas as CanvasImageSource, 0, 0);
     layer.style.visibility = 'visible';
     this.stats.shown++;
+    // Today the drawing was on the canvas itself: `context.canvas` reads it.
+    this.mirror(state, state.canvas as CanvasImageSource);
   }
 
   private hideLayer(state: CompatState): void {

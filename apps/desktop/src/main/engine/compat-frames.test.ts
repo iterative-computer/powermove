@@ -38,6 +38,24 @@ describe('CompatFrames', () => {
     expect('layer' in asks.get(1)![1]!).toBe(false);
   });
 
+  it('hands a compatibility context\'s shared export frame to the windows inline, and answers its pass-through or its frame', async () => {
+    const asks: EngineCompatAsk[] = [];
+    const take = vi.fn(() => new Uint8Array(16).fill(5));
+    const frames = new CompatFrames({ windows: () => [{ id: 1, ask: (a: EngineCompatAsk) => asks.push(a) }], publishPixels: () => '/pm.0123456789abcdef01234567', unlinkPixels: vi.fn(), takePixels: take });
+    const context: CompatFrameRequest = { ...request, layer: 'c', source: 'compatContext', frame: { width: 2, height: 2, payload: { kind: 'sharedMemory', name: '/pm.aaaaaaaaaaaaaaaaaaaaaaaa', length: 16 } } };
+    const first = frames.serve(context);
+    expect(take).toHaveBeenCalledWith('/pm.aaaaaaaaaaaaaaaaaaaaaaaa', 16);
+    expect(asks[0]!.request.frame).toEqual({ width: 2, height: 2, payload: { kind: 'inline', bytes: new Uint8Array(16).fill(5) } });
+    frames.answer(1, { ask: asks[0]!.ask, status: 'native' });
+    expect(await first).toMatchObject({ type: 'compatFrame', native: true });
+    const second = frames.serve(context);
+    frames.answer(1, pixels(asks[1]!.ask));
+    expect(await second).toMatchObject({ type: 'compatFrame', width: 2, height: 2, payload: { kind: 'inline' } });
+    // Without the addon's reader the frame cannot reach a window.
+    const none = new CompatFrames({ windows: () => [{ id: 1, ask: () => {} }], publishPixels: null, unlinkPixels: null });
+    await expect(none.serve(context)).rejects.toThrow(/shared pixels/);
+  });
+
   it('asks every window and takes the first pixels', async () => {
     const { frames, asks } = setup([1, 2]);
     const answer = frames.serve(request);

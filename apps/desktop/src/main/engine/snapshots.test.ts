@@ -241,7 +241,7 @@ describe('sync snapshots served by main’s session for the window', () => {
     const service = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare }, log: () => {} });
     const reply = await service.snapshot(12, request({}, { session: null, generation: 0, document: doc }));
     expect(reply.status).toBe('rendered');
-    expect(prepare).toHaveBeenCalledWith(12, doc, [], []);
+    expect(prepare).toHaveBeenCalledWith(12, doc, [], [], []);
     expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
     expect(service.status().windowSessions).toBe(1);
   });

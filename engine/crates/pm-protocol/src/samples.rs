@@ -829,6 +829,7 @@ pub fn requests() -> Vec<Envelope> {
                 scale: 1.0,
                 revision: rev(42),
                 svg: None,
+                frame: None,
             }),
         ),
     ]

@@ -1421,6 +1421,12 @@ fn run_job(
             .clone()
             .map(|c| c as Arc<dyn pm_render::compat::CompatRasters>),
     );
+    // A compatibility context in the exporting window draws over each frame
+    // (today's WebM frames, `frame:rendered` before the canvas was encoded).
+    let mut plan = plan;
+    plan.frame_post = job_compat
+        .as_ref()
+        .and_then(|c| c.context_frames(export.composition.clone()));
     let result = run_export_with_blender(
         renderer,
         &export,

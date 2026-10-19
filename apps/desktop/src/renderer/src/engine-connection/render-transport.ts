@@ -138,10 +138,21 @@ export interface TransportFallbackRunner {
 
 /** Draws one layer's compatibility pixels for an export frame (the `raster`
  *  override and compatibility-context producers register one each). */
+type CompatProduced = { key: string; width: number; height: number; format: CompatFormat; origin: [number, number]; scale: number; data: Uint8Array };
+/** An export frame's compatibility pixels, `'native'` when the producer
+ *  leaves it to the engine (a compatibility context nobody drew into), or
+ *  null when it has none. */
 export type CompatProducer = (request: CompatFrameRequest) =>
-  | { key: string; width: number; height: number; format: CompatFormat; origin: [number, number]; scale: number; data: Uint8Array }
+  | CompatProduced
+  | 'native'
   | null
-  | Promise<{ key: string; width: number; height: number; format: CompatFormat; origin: [number, number]; scale: number; data: Uint8Array } | null>;
+  | Promise<CompatProduced | 'native' | null>;
+
+/** The WebM formats (today's `exportWebCodecs`/`exportRecorder` read their
+ *  frames from the compositor's canvas after `frame:rendered`). */
+export function exportDrawsOverFrames(format: unknown): boolean {
+  return format === 'webm' || format === 'webm-vp9' || format === 'webm-vp8' || format === 'rec';
+}
 
 /**
  * A producer's answer to one of the engine's compatibility needs (a layer at
@@ -276,6 +287,18 @@ export class EngineRenderTransport {
   get producing(): CompatSource[] {
     return [...this.answerers.keys()];
   }
+
+  /** The sources an export in `format` names: the layer producers, and the
+   *  compatibility context for the WebM formats while it draws
+   *  ([`exportDrawsOverFrames`]). */
+  exportSources(format: unknown): CompatSource[] {
+    const sources = this.producing;
+    if (exportDrawsOverFrames(format) && this.producers.has('compatContext') && this.contextActive?.()) sources.push('compatContext');
+    return sources;
+  }
+
+  /** Whether an extension holds the compatibility context (the kernel sets it). */
+  contextActive: (() => boolean) | null = null;
 
   /**
    * Registers the producer that answers the engine's needs for `source`
@@ -917,7 +940,9 @@ export class EngineRenderTransport {
     }
     if (!producer) return no(`No ${ask.request.source === 'rasterOverride' ? 'raster override' : ask.request.source === 'svgImage' ? 'SVG rasterizer' : 'compatibility context'} draws layer ${ask.request.layer} in this window.`);
     try {
+      if (ask.request.source === 'compatContext') this.compatStats.exportAsks++;
       const pixels = await producer(ask.request);
+      if (pixels === 'native') return answer({ ask: ask.ask, status: 'native' });
       if (!pixels) return no(`Layer ${ask.request.layer} has no compatibility pixels at that frame.`);
       answer({ ask: ask.ask, status: 'pixels', ...pixels });
     } catch (error) {

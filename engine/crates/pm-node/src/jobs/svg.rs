@@ -71,6 +71,7 @@ impl SvgRasterSource for HostSvgRasters {
             scale: 1.0,
             revision: self.revision,
             svg: Some(need.request.clone()),
+            frame: None,
         };
         let frame = match self
             .shared

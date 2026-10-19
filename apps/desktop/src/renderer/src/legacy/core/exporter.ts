@@ -634,6 +634,13 @@ async function run(opts: any) {
   }
 }
 
+/** The compatibility producers an export in `format` names. */
+function compatSources(format: unknown): { compat?: string[] } {
+  const render: any = PM.EngineRender;
+  const sources: string[] = typeof render?.exportSources === 'function' ? render.exportSources(format) : (render?.producing ?? []);
+  return sources.length ? { compat: [...sources] } : {};
+}
+
 /** The job engine's view of the sheet's settings (shared/engine-ipc.ts). */
 function sheetOptions(opts: any): any {
   const p: any = PM.proj;
@@ -643,8 +650,9 @@ function sheetOptions(opts: any): any {
     start: opts.format === 'still' ? PM.time : t0, end: opts.format === 'still' ? PM.time + 1 / Math.max(1, Number(opts.fps) || p.fps || 30) : t1,
     audio: opts.audio !== false, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
     delivery: normalizeDelivery(opts.delivery), hideCaptions: opts.captionsBurn === false,
-    // A raster override's layers are drawn by this window (kernel/raster-compat.ts).
-    ...(PM.EngineRender?.producing?.length ? { compat: PM.EngineRender.producing } : {})
+    // A raster override's layers are drawn by this window (kernel/raster-compat.ts),
+    // and a WebM export's frames go through its compatibility context (compat-context.ts).
+    ...compatSources(opts.format)
   };
 }
 

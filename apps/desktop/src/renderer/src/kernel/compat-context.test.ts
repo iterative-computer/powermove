@@ -48,6 +48,7 @@ function rig(options: { width?: number; height?: number } = {}) {
   const twoD = () => ({
     setTransform() {}, fillRect: (...a: unknown[]) => drawn.push(['fillRect', ...a]),
     drawImage: (...a: unknown[]) => drawn.push(['drawImage', ...a]),
+    putImageData: (...a: unknown[]) => drawn.push(['putImageData', ...a]),
     set fillStyle(v: string) { drawn.push(['fillStyle', v]); }, globalCompositeOperation: 'source-over', imageSmoothingEnabled: true
   });
   let gl: ReturnType<typeof fakeGl> | null = null;
@@ -223,5 +224,46 @@ describe('render.gl.init before the engine connection is up', () => {
     expect(bindLate({ EngineCanvas: binding }, canvas)).toBe(false);
     canvas.remove();
     expect(bindLate({ EngineCanvas: { bound: null, bind: binding.bind } }, canvas)).toBe(false);
+  });
+
+  it('copies each presented frame, then the drawing over it, into the bound canvas: context.canvas reads what today\'s canvas held', () => {
+    const r = rig();
+    r.env.bound.mockReturnValue(r.bound);
+    const gl = r.host.context()!;
+    r.drawn.length = 0;
+    r.host.presented();
+    // The frame under the bound canvas (the presentation at twice the density), over black.
+    expect(r.drawn).toContainEqual(['drawImage', r.presentation, 0, 0, 400, 200, 0, 0, 200, 100]);
+    expect(r.host.stats.mirrored).toBe(1);
+    // A drawing over it lands in the bound canvas too.
+    gl.clear(0x4000);
+    r.flush();
+    expect(r.drawn.at(-1)).toEqual(['drawImage', r.made[0], 0, 0, 200, 100]);
+    expect(r.host.stats.mirrored).toBe(2);
+  });
+
+  it('runs a WebM export frame\'s handlers over that frame at the export\'s size and returns what they drew, top-down', () => {
+    const r = rig();
+    r.env.bound.mockReturnValue(r.bound);
+    const gl: any = r.host.context()!;
+    (globalThis as any).ImageData ??= class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} };
+    const frame = { width: 2, height: 2, data: new Uint8Array([1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255, 4, 4, 4, 255]) };
+    // No handler draws: the engine's frame stands.
+    let sizes: number[] = [];
+    expect(r.host.exportFrame(frame, () => { sizes = [r.made[0].width, r.made[0].height]; })).toBeNull();
+    expect(sizes).toEqual([2, 2]);
+    expect([r.made[0].width, r.made[0].height]).toEqual([200, 100]);
+    // A handler draws: the frame is uploaded under it, and read back flipped to top-down.
+    // (the fake's readPixels writes nothing: the pixels themselves are measured in e2e/engine-compat-context.spec.ts)
+    const out = r.host.exportFrame(frame, () => { gl.clear(0x4000); });
+    expect(r.drawn.some((d) => d[0] === 'putImageData')).toBe(true);
+    expect(r.made[0].width).toBe(200);
+    expect(out).not.toBeNull();
+    expect(out!.length).toBe(16);
+    expect([...out!].filter((_, i) => i % 4 === 3)).toEqual([255, 255, 255, 255]);
+    // The drawing went to the export, not the viewer's layer.
+    r.flush();
+    expect(r.host.shownLayer).toBeNull();
+    expect(r.host.stats.exportFrames).toBe(1);
   });
 });

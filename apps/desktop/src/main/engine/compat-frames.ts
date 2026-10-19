@@ -40,6 +40,8 @@ export type CompatFramesOptions = {
   /** pm-bridge's shared-memory writer and its cleanup (absent without the addon). */
   publishPixels: ((bytes: Uint8Array) => string) | null;
   unlinkPixels: ((name: string) => void) | null;
+  /** pm-bridge's shared-memory reader (an export frame the engine shared). */
+  takePixels?: ((name: string, length: number) => Uint8Array) | null;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
 };
 
@@ -87,6 +89,13 @@ export class CompatFrames {
       ? 'SVG images are drawn by the editor window that has this project open; open the project in a window to export it.'
       : 'This layer is drawn by an extension in the editor; open the project in a window to export it.';
     if (!windows.length) throw new ProtocolError('notHeadlessRenderable', closed);
+    // A compatibility context's export frame goes to the windows inline.
+    const frame = request.frame;
+    if (frame && frame.payload.kind === 'sharedMemory') {
+      if (!this.options.takePixels) throw new ProtocolError('internal', 'Main cannot read shared pixels without the frame bridge addon.');
+      const bytes = this.options.takePixels(frame.payload.name, Number(frame.payload.length));
+      request = { ...request, frame: { ...frame, payload: { kind: 'inline', bytes } } };
+    }
     const ask = this.next++;
     const answer = await new Promise<EngineCompatAnswer>((resolve) => {
       const timer = (this.options.schedule ?? defaultSchedule)(() => {

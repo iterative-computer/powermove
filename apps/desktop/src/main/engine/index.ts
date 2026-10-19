@@ -293,7 +293,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       .filter((w) => !w.isDestroyed())
       .map((w) => ({ id: w.webContents.id, ask: (ask) => w.webContents.send(ENGINE_IPC.compatAsk, ask) })),
     publishPixels: bridgeAddon?.publishPixels ? (bytes) => bridgeAddon.publishPixels!(bytes) : null,
-    unlinkPixels: bridgeAddon?.unlinkPixels ? (name) => bridgeAddon.unlinkPixels!(name) : null
+    unlinkPixels: bridgeAddon?.unlinkPixels ? (name) => bridgeAddon.unlinkPixels!(name) : null,
+    takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null
   });
   options.ipc.on(ENGINE_IPC.compatAnswer, (event, answer: unknown) => {
     if (!options.isTrustedSender(event)) return;

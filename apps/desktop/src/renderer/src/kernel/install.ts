@@ -115,7 +115,7 @@ import { parseExtensionUrl } from '../../../shared/extension-url';
 import { fetchRemoteMedia, type AdmitDownload, type ImportUrl } from './remote-media';
 import { touchedDocument, writeDocument } from '../engine-doc/write';
 import { assetAudio, assetSource } from './live-media';
-import { createRasterCompat } from './raster-compat';
+import { createRasterCompat, TICKS_PER_SECOND } from './raster-compat';
 import { compatContext, createCompatContextHost } from './compat-context';
 
 type LegacyPM = Record<string, any>;
@@ -984,9 +984,36 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   }
   const compatContextHost = createCompatContextHost(PM);
   PM.CompatContext = compatContextHost;
+  /** The viewport the last presented frame carried (today's export frames
+   *  emitted `GL.previewViewport` as it stood). */
+  let presentedViewport: unknown = null;
   {
-    const off = PM?.bus?.on?.('preview:presented', () => compatContextHost.presented());
+    const off = PM?.bus?.on?.('preview:presented', (frame: { viewport?: unknown } | undefined) => {
+      presentedViewport = frame?.viewport ?? null;
+      compatContextHost.presented();
+    });
     if (typeof off === 'function') subscriptions.push(off);
+  }
+  /* WebM exports with the engine: each frame comes here before it is
+     encoded, and `frame:rendered` runs over it in the compatibility
+     context, as today's `renderInto` frames did (compat-context.ts). */
+  if (PM.EngineRender?.provideCompat) {
+    const transport = PM.EngineRender as import('../engine-connection/render-transport').EngineRenderTransport;
+    transport.contextActive = () => compatContextHost.active;
+    const unprovide = transport.provideCompat('compatContext', (request) => {
+      const frame = request.frame;
+      if (!frame) return null;
+      if (frame.payload.kind !== 'inline') throw new Error('The export frame did not reach this window.');
+      const width = Number(frame.width), height = Number(frame.height);
+      const time = Number(request.time) / TICKS_PER_SECOND;
+      const drawn = compatContextHost.exportFrame({ width, height, data: frame.payload.bytes }, () =>
+        kernel.events.emit('frame:rendered', { time, viewport: (presentedViewport ?? null) as any, version: PM.animVersion?.(), quality: 1 }));
+      return drawn ? { key: `compat-context:${String(request.time)}`, width, height, format: 'rgba8Premultiplied', origin: [0, 0], scale: 1, data: drawn } : 'native';
+    });
+    subscriptions.push(() => {
+      unprovide();
+      if (transport.contextActive) transport.contextActive = null;
+    });
   }
   subscriptions.push(() => {
     compatContextHost.dispose();

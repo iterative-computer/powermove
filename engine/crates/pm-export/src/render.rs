@@ -614,6 +614,26 @@ pub struct ExportPlan {
     pub sequence_name: Option<String>,
     /// Encoded-frame previews for the progress sheet.
     pub preview: bool,
+    /// Runs over each rendered frame before it is encoded (an extension's
+    /// compatibility context drawing over today's WebM export frames;
+    /// pm-node `jobs::compat`). `None`: frames are encoded as rendered.
+    pub frame_post: Option<Arc<dyn FramePost>>,
+}
+
+/// A pass over each rendered export frame before encoding ([`ExportPlan::frame_post`]).
+pub trait FramePost: Send + Sync {
+    /// Frame `index` at `time`: its premultiplied working values
+    /// (`width × height × 4`, top-down, `working` encoding), replaced or
+    /// returned unchanged. An error fails the export.
+    fn frame(
+        &self,
+        index: u64,
+        time: Ticks,
+        width: u32,
+        height: u32,
+        working: crate::settings::WorkingEncoding,
+        rgba: Vec<f32>,
+    ) -> Result<Vec<f32>, JobError>;
 }
 
 pub struct AudioPlan {
@@ -879,6 +899,7 @@ pub fn plan_export_with(job: &ExportJob, blender: bool) -> Result<ExportPlan, Jo
         document,
         sequence_name: s.delivery.sequence_name.clone(),
         preview: s.delivery.preview,
+        frame_post: None,
     })
 }
 
@@ -1003,8 +1024,10 @@ where
         audio,
         document,
         preview: wants_preview,
+        frame_post,
         ..
     } = plan;
+    let working = spec.working;
     let frames = spec.frames;
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
@@ -1139,9 +1162,23 @@ where
                         ))
                     }
                 });
+            // The frame as the exporting window's compatibility context
+            // leaves it (today's WebM frames: `frame:rendered` handlers drew
+            // on the compositor's canvas before it was encoded).
+            let rendered = rendered.and_then(|f| match &frame_post {
+                None => Ok(f.rgba),
+                Some(post) => post.frame(
+                    n,
+                    timeline.tick(n),
+                    request.output_size.width,
+                    request.output_size.height,
+                    working,
+                    f.rgba,
+                ),
+            });
             match rendered {
-                Ok(f) => {
-                    if tx.send(Rendered::Frame(n, f.rgba)).is_err() {
+                Ok(rgba) => {
+                    if tx.send(Rendered::Frame(n, rgba)).is_err() {
                         break;
                     }
                 }
