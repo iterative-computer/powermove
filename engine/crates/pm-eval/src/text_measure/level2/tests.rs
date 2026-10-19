@@ -362,7 +362,7 @@ fn uncovered_characters_keep_their_place_as_notdef() {
                 r.glyphs
                     .iter()
                     .zip(&r.sources)
-                    .map(|(g, s)| (u32::from(g.id), *s, g.x))
+                    .map(|(g, s)| (g.id, *s, g.x))
             })
             .collect()
     };
