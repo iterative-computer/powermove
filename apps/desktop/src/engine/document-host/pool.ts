@@ -206,7 +206,7 @@ export class DocumentHostPool implements DocumentHostPoolApi {
     const missing = (what: string) => { throw new DocumentHostError('service-unavailable', `${what} is not available on this host.`); };
     switch (name) {
       case 'store.read': return s.store.read(String(args[0]));
-      case 'store.snapshot': return s.store.snapshot?.() ?? {};
+      case 'store.snapshot': return s.store.snapshot?.() ?? null;
       case 'store.write': return s.store.write(String(args[0]), args[1], args[2]);
       case 'store.remove': return s.store.remove(String(args[0]));
       case 'session.join': return s.session.join(String(args[0]));

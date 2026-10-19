@@ -71,8 +71,11 @@ export class DocumentWorker {
   private storeWrites: Promise<unknown> = Promise.resolve();
 
   private async editorStore() {
-    const seed = await this.service<Record<string, unknown>>('store.snapshot');
-    const memory = memoryStore(seed);
+    const seed = await this.service<Record<string, unknown> | null>('store.snapshot');
+    const memory = memoryStore(seed ?? {});
+    // Older embedders keep their existing instance-local preferences. Only a
+    // host that supplied a profile snapshot opts into preference write-through.
+    if (seed === null) return memory;
     const set = memory.set, del = memory.del;
     memory.set = (key, value) => {
       const base = key === 'projects' || key === 'projectTrash' ? memory.get(key, null) : undefined;
