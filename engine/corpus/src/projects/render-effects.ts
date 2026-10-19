@@ -156,6 +156,44 @@ function combinations(): CorpusProject[] {
   ];
 }
 
+/**
+ * Color, Levels, and Posterize at the parameters where they are step
+ * functions (amendment 9's WebGL-unstable class): the shader corpus's
+ * variants whose WebGL output moves past the Standard tolerance when the
+ * input moves one binary16 step (`webgl.ts --perturb-input`,
+ * glsl-20261016-041029), plus Levels at gamma 1 (`pow(x, 1)`, where naga's
+ * `pow` and ANGLE's `powr` differ). Each on a rotated, stretched photo (the
+ * resampled layer buffer feeds the step) and on the alpha image.
+ */
+function stepProjects(): CorpusProject[] {
+  const sets: Array<[string, Array<Record<string, Value>>]> = [
+    ['color', [
+      { exposure: 4, contrast: 100, saturation: 200, hue: 180, temperature: 100 },
+      { exposure: -4, contrast: 100, saturation: 200, hue: -180, temperature: -100 },
+      { exposure: 1, contrast: 60, saturation: 200, hue: 90, temperature: 0 },
+    ]],
+    ['levels', [
+      { inBlack: 70, inWhite: 70, gamma: 2.83 },
+      { inBlack: 100, inWhite: 100, gamma: 4 },
+      { inBlack: 69.79917553253472, inWhite: 47.21242974046618, gamma: 1.0672373200533911 },
+      { inBlack: 30, inWhite: 30, gamma: 1.27 },
+      { inBlack: 0, inWhite: 100, gamma: 1 },
+      { inBlack: 45, inWhite: 55, gamma: .2 },
+    ]],
+    ['posterize', [{ levels: 45.4 }, { levels: 64 }, { levels: 25.383839026093483 }, { levels: 20.6 }, { levels: 2 }, { levels: 3 }]],
+  ];
+  return sets.map(([id, params]) => {
+    const b = newProject(`render/fx-steps-${id}`, { name: `Step parameters ${id}`, backgroundFill: GRADIENT, w: 480, h: 270, dur: 1 });
+    params.forEach((values, i) => {
+      const photo = b.add(b.layer('image', { name: `Photo ${i}`, d: { asset: ref(PHOTO), fit: 'stretch', w: 140, h: 84 }, p: { 'position.x': 10 + (i % 3) * 155, 'position.y': 10 + Math.floor(i / 3) * 100, rotation: 4 + i } }));
+      photo.fx.push(b.effect(id, values));
+    });
+    const alpha = b.add(b.layer('image', { name: 'Alpha image', d: { asset: ref('still-alpha.png'), fit: 'contain', w: 160, h: 90 }, p: { 'position.x': 300, 'position.y': 175, opacity: 85 } }));
+    alpha.fx.push(b.effect(id, params[0]!));
+    return project(b, { group: 'Render', title: `Effect ${id} at step parameters`, covers: [`effect ${id}`, 'effect at extreme values', 'WebGL-unstable parameters'], samples: [0, .5], alpha: true });
+  });
+}
+
 export function renderEffectProjects(): CorpusProject[] {
-  return [...effects.map(e => effectProject(e.id)), ...transitions.map(t => transitionProject(t.id)), ...combinations()];
+  return [...effects.map(e => effectProject(e.id)), ...transitions.map(t => transitionProject(t.id)), ...combinations(), ...stepProjects()];
 }
