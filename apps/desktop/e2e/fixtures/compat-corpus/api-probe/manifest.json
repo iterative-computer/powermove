@@ -1,0 +1,10 @@
+{
+  "id": "api-probe",
+  "name": "API probe",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Calls today's API members (section 20) the way extensions at apiVersion 1 to 3 do and records what they return.",
+  "entry": "index.ts",
+  "contributes": ["commands"],
+  "author": "user"
+}
