@@ -58,10 +58,13 @@ pub struct Options {
     pub determinism: bool,
 }
 
-/// Effect types whose WebGL output is itself unstable (amendment 9; the
-/// effects lane's corpus finding, docs/engine/effects.md): a corpus frame
-/// of theirs that fails is judged by review.
-const WEBGL_UNSTABLE: &[&str] = &["posterize"];
+/// Effect types whose WebGL output is itself unstable (amendment 9): a
+/// corpus frame of theirs that fails would be judged by review. None:
+/// Posterize, the one the corpus showed departing, is bit-exact since its
+/// input (Level 1 stills sampled as `Rgba8Unorm`) and its program (ANGLE's
+/// built-in calls, `pm_render::glsl`) match today's (docs/engine/effects.md),
+/// so every effect frame is held to the Standard class.
+const WEBGL_UNSTABLE: &[&str] = &[];
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -462,28 +465,38 @@ fn describe(r: &FrameResult) -> String {
 
 /// Whether any effect of the document is WebGL-unstable.
 fn webgl_unstable(document: &pm_model::Document) -> bool {
-    fn walk(n: &pm_model::Node) -> bool {
+    unstable_in(document, WEBGL_UNSTABLE)
+}
+
+/// Whether any effect of the document is one of `types`.
+fn unstable_in(document: &pm_model::Document, types: &[&str]) -> bool {
+    fn walk(n: &pm_model::Node, types: &[&str]) -> bool {
         match n.kind() {
             pm_model::NodeKind::Object(map) => {
                 let unstable = map.iter().any(|(k, v)| {
                     k.to_string_lossy() == "fx"
                         && matches!(v.kind(), pm_model::NodeKind::Array(items) if items.iter().any(|e| {
                             e.get("type").is_some_and(|t| matches!(t.kind(), pm_model::NodeKind::String(s)
-                                if WEBGL_UNSTABLE.contains(&s.to_string_lossy().as_str())))
+                                if types.contains(&s.to_string_lossy().as_str())))
                         }))
                 });
-                unstable || map.iter().any(|(_, v)| walk(v))
+                unstable || map.iter().any(|(_, v)| walk(v, types))
             }
-            pm_model::NodeKind::Array(items) => items.iter().any(walk),
+            pm_model::NodeKind::Array(items) => items.iter().any(|v| walk(v, types)),
             _ => false,
         }
     }
-    document.root().is_some_and(walk)
+    document.root().is_some_and(|n| walk(n, types))
 }
 
 /// The document with every WebGL-unstable effect removed from every `fx`
 /// list (layers keep their other effects).
 fn without_unstable(value: &pm_model::json::Value) -> pm_model::json::Value {
+    without_types(value, WEBGL_UNSTABLE)
+}
+
+/// `value` with every effect of `types` removed from every `fx` list.
+fn without_types(value: &pm_model::json::Value, types: &[&str]) -> pm_model::json::Value {
     use pm_model::json::Value;
     match value {
         Value::Object(map) => {
@@ -497,19 +510,21 @@ fn without_unstable(value: &pm_model::json::Value) -> pm_model::json::Value {
                             .iter()
                             .filter(|e| {
                                 !matches!(e, Value::Object(m) if m.get("type").is_some_and(|t|
-                                    matches!(t, Value::String(s) if WEBGL_UNSTABLE.contains(&s.to_string_lossy().as_str()))))
+                                    matches!(t, Value::String(s) if types.contains(&s.to_string_lossy().as_str()))))
                             })
-                            .map(without_unstable)
+                            .map(|v| without_types(v, types))
                             .collect(),
                     )
                 } else {
-                    without_unstable(v)
+                    without_types(v, types)
                 };
                 out.insert(k.clone(), v);
             }
             Value::Object(out)
         }
-        Value::Array(items) => Value::Array(items.iter().map(without_unstable).collect()),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|v| without_types(v, types)).collect())
+        }
         v => v.clone(),
     }
 }
@@ -923,23 +938,33 @@ mod tests {
     const NESTED: &str = r#"{"compId":"c","layers":[{"id":"a","fx":[{"type":"blur"}]}],
         "comps":{"k":{"layers":[{"id":"b","fx":[{"type":"blur"},{"type":"posterize","levels":4}]}]}}}"#;
 
+    const TYPES: &[&str] = &["posterize"];
+
+    #[test]
+    fn no_effect_is_listed_apart() {
+        assert!(WEBGL_UNSTABLE.is_empty());
+        assert!(!webgl_unstable(&doc(NESTED)));
+    }
+
     #[test]
     fn webgl_unstable_finds_nested_effects() {
-        assert!(webgl_unstable(&doc(NESTED)));
-        assert!(!webgl_unstable(&doc(
-            r#"{"compId":"c","layers":[{"id":"a","fx":[{"type":"blur"}]}],"comps":{}}"#
-        )));
+        assert!(unstable_in(&doc(NESTED), TYPES));
+        assert!(!unstable_in(
+            &doc(r#"{"compId":"c","layers":[{"id":"a","fx":[{"type":"blur"}]}],"comps":{}}"#),
+            TYPES
+        ));
         // A layer type or name is not an effect.
-        assert!(!webgl_unstable(&doc(
-            r#"{"compId":"c","layers":[{"id":"a","type":"posterize","fx":[]}]}"#
-        )));
+        assert!(!unstable_in(
+            &doc(r#"{"compId":"c","layers":[{"id":"a","type":"posterize","fx":[]}]}"#),
+            TYPES
+        ));
     }
 
     #[test]
     fn without_unstable_keeps_other_effects() {
-        let stripped = without_unstable(&pm_model::json::parse(NESTED).unwrap());
+        let stripped = without_types(&pm_model::json::parse(NESTED).unwrap(), TYPES);
         let d = pm_model::Document::new(Some(stripped), 1);
-        assert!(!webgl_unstable(&d));
+        assert!(!unstable_in(&d, TYPES));
         let v = d.to_value().unwrap();
         let text = pm_model::json::write::to_canonical_string(&v);
         assert_eq!(text.matches("\"blur\"").count(), 2, "{text}");

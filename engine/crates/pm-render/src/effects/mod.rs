@@ -48,9 +48,13 @@ pub use pm_glsl::VERTEX;
 /// one binary16 step (`tests/effects_webgl.rs`,
 /// `webgl_instability_under_a_one_step_input_perturbation`: Posterize and
 /// Levels are step functions at some parameters, Color's hue rotation at
-/// saturated extremes). Where the engine's input to them differs from
-/// today's at rounding level, their output differs at isolated pixels;
-/// such frames are judged by review, not by the Standard class alone.
+/// saturated extremes). Where the engine's input to them or its arithmetic
+/// differed from today's at rounding level, their output differed at
+/// isolated pixels. Since 2026-10-19 neither does: their inputs (Level 1
+/// stills as `Rgba8Unorm`) and their programs' built-in calls
+/// ([`crate::glsl`]) match today's, and all three are bit-exact against
+/// WebGL at every corpus parameter set, so no test lists their frames
+/// apart; the list records which effects are exposed if either drifts.
 pub const WEBGL_UNSTABLE: &[&str] = &["posterize", "levels", "color"];
 
 /// Where a definition stands.

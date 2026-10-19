@@ -55,11 +55,12 @@ const STILL_CLASSES: &[(&str, bool)] = &[
 ];
 
 /// The effects whose corpus frames are listed apart rather than failed:
-/// the part of `pm_render::effects::WEBGL_UNSTABLE` the app corpus has
-/// shown departing (Posterize's one-level boundary flips). Levels and Color
-/// are unstable at the shader level only; a corpus frame of theirs that
-/// departs fails.
-const CORPUS_UNSTABLE: &[&str] = &["posterize"];
+/// none. Posterize, the one the app corpus showed departing (one-level
+/// boundary flips), is bit-exact in its float frames since its input (Level
+/// 1 stills sampled as `Rgba8Unorm`) and its program's built-in calls
+/// (`pm_render::glsl`) match today's (docs/engine/effects.md, 2026-10-19);
+/// a frame of any effect that departs fails.
+const CORPUS_UNSTABLE: &[&str] = &[];
 
 /// Whether any effect in the document is in [`CORPUS_UNSTABLE`].
 fn webgl_unstable(document: &pm_model::Document) -> bool {
