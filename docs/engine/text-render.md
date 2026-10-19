@@ -1015,7 +1015,8 @@ The fresh app matrix passes 22/22, including caption burn-in, live window
 seeds and document-host boot. The affected TypeScript suite passes 264 tests
 in 14 files with no skips; the six ratchet contract tests pass in both Rust
 profiles. Release validation uses `CARGO_PROFILE_RELEASE_LTO=false` for the
-previously disclosed cache/bitcode limitation; it does not verify shipping LTO.
+missing-bitcode link failure (pm-media's bundled CrabbyAvif archive, not the
+cache; fixed since, see release-build.md); it does not verify shipping LTO.
 
 The follow-up **textexact** lane owns reducing these measurements to zero
 before beta: line-for-line ports of Skia's CPU AAA scan converter and
@@ -1201,9 +1202,11 @@ captures unchanged. The separate capture-transport fixes are described above.
   the private corpus directory (CI): the captures are renders of system
   fonts and a private project and cannot be committed. On a machine with
   the directory, a full run fails for any FONTS-R entry it did not measure.
-- The shipping LTO profile remains unverified. Test/addon builds use
-  `CARGO_PROFILE_RELEASE_LTO=false` because the cached build otherwise
-  reports missing bitcode.
+- These measurements did not use the shipping LTO profile: test and addon
+  builds set `CARGO_PROFILE_RELEASE_LTO=false` because thin-LTO links
+  reported missing bitcode. The cause was pm-media bundling CrabbyAvif's
+  Rust staticlib into its rlib, not the compile cache; the shipping profile
+  is verified since, see [release-build.md](release-build.md).
 
 ## Changes outside the lane
 
