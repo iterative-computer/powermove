@@ -1146,7 +1146,7 @@ native and today's order; each row asserts every answer equals today's. Medians
 | Genuinely detached object, keyed (owner-accepted, decision 1) | 8.26 µs | 38.7 ns | Accepted |
 | Genuinely detached object, expression | 3.67 µs | 218.5 ns | Accepted (decision 1) |
 | Detached object made anew per call, keyed | 9.19 µs | 37.6 ns | Accepted class (was 92 ms, and an out-of-memory loop) |
-| Detached object made anew per call, expression | 4.18 µs | 225.5 ns | Accepted class (was about 97 µs to 113 ms) |
+| Detached object made anew per call, expression | 4.18 µs | 225.5 ns | Accepted class (was 64.7 ms; 97 µs before the property address was reused) |
 | Held `rootComp`, expression, new time every call | 1.83 µs | 221.8 ns | **No** (see below) |
 | No scope, expression, new time every call | 2.09 µs | 228.5 ns | **No** (see below) |
 
