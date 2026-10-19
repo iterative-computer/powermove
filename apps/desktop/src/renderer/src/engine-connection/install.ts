@@ -120,8 +120,24 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   let viewerHandlers: EngineViewerHandlers | null = null;
   let viewerLease = 0;
   let sessionReady: Promise<void> | null = null;
+  /** The open composition (what Play plays and the viewer shows). */
+  const openComposition = (): string => String(PM.proj?.compId ?? PM.proj?.id ?? '');
+  /**
+   * A viewerless session follows the open composition: switching
+   * compositions inside a project is a document batch, not a load, so
+   * nothing else would tell the session (a viewer's presentation sends its
+   * own state). Before every transport command too, so a Play right after
+   * a switch plays the composition just opened.
+   */
+  const followComposition = (): void => {
+    const s = current;
+    if (!s || s.closed || !s.headless) return;
+    const composition = openComposition();
+    if (composition && s.composition !== composition) s.sendHeadless(composition);
+  };
   const transport = new EngineTransport(() => current, hostClock, {
-    exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); })
+    exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); }),
+    prepare: followComposition
   });
   /** animVersion per revision sent, for `frame:rendered.version`. */
   const versions = new RevisionVersions();
@@ -152,6 +168,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   });
   const unrouteAudio = routeAudioPanels(PM.Audio, audio, () => transport.active());
   const offAssets = PM.bus?.on?.('assets', () => audio.sync()) ?? (() => {});
+  // A composition switch (compositions.open) and its undo announce `comps`.
+  const offComps = PM.bus?.on?.('comps', followComposition) ?? (() => {});
+  const offProject = PM.bus?.on?.('project', followComposition) ?? (() => {});
 
   // Edits reach the engine as soon as the write that made them returns: a
   // write that leaves the barrier dirty schedules one flush at the end of
@@ -235,7 +254,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       // overwrite the replacement document's requested UI position.
       onLoading: () => transport.seek(Number(PM.time) || 0, false),
       onLoaded: () => {
-        if (session.headless) session.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+        if (session.headless) session.sendHeadless(openComposition());
         PM.bus?.emit?.('layout');
       },
       onRoute: (route, reason) => {
@@ -248,7 +267,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     sessions.add(session);
     current = session;
     transport.resetLoop();
-    session.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+    session.sendHeadless(openComposition());
     sessionReady = session.start().catch((error: unknown) => {
       log('warn', `engine session: ${error instanceof Error ? error.message : String(error)}`);
       session.close();
@@ -388,10 +407,22 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         close: () => {
           if (lease !== viewerLease || opened.closed) return;
           viewerHandlers = null;
-          opened.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+          opened.sendHeadless(openComposition());
           transport.refresh();
         }
       };
+      // A viewer that replaces another on a session already presenting
+      // (no viewerless state in between, which would make the engine say
+      // it again) learns why a composition the engine cannot draw shows
+      // nothing. Its channel is in place by the next microtask.
+      if (!opened.headless && opened.route === 'legacy') {
+        const reason = opened.routeReason ?? '';
+        queueMicrotask(() => {
+          if (lease === viewerLease && viewerHandlers === handlers && opened.route === 'legacy') {
+            handlers.message({ type: 'routed', route: 'legacy', reason }, performance.now());
+          }
+        });
+      }
     }
   });
   let service = makeService();
@@ -446,6 +477,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offPending();
       offEager();
       offAssets();
+      offComps();
+      offProject();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);

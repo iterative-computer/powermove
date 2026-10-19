@@ -41,7 +41,14 @@ export type StreamBatch = { baseRevision: number; revision: number; origin: Patc
 /** Stages a large resync document with main (`nativeEngine.stageDocument`). */
 export type StageDocument = (session: number, bytes: Uint8Array) => Promise<{ handle: string; length: number }>;
 
-/** Where the session's composition is drawn. */
+/**
+ * Where the session's composition stands: `pending` (not decided yet),
+ * `engine` (drawn by the engine), `legacy` (something in it the engine
+ * cannot draw yet, with the reason; the name is the capability-routing
+ * scaffolding's, amendment 21). With "Use New Engine" on nothing else draws
+ * a `legacy` composition: the viewer shows the reason and the engine's
+ * clock and audio run as for `engine`.
+ */
 export type Route = 'pending' | 'engine' | 'legacy';
 
 /** Messages for the viewer's presentation (engine-present/protocol.ts). */
@@ -378,8 +385,10 @@ export class DocumentSession {
         if (this.headless && message.revision !== null && Number(message.revision) >= this.applied) {
           // Headless clocks are published only once the engine has the
           // document/media and accepts transport, tagged with that revision.
+          // A composition the engine cannot draw keeps its route (and
+          // reason): its clock runs all the same.
           const revision = Number(message.revision) || 0;
-          if (this.legacyRevision === null || revision > this.legacyRevision) {
+          if (this.route === 'pending' && (this.legacyRevision === null || revision > this.legacyRevision)) {
             this.legacyRevision = null;
             this.setRoute('engine', null);
           }
@@ -493,6 +502,11 @@ export class DocumentSession {
   /** A session owns the clock independently of any presentation channel. */
   headless = false;
   private lastState: ViewerState | null = null;
+
+  /** The composition of the newest viewer state sent (null before one). */
+  get composition(): string | null {
+    return this.lastState ? String(this.lastState.composition) : null;
+  }
 
   sendHeadless(composition: string): void {
     this.sendViewerState({
