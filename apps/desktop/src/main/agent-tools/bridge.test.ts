@@ -199,7 +199,8 @@ describe('native Powermove agent tool bridge', () => {
       failures = [{ code: 'notHeadlessRenderable', scope: { kind: 'definition', definition: 'acme.glow' }, message: 'The shader of acme.glow compiles in WebGL but not in the native engine\'s pipeline.', retry: { kind: 'afterUserAction' }, detail: diagnostic }];
       const headless = await read();
       expect(headless).toMatchObject({ valid: true, compiled: true });
-      expect(headless.warnings[0]).toContain('headless renders cannot draw it');
+      expect(headless.warnings[0]).toContain('the viewer and exports');
+      expect(headless.warnings[0]).toContain('pm-cli, headless renders) cannot draw it');
       // The new engine off: the renderer's own validator, as before.
       engineJobs.available = false;
       await bridge.callTool(session, 'validate_effect', { definition });

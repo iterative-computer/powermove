@@ -800,8 +800,9 @@ export class PowermoveAgentToolBridge {
    * wrapped program through the engine's GLSL pipeline and GPU pipeline
    * creation. A program WebGL refuses too is reported with its errors in
    * the author's lines; one only the app's WebGL fallback runner draws is
-   * valid, with a warning that headless renders cannot draw it (acceptance
-   * never narrower than WebGL's).
+   * valid, with a warning that it draws through the app window's runner
+   * (the viewer and the app's exports) and that headless renders without
+   * the app (pm-cli) cannot draw it (acceptance never narrower than WebGL's).
    */
   private async validateEffect(session: PowermoveAgentToolSession, args: Record<string, unknown>): Promise<AgentToolResponseEvent> {
     const checked = await this.rendererValue(session, '__validate_effect_snapshot', args);
@@ -816,7 +817,7 @@ export class PowermoveAgentToolBridge {
         note: 'The definition passes the registration validator, but its shader does not compile (WebGL refuses it too, so nothing would draw it). Line numbers are in the frag you wrote; 0 means generated code.' }
       : {
         valid: true, id: checked.id, parameterCount: checked.parameterCount, compiled: true,
-        ...(headless ? { warnings: [`${headless.message} It draws in the app through the WebGL fallback; exports and headless renders cannot draw it.`] } : {}),
+        ...(headless ? { warnings: [`${headless.message} It draws in the app (the viewer and exports) through the app window's WebGL fallback runner, more slowly than a natively translated effect; renders without the app window (pm-cli, headless renders) cannot draw it.`] } : {}),
         note: 'Validated with the kernel registration validator and compiled through the engine pipeline. Does not register the effect or change the project; after loading, verify with render_frames.'
       };
     return { runId: session.runId, callId: `main-${randomUUID()}`, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }] };
