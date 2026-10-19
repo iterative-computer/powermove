@@ -763,3 +763,26 @@ PM_BENCH_EDIT=drag target/release/examples/compose_bench doc.json <composition> 
 - `pm-render --test draw_reuse`: all 5 tests pass (seeded edited plans,
   corpus plans, pixel-exact frames, on-disk image changes, and drag reuse).
   These are correctness checks; no performance gate is claimed from them.
+
+### Worker commit deadlines (P4)
+
+The supplied fixups2 common-timeline traces locate the judder after submission:
+at HD the worker's canvas reaches viz p50 0.365 ms after its rAF, but viz
+starts drawing it either immediately (p50 0.436 ms after rAF) or one refresh
+later (p95 8.763 ms). UHD likewise splits one/two refreshes. Those are analyses
+of the supplied pre-change traces, not new performance measurements.
+
+Timed commits now target 0.75 refreshes after BeginFrame so they target the
+following compositor refresh consistently; the display prediction is two
+refreshes plus the existing 3.2 ms panel offset. Paused and gesture frames still
+draw on arrival. Every BeginFrame feeds the refresh estimator before scheduling
+the commit, including when a faster, initially unknown display supersedes a
+pending timer. A late timer uses the current refresh's decision. Retargeting and
+disposal cancel the outstanding timer. The presenter/worker regressions cover
+gestures, cancellation, timed frames and an unknown 120 Hz display.
+
+**Not gate-complete:** the initial run found and corrected starvation before the
+refresh period was known. The next paired run lost its awake display during the
+today row, so it is invalid and produced no native timing comparison. There is
+no valid final paired p50/p95/p99/max result at 30, 25 or 23.976 fps, or a final
+A/V-under-load result. Do not treat the changed phase or prediction as a P4 pass.

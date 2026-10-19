@@ -443,3 +443,46 @@ describe('EnginePresenter', () => {
     }
   });
 });
+
+
+it('keeps gesture arrival immediate while timed commits wait for their deadline and cancel on disposal', () => {
+  let now = 0;
+  let tick: ((t:number)=>void) | null = null;
+  let deadline: {run:()=>void; at:number} | null = null;
+  const source = new Source(), painter = new Painter(), link = new Link();
+  const presenter = new EnginePresenter({link, source, painter, displayHz:120, drawOnArrival:true, commitPhaseRefreshes:.75, now:()=>now,
+    timers:{set:(run,ms)=>{deadline={run,at:now+ms};return 1;},clear:()=>{deadline=null;}}});
+  presenter.start(cb=>{tick=cb;return 1;},()=>{});
+  tick!(0);
+  expect(deadline!.at).toBeCloseTo(6.25);
+  source.arrive(1,1);
+  presenter.receive({type:'frame',frame:desc(1)});
+  expect(painter.draws).toHaveLength(1);
+  expect(deadline).not.toBeNull();
+  presenter.dispose();
+  expect(deadline).toBeNull();
+});
+
+it('fits an unknown 120 Hz clock even when the initial 60 Hz commit deadline is superseded', () => {
+  let now = 0;
+  let tick: ((t:number)=>void) | null = null;
+  let deadline: {run:()=>void; at:number} | null = null;
+  const source = new Source(), painter = new Painter(), link = new Link();
+  const presenter = new EnginePresenter({link, source, painter, commitPhaseRefreshes:.75, now:()=>now,
+    timers:{set:(run,ms)=>{deadline={run,at:now+ms};return 1;},clear:()=>{deadline=null;}}});
+  presenter.receive({type:'clock',sample:{epoch:1,seq:1,state:'playing',hostTime:0,mediaTime:0,rate:{num:1,den:1},outputLatencyUs:0,sampleRate:48000,loopRange:null}},0);
+  source.arrive(1,1);
+  presenter.receive({type:'frame',frame:desc(1,{duration:TICKS_PER_SECOND})});
+  presenter.start(cb=>{tick=cb;return 1;},()=>{});
+  for (let i=0;i<40;i++) {
+    now=i*1000/120;
+    tick!(now);
+    const task = deadline as {run:()=>void;at:number} | null;
+    if (task && task.at < (i+1)*1000/120) {
+      now=task.at;
+      task.run();
+    }
+  }
+  expect(painter.draws).toHaveLength(1);
+  presenter.dispose();
+});

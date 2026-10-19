@@ -1412,3 +1412,14 @@ Final validation (including a serialized native rerun under the Electron lock):
   average 2.3 to 16; the document's render cost moved between 10 and
   17 ms from run to run on 2026-10-16); a quiet-machine round would
   tighten the spread.
+
+## Perf3 worker commit phase
+
+Timed worker commits now target a fixed point between BeginFrames rather than
+racing the page's commit for the same refresh (`presenter.ts`,
+`commitPhaseRefreshes`; `present-worker.ts`, 0.75). Immediate gesture frames
+retain draw-on-arrival. The refresh fit is sampled before deferral, including
+when the display rate is initially unknown; pending timers are cancelled on
+retarget/dispose. The prediction is two refreshes plus the existing panel
+offset. See `perf.md`, "Worker commit deadlines (P4)": targeted unit tests pass,
+but final paired cadence and A/V feedback on an awake display remain required.
