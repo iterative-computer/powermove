@@ -279,10 +279,31 @@ export class NativeApi {
     const liveCur = this.PM.curComp?.() ?? this.PM.proj;
     const cur = this.unwrap(liveCur);
     if (cur === proj) return { comp: open, open, cur, liveCur };
-    const path = findPath(proj, cur, 64);
-    if (!path) return cur && typeof cur === 'object' ? { comp: '@json:' + JSON.stringify(cur), open, cur, liveCur } : null;
-    const comp = path.length === 2 && path[0] === 'comps' ? String(path[1]) : '@path:' + JSON.stringify(canonicalPath(path, proj.compId));
+    const comp = this.address(proj, cur);
+    if (comp === null) return cur && typeof cur === 'object' ? { comp: '@json:' + JSON.stringify(cur), open, cur, liveCur } : null;
     return { comp, open, cur, liveCur };
+  }
+
+  /** Where each composition object last was: checked by walking its path, so a stale entry is never used. */
+  private addresses = new WeakMap<object, PathPart[] | null>();
+
+  /**
+   * The engine address of composition object `cur` inside `proj`: its id when
+   * it is a top-level composition (O(1)), else `@path:` with its canonical path.
+   * Nested compositions are found once by identity and then answered from the
+   * cache, verified in O(depth) per call; null when it is not in the document.
+   */
+  private address(proj: any, cur: any): string | null {
+    if (!cur || typeof cur !== 'object') return null;
+    if (typeof cur.id === 'string' && proj.comps && typeof proj.comps === 'object' && proj.comps[cur.id] === cur) return cur.id;
+    const cached = this.addresses.get(cur);
+    let path = cached && at(proj, cached) === cur ? cached : undefined;
+    if (!path) {
+      path = findPath(proj, cur, 64) ?? undefined;
+      if (path) this.addresses.set(cur, path);
+    }
+    if (!path) return null;
+    return path.length === 2 && path[0] === 'comps' ? String(path[1]) : '@path:' + JSON.stringify(canonicalPath(path, proj.compId));
   }
 
   private context(L: any): Context | null {
@@ -947,8 +968,8 @@ export class NativeApi {
         }
       }
       for (const child of Object.values(comp.comps ?? {})) {
-        const path = findPath(proj, child, 64);
-        if (path) await visit(child, path.length === 2 ? String(path[1]) : '@path:' + JSON.stringify(canonicalPath(path, proj.compId)));
+        const address = this.address(proj, child);
+        if (address !== null) await visit(child, address);
       }
     };
     await visit(proj, open);

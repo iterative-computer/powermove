@@ -156,6 +156,47 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     expect(doc.dual!.total().mismatched).toBe(0);
   });
 
+  it('addresses a precomposition scope in O(1) and a nested one from a verified cache', async () => {
+    const { PM, doc } = await editor('on');
+    // The reviewer's shape: 100 layers of 40 keyed properties in the open composition.
+    PM.proj.layers = Array.from({ length: 100 }, (_, i) => {
+      const L = PM.mkLayer('solid', { name: `L${i}` });
+      for (let k = 0; k < 40; k++) L.p[`extra${k}`] = PM.P(k, { kf: Array.from({ length: 5 }, (_, t) => PM.KF(t, t)) });
+      return L;
+    });
+    const pre = { id: 'pre', fps: 30, w: 640, h: 360, dur: 10, layers: [PM.mkLayer('solid', { name: 'In pre' })] };
+    const deep = { id: 'deep', fps: 24, w: 640, h: 360, dur: 10, layers: [PM.mkLayer('solid', { name: 'In deep' })] };
+    PM.proj.comps = { pre, outer: { id: 'outer', layers: [], comps: { deep } } };
+    PM.touch();
+    const api = doc.api! as any;
+    const time = (comp: any, n: number) => {
+      PM.scope = [comp];
+      PM.curComp = () => PM.scope.at(-1) ?? PM.proj;
+      api.comps();
+      const t0 = performance.now();
+      for (let i = 0; i < n; i++) api.comps();
+      return (performance.now() - t0) / n;
+    };
+    const preMs = time(pre, 2000);
+    const deepMs = time(deep, 2000);
+    expect(api.comps().comp).toBe('@path:' + JSON.stringify(['comps', 'outer', 'comps', 'deep']));
+    // A move invalidates the cached path: the next answer finds it again.
+    PM.proj.comps = { pre, deep, outer: { id: 'outer', layers: [], comps: {} } };
+    PM.touch();
+    expect(api.comps().comp).toBe('deep');
+    PM.proj.comps = { pre, other: { id: 'other', layers: [], comps: { deep } } };
+    PM.touch();
+    expect(api.comps().comp).toBe('@path:' + JSON.stringify(['comps', 'other', 'comps', 'deep']));
+    PM.scope = [pre];
+    expect(api.comps().comp).toBe('pre');
+    expect(doc.api!.worldMatrix(pre.layers[0], 1)).toBeTruthy();
+    PM.scope = [];
+    console.log(`[strict] scope address per call: precomposition ${(preMs * 1e3).toFixed(2)} µs, nested ${(deepMs * 1e3).toFixed(2)} µs`);
+    expect(preMs).toBeLessThan(0.05);
+    expect(deepMs).toBeLessThan(0.05);
+    expect(fallbacks(doc)).toEqual({});
+  });
+
   it.runIf(existsSync(BRIDGE))('recovers a repeatedly failing font provider on retry without a legacy answer', async () => {
     const { FontRegistry } = createRequire(import.meta.url)(BRIDGE) as any;
     const registry = new FontRegistry();
