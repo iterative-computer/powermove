@@ -3,8 +3,8 @@
  * docs/engine/tracer.md), behind "Use New Engine": the viewer shows
  * engine frames for a composition the engine supports, edits reach the
  * engine through pm-wasm's patch stream, overlays line up with engine
- * geometry, unsupported compositions stay with the current engine without
- * errors, playback runs on the engine's clock, a killed engine and a lost
+ * geometry, a composition the engine cannot draw says why on the stage
+ * while the transport stays on the engine (amendment 21), playback runs on the engine's clock, a killed engine and a lost
  * GPU recover, and switching engines loses nothing.
  *
  * Run serially, one Electron at a time:
@@ -33,11 +33,10 @@ type Status = {
 const status = (page: Page): Promise<Status> => page.evaluate(() => (window as any).PM.EngineConnection.status());
 
 /** A 640×360, 30 fps, 4 s composition with a background and two solids. */
-async function tracerProject(page: Page, extra: { fx?: boolean; pathMask?: boolean } = {}): Promise<string> {
+async function tracerProject(page: Page, extra: { fx?: boolean; pathMask?: boolean; unknownEffect?: boolean } = {}): Promise<string> {
   return page.evaluate((extra) => {
     const PM = (window as any).PM;
-    // A bezier path mask (still routed to the current engine: the new
-    // engine draws parametric masks, not path masks).
+    // A bezier path mask (drawn by the engine since compclose).
     const pathMask = (PM: any, comp: any) => {
       const P = PM.P;
       const vertex = (i: number, x: number, y: number) => ({ id: `mv${i}`, p: { x: P(x), y: P(y), inX: P(0), inY: P(0), outX: P(0), outY: P(0) } });
@@ -58,6 +57,13 @@ async function tracerProject(page: Page, extra: { fx?: boolean; pathMask?: boole
     bar.p['position.x'].v = 300; bar.p['position.y'].v = 250;
     if (extra.fx) box.fx.push(PM.mkEffect('invert'));
     if (extra.pathMask) box.masks.push(pathMask(PM, project));
+    if (extra.unknownEffect) {
+      // An effect no extension defines (a disabled or removed extension's):
+      // the engine has no definition to draw it with.
+      const fx = PM.mkEffect('invert');
+      fx.type = 'e2e-unknown-effect';
+      box.fx.push(fx);
+    }
     project.layers = [box, bar];
     PM.replaceProject(project);
     PM.Projects?.put?.(PM.proj);
@@ -130,7 +136,7 @@ async function windowPixel(session: LaunchedApp, cssX: number, cssY: number): Pr
   }, { x: origin.x + cssX, y: origin.y + cssY });
 }
 
-async function openTracer(session: LaunchedApp, extra: { fx?: boolean; pathMask?: boolean } = {}): Promise<string> {
+async function openTracer(session: LaunchedApp, extra: { fx?: boolean; pathMask?: boolean; unknownEffect?: boolean } = {}): Promise<string> {
   await session.openEditor();
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
@@ -291,38 +297,137 @@ test.describe('Use New Engine: the tracer bullet', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('a composition with unsupported features stays with the current engine, without errors', async ({ session }) => {
+  test('a composition the engine cannot draw names why on the stage and keeps the transport on the engine', async ({ session }) => {
     const { page } = session;
-    await openTracer(session, { pathMask: true });
+    await openTracer(session);
+    await waitRoute(page, 'engine');
+    await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
+    /** The stage: the current engine's canvas, the engine's state line. */
+    const stage = () => page.evaluate(() => {
+      const V = (window as any).PM.Kernel.services.get('viewer');
+      const line = V.stage.querySelector('[data-engine-status]') as HTMLElement | null;
+      const box = line?.getBoundingClientRect();
+      return { legacy: V.el.style.visibility as string, status: line?.textContent ?? null, role: line?.getAttribute('role') ?? null, visible: !!box && box.width > 0 && box.height > 0 };
+    });
+    /** A project color setting this engine does not know (a project saved
+     *  by a newer app, say): one of the remaining `pm_render::unsupported`
+     *  reasons, which the current engine ignores. */
+    const unknownColor = () => page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.hist.do('Color', () => { PM.proj.color = { mode: 'unknown-to-this-engine' }; });
+      PM.touch(); PM.bus.emit('project');
+    });
+    const why = /cannot draw this composition yet: .*project color/;
+    await unknownColor();
     await waitRoute(page, 'legacy');
-    expect((await status(page)).routeReason).toMatch(/path masks/);
+    expect((await status(page)).routeReason).toMatch(/project color/);
+    // Amendment 21: nothing hands the viewer to the current engine. Its
+    // canvas stays hidden and the stage says what the engine cannot draw.
+    await expect.poll(async () => (await stage()).status, { timeout: 20_000 }).toMatch(why);
+    expect(await stage()).toMatchObject({ legacy: 'hidden', role: 'status', visible: true });
     expect(await enginePresenting(page)).toBe(false);
-    expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').el.style.visibility)).toBe('');
-    // The legacy compositor draws it.
-    await expect.poll(() => page.evaluate(() => Boolean((window as any).PM.GL.gl))).toBe(true);
-    // Removing the path mask brings engine frames back; adding one routes again.
+    // The transport and its clock stay with the engine: Play plays.
+    expect((await status(page)).driving).toBe(true);
+    await page.evaluate(() => { const PM = (window as any).PM; PM.loop = false; PM.setTime(0.5); PM.play(); });
+    await expect.poll(async () => (await status(page)).clock?.state, { timeout: 10_000 }).toBe('playing');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.time), { timeout: 10_000 }).toBeGreaterThan(0.9);
+    expect(await page.evaluate(() => (window as any).PM.playing)).toBe(true);
+    expect((await stage()).legacy).toBe('hidden');
+    await page.evaluate(() => (window as any).PM.pause());
+    await expect.poll(async () => (await status(page)).clock?.state, { timeout: 10_000 }).toBe('stopped');
+    // Removing the setting brings engine frames back and clears the line;
+    // setting it again says so again.
     await page.evaluate(() => {
       const PM = (window as any).PM;
-      const box = PM.proj.layers.find((l: any) => l.id === 'box');
-      (window as any).__tracerPathMask = structuredClone(box.masks[0]);
-      PM.hist.do('Remove mask', () => { box.masks = []; });
-      PM.touch();
+      PM.hist.do('Color', () => { delete PM.proj.color; });
+      PM.touch(); PM.bus.emit('project');
     });
     await waitRoute(page, 'engine');
     await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
-    await page.evaluate(() => {
-      const PM = (window as any).PM;
-      PM.hist.do('Path mask', () => {
-        const bar = PM.proj.layers.find((l: any) => l.id === 'bar');
-        bar.masks = [(window as any).__tracerPathMask];
-      });
-      PM.touch();
-    });
+    // Cleared once that frame is on screen (the canvas shows it a few
+    // animation frames after the GPU finished it).
+    await expect.poll(async () => (await stage()).status, { timeout: 5_000 }).toBeNull();
+    await unknownColor();
     await waitRoute(page, 'legacy');
-    expect((await status(page)).routeReason).toMatch(/path masks/);
     await expect.poll(() => enginePresenting(page)).toBe(false);
+    await expect.poll(async () => (await stage()).status).toMatch(why);
+    expect((await stage()).legacy).toBe('hidden');
     const errors = session.diagnostics.console.filter((c) => c.type === 'error');
     expect(errors.map((e) => e.text)).toEqual([]);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('switching between a composition the engine cannot draw and one it can, with the viewer attached', async ({ session }) => {
+    const { page } = session;
+    await openTracer(session, { unknownEffect: true });
+    const first = await page.evaluate(() => (window as any).PM.proj.compId as string);
+    await waitRoute(page, 'legacy');
+    const why = /cannot draw this composition yet: .*e2e-unknown-effect/;
+    /** The renderer's view of the stage, the session, and the engine frame on screen. */
+    const view = () => page.evaluate(() => {
+      const PM = (window as any).PM;
+      const V = PM.Kernel.services.get('viewer');
+      const line = V.stage.querySelector('[data-engine-status]') as HTMLElement | null;
+      const canvas = document.getElementById('engine-present');
+      const s = PM.EngineConnection.status();
+      const doc = PM.EngineDoc;
+      doc.barrier.flush();
+      const frame = V.engineFrame?.() ?? null;
+      return {
+        comp: PM.proj.compId as string, session: PM.EngineConnection.session()?.composition ?? null,
+        route: s.route as string, reason: s.routeReason as string | null, status: line?.textContent ?? null,
+        presenting: !!canvas && canvas.style.visibility === 'visible', legacy: V.el.style.visibility as string,
+        revision: doc.barrier.revision as number, frameRevision: frame?.revision ?? null
+      };
+    });
+    const unsupported = async (comp: string) => {
+      await expect.poll(async () => { const v = await view(); return { comp: v.comp, session: v.session, route: v.route, presenting: v.presenting }; }, { timeout: 20_000 })
+        .toEqual({ comp, session: comp, route: 'legacy', presenting: false });
+      await expect.poll(async () => (await view()).status, { timeout: 10_000 }).toMatch(why);
+      const v = await view();
+      expect(v.reason).toMatch(why);
+      expect(v.legacy).toBe('hidden');
+      return v;
+    };
+    const drawn = async (comp: string) => {
+      // The engine draws the switched-to composition at the revision it
+      // reported the other one at: that frame must reach the stage.
+      await expect.poll(async () => { const v = await view(); return { comp: v.comp, session: v.session, route: v.route, presenting: v.presenting, status: v.status, reason: v.reason }; }, { timeout: 20_000 })
+        .toEqual({ comp, session: comp, route: 'engine', presenting: true, status: null, reason: null });
+      const v = await view();
+      expect(v.frameRevision).toBe(v.revision);
+      expect(v.legacy).toBe('hidden');
+      return v;
+    };
+    const report = async () => (await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'))).presenter;
+    const a0 = await unsupported(first);
+    const routed0 = (await report()).routedLegacy as number;
+    // A drawable composition of the same project, opened (a document
+    // batch, not a load): the engine hears the batch before the viewer state.
+    const second = await page.evaluate(() => (window as any).PM.Comps.create({ name: 'Plain', w: 640, h: 360, fps: 30, dur: 3 }, { open: true }) as string);
+    const b1 = await drawn(second);
+    console.log(`switch A ${JSON.stringify(a0)} -> B ${JSON.stringify(b1)}`);
+    await page.evaluate((id) => (window as any).PM.Comps.open(id), first);
+    await unsupported(first);
+    await page.evaluate((id) => (window as any).PM.Comps.open(id), second);
+    const b2 = await drawn(second);
+    // And it stays drawn: nothing comes back to cover it.
+    await page.waitForTimeout(1_000);
+    expect(await view()).toMatchObject({ comp: second, route: 'engine', presenting: true, status: null });
+    const presenter = await report();
+    console.log(`switch B again ${JSON.stringify(b2)}; routedLegacy ${routed0} -> ${presenter.routedLegacy}; routes ${JSON.stringify(presenter.routes)}`);
+    expect(presenter.routedLegacy).toBeGreaterThan(routed0);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    const errors = session.diagnostics.console.filter((c) => c.type === 'error');
+    expect(errors.map((e) => e.text)).toEqual([]);
+  });
+
+  test('path masks are drawn by the engine', async ({ session }) => {
+    const { page } = session;
+    await openTracer(session, { pathMask: true });
+    await waitRoute(page, 'engine');
+    await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
+    expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').stage.querySelector('[data-engine-status]'))).toBeNull();
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 

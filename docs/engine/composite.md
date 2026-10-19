@@ -333,3 +333,48 @@ Recapture the corpus cases with
 - App: `legacy/ui/project-settings.ts` (Color section), `settings/install.ts`,
   `settings/project-color.ts` (new), `shared/project-color.ts` (new),
   `shared/engine-stamp.ts` (project color is native-only), `e2e/project-color.spec.ts`.
+
+## COMPCLOSE-2 follow-up: windowed mask fills
+
+The animated-mask CPU-fill gap above is superseded by a windowed white-fill
+path in `pm_vector::canvas2d::Context`. Tessellation and the viewport transform
+still use the original output canvas, including its f32 round trip. The raster
+window is the resulting device mesh bounds, clipped to the canvas with a one-pixel
+AA/snapping margin. MSAA and analytic samples keep **global** pixel coordinates;
+vertices and fragment interpolation are never translated to the window. White
+fill alpha resolves directly from the sample mask/analytic coverage, avoiding a
+full-canvas multisampled RGBA allocation and resolve.
+
+Polygon fills use exact rational scanline crossing thresholds and fill winding
+spans, rather than comparing every pixel with every edge. Both nonzero and even-odd
+rules retain the original top-left/sample tests. Alpha outside the window is still
+present and transparent in the full-sized item returned to pm-render. The blur's
+save-layer bounds, feather margin, downsample phase, GPU passes and composite
+therefore stay unchanged; cropping the blur source would change pixels.
+
+Verification on the existing captures: every one of the 54 GPU mask canvases is
+bit-exact, including HD, UHD, all feather pass structures, off-canvas paths and
+subtract-only combinations. The composite path-mask corpus and a direct full-canvas
+versus windowed-fill test cover placement, clipping, reflections, analytic and
+polygon/triangle paths at 317×233, 1920×1080 and 3840×2160. The 529-case Canvas2D
+gate retains exactly its previous result: 503 exact, 22 within one, four pre-existing
+pinned cases; no reference, tolerance or exception was changed. Those existing
+pins remain the vector lane's gaps, not accepted differences from this change.
+
+The GPU/item cache and full-sized alpha/blur upload are unchanged. Windowing saves
+CPU fill work; it does not establish that every animated-mask project beats today's
+GPU Canvas2D path. Paired viewer results and remaining limits are recorded in perf.md.
+
+Round 4 (after merging the wave 5 lanes, including perf2's pm-render caching and
+svgcompat): `tests/path_masks.rs` (54 canvases bit-exact), the pm-vector canvas2d
+unit tests and the 529-case Canvas2D gate (503 exact, 22 within one, the same four
+known exceptions, capture `canvas-20261018-220349-9a95e00c`) pass on the merged
+head. A new unit test, `windowed_pixel_aligned_rects_equal_full_canvas_at_every_pixel`,
+covers the non-AA bounds renderer (`Polygons { msaa: false }`, the 1X pattern) that
+the window test did not: device-aligned rectangles, within the pixel tolerance,
+mirrored, quarter-turned and partly or wholly offscreen, at 317x233, HD and UHD,
+asserting that path is taken. The windowing code is unchanged since round 1; the
+composite `path-masks*` corpus was not rerun this round: no pm-cli build exists in
+this worktree, and building one with 45 GB free risked the 40 GB disk floor. Its
+round 1 result (bit-exact) stands. The
+playback cadence tail is issue P4 (perf3 lane).

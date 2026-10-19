@@ -43,7 +43,7 @@ use crate::ops::{self, Op};
 use crate::patch::{self, NodeMut, Patch, PatchError, PathPart, Tree};
 
 /// One node of the revisioned tree.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct Node {
     rev: u64,
     kind: NodeKind,
@@ -60,7 +60,31 @@ pub enum NodeKind {
     Object(BTreeMap<JsString, Node>),
 }
 
+impl Clone for Node {
+    fn clone(&self) -> Self {
+        // A cloned input may be consumed after the original tree is left.
+        // Retain its complete dependency before its address changes.
+        #[cfg(feature = "read-tracking")]
+        reads::record(self);
+        Self {
+            rev: self.rev,
+            kind: self.kind.clone(),
+        }
+    }
+}
+
 impl Node {
+    /// Apply detached-scope updates with the document's patch semantics.
+    pub fn apply_patches(&mut self, patches: &[Patch], rev: u64) -> Result<(), PatchError> {
+        let mut root = Some(std::mem::replace(self, Node::from_value(Value::Null, rev)));
+        let result = patches
+            .iter()
+            .enumerate()
+            .try_for_each(|(i, p)| patch::apply_one(&mut root, p, i, rev).map(|_| ()));
+        *self = root.unwrap_or_else(|| Node::from_value(Value::Null, rev));
+        result
+    }
+
     /// A tree holding `value`, every node at revision `rev`.
     pub fn from_value(value: Value, rev: u64) -> Node {
         let kind = match value {
@@ -89,6 +113,8 @@ impl Node {
     }
 
     pub fn kind(&self) -> &NodeKind {
+        #[cfg(feature = "read-tracking")]
+        reads::record(self);
         &self.kind
     }
 
@@ -99,7 +125,7 @@ impl Node {
 
     /// The subtree as a plain JSON value.
     pub fn to_value(&self) -> Value {
-        match &self.kind {
+        match self.kind() {
             NodeKind::Null => Value::Null,
             NodeKind::Bool(b) => Value::Bool(*b),
             NodeKind::Number(n) => Value::Number(*n),
@@ -115,7 +141,7 @@ impl Node {
 
     /// Object member.
     pub fn get(&self, key: &str) -> Option<&Node> {
-        match &self.kind {
+        match self.kind() {
             NodeKind::Object(map) => map.get(key.as_bytes()),
             _ => None,
         }
@@ -123,7 +149,7 @@ impl Node {
 
     /// Array element.
     pub fn at(&self, index: usize) -> Option<&Node> {
-        match &self.kind {
+        match self.kind() {
             NodeKind::Array(items) => items.get(index),
             _ => None,
         }
@@ -135,7 +161,7 @@ impl Node {
         let mut node = self;
         for part in path {
             let key = part.property_key();
-            node = match &node.kind {
+            node = match node.kind() {
                 NodeKind::Object(map) => map.get(&key)?,
                 NodeKind::Array(items) => {
                     items.get(crate::json::array_index(key.as_str()?)? as usize)?
@@ -148,8 +174,8 @@ impl Node {
 
     /// The string `id` member of an object node.
     fn record_id(&self) -> Option<&JsString> {
-        match &self.kind {
-            NodeKind::Object(map) => match map.get("id".as_bytes()).map(|n| &n.kind) {
+        match self.kind() {
+            NodeKind::Object(map) => match map.get("id".as_bytes()).map(Node::kind) {
                 Some(NodeKind::String(s)) => Some(s),
                 _ => None,
             },
@@ -284,7 +310,7 @@ impl Tree for Node {
 impl JsonTree for Node {
     type Child = Node;
     fn view(&self) -> View<'_, Node> {
-        match &self.kind {
+        match self.kind() {
             NodeKind::Null => View::Null,
             NodeKind::Bool(b) => View::Bool(*b),
             NodeKind::Number(n) => View::Number(*n),
@@ -429,5 +455,80 @@ impl Document {
     /// The canonical digest as bytes.
     pub fn canonical_digest(&self) -> Option<[u8; 32]> {
         self.root.as_ref().map(canonical_digest)
+    }
+}
+
+/// Per-thread input tracing, enabled only by pm-wasm. Native rendering does
+/// not pay for it. Container reads depend on their own shape; child values
+/// are separate reads. The caller must reset evaluator memos before tracing.
+#[cfg(feature = "read-tracking")]
+pub mod reads {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
+    thread_local! { static READS: RefCell<Option<HashSet<usize>>> = const { RefCell::new(None) }; }
+    pub fn begin() {
+        READS.with(|r| *r.borrow_mut() = Some(HashSet::new()));
+    }
+    pub(super) fn record(n: &Node) {
+        READS.with(|r| {
+            if let Some(set) = r.borrow_mut().as_mut() {
+                set.insert(n as *const Node as usize);
+            }
+        });
+    }
+    /// Stable node addresses to input paths. Rebuild after a patch; queries
+    /// at another time only walk their actual read set, never the whole scope.
+    pub struct Index {
+        root: usize,
+        parents: HashMap<usize, (usize, PathPart)>,
+    }
+    impl Index {
+        pub fn new(root: &Node) -> Self {
+            fn walk(node: &Node, parents: &mut HashMap<usize, (usize, PathPart)>) {
+                let parent = node as *const Node as usize;
+                match &node.kind {
+                    NodeKind::Array(a) => {
+                        for (i, child) in a.iter().enumerate() {
+                            parents.insert(child as *const Node as usize, (parent, i.into()));
+                            walk(child, parents);
+                        }
+                    }
+                    NodeKind::Object(o) => {
+                        for (k, child) in o {
+                            parents
+                                .insert(child as *const Node as usize, (parent, k.clone().into()));
+                            walk(child, parents);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut parents = HashMap::new();
+            walk(root, &mut parents);
+            Self {
+                root: root as *const Node as usize,
+                parents,
+            }
+        }
+    }
+    /// Stop before resolving paths, so tracing never records its own work.
+    pub fn finish(index: Option<&Index>) -> Vec<Vec<PathPart>> {
+        let set = READS.with(|r| r.borrow_mut().take()).unwrap_or_default();
+        let Some(index) = index else {
+            return Vec::new();
+        };
+        set.into_iter()
+            .filter_map(|mut address| {
+                let mut path = Vec::new();
+                while address != index.root {
+                    let (parent, part) = index.parents.get(&address)?;
+                    path.push(part.clone());
+                    address = *parent;
+                }
+                path.reverse();
+                Some(path)
+            })
+            .collect()
     }
 }

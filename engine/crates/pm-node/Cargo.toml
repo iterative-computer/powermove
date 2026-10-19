@@ -50,11 +50,16 @@ node = ["dep:napi", "dep:napi-derive"]
 # The C′ prototype (pm-gpu `remote-layer`): measurement builds only. Without
 # it, POWERMOVE_BRIDGE_REMOTE_LAYER=1 reports that this build has no C′.
 remote-layer = ["pm-gpu/remote-layer"]
+# Test hooks on production types (a held paused frame,
+# POWERMOVE_BRIDGE_TEST_SEND_DELAY_MS); off in the app. The crate's own
+# tests turn it on through the dev-dependency below.
+test-hooks = []
 
 [dev-dependencies]
 pm-model = { path = "../pm-model" }
 # The audio status test holds and fails decoders (pm-audio's test hooks).
 pm-audio = { path = "../pm-audio", features = ["test-hooks"] }
+pm-node = { path = ".", features = ["test-hooks"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [[test]]

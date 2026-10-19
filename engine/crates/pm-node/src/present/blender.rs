@@ -655,7 +655,12 @@ enum Job {
 /// surfaces join the preview map (a later synchronous capture draws them);
 /// a failure answers the capture only (previews go on).
 fn run_capture(inner: &Inner, worker: &mut Worker, c: Capture, cancel: &AtomicBool) {
-    let id = JobId::new(format!("capture-{}-{}-{}", c.key.0.0, c.key.1.get(), c.token));
+    let id = JobId::new(format!(
+        "capture-{}-{}-{}",
+        c.key.0.0,
+        c.key.1.get(),
+        c.token
+    ));
     let result = render(inner, worker, c.key, &c.snapshots, &c.hashes, id, cancel);
     let mut st = inner.lock();
     st.running = None;
@@ -1331,7 +1336,11 @@ mod tests {
                 .is_none()
         );
         // Nor one layer short of what was asked.
-        assert!(r.blender.prepared(&[final_frame(&["box", "cone"], 0.0)]).is_none());
+        assert!(
+            r.blender
+                .prepared(&[final_frame(&["box", "cone"], 0.0)])
+                .is_none()
+        );
         assert!(!r.blender.busy());
     }
 

@@ -20,9 +20,10 @@
 import type { PathPart } from '../../../shared/patch';
 import { lookup, type DocumentBarrier } from './barrier';
 import type { PmWasm } from './wasm';
+import { DetachedScopes, copyOf } from './detached';
 import type { DualAnswers } from './dual';
 import { layer3DRole } from '../core/scene3d/layers';
-import { canonicalPath } from '../legacy/core/compositions';
+import { COMP_FIELDS, canonicalPath } from '../legacy/core/compositions';
 import type { FontLoader } from './fonts';
 
 type Legacy = Record<string, any>;
@@ -38,6 +39,57 @@ function timePerturbations<T>(time: unknown, at: (t: number) => T): Array<() => 
 
 /** A fast-path miss (the slow path answers). */
 const MISS = Symbol('miss');
+
+/**
+ * The engine address prefix of `rootComp(PM.proj)` (pm-eval's `ROOT_VIEW`):
+ * the open composition's layers and fields seen through the wrapper
+ * `PM.Comps.get(openId)` returns. Expressions get the wrapper as `comp` and
+ * `param()` reads its `params`, so the wrapper has its own address; the open
+ * composition's address would hand them the project.
+ */
+const ROOT_VIEW = '@root:';
+/** The fast path's stamp for a scope addressed as {@link ROOT_VIEW}. */
+const ROOT_STAMP = Object.freeze({ rootView: true });
+
+const hasOwn = (o: object, key: string): boolean => Object.prototype.hasOwnProperty.call(o, key);
+
+/**
+ * Whether `cur` is, member for member, what `rootComp(proj)` builds now
+ * (legacy/core/compositions.ts): every member an expression can read holds
+ * the project's value (`id: compId`, `name: compName`, each composition
+ * field), and it has no other member. Anything else an expression could
+ * read differently (an added `params`, a stale `fps`) makes it a detached
+ * scope instead. Runs on every expression evaluation under the wrapper
+ * view, so the fields are named reads (inline caches) and the members one
+ * for-in walk (V8's enum cache): about 30 ns. `fields` is how many
+ * composition fields the project has (see `projectFields`). Members for-in
+ * does not list (non-enumerable or symbol keys) are not compared; rootComp
+ * never makes them (docs/engine/document-host.md).
+ */
+function isRootWrapper(cur: any, proj: any, fields: number, unwrap: <T>(v: T) => T): boolean {
+  const same = (a: unknown, b: unknown): boolean => Object.is(a, b) || (!!a && typeof a === 'object' && unwrap(a) === b);
+  if (Object.getPrototypeOf(cur) !== Object.prototype) return false;
+  if (!same(cur.id, proj.compId) || !same(cur.name, proj.compName) || !same(cur.layers, proj.layers)
+    || !same(cur.w, proj.w) || !same(cur.h, proj.h) || !same(cur.fps, proj.fps) || !same(cur.fpsRational, proj.fpsRational)
+    || !same(cur.dur, proj.dur) || !same(cur.bg, proj.bg) || !same(cur.backgroundFill, proj.backgroundFill)
+    || !same(cur.markers, proj.markers) || !same(cur.work, proj.work) || !same(cur.shutter, proj.shutter)
+    || !same(cur.audioGain, proj.audioGain) || !same(cur.render3d, proj.render3d)) return false;
+  let members = 0;
+  for (const key in cur) {
+    switch (key) {
+      // COMP_FIELDS (a test checks this list against it), id and name.
+      case 'id': case 'name': case 'w': case 'h': case 'fps': case 'fpsRational': case 'dur': case 'bg':
+      case 'backgroundFill': case 'layers': case 'markers': case 'work': case 'shutter': case 'audioGain': case 'render3d':
+        members += 1;
+        break;
+      default:
+        return false;
+    }
+  }
+  return members === fields + 2;
+}
+/** The members isRootWrapper compares, besides `id` and `name` (must equal COMP_FIELDS). */
+export const ROOT_WRAPPER_FIELDS = ['w', 'h', 'fps', 'fpsRational', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'render3d'] as const;
 
 /** Finds `target` inside `root` by identity; its path, or null. */
 export function findPath(root: any, target: any, limit = 12): PathPart[] | null {
@@ -229,8 +281,10 @@ export class NativeApi {
   private depth = 0;
   private answeredNatively = false;
   /** Live channel object → interned id (validated on every use). */
-  private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown }>();
-  /** Live layer → its interned transform channels (valid at `revision` with `cur` as `PM.curComp()`). */
+  private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown; wasm: PmWasm; time?: number; number?: number }>();
+  /** A detached property's validated address; its inputs are rechecked by DetachedScopes. */
+  private detachedProps = new WeakMap<object, { layer: object; cur: unknown; key: unknown; path: PathPart[]; request: Record<string, unknown> }>();
+  /** Live layer → interned transform channels, valid at the current revision and scope. */
   private channels = new WeakMap<object, { comp: string; ids: Map<string, number>; revision: number; cur: unknown }>();
   private refs = new Map<number, number>();
   /**
@@ -277,7 +331,8 @@ export class NativeApi {
 
   /** The module, flushed and ready, or null (then the legacy code answers). */
   private ready(): PmWasm | null {
-    const wasm = this.wasm();
+    let wasm = this.wasm();
+    if (wasm?.dead && this.revive?.()) wasm = this.wasm();
     const barrier = this.barrier();
     if (!wasm || wasm.dead || !barrier) return null;
     try { barrier.flush(); } catch (error) { console.warn('[engine-doc] flush failed', error); return null; }
@@ -303,21 +358,38 @@ export class NativeApi {
     return cached;
   }
 
-  /** `PM.curComp()`'s id and the open composition's. */
-  private comps(): { comp: string; open: string; cur: any; liveCur: any } | null {
+  /**
+   * `PM.curComp()`'s address and the open composition's. `wrapperFree`: the
+   * caller's answer cannot read the scope object itself (a channel without
+   * an expression: `evalKfs` reads only the channel and the layer), so a
+   * scope over the open composition's own layers is addressed as the
+   * wrapper view even when it is not a pristine `rootComp`.
+   */
+  private comps(wrapperFree = false): { comp: string; open: string; cur: any; liveCur: any } | null {
     const proj = this.unwrap(this.PM.proj);
     if (!proj || typeof proj !== 'object') return null;
     const open = typeof proj.compId === 'string' ? proj.compId : typeof proj.id === 'string' ? proj.id : '';
     const liveCur = this.PM.curComp?.() ?? this.PM.proj;
     const cur = this.unwrap(liveCur);
-    if (cur === proj) return { comp: open, open, cur, liveCur };
+    if (cur === proj) return { comp: open, open, cur: proj, liveCur: proj };
+    // Comps.get(rootId) constructs a new rootComp object on every call. Its
+    // layers are the open composition's live array, so address the mirror
+    // (no serialization) through the wrapper's own view: expressions and
+    // param() see the wrapper's members, not the project's.
+    if (this.overOpen(cur, proj) && (wrapperFree || isRootWrapper(cur, proj, this.projectFields(proj), this.unwrap))) {
+      return { comp: ROOT_VIEW + open, open, cur: proj, liveCur: proj };
+    }
     const comp = this.address(proj, cur);
-    if (comp === null) return cur && typeof cur === 'object' ? { comp: '@json:' + JSON.stringify(cur), open, cur, liveCur } : null;
+    if (comp === null) return cur && typeof cur === 'object' ? { comp: this.detached.address(cur), open, cur, liveCur } : null;
     return { comp, open, cur, liveCur };
   }
 
   /** Where each composition object last was: checked by walking its path, so a stale entry is never used. */
+  private detached = new DetachedScopes();
   private addresses = new WeakMap<object, PathPart[] | null>();
+  private detachedAddresses = new WeakMap<object, { proj: unknown; revision: number }>();
+  /** The object last found outside the document, and where (see `address`). */
+  private lastDetached: { ref: WeakRef<object>; proj: unknown; revision: number } | null = null;
 
   /**
    * The engine address of composition object `cur` inside `proj`: its id when
@@ -328,18 +400,51 @@ export class NativeApi {
   private address(proj: any, cur: any): string | null {
     if (!cur || typeof cur !== 'object') return null;
     if (typeof cur.id === 'string' && proj.comps && typeof proj.comps === 'object' && proj.comps[cur.id] === cur) return cur.id;
+    const revision = this.barrier()?.revision ?? -1;
+    const detached = this.detachedAddresses.get(cur);
+    if (detached && detached.proj === proj && detached.revision === revision) return null;
     const cached = this.addresses.get(cur);
     let path = cached && at(proj, cached) === cur ? cached : undefined;
-    if (!path) {
+    // A fresh copy of the composition object last found outside the document,
+    // at the same revision (a caller building its scope object for every
+    // query): no walk of the whole document per query. Addressing it as
+    // detached is exact even if it were inside (the detached path evaluates
+    // the live object itself), only slower.
+    const seen = this.lastDetached;
+    const last = !path && seen && seen.proj === proj && seen.revision === revision ? seen.ref.deref() : undefined;
+    if (!path && !(last && copyOf(cur, last))) {
       path = findPath(proj, cur, 64) ?? undefined;
       if (path) this.addresses.set(cur, path);
     }
-    if (!path) return null;
+    if (!path) {
+      this.detachedAddresses.set(cur, { proj, revision });
+      this.lastDetached = { ref: new WeakRef(cur), proj, revision };
+      return null;
+    }
     return path.length === 2 && path[0] === 'comps' ? String(path[1]) : '@path:' + JSON.stringify(canonicalPath(path, proj.compId));
+  }
+
+  private fields: { proj: unknown; revision: number; count: number } = { proj: null, revision: -1, count: 0 };
+  /** How many composition fields `proj` has (cached per barrier revision: they change only through it). */
+  private projectFields(proj: any): number {
+    const revision = this.barrier()?.revision ?? -1;
+    const f = this.fields;
+    if (f.proj !== proj || f.revision !== revision || revision < 0) {
+      let count = 0;
+      for (const key of COMP_FIELDS) if (hasOwn(proj, key)) count += 1;
+      f.proj = proj; f.revision = revision; f.count = count;
+    }
+    return f.count;
+  }
+
+  /** Whether scope object `cur` is a view of the open composition: its own `layers` and `id: compId`. */
+  private overOpen(cur: any, proj: any): boolean {
+    return !!cur && typeof cur === 'object' && this.unwrap(cur.layers) === proj.layers && cur.id === proj.compId;
   }
 
   /** Where the mirror holds composition `cur` (at engine address `comp`). */
   private mirrorBase(comp: string, cur: any): PathPart[] {
+    if (comp.startsWith(ROOT_VIEW)) comp = comp.slice(ROOT_VIEW.length);
     if (comp.startsWith('@path:')) return JSON.parse(comp.slice(6));
     // A root canonicalProject leaves as it is (no compId): the mirror holds its layers at the top.
     if (cur === this.unwrap(this.PM.proj) && !canonicalRoot(cur)) return [];
@@ -394,8 +499,8 @@ export class NativeApi {
     return i;
   }
 
-  private context(L: any): Context | null {
-    const c = this.comps();
+  private context(L: any, wrapperFree = false): Context | null {
+    const c = this.comps(wrapperFree);
     if (!c) return null;
     const raw = this.unwrap(L);
     if (!raw || typeof raw !== 'object') return null;
@@ -410,12 +515,12 @@ export class NativeApi {
     // before answering rather than answer for another layer.
     const barrier = this.barrier();
     const mirrored = barrier ? lookup(barrier.shadow, [...this.mirrorBase(c.comp, c.cur), 'layers', i, 'id']) : null;
-    if (barrier && !c.comp.startsWith('@json:') && (!mirrored?.exists || mirrored.value !== raw.id)) {
+    if (barrier && !c.comp.startsWith('@scope:') && (!mirrored?.exists || mirrored.value !== raw.id)) {
       this.stats.repairs += 1;
       const missed = barrier.repair('structuralDiff');
       if (missed.length) this.onStale?.('context', missed);
     }
-    const first = !c.comp.startsWith('@json:') && typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
+    const first = !c.comp.startsWith('@scope:') && typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
     return { comp: c.comp, open: c.open, layer: i, raw, first, live };
   }
 
@@ -425,14 +530,18 @@ export class NativeApi {
     const ask = (instance: PmWasm): any => {
       const payload: Record<string, unknown> = { op, ...request };
       if (typeof request.comp === 'string' && request.comp.startsWith('@json:')) {
-        payload.compJson = JSON.parse(request.comp.slice(6));
+        payload.compJsonText = request.comp.slice(6);
         payload.comp = '@detached';
       }
-      let reply = instance.query(payload);
+      const run = () => typeof request.comp === 'string' && request.comp.startsWith('@scope:')
+        && !('compJson' in payload) && !('compJsonText' in payload)
+        ? this.detached.query(request.comp, payload, instance, this.barrier()?.revision ?? -1)
+        : instance.query(payload);
+      let reply = run();
       if (reply?.fonts && this.fonts) {
         // Text layout met fonts the mirror lacks: load them (at once from a
         // synchronous registry, in the background otherwise) and ask again.
-        reply = this.fonts.resolve(instance, () => instance.query(payload), (r: any) => !!r?.fonts) ?? reply;
+        reply = this.fonts.resolve(instance, run, (r: any) => !!r?.fonts) ?? reply;
       }
       return reply;
     };
@@ -566,7 +675,7 @@ export class NativeApi {
     if (!barrier || !wasm || wasm.dead) return null;
     try { barrier.flush(); } catch { return null; }
     const c = this.comps();
-    if (!c) return null;
+    if (!c || c.comp.startsWith('@scope:')) return null;
     return { shape: barrier.shapeRevision, cur: c.cur, live: c.liveCur, comp: c.comp };
   }
 
@@ -626,6 +735,8 @@ export class NativeApi {
   reset(): void {
     this.generation += 1;
     this.props = new WeakMap();
+    this.detached = new DetachedScopes();
+    this.detachedProps = new WeakMap();
     this.channels = new WeakMap();
     this.refs.clear();
     this.indexed = new WeakMap();
@@ -652,13 +763,46 @@ export class NativeApi {
   // ── anim ──────────────────────────────────────────────────────────────
 
   /** The fast path's validity stamp: the mirror revision and `PM.curComp()`. */
-  private stamp(): { revision: number; cur: unknown } | null {
+  private stamp(): { revision: number; cur: unknown; scope: any } | null {
     const barrier = this.barrier();
     if (!barrier) return null;
     // flush() returns at once when nothing waits (it also notices writes a
     // plain transaction has not announced yet).
     barrier.flush();
-    return { revision: barrier.revision, cur: this.PM.scope?.length ? this.unwrap(this.PM.curComp()) : null };
+    const proj = this.unwrap(this.PM.proj);
+    const cur = this.PM.scope?.length ? this.unwrap(this.PM.curComp()) : null;
+    if (!cur || cur === proj) return { revision: barrier.revision, cur: null, scope: proj };
+    // Ids interned under the wrapper view serve any scope over the open
+    // composition's layers; an expression channel also needs the scope to
+    // be a pristine rootComp (see `current`).
+    return { revision: barrier.revision, cur: proj && this.overOpen(cur, proj) ? ROOT_STAMP : cur, scope: cur };
+  }
+
+  /**
+   * Whether an interned id (with the revision and scope stamp it was last
+   * validated at) still answers channel `raw`. Without an expression the
+   * answer reads only the channel and its layer (`evalKfs(prop.kf, T -
+   * L.from)` or `prop.v`), never the scope, so the mirror revision decides
+   * alone and `PM.curComp()` is not called. With one, the scope must be the
+   * one it was interned under, and for the wrapper view a pristine
+   * rootComp: checked on every call, since the scope object can change
+   * without the barrier seeing it.
+   */
+  private current(entry: { revision: number; cur: unknown }, raw: any): boolean {
+    if (this.wrapperFreeChannel(raw)) {
+      const barrier = this.barrier();
+      if (!barrier) return false;
+      barrier.flush();
+      return entry.revision === barrier.revision;
+    }
+    const stamp = this.stamp();
+    return !!stamp && entry.revision === stamp.revision && entry.cur === stamp.cur
+      && (stamp.cur !== ROOT_STAMP || isRootWrapper(stamp.scope, this.unwrap(this.PM.proj), this.projectFields(this.unwrap(this.PM.proj)), this.unwrap));
+  }
+
+  private wrapperFreeChannel(raw: any): boolean {
+    // `PM.ev`/`PM.evP` without an expression: `evalKfs(prop.kf, T - L.from)` or `prop.v`.
+    return !!raw && typeof raw === 'object' && !raw.expr;
   }
 
   /** `pm_ev` for an id validated at this revision; MISS when it must take the slow path. */
@@ -681,9 +825,8 @@ export class NativeApi {
     if (!this.dual && typeof key === 'string' && typeof T === 'number' && L && typeof L === 'object') {
       const raw = this.unwrap(L);
       const entry = this.channels.get(raw);
-      const stamp = entry && this.stamp();
-      const id = stamp && entry.revision === stamp.revision && entry.cur === stamp.cur ? entry.ids.get(key) : undefined;
-      if (id !== undefined) {
+      const id = entry?.ids.get(key);
+      if (id !== undefined && this.current(entry!, raw.p?.[key])) {
         const value = this.fastValue(id, T, raw.p?.[key]);
         if (value !== MISS) { this.stats.calls.ev = (this.stats.calls.ev ?? 0) + 1; return value; }
       }
@@ -691,7 +834,8 @@ export class NativeApi {
     return this.answer('ev', () => {
       const wasm = this.ready();
       if (!wasm) return { fallback: 'unavailable' };
-      const ctx = this.context(L);
+      const rawL = this.unwrap(L);
+      const ctx = this.context(L, !!rawL && typeof rawL === 'object' && !!rawL.p && typeof rawL.p === 'object' && Object.prototype.hasOwnProperty.call(rawL.p, key) && this.wrapperFreeChannel(rawL.p[key]));
       if (!ctx) return { fallback: 'context' };
       if (typeof key !== 'string' || typeof T !== 'number' || !ctx.first || typeof ctx.layer !== 'number') {
         return this.query('ev', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, key: String(key), t: T });
@@ -718,18 +862,47 @@ export class NativeApi {
     if (!this.dual && typeof T === 'number') {
       const rawProp = this.unwrap(prop);
       const entry = this.props.get(rawProp);
-      const stamp = entry && this.stamp();
-      if (stamp && entry.revision === stamp.revision && entry.cur === stamp.cur && entry.key === key && entry.layer === this.unwrap(L)) {
+      if (entry && entry.key === key && entry.layer === this.unwrap(L) && this.current(entry, rawProp)) {
+        // The value was already answered by pm-wasm at this exact time and
+        // revision. Like its own last-answer memo, keep numeric answers only.
+        if (entry.time !== undefined && Object.is(entry.time, T)) {
+          // reset() drops these entries when an instance is replaced.
+          if (!entry.wasm.dead) {
+            this.stats.fastPath += 1;
+            this.stats.calls.evP = this.stats.calls.evP! + 1;
+            return entry.number;
+          }
+        }
         const value = this.fastValue(entry.id, T, rawProp);
+        if (typeof value === 'number') { entry.time = T; entry.number = value; }
         if (value !== MISS) { this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1; return value; }
+      }
+    }
+    if (!this.dual && typeof T === 'number' && typeof key === 'string') {
+      const rawProp = this.unwrap(prop), entry = this.detachedProps.get(rawProp);
+      const stamp = entry && this.stamp();
+      // A fresh copy of the scope object (`copyOf`) shares its detached
+      // scope, which validates the answer's reads on the new object.
+      if (stamp && entry.cur !== stamp.cur && stamp.cur && typeof stamp.cur === 'object' && stamp.cur !== ROOT_STAMP
+        && copyOf(stamp.cur, entry.cur) && this.detached.address(stamp.cur) === entry.request.comp) entry.cur = stamp.cur;
+      if (stamp && entry.cur === stamp.cur && entry.request.open === (this.PM.proj?.compId ?? this.PM.proj?.id ?? '')
+        && (stamp.cur as any)?.layers?.[entry.request.layer as number] === entry.layer
+        && entry.layer === this.unwrap(L) && entry.key === key && at(entry.layer, entry.path) === rawProp) {
+        entry.request.t = T;
+        const reply = this.query<any>('evP', entry.request);
+        if ('value' in reply && (reply.value === null || typeof reply.value !== 'object')) {
+          this.count('evP');
+          this.stats.fastPath += 1;
+          return reply.value;
+        }
       }
     }
     return this.answer('evP', () => {
       const wasm = this.ready();
       if (!wasm) return { fallback: 'unavailable' };
-      const ctx = this.context(L);
-      if (!ctx) return { fallback: 'context' };
       const rawProp = this.unwrap(prop);
+      const ctx = this.context(L, this.wrapperFreeChannel(rawProp));
+      if (!ctx) return { fallback: 'context' };
       const stamp = this.stamp()!;
       let entry = this.props.get(rawProp);
       const valid = entry && entry.layer === ctx.raw && entry.comp === ctx.comp && entry.key === key && at(ctx.raw, entry.path) === rawProp;
@@ -739,16 +912,19 @@ export class NativeApi {
           const request = path
             ? { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, key: String(key), t: T }
             : { comp: ctx.comp, open: ctx.open, layer: ctx.layer, prop: JSON.parse(JSON.stringify(rawProp)), key: String(key), t: T };
+          if (path && stamp.cur && stamp.cur !== ROOT_STAMP && typeof key === 'string' && typeof ctx.layer === 'number' && ctx.comp.startsWith('@scope:')) this.detachedProps.set(rawProp, { layer: ctx.raw, cur: stamp.cur, key, path, request: { op: 'evP', ...request } });
           return this.query('evP', request);
         }
         const id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: path }, rawProp);
         if (id < 0) return this.query('evP', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, key, t: T });
-        entry = { layer: ctx.raw, path, comp: ctx.comp, id, key, revision: stamp.revision, cur: stamp.cur };
+        entry = { layer: ctx.raw, path, comp: ctx.comp, id, key, revision: stamp.revision, cur: stamp.cur, wasm };
         this.props.set(rawProp, entry);
       }
       entry!.revision = stamp.revision;
       entry!.cur = stamp.cur;
       const got = this.evById(wasm, entry!.id, T);
+      entry!.time = 'value' in got && typeof got.value === 'number' ? T : undefined;
+      if ('value' in got && typeof got.value === 'number') entry!.number = got.value;
       this.noteError(rawProp, wasm, entry!.id);
       return got;
     }, () => this.legacy.evP(L, prop, T, key), () => ({ layer: L?.id, key, t: T }));

@@ -16,7 +16,7 @@
  * viewer (capability routing, section 21); a frame means the engine draws
  * it.
  */
-import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
 
@@ -46,7 +46,14 @@ export type StreamBatch = { baseRevision: number; revision: number; origin: Patc
 /** Stages a large resync document with main (`nativeEngine.stageDocument`). */
 export type StageDocument = (session: number, bytes: Uint8Array) => Promise<{ handle: string; length: number }>;
 
-/** Where the session's composition is drawn. */
+/**
+ * Where the session's composition stands: `pending` (not decided yet),
+ * `engine` (drawn by the engine), `legacy` (something in it the engine
+ * cannot draw yet, with the reason; the name is the capability-routing
+ * scaffolding's, amendment 21). With "Use New Engine" on nothing else draws
+ * a `legacy` composition: the viewer shows the reason and the engine's
+ * clock and audio run as for `engine`.
+ */
 export type Route = 'pending' | 'engine' | 'legacy';
 
 /** Messages for the viewer's presentation (engine-present/protocol.ts). */
@@ -54,7 +61,7 @@ export type ViewerMessage =
   | { type: 'frame'; frame: FrameDescriptor }
   | { type: 'surfacePool'; pool: SurfacePool }
   | { type: 'clock'; sample: ClockSample }
-  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number };
+  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number };
 
 /** The kernel's definition stream (`PM.EngineDefinitions`, kernel/engine-definitions.ts; contract 10). */
 export interface DefinitionsSource {
@@ -183,9 +190,23 @@ export class DocumentSession {
   /** Definitions pushes the engine refused in a row, and the pending retry. */
   private definitionRefusals = 0;
   private definitionRetry: ReturnType<typeof setTimeout> | null = null;
-  /** The revision the engine routed the composition to the legacy viewer at:
-   *  frames of that revision or older, still in flight, are stale. */
-  private legacyRevision: number | null = null;
+  /** The newest frame `seq` the engine had given the view when it last said
+   *  it cannot draw the view's composition (the report's
+   *  `ErrorDetail::Unsupported.lastFrame`). A frame at or below it was
+   *  drawn before the decision and is stale; one above it is a later
+   *  decision at any revision: a composition switch draws the new
+   *  composition at the very revision the old one was reported at (the
+   *  document batch reaches the engine before the viewer state), so the
+   *  revision alone cannot tell them apart.
+   *
+   *  The engine's number, not the newest frame received: arrival order is
+   *  not the engine's decision order. Paused frames leave from the engine's
+   *  completion thread once the GPU finishes them, so a frame drawn before
+   *  the report could arrive after it with a higher seq than any frame
+   *  received so far. The engine also sends those frames before the report
+   *  (it drains the completion thread first); the seq makes the gate hold
+   *  whatever the order. */
+  private routedSeq: number | null = null;
 
   constructor(private readonly options: SessionOptions) {}
 
@@ -372,8 +393,9 @@ export class DocumentSession {
       case 'frame': {
         const { type: _t, ...frame } = event;
         const revision = Number((frame as { revision?: unknown }).revision) || 0;
-        if (this.legacyRevision !== null && revision <= this.legacyRevision) return;
-        this.legacyRevision = null;
+        const seq = Number((frame as { seq?: unknown }).seq) || 0;
+        if (this.routedSeq !== null && seq <= this.routedSeq) return;
+        this.routedSeq = null;
         this.frames++;
         this.lastFrame = frame as unknown as FrameDescriptor;
         this.setRoute('engine', null);
@@ -390,14 +412,14 @@ export class DocumentSession {
       case 'clock': {
         const { type: _t, ...sample } = event;
         this.clock = sample as unknown as ClockSample;
-        if (this.headless && message.revision !== null && Number(message.revision) >= this.applied) {
-          // Headless clocks are published only once the engine has the
-          // document/media and accepts transport, tagged with that revision.
-          const revision = Number(message.revision) || 0;
-          if (this.legacyRevision === null || revision > this.legacyRevision) {
-            this.legacyRevision = null;
-            this.setRoute('engine', null);
-          }
+        if (this.headless && message.revision !== null && Number(message.revision) >= this.applied && this.route !== 'engine') {
+          // A headless clock carries the document revision only while the
+          // engine draws the composition (it runs untagged for one the
+          // engine cannot draw): with no frames to learn the route from, a
+          // tagged clock is the engine's word that it draws this one, after
+          // a load or after an edit or switch made it drawable again.
+          this.routedSeq = null;
+          this.setRoute('engine', null);
         }
         this.options.onClock?.(this.clock);
         this.options.handlers.message({ type: 'clock', sample: this.clock }, arrivedMs);
@@ -463,9 +485,12 @@ export class DocumentSession {
         const error = (event as unknown as { error: { code: string; message: string; retry: { kind: string } } }).error;
         if (error.code === 'unsupported') {
           const revision = Number(event['revision']) || 0;
-          this.legacyRevision = revision;
+          const detail = (error as { detail?: ErrorDetail | null }).detail;
+          const received = Number(this.lastFrame?.seq) || 0;
+          const seq = detail?.kind === 'unsupported' ? Number(detail.lastFrame) || 0 : received;
+          this.routedSeq = seq;
           this.setRoute('legacy', error.message);
-          this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision }, arrivedMs);
+          this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision, seq }, arrivedMs);
           return;
         }
         this.failures.push(`${error.code}: ${error.message}`);
@@ -578,6 +603,11 @@ export class DocumentSession {
   /** A session owns the clock independently of any presentation channel. */
   headless = false;
   private lastState: ViewerState | null = null;
+
+  /** The composition of the newest viewer state sent (null before one). */
+  get composition(): string | null {
+    return this.lastState ? String(this.lastState.composition) : null;
+  }
 
   sendHeadless(composition: string): void {
     this.sendViewerState({

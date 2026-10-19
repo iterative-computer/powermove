@@ -43,6 +43,8 @@ pub enum Rule {
 pub struct SampleMask {
     pub width: u32,
     pub height: u32,
+    /// Pixel origin in the original canvas; preserves the global sample grid.
+    pub origin: [u32; 2],
     /// The sample positions (4× or 1×).
     pub pattern: &'static [[f64; 2]],
     pub bits: Vec<u8>,
@@ -53,6 +55,7 @@ impl SampleMask {
         Self {
             width,
             height,
+            origin: [0, 0],
             pattern,
             bits: vec![0; (width * height) as usize],
         }
@@ -110,8 +113,8 @@ pub fn fill_polygons(mask: &mut SampleMask, contours: &[Vec<[f64; 2]>], rule: Ru
         return;
     }
     let one = 1i64 << SUBPIXEL_BITS;
-    let py0 = (miny.div_euclid(one) - 1).max(0);
-    let py1 = (maxy.div_euclid(one) + 1).min(i64::from(mask.height) - 1);
+    let py0 = (miny.div_euclid(one) - 1).max(i64::from(mask.origin[1]));
+    let py1 = (maxy.div_euclid(one) + 1).min(i64::from(mask.origin[1] + mask.height) - 1);
     let mut crossings: Vec<(i64, i64, i32)> = Vec::new();
     for py in py0..=py1 {
         for (si, s) in mask.pattern.iter().enumerate() {
@@ -131,23 +134,32 @@ pub fn fill_polygons(mask: &mut SampleMask, contours: &[Vec<[f64; 2]>], rule: Ru
             if crossings.is_empty() {
                 continue;
             }
-            for px in 0..i64::from(mask.width) {
-                let (sx, _) = sample_grid(px, 0, *s);
-                let mut w = 0;
-                for &(num, den, wd) in &crossings {
-                    // Inside when the edge is left of the sample, or exactly on
-                    // it (a left edge includes its samples).
-                    if num <= sx * den {
-                        w += wd;
+            // Each edge changes winding at the first integer pixel whose
+            // sample is on its right. Compute that threshold as an exact
+            // rational ceil: no float intersection can flip an edge sample.
+            // Filling spans avoids testing every pixel against every edge.
+            let sx = (s[0] * one as f64) as i64;
+            let mut events: Vec<(i64, i32)> = crossings.iter().map(|&(num, den, wd)| {
+                let n = i128::from(num) - i128::from(sx) * i128::from(den);
+                let d = i128::from(one) * i128::from(den);
+                let x = n.div_euclid(d) + i128::from(n.rem_euclid(d) != 0);
+                (x.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64, wd)
+            }).collect();
+            events.sort_unstable_by_key(|e| e.0);
+            let x0 = i64::from(mask.origin[0]);
+            let x1 = x0 + i64::from(mask.width);
+            let row = (py as u32 - mask.origin[1]) as usize * mask.width as usize;
+            let (mut x, mut w) = (x0, 0);
+            for (edge, wd) in events.into_iter().chain(std::iter::once((x1, 0))) {
+                let end = edge.clamp(x0, x1);
+                let inside = match rule { Rule::NonZero => w != 0, Rule::EvenOdd => w & 1 != 0 };
+                if inside && end > x {
+                    for bits in &mut mask.bits[row + (x-x0) as usize..row + (end-x0) as usize] {
+                        *bits |= 1 << si;
                     }
                 }
-                let inside = match rule {
-                    Rule::NonZero => w != 0,
-                    Rule::EvenOdd => w & 1 != 0,
-                };
-                if inside {
-                    mask.bits[(py as u32 * mask.width + px as u32) as usize] |= 1 << si;
-                }
+                w += wd;
+                x = end;
             }
         }
     }
@@ -286,10 +298,10 @@ pub fn fill_triangles(mask: &mut SampleMask, tris: &[[[f32; 2]; 3]]) {
         }
         let (minx, maxx) = (v.iter().map(|p| p.0).min().unwrap(), v.iter().map(|p| p.0).max().unwrap());
         let (miny, maxy) = (v.iter().map(|p| p.1).min().unwrap(), v.iter().map(|p| p.1).max().unwrap());
-        let px0 = (minx.div_euclid(one)).max(0);
-        let px1 = (maxx.div_euclid(one)).min(i64::from(mask.width) - 1);
-        let py0 = (miny.div_euclid(one)).max(0);
-        let py1 = (maxy.div_euclid(one)).min(i64::from(mask.height) - 1);
+        let px0 = (minx.div_euclid(one)).max(i64::from(mask.origin[0]));
+        let px1 = (maxx.div_euclid(one)).min(i64::from(mask.origin[0] + mask.width) - 1);
+        let py0 = (miny.div_euclid(one)).max(i64::from(mask.origin[1]));
+        let py1 = (maxy.div_euclid(one)).min(i64::from(mask.origin[1] + mask.height) - 1);
         if px1 < px0 || py1 < py0 {
             continue;
         }
@@ -331,7 +343,7 @@ pub fn fill_triangles(mask: &mut SampleMask, tris: &[[[f32; 2]; 3]]) {
                         }
                     }
                     if w != 0 {
-                        mask.bits[(py as u32 * mask.width + px as u32) as usize] |= 1 << si;
+                        mask.bits[((py as u32 - mask.origin[1]) * mask.width + px as u32 - mask.origin[0]) as usize] |= 1 << si;
                     }
                 }
             }
@@ -342,6 +354,41 @@ pub fn fill_triangles(mask: &mut SampleMask, tris: &[[[f32; 2]; 3]]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn winding_spans_match_point_sampling_with_holes_and_clipped_windows() {
+        let contours = vec![
+            vec![[-8.375, 2.125], [80.875, 5.375], [34.125, 60.625], [9.625, 45.875]],
+            vec![[20.0, 15.0], [39.875, 15.0], [39.875, 41.125], [20.0, 41.125]],
+            vec![[20.0, 15.0], [39.875, 15.0], [39.875, 41.125], [20.0, 41.125]],
+        ];
+        for rule in [Rule::NonZero, Rule::EvenOdd] {
+            for pattern in [&SAMPLES_1X[..], &SAMPLES_4X[..]] {
+                let mut mask = SampleMask::new(32, 29, pattern);
+                mask.origin = [19, 13];
+                fill_polygons(&mut mask, &contours, rule);
+                for y in 0..mask.height {
+                    for x in 0..mask.width {
+                        let mut expected = 0;
+                        for (s, sample) in pattern.iter().enumerate() {
+                            let (sx, sy) = sample_grid(i64::from(x+19), i64::from(y+13), *sample);
+                            let mut winding = 0;
+                            for c in &contours {
+                                for (a,b) in c.iter().zip(c.iter().cycle().skip(1)).take(c.len()) {
+                                    let (ax,ay,bx,by) = (snap(a[0]),snap(a[1]),snap(b[0]),snap(b[1]));
+                                    if ay == by { continue; }
+                                    let (x0,y0,x1,y1,wd) = if ay<by {(ax,ay,bx,by,1)} else {(bx,by,ax,ay,-1)};
+                                    if sy>=y0 && sy<y1 && x0*(y1-y0)+(x1-x0)*(sy-y0)<=sx*(y1-y0) { winding += wd; }
+                                }
+                            }
+                            if match rule {Rule::NonZero=>winding!=0,Rule::EvenOdd=>winding&1!=0} { expected |= 1<<s; }
+                        }
+                        assert_eq!(mask.bits[(y*mask.width+x) as usize], expected);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn half_pixel_square_covers_two_samples() {
