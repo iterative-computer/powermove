@@ -271,6 +271,17 @@ impl Renderer {
         let pipelines = Pipelines::new(&device);
         let media = MediaCache::new(&device);
         let text_gpu = crate::text::gpu::TextGpu::new(&device);
+        let mut effects = Effects::new(format!("{}; wgpu 30", std::env::consts::OS));
+        if let Ok(browser) = std::env::var("POWERMOVE_ENGINE_PARITY_ENV") {
+            let environment = format!(
+                "{browser}; {:?}; pipeline {}",
+                device.adapter_info(),
+                pm_glsl::pipeline::PIPELINE_REVISION
+            );
+            let directory = std::env::var_os("POWERMOVE_ENGINE_SHADER_CACHE")
+                .map(|d| std::path::PathBuf::from(d).join("angle-parity"));
+            effects.parity.configure(Some(environment), directory);
+        }
         Renderer {
             text: crate::text::TextContext::default(),
             text_gpu,
@@ -286,7 +297,7 @@ impl Renderer {
             device,
             queue,
             bracket: None,
-            effects: Effects::new(format!("{}; wgpu 30", std::env::consts::OS)),
+            effects,
             effect_host: None,
             shaders: Default::default(),
             fallback_host: None,

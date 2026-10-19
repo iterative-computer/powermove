@@ -958,3 +958,170 @@ fn fallback_step_cost_at_full_hd() {
         stats(&mut native)
     );
 }
+
+/// First-use decisions use the runner's actual first frame, then avoid the
+/// runner for verified programs; mismatches pin and survive a fresh renderer.
+#[test]
+fn parity_probe_presents_angle_then_verifies_or_pins_across_restart() {
+    use pm_render::effects::parity::Verdict;
+    let _gpu = gpu();
+    let mut set = builtin_definitions();
+    let mut def = set
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap()
+        .clone();
+    def.id = "probe.identity".into();
+    def.origin = DefinitionOrigin::Local;
+    // Use an exact copy shader, regardless of the built-in's formatting.
+    let g = def.glsl.as_mut().unwrap();
+    let start = g.source.find("void main()").unwrap();
+    g.source.truncate(start);
+    g.source.push_str("void main(){o=texture(u_tex,v_st);}");
+    let code = g.source.clone();
+    set.definitions.push(def);
+    let doc = stack(
+        json!([{ "id": "fx", "type": "probe.identity", "on": true, "p": {} }]),
+        Value::Null,
+    );
+    let dir = std::env::temp_dir().join(format!("pm-render-parity-{}", std::process::id()));
+    let make = |env: &str| {
+        let mut r = Renderer::headless().unwrap();
+        r.set_definitions(&set).unwrap();
+        r.set_shader_fallback_runner(true);
+        r.effects_mut()
+            .parity
+            .configure(Some(env.into()), Some(dir.clone()));
+        r
+    };
+    let pending = |r: &mut Renderer| match render(r, &doc) {
+        Err(RenderError::ShaderFallbackPending(p)) => p[0].clone(),
+        other => panic!("unknown program must hold presentation: {other:?}"),
+    };
+    let mut r = make("version A");
+    let first = pending(&mut r);
+    let pixels = r.fallback_textures(&first.key).unwrap()[0].as_ref().clone();
+    r.put_fallback_pixels(first.key.clone(), pixels);
+    let angle_frame = render(&mut r, &doc).unwrap();
+    assert_eq!(
+        r.effects_mut().parity.verdict(&code),
+        Verdict::NativeVerified
+    );
+    assert_eq!(render(&mut r, &doc).unwrap(), angle_frame);
+    let mut restarted = make("version A");
+    assert_eq!(
+        restarted.effects_mut().parity.verdict(&code),
+        Verdict::NativeVerified
+    );
+    assert_eq!(render(&mut restarted, &doc).unwrap(), angle_frame);
+    // An independent driver/browser generation must be probed again.
+    let mut r = make("version B");
+    let request = pending(&mut r);
+    let mut angle = r.fallback_textures(&request.key).unwrap()[0]
+        .as_ref()
+        .clone();
+    for p in angle.rgba16f.chunks_exact_mut(4) {
+        p[0] = 0x3800;
+    }
+    r.put_fallback_pixels(request.key.clone(), angle);
+    let pinned_frame = render(&mut r, &doc).unwrap();
+    assert_ne!(
+        pinned_frame, angle_frame,
+        "presents ANGLE even on a native discrepancy"
+    );
+    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Runner);
+    let mut restarted = make("version B");
+    assert_eq!(
+        restarted.effects_mut().parity.verdict(&code),
+        Verdict::Runner
+    );
+    assert_eq!(pending(&mut restarted).key, request.key);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn parity_probe_covers_transitions_and_fragment_layers() {
+    use pm_render::effects::parity::Verdict;
+    let _gpu = gpu();
+    for kind in ["transition", "shader", "extension"] {
+        let mut set = builtin_definitions();
+        let mut def = set
+            .definitions
+            .iter()
+            .find(|d| d.id.as_str() == "crossfade")
+            .unwrap()
+            .clone();
+        def.id = "probe.constant".into();
+        def.origin = DefinitionOrigin::Local;
+        let g = def.glsl.as_mut().unwrap();
+        let start = g.source.find("void main()").unwrap();
+        g.source.truncate(start);
+        g.source.push_str("void main(){o=vec4(0.25,0.5,0.75,1.0);}");
+        let mut code = g.source.clone();
+        if kind == "extension" {
+            def.kind = DefinitionKind::Layer;
+            def.renderer = Some(pm_protocol::definitions::LayerRenderer::Fragment {
+                fragment: "void main(){fragColor=vec4(0.25,0.5,0.75,1.0);}".into(),
+            });
+            let body = "void main(){fragColor=vec4(0.25,0.5,0.75,1.0);}";
+            def.glsl = Some(pm_protocol::definitions::WrappedGlsl {
+                source: format!("{}\n{body}", pm_render::shader_layers::header()),
+                body_line_offset: pm_render::shader_layers::header().lines().count() as u32,
+                body_utf16_len: body.len() as u32,
+                body_utf8_len: body.len() as u32,
+            });
+            code = def.glsl.as_ref().unwrap().source.clone();
+        }
+        let doc = if kind == "transition" {
+            stack(json!([]), json!({"type":"probe.constant","dur":1,"p":{}}))
+        } else {
+            let mut l = layer("fragment", "#000000", json!([]), Value::Null);
+            l["type"] = json!(if kind == "shader" {
+                "shader"
+            } else {
+                "extension"
+            });
+            l["d"] = if kind == "shader" {
+                json!({"code":"void main(){fragColor=vec4(0.25,0.5,0.75,1.0);}","uniforms":{},"w":64,"h":32})
+            } else {
+                json!({"definition":"probe.constant","params":{},"w":64,"h":32})
+            };
+            document(vec![l])
+        };
+        if kind == "shader" {
+            code = format!(
+                "{}\nvoid main(){{fragColor=vec4(0.25,0.5,0.75,1.0);}}",
+                pm_render::shader_layers::header()
+            );
+        }
+        if kind != "shader" {
+            set.definitions.push(def);
+        }
+        let mut r = Renderer::headless().unwrap();
+        r.set_definitions(&set).unwrap();
+        r.set_shader_fallback_runner(true);
+        r.effects_mut()
+            .parity
+            .configure(Some(format!("test-{kind}")), None);
+        let request = match render(&mut r, &doc) {
+            Err(RenderError::ShaderFallbackPending(p)) => p[0].clone(),
+            other => panic!("{kind} must hold its first frame: {other:?}"),
+        };
+        let pixels = FallbackPixels {
+            width: request.width,
+            height: request.height,
+            rgba16f: (0..request.width * request.height)
+                .flat_map(|_| [0x3400, 0x3800, 0x3a00, 0x3c00])
+                .collect(),
+        };
+        r.put_fallback_pixels(request.key, pixels);
+        render(&mut r, &doc).unwrap();
+        assert_eq!(
+            r.effects_mut().parity.verdict(&code),
+            Verdict::NativeVerified,
+            "{kind}"
+        );
+        render(&mut r, &doc).unwrap();
+    }
+}

@@ -428,6 +428,53 @@ impl crate::exec::Exec<'_> {
         if !span.builtin && self.effects.watchdog.hold(&span.subject) {
             return Err(Missed::Held);
         }
+        let probe_code = if self.shaders.fallback_runner && self.effects.parity.enabled() {
+            match &source.program {
+                ProgramRef::Code { source, .. } => Some(source.to_string()),
+                ProgramRef::Definition { id, .. } => {
+                    self.effects.parity_source(DefinitionKind::Layer, id)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let probe = probe_code.as_ref().and_then(|code| {
+            let verdict = self.effects.parity.verdict(code);
+            if verdict == crate::effects::parity::Verdict::NativeVerified {
+                return None;
+            }
+            let request = Arc::new(super::fallback::request(
+                source.layer.clone(),
+                code.clone(),
+                source.width,
+                source.height,
+                &source.calls,
+                &crate::effects::exec::parity_failure(),
+            ));
+            Some((verdict, request))
+        });
+        if let Some((verdict, request)) = &probe
+            && (*verdict == crate::effects::parity::Verdict::Runner
+                || self
+                    .shaders
+                    .fallback
+                    .get(&request.key)
+                    .is_none_or(|p| !p.fits(request)))
+        {
+            let mut fallback = source.clone();
+            fallback.program = ProgramRef::Fallback(request.clone());
+            let drawn = self.shader_source(encoder, &fallback);
+            if matches!(drawn, Err(Missed::Disabled)) {
+                self.effects.fallback.fatal.get_or_insert_with(|| {
+                    format!(
+                        "Layer {}: shader parity is waiting for its WebGL reference",
+                        source.layer
+                    )
+                });
+            }
+            return drawn;
+        }
         let out = self
             .pool
             .take_working(self.device, source.width, source.height, self.precision);
@@ -525,6 +572,44 @@ impl crate::exec::Exec<'_> {
         );
         if let (Some(timer), Some((_, e))) = (self.timer.as_ref(), queries) {
             timer.mark(device, encoder, &out.view, e);
+        }
+        if let Some((_, request)) = probe {
+            let done = std::mem::replace(
+                encoder,
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("pm frame after shader parity probe"),
+                }),
+            );
+            queue.submit([done.finish()]);
+            let angle = self
+                .shaders
+                .fallback
+                .get(&request.key)
+                .expect("checked above");
+            match crate::effects::exec::read_half(device, queue, &out) {
+                Ok(native) => {
+                    self.effects
+                        .parity
+                        .judge(&request.fragment, &native, &angle);
+                }
+                Err(error) => {
+                    self.effects
+                        .watchdog
+                        .report(pm_protocol::error::EngineError::new(
+                            pm_protocol::error::ErrorCode::Internal,
+                            pm_protocol::error::ErrorScope::Layer {
+                                layer: source.layer.as_str().into(),
+                            },
+                            format!("shader parity readback failed ({error})"),
+                        ));
+                }
+            }
+            self.pool.give(out);
+            let target = self
+                .shaders
+                .fallback_target(device, queue, &request)
+                .expect("checked above");
+            return Ok((target, false));
         }
         Ok((out, true))
     }

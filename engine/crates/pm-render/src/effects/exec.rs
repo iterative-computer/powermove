@@ -26,6 +26,13 @@ use crate::exec::Region;
 use crate::shader_layers::{FallbackPixels, FallbackUnit};
 use pm_protocol::error::{EngineError, ErrorCode, ErrorScope};
 
+pub(crate) fn parity_failure() -> pm_glsl::Failure {
+    pm_glsl::Failure::new(
+        pm_glsl::FailureStage::AngleParity,
+        "first-use native/ANGLE parity probe or persisted ANGLE pin",
+    )
+}
+
 /// `fullQuad(w, h)` as the column-major mat3 uniform.
 fn full_quad(w: u32, h: u32) -> [f32; 9] {
     [w as f32, 0.0, 0.0, 0.0, h as f32, 0.0, 0.0, 0.0, 1.0]
@@ -91,7 +98,7 @@ fn runner_param_calls(params: &[Param], calls: &mut Vec<(String, Call)>) {
 
 /// A target's pixels as binary16 RGBA in its row order (GL order for
 /// every pm-render target).
-fn read_half(
+pub(crate) fn read_half(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     target: &Target,
@@ -319,6 +326,28 @@ impl<'c> Gpu<'c> {
         let format = input.format();
         let (w, h) = (input.width(), input.height());
         let device = self.device;
+        let probe = self
+            .effects
+            .parity_source(DefinitionKind::Effect, &step.definition)
+            .map(|source| self.effects.parity.verdict(&source));
+        if probe == Some(super::parity::Verdict::Runner) {
+            let mut result = self.runner_effect(
+                layer,
+                step,
+                input,
+                backdrop,
+                time,
+                parity_failure(),
+                (uv, origin, resolution),
+                None,
+            )?;
+            if step.clamp {
+                let clamped = self.take(w, h);
+                self.simple_pass(SimpleOp::Clamp, &result, &clamped);
+                self.taken.push(std::mem::replace(&mut result, clamped));
+            }
+            return Some(result);
+        }
         if let Err(failure) =
             self.effects
                 .program(device, DefinitionKind::Effect, &step.definition, format)
@@ -337,6 +366,7 @@ impl<'c> Gpu<'c> {
                 time,
                 failure,
                 (uv, origin, resolution),
+                None,
             )?;
             if step.clamp {
                 let clamped = self.take(w, h);
@@ -409,6 +439,28 @@ impl<'c> Gpu<'c> {
         }
         let mut result = outputs.pop().expect("at least one pass");
         self.taken.extend(outputs);
+        if probe == Some(super::parity::Verdict::Unknown) {
+            let answer = self.runner_effect(
+                layer,
+                step,
+                input,
+                backdrop,
+                time,
+                parity_failure(),
+                (uv, origin, resolution),
+                Some(&result),
+            );
+            self.taken.push(result);
+            if answer.is_none() && !self.effects.fallback.blocked {
+                self.effects.fallback.fatal.get_or_insert_with(|| {
+                    format!(
+                        "{}: first-use shader parity is waiting for its WebGL reference",
+                        step.definition
+                    )
+                });
+            }
+            result = answer?;
+        }
         if step.clamp {
             let clamped = self.take(w, h);
             self.simple_pass(SimpleOp::Clamp, &result, &clamped);
@@ -430,6 +482,21 @@ impl<'c> Gpu<'c> {
         let format = before.format();
         let (w, h) = (before.width(), before.height());
         let device = self.device;
+        let probe = self
+            .effects
+            .parity_source(DefinitionKind::Transition, &step.definition)
+            .map(|source| self.effects.parity.verdict(&source));
+        if probe == Some(super::parity::Verdict::Runner) {
+            return self.runner_transition(
+                layer,
+                step,
+                before,
+                with_layer,
+                time,
+                parity_failure(),
+                None,
+            );
+        }
         if let Err(failure) =
             self.effects
                 .program(device, DefinitionKind::Transition, &step.definition, format)
@@ -438,7 +505,7 @@ impl<'c> Gpu<'c> {
                 self.fallback(layer, &step.definition);
                 return None;
             }
-            return self.runner_transition(layer, step, before, with_layer, time, failure);
+            return self.runner_transition(layer, step, before, with_layer, time, failure, None);
         }
         let builtin = self.builtin(DefinitionKind::Transition, &step.definition);
         if !builtin && self.held(DefinitionKind::Transition, &step.definition) {
@@ -490,6 +557,27 @@ impl<'c> Gpu<'c> {
         if let (Some(timer), Some((_, e))) = (self.timer.as_deref(), span) {
             timer.mark(device, self.encoder, &out.view, e);
         }
+        if probe == Some(super::parity::Verdict::Unknown) {
+            let answer = self.runner_transition(
+                layer,
+                step,
+                before,
+                with_layer,
+                time,
+                parity_failure(),
+                Some(&out),
+            );
+            self.taken.push(out);
+            if answer.is_none() && !self.effects.fallback.blocked {
+                self.effects.fallback.fatal.get_or_insert_with(|| {
+                    format!(
+                        "{}: first-use shader parity is waiting for its WebGL reference",
+                        step.definition
+                    )
+                });
+            }
+            return answer;
+        }
         Some(out)
     }
 
@@ -506,6 +594,7 @@ impl<'c> Gpu<'c> {
         time: f64,
         failure: pm_glsl::Failure,
         (uv, origin, resolution): ([f64; 4], [f64; 2], [f64; 2]),
+        native: Option<&Target>,
     ) -> Option<Target> {
         let (w, h) = (input.width(), input.height());
         let passes: Vec<Vec<(String, Call)>> = (0..step.passes.max(1))
@@ -561,11 +650,12 @@ impl<'c> Gpu<'c> {
             Some(&step.instance),
             self.builtin(DefinitionKind::Effect, &step.definition),
         );
-        self.runner_step(span, passes, units, &textures, failure)
+        self.runner_step(span, passes, units, &textures, failure, native)
     }
 
     /// A transition only the fallback runner draws: `u_from` and `u_to`
     /// the stack without and with the layer.
+    #[allow(clippy::too_many_arguments)]
     fn runner_transition(
         &mut self,
         layer: &str,
@@ -574,6 +664,7 @@ impl<'c> Gpu<'c> {
         with_layer: &Target,
         time: f64,
         failure: pm_glsl::Failure,
+        native: Option<&Target>,
     ) -> Option<Target> {
         let (w, h) = (before.width(), before.height());
         let (from, to) = if step.edge_in {
@@ -614,7 +705,7 @@ impl<'c> Gpu<'c> {
             None,
             self.builtin(DefinitionKind::Transition, &step.definition),
         );
-        self.runner_step(span, vec![calls], units, &[from, to], failure)
+        self.runner_step(span, vec![calls], units, &[from, to], failure, native)
     }
 
     /// The runner's pixels for a step, written into a working target, or
@@ -629,6 +720,7 @@ impl<'c> Gpu<'c> {
         units: Vec<FallbackUnit>,
         textures: &[&Target],
         failure: pm_glsl::Failure,
+        native: Option<&Target>,
     ) -> Option<Target> {
         let Subject::Definition { kind, id } = &span.subject else {
             return None;
@@ -723,6 +815,23 @@ impl<'c> Gpu<'c> {
             && result.width == w
             && result.height == h
         {
+            if let Some(native) = native {
+                match read_half(device, queue, native) {
+                    Ok(pixels) => {
+                        self.effects
+                            .parity
+                            .judge(&request.fragment, &pixels, &result);
+                    }
+                    Err(error) => {
+                        // Do not verify on an unreadable comparison; ANGLE still presents.
+                        self.effects.watchdog.report(EngineError::new(
+                            ErrorCode::Internal,
+                            span_scope(&span),
+                            format!("{id}: shader parity readback failed ({error})"),
+                        ));
+                    }
+                }
+            }
             let out = self.take(w, h);
             write_half(queue, &out, &result);
             return Some(out);
