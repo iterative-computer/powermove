@@ -360,8 +360,11 @@ A Cargo workspace at `engine/`.
 | `pm-protocol` | Messages, MessagePack codec, TypeScript types via `ts-rs`, contract types | native, wasm |
 | `pm-host` | Host services interface and the CLI implementation | native |
 | `pm-node` | napi-rs host for engine processes | native |
+| `pm-node-addon` | The engine processes' addon (`pm_node.node`): a cdylib over `pm-node`, so release LTO applies (docs/engine/release-build.md) | native |
 | `pm-bridge` | napi-rs addon in main: rendezvous, surface import, font registry before Phase 2 | native |
+| `pm-bridge-addon` | Main's addon (`pm_bridge.node`): a cdylib over `pm-bridge` | native |
 | `pm-wasm` | wasm-bindgen exports | wasm |
+| `pm-wasm-module` | The module (`pm_wasm.wasm`): a cdylib over `pm-wasm` | wasm |
 | `pm-cli` | Headless binary, parity runner, test sinks | native |
 
 ## 5. Time

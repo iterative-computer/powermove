@@ -212,17 +212,17 @@ const selected = only.length ? only.map(name => {
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-bridge-measure-'));
 const harnessAddon = path.join(work, 'pm_bridge_harness.node');
 if (!process.argv.includes('--skip-build') && !from) {
-  execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-bridge --lib --features harness'], { cwd: engineDir, stdio: 'inherit' });
+  execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-bridge-addon --features harness'], { cwd: engineDir, stdio: 'inherit' });
 }
-fs.copyFileSync(path.join(engineDir, 'target/release/libpm_bridge.dylib'), harnessAddon);
+fs.copyFileSync(path.join(engineDir, 'target/release/libpm_bridge_addon.dylib'), harnessAddon);
 // The C′ prototype is compiled into pm-node only with its `remote-layer`
 // feature (never in release builds): its runs load an addon built with it.
 const remoteAddon = path.join(work, 'pm_node_remote_layer.node');
 if (selected.some((run) => run.remoteLayer) && !from) {
   if (!process.argv.includes('--skip-build')) {
-    execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-node --features node,remote-layer'], { cwd: engineDir, stdio: 'inherit' });
+    execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-node-addon --features node,remote-layer'], { cwd: engineDir, stdio: 'inherit' });
   }
-  fs.copyFileSync(path.join(engineDir, 'target/release/libpm_node.dylib'), remoteAddon);
+  fs.copyFileSync(path.join(engineDir, 'target/release/libpm_node_addon.dylib'), remoteAddon);
 }
 const harness = createRequire(import.meta.url)(harnessAddon);
 const allowAsleep = process.argv.includes('--allow-display-asleep');

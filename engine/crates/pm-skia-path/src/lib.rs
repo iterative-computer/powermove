@@ -38,6 +38,7 @@ extern crate std;
 
 extern crate alloc;
 
+mod convex;
 mod f32x2_t;
 mod f32x4_t;
 mod floating_point;
@@ -45,6 +46,7 @@ mod path;
 mod path_builder;
 pub mod path_geometry;
 mod rect;
+mod rect_contour;
 mod scalar;
 mod size;
 mod stroker;
@@ -55,6 +57,7 @@ pub use floating_point::*;
 pub use path::*;
 pub use path_builder::*;
 pub use rect::*;
+pub use rect_contour::RectContour;
 pub use scalar::*;
 pub use size::*;
 pub use stroker::*;

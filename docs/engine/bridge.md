@@ -31,6 +31,7 @@ source. The open options are in
 | Part | Code |
 |---|---|
 | Rendezvous, audit token, Team ID, Mach wire format, main's receive loop | `engine/crates/pm-bridge` (`rendezvous`, `audit`, `wire`, `host`, `node`) |
+| Main's addon (`pm_bridge.node`), the cdylib over pm-bridge | `engine/crates/pm-bridge-addon` |
 | Viewer surfaces, display transform, bridge test source | `engine/crates/pm-gpu/src/bridge_out` |
 | Presenter in the interactive engine (pools, render thread, transport clock, descriptors) | `engine/crates/pm-node/src/present`, hook in `engine/crates/pm-engine/src/present.rs` |
 | Main: one bridge per engine launch, import once, send once per receiver | `apps/desktop/src/main/engine/bridge.ts`, wired in `main/engine/index.ts` |
@@ -240,6 +241,9 @@ frame as late until it decided on the page's clock):
   and the release script's `--with-engine` check; before, a packaged app
   could not load the bridge, so it presented nothing and the Team ID policy
   could never run in a signed build.
+- **Build.** The addon is the cdylib-only `pm-bridge-addon` crate over the
+  `pm-bridge` rlib, so the release profile's thin LTO applies; see
+  [release-build.md](release-build.md).
 
 ## The Phase 2 gate items (2026-10-16)
 
