@@ -179,7 +179,15 @@ fn main() {
         "cargo:rustc-link-search=native={}",
         native.join("lib").display()
     );
-    println!("cargo:rustc-link-lib=static=crabby_avif");
+    // CrabbyAvif is a Rust staticlib: its archive members are named like
+    // rustc's own codegen units (`*.rcgu.o`) and carry no LLVM bitcode (and
+    // a private copy of std). Bundled into this rlib, a thin-LTO link of any
+    // binary or cdylib above pm-media reads them as Rust objects and fails
+    // ("failed to get bitcode from object file for LTO (Can't find section
+    // __bitcode)"). `-bundle` keeps the archive out of the rlib: rustc hands
+    // it to the system linker at the final link instead, where its members
+    // are ordinary objects (docs/engine/release-build.md).
+    println!("cargo:rustc-link-lib=static:-bundle=crabby_avif");
     println!("cargo:rustc-link-lib=static=skcms");
     println!("cargo:rustc-link-lib=static=dav1d");
     println!("cargo:rustc-link-lib=static=OpenEXRCore-3_5");

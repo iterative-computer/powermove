@@ -7,14 +7,14 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The addon is a cdylib loaded by Electron main (built with `--features
-# node`). The engine processes link the rlib for the client side of the
-# rendezvous. The napi glue is behind the `node` feature so the crate builds
-# and tests without Node's symbols (they resolve when Node loads the addon);
-# the napi exports are tested from JavaScript (scripts/fonts-smoke.mjs, the
-# frame bridge's Electron integration test).
-[lib]
-crate-type = ["cdylib", "rlib"]
+# The engine processes link this rlib for the client side of the
+# rendezvous. The addon Electron main loads is the cdylib-only
+# pm-bridge-addon crate over it (built with `--features node`), so the
+# release profile's LTO applies to it (docs/engine/release-build.md). The
+# napi glue is behind the `node` feature so the crate builds and tests
+# without Node's symbols (they resolve when Node loads the addon); the napi
+# exports are tested from JavaScript (scripts/fonts-smoke.mjs, the frame
+# bridge's Electron integration test).
 
 [[bin]]
 # Plays the engine in the cross-process rendezvous tests.
@@ -43,6 +43,3 @@ node = ["dep:napi", "dep:napi-derive", "dep:serde", "dep:serde_json", "dep:pm-te
 # Measurement helpers for the S1 harness (synthetic input, EDR headroom).
 # Never in release builds.
 harness = ["node", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
-
-[build-dependencies]
-napi-build = "2.6"

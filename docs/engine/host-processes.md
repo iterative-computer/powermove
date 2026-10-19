@@ -226,9 +226,10 @@ would be created, so that lane builds on them.
 
 ## Packaging and signing
 
-- `bun run build:engine` builds `pm-node` with the pinned toolchain into
+- `bun run build:engine` builds `pm-node-addon` (the cdylib over `pm-node`)
+  with the pinned toolchain and the release profile's thin LTO into
   `apps/desktop/native/pm_node.node` (ignored by Git) and checks its
-  protocol build.
+  protocol build ([release-build.md](release-build.md)).
 - `electron-builder.yml` ships `native/pm_node.node` unpacked from the asar
   (`process.dlopen` cannot map out of an asar).
 - `scripts/release-mac.mjs --with-engine` builds the addon and requires it
