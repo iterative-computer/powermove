@@ -735,8 +735,9 @@ PM_BENCH_ROUTES=3000 target/release/examples/compose_bench doc.json <composition
 # A drag of one layer with and without the draw reuse and the frame prefix:
 PM_BENCH_EDIT=drag PM_BENCH_LAYER=150 target/release/examples/compose_bench doc.json <composition> 300
 PM_BENCH_EDIT=drag PM_BENCH_LAYER=150 PM_BENCH_REUSE=0 target/release/examples/compose_bench doc.json <composition> 300
-# (examples and test builds: CARGO_PROFILE_RELEASE_LTO=off where kache's objects
-# carry no bitcode, as pm-audio.md notes; the addons build with thin LTO.)
+# (measured with CARGO_PROFILE_RELEASE_LTO=off for examples and tests: their
+# thin-LTO links failed on pm-media's bundled CrabbyAvif archive, not on kache,
+# and the addons were not LTO'd at all; both fixed since, see release-build.md.)
 # The reuse's equivalence tests, longer:
 PM_REUSE_FUZZ=30 PM_REUSE_FRAMES=1500 cargo test --release -p pm-render --test draw_reuse
 

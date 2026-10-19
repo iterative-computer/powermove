@@ -1,0 +1,37 @@
+[package]
+name = "pm-bridge-addon"
+description = "Electron main's Node-API addon (pm_bridge.node): a cdylib over pm-bridge (sections 12 and 18)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The addon Electron main loads (the frame bridge and the font registry),
+# installed as native/pm_bridge.node by
+# apps/desktop/scripts/build-engine-addon.mjs. It is its own crate because
+# Cargo never passes `-C lto` to a crate whose types are ["cdylib", "rlib"]:
+# this cdylib-only crate gets the release profile's thin LTO, and pm-bridge
+# stays a plain rlib, which the engine processes link for the client side of
+# the rendezvous (docs/engine/release-build.md).
+[lib]
+crate-type = ["cdylib"]
+# The cdylib links Node's symbols only when Node loads it.
+test = false
+doctest = false
+
+[dependencies]
+pm-bridge = { path = "../pm-bridge" }
+
+[features]
+# pm-bridge's napi glue. Off by default so workspace-wide `cargo test` and
+# `clippy` never unify it into pm-node or pm-bridge's test binaries. Without
+# it this dylib has no Node-API exports; the build script warns. Never build
+# this crate in the same cargo invocation as pm-node-addon: feature
+# unification would put the bridge's exports into pm_node.node too.
+node = ["pm-bridge/node"]
+# Measurement helpers for the S1 harness. Never in release builds.
+harness = ["node", "pm-bridge/harness"]
+
+[build-dependencies]
+napi-build = "2.6"

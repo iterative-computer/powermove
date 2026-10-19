@@ -2079,7 +2079,6 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "napi",
- "napi-build",
  "napi-derive",
  "objc2",
  "objc2-app-kit",
@@ -2090,6 +2089,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pm-bridge-addon"
+version = "0.1.0"
+dependencies = [
+ "napi-build",
+ "pm-bridge",
 ]
 
 [[package]]
@@ -2309,7 +2316,6 @@ dependencies = [
  "image",
  "libc",
  "napi",
- "napi-build",
  "napi-derive",
  "pm-audio",
  "pm-blender",
@@ -2327,6 +2333,15 @@ dependencies = [
  "serde",
  "serde_json",
  "wgpu",
+]
+
+[[package]]
+name = "pm-node-addon"
+version = "0.1.0"
+dependencies = [
+ "napi-build",
+ "pm-media",
+ "pm-node",
 ]
 
 [[package]]
@@ -2469,6 +2484,13 @@ dependencies = [
  "pm-time",
  "ryu-js",
  "serde_json",
+]
+
+[[package]]
+name = "pm-wasm-module"
+version = "0.1.0"
+dependencies = [
+ "pm-wasm",
 ]
 
 [[package]]
