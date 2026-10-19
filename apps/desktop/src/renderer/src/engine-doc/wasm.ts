@@ -42,6 +42,8 @@ export interface PmWasmExports {
   pm_fonts_clear(): void;
   pm_fonts_outlines(outlines: number): void;
   pm_model_set?(len: number): number;
+  pm_model_import?(len: number): number;
+  pm_prepare_model_import?(len: number): number;
   pm_model_forget?(len: number): void;
   pm_models_clear?(): void;
   pm_heap_live(): number;
@@ -188,6 +190,34 @@ export class PmWasm {
 
   revision(): number { return this.call(() => this.x.pm_revision()); }
   hash(): string { return this.call(() => this.readOut(this.x.pm_hash())); }
+
+  /** Parse an imported model using the engine's glTF importer. */
+  importModel(bytes: Uint8Array): any {
+    return this.call(() => {
+      if (!this.x.pm_model_import) throw new Error('The engine model importer is unavailable');
+      const status = this.x.pm_model_import(this.writeBytes(bytes));
+      if (status !== 0) throw new Error(this.readOut());
+      return this.readJson();
+    });
+  }
+
+  /** Pack a selected model bundle using the engine's OBJ/MTL importer. */
+  prepareModelImport(files: { name: string; mime: string; bytes: Uint8Array }[]): { unchanged: number } | { bytes: Uint8Array } {
+    return this.call(() => {
+      if (!this.x.pm_prepare_model_import) throw new Error('The engine model importer is unavailable');
+      const header = encoder.encode(JSON.stringify(files.map(f => ({ name: f.name, mime: f.mime, length: f.bytes.length }))));
+      const length = 4 + header.length + files.reduce((n, f) => n + f.bytes.length, 0);
+      const input = new Uint8Array(length);
+      new DataView(input.buffer).setUint32(0, header.length, true);
+      input.set(header, 4);
+      let offset = 4 + header.length;
+      for (const file of files) { input.set(file.bytes, offset); offset += file.bytes.length; }
+      const status = this.x.pm_prepare_model_import(this.writeBytes(input));
+      if (status === 2) return { unchanged: Number(this.readOut()) };
+      if (status !== 0) throw new Error(this.readOut());
+      return { bytes: this.bytes(this.x.pm_out_ptr(), this.x.pm_out_len()).slice() };
+    });
+  }
   toJson(): string { return this.call(() => this.readOut(this.x.pm_to_json())); }
 
   // ── the fast path ─────────────────────────────────────────────────────

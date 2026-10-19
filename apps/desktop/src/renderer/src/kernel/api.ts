@@ -756,7 +756,13 @@ export interface ImportFilesOptions {
   /** For a dropped folder: keep it as a media folder of individual files rather than an image sequence. */
   asFolder?: boolean;
 }
-export interface RuntimeAsset extends AssetRecord { blob?: Blob; sourceText?: string; [key: string]: unknown }
+export interface RuntimeAsset extends AssetRecord {
+  blob?: Blob;
+  sourceText?: string;
+  /** @deprecated Extension compatibility view. Prefer scene3d APIs for geometry. */
+  object3d?: import('three').Object3D;
+  [key: string]: unknown;
+}
 export interface WaveformOptions { [key: string]: unknown }
 export interface FontCatalog {
   bundled: string[];

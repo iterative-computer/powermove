@@ -23,7 +23,7 @@ import { createScene, parseScene, SCENE3D_DEFINITION } from '../core/scene3d/sch
 import { editScene } from '../core/scene3d/operations';
 import { setViewportMode, orbitViewStep, enterLocalView, exitLocalView, toggleViewProjection } from '../core/scene3d/viewport';
 import { loadGltf } from '../core/scene3d/import-model';
-import { compositionRuntime } from '../core/scene3d/service';
+import { compositionRuntime, sceneForLayer } from '../core/scene3d/service';
 import { runtimeBoxes } from '../core/scene3d/navigation';
 import { renderCamera, runtimeCameraFacts } from '../core/scene3d/render-camera';
 import { targetScene } from '../core/scene3d/engine-targets';
@@ -310,6 +310,70 @@ const mismatches = (doc: EngineDoc) => doc.dual!.stats.samples;
 const fellBack = (doc: EngineDoc) => Object.entries(doc.api!.stats.fallbacks).filter(([k]) => /^(gl\.pick|gl\.bounds|groups\.bounds|objectBoxes3d):/.test(k));
 
 describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
+  it('keeps runtime insertion history when an equal-distance source is replaced', async () => {
+    const { PM, doc } = await editor('on', true);
+    editScene(PM, { operation: 'add_object', object: { id: 'tie_a', source: { primitive: 'box' } } });
+    editScene(PM, { operation: 'add_object', object: { id: 'tie_b', source: { primitive: 'box' } } });
+    PM.touch();
+    const center = [PM.proj.w / 2, PM.proj.h / 2] as const;
+    const reference = () => compositionRuntime(PM, 0).pick(0, 0);
+    const initial = reference();
+    expect(initial).toMatch(/^tie_/);
+    expect(doc.api!.pick(...center, 0)?.id).toBe(initial);
+
+    const first = PM.L(initial);
+    first.d.data.object.source = { primitive: 'box', parameters: { width: 1 } };
+    PM.touch();
+    const after = reference();
+    expect(after).not.toBe(initial);
+    expect(doc.api!.pick(...center, 0)?.id).toBe(after);
+    expect(fellBack(doc)).toEqual([]);
+  });
+
+  it('throws the exact ZodError for a corrupted legacy scene reached by a bounds query', async () => {
+    const { PM, doc } = await editor('on', true);
+    const raw: any = { ...createScene(), objects: [{ id: 'bad', source: { primitive: 'unknown' } }] };
+    const layer = PM.mkLayer('extension', { name: 'Corrupt scene' });
+    layer.d = { definition: SCENE3D_DEFINITION, data: { scene: raw }, params: {} };
+    PM.addLayer(layer, 0);
+    PM.touch();
+    let expected: any;
+    try { parseScene(raw); } catch (error) { expected = error; }
+    expect(expected?.name).toBe('ZodError');
+    let actual: any;
+    try { doc.api!.bounds(layer, 0); } catch (error) { actual = error; }
+    expect(actual?.constructor).toBe(expected.constructor);
+    expect(actual?.message).toBe(expected.message);
+    expect(actual?.issues).toEqual(expected.issues);
+    let atFrame: any;
+    try { doc.api!.syncScene3dFrame(0); } catch (error) { atFrame = error; }
+    expect(atFrame?.constructor).toBe(expected.constructor);
+    expect(atFrame?.message).toBe(expected.message);
+    expect(atFrame?.issues).toEqual(expected.issues);
+    let picked: any;
+    try { doc.api!.pick(PM.proj.w / 2, PM.proj.h / 2, 0); } catch (error) { picked = error; }
+    expect(picked?.constructor).toBe(expected.constructor);
+    expect(picked?.message).toBe(expected.message);
+    expect(picked?.issues).toEqual(expected.issues);
+    expect(fellBack(doc)).toEqual([]);
+  });
+
+  it('preserves the ZodError issues for a corrupt generated model scene', async () => {
+    const { PM, doc } = await editor('on', true);
+    await addModels(PM);
+    addExtensionScenes(PM, true);
+    const layer = PM.proj.layers.find((l: any) => l.name === 'Invalid background');
+    let expected: any;
+    try { sceneForLayer(PM, layer, 0); } catch (error) { expected = error; }
+    expect(expected?.name).toBe('ZodError');
+    let actual: any;
+    try { doc.api!.bounds(layer, 0); } catch (error) { actual = error; }
+    expect(actual?.constructor).toBe(expected.constructor);
+    expect(actual?.message).toBe(expected.message);
+    expect(actual?.issues).toEqual(expected.issues);
+    expect(fellBack(doc)).toEqual([]);
+  });
+
   it('answer like the three.js runtime on random compositions, in the camera and editor views', async () => {
     let compared = 0;
     for (const seed of [1, 2, 3, 4, 5]) {

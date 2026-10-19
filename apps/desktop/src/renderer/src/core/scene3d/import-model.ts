@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 /** The bytes each loaded model was parsed from, for the engine's geometry (picks and bounds). */
 const modelSources=new WeakMap<THREE.Object3D,ArrayBuffer>();
 export const modelSourceBytes=(root:THREE.Object3D):ArrayBuffer|null=>modelSources.get(root)??null;
+export const registerModelSource=(root:THREE.Object3D,bytes:ArrayBuffer):void=>{modelSources.set(root,bytes);};
 
 /** Self-contained glTF only: imports must never fetch untrusted remote dependencies. */
 export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animations:THREE.AnimationClip[];vertices:number;triangles:number}> {

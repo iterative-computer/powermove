@@ -21,7 +21,10 @@ import type { PathPart } from '../../../shared/patch';
 import { lookup, type DocumentBarrier } from './barrier';
 import type { PmWasm } from './wasm';
 import type { DualAnswers } from './dual';
-import { geometryRequest, refreshModels, resolveModels } from '../core/scene3d/engine-geometry';
+import { geometryRequest, meshFields, refreshModels, resolveModels } from '../core/scene3d/engine-geometry';
+import { sceneForLayer } from '../core/scene3d/service';
+import { parseScene, SCENE3D_DEFINITION } from '../core/scene3d/schema';
+import { layer3DRole } from '../core/scene3d/layers';
 import { canonicalPath } from '../legacy/core/compositions';
 import type { FontLoader } from './fonts';
 
@@ -290,6 +293,20 @@ export class NativeApi {
     return wasm.dead ? null : wasm;
   }
 
+  /** Import through the same engine module that answers 3D geometry. */
+  importModel(bytes: Uint8Array): any {
+    const wasm = this.ready();
+    if (!wasm) throw new Error('The engine model importer is unavailable');
+    return wasm.importModel(bytes);
+  }
+
+  /** Package model import inputs through the engine's import pipeline. */
+  prepareModelImport(files: Array<{ name: string; mime: string; bytes: Uint8Array }>): { unchanged: number } | { bytes: Uint8Array } {
+    const wasm = this.ready();
+    if (!wasm) throw new Error('The engine model import preparation is unavailable');
+    return wasm.prepareModelImport(files);
+  }
+
   private count(op: string) { this.stats.calls[op] = (this.stats.calls[op] ?? 0) + 1; }
   private fell(op: string, why: string) { const k = `${op}:${why}`; this.stats.fallbacks[k] = (this.stats.fallbacks[k] ?? 0) + 1; }
 
@@ -428,8 +445,30 @@ export class NativeApi {
   private query<T>(op: string, request: Record<string, unknown>, map?: (v: any) => T): Native<T> {
     let wasm = this.ready();
     if (!wasm) return { fallback: 'unavailable' };
+    // The extension scene is parsed by SceneRuntime only when its layer is
+    // reached. Supply the exact parser error to the native query, which
+    // decides whether that layer is reached by the pick or bounds request.
+    const sceneErrors = new Map<string, Error>();
+    if (op === 'pick' || op === 'bounds' || op === 'syncScene3d') {
+      const layers: any[] = this.comps()?.cur?.layers ?? [];
+      const candidates = op === 'bounds' || op === 'syncScene3d'
+        ? [typeof request.layer === 'number' ? layers[request.layer] : request.layer]
+        : layers;
+      for (const layer of candidates) {
+        if (!layer || layer.type !== 'extension' || typeof layer.id !== 'string') continue;
+        const raw = layer.d?.definition === SCENE3D_DEFINITION ? layer.d?.data?.scene : undefined;
+        try {
+          const scene = sceneForLayer(this.PM, layer, Number(request.t));
+          if (scene && raw && typeof raw === 'object') {
+            parseScene(raw);
+          }
+        } catch (error) {
+          sceneErrors.set(layer.id, error instanceof Error ? error : new Error(String(error)));
+        }
+      }
+    }
     const ask = (instance: PmWasm): any => {
-      const payload: Record<string, unknown> = { op, ...request };
+      const payload: Record<string, unknown> = { op, ...request, invalidSceneIds: [...sceneErrors.keys()] };
       if (typeof request.comp === 'string' && request.comp.startsWith('@json:')) {
         payload.compJson = JSON.parse(request.comp.slice(6));
         payload.comp = '@detached';
@@ -461,6 +500,10 @@ export class NativeApi {
     if (reply?.fonts && this.fonts?.disabled) this.onFailure?.('font-service-unavailable', 'The native font service stopped answering, so text layout cannot run in the new engine.');
     if ('ok' in reply) return { value: map ? map(reply.ok) : reply.ok };
     if (reply.throw) {
+      if (reply.throw.kind === 'SceneValidation') {
+        const exact = sceneErrors.get(reply.throw.message);
+        if (exact) return { threw: exact };
+      }
       const error = new (reply.throw.kind === 'TypeError' ? TypeError : reply.throw.kind === 'RangeError' ? RangeError : Error)(reply.throw.message);
       return { threw: error };
     }
@@ -990,6 +1033,43 @@ export class NativeApi {
   }
 
   // ── render ────────────────────────────────────────────────────────────
+
+  /** Advance extension scene runtime history at a viewer frame boundary.
+   * Multiple edits before one frame collapse to the source that frame sees;
+   * source recreation between presented frames retains its insertion order. */
+  syncScene3dFrame(T: number): void {
+    const c = this.comps();
+    if (!c) return;
+    const layers: any[] = Array.isArray(c.cur.layers) ? c.cur.layers : [];
+    const fields = meshFields(this.PM);
+    // The open composition can be nested below the registry helper's
+    // top-level scan. Include its definitions exactly as sceneForLayer does.
+    if (fields) for (const layer of layers) {
+      const definition = layer?.type === 'extension' ? layer.d?.definition : null;
+      if (typeof definition !== 'string' || Object.prototype.hasOwnProperty.call(fields, definition)) continue;
+      let renderer: any;
+      try { renderer = this.PM.layerDefinition(definition)?.renderer; } catch { renderer = null; }
+      if (renderer?.kind === 'mesh') fields[definition] = String(renderer.assetField);
+    }
+    const accepted = (reply: Native<unknown>): void => {
+      if ('threw' in reply) throw reply.threw;
+      if ('fallback' in reply) {
+        const error = new Error(`The native viewer could not synchronize the 3D scene (${reply.fallback})`);
+        error.name = 'EngineSceneSyncUnavailable';
+        throw error;
+      }
+    };
+    if (layers.some(layer3DRole)) accepted(this.query('camera3d', { comp: c.comp, open: c.open, t: T, meshFields: fields }));
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i];
+      if (layer?.type !== 'extension') continue;
+      const definition = layer.d?.definition;
+      if (definition !== SCENE3D_DEFINITION && !(typeof definition === 'string' && fields && Object.prototype.hasOwnProperty.call(fields, definition))) continue;
+      if (typeof this.PM.active === 'function' && !this.PM.active(layer, T)) continue;
+      const reply = this.query('syncScene3d', { comp: c.comp, open: c.open, layer: i, t: T, meshFields: fields });
+      accepted(reply);
+    }
+  }
 
   bounds(L: any, T: any): any {
     return this.answer('gl.bounds', () => this.layerQuery('bounds', L, { t: T, ...geometryRequest(this.PM) }), () => this.legacy.bounds(L, T), () => ({ layer: L?.id, t: T }),

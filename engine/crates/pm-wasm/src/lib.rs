@@ -25,6 +25,7 @@ pub mod edit;
 pub mod engine;
 pub mod expr;
 pub mod geometry;
+pub mod imported_model;
 mod queries;
 pub mod reply;
 

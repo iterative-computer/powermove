@@ -194,8 +194,14 @@ impl Exporter<'_> {
         // flipY: drawn bottom-up into the export canvas.
         let flipped = image::imageops::flip_vertical(&drawn);
         let view = self.w.view(&png(&flipped), None);
-        self.images
-            .push(json!({ "mimeType": "image/png", "bufferView": view }));
+        let mut image = json!({ "mimeType": "image/png", "bufferView": view });
+        if let TexSource::File(file) = source {
+            // The compatibility exporter must use the selected HTML image,
+            // not this intermediate PNG. JPEG/WebP color conversion through
+            // a second ImageBitmap decode changes Chromium's final PNG bytes.
+            image["extras"] = json!({ "__pmSourceFile": file });
+        }
+        self.images.push(image);
         self.image_cache
             .insert(source.clone(), self.images.len() - 1);
         self.images.len() - 1
@@ -262,6 +268,24 @@ impl Exporter<'_> {
             if let Some(t) = &m.normal_map {
                 let t = self.texture(t);
                 def.insert("normalTexture".into(), t);
+            }
+            // The intermediate GLB is imported back into the compatibility
+            // Object3D before final Chromium export. Mark only oversized bump
+            // sources so Chromium can perform the exact canvas resize used by
+            // today's prepareImport; image::Triangle has different pixels.
+            if let Some(Tex {
+                source: TexSource::Bump(file, strength, _),
+                ..
+            }) = &m.normal_map
+                && let Some(image) = self.decoded.get(file)
+                && (image.width() > MAX_BUMP || image.height() > MAX_BUMP)
+            {
+                def.insert(
+                    "extras".into(),
+                    json!({"__pmBumpSource":{
+                        "file":file,"strength":f64::from_bits(*strength)
+                    }}),
+                );
             }
         }
         if m.transparent {
@@ -663,6 +687,8 @@ mod tests {
             panic!("packed")
         };
         assert_eq!(name, "card.glb");
+        let json = gltf::json_of(&bytes).unwrap();
+        assert_eq!(json["images"][0]["extras"]["__pmSourceFile"], 2);
         let (model, scene, facts) = gltf::import(&bytes).unwrap();
         assert_eq!((facts.vertices, facts.triangles), (6, 2));
         assert_eq!(scene.objects[0].name, "AuxScene");
@@ -714,5 +740,24 @@ mod tests {
         let len = (dx * dx + 1.0).sqrt();
         let want = |c: f64| js::u8_clamp((c * (1.0 / len) * 0.5 + 0.5) * 255.0);
         assert_eq!(img.get_pixel(1, 0).0, [want(dx), 128, want(1.0), 255]);
+    }
+
+    #[test]
+    fn oversized_bump_carries_private_chromium_resize_source() {
+        let bump = png_of(2050, 2, |x, _| [(x % 256) as u8, 0, 0, 255]);
+        let out = prepare_import(&[
+            file("card.obj", QUAD.as_bytes()),
+            file("m.mtl", b"newmtl Paper\nmap_bump -bm 0.6 height.png\n"),
+            file("height.png", &bump),
+        ])
+        .unwrap();
+        let Prepared::Glb { bytes, .. } = out else {
+            panic!("packed")
+        };
+        let json = gltf::json_of(&bytes).unwrap();
+        assert_eq!(
+            json["materials"][0]["extras"]["__pmBumpSource"],
+            json!({"file":2,"strength":0.6})
+        );
     }
 }
