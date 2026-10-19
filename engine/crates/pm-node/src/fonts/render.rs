@@ -1,6 +1,11 @@
 //! Fonts for the engine's own text rendering (plan section 12; Phase 3c
 //! "full render fonts on the render and job threads"; RFC 16).
 //!
+//! The application host installs [`RenderFonts::with_hub`] over the existing
+//! scoped [`super::hub::FontHub`] / `ServedFonts` provider, retaining per-window
+//! cache seeds and replay readiness for views and snapshots. The independent
+//! broker API below remains available to callers without a window seed scope.
+//!
 //! The registry (`pm_text::registry::CoreTextRegistry`) uses AppKit's font
 //! manager, so it lives on the utility process's JavaScript thread (the
 //! process main thread, [`super::FontService`]). The threads that render
@@ -559,6 +564,30 @@ impl RenderFonts {
 mod tests {
     use super::*;
     use pm_text::answers::{Answer, FaceRecord};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scoped_font_failure_waits_only_once_per_frame_and_retries_next_frame() {
+        use pm_text::served::FontServer;
+        let hub = Arc::new(super::super::hub::FontHub::with_timeout(Duration::ZERO));
+        let health = FontHealth::default();
+        let server = ScopedServer {
+            hub: hub.clone(),
+            health: health.clone(),
+        };
+        assert!(server.serve(&[]).is_err());
+        assert!(health.failed());
+        assert_eq!(hub.stats().round_trips, 1);
+        assert!(server.serve(&[]).is_err());
+        assert_eq!(
+            hub.stats().round_trips,
+            1,
+            "later queries fail without waiting"
+        );
+        assert!(health.take_failure().is_some());
+        assert!(server.serve(&[]).is_err());
+        assert_eq!(hub.stats().round_trips, 2, "a fresh frame may retry");
+    }
 
     /// A registry stand-in: one family, served from bytes it owns.
     struct Fake {

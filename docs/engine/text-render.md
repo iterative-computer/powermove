@@ -999,6 +999,14 @@ cases, and the Fontations COLR route. Keep the SDF edge residual in its
 coverage list too. Lower the ratchet after each measured improvement and
 retain the original references. These ports are not started in Round 7.
 
+The Round 7 integration merge also retains the window-scoped served-font
+provider when installing the bridge lane's `RenderFonts`. Both viewer frames
+and frame/layer snapshots select their originating port's seeds. The scoped
+provider reports a failed registry query through the bridge's font-health
+boundary, so later fallback queries in that frame fail immediately and a later
+frame can retry. The incoming unscoped broker API remains available for its
+independent callers; exports and jobs retain the served hub.
+
 ## Gaps
 
 FONTS-R governs the 23 nonzero Round 6 residual checks. They pass only at
