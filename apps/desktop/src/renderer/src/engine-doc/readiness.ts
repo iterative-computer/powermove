@@ -32,37 +32,76 @@ export async function waitForDocumentReady(PM: PMRegistry): Promise<void> {
 }
 
 /**
- * Editor commands that never read or write the document: they open app
- * surfaces (Settings, where "Use New Engine" is switched off, the palette,
+ * Built-in editor commands that never wait for the document module. Most open
+ * app surfaces (Settings, where "Use New Engine" is switched off, the palette,
  * the agent, Projects) or windows and tabs, or start opening another project
- * (whose own open path waits for the document module). These run at once from
- * a key or the native menu even while the module is loading or after it
- * failed. Every other command, including any extension command, is treated as
- * a document command and waits; that is the safe default.
+ * (whose own open path waits for the document module). Save writes the
+ * JavaScript project, which needs no module (its consistency check is skipped
+ * until the module is ready), so a failed load can still be saved by shortcut
+ * and menu as it can from the toolbar.
+ *
+ * The field-editing commands (`blurField` and the `context*` Edit commands)
+ * act on the focused text field or text selection when one owns the key:
+ * native paste, copy, undo and so on, which never touch the document. They
+ * run at once too, and gate only their document fallback (`pasteLayers`,
+ * `copyLayers`, `undo`, ...) with `runWhenDocumentReady`.
+ *
+ * These ids count as app commands only while the built-in definition is
+ * active. Every other command, including any extension command and an
+ * extension's override of one of these ids, is treated as a document command
+ * and waits; that is the safe default (commands carry no metadata saying
+ * whether they read the document).
  */
 export const APP_COMMANDS: ReadonlySet<string> = new Set([
   'settings', 'palette', 'agent', 'projects',
-  'open', 'newProject',
+  'open', 'newProject', 'save', 'saveAs',
   'closeTab', 'nextTab', 'previousTab', 'moveTabToNewWindow',
+  'blurField', 'contextUndo', 'contextRedo', 'contextCut', 'contextCopy', 'contextPaste', 'contextSelectAll',
 ]);
 
-/** Whether a command reads or writes the document (see `APP_COMMANDS`). */
-export function documentCommand(id: string): boolean {
-  return !APP_COMMANDS.has(id);
+/** The owner the legacy layer registers its built-in commands under (legacy/ui/shortcuts.ts). */
+const BUILT_IN_OWNER = 'legacy';
+
+/**
+ * Whether a command reads or writes the document (see `APP_COMMANDS`). With a
+ * registry, an app command id that an extension has overridden is a document
+ * command.
+ */
+export function documentCommand(id: string, PM?: PMRegistry): boolean {
+  if (!APP_COMMANDS.has(id)) return true;
+  const owner = (PM as { Kernel?: { commands?: { topEntry?(id: string): { ownerId: string } | undefined } } } | undefined)
+    ?.Kernel?.commands?.topEntry?.(id)?.ownerId;
+  return owner !== undefined && owner !== BUILT_IN_OWNER;
 }
 
 /**
- * Runs a command from a key or the native menu. An app command runs now. A
- * document command runs now when the document can answer; while the module
- * is loading (boot, Retry or revival) it runs once that settles, and if the
- * load fails it does not run and the named failure is shown instead.
- * Returns the command's result, or undefined when it was queued.
+ * Runs work that reads or writes the document. It runs now when the document
+ * can answer; while the module is loading (boot, Retry or revival) it runs
+ * once that settles, and if the load fails it does not run and the named
+ * failure is shown instead. Returns the work's result, or undefined when it
+ * was queued.
  */
-export function runCommandWhenReady(PM: PMRegistry, id: string, run: () => unknown): unknown {
-  if (!documentCommand(id) || !documentPending(PM)) return run();
+export function runWhenDocumentReady(PM: PMRegistry, label: string, run: () => unknown): unknown {
+  if (!documentPending(PM)) return run();
+  const failed = (error: unknown) => { console.error(`[engine-doc] command ${label} failed`, error); };
   void waitForDocumentReady(PM).then(
-    () => { try { run(); } catch (error) { console.error(`[engine-doc] command ${id} failed`, error); } },
+    () => {
+      let result: unknown;
+      try { result = run(); } catch (error) { failed(error); return; }
+      if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+        Promise.resolve(result).catch(failed);
+      }
+    },
     () => {}, // waitForDocumentReady showed the named failure.
   );
   return undefined;
+}
+
+/**
+ * Runs a command from a key or the native menu. An app command runs now; a
+ * document command goes through `runWhenDocumentReady`.
+ */
+export function runCommandWhenReady(PM: PMRegistry, id: string, run: () => unknown): unknown {
+  if (!documentCommand(id, PM)) return run();
+  return runWhenDocumentReady(PM, id, run);
 }

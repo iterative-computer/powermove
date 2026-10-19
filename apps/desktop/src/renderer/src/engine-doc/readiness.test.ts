@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { documentCommand, documentPending, runCommandWhenReady, waitForDocumentReady } from './readiness';
+import { documentCommand, documentPending, runCommandWhenReady, runWhenDocumentReady, waitForDocumentReady } from './readiness';
 
 describe('document readiness for async callers', () => {
   it('holds a request until the native mirror is ready', async () => {
@@ -45,12 +45,19 @@ describe('document readiness for async callers', () => {
   });
 
   it('classifies app commands, which always run, apart from document commands, which wait', async () => {
-    for (const id of ['settings', 'palette', 'agent', 'projects', 'open', 'newProject', 'closeTab', 'nextTab', 'previousTab', 'moveTabToNewWindow']) {
+    for (const id of ['settings', 'palette', 'agent', 'projects', 'open', 'newProject', 'save', 'saveAs', 'closeTab', 'nextTab', 'previousTab', 'moveTabToNewWindow',
+      'blurField', 'contextUndo', 'contextRedo', 'contextCut', 'contextCopy', 'contextPaste', 'contextSelectAll']) {
       expect(documentCommand(id)).toBe(false);
     }
-    for (const id of ['duplicate', 'save', 'export', 'undo', 'contextPaste', 'projectSettings', 'zoomIn', 'vendor.unknown']) {
+    for (const id of ['duplicate', 'export', 'undo', 'redo', 'pasteLayers', 'copyLayers', 'selectAll', 'projectSettings', 'zoomIn', 'vendor.unknown']) {
       expect(documentCommand(id)).toBe(true);
     }
+    // An app command id counts only while the built-in definition is active.
+    const owners: Record<string, string> = { settings: 'legacy', contextPaste: 'vendor.paste' };
+    const withKernel = { Kernel: { commands: { topEntry: (id: string) => owners[id] ? { ownerId: owners[id] } : undefined } } } as never;
+    expect(documentCommand('settings', withKernel)).toBe(false);
+    expect(documentCommand('contextPaste', withKernel)).toBe(true);
+    expect(documentCommand('duplicate', withKernel)).toBe(true);
     // Ready or disabled: every command runs in its own tick and returns its result.
     expect(runCommandWhenReady({ EngineDoc: { enabled: true, ready: true } } as never, 'duplicate', () => 7)).toBe(7);
     expect(runCommandWhenReady({} as never, 'duplicate', () => 8)).toBe(8);
@@ -64,6 +71,20 @@ describe('document readiness for async callers', () => {
     release(true);
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('runs gated document work in its own tick when ready and reports a deferred rejection', async () => {
+    expect(runWhenDocumentReady({ EngineDoc: { enabled: true, ready: true } } as never, 'pasteLayers', () => 3)).toBe(3);
+    let release!: (ready: boolean) => void;
+    const doc = { enabled: true, strict: true, ready: false, whenReady: new Promise<boolean>(resolve => { release = resolve; }) };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failure = new Error('paste failed');
+    expect(runWhenDocumentReady({ EngineDoc: doc } as never, 'contextPaste', () => Promise.reject(failure))).toBeUndefined();
+    doc.ready = true;
+    release(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(error).toHaveBeenCalledWith('[engine-doc] command contextPaste failed', failure);
+    error.mockRestore();
   });
 
   it('lets development modes without strict failures answer through their own fallback', async () => {

@@ -217,10 +217,16 @@ describe('legacy Electron shim install', () => {
     const menu = bridge.onMenuCommand.mock.calls[0][0];
     menu('settings');
     expect(PM.cmd).toHaveBeenCalledWith('settings');
+    // Save and the field-editing Edit items need no module (the built-in
+    // contextPaste gates only its document fallback).
+    menu('save');
+    menu('contextPaste');
+    expect(PM.cmd).toHaveBeenCalledWith('save');
+    expect(PM.cmd).toHaveBeenCalledWith('contextPaste');
     menu('duplicate');
     menu('paste');
     await flush();
-    expect(PM.cmd).toHaveBeenCalledTimes(1);
+    expect(PM.cmd).toHaveBeenCalledTimes(3);
     expect(showFailure).toHaveBeenCalledTimes(2);
   });
 
@@ -230,13 +236,13 @@ describe('legacy Electron shim install', () => {
     const loading = new Promise<boolean>(resolve => { finish = resolve; });
     PM.EngineDoc = { enabled: true, strict: true, ready: false, whenReady: Promise.resolve(false), settled: () => loading, showFailure: vi.fn() };
     PM.cmd = vi.fn();
-    bridge.onMenuCommand.mock.calls[0][0]('save');
+    bridge.onMenuCommand.mock.calls[0][0]('duplicate');
     await flush();
     expect(PM.cmd).not.toHaveBeenCalled();
     PM.EngineDoc.ready = true;
     finish(true);
     await flush();
-    expect(PM.cmd).toHaveBeenCalledWith('save');
+    expect(PM.cmd).toHaveBeenCalledWith('duplicate');
     expect(PM.EngineDoc.showFailure).not.toHaveBeenCalled();
   });
 
