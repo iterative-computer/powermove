@@ -78,7 +78,14 @@ them into the tool's error text, with "(retry the call)" when `retry` holds.
    patch writes a path one of the worker's unacknowledged batches also writes (the
    host's order, which the worker cannot see, decides the value), and after a batch
    the host refused, the worker reconciles behind its sends: it joins again, takes the
-   host's copy, puts its unsent edits on top, and sends them. `stats().hash` is the
+   host's copy, puts its unsent edits on top, and sends them. While a reconciliation
+   is pending no batch is cut, so every remote patch is rebased: edits the host has
+   not seen (the diff from `synced`, and refused paths kept for a retry) go back on
+   top of the patch, because the host applies them after it. A remote patch that
+   arrives while the reconciliation's join is in flight is applied to the host's copy
+   too when its seq is newer than the copy's. A refused batch whose value a remote
+   patch overwrote in flight gets its value back in the document (the host never
+   applied it), unless a later local edit wrote the same path. `stats().hash` is the
    instance document's canonical hash, which tests compare with the host's.
 3. **Concurrent calls.** Tool calls run concurrently inside a worker (the harness
    keeps one transaction per run and checks base revisions); lifecycle requests run
@@ -154,12 +161,14 @@ Shared with the editor (docs/engine/write-path.md has the details):
 |---|---|
 | `trap` | The question is asked again on a fresh instance, made synchronously from the kept module and resynced: the answer is native. A second trap is `pm-wasm-trap` (named) |
 | `detached-prop`, `detached-parent`, `detached-path` | Gone: the channel, parent layer, or path goes to pm-wasm as JSON and is evaluated ad hoc (`hasKeyAt`, `transformParentMatrix`, `parent3D`, `pathValues`, `groupMatrix`); dual answers equal the legacy ones |
-| a non-object where a channel or path belongs | `invalid-input`: the legacy code throws reading it before any evaluation, and that throw is the API's answer |
+| a non-object where a channel or path belongs | Native: the legacy TypeError and message (`p.kf`, `path.id`, `path.p`, `Object.entries`) thrown before the layer is read, as today |
 | `error:*` | Still counted; `pm-wasm-error` named failure with the new engine on |
 | `unavailable` | Workers never answer before the module is ready (open fails by name). In the editor, the boot window before `whenReady` remains (below) |
 | `fonts` | Synchronous registry answers and whole faces in workers and the editor; missing faces/services are named failures with Retry |
 | `ink` | Whole faces supply outlines in both hosts |
-| `host`, `3d`, `legacy`, `flush`, `exception`, missing context | Named strict failure; never a legacy answer |
+| `legacy` (pm-edit `LEGACY_ONLY`, the self-space camera reparent) | Gone: pm-edit answers it natively, reproducing the legacy stale-cache read (docs/engine/pm-edit.md) |
+| `context` in `editKernels.align` (layers outside the open composition, empty selection) and its kernel's `host`/`fonts`/`ink` | The caller's own code answers (the strip's `alignCommands`, extension code over `api.anim`/`api.render`, native or failing by name), counted in `stats.callers`; never the legacy evaluator |
+| `host`, `3d`, `flush`, `exception`, other missing context | Named strict failure; never a legacy answer |
 
 `gl.bounds` and `gl.pick` have no legacy reference headlessly (no compositor).
 The desktop contract records real Canvas measurements and replays them through
@@ -336,20 +345,76 @@ report's evidence paths.
 - Native 3D bounds/picking still require the threed lane's host geometry service.
   Calls reaching those queries (`get_project_state` with selected 3D content and
   geometry edits through `apply_commands`, including alignment/group placement)
-  now fail visibly instead of silently invoking three.js. The cache-dependent
-  cyclic camera/light reparent refusal (`apply_commands` / `set_layer` parent)
-  is also named; its exact stale-cache behavior remains to be ported.
+  now fail visibly instead of silently invoking three.js. (The cyclic camera/light
+  reparent named here in round 4 is ported in round 5.)
 - Host media import/replace, render pixel output, and staging/rebase are explicit
   corpus exclusions with reasons; their service-specific gates remain with the
   media, agents and extension lanes. No missing tool is silently excluded.
-- Detached `NativeEdits` alignment, leave-attributes and anchor-reference helpers
-  are named `context` failures when the layer is outside the open document. They
+- Detached `NativeEdits` leave-attributes and anchor-reference helpers
+  are named `context` failures when the layer is outside the open document
+  (alignment runs the caller's own code since round 5). They
   never execute a legacy fallback in strict mode. Normal document tool targets
   remain live ids; none of the 43 contract calls hits this failure.
 - The 750 ms history debounce still means SIGKILL inside that interval can lose
   undo entries; the document itself has reached the session before each answer.
 - Store containment limitations from the earlier rounds remain: no OS sandbox
   outside macOS, and no headless XHR/EventSource/Web Workers/Blob IPC parity.
+
+## Round 5 (review fixes) verification and remaining work
+
+Rerun on integration tip `e9a80939` (unchanged since round 4).
+
+- **Read-your-writes during a reconciliation** (blocking finding 1): fixed as in
+  invariant 2. The reviewer's reproduction (an edit during the reconciliation's own
+  send, then a same-path remote patch) is a pool test; it ends with the edit, as
+  outside a reconciliation.
+- **Seeded schedules** (finding 2): `sync-schedule.test.ts` replaces the two fixed
+  schedules. Each seed drives a real worker step by step and chooses, at every step,
+  among tool calls on colliding and disjoint values (composition name, duration, new
+  layers, layer names), remote patches on the same values by path, and releasing or
+  refusing the oldest held round trip; it also picks whether the host holds each
+  send or join before applying (snapshotting) or after (ack or copy in flight).
+  Read-your-writes is checked the moment each answer arrives (the host received a
+  worker state holding the call's value, or a later local value of the same slot);
+  at the end the hashes must match and every refused edit must have reached the
+  host unless a later call wrote the same slot. The default 64 seeds: 448 calls,
+  320 remote patches, 91 reconciliation joins, 37 refused sends, 9 refused joins,
+  23 calls and 19 remote patches during a held join, 22 calls and 16 remote patches
+  during a held reconciliation send; 0 failures. 300 more seeds from another base:
+  0 failures. The previous worker fails 6 of the first 60 seeds (one answered edit
+  never reached the host; refused edits lost to a remote patch).
+- **Composition addresses** (finding 3): a top-level precomposition is checked by
+  `proj.comps[cur.id] === cur` again, and a nested one comes from a path cache
+  verified by walking the path on each call. On the reviewer's 100-layer, 40-keyed
+  property shape: 7.96 ms per scope lookup before, 0.15 µs (precomposition) and
+  0.39 µs (nested) after (strict test, bound 50 µs).
+- **Cyclic camera/light reparent** (finding 4): ported; see docs/engine/pm-edit.md.
+  The 36 committed `selfSpace` vectors match, 216 more from a fresh seed match, and
+  without the stale read the 36 fail.
+- **Align** (finding 5): `editKernels.align` runs the caller's own code for layers
+  outside the open composition, empty selections, and the kernel's host/fonts/ink
+  refusals; engine faults stay named failures.
+- Also: non-object detached inputs throw the legacy TypeError natively; a root
+  without `compId` no longer runs a structural-diff repair on every query (its
+  layers are at the mirror's top level); explicit layer lists are asked by their
+  composition's address (0.014 ms/call) or by their structural members (264 ms ->
+  0.4 ms/call on 102 heavy layers); `hostFetch` sends the session cookie only to
+  the serve host's origin.
+
+Remaining (measured, not accepted as differences):
+
+- A detached current scope (`PM.curComp()` not in the document) is still asked as
+  `@json:` with the whole composition, and pm-wasm resets its evaluator cache for
+  every such query: 62 ms per `evP` for a detached 100-layer, 40-keyed-property
+  composition. Attached and nested compositions are unaffected. Making it cheap
+  needs pm-wasm to keep a detached composition between queries, keyed by a
+  change signal the barrier does not have for objects outside the document.
+- The editor's boot window: `EngineDoc.enabled` is true before pm-wasm compiles,
+  so a kernel query in that window is a named `unavailable` failure. Round 4 boots
+  showed none. Gating the kernel boot on `whenReady` would delay extension UI,
+  which decision F rules out; compiling synchronously is not done.
+- Native 3D bounds/picking (issue D1, threed lane) still fail by name with the
+  setting on.
 
 ## Out-of-ownership edits (all rounds)
 
@@ -374,7 +439,12 @@ The following edits outside them are intentional and local:
 - `pm-eval/src/bounds.rs`: detached input support from the first round;
   `pm-eval/src/comp.rs`: nested and ad-hoc composition addressing.
 - `pm-wasm/src/engine.rs` and `tests/queries.rs`: detached query inputs, nested
-  composition scopes and replacement-time native queries.
+  composition scopes and replacement-time native queries; round 5 removes the
+  `{legacy}` reply (`engine.rs`, `edit.rs`, `tests/edit.rs`).
+- `pm-edit/src/pose.rs`, `pm-edit/src/lib.rs`, `pm-edit/tests/edit_parity.rs`,
+  `pm-edit/tests/vectors/generate-edit-vectors.ts` (comments only), and
+  `docs/engine/pm-edit.md` (round 5): the self-space reparent port.
+- `engine/main.ts` is owned; `serve.integration.test.ts` gains the origin test.
 - `docs/engine/rfcs/15-document-host.md`: frozen version-1 interface description;
   `docs/engine/pm-eval.md`: composition-scope API notes.
 

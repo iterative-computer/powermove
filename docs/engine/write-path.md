@@ -182,8 +182,10 @@ on; docs/engine/document-host.md):
   (`prop`), `transformParentMatrix` and `parent3D` a parent layer's (`parent`),
   `pathValues` and `groupMatrix` a path's (`pathJson`; `groupMatrix` appends it after
   the layer's paths, so parent lookups and cycle closing match the legacy recursion).
-  A non-object where a channel or path belongs is `invalid-input`: the legacy code
-  throws reading it before any evaluation.
+  A non-object where a channel or path belongs throws the legacy TypeError natively
+  (`hasKeyAt`: reading `kf` or `find`; `pathValues`: `path.id` for the default prefix
+  or `path.p`; `groupMatrix`: `path.id`; a primitive: `Object.entries`), before the
+  layer is read, as today.
 - **Named failures** (`strict` only): a module that does not load
   (`pm-wasm-unavailable`, `retry()` loads it again), a pm-wasm error reply
   (`pm-wasm-error`), a trap twice (`pm-wasm-trap`), and a font provider given up
@@ -422,3 +424,19 @@ Composition addresses may identify a nested canonical member path. Replacement
 scopes detached from the current project are evaluated as native `compJson`
 inputs, with the open project's rate and members retained. See document-host.md
 for tests, remaining 3D/cyclic-pose failures and cross-lane edits.
+
+## Round 5: review fixes
+
+- pm-edit answers the cyclic camera/light reparent natively (the legacy aim's
+  stale-cache read, docs/engine/pm-edit.md), so the `legacy` reason and pm-wasm's
+  `{legacy}` reply are gone.
+- `editKernels.align` runs the caller's own code (the strip's `alignCommands`, or a
+  fork's) for layers outside the open composition, an empty selection, and the
+  kernel's `host`/`fonts`/`ink` refusals: that code is extension code over
+  `api.anim`/`api.render`, which answer natively or fail by name. It is counted in
+  `NativeEditStats.callers`, not `fallbacks`. Engine faults stay named failures.
+- Composition scopes are addressed in O(1) for `proj.comps` members and from a
+  verified path cache for nested ones; a root without `compId` is looked up at the
+  mirror's top level (no repair per query); explicit layer lists go by their
+  composition's address, or as their structural members only. Measurements are in
+  document-host.md, round 5.
