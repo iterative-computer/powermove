@@ -89,6 +89,14 @@ impl CoreTextReference {
         if let Some(f) = self.fonts.get(&key) {
             return Some(f.clone());
         }
+        // SkTypeface_Mac::MakeFromStream instances variable data through a
+        // CTFont descriptor at its default size, then the scaler makes an
+        // exact copy at the strike size. CGFontCreateCopyWithVariations is
+        // a different instancing path and changes variable outlines.
+        if let Some(font) = self.variable_font(id, run) {
+            self.fonts.insert(key, font.clone());
+            return Some(font);
+        }
         // Single fonts go through CGFont, so CoreText never looks the face
         // up by name (it substitutes Times for a hidden system font's
         // PostScript name, ".SFNS-Regular"); variations are applied by axis
@@ -140,6 +148,73 @@ impl CoreTextReference {
         }
         self.fonts.insert(key, font.clone());
         Some(font)
+    }
+
+    fn variable_font(&mut self, id: Source, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
+        use skrifa::{MetadataProvider, raw::TableProvider};
+        let file = skrifa::FontRef::from_index(run.data, run.index).ok()?;
+        let axes = file.fvar().ok()?.axes().ok()?;
+        // Hidden system fonts must retain the CGFont identity: descriptor
+        // matching can substitute Times for a hidden PostScript name.
+        let hidden = file
+            .localized_strings(skrifa::string::StringId::POSTSCRIPT_NAME)
+            .any(|name| name.chars().next() == Some('.'));
+        if hidden {
+            return None;
+        }
+        let desc = match self.descriptors.entry((id, run.index)) {
+            std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let data = CFData::from_bytes(run.data);
+                let arr = unsafe { CTFontManagerCreateFontDescriptorsFromData(&data) };
+                let arr: CFRetained<CFArray<CTFontDescriptor>> =
+                    unsafe { CFRetained::cast_unchecked(arr) };
+                e.insert(arr.get(run.index as usize)?).clone()
+            }
+        };
+        let mut font = unsafe { CTFont::with_font_descriptor(&desc, 0.0, std::ptr::null()) };
+        let keys: Vec<_> = axes
+            .iter()
+            .map(|a| CFNumber::new_i64(i64::from(u32::from_be_bytes(a.axis_tag().into_bytes()))))
+            .collect();
+        let values: Vec<_> = axes
+            .iter()
+            .map(|a| {
+                let tag = u32::from_be_bytes(a.axis_tag().into_bytes());
+                let value = run
+                    .coords
+                    .iter()
+                    .rev()
+                    .find(|(t, _)| *t == tag)
+                    .map_or(a.default_value().to_f32(), |(_, v)| *v)
+                    .clamp(a.min_value().to_f32(), a.max_value().to_f32());
+                CFNumber::new_f64(value as f64)
+            })
+            .collect();
+        let kr: Vec<_> = keys.iter().map(|k| &**k).collect();
+        let vr: Vec<_> = values.iter().map(|v| &**v).collect();
+        let variations = CFDictionary::from_slices(&kr, &vr);
+        let attrs: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(
+            &[unsafe { kCTFontVariationAttribute }],
+            &[variations.as_ref() as &CFType],
+        );
+        let var_desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
+        font = unsafe { font.copy_with_attributes(0.0, std::ptr::null(), Some(&var_desc)) };
+        let opsz = run
+            .coords
+            .iter()
+            .find(|(t, _)| *t == u32::from_be_bytes(*b"opsz"))
+            .map_or(unsafe { font.size() }, |(_, v)| *v as f64);
+        let opsz_key = CFString::from_str("NSCTFontOpticalSizeAttribute");
+        let tracking_key = CFString::from_str("NSCTFontUnscaledTrackingAttribute");
+        let opsz_value = CFNumber::new_f64(opsz);
+        let zero = CFNumber::new_i32(0);
+        let attrs: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(
+            &[&*opsz_key, &*tracking_key],
+            &[opsz_value.as_ref() as &CFType, zero.as_ref() as &CFType],
+        );
+        let desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
+        Some(unsafe { font.copy_with_attributes(run.size as f64, std::ptr::null(), Some(&desc)) })
     }
 
     fn graphics_font(&self, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
