@@ -3,8 +3,10 @@
 
      node engine/crates/pm-wasm/scripts/build.mjs [--out <file>] [--debug]
 
-   Runs `cargo build --release --target wasm32-unknown-unknown -p pm-wasm`
-   with the pinned toolchain (engine/env.sh), drops the custom sections
+   Runs `cargo build --release --target wasm32-unknown-unknown -p
+   pm-wasm-module` (the cdylib over pm-wasm, so the release profile's thin
+   LTO applies: docs/engine/release-build.md) with the pinned toolchain
+   (engine/env.sh), drops the custom sections
    (DWARF line tables, names) that the release profile keeps for native
    builds, and writes the module to
    apps/desktop/src/renderer/public/engine/pm_wasm.wasm (gitignored), which
@@ -24,11 +26,11 @@ const outIndex = args.indexOf('--out');
 const out = outIndex >= 0 ? resolve(args[outIndex + 1]) : join(repo, 'apps/desktop/src/renderer/public/engine/pm_wasm.wasm');
 const debug = args.includes('--debug');
 
-execFileSync('bash', ['-c', 'source env.sh && nice -n 15 cargo build --release --target wasm32-unknown-unknown -p pm-wasm'], {
+execFileSync('bash', ['-c', 'source env.sh && nice -n 15 cargo build --release --target wasm32-unknown-unknown -p pm-wasm-module'], {
   cwd: engineDir,
   stdio: 'inherit'
 });
-const built = readFileSync(join(engineDir, 'target/wasm32-unknown-unknown/release/pm_wasm.wasm'));
+const built = readFileSync(join(engineDir, 'target/wasm32-unknown-unknown/release/pm_wasm_module.wasm'));
 
 /** The module without custom sections (id 0). */
 export function strip(bytes) {

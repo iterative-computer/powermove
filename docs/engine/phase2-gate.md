@@ -246,7 +246,7 @@ source engine/env.sh
 cd apps/desktop && bun install && node scripts/build-engine-addon.mjs \
   && node ../../engine/crates/pm-wasm/scripts/build.mjs && bun run build
 # the harnesses load pm-bridge with its harness feature; the addon build replaces it
-(cd ../../engine && cargo build --release --locked -p pm-bridge --lib --features harness)
+(cd ../../engine && cargo build --release --locked -p pm-bridge-addon --features harness)
 scripts/gate-rerun.sh ledger-off engine-specs engine-specs-new flag-on-specs audit-suite \
   engine-host-integration test-mcp engine-switch-corpus pm-wasm-bench
 scripts/gate-rerun.sh perf s1 tracer-measure frame-bridge-integration transport-repeat
@@ -547,7 +547,7 @@ $L bunx playwright test e2e/native-engine.spec.ts e2e/native-engine-tracer.spec.
 POWERMOVE_NEW_ENGINE=1 $L bunx playwright test <the 40 files listed above> --workers=1
 
 # Measurements (the harness needs pm-bridge with its harness feature)
-(cd ../../engine && cargo build --release --locked -p pm-bridge --lib --features harness)
+(cd ../../engine && cargo build --release --locked -p pm-bridge-addon --features harness)
 $L node scripts/frame-bridge-measure.mjs --skip-build --tag p2gate --only tracer-drag-today-500-idle,...
 PM_TRACER_MEASURE=1 $L bunx playwright test e2e/native-engine-tracer-measure.spec.ts --workers=1
 $L node scripts/frame-bridge-integration.mjs --skip-build
