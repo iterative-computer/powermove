@@ -151,6 +151,29 @@ const asJson = (value: any): any => JSON.parse(JSON.stringify(value));
 /** Whether canonicalProject moves this root into `comps[compId]` (shared/canonical-json.ts). */
 const canonicalRoot = (proj: any): boolean => typeof proj?.compId === 'string' && !!proj.compId
   && !(Object.prototype.hasOwnProperty.call(proj, 'comps') && !(proj.comps && typeof proj.comps === 'object' && !Array.isArray(proj.comps)));
+/**
+ * A caller's own layer list as the structural questions read it
+ * (`groupAncestors`: `id`, `group`, `type`; `validMatteSource`: `id`, `type`,
+ * `matteSource`; pm-eval's `group_ancestors` and `valid_matte_source` read
+ * nothing else): each layer's JSON reduced to those members, so a list of
+ * heavy layers is not serialized whole on every call. Other items keep their JSON.
+ */
+const STRUCTURE = ['id', 'group', 'type', 'matteSource'] as const;
+const structural = (item: any): any => {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+  const out: Record<string, unknown> = {};
+  for (const key of STRUCTURE) if (Object.prototype.propertyIsEnumerable.call(item, key)) out[key] = item[key];
+  return out;
+};
+const structuralList = (list: any[]): any => asJson(Array.from(list, structural));
+/** A composition's own scalar members with `layers` (no `comps`, no layer contents). */
+const structuralComp = (cur: any, layers: any[]): any => {
+  const out: Record<string, unknown> = {};
+  if (cur && typeof cur === 'object') for (const [key, value] of Object.entries(cur)) if (value === null || typeof value !== 'object') out[key] = value;
+  out.layers = structuralList(layers);
+  return out;
+};
+
 /** V8's TypeError for `value[key]` on a nullish `value`. */
 const readThrows = (value: unknown, key: string): TypeError => new TypeError(`Cannot read properties of ${value === null ? 'null' : 'undefined'} (reading '${key}')`);
 /** V8's TypeError for `Object.entries(undefined)`. */
@@ -315,6 +338,62 @@ export class NativeApi {
     return path.length === 2 && path[0] === 'comps' ? String(path[1]) : '@path:' + JSON.stringify(canonicalPath(path, proj.compId));
   }
 
+  /** Where the mirror holds composition `cur` (at engine address `comp`). */
+  private mirrorBase(comp: string, cur: any): PathPart[] {
+    if (comp.startsWith('@path:')) return JSON.parse(comp.slice(6));
+    // A root canonicalProject leaves as it is (no compId): the mirror holds its layers at the top.
+    if (cur === this.unwrap(this.PM.proj) && !canonicalRoot(cur)) return [];
+    return ['comps', comp];
+  }
+
+  /**
+   * The composition whose `layers` array `list` is, anywhere in the
+   * document (the open one, `comps`, or nested `comps`): its engine address
+   * and the composition, or null for a list of the caller's own.
+   */
+  private ownerOf(list: any): { comp: string; cur: any } | null {
+    const proj = this.unwrap(this.PM.proj);
+    if (!proj || typeof proj !== 'object' || !Array.isArray(list)) return null;
+    if (proj.layers === list) return { comp: typeof proj.compId === 'string' ? proj.compId : typeof proj.id === 'string' ? proj.id : '', cur: proj };
+    const seen = new Set<any>();
+    const visit = (comps: any, depth: number): { comp: string; cur: any } | null => {
+      if (!comps || typeof comps !== 'object' || depth > 16 || seen.has(comps)) return null;
+      seen.add(comps);
+      for (const comp of Object.values(comps)) {
+        if (!comp || typeof comp !== 'object') continue;
+        if ((comp as any).layers === list) {
+          const address = this.address(proj, comp);
+          return address === null ? null : { comp: address, cur: comp };
+        }
+        const nested = visit((comp as any).comps, depth + 1);
+        if (nested) return nested;
+      }
+      return null;
+    };
+    return visit(proj.comps, 0);
+  }
+
+  /**
+   * A layer of an explicit list that is some composition's own `layers`:
+   * its index there (checked against the mirror, repaired if a write
+   * bypassed the barrier), or its JSON when it is not in the list.
+   */
+  private listLayer(owner: { comp: string; cur: any }, L: any): number | any {
+    const layers: any[] = owner.cur.layers;
+    const raw = this.unwrap(L);
+    const i = this.index(layers).index.get(raw);
+    // Not in the list: its JSON (the questions read its structure only); not an object: no members.
+    if (i === undefined || layers[i] !== raw) return raw && typeof raw === 'object' ? asJson(structural(raw)) : {};
+    const barrier = this.barrier();
+    const mirrored = barrier ? lookup(barrier.shadow, [...this.mirrorBase(owner.comp, owner.cur), 'layers', i, 'id']) : null;
+    if (barrier && (!mirrored?.exists || mirrored.value !== raw.id)) {
+      this.stats.repairs += 1;
+      const missed = barrier.repair('structuralDiff');
+      if (missed.length) this.onStale?.('context', missed);
+    }
+    return i;
+  }
+
   private context(L: any): Context | null {
     const c = this.comps();
     if (!c) return null;
@@ -330,11 +409,7 @@ export class NativeApi {
     // what it holds). If not, a structural write bypassed the barrier: repair
     // before answering rather than answer for another layer.
     const barrier = this.barrier();
-    const base: PathPart[] = c.comp.startsWith('@path:') ? JSON.parse(c.comp.slice(6))
-      // A root canonicalProject leaves as it is (no compId): the mirror holds its layers at the top.
-      : c.cur === this.unwrap(this.PM.proj) && !canonicalRoot(c.cur) ? []
-        : ['comps', c.comp];
-    const mirrored = barrier ? lookup(barrier.shadow, [...base, 'layers', i, 'id']) : null;
+    const mirrored = barrier ? lookup(barrier.shadow, [...this.mirrorBase(c.comp, c.cur), 'layers', i, 'id']) : null;
     if (barrier && !c.comp.startsWith('@json:') && (!mirrored?.exists || mirrored.value !== raw.id)) {
       this.stats.repairs += 1;
       const missed = barrier.repair('structuralDiff');
@@ -779,11 +854,26 @@ export class NativeApi {
   }
 
   groupAncestors(L: any, layers?: any[]): any[] {
+    // `if (!layer?.group) return []` comes before anything reads the list
+    // (an explicit list, or a layer that is not one; the shaped path below
+    // caches the rest per revision).
+    const raw = this.unwrap(L);
+    if (!raw?.group && (layers !== undefined || !raw || typeof raw !== 'object')) {
+      return this.answer('groups.ancestors', () => ({ value: [] }), () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id }));
+    }
     if (layers !== undefined) {
       const c = this.comps();
-      if (!c || this.unwrap(layers) !== c.cur.layers) return this.answer('groups.ancestors',
-        () => this.query('groupAncestors', { comp: c?.comp ?? '', open: c?.open ?? '', compJson: { ...(c?.cur ?? {}), layers: asJson(layers) }, layer: asJson(L) }, (indexes: number[]) => indexes.map(i => layers[i])),
-        () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id }));
+      if (!c || this.unwrap(layers) !== c.cur.layers) {
+        // Another composition's own layers (audio, the mixer, a render of
+        // another composition): asked by its address, not as JSON.
+        const owner = c ? this.ownerOf(this.unwrap(layers)) : null;
+        if (owner) return this.answer('groups.ancestors',
+          () => this.query('groupAncestors', { comp: owner.comp, open: c!.open, layer: this.listLayer(owner, L) }, (indexes: number[]) => indexes.map(i => layers[i])),
+          () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id }));
+        return this.answer('groups.ancestors',
+          () => this.query('groupAncestors', { comp: c?.comp ?? '', open: c?.open ?? '', compJson: structuralComp(c?.cur, layers), layer: asJson(structural(this.unwrap(L))) }, (indexes: number[]) => indexes.map(i => layers[i])),
+          () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id }));
+      }
     }
     return this.shaped('groups.ancestors', L, 'groupAncestors',
       () => this.answer('groups.ancestors', () => this.layerQuery('groupAncestors', L, {}, (indexes: number[], ctx) => indexes.map(i => ctx.live[i])),
@@ -1053,9 +1143,15 @@ export class NativeApi {
   }
 
   validMatteSource(layers: any[], layer: any, id: any): boolean {
+    // `new Set([layer.id])` throws first for a missing layer.
+    if (layer == null) return this.answer('validMatteSource', () => ({ threw: readThrows(layer, 'id') }), () => this.legacy.validMatteSource(layers, layer, id), () => ({ id }));
     const c = this.comps();
+    const owner = c && this.unwrap(layers) !== c.cur.layers ? this.ownerOf(this.unwrap(layers)) : null;
+    if (owner) return this.answer('validMatteSource',
+      () => this.query('validMatteSource', { comp: owner.comp, open: c!.open, layer: this.listLayer(owner, layer), id: id === undefined ? { $u: 1 } : id }),
+      () => this.legacy.validMatteSource(layers, layer, id), () => ({ layer: layer?.id, id }));
     if (!c || this.unwrap(layers) !== c.cur.layers) return this.answer('validMatteSource',
-      () => this.query('validMatteSource', { comp: c?.comp ?? '', open: c?.open ?? '', compJson: { ...(c?.cur ?? {}), layers: asJson(layers) }, layer: asJson(layer), id: id === undefined ? { $u: 1 } : id }),
+      () => this.query('validMatteSource', { comp: c?.comp ?? '', open: c?.open ?? '', compJson: structuralComp(c?.cur, layers), layer: asJson(structural(this.unwrap(layer))), id: id === undefined ? { $u: 1 } : id }),
       () => this.legacy.validMatteSource(layers, layer, id), () => ({ id }));
     return this.answer('validMatteSource', () => this.layerQuery('validMatteSource', layer, { id: id === undefined ? { $u: 1 } : id }),
       () => this.legacy.validMatteSource(layers, layer, id), () => ({ layer: layer?.id, id }));

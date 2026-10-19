@@ -178,6 +178,39 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     }
   });
 
+  it("asks about another composition's own layer list by its address", async () => {
+    const { PM, doc } = await editor('audit');
+    const group = PM.mkLayer('group', { name: 'G' });
+    const inner = PM.mkLayer('solid', { name: 'In' }); inner.group = group.id;
+    const matte = PM.mkLayer('solid', { name: 'Matte' });
+    const other = { id: 'other', name: 'Other', fps: 30, w: 640, h: 360, dur: 10, layers: [inner, group, matte] };
+    const deep = { id: 'deep', fps: 30, w: 640, h: 360, dur: 10, layers: [PM.mkLayer('solid', { name: 'Deep' })] };
+    PM.proj.comps = { other, outer: { id: 'outer', layers: [], comps: { deep } } };
+    PM.touch();
+    const api = doc.api!;
+    expect(api.groupAncestors(inner, other.layers)).toEqual([group]);
+    expect(api.groupAncestors(matte, other.layers)).toEqual([]);
+    expect(api.groupAncestors(deep.layers[0], deep.layers)).toEqual([]);
+    expect(api.groupAncestors(clone(inner), other.layers)).toEqual([group]);
+    expect(api.validMatteSource(other.layers, inner, matte.id)).toBe(true);
+    expect(api.validMatteSource(other.layers, inner, inner.id)).toBe(false);
+    // A caller's own list (filtered, as the 3D depth pass makes) and odd inputs.
+    const filtered = other.layers.filter((l: any) => l.type !== 'solid' || l === inner);
+    expect(api.groupAncestors(inner, filtered)).toEqual([group]);
+    expect(api.groupAncestors(inner, [inner])).toEqual([]);
+    expect(api.groupAncestors(null, other.layers)).toEqual([]);
+    expect(api.groupAncestors(5 as any, other.layers)).toEqual([]);
+    expect(api.validMatteSource([inner, matte], inner, matte.id)).toBe(true);
+    expect(api.validMatteSource([inner, { ...matte, type: 'null' }], inner, matte.id)).toBe(false);
+    expect(() => api.validMatteSource(other.layers, null, matte.id)).toThrow("Cannot read properties of null (reading 'id')");
+    expect(api.validMatteSource(other.layers, 7 as any, matte.id)).toBe(true);
+    const repairs = (doc.stats() as any).native.repairs;
+    for (let i = 0; i < 3; i++) api.groupAncestors(inner, other.layers);
+    expect((doc.stats() as any).native.repairs).toBe(repairs);
+    expect(fallbacks(doc)).toEqual({});
+    expect(doc.dual!.total().mismatched).toBe(0);
+  });
+
   it('addresses a precomposition scope in O(1) and a nested one from a verified cache', async () => {
     const { PM, doc } = await editor('on');
     // The reviewer's shape: 100 layers of 40 keyed properties in the open composition.
