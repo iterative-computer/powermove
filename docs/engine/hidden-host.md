@@ -7,6 +7,8 @@ with one process, pm-wasm document, kernel, extension registry and Undo history
 per project. The host persists worker edits before answering tools. Profile writes are
 serialized, and shared project/trash indexes apply each worker’s changes against
 the current host value, preserving projects created or renamed by other workers.
+Workers refresh shared preferences before tools; profile snapshots omit unrelated
+project documents and Undo histories. Committed preferences notify DOM clients.
 
 The interactive and job `pm-node` children use the desktop `NativeEngine`
 supervisor, restart ledger, attribution, backoff, host capabilities, budgets,
@@ -20,8 +22,9 @@ owners and increasing generations.
 
 Agent imports stream into the host's immutable content store, use the desktop's
 sampled fingerprint plus the full content hash, and ask the job engine to probe
-the stored object. Numeric audio facts retain channel counts for named and custom
-layouts. The production agent harness keeps validation, cancellation, locked
+the stored object. Read-only sources get a private writable staging copy for
+fsync; their immutable source objects keep their original permissions. Numeric
+audio facts retain channel counts for named and custom layouts. The production agent harness keeps validation, cancellation, locked
 references and transactions; the worker import adapter commits the shared asset
 identity and preserves replacement bytes for Undo. Workers resolve availability
 through host media paths. Existing CLI flat media copies are promoted into host
@@ -35,8 +38,10 @@ keep an export independent of another project or tab.
 ## Chromium and shader pins
 
 `LazyNativeBrowser` starts Chromium only for DOM tools, a compatibility raster
-request, or an ANGLE shader request. A DOM page opens the session's project,
-joins its remote project session and flushes edits before answering. Workspace
+request, or an ANGLE shader request. A DOM page waits for document and complete
+extension boot, opens the session's project, joins its remote project session
+and flushes edits before answering. The setting-off host uses the same extension
+readiness gate, so neither host exposes a partially registered panel list. Workspace
 tools invoke the production dispatcher, retaining persisted layout, workspace,
 viewport and the complete built-in/user panel registry. They do not return the
 worker's reduced workspace answer. The page's compositor output is replaced by
@@ -96,7 +101,8 @@ yet provided by this embedder.
 `packages/cli/scripts/assemble-native.mjs` consumes `pm-node-addon`,
 `pm-bridge-addon` and `pm-cli` release artifacts, matching LGPL FFmpeg, and the
 native image-decoder license directory. It checks architecture, relocates and
-signs dylibs, constructs/ticks/pumps `EngineHost` on clean Node 22, and launches
-`pm-cli`. ARM64 and x64 require separate FFmpeg/native libraries; x64 loads under
+signs dylibs, resolves cross-linked Swift overlays to Apple's system runtime
+without redistributing them, constructs/ticks/pumps `EngineHost` on clean Node 22,
+and launches `pm-cli`. ARM64 and x64 require separate FFmpeg/native libraries; x64 loads under
 Rosetta on an ARM64 machine. The FFmpeg cross build uses the same pinned sources,
 component selection and LGPL policy as ARM64. These commands never publish.
