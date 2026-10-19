@@ -34,6 +34,8 @@ pub mod color;
 pub mod effects;
 pub(crate) mod exec;
 pub(crate) mod gpu;
+pub mod half_store;
+pub mod path_masks;
 pub mod region;
 
 use pm_protocol::color::BlendMode;
@@ -99,14 +101,19 @@ pub struct AdjustmentNode {
     pub alpha: f64,
 }
 
-/// A layer's masks on today's parametric route, ready for the GPU.
+/// A layer's masks, ready for the GPU: today's parametric route, or the
+/// path route's coverage canvas (`path`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Masks {
-    /// Output pixels to layer pixels (`u_inv`), a column-major 3×3 matrix:
-    /// the inverse world matrix, or for a 3D layer the inverse of its
-    /// projected plane.
+    /// Parametric: output pixels to layer pixels (`u_inv`), a column-major
+    /// 3×3 matrix: the inverse world matrix, or for a 3D layer the inverse
+    /// of its projected plane. Path: output pixels to coverage canvas
+    /// pixels (`u_covTransform`; the identity for a 2D layer).
     pub inverse: [f64; 9],
+    /// The parametric masks (empty on the path route).
     pub masks: pm_vector::ParametricMasks,
+    /// The path route (`applyPathMasks`).
+    pub path: Option<path_masks::PathCoverage>,
 }
 
 /// A track matte.

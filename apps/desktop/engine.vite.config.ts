@@ -15,8 +15,12 @@ export default defineConfig({
     outDir: process.env['POWERMOVE_ENGINE_OUT'] ?? 'out/engine',
     emptyOutDir: true,
     rollupOptions: {
-      input: path.resolve(__dirname, 'src/engine/main.ts'),
-      output: { format: 'es', entryFileNames: 'engine.mjs' },
+      input: {
+        engine: path.resolve(__dirname, 'src/engine/main.ts'),
+        // The contained runtime for Store extensions and scripts (document-host/contained.ts).
+        'sandbox-runtime': path.resolve(__dirname, 'src/engine/sandbox-runtime.ts')
+      },
+      output: { format: 'es', entryFileNames: '[name].mjs', chunkFileNames: 'chunks/[name]-[hash].mjs' },
       external: ['ws']
     },
     sourcemap: true,

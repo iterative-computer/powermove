@@ -27,7 +27,7 @@ export const DISPLAY_TOOLS = new Set([
    own copy, so a tab that has the run's project open is preferred. A tab on
    another project would look the asset up in the wrong document, so it is
    never used (media-tools lane). */
-export const TAB_FIRST_TOOLS = new Set([MEDIA_SOURCE_TOOL]);
+export const TAB_FIRST_TOOLS = new Set([MEDIA_SOURCE_TOOL, 'get_workspace_state']);
 
 const MAX_BUFFERED_EVENTS = 5000;
 

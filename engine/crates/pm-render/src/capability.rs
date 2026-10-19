@@ -44,15 +44,8 @@ pub enum Feature {
     Effects,
     /// Layer masks.
     Masks,
-    /// Bezier path masks (today's Canvas2D coverage route, which also takes
-    /// every other mask of the layer).
-    PathMasks,
-    /// A track matte, or a layer used as one.
-    TrackMatte,
     /// Transitions.
     Transition,
-    /// A blend mode other than normal (or an animated blend mode).
-    BlendMode(String),
     /// Layer or group motion blur.
     MotionBlur,
     /// 2.5D layers (the 3D switch or a 3D group).
@@ -115,10 +108,7 @@ impl fmt::Display for Feature {
             Feature::Scene3d(s) => write!(f, "3D: {s}"),
             Feature::Effects => write!(f, "effects"),
             Feature::Masks => write!(f, "masks"),
-            Feature::PathMasks => write!(f, "path masks"),
-            Feature::TrackMatte => write!(f, "track mattes"),
             Feature::Transition => write!(f, "transitions"),
-            Feature::BlendMode(m) => write!(f, "blend mode {m}"),
             Feature::MotionBlur => write!(f, "motion blur"),
             Feature::TwoAndAHalfD => write!(f, "2.5D layers"),
             Feature::Adjustment => write!(f, "adjustment layers with effects"),
@@ -232,6 +222,17 @@ pub fn unsupported_with_media(
     check(document, composition, Some(assets), None, false)
 }
 
+/// [`unsupported_with_definitions`] for a renderer with fonts configured
+/// (`Renderer::set_text_fonts`): text and captions layers are drawn.
+pub fn unsupported_with_definitions_and_fonts(
+    document: &Document,
+    composition: &str,
+    assets: Option<&dyn AssetResolver>,
+    effects: &crate::effects::Effects,
+) -> Vec<Unsupported> {
+    check(document, composition, assets, Some(effects), true)
+}
+
 /// [`unsupported_with_media`] for a renderer with fonts configured
 /// (`Renderer::set_text_fonts`): text and captions layers are drawn
 /// (`Renderer::unsupported_with_media` picks the right check).
@@ -262,9 +263,11 @@ fn check(
             feature: Feature::ProjectColor,
         });
     }
-    // The stamp (section 6) marks native-only features. The ones this
-    // renderer draws are linked media and Interpret Footage overrides; a
-    // stamp with neither stands for a feature it does not know.
+    // The stamp (section 6) only tells the legacy engine to refuse the
+    // project: every native-only feature it stands for is drawn here or
+    // judged by its own check ([`STAMP_FIELDS`]), so it routes nothing.
+    // `Feature::RequiresEngine` remains for a stamping field no lane draws;
+    // the classification test keeps that list empty.
     if let Some(r) = node::member(Some(root), "requiresEngine")
         && node::truthy(Some(r))
         && !native_features_drawn(root)
@@ -382,26 +385,11 @@ fn check_composition(
                 }
             }
         }
-        // Parametric masks, track mattes, and blend modes are drawn
-        // (`crate::composite`); bezier path masks and masks that are not an
-        // array are not.
-        let masks = node::member(Some(layer), "masks");
-        if is_property(masks) || (node::truthy(masks) && node::array(masks).is_none()) {
-            add(layer, Feature::Masks);
-        }
-        // Masks on 3D object layers (today's slow path turns the scene
-        // pass; not matched yet).
-        if pm_eval::parenting::Role3d::of(layer).is_some()
-            && node::array(masks).is_some_and(|m| !m.is_empty())
-        {
-            add(layer, Feature::Masks);
-        }
-        if node::array(masks).is_some_and(|m| {
-            m.iter()
-                .any(|mask| node::truthy(node::member(Some(mask), "path")))
-        }) {
-            add(layer, Feature::PathMasks);
-        }
+        // Parametric and bezier path masks (also on 3D object layers),
+        // track mattes, and blend modes are drawn (`crate::composite`).
+        // Masks that are not an array fail the layer as today's
+        // `(L.masks || []).some(…)` does (a named layer failure, not a
+        // route).
         if js::flag(layer, "transitionIn") || js::flag(layer, "transitionOut") {
             match effects {
                 None => add(layer, Feature::Transition),
@@ -412,10 +400,10 @@ fn check_composition(
                 }
             }
         }
-        // Motion blur and 2.5D planes are drawn for the layer types their
-        // parity cases cover (`crate::motion`, `crate::space25d`;
-        // docs/engine/motion.md); other types keep routing until their own
-        // renderers are compared with them.
+        // Motion blur and 2.5D planes are drawn for every visual layer type
+        // (`crate::motion::DRAWN_TYPES`, `crate::space25d::DRAWN_TYPES`,
+        // each compared with today's in the corpus; docs/engine/motion.md).
+        // A type missing from those lists is a new layer type and routes.
         let mblur = node::member(Some(layer), "mblur");
         let own_blur = is_property(mblur) || node::truthy(mblur);
         if own_blur && !crate::motion::DRAWN_TYPES.contains(&ty.as_str()) {
@@ -435,29 +423,27 @@ fn check_composition(
         // Members of a 3D group are placed in its space, members of a
         // blurred group are sampled with it, and the layers of a composition
         // reached through a blurred precomp are drawn at every sample time:
-        // other types keep routing. That includes 3D object, light, and
-        // camera layers, whose scene pass is built at the center time and
-        // whose placement inside a 3D group has no parity case.
+        // types outside the compared lists keep routing.
         let (three_d, blurred) = enclosing_groups(layers, layer);
-        if !crate::space25d::DRAWN_TYPES.contains(&ty.as_str())
-            && !NOT_VISUAL.contains(&ty.as_str())
-        {
-            if three_d {
+        if !NOT_VISUAL.contains(&ty.as_str()) {
+            if three_d && !crate::space25d::DRAWN_TYPES.contains(&ty.as_str()) {
                 add(layer, Feature::TwoAndAHalfD);
             }
-            if blurred || sampled {
+            if (blurred || sampled) && !crate::motion::DRAWN_TYPES.contains(&ty.as_str()) {
                 add(layer, Feature::MotionBlur);
             }
         }
-        // Level 2 shape, solid, and SVG image content is drawn
-        // (`crate::vector`), and other level 2 raster content (image,
-        // video, precomp) is resampled by `crate::sampling`; other level 2
-        // content keeps routing.
+        // Level 2 content of every layer type is drawn: shapes, solids, and
+        // SVG images (`crate::vector`), image, video, precomp, shader, and
+        // extension raster content resampled (`crate::sampling`), text and
+        // captions at output resolution (`crate::text`, which names the
+        // level 2 text it does not lay out yet), and layers that draw
+        // nothing of their own.
         if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0)
-            && !matches!(ty.as_str(), "shape" | "solid")
-            && !crate::sampling::samples_layer_type(&ty)
+            && ty == "text"
+            && let Some(why) = level2_text_gap(layer)
         {
-            add(layer, Feature::CompatLevel2);
+            add(layer, Feature::Text(why.into()));
         }
         if ty == "group" && js::flag(node::member(Some(layer), "d").unwrap_or(layer), "modeling") {
             add(layer, Feature::Scene3d("model groups".into()));
@@ -499,45 +485,29 @@ fn check_composition(
     }
 }
 
-/// Whether the document's native-only features (the `requiresEngine`
-/// stamp's reasons, `shared/engine-stamp.ts`; the section 6 field table,
-/// [`pm_protocol::patch::FIELD_TABLE`]) are all ones this engine draws, and
-/// at least one is present. The stamp carries no reasons, so each field
-/// that stamps is classified ([`STAMP_FIELDS`]):
+/// Whether every native-only feature the document uses (the
+/// `requiresEngine` stamp's reasons, `shared/engine-stamp.ts`; the section 6
+/// field table, [`pm_protocol::patch::FIELD_TABLE`]) is one this engine
+/// draws. The stamp carries no reasons, so each field that stamps is
+/// classified ([`STAMP_FIELDS`]):
 ///
-/// - drawn here: linked media (`storage: "linked"` or `link`) and Interpret
-///   Footage overrides (`interpret`);
-/// - judged elsewhere, never enough on its own: the project `color`
-///   ([`Feature::ProjectColor`]) and clip `pitch` (audio, `pm-audio`);
-/// - not drawn: precomp `keepFrameRate` — a stamp that may carry it routes
-///   the project away.
+/// - drawn here: linked media (`storage: "linked"` or `link`), Interpret
+///   Footage overrides (`interpret`), and precomp `keepFrameRate`
+///   (`crate::retime::keep_frame_rate`);
+/// - judged elsewhere: the project `color` ([`Feature::ProjectColor`] lists
+///   only settings this renderer does not know) and clip `pitch` (audio,
+///   `pm-audio`).
+///
+/// A stamp without any of them (a project whose only native-only setting is
+/// its color, or one stamped before its feature was removed) is accepted:
+/// the stamp is the legacy engine's refusal, not a capability.
 fn native_features_drawn(root: &Node) -> bool {
     // Every stamping field not drawn here is set (`true`, or any value
     // other than absent, false, or null) nowhere in the document.
     let set = |v: &Node| !matches!(v.kind(), NodeKind::Null | NodeKind::Bool(false));
-    if STAMP_FIELDS
+    !STAMP_FIELDS
         .iter()
         .any(|&(_, field, class)| class == StampField::NotDrawn && any_member(root, field, &set))
-    {
-        return false;
-    }
-    let Some(assets) = node::member(Some(root), "assets") else {
-        return false;
-    };
-    let mut any = false;
-    let mut visit = |asset: &Node| {
-        let linked = js::member_string(asset, "storage").as_deref() == Some("linked")
-            || node::member(Some(asset), "link").is_some_and(|l| node::truthy(Some(l)));
-        let interpreted =
-            node::member(Some(asset), "interpret").is_some_and(|i| node::truthy(Some(i)));
-        any |= linked || interpreted;
-    };
-    match assets.kind() {
-        NodeKind::Object(map) => map.values().for_each(&mut visit),
-        NodeKind::Array(list) => list.iter().for_each(&mut visit),
-        _ => {}
-    }
-    any
 }
 
 /// How [`native_features_drawn`] treats each field of the section 6 table
@@ -546,6 +516,9 @@ fn native_features_drawn(root: &Node) -> bool {
 enum StampField {
     Drawn,
     JudgedElsewhere,
+    /// A native-only field no lane draws: a document that sets it routes
+    /// ([`Feature::RequiresEngine`]). None today.
+    #[allow(dead_code)]
     NotDrawn,
 }
 
@@ -556,7 +529,7 @@ const STAMP_FIELDS: [(&str, &str, StampField); 6] = [
     ("asset", "link", StampField::Drawn),
     ("asset", "interpret", StampField::Drawn),
     ("asset", "storage", StampField::Drawn),
-    ("precomp", "keepFrameRate", StampField::NotDrawn),
+    ("precomp", "keepFrameRate", StampField::Drawn),
     ("clip", "pitch", StampField::JudgedElsewhere),
     ("project", "color", StampField::JudgedElsewhere),
 ];
@@ -571,6 +544,25 @@ fn any_member(n: &Node, name: &str, test: &dyn Fn(&Node) -> bool) -> bool {
         NodeKind::Array(list) => list.iter().any(|v| any_member(v, name, test)),
         _ => false,
     }
+}
+
+/// What `crate::text` does not lay out at `compat` level 2 yet (its
+/// `text_layer_level2` checks): animated or range-styled text and
+/// typography anchoring.
+fn level2_text_gap(layer: &Node) -> Option<&'static str> {
+    let d = node::member(Some(layer), "d");
+    let has = |key: &str| {
+        node::member(d, key)
+            .map(|n| node::get(n, b"length").truthy())
+            .unwrap_or(false)
+    };
+    if has("animators") || has("styles") {
+        return Some("animated or range-styled text at compat level 2");
+    }
+    if node::member(d, "fontAnchorBounds").is_some_and(|b| node::truthy(Some(b))) {
+        return Some("typography anchoring at compat level 2");
+    }
+    None
 }
 
 /// Whether any group enclosing `layer` (its `group` chain within `layers`)
@@ -759,23 +751,38 @@ mod tests {
     }
 
     #[test]
-    fn a_stamp_is_accepted_only_when_every_reason_is_drawn() {
+    fn every_stamp_reason_is_drawn() {
         let drawn = |doc: &Document| native_features_drawn(doc.root().unwrap());
         assert!(drawn(&stamped(serde_json::json!({}))));
-        // A native-only feature this renderer does not draw, next to one it
-        // does, routes the project away.
+        // keepFrameRate is drawn (`crate::retime::keep_frame_rate`).
         let precomp = serde_json::json!({ "comps": { "c": { "layers": [
             { "id": "p", "type": "precomp", "d": { "comp": "x", "keepFrameRate": true } }
         ] } } });
-        assert!(!drawn(&stamped(precomp)));
-        let off = serde_json::json!({ "comps": { "c": { "layers": [
-            { "id": "p", "type": "precomp", "d": { "comp": "x", "keepFrameRate": false } }
-        ] } } });
-        assert!(drawn(&stamped(off)));
-        // Without a reason drawn here, the stamp stands for something else.
-        let mut plain = stamped(serde_json::json!({ "assets": {} }));
-        assert!(!drawn(&plain));
-        plain = stamped(serde_json::json!({ "assets": {}, "color": { "linearBlending": true } }));
-        assert!(!drawn(&plain));
+        assert!(drawn(&stamped(precomp)));
+        // A stamp whose only reason is the project color (linear blending)
+        // or clip pitch is drawn: those are judged by their own checks.
+        let color =
+            stamped(serde_json::json!({ "assets": {}, "color": { "linearBlending": true } }));
+        assert!(drawn(&color));
+        let doc = color;
+        assert!(
+            super::unsupported(&doc, "root").is_empty(),
+            "{:?}",
+            super::unsupported(&doc, "root")
+        );
+        let pitch = serde_json::json!({ "assets": {}, "layers": [
+            { "id": "a", "type": "audio", "d": { "pitch": "follow" } }
+        ] });
+        assert!(drawn(&stamped(pitch)));
+        assert!(drawn(&stamped(serde_json::json!({ "assets": {} }))));
+        // Invalid project color is still its own named feature.
+        let bad = stamped(serde_json::json!({ "color": { "mode": "nonsense" } }));
+        assert_eq!(
+            super::unsupported(&bad, "root")
+                .iter()
+                .map(|u| u.feature.clone())
+                .collect::<Vec<_>>(),
+            vec![Feature::ProjectColor]
+        );
     }
 }

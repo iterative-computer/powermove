@@ -220,16 +220,22 @@ describe.skipIf(!built)('pm-edit in the edit pipeline', () => {
     }
   });
 
-  it('runs the legacy edit for a camera reparented into a space that moves with it', async () => {
-    // A keyframed camera, and a group parented to it holding a solid: putting
-    // the camera under the solid (which `PM.wouldCycle` allows) makes its
-    // parent space read its own transform, which pm-edit leaves to the
-    // legacy edit (`{legacy}`).
+  it('answers a camera reparented into a space that moves with it as the legacy edit does', async () => {
+    // A camera with keyed, static and expression channels, and a group
+    // parented to it holding a solid: putting the camera under the solid
+    // (which `PM.wouldCycle` allows) makes its parent space read its own
+    // transform. The legacy aim then reads the camera's keyed channels
+    // through the evaluation cache the pose write left stale; pm-edit
+    // reproduces that read natively.
     const source = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
     source.proj = source.mkProject({ dur: 3, fps: 29.97 });
-    const camera = source.mkLayer('null', { name: 'Camera', from: 0, dur: 3 });
-    Object.assign(camera, { type: 'extension', threeD: true, d: { definition: 'powermove.3d.camera', data: { camera: { p: { targetX: source.P(10), targetY: source.P(20), targetZ: source.P(-30) } } } } });
+    const camera = source.mkLayer('null', { name: 'Camera', from: 0.1, dur: 3 });
+    Object.assign(camera, { type: 'extension', threeD: true, d: { definition: 'powermove.3d.camera', data: { camera: { p: { targetX: source.P(10), targetY: source.P(20, { kf: [source.KF(0, 20, 'linear'), source.KF(2, -40, 'easeOut')] }), targetZ: source.P(-30) } } } } });
     camera.p['position.x'].kf = [source.KF(0, 0, 'linear'), source.KF(2, 400, 'linear')];
+    camera.p['position.y'].v = 120;
+    camera.p['position.y'].expr = 'value + 10';
+    camera.p.rotation.v = 15;
+    camera.p['scale.x'].kf = [source.KF(0, 80, 'easeIn'), source.KF(1.5, 140, 'linear')];
     const solid = source.mkLayer('solid', { name: 'Solid', from: 0, dur: 3 });
     solid.p['position.x'].v = 40;
     source.proj.layers = [camera, solid];
@@ -239,22 +245,29 @@ describe.skipIf(!built)('pm-edit in the edit pipeline', () => {
     group.parent = camera.id;
     const json = JSON.stringify(own(source.proj));
     const known = knownIds(JSON.parse(json));
-    const reparent = (PM: any) => {
-      PM.time = 0.5;
-      return ok(PM, { type: 'set_layer', target: byName(PM, 'Camera').id, patch: { parent: byName(PM, 'Solid').id } });
-    };
-    const legacy = await editor('off', json);
-    reparent(legacy.PM);
-    const native = await editor('on', json);
-    reparent(native.PM);
-    const stats = native.doc.edits!.stats;
-    expect(stats.calls.reparent).toBe(1);
-    expect(stats.fallbacks).toEqual({ 'reparent:legacy': 1 });
-    expect(stats.applied.reparent ?? 0).toBe(0);
-    expect(byName(native.PM, 'Camera').parent).toBe(byName(native.PM, 'Solid').id);
-    expect(editDiffers(canonical(native.PM, known), canonical(legacy.PM, known), known)).toBeNull();
-    // The legacy edit did rewrite the camera's aim.
-    expect(byName(native.PM, 'Camera').d.data.camera.p.targetX.v).not.toBe(10);
+    for (const t of [0.5, 1.25, 2.6]) {
+      const reparent = (PM: any) => {
+        PM.time = t;
+        return ok(PM, { type: 'set_layer', target: byName(PM, 'Camera').id, patch: { parent: byName(PM, 'Solid').id } });
+      };
+      const legacy = await editor('off', json);
+      expect(reparent(legacy.PM)).toBe(true);
+      const native = await editor('on', json);
+      expect(reparent(native.PM)).toBe(true);
+      const stats = native.doc.edits!.stats;
+      expect(stats.calls.reparent).toBe(1);
+      expect(stats.fallbacks).toEqual({});
+      expect(stats.applied.reparent).toBe(1);
+      expect(byName(native.PM, 'Camera').parent).toBe(byName(native.PM, 'Solid').id);
+      expect(editDiffers(canonical(native.PM, known), canonical(legacy.PM, known), known), `t ${t}`).toBeNull();
+      // The edit rewrote the camera's aim (read through the stale channels).
+      expect(byName(native.PM, 'Camera').d.data.camera.p.targetX.v).not.toBe(10);
+      // In audit the native edit is compared with the legacy one.
+      const audit = await editor('audit', json);
+      reparent(audit.PM);
+      expect(audit.doc.dual!.stats.mismatched['edit.reparent'] ?? 0, `t ${t} dual`).toBe(0);
+      expect(audit.doc.dual!.stats.compared['edit.reparent'], `t ${t} compared`).toBe(1);
+    }
   });
 });
 

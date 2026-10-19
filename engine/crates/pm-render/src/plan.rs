@@ -670,9 +670,7 @@ fn draw_layer<'d>(
         let Some(effects) = effects else {
             return Ok(None);
         };
-        let Some(masks) = layer_masks(scope, b, layer, time, scale, has_masks)? else {
-            return Ok(None);
-        };
+        let masks = layer_masks(scope, layer, time, scale, width, height, has_masks)?;
         return Ok(Some(vec![node(composite::Node::Adjustment(
             composite::AdjustmentNode {
                 layer: id.clone(),
@@ -689,22 +687,18 @@ fn draw_layer<'d>(
     // Today's fast path draws straight into the accumulator; anything else
     // goes through the layer's own target.
     let slow = has_masks || has_fx || blend != BlendMode::Normal || matted || transition.is_some();
-    // Motion blur samples draw straight into their accumulation; a blurred
+    // Motion blur samples draw straight into their accumulation. A blurred
     // layer that also needs its own target (masks, effects, matte, blend
-    // mode, transition) has no parity case and keeps routing.
-    if blur.is_some() && slow {
-        refuse(b, Feature::MotionBlur);
-        return Ok(None);
-    }
+    // mode, transition) takes the accumulation as its layer target, as
+    // today's slow path does (`lf` holds the samples; masks, effects, and
+    // the matte read it at the center time).
     // The layer's own target: masks, effects, matte, then the composite.
     let wrap = |scope: &mut Scope<'_, 'd>,
                 b: &mut Build<'_>,
                 content: Vec<Draw>,
                 composite_alpha: f64|
      -> JsResult<Option<Vec<Draw>>> {
-        let Some(masks) = layer_masks(scope, b, layer, time, scale, has_masks)? else {
-            return Ok(None);
-        };
+        let masks = layer_masks(scope, layer, time, scale, width, height, has_masks)?;
         let matte = if matted {
             layer_matte(scope, b, layer, time, width, height, scale)?
         } else {
@@ -735,11 +729,19 @@ fn draw_layer<'d>(
             });
         }
         if let Some(blur) = blur {
-            // The group's members at every sample time, accumulated.
+            // The group's members at every sample time, accumulated; the
+            // sum is drawn at the group's opacity, or is the layer target
+            // of the slow path (composited at the group's opacity).
+            if !slow {
+                let draw = crate::motion::plan::blur_group(
+                    scope, b, layer, time, width, height, scale, alpha, blur,
+                );
+                return Ok(Some(vec![draw]));
+            }
             let draw = crate::motion::plan::blur_group(
-                scope, b, layer, time, width, height, scale, alpha, blur,
+                scope, b, layer, time, width, height, scale, 1.0, blur,
             );
-            return Ok(Some(vec![draw]));
+            return wrap(scope, b, vec![draw], alpha);
         }
         // A boundary group: its members composite into their own target,
         // drawn with the group's opacity.
@@ -762,7 +764,11 @@ fn draw_layer<'d>(
         let draw = crate::motion::plan::blur_layer(
             scope, b, layer, time, width, height, scale, alpha, blur,
         )?;
-        return Ok(draw.map(|d| vec![d]));
+        return match draw {
+            Some(d) if slow => wrap(scope, b, vec![d], 1.0),
+            Some(d) => Ok(Some(vec![d])),
+            None => Ok(None),
+        };
     }
     let Some(draw) = layer_draw(scope, b, layer, time, width, height, scale, alpha)? else {
         return Ok(None);
@@ -793,8 +799,12 @@ pub(crate) fn layer_draw<'d>(
     let id = js::layer_id(layer);
     let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
     let ty = js::layer_type(layer);
-    let level2 = (crate::sampling::is_level2(layer) && crate::sampling::samples_layer_type(&ty))
-        .then_some(b.sampling);
+    // Level 2 raster content: images, video, precomps, and shader and
+    // extension layer output (`crate::shader_layers` renders it at the
+    // density it is drawn at).
+    let level2_type =
+        crate::sampling::samples_layer_type(&ty) || matches!(ty.as_str(), "shader" | "extension");
+    let level2 = crate::sampling::is_level2(layer).then_some(b.sampling);
     let draw = match quad {
         Quad::Solid {
             rgb,
@@ -825,9 +835,11 @@ pub(crate) fn layer_draw<'d>(
             uv,
         } => {
             let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?;
-            // Level 2 SVG images are drawn at output resolution by
-            // `crate::vector`, never resampled.
-            let level2 = level2.filter(|_| !matches!(source, Source::Vector(_)));
+            // Level 2 image, video, and precomp content is resampled; other
+            // level 2 content draws at output resolution (`crate::vector`,
+            // `crate::text`), except on a plane, where its layer-space raster
+            // is resampled too (`crate::space25d::local`).
+            let level2 = level2.filter(|_| level2_type || plane.is_some());
             Draw {
                 layer: id.clone(),
                 matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
@@ -856,6 +868,41 @@ pub(crate) fn layer_draw<'d>(
     Ok(Some(draw))
 }
 
+/// A motion-blur sample of a 3D object layer at `time`: pushes the
+/// enclosing pass's 3D state rebuilt at that time (today's
+/// `compositionRuntime(PM, T + dt)`); [`pop_sample_3d`] removes it. Returns
+/// whether a state was pushed (other layer types, or no enclosing pass).
+pub(crate) fn push_sample_3d<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    width: u32,
+    height: u32,
+) -> JsResult<bool> {
+    if pm_eval::parenting::Role3d::of(layer) != Some(pm_eval::parenting::Role3d::Object) {
+        return Ok(false);
+    }
+    let Some(center) = b.pass3d.last() else {
+        return Ok(false);
+    };
+    let ctx = center.at_time(
+        scope,
+        time,
+        width,
+        height,
+        b.assets,
+        b.options3d.view.as_ref(),
+    )?;
+    b.pass3d.push(ctx);
+    Ok(true)
+}
+
+/// Removes the state [`push_sample_3d`] pushed.
+pub(crate) fn pop_sample_3d(b: &mut Build<'_>) {
+    b.pass3d.pop();
+}
+
 /// `content` as it is, or wrapped with its plane and resampler.
 fn placed(
     content: Content,
@@ -872,26 +919,18 @@ fn placed(
     }))
 }
 
-/// The layer's masks for its node: `Some(None)` when nothing is masked,
-/// `None` when the masks are unsupported (recorded).
+/// The layer's masks for its node (`None` when nothing is masked). The
+/// path route's coverage canvas is the `width × height` output.
 fn layer_masks<'d>(
     scope: &mut Scope<'_, 'd>,
-    b: &mut Build<'_>,
     layer: &'d Node,
     time: f64,
     scale: (f64, f64),
+    width: u32,
+    height: u32,
     has_masks: bool,
-) -> JsResult<Option<Option<composite::Masks>>> {
+) -> JsResult<Option<composite::Masks>> {
     if !has_masks {
-        return Ok(Some(None));
-    }
-    if pm_eval::parenting::Role3d::of(layer).is_some() {
-        // Today a masked 3D object layer draws its scene pass turned by
-        // 180° (measured on the composite/3d-mask corpus case); routed
-        // until that is matched (docs/engine/composite.md).
-        let comp_id = scope.comp.id().to_string_lossy();
-        b.unsupported
-            .push(Unsupported::layer(&comp_id, layer, Feature::Masks));
         return Ok(None);
     }
     let world = scaled_world(scope, layer, time, scale)?;
@@ -912,14 +951,10 @@ fn layer_masks<'d>(
     } else {
         None
     };
-    match composite::build::masks(scope, layer, time, world, plane)? {
-        composite::build::MaskRoute::Unmasked => Ok(Some(None)),
-        composite::build::MaskRoute::Parametric(m) => Ok(Some(Some(m))),
-        composite::build::MaskRoute::Path => {
-            let comp_id = scope.comp.id().to_string_lossy();
-            b.unsupported
-                .push(Unsupported::layer(&comp_id, layer, Feature::PathMasks));
-            Ok(None)
+    match composite::build::masks(scope, layer, time, world, plane, width, height)? {
+        composite::build::MaskRoute::Unmasked => Ok(None),
+        composite::build::MaskRoute::Parametric(m) | composite::build::MaskRoute::Path(m) => {
+            Ok(Some(m))
         }
     }
 }
@@ -1090,23 +1125,48 @@ fn native_content_quad<'d>(
                 c.rgb[2] as f32,
                 c.alpha as f32,
             ];
-            let world = vector_world(scope, layer, time, scale)?;
-            let scene = crate::vector::level2::solid_scene(
+            let (sw, sh) = (
                 js::or_number(js::get(&d, "w"), wf),
                 js::or_number(js::get(&d, "h"), hf),
-                js::get(&d, "radius").to_number(),
-                rgba,
-                &world,
             );
+            let radius = js::get(&d, "radius").to_number();
+            let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
+                let scene = crate::vector::level2::solid_scene(sw, sh, radius, rgba, world);
+                Ok(scene
+                    .pixel_bounds(target)
+                    .map(|rect| crate::vector::VectorQuad::Device {
+                        source: crate::vector::VectorSource::Scene { scene, rect },
+                        rect,
+                    }))
+            };
+            if scope.is_3d_layer(layer)? {
+                return local_level2(
+                    scope,
+                    layer,
+                    time,
+                    scale,
+                    pm_vector::render::scene::PixelRect::new(0, 0, width, height),
+                    &mut plan,
+                );
+            }
+            let world = vector_world(scope, layer, time, scale)?;
             let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
-            Ok(scene.pixel_bounds(target).map(|rect| {
-                device_quad(crate::vector::VectorQuad::Device {
-                    source: crate::vector::VectorSource::Scene { scene, rect },
-                    rect,
-                })
-            }))
+            Ok(plan(scope, &world, target)?.map(device_quad))
         }
         "shape" => {
+            if crate::vector::level2(layer) && scope.is_3d_layer(layer)? {
+                let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
+                    crate::vector::plan_shape(scope, layer, &d, time, world, target)
+                };
+                return local_level2(
+                    scope,
+                    layer,
+                    time,
+                    scale,
+                    pm_vector::render::scene::PixelRect::new(0, 0, width, height),
+                    &mut plan,
+                );
+            }
             let world = vector_world(scope, layer, time, scale)?;
             let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
             let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target)?;
@@ -1215,6 +1275,27 @@ fn native_content_quad<'d>(
                 let world = vector_world(scope, layer, time, scale)?;
                 let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
                 return match crate::vector::svg::plan_svg(&path, bw, bh, uv, &world, target) {
+                    Ok(crate::vector::svg::SvgPlan::Drawn(Some(_)))
+                        if scope.is_3d_layer(layer)? =>
+                    {
+                        let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
+                            Ok(
+                                match crate::vector::svg::plan_svg(&path, bw, bh, uv, world, target)
+                                {
+                                    Ok(crate::vector::svg::SvgPlan::Drawn(q)) => q.map(|q| *q),
+                                    _ => None,
+                                },
+                            )
+                        };
+                        local_level2(
+                            scope,
+                            layer,
+                            time,
+                            scale,
+                            pm_vector::render::scene::PixelRect::new(0, 0, width, height),
+                            &mut plan,
+                        )
+                    }
                     Ok(crate::vector::svg::SvgPlan::Drawn(quad)) => {
                         Ok(quad.map(|q| device_quad(*q)))
                     }
@@ -1560,6 +1641,80 @@ fn vector_world<'d>(
     Ok(mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]))
 }
 
+/// Places vector content under a world matrix into a clip
+/// ([`local_level2`]).
+type PlanVector<'p, 'd> = dyn FnMut(
+        &mut Scope<'_, 'd>,
+        &Mat2d,
+        pm_vector::render::scene::PixelRect,
+    ) -> JsResult<Option<crate::vector::VectorQuad>>
+    + 'p;
+
+/// Level 2 device content of a 3D layer (`crate::space25d::local`):
+/// `plan` places the content under a world matrix into a clip. It runs
+/// once in content coordinates; a coverage scene is then projected through
+/// the plane and covered at output resolution in `target`, and anything
+/// else (a resvg raster) is planned again at the density its bounds need on
+/// the plane and drawn as a layer-space texture by the level 2 resampler.
+fn local_level2<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    target: pm_vector::render::scene::PixelRect,
+    plan: &mut PlanVector<'_, 'd>,
+) -> JsResult<Option<Quad>> {
+    let clip = crate::space25d::local::unbounded();
+    let rect_of = |q: &crate::vector::VectorQuad| match q {
+        crate::vector::VectorQuad::Device { rect, .. } => Some(*rect),
+        crate::vector::VectorQuad::Layer { .. } => None,
+    };
+    let Some(first) = plan(scope, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], clip)? else {
+        return Ok(None);
+    };
+    let Some(r) = rect_of(&first) else {
+        return Ok(Some(device_quad(first)));
+    };
+    let bounds = [
+        f64::from(r.x),
+        f64::from(r.y),
+        f64::from(r.width),
+        f64::from(r.height),
+    ];
+    let (dx, dy) = crate::space25d::local::density(scope, layer, time, scale, bounds)?;
+    if let crate::vector::VectorQuad::Device {
+        source: crate::vector::VectorSource::Scene { scene, .. },
+        ..
+    } = &first
+        && let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
+    {
+        let projected = crate::space25d::local::project_scene(scene, &plane, dx.max(dy));
+        return Ok(projected.pixel_bounds(target).map(|rect| {
+            device_quad(crate::vector::VectorQuad::Device {
+                source: crate::vector::VectorSource::Scene {
+                    scene: projected,
+                    rect,
+                },
+                rect,
+            })
+        }));
+    }
+    let Some(second) = plan(scope, &[dx, 0.0, 0.0, dy, 0.0, 0.0], clip)? else {
+        return Ok(None);
+    };
+    Ok(Some(match second {
+        crate::vector::VectorQuad::Device { source, rect } => Quad::Texture {
+            source: Source::Vector(Box::new(source)),
+            w: f64::from(rect.width) / dx,
+            h: f64::from(rect.height) / dy,
+            ax: -f64::from(rect.x) / dx,
+            ay: -f64::from(rect.y) / dy,
+            uv: [0.0, 0.0, 1.0, 1.0],
+        },
+        layer_quad => device_quad(layer_quad),
+    }))
+}
+
 /// A planned vector quad as the render graph's quad.
 fn device_quad(q: crate::vector::VectorQuad) -> Quad {
     match q {
@@ -1615,6 +1770,9 @@ fn text_quad<'d>(
     }
     let world = scaled_world(scope, layer, time, scale)?;
     // `compat` level 2: drawn at output resolution, no raster.
+    if node::to_number(node::member(Some(layer), "compat")) >= 2.0 && scope.is_3d_layer(layer)? {
+        return local_text(scope, b, layer, ty, time, scale);
+    }
     if node::to_number(node::member(Some(layer), "compat")) >= 2.0 {
         let offset = scope.size_anchor_offset(layer, time)?;
         let m = mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]);
@@ -1654,6 +1812,75 @@ fn text_quad<'d>(
         ax: q.ax,
         ay: q.ay,
         uv: [0.0, 0.0, 1.0, 1.0],
+    }))
+}
+
+/// Level 2 text or captions on a 2.5D plane: laid out in layer space at the
+/// plane's density (`crate::space25d::local`) and drawn through the plane by
+/// the level 2 resampler. The layout runs once at unit density, offset into
+/// a large canvas, for its bounds.
+fn local_text<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    ty: &str,
+    time: f64,
+    scale: (f64, f64),
+) -> JsResult<Option<Quad>> {
+    const MARGIN: f64 = 65536.0;
+    let comp_id = scope.comp.id().to_string_lossy();
+    let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
+        return Ok(None);
+    };
+    let mut lay = |scope: &mut Scope<'_, 'd>, m: kurbo::Affine, target: (u32, u32)| {
+        if ty == "text" {
+            text.text_layer_level2(scope, layer, time, m, target)
+        } else {
+            text.captions_layer_level2(scope, layer, time, m, target)
+        }
+    };
+    let side = (2.0 * MARGIN) as u32;
+    let first = lay(
+        scope,
+        kurbo::Affine::translate((MARGIN, MARGIN)),
+        (side, side),
+    )?;
+    let Some(first) = first else {
+        for what in text.take_unsupported() {
+            b.unsupported
+                .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+        }
+        return Ok(None);
+    };
+    let [x0, y0, x1, y1] = first.crop.map(f64::from);
+    let bounds = [x0 - MARGIN, y0 - MARGIN, x1 - x0, y1 - y0];
+    let (dx, dy) = crate::space25d::local::density(scope, layer, time, scale, bounds)?;
+    // Layer space at density, shifted so the content starts near the
+    // canvas origin.
+    let (ox, oy) = (
+        (bounds[0] * dx).floor() - 1.0,
+        (bounds[1] * dy).floor() - 1.0,
+    );
+    let size = (
+        ((bounds[0] + bounds[2]) * dx - ox).ceil() as u32 + 2,
+        ((bounds[1] + bounds[3]) * dy - oy).ceil() as u32 + 2,
+    );
+    let m = kurbo::Affine::new([dx, 0.0, 0.0, dy, -ox, -oy]);
+    let second = lay(scope, m, size)?;
+    for what in text.take_unsupported() {
+        b.unsupported
+            .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+    }
+    Ok(second.map(|p| {
+        let [x0, y0, x1, y1] = p.crop.map(f64::from);
+        Quad::Texture {
+            source: Source::Text(Box::new(p)),
+            w: (x1 - x0) / dx,
+            h: (y1 - y0) / dy,
+            ax: -(x0 + ox) / dx,
+            ay: -(y0 + oy) / dy,
+            uv: [0.0, 0.0, 1.0, 1.0],
+        }
     }))
 }
 
