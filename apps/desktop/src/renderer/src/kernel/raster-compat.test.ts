@@ -9,7 +9,7 @@ const shape = { id: 'box', type: 'shape', d: { shape: 'rect', w: 40, h: 20 }, fx
 const captions = { id: 'subs', type: 'captions', d: {}, fx: [] as any[] };
 const nested = { id: 'inner', type: 'text', d: { text: 'Nested' }, fx: [] as any[] };
 
-function setup(withAsync = false) {
+function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: number, crop?: any) => string | null) {
   const PM: any = {
     time: 0,
     proj: { id: 'P', compId: 'P-root', layers: [text, shape, captions], comps: { inner: { id: 'inner', layers: [nested] } } },
@@ -29,6 +29,7 @@ function setup(withAsync = false) {
     onChainChange: (fn) => services.onChange('raster', fn),
     engineRaster,
     engineRasterAsync: withAsync ? engineRasterAsync : undefined,
+    rasterKey,
     readPixels,
     log: () => {}
   });
@@ -40,6 +41,32 @@ function setup(withAsync = false) {
 }
 
 describe('the raster override producer', () => {
+  it('reuses a native-evaluated unchanged base across playback times while wrappers still run at each time', async () => {
+    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.d, scale, crop]));
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, scale: number, time: number, ...rest: any[]) => ({ ...original(layer, scale, time, ...rest), key: `animated-wrapper:${time}` }));
+    expect(compat.answer(need('box', 0), 4)).toMatchObject({ key: 'animated-wrapper:0' });
+    await compat.prepare(need('box', 1), 4);
+    expect(compat.answer(need('box', 1), 4, { prepared: true })).toMatchObject({ key: 'animated-wrapper:1' });
+    expect(engineRaster).toHaveBeenCalledTimes(1);
+    expect(engineRasterAsync).not.toHaveBeenCalled();
+    // A new document revision invalidates content-identical cached pixels.
+    await compat.prepare(need('box', 1.5), 5);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('prepares fresh pixels when evaluated content changes with time', async () => {
+    const { services, compat, engineRasterAsync, need } = setup(true, (_layer, scale, time) => `${scale}:${time >= 1 ? 'blue' : 'red'}`);
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, ...args: any[]) => ({ ...original(layer, ...args), key: 'animated-content' }));
+    compat.answer(need('box', 0), 4);
+    await compat.prepare(need('box', .5), 4);
+    expect(engineRasterAsync).not.toHaveBeenCalled();
+    await compat.prepare(need('box', 1), 4);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+    expect(engineRasterAsync).toHaveBeenCalledWith(shape, 2, 1, undefined);
+  });
+
   it('propagates a preparation failure instead of drawing a blank or blocking in a sync retry', async () => {
     const { services, compat, engineRaster, engineRasterAsync, need } = setup(true);
     const original = services.get<any>('raster');

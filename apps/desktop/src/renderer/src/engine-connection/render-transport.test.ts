@@ -535,6 +535,23 @@ describe('compatibility answers during playback', () => {
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 
+  it('warms a bounded horizon from paused needs before Play without a continuing paused timer', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked, state } = rig(false);
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, async () => {});
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => i * frame));
+      expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(2);
+      expect(vi.getTimerCount()).toBe(0);
+      state.playing = true;
+      t.playbackStarted();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toHaveLength(7);
+    } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
+  });
+
   it('bounds async preparations, presents ready answers independently, and drops obsolete completions', async () => {
     vi.useFakeTimers();
     const { t, session, asked, state } = rig(true);

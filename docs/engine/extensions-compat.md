@@ -186,18 +186,35 @@ lane).
 
 ### Playback
 
-A frame whose compatibility answers are missing is not drawn: the presenter
-draws the clock's frame when they arrive (`present/render.rs`, `CompatPending`),
-and during playback the clock has moved on by then. Measured before the
-lookahead: 2 frames presented in 3 s of 30 fps playback with a shape
-override, against today's 90. So the window answers ahead
-(`render-transport.ts` `lookahead`, `presentedWhilePlaying`): each layer the
-engine asked for is answered for the next `COMPAT_LOOKAHEAD` (6) frames of
-the open composition, starting at Play from the layers asked for while
-paused, and one more per presented frame, within 6 ms of the main thread per
-call. A nested or retimed layer whose time runs at another rate gets its
-answers ahead at the open composition's frames, so its frames that miss are
-asked for as before.
+A frame whose compatibility answers are missing waits for its window producer.
+Playback preparation follows the audio-clock playhead, quantized to composition
+frames, with six frames ahead. A 4 ms poll replenishes that horizon even when
+nothing has reached the viewer. Delayed needs cannot imply reverse playback:
+the transport rate supplies direction, and obsolete needs yield to the current
+playhead. Each producer turn admits at most sixteen answers within a 6 ms
+budget. Layer/source entries and their time windows are bounded.
+
+At most two base-raster preparations are in flight. They use asynchronous IPC
+with native dependency priority: ordinary async snapshots yield to due viewer
+frames, but a viewer waiting for these pixels cannot make progress first.
+Each ready result can run its synchronous wrapper independently of a slower
+sibling. A paused need warms at most one six-frame horizon for 50 ms without
+a continuing paused timer, so Play can consume ready pixels immediately.
+Unchanged plain-shape base pixels use the native evaluator’s resolved content
+identity across times; the bounded cache holds at most two surfaces / 32 MiB.
+Wrappers still run for every requested time, including animated wrappers.
+The prepared surface must match live layer identity, time, density,
+crop and revision. Reset, chain changes, fonts and disposal invalidate it;
+snapshots and exports use their existing paths. A modified layer passed by a
+wrapper still asks for that exact layer's base pixels. Nested or retimed layers
+retain the open composition's preparation step and ask for any missing times.
+
+Timed worker commits retain the earliest queued refresh deadline. When a later
+BeginFrame overtakes an overdue timer, it fulfils that turn immediately. The
+previous cancellation on every BeginFrame could starve timed drawing under
+load, which also stopped the earlier presentation-driven lookahead. The
+presenter regression test delays every timer past the next BeginFrame and
+requires the timed frame to draw. Viewer version is 1.3.8.
 
 ### Earlier measurements (2026-10-19, before round-three integration)
 

@@ -961,6 +961,13 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
       const engine = engineRender(PM);
       return engine ? engineRasterBase(PM, engine, [layer as Layer, scale, time, undefined, crop as RasterWindow | undefined]) : null;
     },
+    rasterKey: (layer, scale, time, crop) => {
+      // The legacy shape cache also keys pixels by resolved content rather
+      // than composition time: rotation alone never repaints its base.
+      if (layer?.type !== 'shape' || layer.d?.paths?.length) return null;
+      const evaluator = native(PM);
+      return evaluator ? JSON.stringify([evaluator.resolveContent(layer, time), scale, crop ?? null]) : null;
+    },
     engineRasterAsync: async (layer, scale, time, crop) => {
       const engine = engineRender(PM);
       if (!engine) return null;
