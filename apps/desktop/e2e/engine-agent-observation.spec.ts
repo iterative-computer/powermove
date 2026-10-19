@@ -1,10 +1,19 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { loadavg } from 'node:os';
+import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { launchApp } from './helpers/app';
 
 /** Runs hidden under pm-electron-lock; the user's desktop is never captured. */
 test('agent observations batch five 720 px frames during UHD project playback without pausing', async () => {
   test.setTimeout(180_000);
+  const addon = process.env['POWERMOVE_ENGINE_ADDON'] ?? path.resolve(__dirname, '../native/pm_node.node');
+  const addonSha256 = createHash('sha256').update(readFileSync(addon)).digest('hex');
+  if (process.env['POWERMOVE_SHIPPING_ADDON_SHA256']) expect(addonSha256).toBe(process.env['POWERMOVE_SHIPPING_ADDON_SHA256']);
+  const loadStart = loadavg()[0]!; let loadPeak = loadStart;
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
+  const sampling = setInterval(() => { loadPeak = Math.max(loadPeak, loadavg()[0]!); }, 1000); sampling.unref();
   try {
     await session.openEditor();
     await expect.poll(() => session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine?.engine?.status().job.state), { timeout: 30_000 }).toBe('ready');
@@ -38,10 +47,10 @@ test('agent observations batch five 720 px frames during UHD project playback wi
     });
     const sorted = result.ms.toSorted((a, b) => a - b);
     const p95 = sorted[Math.ceil(sorted.length * .95) - 1]!;
-    console.log(JSON.stringify({ agentObservation: { trials: sorted.length, p50Ms: sorted[9], p95Ms: p95, maxMs: sorted.at(-1), pauses: result.pauses, elapsedTimeline: result.elapsedTimeline } }));
+    console.log(JSON.stringify({ agentObservation: { addonSha256, loadStart, loadPeak, trials: sorted.length, p50Ms: sorted[9], p95Ms: p95, maxMs: sorted.at(-1), pauses: result.pauses, elapsedTimeline: result.elapsedTimeline } }));
     expect(result.pauses).toBe(0);
     expect(result.playing).toBe(true);
     expect(result.elapsedTimeline).toBeGreaterThan(0);
     expect(p95).toBeLessThanOrEqual(10_000);
-  } finally { await session.close(); }
+  } finally { clearInterval(sampling); await session.close(); }
 });
