@@ -145,6 +145,36 @@ describe('EngineRenderTransport', () => {
     expect(transport.stats.failed).toBe(1);
   });
 
+  it('finishes successive raster and dependent program phases synchronously and asynchronously', async () => {
+    const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
+    const replies = (): EngineSnapshotReply[] => [
+      { status: 'needsRenderer', revision: 12, fallback: [], compat: [need] },
+      ...['a', 'b', 'c', 'd'].map((key): EngineSnapshotReply => ({ status: 'needsRenderer', revision: 12, fallback: [fallbackRequest(key.repeat(64))], compat: [] })),
+      rendered(2, 2)
+    ];
+    for (const async of [false, true]) {
+      const { transport, asked, runner } = setup(replies());
+      transport.answerCompat('rasterOverride', () => ({ kind: 'native' }));
+      const result = async ? await transport.snapshot({ time: 0, width: 2, height: 2 }) : transport.snapshotSync({ time: 0, width: 2, height: 2 });
+      expect(result.width).toBe(2);
+      expect(asked).toHaveLength(6);
+      expect(asked[5]!.snapshot.uploaded).toHaveLength(4);
+      expect(async ? runner.render : runner.renderSync).toHaveBeenCalledTimes(4);
+    }
+  });
+
+  it('still stops a repeated unresolved raster dependency after three replies', async () => {
+    const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
+    const needs: EngineSnapshotReply = { status: 'needsRenderer', revision: 12, fallback: [], compat: [need] };
+    for (const async of [false, true]) {
+      const { transport, asked } = setup([needs, needs, needs, rendered(2, 2)]);
+      transport.answerCompat('rasterOverride', () => ({ kind: 'native' }));
+      if (async) await expect(transport.snapshot({ time: 0, width: 2, height: 2 })).rejects.toThrow(/same unresolved snapshot dependencies 3 times/);
+      else expect(() => transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(/same unresolved snapshot dependencies 3 times/);
+      expect(asked).toHaveLength(3);
+    }
+  });
+
   it("returns today's shapes: a canvas, a JPEG data URL at 0.74, '' only on failure", () => {
     const { transport, asked, fake } = setup([rendered(480, 270), rendered(320, 180), { status: 'failed', code: 'unsupported', message: 'x' }]);
     expect(transport.snapshotDataUrlSync(1, 480, { w: 1920, h: 1080 })).toBe('data:image/jpeg;q=0.74;480x270');
@@ -362,6 +392,19 @@ describe('EngineRenderTransport', () => {
       expect(runner.renderSync).toHaveBeenCalledTimes(1);
       expect(asked[1]).toMatchObject({ session: null, snapshot: { uploaded: ['c'.repeat(64)] } });
       expect((asked[1] as any).fallbackPixels[0]).toMatchObject({ key: 'c'.repeat(64), width: 2, height: 2 });
+    });
+
+    it('main-owned snapshots finish a chain of distinct dependent programs', () => {
+      const d = doc();
+      const { transport, asked, runner } = setup([
+        ...['a', 'b', 'c', 'd'].map((key): EngineSnapshotReply => ({ status: 'needsRenderer', revision: 12, fallback: [fallbackRequest(key.repeat(64))], compat: [] })),
+        rendered(2, 2)
+      ], { session: null, windowDocument: d.windowDocument });
+      expect(transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+      expect(runner.renderSync).toHaveBeenCalledTimes(4);
+      expect(asked).toHaveLength(5);
+      expect(asked[4]!.snapshot.uploaded).toHaveLength(4);
+      expect((asked[4] as any).fallbackPixels[0].key).toBe('d'.repeat(64));
     });
 
     it('a raster override: main\'s session learns the producers, and the needs\' answers go along with the next round', () => {
