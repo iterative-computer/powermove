@@ -51,3 +51,46 @@ test('font census cost on a large timeline during playback', async () => {
   }
   await appendFile(process.env.PM_FONT_CENSUS_OUT ?? '/tmp/powermove-font-census.jsonl', JSON.stringify(rows) + '\n');
 });
+
+// Opt-in benchmark: measureText-heavy work on a connected canvas (as an
+// extension panel or UI chart would do it), with and without the census,
+// while the DOM keeps changing text around it.
+test('font census cost on connected-canvas measureText', async () => {
+  test.skip(process.env.PM_FONT_CENSUS_MEASURE !== '1', 'opt-in measureText measurement');
+  test.setTimeout(300_000);
+  const rows = [];
+  for (const enabled of ['0', '1']) {
+    const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: enabled } });
+    try {
+      await session.openEditor();
+      await session.page.waitForTimeout(1000);
+      const row = await session.page.evaluate(() => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 200; canvas.height = 50;
+        document.body.append(canvas);
+        const ctx = canvas.getContext('2d')!;
+        const host = document.createElement('div');
+        host.style.cssText = 'position:fixed;left:0;top:0;opacity:0.01;pointer-events:none';
+        document.body.append(host);
+        const fonts = ['400 12px system-ui', '600 14px system-ui', '400 13px Menlo'];
+        const run = (calls: number, mutateEvery: number) => {
+          const started = performance.now();
+          let width = 0;
+          for (let i = 0; i < calls; i++) {
+            if (mutateEvery && i % mutateEvery === 0) host.textContent = `Label ${i}`;
+            ctx.font = fonts[i % fonts.length]!;
+            width += ctx.measureText(`Value ${i}`).width;
+          }
+          return { ms: performance.now() - started, width };
+        };
+        run(2000, 0);
+        const steady = run(30_000, 0);
+        const mutating = run(30_000, 100);
+        canvas.remove(); host.remove();
+        return { steadyMs: steady.ms, mutatingMs: mutating.ms, calls: 30_000, stats: (window as any).PM.EngineDoc?.stats().fontCensus ?? null };
+      });
+      rows.push({ enabled, ...row });
+    } finally { await session.close(); }
+  }
+  await appendFile(process.env.PM_FONT_CENSUS_OUT ?? '/tmp/powermove-font-census.jsonl', JSON.stringify({ measureText: rows }) + '\n');
+});

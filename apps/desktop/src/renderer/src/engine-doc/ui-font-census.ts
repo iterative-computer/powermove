@@ -165,23 +165,27 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
   for (const proto of [(view as any).CanvasRenderingContext2D?.prototype, (view as any).OffscreenCanvasRenderingContext2D?.prototype]) {
     if (!proto) continue;
     const declaration = doc.createElement('span').style;
-    // The description each context last used, by its state. A connected
-    // canvas's state includes the style generation (its inherited style can
-    // change); a detached or offscreen canvas has no inherited style. Only a
-    // changed state parses the font and reads the computed style again.
+    // The descriptions each context used, by state. A connected canvas's
+    // state includes the style generation (its inherited style can change);
+    // a detached or offscreen canvas has no inherited style. Only a new
+    // state parses the font and reads the computed style.
     type Description = { key: string; use: UiFontUse } | null;
-    const described = new WeakMap<object, { state: string; description: Description }>();
+    const described = new WeakMap<object, Map<string, Description>>();
     const stateOf = (ctx: CanvasRenderingContext2D): string => {
       const connected = ctx.canvas instanceof view.HTMLCanvasElement && ctx.canvas.isConnected;
       return `${ctx.font}|${ctx.textRendering}|${ctx.fontStretch}${connected ? `|${styleGeneration}` : ''}`;
     };
     const describe = (ctx: CanvasRenderingContext2D): Description => {
       const state = stateOf(ctx);
-      const last = described.get(ctx);
-      if (last?.state === state) return last.description;
+      let states = described.get(ctx);
+      if (!states) described.set(ctx, states = new Map());
+      const known = states.get(state);
+      if (known !== undefined) return known;
+      // A context cycling through many fonts or generations stays bounded.
+      if (states.size >= 64) states.clear();
       declaration.font = ctx.font;
       const use = useOf(declaration);
-      if (!use) { described.set(ctx, { state, description: null }); return null; }
+      if (!use) { states.set(state, null); return null; }
       const canvas = ctx.canvas;
       const inherited = canvas instanceof view.HTMLCanvasElement && canvas.isConnected ? view.getComputedStyle(canvas) : null;
       use.cacheKey = fontCacheKey({
@@ -197,7 +201,7 @@ export function startUiFontCensus(doc: Document, host: UiFontCensusHost, idle?: 
         fontVariantAlternates: inherited?.fontVariantAlternates,
       });
       const description = { key: `1|${use.families.join(',')}|${use.size}|${use.weight}|${use.italic}|${use.cacheKey}`, use };
-      described.set(ctx, { state, description });
+      states.set(state, description);
       return description;
     };
     for (const name of ['measureText', 'fillText', 'strokeText']) {
