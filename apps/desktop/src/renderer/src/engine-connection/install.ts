@@ -28,7 +28,7 @@ import type { ClockSample } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
-import { DocumentSession, documentId, type DocumentStream } from './session';
+import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
 import { EngineRenderTransport } from './render-transport';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
@@ -41,6 +41,7 @@ import { ViewerPresentation } from '../../../extensions/viewer/engine-present/pr
 import { ShaderFallbackRunner } from './shader-fallback';
 import { SvgRasters } from './svg-rasters';
 import { EngineTransport } from './transport';
+import { followOpenComposition } from './composition-follow';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
 export const ENGINE_VIEWER_SERVICE = 'engine.viewer';
@@ -92,6 +93,17 @@ export interface EngineConnectionHandle {
   dispose(): void;
 }
 
+/**
+ * The route message a viewer attaching to `session` missed: the session
+ * already presents (no viewerless state in between, which would make the
+ * engine say it again) a composition the engine cannot draw. Null
+ * otherwise.
+ */
+export function missedRoute(session: { readonly headless: boolean; readonly route: Route; readonly routeReason: string | null }): { type: 'routed'; route: 'legacy'; reason: string } | null {
+  if (session.headless || session.route !== 'legacy') return null;
+  return { type: 'routed', route: 'legacy', reason: session.routeReason ?? '' };
+}
+
 export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHost | null | undefined, target: Window = window): EngineConnectionHandle | null {
   const native = host?.nativeEngine;
   let enabled = false;
@@ -122,8 +134,13 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   let viewerHandlers: EngineViewerHandlers | null = null;
   let viewerLease = 0;
   let sessionReady: Promise<void> | null = null;
+  /** The open composition (what Play plays and the viewer shows). */
+  const openComposition = (): string => String(PM.proj?.compId ?? PM.proj?.id ?? '');
+  /** A viewerless session follows the open composition (composition-follow.ts). */
+  const follower = followOpenComposition({ session: () => current, open: openComposition, bus: PM.bus });
   const transport = new EngineTransport(() => current, hostClock, {
-    exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); })
+    exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); }),
+    prepare: follower.follow
   });
   /** animVersion per revision sent, for `frame:rendered.version`. */
   const versions = new RevisionVersions();
@@ -252,7 +269,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       // overwrite the replacement document's requested UI position.
       onLoading: () => transport.seek(Number(PM.time) || 0, false),
       onLoaded: () => {
-        if (session.headless) session.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+        if (session.headless) session.sendHeadless(openComposition());
         PM.bus?.emit?.('layout');
       },
       onRoute: (route, reason) => {
@@ -265,7 +282,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     sessions.add(session);
     current = session;
     transport.resetLoop();
-    session.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+    session.sendHeadless(openComposition());
     sessionReady = session.start().then(() => renderTransport.syncProducers(session)).catch((error: unknown) => {
       log('warn', `engine session: ${error instanceof Error ? error.message : String(error)}`);
       session.close();
@@ -433,6 +450,18 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const previous = viewerHandlers;
       viewerHandlers = handlers;
       previous?.closed('another viewer attached to the engine session');
+      // A viewer that replaces another on a session already presenting
+      // (no viewerless state in between, which would make the engine say
+      // it again) learns why a composition the engine cannot draw shows
+      // nothing. Its channel is in place by the next microtask.
+      const missed = missedRoute(opened);
+      if (missed) {
+        queueMicrotask(() => {
+          if (lease === viewerLease && viewerHandlers === handlers && opened.route === 'legacy') {
+            handlers.message(missed, performance.now());
+          }
+        });
+      }
       return {
         sendViewerState: (state) => {
           if (lease === viewerLease) opened.sendViewerState({ ...state, headless: false } as never);
@@ -441,7 +470,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         close: () => {
           if (lease !== viewerLease || opened.closed) return;
           viewerHandlers = null;
-          opened.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+          opened.sendHeadless(openComposition());
           transport.refresh();
         }
       };
@@ -499,6 +528,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offPending();
       offEager();
       offAssets();
+      follower.dispose();
       unprovideSvg();
       unrouteAudio();
       target.removeEventListener('message', onMessage);

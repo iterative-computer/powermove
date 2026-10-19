@@ -352,6 +352,17 @@ pub struct FrameTrace {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
+    /// Render-thread turns (one command batch, or one pass over the views)
+    /// longer than [`STALL_US`]: the clock, frames, and audio status wait
+    /// behind them. The longest, and what the last one was doing.
+    pub stalls: u64,
+    pub stall_us_max: i64,
+    pub last_stall: Option<String>,
+    /// Every render-thread turn of at least 50, 100, 250 ms and 1 s, by
+    /// band ([`SLOW_TURN_BANDS_US`]), and the longest of them: hitches
+    /// shorter than a stall show here.
+    pub slow_turns: [u64; 4],
+    pub turn_us_max: i64,
     pub checked_in: bool,
     pub check_in_us: i64,
     pub bridge_error: Option<String>,
@@ -701,21 +712,66 @@ pub fn run(
         match rx.recv_timeout(timeout) {
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(command) => {
+                let started = now();
+                let what = command_name(&command);
                 if !thread.apply(command) {
                     break;
                 }
+                thread.note_turn(what, started);
                 while let Ok(command) = rx.try_recv() {
+                    let started = now();
+                    let what = command_name(&command);
                     if matches!(command, Command::Shutdown) || !thread.apply(command) {
                         thread.shutdown();
                         return;
                     }
+                    thread.note_turn(what, started);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
         }
+        let started = now();
         thread.work();
+        thread.note_turn("work", started);
     }
     thread.shutdown();
+}
+
+/// A render-thread turn longer than this is a stall (diagnostics: the
+/// status report and a warning in the engine log).
+pub const STALL_US: i64 = 250_000;
+
+/// The lower bounds of the slow-turn bands in [`Stats::slow_turns`].
+pub const SLOW_TURN_BANDS_US: [i64; 4] = [50_000, 100_000, STALL_US, 1_000_000];
+
+/// The band of [`SLOW_TURN_BANDS_US`] a turn of `took` µs falls in.
+pub fn slow_turn_band(took: i64) -> Option<usize> {
+    SLOW_TURN_BANDS_US.iter().rposition(|&low| took >= low)
+}
+
+/// What a command is, for stall diagnostics.
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Shutdown => "shutdown",
+        Command::Configure { .. } => "viewer state",
+        Command::Release { .. } => "release",
+        Command::Transport { .. } => "transport",
+        Command::Audio { .. } => "audio",
+        Command::Render { .. } => "frame request",
+        Command::Close { .. } => "close",
+        Command::ClosePort { .. } => "close port",
+        Command::Document { .. } => "document",
+        Command::Definitions { .. } => "definitions",
+        Command::Media { .. } => "media",
+        Command::ShaderFallback { .. } => "shader fallback",
+        Command::FrameCache { .. } => "frame cache",
+        Command::Snapshot(_) => "snapshot",
+        Command::Compat { .. } => "compat",
+        Command::LoseDevice => "lose device",
+        Command::FontsChanged => "fonts",
+        #[allow(unreachable_patterns)]
+        _ => "command",
+    }
 }
 
 impl Thread {
@@ -729,6 +785,35 @@ impl Thread {
 
     fn stats(&self) -> std::sync::MutexGuard<'_, Stats> {
         self.stats.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records a turn that stalled the thread (see [`STALL_US`]).
+    fn note_turn(&self, what: &'static str, started: i64) {
+        let took = now() - started;
+        let band = slow_turn_band(took);
+        if band.is_none() {
+            return;
+        }
+        {
+            let mut stats = self.stats();
+            stats.turn_us_max = stats.turn_us_max.max(took);
+            if let Some(band) = band {
+                stats.slow_turns[band] += 1;
+            }
+            if took < STALL_US {
+                return;
+            }
+            stats.stalls += 1;
+            stats.stall_us_max = stats.stall_us_max.max(took);
+            stats.last_stall = Some(format!("{what}: {} ms", took / 1000));
+        }
+        self.log(
+            LogLevel::Warn,
+            format!(
+                "presenter: the render thread spent {} ms on {what}",
+                took / 1000
+            ),
+        );
     }
 
     fn check_in(&mut self) {
@@ -1410,10 +1495,10 @@ impl Thread {
         }
         match command {
             TransportCommand::Play { rate } => {
-                if view.reported != Some(Route::Engine) {
-                    if !matches!(view.reported, Some(Route::Legacy(_))) {
-                        view.deferred_transport = Some(TransportCommand::Play { rate });
-                    }
+                if !takes_transport(view.reported.as_ref()) {
+                    // Not decided yet (document or media on its way): the
+                    // latest Play waits for the route.
+                    view.deferred_transport = Some(TransportCommand::Play { rate });
                     return;
                 }
                 view.deferred_transport = None;
@@ -1458,13 +1543,11 @@ impl Thread {
                 pre_roll,
                 post_roll,
             } => {
-                if view.reported != Some(Route::Engine) {
-                    if !matches!(view.reported, Some(Route::Legacy(_))) {
-                        view.deferred_transport = Some(TransportCommand::PlayAround {
-                            pre_roll,
-                            post_roll,
-                        });
-                    }
+                if !takes_transport(view.reported.as_ref()) {
+                    view.deferred_transport = Some(TransportCommand::PlayAround {
+                        pre_roll,
+                        post_roll,
+                    });
                     return;
                 }
                 view.deferred_transport = None;
@@ -1510,7 +1593,7 @@ impl Thread {
             TransportCommand::Seek { time, mode } => {
                 let playing = view.clock.following() && view.clock.is_playing();
                 let awaiting = view.awaiting;
-                let engine = view.reported == Some(Route::Engine);
+                let engine = takes_transport(view.reported.as_ref());
                 view.scrub = mode == SeekMode::Scrub && !playing && awaiting.is_none();
                 view.clock.apply(TransportCommand::Seek { time, mode }, at);
                 if playing || awaiting.is_some() {
@@ -1578,7 +1661,7 @@ impl Thread {
     /// only when enabled, otherwise it silently prepares the next start.
     fn scrub_grain(&mut self, key: Key, media: i64) {
         if self.config.host_clock
-            || self.views.get(&key).and_then(|v| v.reported.as_ref()) != Some(&Route::Engine)
+            || !takes_transport(self.views.get(&key).and_then(|v| v.reported.as_ref()))
         {
             return;
         }
@@ -1825,7 +1908,13 @@ impl Thread {
             a == state
         };
         let composition_changed = view.state.composition != state.composition;
+        let attached = view.state.headless == Some(true) && state.headless != Some(true);
         view.state = state;
+        // A viewer attaching to a session whose composition the renderer
+        // cannot draw is told so (the report went out while headless).
+        if attached && matches!(view.reported, Some(Route::Legacy(_))) {
+            view.reported = None;
+        }
         if let Some(revision) = revision {
             view.revision = view.revision.max(revision);
         }
@@ -2316,7 +2405,8 @@ impl Thread {
             if (view.dirty && view.state.headless != Some(true))
                 || !view.requests.is_empty()
                 || (view.sample_due
-                    && (view.state.headless != Some(true) || view.reported == Some(Route::Engine)))
+                    && (view.state.headless != Some(true)
+                        || takes_transport(view.reported.as_ref())))
             {
                 return Duration::ZERO;
             }
@@ -2524,19 +2614,21 @@ impl Thread {
                     view.dirty = true;
                     view.sample_due = true;
                 }
-                Route::Legacy(_) | Route::Pending(_) => {
+                // Something the renderer cannot draw (plan amendment 21: no
+                // other engine draws it): the stage shows the named failure,
+                // and the transport and audio go on as they were.
+                Route::Legacy(_) => {}
+                Route::Pending(_) => {
                     stop = view.clock.is_playing() || view.awaiting.is_some();
                 }
             }
         }
         if stop {
-            if matches!(route, Route::Pending(_)) {
-                let rate = view.awaiting.map_or(view.clock.rate(), |a| a.2);
-                view.deferred_transport
-                    .get_or_insert(TransportCommand::Play { rate });
-            } else {
-                view.deferred_transport = None;
-            }
+            // Not decided (a resync, media being resolved): the run stops
+            // and resumes, from where it stopped, once the route is known.
+            let rate = view.awaiting.map_or(view.clock.rate(), |a| a.2);
+            view.deferred_transport
+                .get_or_insert(TransportCommand::Play { rate });
             view.awaiting = None;
             view.clock.apply(TransportCommand::Pause, t);
             view.schedule.reset();
@@ -2569,7 +2661,21 @@ impl Thread {
                 self.report_legacy(key, reasons);
             }
         }
-        if route == Route::Engine {
+        if takes_transport(Some(&route)) {
+            // Paused exact seeks while the route was undecided moved only
+            // the line (a load, a composition switch, media resolving): the
+            // audio a paused session already has prepares its next start
+            // at the line again.
+            if changed
+                && !self.config.host_clock
+                && let Some(view) = self.views.get(&key)
+                && !view.clock.is_playing()
+                && view.awaiting.is_none()
+                && view.deferred_transport.is_none()
+                && let Some(link) = self.audio.get(&key)
+            {
+                link.send(AudioCtl::Seek(view.clock.media_at(t)));
+            }
             let deferred = self
                 .views
                 .get_mut(&key)
@@ -2594,7 +2700,10 @@ impl Thread {
             .get(&key)
             .and_then(|d| Revision::new(d.revision()).ok())
             .unwrap_or(Revision::ZERO);
-        let mut message = format!("Drawn by the current engine: {}.", reasons.join("; "));
+        let mut message = format!(
+            "The new engine cannot draw this composition yet: {}.",
+            reasons.join("; ")
+        );
         if message.len() > 2_000 {
             message.truncate(1_997);
             message.push_str("...");
@@ -2616,6 +2725,13 @@ impl Thread {
         let lead = self.config.lead;
         self.retry_pool(key);
         let draws = !self.config.document || self.document_step(key);
+        // A headless view's clock is heard once its route is decided (drawn
+        // or not: the transport runs either way).
+        let takes = draws
+            || self
+                .views
+                .get(&key)
+                .is_some_and(|v| takes_transport(v.reported.as_ref()));
         // Clock samples.
         if let Some(view) = self.views.get_mut(&key) {
             let t = now();
@@ -2623,14 +2739,19 @@ impl Thread {
                 && view
                     .last_sample
                     .is_none_or(|last| t - last >= SAMPLE_INTERVAL_US);
-            if (view.sample_due || periodic) && (!view.state.headless.is_some_and(|h| h) || draws) {
+            if (view.sample_due || periodic) && (!view.state.headless.is_some_and(|h| h) || takes) {
                 view.sample_due = false;
                 view.last_sample = Some(t);
                 let sample = view.clock.sample(t);
+                // A headless clock carries the document revision only while
+                // the engine draws the composition: the renderer has no
+                // frame to learn the route from, so a tagged clock after an
+                // `unsupported` report is how it hears the composition is
+                // drawable again (an edit, a composition switch).
                 let revision = view
                     .state
                     .headless
-                    .filter(|h| *h)
+                    .filter(|h| *h && draws)
                     .and_then(|_| self.docs.get(&key))
                     .and_then(|doc| Revision::new(doc.revision()).ok());
                 self.event(key, Event::Clock(sample), revision);
@@ -2647,7 +2768,7 @@ impl Thread {
                     key,
                     id,
                     ErrorCode::Unsupported,
-                    "The current engine draws this composition.",
+                    "The new engine cannot draw this composition yet.",
                 );
             }
             return;
@@ -4120,6 +4241,13 @@ enum BlenderFrames {
     Fail(ErrorCode, String),
 }
 
+/// Whether a view's route takes transport: the engine runs the clock and
+/// audio for every decided route, drawn or not (amendment 21: nothing hands
+/// playback to the legacy engine). Only an undecided route defers it.
+fn takes_transport(route: Option<&Route>) -> bool {
+    matches!(route, Some(Route::Engine | Route::Legacy(_)))
+}
+
 /// Snapshot build failures the static check routes for exports
 /// (`pm_export::blender`): the engine cannot build these frames.
 fn blender_routed(why: &str) -> bool {
@@ -4237,6 +4365,17 @@ fn blender_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_turns_fall_in_their_bands() {
+        assert_eq!(slow_turn_band(0), None);
+        assert_eq!(slow_turn_band(49_999), None);
+        assert_eq!(slow_turn_band(50_000), Some(0));
+        assert_eq!(slow_turn_band(120_000), Some(1));
+        assert_eq!(slow_turn_band(STALL_US), Some(2));
+        assert_eq!(slow_turn_band(999_999), Some(2));
+        assert_eq!(slow_turn_band(4_000_000), Some(3));
+    }
 
     fn spec() -> PoolSpec {
         PoolSpec {

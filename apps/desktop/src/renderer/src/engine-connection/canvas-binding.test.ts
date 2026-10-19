@@ -100,6 +100,45 @@ describe('EngineCanvasBinding (render.gl.init/resize with the engine on)', () =>
     expect(binding.bound).toBeNull();
   });
 
+  it('a caller that tears its canvas down without another resize leaves no presenter behind', () => {
+    const watched: Array<{ canvas: HTMLCanvasElement; changed: () => void; stopped: boolean }> = [];
+    const made: FakePresentation[] = [];
+    const binding = new EngineCanvasBinding({
+      service: () => ({ exclusive: true }) as unknown as EngineViewerService,
+      composition: () => ({ w: 1920, h: 1080 }),
+      quality: () => 1,
+      present: ({ stage, before }) => {
+        const p = new FakePresentation(stage, before);
+        made.push(p);
+        return p;
+      },
+      watch: (canvas, changed) => {
+        const entry = { canvas, changed, stopped: false };
+        watched.push(entry);
+        return () => { entry.stopped = true; };
+      }
+    });
+    const stage = document.createElement('div');
+    const canvas = document.createElement('canvas');
+    stage.append(canvas);
+    document.body.append(stage);
+    rect(stage, { left: 0, top: 0, width: 1000, height: 600 });
+    rect(canvas, { left: 20, top: 30, width: 960, height: 540 });
+    binding.bind(canvas);
+    binding.resize();
+    expect(watched).toHaveLength(1);
+    // A size change while connected is the caller's to report.
+    watched[0]!.changed();
+    expect(made[0]!.disposed).toBe(false);
+    // A disabled viewer extension (say) removes its stage and calls nothing more.
+    stage.remove();
+    watched[0]!.changed();
+    expect(made[0]!.disposed).toBe(true);
+    expect(binding.bound).toBeNull();
+    expect(binding.presenting).toBe(false);
+    expect(watched[0]!.stopped).toBe(true);
+  });
+
   it('does nothing with the engine off', () => {
     const { binding, canvas, disable } = setup();
     disable();

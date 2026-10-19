@@ -186,6 +186,35 @@ fn headless_playback_draws_nothing_and_a_view_joins_its_running_clock() {
     );
 }
 
+/// A composition the renderer cannot draw (an effect without the kernel's
+/// definitions) still plays on the engine's clock (amendment 21: nothing
+/// hands the transport to another engine): the view is told why it draws
+/// nothing, again when a viewer attaches, and no frame is drawn.
+#[test]
+fn an_unsupported_composition_plays_on_the_engine_clock_and_says_why() {
+    for headless in ["0", "1"] {
+        let mut envs = vec![(SOURCE_ENV, "document"), ("PM_UNSUPPORTED_TEST", "1")];
+        if headless == "1" {
+            envs.push(("PM_HEADLESS_TEST", "1"));
+        }
+        let stdout = run_child("child_silent_play", &envs);
+        assert!(
+            stdout.contains("CHILD-OK"),
+            "child did not finish (headless {headless}): {stdout}"
+        );
+    }
+}
+
+/// The message of the next unsupported failure.
+fn unsupported(envelope: &Envelope) -> Option<String> {
+    match &envelope.message {
+        Message::Event {
+            body: Event::Failure(f),
+        } if f.error.code == ErrorCode::Unsupported => Some(f.error.message.clone()),
+        _ => None,
+    }
+}
+
 #[test]
 #[ignore = "run by a_silent_composition_plays_from_play_without_waiting_for_the_audio_device"]
 fn child_silent_play() {
@@ -228,8 +257,15 @@ fn child_silent_play() {
         _ => None,
     });
     let event = |body: Event| Envelope::new(Message::Event { body }).with_session(session);
-    // A solid and nothing else: nothing to hear.
-    let doc = project(solid(100.0, json!([])));
+    // A solid and nothing else: nothing to hear. Unsupported: an effect
+    // without definitions (the renderer cannot draw it).
+    let unsupported_test = std::env::var("PM_UNSUPPORTED_TEST").is_ok();
+    let fx = if unsupported_test {
+        json!([{ "id": "fx1", "type": "blur", "on": true, "params": {} }])
+    } else {
+        json!([])
+    };
+    let doc = project(solid(100.0, fx));
     send(
         &mut host,
         Envelope::new(Message::Request {
@@ -250,16 +286,32 @@ fn child_silent_play() {
     let mut viewer = state(1);
     viewer.headless = Some(headless);
     send(&mut host, event(Event::Viewer(viewer)));
+    if unsupported_test {
+        let why = inbox.wait(Duration::from_secs(10), unsupported);
+        assert!(
+            why.starts_with("The new engine cannot draw this composition yet:"),
+            "{why}"
+        );
+    }
     if headless {
+        // A headless clock carries the revision only while the engine draws
+        // the composition: the renderer learns the route from it.
+        let tag = if unsupported_test {
+            None
+        } else {
+            Revision::new(1).ok()
+        };
         inbox.wait(Duration::from_secs(5), |m| match &m.message {
             Message::Event {
                 body: Event::Clock(_),
-            } if m.revision == Revision::new(1).ok() => Some(()),
+            } if m.revision == tag => Some(()),
             _ => None,
         });
         let status: Value = serde_json::from_str(&host.status_json()).unwrap();
         assert_eq!(status["presenter"]["pools"], 0);
         assert_eq!(status["presenter"]["frames"], 0);
+    } else if unsupported_test {
+        // Nothing to draw: the failure above is what the viewer shows.
     } else {
         let first = inbox.wait(Duration::from_secs(20), frame);
         send(
@@ -298,13 +350,20 @@ fn child_silent_play() {
         std::thread::sleep(Duration::from_millis(150));
         let status: Value = serde_json::from_str(&host.status_json()).unwrap();
         assert_eq!(status["presenter"]["frames"], 0);
+        inbox.take();
         send(&mut host, event(Event::Viewer(state(2))));
-        let joined = inbox.wait(Duration::from_secs(20), frame);
-        assert!(
-            joined.duration.is_some(),
-            "joins timed playback, without a pause or seek"
-        );
-        assert!(joined.pts.get() > 0);
+        if unsupported_test {
+            // The viewer that attaches is told why it draws nothing.
+            let why = inbox.wait(Duration::from_secs(10), unsupported);
+            assert!(why.contains("cannot draw"), "{why}");
+        } else {
+            let joined = inbox.wait(Duration::from_secs(20), frame);
+            assert!(
+                joined.duration.is_some(),
+                "joins timed playback, without a pause or seek"
+            );
+            assert!(joined.pts.get() > 0);
+        }
         let clock = inbox.wait(Duration::from_secs(2), |m| match &m.message {
             Message::Event {
                 body: Event::Clock(c),
@@ -322,8 +381,49 @@ fn child_silent_play() {
     });
     let status: Value = serde_json::from_str(&host.status_json()).unwrap();
     let presenter = &status["presenter"];
+    if unsupported_test {
+        assert_eq!(presenter["frames"], 0, "{presenter}");
+        assert!(
+            inbox.take().iter().filter_map(frame).next().is_none(),
+            "no frame is drawn for an unsupported composition"
+        );
+    }
     assert_eq!(presenter["silentRuns"], 1, "{presenter}");
     assert_eq!(presenter["hostClockRuns"], 0, "{presenter}");
+    if unsupported_test && headless {
+        // Viewerless again, and an edit makes the composition drawable: the
+        // clock comes tagged with the new revision (no frame says so).
+        let mut away = state(3);
+        away.headless = Some(true);
+        send(&mut host, event(Event::Viewer(away)));
+        let drawable = project(solid(100.0, json!([])));
+        inbox.take();
+        send(
+            &mut host,
+            Envelope::new(Message::Request {
+                id: RequestId::new(3).unwrap(),
+                body: Request::Resync(Resync {
+                    document: "Ptracer".into(),
+                    revision: Revision::new(2).unwrap(),
+                    encoding: DocumentEncoding::CanonicalJsonV1,
+                    source: ResyncSource::Inline {
+                        body: Bytes(drawable.to_string().into_bytes()),
+                    },
+                    hash: ContentHash(pm_model::hash::canonical_digest(&model(&drawable))),
+                }),
+            })
+            .with_session(session),
+        );
+        inbox.wait(Duration::from_secs(10), |m| match &m.message {
+            Message::Event {
+                body: Event::Clock(_),
+            } if m.revision == Revision::new(2).ok() => Some(()),
+            Message::Event {
+                body: Event::Clock(_),
+            } if m.revision.is_some() => panic!("a clock tagged {:?}", m.revision),
+            _ => None,
+        });
+    }
     // The view's audio thread never opened a device.
     for audio in presenter["audio"]
         .as_object()
