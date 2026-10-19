@@ -247,9 +247,15 @@ fn pmv_projects_render_from_embedded_media() {
 
 #[test]
 fn projects_the_engine_cannot_render_exit_3_and_write_nothing() {
+    // pm-cli has fonts, so text no longer refuses. A project color setting
+    // this engine does not know (one from a later version) still does
+    // (`Feature::ProjectColor`), and always will: drawing it with a guess
+    // would differ from the app that wrote it.
     let dir = scratch("routed");
+    let mut p = project(true, true);
+    p["color"] = json!({ "mode": "a-mode-from-a-later-version" });
     let project_file = dir.join("p.json");
-    std::fs::write(&project_file, project(true, true).to_string()).unwrap();
+    std::fs::write(&project_file, p.to_string()).unwrap();
     let out = cli(&[
         project_file.to_str().unwrap(),
         "-o",
@@ -261,11 +267,55 @@ fn projects_the_engine_cannot_render_exit_3_and_write_nothing() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(String::from_utf8_lossy(&out.stderr).contains("text"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("project color"), "{stderr}");
+    assert!(!stderr.contains("text"), "text no longer refuses: {stderr}");
     assert_eq!(
         std::fs::read_dir(&dir).unwrap().count(),
         1,
         "only the project"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn text_projects_render_with_the_hosts_fonts() {
+    let dir = scratch("text");
+    let project_file = dir.join("p.json");
+    let mut text_project = project(false, false);
+    text_project["assets"] = json!({});
+    text_project["layers"] = json!([layer(
+        "t",
+        "text",
+        json!({"text":"Visible text", "font":"system-ui", "size":48, "weight":400, "color":"#ffffff"}),
+        20.0,
+        20.0
+    )]);
+    std::fs::write(&project_file, text_project.to_string()).unwrap();
+    let out_file = dir.join("text.png");
+    let s = summary(&cli(&[
+        project_file.to_str().unwrap(),
+        "-o",
+        out_file.to_str().unwrap(),
+        "--format",
+        "still",
+    ]));
+    assert!(s["frames"].as_u64().unwrap_or(0) > 0, "{s}");
+    let decoder = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&out_file).unwrap(),
+    ));
+    let mut reader = decoder.read_info().unwrap();
+    let mut bytes = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut bytes).unwrap();
+    assert_eq!(info.bit_depth, png::BitDepth::Eight);
+    let channels = info.color_type.samples();
+    let bright = bytes[..info.buffer_size()]
+        .chunks_exact(channels)
+        .filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200)
+        .count();
+    assert!(
+        bright > 100,
+        "text must contribute white ink over the black background, found {bright} bright pixels"
     );
     std::fs::remove_dir_all(dir).unwrap();
 }

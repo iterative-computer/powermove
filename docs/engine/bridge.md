@@ -1757,3 +1757,31 @@ P5) now belong to the perf3 lane.
   average 2.3 to 16; the document's render cost moved between 10 and
   17 ms from run to run on 2026-10-16); a quiet-machine round would
   tighten the spread.
+
+## Perf3 worker commit phase
+
+Timed worker commits now target a fixed point between BeginFrames rather than
+racing the page's commit for the same refresh (`presenter.ts`,
+`commitPhaseRefreshes`; `present-worker.ts`, 0.75). Immediate gesture frames
+retain draw-on-arrival. The refresh fit is sampled before deferral, including
+when the display rate is initially unknown; pending timers are cancelled on
+retarget/dispose. The prediction is two refreshes plus the existing panel
+offset. See `perf.md`, "Worker commit deadlines (P4)": targeted unit tests pass,
+but final paired cadence and A/V feedback on an awake display remain required.
+
+#### perf3: prepare the viewer drawing before mount
+
+The native connection owns `PresentationWarmup`, a single detached drawing for
+its document. It starts before registering the viewer service. The drawing has
+no engine session or animation loop; the worker initializes its WebGPU device
+and compiles SDR/EDR pipelines asynchronously. `ViewerPresentation` claims the
+canvas and worker together and transfers failure/loss callbacks to the current
+backend token. A popout cannot claim a drawing from a different document. If
+worker WebGPU fails before claim, a detached page painter is prepared instead.
+Closing a viewer prepares the next spare; removing the connection disposes the
+unused spare, including painters that finish initialization after disposal.
+
+This removes worker construction and first-pipeline compilation from a warmed
+mid-play mount. It does not remove the viewer extension's own DOM work. See
+`perf.md` P5 for the deterministic reverse scheduling result and remaining paired
+mount/A/V gates; neither physical-display gate is claimed from unit tests.

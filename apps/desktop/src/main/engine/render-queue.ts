@@ -45,7 +45,7 @@ import type { UserExportStatus } from './agent-jobs';
 /** What the queue needs from the job engine (AgentJobs). */
 export interface QueueEngine {
   readonly available: boolean;
-  exportQueued(project: unknown, options: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', definitions?: DefinitionsUpdate[]): Promise<{ jobId: string; frames: number }>;
+  exportQueued(project: unknown, options: SheetExportOptions, destination: string, overwrite: 'uniqueName' | 'replace' | 'fail', definitions?: DefinitionsUpdate[], seedOwner?: number | null): Promise<{ jobId: string; frames: number }>;
   cancelQueued(jobId: string): Promise<void>;
 }
 
@@ -96,10 +96,13 @@ export type RenderQueueOptions = {
   /** Called with the new state after every change. */
   onChange?(state: RenderQueueState): void;
   now?: () => number;
+  windowOpen?(owner: number): boolean;
 };
 
 export class RenderQueue {
   private jobs: StoredJob[] = [];
+  // Runtime only: webContents ids must never survive an app relaunch.
+  private seedOwners = new Map<string, number>();
   private agents: AgentEntry[] = [];
   private running = false;
   /** The engine job of the queue job that is rendering. */
@@ -201,6 +204,7 @@ export class RenderQueue {
     preset?: string;
     /** The window's definitions as the updates a job session starts with. */
     definitions?: DefinitionsUpdate[];
+    owner?: number;
   }): Promise<string> {
     await this.loaded;
     if (!validSheetExportOptions(input.options)) throw new Error('Invalid export settings.');
@@ -222,6 +226,7 @@ export class RenderQueue {
     if (input.definitions?.length) {
       await atomicWrite(this.definitionsFile(id), new TextEncoder().encode(JSON.stringify(input.definitions)));
     }
+    if (input.owner !== undefined) this.seedOwners.set(id, input.owner);
     this.jobs.push({
       id,
       name: input.name,
@@ -330,7 +335,9 @@ export class RenderQueue {
       });
     const finished = new Promise<void>((resolve) => { this.waiters.set(job.id, resolve); });
     try {
-      const started = await this.options.engine.exportQueued(project, job.options, job.destination, ENGINE_POLICY[job.overwrite], definitions);
+      const owner = this.seedOwners.get(job.id);
+      const seedOwner = owner !== undefined && this.options.windowOpen?.(owner) ? owner : null;
+      const started = await this.options.engine.exportQueued(project, job.options, job.destination, ENGINE_POLICY[job.overwrite], definitions, seedOwner);
       if (!this.current || this.current.id !== job.id) {
         // Cancelled while it was being submitted.
         await this.options.engine.cancelQueued(started.jobId);

@@ -25,7 +25,7 @@ pub use wrap::{
     GlyphLayout, Measure, SourceLine, Unit, glyph_layout, graphemes, text_source_lines,
 };
 
-pub use crate::blink::measure::FontCacheSeed;
+pub use crate::blink::measure::{APP_UI_TEXT_SIZES, FontCacheSeed, app_ui_font_cache_seeds};
 use crate::blink::shaper::UNMATCHED_VS_GLYPH;
 use crate::fallback_cache::FallbackCached;
 use crate::font::{FaceId, FontResolver, PreparedCache};

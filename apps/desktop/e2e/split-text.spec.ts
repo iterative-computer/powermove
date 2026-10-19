@@ -1,4 +1,8 @@
 import { chooseNativeMenu, inspectNativeMenu, expect, test } from './helpers/app';
+import { expectEngineDrewText } from './helpers/engine-drew';
+
+// With the new engine on, the engine (not the legacy renderer) drew the text.
+test.afterEach(async ({ session }) => { await expectEngineDrewText(session); });
 
 for (const [label, expected] of [
   ['By word', ['Hello', 'world', 'Hello', '👨‍👩‍👧‍👦!']],

@@ -88,6 +88,8 @@ pub struct Options {
     /// winning registrations of the app that made the project, forks and
     /// overrides by id included.
     pub definitions: Option<PathBuf>,
+    /// The editor's display scale factor (`crate::fonts`).
+    pub ui_scale: Option<f32>,
 }
 
 fn usage(m: impl Into<String>) -> Failure {
@@ -623,6 +625,10 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     };
     install_interrupt();
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+    crate::fonts::install(
+        &mut renderer,
+        options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
+    );
     // No Chromium here: level 1 SVG images are drawn by resvg (decision S1),
     // an approximation of the app's, reported below.
     renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);

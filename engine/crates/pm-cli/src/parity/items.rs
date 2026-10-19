@@ -91,7 +91,11 @@ pub struct Item {
 /// Why some dumped values are never compared.
 pub const SHADER_META: &str = "shader compile metadata (the GL program's uniform list and cache key), Phase 3a shader pipeline";
 
-const VARIABLE_INK: (f64, f64) = (2e-4, 0.0);
+/// The variable-font ink tolerance class (Phase 1 T2; `compare`): CoreText
+/// instances variable outlines with its own variation arithmetic, skrifa's
+/// differ by at most 1.19e-4 px on the corpus. pm-eval's corpus test uses
+/// the same bound.
+pub const VARIABLE_INK: (f64, f64) = (2e-4, 0.0);
 pub const VARIABLE_INK_CLASS: &str = "variable-font ink (CoreText instances outlines)";
 
 fn s(v: Option<&Value>) -> String {
@@ -536,7 +540,7 @@ impl<R: FontResolver> Builder<'_, R> {
                 it.legacy_threw = layer_error(l, "*bounds");
                 it.rule = Rule::bounds();
                 if variable {
-                    it.rule.question = Some((VARIABLE_INK, VARIABLE_INK_CLASS));
+                    it.rule.class = Some((VARIABLE_INK, VARIABLE_INK_CLASS));
                 }
                 it.text_deps = deps.clone();
                 out.push(it);
@@ -559,7 +563,7 @@ impl<R: FontResolver> Builder<'_, R> {
                     it.legacy_threw = layer_error(l, "*textRaster");
                     it.rule = Rule::bounds();
                     if variable {
-                        it.rule.question = Some((VARIABLE_INK, VARIABLE_INK_CLASS));
+                        it.rule.class = Some((VARIABLE_INK, VARIABLE_INK_CLASS));
                     }
                     it.text_deps = deps.clone();
                     out.push(it);

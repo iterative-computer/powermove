@@ -44,6 +44,7 @@ Capture options:
 | `--real-step <s>` | Sample spacing for the real project (default 2 s, plus the last frame) |
 | `--no-eval` | Skip evaluation dumps |
 | `--restart-every <n>` | Relaunch the app every n projects (default 30) |
+| `--text-only` | Every project with text or captions, reduced to its text (`src/text-only.ts`): text, captions, groups, precomps and nulls kept, flat, without motion blur or extension effects. Used with `--label text-iso` for `text_corpus` (text of projects whose other layers the engine does not draw yet) |
 
 ## How the capture drives the app
 

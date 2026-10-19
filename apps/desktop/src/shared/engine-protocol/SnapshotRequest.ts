@@ -40,6 +40,11 @@ waitMs: number,
  */
 blenderWaitMs?: number, 
 /**
+ * `PM.captionsHidden`: omit caption layers from this frame capture.
+ * Per request; it never changes the viewer or a later capture.
+ */
+captionsHidden?: boolean, 
+/**
  * Keys of shader fallback requests (from an earlier `needsRenderer`)
  * the caller drew and posted on the session's port before asking
  * again: the engine waits for those pixels (they are already on their

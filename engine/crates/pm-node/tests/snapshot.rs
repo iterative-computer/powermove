@@ -59,6 +59,10 @@ const HOST: PortId = PortId(1);
 const WINDOW: PortId = PortId(7);
 
 fn run_child(child: &str) -> String {
+    run_child_with(child, &[])
+}
+
+fn run_child_with(child: &str, envs: &[(&str, &str)]) -> String {
     let name = random_service_name(SERVICE_PREFIX).unwrap();
     let server = Rendezvous::register(&name).unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
@@ -69,6 +73,7 @@ fn run_child(child: &str) -> String {
             "--nocapture",
             "--test-threads=1",
         ])
+        .envs(envs.iter().copied())
         .env(CHILD_ENV, "1")
         .env(BRIDGE_ENV, &name)
         .env(SOURCE_ENV, "document")
@@ -160,6 +165,28 @@ fn level1_svg_snapshots_draw_the_windows_rasters() {
 fn a_snapshot_that_fails_on_fonts_leaves_the_viewer_asking_for_svg_rasters() {
     run_child("child_svg_font_failure");
 }
+
+/// The viewer waits for an SVG bucket without a stand-in, but a bucket
+/// the window could not draw ends the wait at once (the frame is drawn
+/// without the image, as today), is asked for again after a while, and
+/// draws when it arrives (pm-node `present::wait`).
+#[test]
+fn an_svg_raster_the_window_cannot_draw_never_freezes_the_viewer() {
+    run_child("child_svg_viewer_failure");
+}
+
+/// A bucket the window never answers for: the viewer's wait times out at
+/// its bound and the frame is drawn without it.
+#[test]
+fn an_unanswered_svg_raster_times_out_instead_of_freezing_the_viewer() {
+    run_child_with(
+        "child_svg_viewer_timeout",
+        &[(pm_node::present::EXTERNAL_WAIT_ENV, SVG_WAIT_CAP_MS)],
+    );
+}
+
+/// The wait cap the SVG timeout child runs with (ms).
+const SVG_WAIT_CAP_MS: &str = "1500";
 
 /// Every message the engine sent, by port.
 #[derive(Default)]
@@ -294,9 +321,9 @@ impl Child {
             |key: &str| std::env::var(key).ok(),
         )
         .unwrap();
-        host.attach(HOST.0, "host").unwrap();
+        host.attach(HOST.0, "host", None).unwrap();
         inbox.push(host.receive(HOST.0, &hello(PeerRole::Host)));
-        host.attach(WINDOW.0, "renderer").unwrap();
+        host.attach(WINDOW.0, "renderer", Some(WINDOW.0)).unwrap();
         inbox.push(host.receive(WINDOW.0, &hello(PeerRole::Renderer)));
         let mut child = Child {
             host,
@@ -412,6 +439,7 @@ fn frame_request(
         view_seq: Some(Seq::new(4).unwrap()),
         wait_ms,
         blender_wait_ms: 0,
+        captions_hidden: false,
         uploaded: Vec::new(),
     }
 }
@@ -1855,8 +1883,18 @@ fn serve_media<T>(
     c: &mut Child,
     path: &std::path::Path,
     timeout: Duration,
-    mut done: impl FnMut(PortId, &Envelope) -> Option<T>,
+    done: impl FnMut(PortId, &Envelope) -> Option<T>,
 ) -> T {
+    try_serve_media(c, path, timeout, done).expect("timed out serving media")
+}
+
+/// [`serve_media`], or `None` once `timeout` passed.
+fn try_serve_media<T>(
+    c: &mut Child,
+    path: &std::path::Path,
+    timeout: Duration,
+    mut done: impl FnMut(PortId, &Envelope) -> Option<T>,
+) -> Option<T> {
     use pm_protocol::error::{EngineError, ErrorScope};
     use pm_protocol::host::{CapabilityHandle, HandleAccess, HandleGrant, HandleResolved};
     let deadline = Instant::now() + timeout;
@@ -1903,9 +1941,11 @@ fn serve_media<T>(
             continue;
         }
         if let Some(found) = c.inbox.try_wait(Duration::from_millis(5), &mut done) {
-            return found;
+            return Some(found);
         }
-        assert!(Instant::now() < deadline, "timed out serving media");
+        if Instant::now() >= deadline {
+            return None;
+        }
     }
 }
 
@@ -2292,4 +2332,150 @@ fn child_compat() {
     let after = pixels_of(&rendered(ask(&mut c, 47, 3)));
     assert_eq!(at(&after, 320, 200, 60), BOX);
     println!("CHILD-OK");
+}
+
+/// A viewer frame from the window port.
+fn viewer_frame(port: PortId, m: &Envelope) -> Option<pm_protocol::frame::FrameDescriptor> {
+    match &m.message {
+        Message::Event {
+            body: Event::Frame(d),
+        } if port == WINDOW => Some(d.clone()),
+        _ => None,
+    }
+}
+
+/// The viewer's SVG raster requests from the window port.
+fn svg_asks(port: PortId, m: &Envelope) -> Option<Vec<pm_protocol::svg_raster::SvgRasterRequest>> {
+    use pm_protocol::snapshot::CompatMessage;
+    match &m.message {
+        Message::Event {
+            body: Event::Compat(CompatMessage::SvgRequests { requests }),
+        } if port == WINDOW => Some(requests.clone()),
+        _ => None,
+    }
+}
+
+/// The SVG project in the viewer: its first raster ask (no frame first).
+fn svg_viewer(c: &mut Child, path: &std::path::Path) -> pm_protocol::svg_raster::SvgRasterKey {
+    c.resync(2, 1, &svg_project());
+    c.event(Event::Viewer(viewer_state()));
+    let asked = serve_media(c, path, Duration::from_secs(20), |port, m| {
+        assert!(
+            viewer_frame(port, m).is_none(),
+            "a frame before the bucket was answered (a stand-in)"
+        );
+        svg_asks(port, m)
+    });
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].asset, "svg1");
+    asked[0].key.clone()
+}
+
+fn presenter_stats(c: &Child) -> Value {
+    let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
+    status["presenter"].clone()
+}
+
+fn svg_file(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("pm-snapshot-svg-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("art.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/></svg>"##,
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+#[ignore = "run by an_svg_raster_the_window_cannot_draw_never_freezes_the_viewer"]
+fn child_svg_viewer_failure() {
+    use pm_protocol::snapshot::CompatMessage;
+    use pm_protocol::svg_raster::SvgRasterPixels;
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let path = svg_file("viewer-failure");
+    let mut c = Child::start();
+    let key = svg_viewer(&mut c, &path);
+    // Waiting for the bucket: no frame meanwhile.
+    assert!(
+        try_serve_media(&mut c, &path, Duration::from_millis(300), viewer_frame).is_none(),
+        "a frame while the bucket is outstanding"
+    );
+    // The window cannot draw it: the frame is drawn at once, without it.
+    let t = Instant::now();
+    c.event(Event::Compat(CompatMessage::SvgFailed {
+        key: key.clone(),
+        reason: "decode".into(),
+        message: "Chromium could not decode this SVG".into(),
+    }));
+    let first = serve_media(&mut c, &path, Duration::from_secs(20), viewer_frame);
+    let shown = t.elapsed();
+    assert!(shown < Duration::from_secs(1), "the frame took {shown:?}");
+    assert_eq!(first.revision.get(), 1);
+    assert!(
+        !first.quality.stand_in,
+        "drawn without the image, not a stand-in"
+    );
+    let stats = presenter_stats(&c);
+    assert_eq!(stats["svgFailedFrames"], json!(1), "{stats}");
+    assert_eq!(stats["externalWaitTimeouts"], json!(0), "{stats}");
+    c.event(Event::ReleaseFrame(FrameRelease {
+        pool_index: first.pool_index,
+        seq: first.seq,
+    }));
+    // Paused, nothing draws again, yet the bucket it lacks is asked for
+    // again once the retry is due (5 s after the failure).
+    let again = serve_media(&mut c, &path, Duration::from_secs(20), |port, m| {
+        assert!(viewer_frame(port, m).is_none(), "drawn again for nothing");
+        svg_asks(port, m)
+    });
+    let retried = t.elapsed();
+    assert!(
+        retried >= Duration::from_millis(4_500) && retried < Duration::from_secs(8),
+        "asked again after {retried:?}"
+    );
+    assert_eq!(again[0].key, key);
+    // Now it arrives: the view draws it.
+    let fill = [0x4C, 0x8D, 0xFF, 0xFF];
+    let t = Instant::now();
+    c.event(Event::Compat(CompatMessage::SvgPixels(SvgRasterPixels {
+        key: key.clone(),
+        row: 0,
+        rows: key.height,
+        data: Bytes(fill.repeat((key.width * key.height) as usize)),
+    })));
+    let drawn = serve_media(&mut c, &path, Duration::from_secs(20), viewer_frame);
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    assert!(drawn.seq.get() > first.seq.get());
+    let stats = presenter_stats(&c);
+    assert_eq!(stats["svgFailedFrames"], json!(1), "drawn with it: {stats}");
+    println!("CHILD-OK svg viewer failure (shown {shown:?}, asked again {retried:?})");
+}
+
+#[test]
+#[ignore = "run by an_unanswered_svg_raster_times_out_instead_of_freezing_the_viewer"]
+fn child_svg_viewer_timeout() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let cap = Duration::from_millis(SVG_WAIT_CAP_MS.parse().unwrap());
+    let path = svg_file("viewer-timeout");
+    let mut c = Child::start();
+    let t = Instant::now();
+    let _key = svg_viewer(&mut c, &path);
+    // Never answered: drawn without it at the bound, counted from the ask.
+    let drawn = serve_media(&mut c, &path, Duration::from_secs(20), viewer_frame);
+    let waited = t.elapsed();
+    assert!(
+        waited + Duration::from_millis(100) >= cap && waited < cap + Duration::from_secs(2),
+        "drawn after {waited:?} (bound {cap:?})"
+    );
+    assert!(!drawn.quality.stand_in);
+    let stats = presenter_stats(&c);
+    assert_eq!(stats["externalWaitTimeouts"], json!(1), "{stats}");
+    assert_eq!(stats["svgFailedFrames"], json!(1), "{stats}");
+    println!("CHILD-OK svg viewer timeout (drawn after {waited:?})");
 }

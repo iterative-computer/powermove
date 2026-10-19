@@ -71,6 +71,8 @@ export type EngineSnapshotOptions = {
   pixels?: SnapshotPixels;
   /** Motion blur samples for layers with their switch on (0, the default: off). */
   motionBlurSamples?: number;
+  /** Omit captions for this frame capture only. Default false. */
+  captionsHidden?: boolean;
   /** Default true. */
   background?: boolean;
   /** Native shading may stand in for Blender (thumbnails, posters). Default false. */
@@ -241,6 +243,8 @@ export type RenderTransportOptions = {
    *  (`render3d.enabled`): only then does a capture that prepares its
    *  Blender frame ask the engine (and main) to wait for Blender. */
   usesBlender?: () => boolean;
+  /** Current PM.captionsHidden for frame captures without an explicit option. */
+  captionsHidden?: () => boolean;
   log: (level: 'info' | 'warn' | 'error', message: string) => void;
   createCanvas?: (width: number, height: number) => HTMLCanvasElement;
   /** Level 1 SVG rasters a snapshot needs (svg-rasters.ts, decision S1). */
@@ -536,6 +540,7 @@ export class EngineRenderTransport {
       target: layer
         ? { kind: 'layer', layer: layer.id, scale: layer.scale, crop: layer.crop ?? null, content: layer.content ?? null }
         : { kind: 'frame', motionBlurSamples: Math.max(0, Math.min(256, Math.round(options.motionBlurSamples ?? 0))), background: options.background !== false, draft3d: options.draft3d === true },
+      captionsHidden: !layer && (options.captionsHidden ?? this.options.captionsHidden?.() ?? false),
       pixels: options.pixels ?? 'opaque',
       class: cls,
       viewSeq: this.options.viewSeq(),
@@ -872,9 +877,9 @@ export class EngineRenderTransport {
     return { time, width: Math.max(2, Math.round(size.w * scale)), height: Math.max(2, Math.round(size.h * scale)), pixels: 'opaque', motionBlurSamples: 0 };
   }
 
-  snapshotDataUrlSync(time: number, maxWidth: number, size: { w: number; h: number }): string {
+  snapshotDataUrlSync(time: number, maxWidth: number, size: { w: number; h: number }, options: { captionsHidden?: boolean } = {}): string {
     try {
-      return this.canvas(this.snapshotSync(this.snapshotOptions(time, maxWidth, size))).toDataURL('image/jpeg', 0.74);
+      return this.canvas(this.snapshotSync({ ...this.snapshotOptions(time, maxWidth, size), captionsHidden: options.captionsHidden })).toDataURL('image/jpeg', 0.74);
     } catch (error) {
       // Today's capture of a Blender composition with no prepared frame
       // throws (`compositor.ts`); it does not come back empty.
@@ -886,8 +891,8 @@ export class EngineRenderTransport {
   /** The same, asynchronously. `prepareBlender`: today's `snapshotAsync`,
    *  which has Blender render the frame first; without it, today's
    *  synchronous capture (a Blender frame nobody prepared fails). */
-  async snapshotDataUrl(time: number, maxWidth: number, size: { w: number; h: number }, options: { prepareBlender?: boolean } = {}): Promise<string> {
-    const snapshot = { ...this.snapshotOptions(time, maxWidth, size), prepareBlender: options.prepareBlender === true };
+  async snapshotDataUrl(time: number, maxWidth: number, size: { w: number; h: number }, options: { prepareBlender?: boolean; captionsHidden?: boolean } = {}): Promise<string> {
+    const snapshot = { ...this.snapshotOptions(time, maxWidth, size), prepareBlender: options.prepareBlender === true, captionsHidden: options.captionsHidden };
     return this.canvas(await this.snapshot(snapshot)).toDataURL('image/jpeg', 0.74);
   }
 

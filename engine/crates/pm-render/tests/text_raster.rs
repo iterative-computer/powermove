@@ -8,17 +8,32 @@
 //! Vello coverage, the float paint pass) and compared with the canvas the
 //! legacy code painted, as the compositor uploads it (premultiplied RGBA8).
 //!
-//! Score: SSIM (the mean of the four channels' maps, 11 × 11 Gaussian,
-//! σ = 1.5) over ink windows (pixels whose local mean alpha exceeds 1/512 in
-//! either image; empty background cannot inflate it), and over the full
-//! canvas. Gate: ink SSIM ≥ 0.98 for every case, except the cases pinned in
-//! `tests/fixtures/text-raster-pins.json` (known to be below the class,
-//! docs/engine/text-render.md "Gaps"), which must stay above their floors.
+//! Gate: today's pixels exactly (amendment 22): every channel of every pixel
+//! within 1 code value of the capture. Refusals and any pixels beyond the
+//! bound fail, except the exact FONTS-R snapshots in fixtures/text-residuals.json.
+//! Regressions, new residuals and improvements with stale budgets fail. Reported besides:
+//! SSIM (the mean of the four channels' maps, 11 × 11 Gaussian, σ = 1.5)
+//! over ink windows (pixels whose local mean alpha exceeds 1/512 in either
+//! image) and over the full canvas.
 //!
-//! The capture is private (renders of the system fonts): `PM_TEXT_RASTER`
-//! names it, else the newest `text-raster-*` in the corpus directory.
-//! Without one the test reports and passes vacuously. Capture with
-//! `pm-electron-lock bun engine/crates/pm-text/capture/render.ts`.
+//! The captures are private (renders of the system fonts and of a real
+//! project): `PM_TEXT_RASTER` names one, else the newest capture of each set
+//! in the corpus directory is gated:
+//!
+//! - `text-raster-*`, the main set (`capture/render.ts`);
+//! - `text-closure-*`, distance-field text in every form, COLR fonts, CSS
+//!   Color 4 colors (`render.ts --set closure`; needs `capture/colr-fonts.py`
+//!   run into the corpus's `fonts` directory);
+//! - `text-paths-*`, glyphs above Skia's atlas limit drawn as paths
+//!   (`render.ts --set paths`);
+//! - `text-source-*`, the real project's text layers as source textures at
+//!   the density their world transform asks for (`capture/source.ts`).
+//!
+//! Capture each with `pm-electron-lock bun engine/crates/pm-text/capture/...`.
+//! A full run (neither `PM_TEXT_RASTER` nor `PM_TEXT_ONLY`) on a machine
+//! with the corpus directory fails when any FONTS-R entry has no selected
+//! capture; without the corpus directory the test reports and passes
+//! vacuously. A narrowed run lists the entries it did not check.
 //!
 //! `PM_TEXT_ONLY=<prefix>` limits cases; `PM_TEXT_DIFFS=<dir>` writes
 //! reference / engine / difference PNGs of failing cases;
@@ -33,23 +48,73 @@ mod support;
 
 #[cfg(target_os = "macos")]
 fn main() {
+    use std::path::PathBuf;
+    use support::text_residuals::{Gate, Ratchet};
+    // `PM_TEXT_RASTER` names one capture (any set); otherwise the newest
+    // capture of every set is gated.
+    let narrowed =
+        std::env::var_os("PM_TEXT_RASTER").is_some() || std::env::var_os("PM_TEXT_ONLY").is_some();
+    let sets: Vec<PathBuf> = match std::env::var("PM_TEXT_RASTER") {
+        Ok(p) => vec![PathBuf::from(p)],
+        Err(_) => CAPTURE_SETS
+            .iter()
+            .filter_map(|prefix| {
+                let found = support::newest_capture(prefix);
+                if found.is_none() {
+                    println!("no {prefix}* capture in the corpus directory");
+                }
+                found
+            })
+            .collect(),
+    };
+    let mut ratchet = Ratchet::load();
+    let mut failed = 0;
+    for dir in &sets {
+        println!("\n== {}", dir.display());
+        failed += gate(dir, &mut ratchet);
+    }
+    // Every FONTS-R raster entry is measured by a full run: a missing or
+    // unselected capture cannot leave one unchecked.
+    let unmeasured = ratchet.unmeasured(Gate::Raster);
+    if narrowed {
+        if !unmeasured.is_empty() {
+            println!(
+                "\npartial run (PM_TEXT_RASTER or PM_TEXT_ONLY): {} FONTS-R entries not checked; this is not the gate",
+                unmeasured.len()
+            );
+        }
+    } else if support::corpus_root().is_none() {
+        eprintln!(
+            "no private corpus directory on this machine: text raster parity and FONTS-R not checked"
+        );
+        return;
+    } else {
+        for line in &unmeasured {
+            println!("  FAILED {line}");
+        }
+        failed += unmeasured.len();
+    }
+    assert!(
+        failed == 0,
+        "{failed} cases violate the strict 1-CV bound or FONTS-R ratchet, or were not measured"
+    );
+}
+
+/// The capture sets a full run gates, by directory prefix (newest of each).
+#[cfg(target_os = "macos")]
+const CAPTURE_SETS: [&str; 4] = ["text-raster-", "text-closure-", "text-paths-", "text-source-"];
+
+/// Strict 1-CV measurement plus the explicit FONTS-R snapshot ratchet.
+#[cfg(target_os = "macos")]
+fn gate(dir: &std::path::Path, ratchet: &mut support::text_residuals::Ratchet) -> usize {
     use pm_protocol::color::Precision;
     use pm_render::Renderer;
     use serde_json::{Value, json};
     use std::path::PathBuf;
     use support::doc::{layer, project};
     use support::text::{ink_ssim, png_rgba};
+    use support::text_residuals::{Key, Outcome};
 
-    let dir = match std::env::var("PM_TEXT_RASTER") {
-        Ok(p) => Some(PathBuf::from(p)),
-        Err(_) => support::newest_capture("text-raster-"),
-    };
-    let Some(dir) = dir else {
-        eprintln!(
-            "no text raster capture; set PM_TEXT_RASTER or capture with pm-text/capture/render.ts"
-        );
-        return;
-    };
     let cases: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("cases.json")).unwrap()).unwrap();
     let manifest: Value =
@@ -61,15 +126,27 @@ fn main() {
     }))
     .unwrap();
     let registry = pm_text::corpus::native_registry(&corpus).expect("registry");
+    let mut measure = pm_eval::text_measure::CompatMeasure::new(registry);
+    // App captures can carry the exact window's seed table, including a
+    // census model under investigation. Never substitute startup seeds.
+    if let Some(seeds) = cases.get("seeds") {
+        measure.compat().set_font_cache_seeds(
+            serde_json::from_value(seeds.clone()).expect("capture font seeds"),
+        );
+    }
     let mut renderer = Renderer::headless().expect("a Metal device");
     renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
-        pm_eval::text_measure::CompatMeasure::new(registry),
-        None,
+        measure, None,
     ))));
     if let Ok(p) = std::env::var("PM_TEXT_PROFILE") {
         let profile: pm_text::render::profile::Profile =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap_or(p)).expect("profile json");
         renderer.text().set_profile(profile);
+    }
+    // `PM_TEXT_OUTLINES=1`: the outline path with the Canvas2D profile (no
+    // platform masks), for comparison.
+    if std::env::var("PM_TEXT_OUTLINES").as_deref() == Ok("1") {
+        renderer.text().set_masks(None);
     }
     if std::env::var("PM_TEXT_COVERAGE").as_deref() == Ok("cpu") {
         renderer
@@ -78,18 +155,9 @@ fn main() {
     }
     let only = std::env::var("PM_TEXT_ONLY").ok();
     let diffs = std::env::var("PM_TEXT_DIFFS").ok().map(PathBuf::from);
-    // Known cases below the text class and their floors (docs/engine/text-render.md, Gaps).
-    let pins: std::collections::BTreeMap<String, f64> = {
-        let v: Value =
-            serde_json::from_str(include_str!("fixtures/text-raster-pins.json")).unwrap();
-        v["pins"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_f64().unwrap()))
-            .collect()
-    };
-    let mut pinned_below = 0;
+    let mut refused = 0;
+    let mut exact = 0;
+    let mut ratcheted = 0;
     let mut rows = Vec::new();
     let mut failed = Vec::new();
     let started = std::time::Instant::now();
@@ -134,9 +202,23 @@ fn main() {
             shot["height"].as_u64().unwrap() as usize,
         );
         let reference = std::fs::read(dir.join(format!("{id}.rgba"))).unwrap();
-        let raster = renderer
-            .text_raster(&document, comp, layer_id, time, scale, Precision::Float16)
-            .unwrap_or_else(|e| panic!("{id}: {e}"));
+        let raster = match renderer.text_raster(
+            &document,
+            comp,
+            layer_id,
+            time,
+            scale,
+            Precision::Float16,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                let line = format!("{id:<26} refused: {e}");
+                println!("{line}");
+                refused += 1;
+                failed.push(line);
+                continue;
+            }
+        };
         let mut ours = vec![0u8; cw * ch * 4];
         let mut geometry = String::new();
         if let Some(r) = &raster {
@@ -155,44 +237,75 @@ fn main() {
             }
         }
         let (ink, full, ratio) = ink_ssim(&reference, &ours, cw, ch);
-        let pin = pins.get(id).copied();
-        let pass = geometry.is_empty()
-            && match pin {
-                Some(floor) => ink >= floor,
-                None => ink >= 0.98,
-            };
-        if pin.is_some() && ink < 0.98 {
-            pinned_below += 1;
+        // The largest channel difference, and the pixels off by more than
+        // one code value.
+        let (mut max_diff, mut off) = (0u8, 0usize);
+        for (a, b) in reference.chunks_exact(4).zip(ours.chunks_exact(4)) {
+            let d = (0..4).map(|c| a[c].abs_diff(b[c])).max().unwrap();
+            max_diff = max_diff.max(d);
+            off += usize::from(d > 1);
         }
+        let strict_pass = geometry.is_empty() && off == 0;
+        let decision = ratchet.check(Key::raster(id), off, max_diff);
+        let in_ratchet = matches!(&decision, Ok(Outcome::Ratcheted));
+        let pass = geometry.is_empty() && decision.is_ok();
+        let ratchet_error = decision.as_ref().err().cloned();
+        exact += usize::from(off == 0);
+        ratcheted += usize::from(in_ratchet && geometry.is_empty());
         let line = format!(
-            "{id:<26} {:>5}x{:<5} ink SSIM {ink:.4}  full {full:.4}  ink ratio {ratio:.3} {geometry}",
-            cw, ch
+            "{id:<26} {:>5}x{:<5} ink SSIM {ink:.4}  full {full:.4}  ink ratio {ratio:.3}  max Δ {max_diff:>3}  >1 CV {off:>6} {geometry}",
+            cw, ch,
         );
+        let line = match &decision {
+            Ok(Outcome::Ratcheted) => format!("{line} [FONTS-R]"),
+            Err(error) => format!("{line} [{error}]"),
+            _ => line,
+        };
         println!("{line}");
+        // Keep review images for ratcheted residuals too.
+        let write_diff = !strict_pass;
         if !pass {
             failed.push(line);
-            if let Some(d) = &diffs {
-                std::fs::create_dir_all(d).unwrap();
-                let diff: Vec<u8> = reference
-                    .chunks_exact(4)
-                    .zip(ours.chunks_exact(4))
-                    .flat_map(|(a, b)| {
-                        let e = (0..4).map(|c| a[c].abs_diff(b[c])).max().unwrap();
-                        [e.saturating_mul(4), 0, 0, 255]
-                    })
-                    .collect();
-                for (name, px) in [("legacy", &reference), ("engine", &ours), ("diff", &diff)] {
-                    support::write_png(
-                        &d.join(format!("{id}-{name}.png")),
-                        cw as u32,
-                        ch as u32,
-                        &png_rgba(px, name != "diff"),
-                    );
-                }
+        }
+        if write_diff && let Some(d) = &diffs {
+            std::fs::create_dir_all(d).unwrap();
+            let diff: Vec<u8> = reference
+                .chunks_exact(4)
+                .zip(ours.chunks_exact(4))
+                .flat_map(|(a, b)| {
+                    let e = (0..4).map(|c| a[c].abs_diff(b[c])).max().unwrap();
+                    [e.saturating_mul(4), 0, 0, 255]
+                })
+                .collect();
+            for (name, px) in [("legacy", &reference), ("engine", &ours), ("diff", &diff)] {
+                support::write_png(
+                    &d.join(format!("{id}-{name}.png")),
+                    cw as u32,
+                    ch as u32,
+                    &png_rgba(px, name != "diff"),
+                );
             }
         }
-        rows.push(json!({"id": id, "group": case["group"], "inkSsim": ink, "fullSsim": full, "inkRatio": ratio, "pass": pass}));
+        // Raw premultiplied buffers of every case, for fitting tools.
+        if let Ok(d) = std::env::var("PM_TEXT_DUMP") {
+            let d = PathBuf::from(d);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(format!("{id}.{cw}x{ch}.engine.rgba")), &ours).unwrap();
+            std::fs::write(d.join(format!("{id}.{cw}x{ch}.legacy.rgba")), &reference).unwrap();
+        }
+        rows.push(json!({"id": id, "group": case["group"], "inkSsim": ink, "fullSsim": full, "inkRatio": ratio, "maxDiff": max_diff, "over1": off, "pass": pass, "ratcheted": in_ratchet, "ratchetError": ratchet_error}));
     }
+    failed.extend(
+        ratchet.missing(
+            cases["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|case| case["id"].as_str())
+                .filter(|id| only.as_deref().is_none_or(|prefix| id.starts_with(prefix)))
+                .map(Key::raster),
+        ),
+    );
     // Per group summary.
     let mut groups: std::collections::BTreeMap<String, (usize, f64, f64)> = Default::default();
     for r in &rows {
@@ -212,10 +325,12 @@ fn main() {
     }
     let stats = renderer.text_gpu().stats;
     println!(
-        "\n{} cases in {:.1} s; {} pinned cases below 0.98 (gap); {} failed; pages {} (cpu {}); vello: {}",
-        rows.len(),
+        "\n{} cases in {:.1} s; {} exact within 1 code value; {} FONTS-R ratcheted; {} refused (gaps); {} failed; pages {} (cpu {}); vello: {}",
+        rows.len() + refused,
         started.elapsed().as_secs_f64(),
-        pinned_below,
+        exact,
+        ratcheted,
+        refused,
         failed.len(),
         stats.pages,
         stats.cpu_pages,
@@ -227,11 +342,7 @@ fn main() {
     for f in &failed {
         println!("  FAILED {f}");
     }
-    assert!(
-        failed.is_empty(),
-        "{} cases below the text class",
-        failed.len()
-    );
+    failed.len()
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -390,4 +390,20 @@ describe('engine fonts bridge', () => {
       [ENGINE_FONTS_IPC.generation]
     ]);
   });
+
+  it('asks for the window\'s font cache seeds and hears when they change', async () => {
+    const { ENGINE_FONTS_EVENTS, ENGINE_FONTS_IPC } = await import('../shared/engine-fonts-ipc');
+    const fonts = bridge().engineFonts!;
+    electronMocks.invoke.mockClear();
+    void fonts.seeds!();
+    expect(electronMocks.invoke.mock.calls).toEqual([[ENGINE_FONTS_IPC.seeds]]);
+    const heard: string[] = [];
+    const off = fonts.onSeedsChanged!((json) => heard.push(json));
+    const [channel, handler] = electronMocks.on.mock.calls.find((call: unknown[]) => call[0] === ENGINE_FONTS_EVENTS.seedsChanged)! as [string, (event: unknown, json: unknown) => void];
+    expect(channel).toBe(ENGINE_FONTS_EVENTS.seedsChanged);
+    handler({}, '{"seeds":[]}');
+    expect(heard).toEqual(['{"seeds":[]}']);
+    off();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(ENGINE_FONTS_EVENTS.seedsChanged, handler);
+  });
 });

@@ -4,6 +4,7 @@
 
 pub mod doc;
 pub mod text;
+pub mod text_residuals;
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +22,7 @@ pub fn repo_root() -> PathBuf {
 
 /// The newest capture whose id starts with `prefix`.
 pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
-    let base = dirs_home()?.join("Library/Application Support/Powermove Engine Corpus");
+    let base = corpus_root()?;
     let mut caps: Vec<PathBuf> = std::fs::read_dir(&base)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -60,6 +61,14 @@ pub fn corpus_dirs() -> Vec<PathBuf> {
     .iter()
     .filter_map(|p| newest_capture(p))
     .collect()
+}
+
+/// The private corpus directory, when this machine has one (gates with
+/// approved residuals require their captures there; elsewhere they report
+/// and pass vacuously).
+pub fn corpus_root() -> Option<PathBuf> {
+    Some(dirs_home()?.join("Library/Application Support/Powermove Engine Corpus"))
+        .filter(|p| p.is_dir())
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -187,6 +196,7 @@ pub fn load_project(capture: &Path, dir: &Path) -> Project {
     Project {
         name: dir
             .strip_prefix(capture.join("projects"))
+            .or_else(|_| dir.strip_prefix(capture))
             .unwrap()
             .display()
             .to_string(),
@@ -212,6 +222,13 @@ pub fn projects(capture: &Path) -> Vec<PathBuf> {
                 out.push(p.path());
             }
         }
+    }
+    if let Ok(real) = std::fs::read_dir(capture.join("real")) {
+        out.extend(
+            real.flatten()
+                .map(|p| p.path())
+                .filter(|p| p.join("loaded.json").is_file()),
+        );
     }
     out.sort();
     out
