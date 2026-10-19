@@ -18,6 +18,8 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 
 const desktop = process.argv.includes('--desktop');
+const missingBrowser = process.argv.includes('--missing-browser');
+const native = process.argv.includes('--native') || missingBrowser;
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 // Powermove's FFmpeg build, found the way the CLI host finds it (src/server/cli.ts hostFfmpeg).
@@ -62,7 +64,7 @@ if (desktop) {
   child = spawn(electron, ['.', '--powermove-mcp'], { cwd: desktopDir, stdio: ['pipe', 'pipe', 'pipe'], env });
 } else {
   const cli = process.env.POWERMOVE_TEST_CLI || path.join(repository, 'packages/cli/bin/powermove.mjs');
-  child = spawn(process.execPath, [cli, 'mcp', '--user-data', profile, '--exports', exportsDir], { stdio: ['pipe', 'pipe', 'pipe'] });
+  child = spawn(process.execPath, [cli, 'mcp', '--user-data', profile, '--exports', exportsDir], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...(native ? { POWERMOVE_NEW_ENGINE: '1' } : {}), ...(missingBrowser ? { POWERMOVE_CHROMIUM: path.join(root, 'missing-chromium') } : {}) } });
 }
 let diagnostics = '', output = '', nextId = 0;
 const pending = new Map();
@@ -125,6 +127,16 @@ async function desktopSmoke() {
   assert.equal(images.length, 2);
   assert(images.every(item => item.mimeType === 'image/jpeg'), 'agent frames from the job engine are JPEG');
   assert(!/render_frames routed/.test(appLog), `render_frames was routed to the current engine: ${appLog.match(/render_frames routed[^\n]*/)?.[0]}`);
+  if (native) {
+    assert(!diagnostics.includes('Chromium started on demand'), 'plain native edits/media/frames must not start Chromium');
+    const listed = text(await tool('list_media'));
+    assert(listed.assets.every(asset => asset.status === 'available'), 'host-store imports are available to the worker');
+    await tool('check_project');
+    await tool('replace_media', { assetId: imported.assetId, path: audio });
+    const workspace = text(await tool('get_workspace_state'));
+    assert(workspace.layout?.registeredPanels?.length > 0, 'native hidden workspace keeps the full production panel registry');
+    assert(diagnostics.includes('Chromium started on demand'), 'workspace DOM starts Chromium lazily');
+  }
   const video = text(await tool('export_video', { name: 'MCP desktop engine', audio: true, motionBlur: false }));
   assert(video.jobId, `export_video did not run in the job engine: ${JSON.stringify(video)} ${appLog.match(/export_video routed[^\n]*/)?.[0] ?? ''}`);
   assert(video.path.startsWith(exportsDir), video.path);
@@ -202,11 +214,22 @@ export default function activate(api: PowermoveAPI) {
   assert.deepEqual(left.filter(name => name.startsWith('.powermove-')), []);
   for (const name of left) assert((await stat(path.join(exportsDir, name))).size > 0, name);
   await quit();
-  console.log(`MCP desktop smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, native text, published shader plus frames, and a self-contained PMV4 with Undo history; ${left.length} verified exports.`);
+  console.log(`MCP ${native ? 'native hidden' : 'desktop'} smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, native text, published shader plus frames, and a self-contained PMV4 with Undo history; ${left.length} verified exports.`);
 }
 
 try {
-  if (desktop) { await desktopSmoke(); throw Object.assign(new Error('done'), { done: true }); }
+  if (missingBrowser) {
+    await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'missing-browser', version: '1' } });
+    await tool('create_project', { name: 'Missing Chromium', width: 320, height: 180, fps: 24, duration: 1 });
+    await tool('start_session', { prompt: 'Inspect the workspace' });
+    const result = await rpc('tools/call', { name: 'get_workspace_state', arguments: {} });
+    assert(result.isError && result.content.some(c => /chromium-unavailable/.test(c.text ?? '')), JSON.stringify(result));
+    assert(!diagnostics.includes('Chromium started on demand'));
+    await tool('finish_session', { commit: true }); await quit();
+    console.log('Native missing-browser case passed: document work succeeds and the first DOM tool returns chromium-unavailable.');
+    throw Object.assign(new Error('done'), { done: true });
+  }
+  if (desktop || native) { await desktopSmoke(); throw Object.assign(new Error('done'), { done: true }); }
   assert.equal((await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'smoke', version: '1' } })).serverInfo.name, 'powermove');
   const tools = (await rpc('tools/list')).tools.map(tool => tool.name);
   for (const name of ['create_project', 'apply_commands', 'edit_video', 'probe_media', 'render_frames', 'delegate_task', 'export_video', 'save_project']) assert(tools.includes(name), name);

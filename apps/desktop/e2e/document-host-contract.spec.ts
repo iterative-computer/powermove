@@ -1,3 +1,4 @@
+import { runContractOnNativeHost } from '../src/server/native/contract-run';
 /*
  * Desktop vs document host worker (contract 15, invariant 8; plan section
  * 22's gate): the agent-tool contract sequence from the same document, in
@@ -83,7 +84,11 @@ test('the agent-tool contract leaves byte-identical documents on the desktop and
 
   const bundle = await buildEngineBundle();
   let worker: ContractTranscript;
-  try { worker = await runContractOnWorker(bundle.script, CONTRACT_SEQUENCE, extensions, desktop.rasters); }
+  let hidden: ContractTranscript | undefined;
+  try {
+    worker = await runContractOnWorker(bundle.script, CONTRACT_SEQUENCE, extensions, desktop.rasters);
+    if (process.env['POWERMOVE_NATIVE_HOST_DIST']) hidden = await runContractOnNativeHost(process.env['POWERMOVE_NATIVE_HOST_DIST']!, bundle.script, extensions, desktop.rasters);
+  }
   finally { bundle.dispose(); }
 
   const desktopTranscript = normalizeMintedIds({ answers: desktop.answers.map((a) => answerOf(a as never)), document: documentBytes(JSON.parse(desktop.document)), documents: desktop.documents, workspace: workspaceDocumentFields(answerOf(desktop.workspace as never)), workspaceRaw: JSON.parse((desktop.workspace as any).content[0].text) }, contractProject());
@@ -102,6 +107,14 @@ test('the agent-tool contract leaves byte-identical documents on the desktop and
     expect(workerTranscript.documents?.[index], `${index}: ${call.tool} live document bytes`).toBe(desktopTranscript.documents?.[index]);
   }
   expect(workerTranscript.document).toBe(desktopTranscript.document);
+  if (hidden) {
+    const native = normalizeMintedIds(hidden, contractProject());
+    for (const [index, call] of CONTRACT_SEQUENCE.entries()) {
+      expect(native.answers[index], `${index}: ${call.tool} through the native hidden host`).toEqual(desktopAnswers[index]);
+      expect(native.documents?.[index], `${index}: ${call.tool} native hidden document bytes`).toBe(desktopTranscript.documents?.[index]);
+    }
+    expect(native.document).toBe(desktopTranscript.document);
+  }
   // get_workspace_state: what it reports of the document and the kernel is the same on both.
   expect(workerTranscript.workspace).toEqual(desktopTranscript.workspace);
 });

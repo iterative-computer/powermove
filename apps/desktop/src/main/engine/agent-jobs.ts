@@ -135,7 +135,7 @@ export type AgentFramesResult =
   | { status: 'rendered'; images: AgentFrameImage[]; revision: number; queuedMs: number };
 
 /** The project as the agent sees it, and where the frames are. */
-export type FramesPlan = { project: unknown; times: number[]; width: number; revision: number };
+export type FramesPlan = { project: unknown; times: number[]; width: number; revision: number; imageFormat?: 'png' };
 
 /** Agent-facing failure: the engine's one-sentence message. */
 export class AgentJobError extends Error {
@@ -673,7 +673,7 @@ export class AgentJobs {
         run,
         frames: plan.times.map((time) => ({ composition: project['compId'], time: toTicks(time) })),
         maxDimension,
-        format: { kind: 'jpeg', quality: 0.74 },
+        format: plan.imageFormat === 'png' ? { kind: 'png' } : { kind: 'jpeg', quality: 0.74 },
         motionBlur: false,
         blender: 'cachedOrPending'
       }, frameSession.session, frameSession.revision);

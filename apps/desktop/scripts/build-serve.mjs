@@ -48,6 +48,11 @@ await build({
   banner: { js: '// Powermove serve host. Built from apps/desktop/src/server by scripts/build-serve.mjs.' }
 });
 
+// The same embedder is importable without starting the CLI (contract gates).
+await build({ entryPoints: [path.join(desktop, 'src/server/native/host.ts')], bundle: true,
+  platform: 'node', target: 'node22', format: 'cjs', loader: { '.py': 'text' },
+  outfile: path.join(outDir, 'native-host.cjs') });
+
 // Node child uses the desktop's engine runtime and supervision protocol.
 await build({ entryPoints: [path.join(desktop, 'src/server/native/engine-child.ts')], bundle: true,
   platform: 'node', target: 'node22', format: 'cjs', outfile: path.join(outDir, 'native-engine-child.cjs'), sourcemap: true });
