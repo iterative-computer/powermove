@@ -16,7 +16,7 @@ const ffmpeg = path.join(process.env.PM_FFMPEG_DIR ?? path.join(os.homedir(), 'L
 const root = await mkdtemp(path.join(os.tmpdir(), 'pm-native-parity-'));
 const evidence = process.env.POWERMOVE_NATIVE_PARITY_EVIDENCE;
 const electron = createRequire(path.join(desktop, 'package.json'))('electron');
-const code = 'float a = v_st.x * u_res.x - gl_FragCoord.x; o = vec4(vec3(fract(a * 1048576.0)), 1.0);';
+const code = 'float a = v_st.x * u_res.x - gl_FragCoord.x; o = vec4(fract(a * 1048576.0), 0.37, 0.71, 1.0);';
 const children = new Set();
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function start(file, args, options) { const child = spawn(file, args, options); children.add(child); child.once('exit', () => children.delete(child)); return child; }
@@ -32,7 +32,7 @@ function mcp(child) {
   child.once('exit', code => { for (const call of pending.values()) { clearTimeout(call.timer); call.reject(new Error(`MCP exited ${code}: ${diagnostics}`)); } pending.clear(); });
   const rpc = (method, params = {}) => new Promise((resolve, reject) => { const call = ++id, timer = setTimeout(() => { pending.delete(call); reject(new Error(`${method} timed out: ${diagnostics}`)); }, 120000); pending.set(call, { resolve, reject, timer }); child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: call, method, params }) + '\n'); });
   const tool = async (name, args = {}) => { const result = await rpc('tools/call', { name, arguments: args }); if (result.isError) throw new Error(`${name}: ${JSON.stringify(result)}\n${diagnostics}`); return JSON.parse(result.content.find(c => c.type === 'text').text); };
-  return { child, rpc, tool, initialize: () => rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'native-parity', version: '1' } }),
+  return { child, rpc, tool, diagnostics: () => diagnostics, initialize: () => rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'native-parity', version: '1' } }),
     async close() {
       const exited = new Promise(resolve => child.once('exit', resolve)); child.stdin.end();
       let timer;
@@ -93,7 +93,11 @@ try {
     await client.initialize(); await client.tool('open_project', { projectId: project.projectId }); await client.tool('start_session', { prompt: 'Compare the persisted workspace' }); return client;
   };
   const old = await open(legacyProfile, false); const expectedWorkspace = await old.tool('get_workspace_state'); await old.tool('finish_session', { commit: true }); await old.close();
-  const native = await open(nativeProfile, true); const actualWorkspace = await native.tool('get_workspace_state');
+  const native = await open(nativeProfile, true);
+  const restored = await native.tool('get_project_state');
+  assert.equal(restored.layerCount, 1, 'the native host recovered the saved layer');
+  assert.equal(restored.layers[0].id, layer.id, 'the native host retained the original layer identity');
+  const actualWorkspace = await native.tool('get_workspace_state');
   if (evidence) { await mkdir(evidence, { recursive: true }); await writeFile(path.join(evidence, 'workspace-desktop.json'), JSON.stringify(desktopWorkspace)); await writeFile(path.join(evidence, 'workspace-legacy.json'), JSON.stringify(expectedWorkspace)); await writeFile(path.join(evidence, 'workspace-native.json'), JSON.stringify(actualWorkspace)); }
   const workspaceBytesEqual = JSON.stringify(actualWorkspace) === JSON.stringify(expectedWorkspace);
   const completeRegistry = JSON.stringify(actualWorkspace.layout.registeredPanels) === JSON.stringify(desktopPanels) && JSON.stringify(expectedWorkspace.layout.registeredPanels) === JSON.stringify(desktopPanels);
@@ -101,12 +105,17 @@ try {
   const persistedLayout = JSON.stringify(actualWorkspace.layout) === JSON.stringify(desktopWorkspace.layout) && JSON.stringify(expectedWorkspace.layout) === JSON.stringify(desktopWorkspace.layout);
   const viewportEqual = JSON.stringify(actualWorkspace.viewport) === JSON.stringify(expectedWorkspace.viewport) && actualWorkspace.viewport?.width === 1440 && actualWorkspace.viewport?.height === 1000;
   const hiddenExport = await native.tool('export_video', { name: 'Pinned hidden', format: 'png', audio: false, motionBlur: false });
+  assert(native.diagnostics().includes(`[native] ANGLE runner pinned to ${project.projectId}`), 'the pinned hidden export used its project ANGLE runner');
   const before = await pngs(desktopExport.path), after = await pngs(hiddenExport.path);
+  assert.equal(before.length, 6); assert.equal(after.length, 6);
+  const reference = pixels(before[0]);
+  const nonBlackReference = reference.some((_, i) => i % 4 === 0 && reference[i + 1] > 0 && reference[i + 2] > 0);
+  assert(nonBlackReference, 'the shader reference must distinguish a missing black composition');
   if (evidence) { await cp(desktopExport.path, path.join(evidence, 'desktop-png'), { recursive: true }); await cp(hiddenExport.path, path.join(evidence, 'hidden-png'), { recursive: true }); }
   const differentFrames = [];
   for (let i = 0; i < Math.min(before.length, after.length); i++) if (!pixels(before[i]).equals(pixels(after[i]))) differentFrames.push(i);
   const pixelsEqual = before.length > 0 && before.length === after.length && differentFrames.length === 0;
-  const result = { frames: before.length, hiddenFrames: after.length, pixelsEqual, differentFrames, workspaceBytesEqual, userPanel, completeRegistry, persistedLayout, viewportEqual, panels: desktopPanels.length, pinnedPrograms: markers.filter(n => n.endsWith('.runner')).length };
+  const result = { frames: before.length, hiddenFrames: after.length, pixelsEqual, differentFrames, workspaceBytesEqual, userPanel, completeRegistry, persistedLayout, viewportEqual, restoredLayers: restored.layerCount, angleRunner: true, nonBlackReference, panels: desktopPanels.length, pinnedPrograms: markers.filter(n => n.endsWith('.runner')).length };
   if (evidence) await writeFile(path.join(evidence, 'result.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));
   await native.tool('finish_session', { commit: true }); await native.close();

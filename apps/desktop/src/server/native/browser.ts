@@ -84,6 +84,7 @@ export class LazyNativeBrowser implements NativeBrowser {
       runner = (async () => {
         const page = await (await this.start()).newPage();
         await page.goto(`${new URL(this.host().url).origin}/engine/native-runner.html?project=${encodeURIComponent(project)}`);
+        this.log(`[native] ANGLE runner pinned to ${project}`);
         return page;
       })().catch(error => { this.runners.delete(project); throw error; });
       this.runners.set(project, runner);

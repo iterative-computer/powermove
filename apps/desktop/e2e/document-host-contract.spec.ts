@@ -145,4 +145,7 @@ test('the native no-window workspace bytes match the existing hidden host includ
   expect(result.completeRegistry).toBe(true);
   expect(result.persistedLayout).toBe(true);
   expect(result.viewportEqual).toBe(true);
+  expect(result.restoredLayers).toBe(1);
+  expect(result.angleRunner).toBe(true);
+  expect(result.nonBlackReference).toBe(true);
 });

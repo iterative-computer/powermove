@@ -9,6 +9,10 @@ serialized, and shared project/trash indexes apply each worker’s changes again
 the current host value, preserving projects created or renamed by other workers.
 Workers refresh shared preferences before tools; profile snapshots omit unrelated
 project documents and Undo histories. Committed preferences notify DOM clients.
+Before the first join, project sessions replay the checkpoint’s ordered recovery
+journal, matching `Projects.get`; recovery leaves the persisted checkpoint and
+journal untouched. A native worker therefore receives the same recovered
+document a browser brings to its session.
 
 The interactive and job `pm-node` children use the desktop `NativeEngine`
 supervisor, restart ledger, attribution, backoff, host capabilities, budgets,
@@ -97,7 +101,9 @@ set to one:
 
 The parity harness captures a real desktop runner pin, compares every decoded
 PNG frame with the hidden export, and compares complete workspace JSON bytes
-with today's hidden host, including a user panel. Before restart it saves a
+with today's hidden host, including a user panel. The export fixture has visible
+color, verifies the recovered layer identity and requires the project’s ANGLE
+runner, so a missing black composition cannot pass pixel parity. Before restart it saves a
 named workspace with custom dock sizes and the user panel visible; both hidden
 hosts must restore that complete layout and report equal viewport bytes. The
 contract gate compares
