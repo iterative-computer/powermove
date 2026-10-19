@@ -46,6 +46,21 @@ fn main() {
         .ok()
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
+    // Level 1 SVG images (decision S1) draw Chromium's rasters, as
+    // tests/corpus.rs sets them: those the svg-rasters tool captured
+    // (PM_SVG_RASTERS, else the newest `svg-rasters-*` directory); without
+    // a directory resvg approximates them.
+    renderer.set_svg_wait(true);
+    match std::env::var("PM_SVG_RASTERS")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| newest_capture("svg-rasters-"))
+    {
+        Some(dir) => renderer.set_svg_source(Some(std::sync::Arc::new(
+            pm_render::vector::svg_rasters::RasterDir::new(dir),
+        ))),
+        None => renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg),
+    }
     // The built-in effects, transitions, and extension layers as the kernel
     // snapshots them (as tests/corpus.rs sets them).
     renderer
@@ -177,7 +192,9 @@ fn main() {
                     d.max
                 );
                 println!("{line}");
-                let fails = text_ssim < 0.98 || !d.passes();
+                // A frame the text changes everywhere has no rest to
+                // compare; its text SSIM covers every pixel.
+                let fails = text_ssim < 0.98 || (d.pixels > 0 && !d.passes());
                 if fails {
                     failed.push(line);
                 }

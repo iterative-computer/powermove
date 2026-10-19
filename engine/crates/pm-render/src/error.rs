@@ -29,6 +29,21 @@ pub enum RenderError {
     /// The targets are left untouched.
     #[error("waiting for the shader fallback runner ({} layer draws)", .0.len())]
     ShaderFallbackPending(Vec<crate::shader_layers::FallbackRequest>),
+    /// The hang guard holds a program this frame draws: a frame that drew
+    /// it was seen running past the hang budget and has not ended
+    /// (`effects::watchdog`, interactive policy). Nothing was presented; the
+    /// caller renders again once `Renderer::watchdog_holding` is false.
+    #[error("waiting for the GPU watchdog to judge a frame that has not finished")]
+    WatchdogPending,
+    /// A program only the WebGL fallback runner draws could not be drawn
+    /// by a runner the renderer waits on (a job: no window to run it, its
+    /// context was lost); the message names it.
+    #[error("{0}")]
+    Fallback(String),
+    /// A job renderer's watchdog stopped after a runaway program
+    /// (`effects::watchdog::Policy::Job`): the message names it.
+    #[error("{0}")]
+    Watchdog(String),
     /// Level 1 SVG rasters (decision S1) a frame that may not substitute
     /// them (an export, a snapshot: `Renderer::set_svg_wait`) did not
     /// have: the caller gets them from the document's renderer

@@ -165,6 +165,49 @@ describe('native Powermove agent tool bridge', () => {
     } finally { await bridge.shutdown(); }
   });
 
+  it('validates effects by compiling them through the engine, never narrower than WebGL', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const snapshot = { id: 'acme.glow', kind: 'effect', glsl: { source: 'void main(){}' } };
+    owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
+      this.requests.push(request);
+      const value = request.tool === '__validate_effect_snapshot' ? { id: 'acme.glow', parameterCount: 2, snapshot } : { tool: request.tool };
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 4 }));
+    } as never;
+    (owner as unknown as { id: number }).id = 3;
+    const diagnostic = { kind: 'shaderCompile', diagnostics: [{ line: 3, column: null, message: "'nope' : undeclared identifier" }] };
+    let failures: unknown[] = [];
+    const engineJobs = {
+      available: true,
+      exportVideo: vi.fn(), renderFrames: vi.fn(), status: vi.fn(), cancelRun: vi.fn(async () => 0),
+      compileDefinitions: vi.fn(async () => failures)
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', engineJobs: engineJobs as never });
+    try {
+      const session = await bridge.openSession({ runId: 'validate-run', owner: owner as never, baseRevision: 0 });
+      const definition = { id: 'acme.glow', label: 'Glow', group: 'Light & Shadow', params: [], frag: 'o = nope;' };
+      const read = async () => JSON.parse(((await bridge.callTool(session, 'validate_effect', { definition })).content[0] as { text: string }).text);
+      // Compiles: valid.
+      expect(await read()).toMatchObject({ valid: true, compiled: true, id: 'acme.glow', parameterCount: 2 });
+      expect(engineJobs.compileDefinitions).toHaveBeenCalledWith([snapshot]);
+      expect(owner.requests.at(-1)!.tool).toBe('__validate_effect_snapshot');
+      expect(owner.requests.at(-1)!.arguments).toEqual({ definition });
+      // WebGL refuses it too: invalid, with the lines of the frag.
+      failures = [{ code: 'shaderCompile', scope: { kind: 'definition', definition: 'acme.glow' }, message: 'The shader of acme.glow does not compile.', retry: { kind: 'afterUserAction' }, detail: diagnostic }];
+      expect(await read()).toMatchObject({ valid: false, compiled: false, errors: [{ line: 3, message: "'nope' : undeclared identifier" }] });
+      // Only the WebGL fallback runner draws it: still valid, with a warning.
+      failures = [{ code: 'notHeadlessRenderable', scope: { kind: 'definition', definition: 'acme.glow' }, message: 'The shader of acme.glow compiles in WebGL but not in the native engine\'s pipeline.', retry: { kind: 'afterUserAction' }, detail: diagnostic }];
+      const headless = await read();
+      expect(headless).toMatchObject({ valid: true, compiled: true });
+      expect(headless.warnings[0]).toContain('the viewer and exports');
+      expect(headless.warnings[0]).toContain('pm-cli, headless renders) cannot draw it');
+      // The new engine off: the renderer's own validator, as before.
+      engineJobs.available = false;
+      await bridge.callTool(session, 'validate_effect', { definition });
+      expect(owner.requests.at(-1)!.tool).toBe('validate_effect');
+    } finally { await bridge.shutdown(); }
+  });
+
   const bridges: PowermoveAgentToolBridge[] = [];
   const children: ChildProcessWithoutNullStreams[] = [];
   const temporaryDirectories: string[] = [];

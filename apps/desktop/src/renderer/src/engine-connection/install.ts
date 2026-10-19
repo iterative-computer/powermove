@@ -38,7 +38,7 @@ import { installAppCaptures, usesBlender } from './app-captures';
 // by themselves (old forks of the viewer).
 import { ViewerPresentation } from '../../../extensions/viewer/engine-present/presentation';
 import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
-import { ShaderFallbackRunner } from './shader-fallback';
+import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
 import { SvgRasters } from './svg-rasters';
 import { EngineTransport } from './transport';
 
@@ -119,6 +119,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const sessions = new Set<DocumentSession>();
   let current: DocumentSession | null = null;
   let fallbackRunner: ShaderFallbackRunner | null = null;
+  // The job engine's fallback requests (exports, agent stills) run in this
+  // window's runner too: one WebGL2 context for the window (decision 19).
+  const offShaderFallback = native.onShaderFallback?.(async ({ request, textures }) =>
+    (await (fallbackRunner ??= new ShaderFallbackRunner()).render(request as ShaderFallbackRequest, textures)).rgba16f) ?? (() => {});
   // One session owns this window's clock. A viewer attaches to it; closing
   // that channel retires presentation only, leaving pm-audio and time alive.
   let viewerHandlers: EngineViewerHandlers | null = null;
@@ -257,6 +261,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       },
       onRoute: (route, reason) => {
         if (route === 'legacy') log('warn', `engine composition unavailable: ${reason ?? ''}`);
+        // Compile errors follow whoever draws (kernel/engine-definitions.ts).
+        (PM as any).EngineDefinitions?.meta?.setRoute?.(route);
         transport.refresh();
         if (route === 'engine') audio.sync();
         PM.bus?.emit?.('draw');
@@ -472,6 +478,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     }),
     dispose: () => {
       drawingWarmup.dispose();
+      offShaderFallback();
       offPending();
       offEager();
       offAssets();

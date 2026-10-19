@@ -17,9 +17,9 @@
 //! built-in definitions the kernel pushes) are listed with their reasons, as
 //! the host would route them to the legacy engine.
 //!
-//! Frames of projects that use a definition whose WebGL output is itself
-//! unstable (amendment 9; `posterize`, docs/engine/effects.md) and that fail
-//! the Standard class are listed apart for review, not counted as failures.
+//! No frame is listed apart: a frame that departs from its class fails,
+//! whatever its effects (amendment 22; the WebGL-unstable review class of
+//! amendment 9 is retired, docs/engine/effects.md).
 //!
 //! `--real` adds each capture's real-world project (`real/<slug>`) with its
 //! media unpacked from the project file the capture opened.
@@ -63,11 +63,6 @@ pub struct Options {
     pub svg_rasters: Option<PathBuf>,
 }
 
-/// Effect types whose WebGL output is itself unstable (amendment 9; the
-/// effects lane's corpus finding, docs/engine/effects.md): a corpus frame
-/// of theirs that fails is judged by review.
-const WEBGL_UNSTABLE: &[&str] = &["posterize"];
-
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
@@ -77,8 +72,6 @@ pub struct Report {
     pub skipped: Vec<Routed>,
     pub compared: usize,
     pub failed: usize,
-    /// Failing frames of WebGL-unstable definitions, judged by review.
-    pub review: usize,
     /// Samples rendered twice (`--determinism`) and how many differed.
     pub determinism_checked: usize,
     pub determinism_failed: usize,
@@ -124,9 +117,6 @@ pub struct FrameResult {
     /// bit-identical (set on the sample's first result).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deterministic: Option<bool>,
-    /// Set when a failing frame is judged by review instead (`webgl-unstable`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub review: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -305,7 +295,6 @@ fn compare_sample_inner(
         three_d: None,
         error,
         deterministic: None,
-        review: None,
     };
     // The capture's motion blur: 16 samples opaque, 20 transparent.
     let mut request = RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
@@ -461,157 +450,8 @@ fn describe(r: &FrameResult) -> String {
     format!(
         "{head} {}{}",
         parts.join("; "),
-        match (r.pass, r.review) {
-            (true, _) => "",
-            (false, Some(_)) => "  REVIEW (WebGL-unstable)",
-            (false, None) => "  FAILED",
-        }
+        if r.pass { "" } else { "  FAILED" }
     )
-}
-
-/// Whether any effect of the document is WebGL-unstable.
-fn webgl_unstable(document: &pm_model::Document) -> bool {
-    fn walk(n: &pm_model::Node) -> bool {
-        match n.kind() {
-            pm_model::NodeKind::Object(map) => {
-                let unstable = map.iter().any(|(k, v)| {
-                    k.to_string_lossy() == "fx"
-                        && matches!(v.kind(), pm_model::NodeKind::Array(items) if items.iter().any(|e| {
-                            e.get("type").is_some_and(|t| matches!(t.kind(), pm_model::NodeKind::String(s)
-                                if WEBGL_UNSTABLE.contains(&s.to_string_lossy().as_str())))
-                        }))
-                });
-                unstable || map.iter().any(|(_, v)| walk(v))
-            }
-            pm_model::NodeKind::Array(items) => items.iter().any(walk),
-            _ => false,
-        }
-    }
-    document.root().is_some_and(walk)
-}
-
-/// The document with every WebGL-unstable effect removed from every `fx`
-/// list (layers keep their other effects).
-fn without_unstable(value: &pm_model::json::Value) -> pm_model::json::Value {
-    use pm_model::json::Value;
-    match value {
-        Value::Object(map) => {
-            let mut out = pm_model::json::Map::new();
-            for (k, v) in map.iter() {
-                let v = if k.to_string_lossy() == "fx"
-                    && let Value::Array(items) = v
-                {
-                    Value::Array(
-                        items
-                            .iter()
-                            .filter(|e| {
-                                !matches!(e, Value::Object(m) if m.get("type").is_some_and(|t|
-                                    matches!(t, Value::String(s) if WEBGL_UNSTABLE.contains(&s.to_string_lossy().as_str()))))
-                            })
-                            .map(without_unstable)
-                            .collect(),
-                    )
-                } else {
-                    without_unstable(v)
-                };
-                out.insert(k.clone(), v);
-            }
-            Value::Object(out)
-        }
-        Value::Array(items) => Value::Array(items.iter().map(without_unstable).collect()),
-        v => v.clone(),
-    }
-}
-
-/// Pixels a WebGL-unstable effect changes: where the frame with the effects
-/// and the frame without them differ in any channel.
-fn changed_pixels(with: &[f32], without: &[f32]) -> Vec<bool> {
-    with.chunks_exact(4)
-        .zip(without.chunks_exact(4))
-        .map(|(a, b)| a.iter().zip(b).any(|(x, y)| x.to_bits() != y.to_bits()))
-        .collect()
-}
-
-/// Whether a failing frame's difference is confined to the pixels the
-/// WebGL-unstable effects change: the frame must pass its class on every
-/// other pixel. `ours` and `reference` are the class's view (8-bit for
-/// Standard, float for alpha); `changed` comes from [`changed_pixels`].
-///
-/// Only the `standard` and `alpha` classes can move to review. A
-/// `standard+3d` frame (judged with the 3D bar's own object and edge masks)
-/// and a `video` frame always stay failures: the confinement is not
-/// defined against those masks, so the rule stays conservative there.
-fn confined_to_unstable(class: &str, ours: &Views, reference: &Views, changed: &[bool]) -> bool {
-    let rest: Vec<bool> = changed.iter().map(|c| !c).collect();
-    match (class, ours, reference) {
-        ("standard", Views::Eight(a), Views::Eight(b)) => Diff::of(a, b, Some(&rest)).passes(),
-        ("alpha", Views::Float(a), Views::Float(b)) => float_max_cv(a, b, Some(&rest)) <= 1.0,
-        _ => false,
-    }
-}
-
-/// A frame as a class compares it.
-enum Views {
-    Eight(Vec<u8>),
-    Float(Vec<f32>),
-}
-
-/// Re-renders a failing frame of a project with WebGL-unstable effects,
-/// with and without those effects, and reports whether its difference from
-/// the capture is confined to the pixels the effects change (then it goes
-/// to review; otherwise it stays a failure). Classes other than `standard`
-/// and `alpha` answer false without rendering ([`confined_to_unstable`]).
-///
-/// The "with" frame is rendered again rather than kept from
-/// [`compare_sample`], whose results hold no frames (keeping every frame
-/// for the few failing unstable ones would hold the whole corpus's frames).
-/// The same request renders the same pixels (the `--determinism` run: every
-/// re-render bit-identical), so the frame equals the one judged.
-fn unstable_confined(
-    renderer: &mut Renderer,
-    p: &Project,
-    s: &corpus::Sample,
-    class: &str,
-) -> Result<bool, String> {
-    let value = p.document.to_value().ok_or("an empty document")?;
-    let stripped = pm_model::Document::new(Some(without_unstable(&value)), 1);
-    let mut request = RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
-    request.motion_blur = pm_render::motion::MotionBlur::Samples(16);
-    let (ours, without, reference) = match class {
-        "standard" => {
-            let with = frame(renderer, p, s.time, &request)?;
-            let without = frame_of(renderer, p, &stripped, s.time, &request)?;
-            let (_, _, reference) = corpus::read_png(&s.png)?;
-            let changed = changed_pixels(&with, &without);
-            return Ok(confined_to_unstable(
-                class,
-                &Views::Eight(opaque8(&with)),
-                &Views::Eight(reference),
-                &changed,
-            ));
-        }
-        "alpha" => {
-            request.background = false;
-            request.motion_blur = pm_render::motion::MotionBlur::Samples(20);
-            let float = s.float.as_ref().ok_or("no float capture")?;
-            (
-                frame(renderer, p, s.time, &request)?,
-                frame_of(renderer, p, &stripped, s.time, &request)?,
-                corpus::read_float(float)?,
-            )
-        }
-        _ => return Ok(false),
-    };
-    if ours.len() != reference.len() || ours.len() != without.len() {
-        return Err("frame size mismatch".into());
-    }
-    let changed = changed_pixels(&ours, &without);
-    Ok(confined_to_unstable(
-        class,
-        &Views::Float(ours),
-        &Views::Float(reference),
-        &changed,
-    ))
 }
 
 /// Extension layer definition ids a document uses.
@@ -676,7 +516,9 @@ fn real_media(pmv: &Path, record_sha: Option<String>) -> Result<crate::render::L
     }
     crate::render::load_project(pmv, None, &[]).map_err(|e| match e {
         crate::render::Failure::Usage(m) | crate::render::Failure::Failed(m) => m,
-        crate::render::Failure::Unsupported(r) => r.join(", "),
+        crate::render::Failure::Unsupported(r) | crate::render::Failure::NotHeadless(r) => {
+            r.join(", ")
+        }
     })
 }
 
@@ -849,7 +691,6 @@ pub fn run(options: &Options) -> Result<Report, String> {
                 continue;
             }
             interpret_videos(&mut renderer, &p);
-            let unstable = webgl_unstable(&p.document);
             let approximated = renderer.svg_approximated();
             for s in &p.samples {
                 for r in compare_sample(
@@ -860,7 +701,6 @@ pub fn run(options: &Options) -> Result<Report, String> {
                     options.diffs.as_deref(),
                     options.determinism,
                 ) {
-                    let mut r = r;
                     if let Some(same) = r.deterministic {
                         report.determinism_checked += 1;
                         if !same {
@@ -868,29 +708,10 @@ pub fn run(options: &Options) -> Result<Report, String> {
                             eprintln!("{} t={}: NOT DETERMINISTIC", r.project, r.time);
                         }
                     }
-                    if !r.pass && unstable && r.error.is_none() {
-                        // Review only when the difference is confined to
-                        // the pixels the unstable effects change.
-                        match unstable_confined(&mut renderer, &p, s, r.class) {
-                            Ok(true) => r.review = Some("webgl-unstable"),
-                            Ok(false) => eprintln!(
-                                "{} t={}: differs outside the WebGL-unstable effect's pixels",
-                                r.project, r.time
-                            ),
-                            Err(e) => eprintln!(
-                                "{} t={}: confinement not checked: {e}",
-                                r.project, r.time
-                            ),
-                        }
-                    }
                     eprintln!("{}", describe(&r));
                     report.compared += 1;
                     if !r.pass {
-                        if r.review.is_some() {
-                            report.review += 1;
-                        } else {
-                            report.failed += 1;
-                        }
+                        report.failed += 1;
                     }
                     report.frames.push(r);
                 }
@@ -915,10 +736,9 @@ pub fn run(options: &Options) -> Result<Report, String> {
         }
     }
     eprintln!(
-        "\ncompared {} frames; {} failed; {} for review (WebGL-unstable); {} projects routed",
+        "\ncompared {} frames; {} failed; {} projects routed",
         report.compared,
         report.failed,
-        report.review,
         report.routed.len()
     );
     if options.determinism {
@@ -950,102 +770,4 @@ pub fn run(options: &Options) -> Result<Report, String> {
         std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(report)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn doc(text: &str) -> pm_model::Document {
-        pm_model::Document::new(Some(pm_model::json::parse(text).unwrap()), 1)
-    }
-
-    const NESTED: &str = r#"{"compId":"c","layers":[{"id":"a","fx":[{"type":"blur"}]}],
-        "comps":{"k":{"layers":[{"id":"b","fx":[{"type":"blur"},{"type":"posterize","levels":4}]}]}}}"#;
-
-    #[test]
-    fn webgl_unstable_finds_nested_effects() {
-        assert!(webgl_unstable(&doc(NESTED)));
-        assert!(!webgl_unstable(&doc(
-            r#"{"compId":"c","layers":[{"id":"a","fx":[{"type":"blur"}]}],"comps":{}}"#
-        )));
-        // A layer type or name is not an effect.
-        assert!(!webgl_unstable(&doc(
-            r#"{"compId":"c","layers":[{"id":"a","type":"posterize","fx":[]}]}"#
-        )));
-    }
-
-    #[test]
-    fn without_unstable_keeps_other_effects() {
-        let stripped = without_unstable(&pm_model::json::parse(NESTED).unwrap());
-        let d = pm_model::Document::new(Some(stripped), 1);
-        assert!(!webgl_unstable(&d));
-        let v = d.to_value().unwrap();
-        let text = pm_model::json::write::to_canonical_string(&v);
-        assert_eq!(text.matches("\"blur\"").count(), 2, "{text}");
-        assert!(!text.contains("posterize"), "{text}");
-    }
-
-    #[test]
-    fn changed_pixels_marks_any_channel() {
-        let with = [0.5, 0.5, 0.5, 1.0, 0.1, 0.2, 0.3, 1.0];
-        let without = [0.5, 0.5, 0.5, 1.0, 0.1, 0.25, 0.3, 1.0];
-        assert_eq!(changed_pixels(&with, &without), [false, true]);
-    }
-
-    #[test]
-    fn review_needs_the_difference_inside_the_effect() {
-        // Three pixels; the effect changes pixel 1 only.
-        let changed = [false, true, false];
-        let reference = vec![10, 10, 10, 255, 100, 100, 100, 255, 50, 50, 50, 255];
-        // 40 CV off where the effect draws: confined.
-        let inside = vec![10, 10, 10, 255, 140, 100, 100, 255, 50, 50, 50, 255];
-        assert!(confined_to_unstable(
-            "standard",
-            &Views::Eight(inside),
-            &Views::Eight(reference.clone()),
-            &changed
-        ));
-        // The same plus 9 CV off on a pixel the effect leaves alone: a failure.
-        let outside = vec![10, 10, 10, 255, 140, 100, 100, 255, 59, 50, 50, 255];
-        assert!(!confined_to_unstable(
-            "standard",
-            &Views::Eight(outside),
-            &Views::Eight(reference),
-            &changed
-        ));
-        // Alpha: 1 CV is the bar outside the effect.
-        let reference = vec![0.0; 12];
-        let mut ours = vec![0.0; 12];
-        ours[4] = 0.5;
-        assert!(confined_to_unstable(
-            "alpha",
-            &Views::Float(ours.clone()),
-            &Views::Float(reference.clone()),
-            &changed
-        ));
-        ours[8] = 2.0 / 255.0;
-        assert!(!confined_to_unstable(
-            "alpha",
-            &Views::Float(ours),
-            &Views::Float(reference),
-            &changed
-        ));
-        // Other classes are never moved to review, even when identical
-        // outside the effect: 3D frames are judged with the 3D bar's masks.
-        for class in ["video", "standard+3d"] {
-            assert!(!confined_to_unstable(
-                class,
-                &Views::Eight(vec![0; 12]),
-                &Views::Eight(vec![0; 12]),
-                &changed
-            ));
-            assert!(!confined_to_unstable(
-                class,
-                &Views::Float(vec![0.0; 12]),
-                &Views::Float(vec![0.0; 12]),
-                &changed
-            ));
-        }
-    }
 }

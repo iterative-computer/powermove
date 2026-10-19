@@ -34,6 +34,7 @@ import { RenderQueue } from './render-queue';
 import { SnapshotService } from './snapshots';
 import { WindowSnapshotSessions } from './window-sessions';
 import { CompatFrames } from './compat-frames';
+import { ShaderFallbackRelay } from './shader-fallback-relay';
 import type { ChildLike, PortLike } from './ports';
 
 /** Main's own client id for its font port to the interactive engine (never
@@ -282,6 +283,27 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       })
     : null;
 
+  // The job engine's decision 19 fallback requests run in a window's
+  // runner (contract 14): the window the job works for, else any window.
+  let jobOwners: { ownerOf(session: number): number | null } | null = null;
+  const fallbackRelay = new ShaderFallbackRelay({
+    send: (id, job) => {
+      const contents = webContents.fromId(id);
+      if (!contents || contents.isDestroyed()) return false;
+      contents.send(ENGINE_IPC.shaderFallback, job);
+      return true;
+    },
+    windows: () => options.windows().filter((w) => !w.isDestroyed()).map((w) => w.webContents.id),
+    ownerOf: (session) => {
+      const owner = jobOwners?.ownerOf(session) ?? null;
+      return owner !== null && owner >= 0 ? owner : null;
+    }
+  });
+  options.ipc.on(ENGINE_IPC.shaderFallbackResult, (event, message: unknown) => {
+    if (!options.isTrustedSender(event)) return;
+    fallbackRelay.answer(event.sender.id, message);
+  });
+
   const engineNowUs = engineClock(bridgeAddon);
   const cacheDirectory = path.join(options.userData, 'Engine Cache');
   // Exports of layers only a window draws (a `raster` override, a
@@ -353,6 +375,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           : { available: false, error: status.error ?? 'This composition renders with Blender. Install Blender 4.5 or later, or set its renderer to Native.' };
       }
     },
+    shaderFallback: (session, request, textures) => fallbackRelay.run(session, request, textures),
     log
   });
 
@@ -458,6 +481,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     engine,
     ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}),
     log,
+    // Each job renders its window's winning registrations (contract 10).
+    definitions: (owner) => engine!.definitions.current(owner),
     onDelivered: (owner, file) => rememberExport(owner, file),
     onUserStatus: (owner, status) => {
       const file = userDestinations.get(status.jobId);
@@ -475,6 +500,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     onQueueStatus: (jobId, status) => renderQueue?.status(jobId, status),
     onAgentJob: (job) => renderQueue?.agentJob(job)
   });
+  jobOwners = agentJobs;
   renderQueue = new RenderQueue({
     directory: path.join(options.userData, 'Render Queue'),
     engine: agentJobs,
@@ -570,7 +596,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       options: queueRequest.options,
       destination: file,
       ...(queueRequest.sidecars ? { sidecars: queueRequest.sidecars } : {}),
-      ...(typeof queueRequest.preset === 'string' ? { preset: queueRequest.preset.slice(0, 120) } : {})
+      ...(typeof queueRequest.preset === 'string' ? { preset: queueRequest.preset.slice(0, 120) } : {}),
+      definitions: engine!.definitions.current(event.sender.id)?.updates(1) ?? []
     });
     return { status: 'added' as const, id };
   });
@@ -614,6 +641,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       attached = true;
     });
     window.once('closed', () => {
+      fallbackRelay.forget(id);
       engine?.removeClient(id);
       windowSessions.forget(id);
       compatFrames.windowGone(id);
@@ -657,6 +685,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       fontClient.disconnect();
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
       options.ipc.removeAllListeners(ENGINE_IPC.playback);
+      options.ipc.removeAllListeners(ENGINE_IPC.shaderFallbackResult);
       agentJobs.dispose();
       await engine?.stop();
       frameBridge?.dispose();

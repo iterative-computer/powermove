@@ -15,6 +15,7 @@ import { editScene } from '../../core/scene3d/operations';
 import { compositionScene,layer3DRole } from '../../core/scene3d/layers';
 import { SCENE3D_DEFINITION, sceneProperties,parseScene } from '../../core/scene3d/schema';
 import { validateEffect } from '../../kernel/glsl';
+import { effectSnapshot } from '../../kernel/definition-snapshots';
 import { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 import { TRANSCRIPTION_MODEL_MISSING } from '../../../../shared/transcription';
@@ -576,6 +577,10 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   const pinned = liveToolObservations.get(request.runId) || liveToolTransactions.get(request.runId);
   if (pinned && request.tool !== '__finish_run') assertTransactionProject(pinned);
   if (request.tool.startsWith('__mcp_')) {
+    // `export_video` reads its project here and then renders in the job
+    // engine with this window's definitions: a publication earlier in the
+    // run reaches main before this answer does (contract 10).
+    if (request.tool === '__mcp_context') await PM.EngineDefinitions?.settle?.();
     const value = await mcpProjectTool(PM, request.tool, request.arguments);
     if (request.tool === '__mcp_context') refreshLiveTransaction(request);
     return { ok: true, content: [toolText(value)], revision: currentRevision() };
@@ -593,6 +598,14 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     if (observed) assertTransactionProject(observed);
     PM.selectLayers([...new Set(ids)], request.arguments.add === true);
     return { ok: true, content: [toolText({ selection: clone(PM.sel) })], revision: currentRevision() };
+  }
+  if (request.tool === '__validate_effect_snapshot') {
+    // validate_effect through the engine (main/agent-tools/bridge.ts): the
+    // kernel's registration validator, then the definition snapshot the
+    // engine compiles, wrapped exactly as a registration would be.
+    const definition = validateEffect(request.arguments.definition as Parameters<typeof validateEffect>[0]);
+    const snapshot = effectSnapshot(definition, 'local', { effect: PM.GLSL_PRE, transition: PM.TRANSITION_PRE, layer: PM.SHADER_HEADER });
+    return { ok: true, content: [toolText({ id: definition.id, parameterCount: definition.params.length, snapshot })], revision: currentRevision() };
   }
   if (request.tool === 'validate_effect') {
     const definition = validateEffect(request.arguments.definition as Parameters<typeof validateEffect>[0]);
@@ -711,7 +724,10 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   if (request.tool === '__engine_frames_plan') {
     // render_frames through the job engine (main/engine/agent-jobs.ts): the
     // same times and width the capture below would use, and the project at
-    // the revision the agent sees.
+    // the revision the agent sees. Extension reloads and registrations
+    // still pending (a publication just before) reach main's definitions
+    // first, so the frames never show a false "missing" (contract 10).
+    await PM.EngineDefinitions?.settle?.();
     const rawTimes = Array.isArray(request.arguments.times) ? request.arguments.times : undefined;
     const times = safeTimes(rawTimes?.slice(0, 5).map(Number).filter(Number.isFinite), defaultTimes());
     const width = PM.clamp(Math.round(Number(request.arguments.width) || 720), 160, 1280);

@@ -103,6 +103,9 @@ struct Metrics {
     hdr_over_one: usize,
     hdr_max_cv: f64,
     pixels: usize,
+    /// Pixels whose four values equal the reference's binary16 values bit
+    /// for bit (`PM_SHADER_STATS`).
+    exact: usize,
 }
 
 impl Metrics {
@@ -135,6 +138,9 @@ fn compare(engine: &[f32], reference: &[u16]) -> Metrics {
         let _ = p;
         let mut worst = 0u32;
         let mut worst_hdr = 0.0f64;
+        if (0..4).all(|c| pm_gpu::readback::f32_to_half(a[c]) == b[c]) {
+            m.exact += 1;
+        }
         for c in 0..4 {
             let r = pm_gpu::readback::half_to_f32(b[c]);
             let e = a[c];
@@ -166,22 +172,7 @@ fn compare(engine: &[f32], reference: &[u16]) -> Metrics {
 /// Probes whose WebGL and engine answers differ for a known, documented
 /// reason (S3.md, "Coverage sweep"; docs/engine/effects.md).
 fn known_open(id: &str) -> Option<&'static str> {
-    const NON_SAMPLER2D: [&str; 8] = [
-        "sampler3D",
-        "samplerCube",
-        "sampler2DArray",
-        "samplerCubeShadow",
-        "sampler2DArrayShadow",
-        "isampler3D",
-        "usamplerCube",
-        "isampler2DArray",
-    ];
     let name = id.rsplit('/').next().unwrap_or(id);
-    if id.starts_with("probe/samplers/") && NON_SAMPLER2D.iter().any(|s| name.starts_with(s)) {
-        return Some(
-            "non-sampler2D sampler: WebGL samples (0, 0, 0, 1), the engine refuses (fallback runner)",
-        );
-    }
     if id.starts_with("probe/types/ternary")
         || id.contains("ternary-struct")
         || id.contains("ternary-array")
@@ -206,6 +197,9 @@ struct Tally {
     variants: usize,
     matched: usize,
     both_refuse: usize,
+    /// Variants WebGL draws that run in the fallback runner (decision 19),
+    /// compared with WebGL by `fallback_effects_match_webgl`.
+    fallback: usize,
     failures: Vec<String>,
     known: Vec<String>,
 }
@@ -249,6 +243,8 @@ fn effects_transitions_and_probes_match_webgl() {
         })
         .unwrap();
     let filter = std::env::var("PM_SHADER_FILTER").ok();
+    // Per-variant measurements, bit-exact pixels included.
+    let stats = std::env::var_os("PM_SHADER_STATS").is_some();
     let mut groups: BTreeMap<String, Tally> = BTreeMap::new();
     for (case, def) in cases.iter().zip(&definitions) {
         let id = case["id"].as_str().unwrap();
@@ -288,6 +284,18 @@ fn effects_transitions_and_probes_match_webgl() {
                     webgl["glError"]
                 )),
             }
+            continue;
+        }
+        // Programs WebGL draws that the native pipeline cannot translate
+        // run in the app's fallback runner with their textures (decision
+        // 19, amendment 21): drawn, compared by `fallback_effects_match_webgl`.
+        if webgl_draws
+            && matches!(
+                renderer.effects().status(kind, def.id.as_str()),
+                Some(Status::NeedsFallback(_))
+            )
+        {
+            tally.fallback += variants.len();
             continue;
         }
         if !webgl_draws || !ready {
@@ -368,6 +376,17 @@ fn effects_transitions_and_probes_match_webgl() {
                 pm_gpu::readback::read_f32(renderer.device(), renderer.queue(), &out.texture)
                     .unwrap();
             let m = compare(&pixels, &reference);
+            if stats {
+                eprintln!(
+                    "{id} {name}: exact {:.3}% ({} of {} px), {} px over 1 CV, max {} CV, above-1.0 max {:.3} CV",
+                    100.0 * m.exact as f64 / m.pixels.max(1) as f64,
+                    m.exact,
+                    m.pixels,
+                    m.over_one,
+                    m.max_cv,
+                    m.hdr_max_cv
+                );
+            }
             if m.pass() {
                 tally.matched += 1;
             } else if let Some(why) = known_open(id) {
@@ -385,12 +404,15 @@ fn effects_transitions_and_probes_match_webgl() {
     }
     let mut failed = 0;
     eprintln!("shader corpus {}", dir.display());
-    eprintln!("| Group | Variants | Match WebGL | Both refuse | Known open | Failures |");
+    eprintln!(
+        "| Group | Variants | Match WebGL | Fallback runner | Both refuse | Known open | Failures |"
+    );
     for (group, t) in &groups {
         eprintln!(
-            "| {group} | {} | {} | {} | {} | {} |",
+            "| {group} | {} | {} | {} | {} | {} | {} |",
             t.variants,
             t.matched,
+            t.fallback,
             t.both_refuse,
             t.known.len(),
             t.failures.len()
@@ -469,5 +491,243 @@ fn webgl_instability_under_a_one_step_input_perturbation() {
             unstable.contains_key("builtin/effect/posterize"),
             "Posterize is a step function of its input; expected it to move under a one-step perturbation"
         );
+        // The built-ins exposed to rounding-level drift are the ones known:
+        // a new one needs the same proof as these (bit-exact against WebGL
+        // at every corpus parameter set, `PM_SHADER_STATS`), not a list
+        // that excuses it.
+        let builtins: Vec<&str> = unstable
+            .keys()
+            .filter_map(|id| id.strip_prefix("builtin/effect/"))
+            .collect();
+        for id in &builtins {
+            assert!(
+                EXPOSED_BUILTINS.contains(id),
+                "built-in {id} is ill-conditioned in WebGL; prove it bit-exact and add it to EXPOSED_BUILTINS"
+            );
+        }
     }
+}
+
+/// Built-in effects in amendment 9's WebGL-unstable class: today's WebGL
+/// output itself moves past the Standard tolerance when its input moves by
+/// one binary16 step (Posterize and Levels are step functions at some
+/// parameters, Color's hue rotation at saturated extremes). Where the
+/// engine's input to them or its arithmetic differed from today's at
+/// rounding level, their output differed at isolated pixels. Since
+/// 2026-10-19 neither does: their inputs (Level 1 stills as `Rgba8Unorm`)
+/// and their programs' built-in calls (`pm_render::glsl`) match today's, and
+/// all three are bit-exact against WebGL at every corpus parameter set. No
+/// test lists their frames apart; this records which built-ins are exposed
+/// if either drifts.
+const EXPOSED_BUILTINS: &[&str] = &["posterize", "levels", "color"];
+
+/// The corpus's fallback runner: answers a request with the pixels the
+/// app's runner drew for it in Chromium (`tools/shaders/fallback-runner.ts
+/// --fallback <dir>`), or writes the request and its textures for that
+/// tool and answers with transparent pixels (counted as waiting, so the
+/// test fails asking for the tool; a failure would turn the program off for
+/// the variants after it and leave their requests unwritten).
+struct CorpusRunner {
+    dir: PathBuf,
+    missing: std::sync::Mutex<usize>,
+}
+
+impl pm_render::shader_layers::FallbackHost for CorpusRunner {
+    fn run(
+        &self,
+        job: &pm_render::shader_layers::FallbackJob,
+    ) -> Result<pm_render::shader_layers::FallbackPixels, pm_render::shader_layers::FallbackFailure>
+    {
+        let r = &job.request;
+        if let Some(rgba16f) = read_f16(&self.dir.join("pixels").join(format!("{}.f16", r.key))) {
+            return Ok(pm_render::shader_layers::FallbackPixels {
+                width: r.width,
+                height: r.height,
+                rgba16f,
+            });
+        }
+        let requests = self.dir.join("requests");
+        std::fs::create_dir_all(&requests).unwrap();
+        for (i, t) in job.textures.iter().enumerate() {
+            let bytes: Vec<u8> = t.rgba16f.iter().flat_map(|v| v.to_le_bytes()).collect();
+            std::fs::write(requests.join(format!("{}-{i}.f16", r.key)), bytes).unwrap();
+        }
+        std::fs::write(
+            requests.join(format!("{}.json", r.key)),
+            serde_json::to_vec(r).unwrap(),
+        )
+        .unwrap();
+        *self.missing.lock().unwrap() += 1;
+        Ok(pm_render::shader_layers::FallbackPixels {
+            width: r.width,
+            height: r.height,
+            rgba16f: vec![0; r.width as usize * r.height as usize * 4],
+        })
+    }
+}
+
+/// Decision 19 for effects and transitions (amendment 21: drawn, not
+/// routed): every case WebGL draws that the native pipeline cannot
+/// translate (amendment 9's samplers other than a float `sampler2D`) runs
+/// in the app's own fallback runner with its textures, and the result,
+/// composed back by the engine, matches the compositor's WebGL output by
+/// the same rule as every other case. Two runs: the first writes the
+/// requests (`<corpus>/fallback-effects/requests`), the tool answers them
+/// in headless Chromium, the second compares.
+#[test]
+fn fallback_effects_match_webgl() {
+    let Some(dir) = corpus_dir() else {
+        eprintln!("no shader corpus; skipped");
+        return;
+    };
+    let corpus: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("corpus.json")).unwrap()).unwrap();
+    let status: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("webgl-metal/status.json")).unwrap())
+            .unwrap();
+    let mut renderer = Renderer::headless().expect("a GPU");
+    let host = std::sync::Arc::new(CorpusRunner {
+        dir: dir.join("fallback-effects"),
+        missing: std::sync::Mutex::new(0),
+    });
+    renderer.set_fallback_host(Some(host.clone()));
+    let mut images: BTreeMap<String, Target> = BTreeMap::new();
+    for image in corpus["images"].as_array().unwrap() {
+        let (w, h) = (
+            image["width"].as_u64().unwrap() as u32,
+            image["height"].as_u64().unwrap() as u32,
+        );
+        let halfs = read_f16(&dir.join(image["file"].as_str().unwrap())).unwrap();
+        images.insert(
+            image["name"].as_str().unwrap().into(),
+            upload(&renderer, w, h, &halfs),
+        );
+    }
+    let cases = corpus["cases"].as_array().unwrap();
+    let definitions: Vec<DefinitionSnapshot> = cases
+        .iter()
+        .map(|c| serde_json::from_value(c["definition"].clone()).unwrap())
+        .collect();
+    renderer
+        .set_definitions(&DefinitionSetSnapshot {
+            generation: Seq::new(1).unwrap(),
+            definitions: definitions.clone(),
+            missing: vec![],
+        })
+        .unwrap();
+    let (mut variants, mut matched) = (0, 0);
+    let mut failures = Vec::new();
+    for (case, def) in cases.iter().zip(&definitions) {
+        let id = case["id"].as_str().unwrap();
+        let webgl = &status["cases"][id];
+        let webgl_draws = webgl["compiled"].as_bool() == Some(true) && webgl["glError"].is_null();
+        // Programs the native pipeline cannot translate, and programs it
+        // translates but that are listed as drawn by WebGL's runner
+        // (`pm_render::effects::ANGLE_ONLY`).
+        let needs = matches!(
+            renderer.effects().status(def.kind, def.id.as_str()),
+            Some(Status::NeedsFallback(_))
+        ) || renderer.effects().angle_only(def.kind, def.id.as_str());
+        if !webgl_draws || !needs {
+            continue;
+        }
+        for variant in case["variants"].as_array().unwrap() {
+            variants += 1;
+            let name = variant["name"].as_str().unwrap();
+            let reference = dir
+                .join("webgl-metal")
+                .join(id.replace('/', "__"))
+                .join(format!("{name}.f16"));
+            let Some(reference) = read_f16(&reference) else {
+                failures.push(format!("{id} {name}: no WebGL output"));
+                continue;
+            };
+            let values: Vec<Option<JsValue>> = variant["params"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(js)
+                .collect();
+            let time = variant["time"].as_f64().unwrap();
+            let out = match def.kind {
+                DefinitionKind::Effect => {
+                    let step = effect_step(def, "fx", &values);
+                    let input = &images[variant["input"].as_str().unwrap()];
+                    let backdrop = variant["backdrop"].as_str().map(|b| &images[b]);
+                    let region = variant["region"]
+                        .as_array()
+                        .map(|r| (r[0].as_u64().unwrap() as u32, r[1].as_u64().unwrap() as u32));
+                    let full = variant["full"]
+                        .as_array()
+                        .map(|r| (r[0].as_u64().unwrap() as u32, r[1].as_u64().unwrap() as u32))
+                        .unwrap();
+                    renderer.run_effects(
+                        input,
+                        backdrop,
+                        &[step],
+                        time,
+                        region,
+                        full,
+                        Precision::Float16,
+                    )
+                }
+                _ => {
+                    let step =
+                        transition_step(def, true, variant["progress"].as_f64().unwrap(), &values);
+                    let from = &images[variant["from"].as_str().unwrap()];
+                    let to = &images[variant["to"].as_str().unwrap()];
+                    renderer.run_transition(from, to, &step, time, Precision::Float16)
+                }
+            };
+            let out = match out {
+                Ok(t) => t,
+                Err(e) => {
+                    failures.push(format!("{id} {name}: {e}"));
+                    continue;
+                }
+            };
+            let pixels =
+                pm_gpu::readback::read_f32(renderer.device(), renderer.queue(), &out.texture)
+                    .unwrap();
+            let m = compare(&pixels, &reference);
+            if std::env::var_os("PM_SHADER_STATS").is_some() {
+                eprintln!(
+                    "{id} {name} (runner): exact {:.3}% ({} of {} px), {} px over 1 CV, max {} CV",
+                    100.0 * m.exact as f64 / m.pixels.max(1) as f64,
+                    m.exact,
+                    m.pixels,
+                    m.over_one,
+                    m.max_cv
+                );
+            }
+            if m.pass() {
+                matched += 1;
+            } else {
+                failures.push(format!(
+                    "{id} {name}: {} px over 1 CV (max {} CV)",
+                    m.over_one, m.max_cv
+                ));
+            }
+        }
+    }
+    let missing = *host.missing.lock().unwrap();
+    eprintln!(
+        "fallback runner cases: {variants} variants, {matched} match WebGL, {} failures, {missing} requests waiting",
+        failures.len()
+    );
+    for f in &failures {
+        eprintln!("  {f}");
+    }
+    assert_eq!(
+        missing,
+        0,
+        "{missing} requests written to {}: run `pm-electron-lock bun engine/crates/pm-render/tools/shaders/fallback-runner.ts --fallback <that dir>` and run this test again",
+        host.dir.display()
+    );
+    assert!(variants > 0, "no case needs the fallback runner");
+    assert!(
+        failures.is_empty(),
+        "{} fallback cases differ from WebGL",
+        failures.len()
+    );
 }

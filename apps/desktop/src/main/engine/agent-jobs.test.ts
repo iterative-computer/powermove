@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { canonicalHash, canonicalProject } from '../../shared/canonical-json';
 import type { EngineError, EngineProcess, JobStatus, Request, Response } from '../../shared/engine-protocol';
 import { AgentJobError, AgentJobs, exportSettingsFor, suggestedName, userExportSettings, type AgentJobsEngine, type UserExportStatus } from './agent-jobs';
+import { DefinitionRelay } from './definitions';
 import { RemoteError } from './protocol';
 
 const project = (extra: Record<string, unknown> = {}) => ({
@@ -23,6 +24,8 @@ class FakeEngine implements AgentJobsEngine {
   submit: (body: Request) => Response | EngineError = (body) => ({ type: 'jobAccepted', job: (body as { job: string }).job, state: 'queued', position: 0 });
   frames: (body: Request) => Response | EngineError = () => ({ type: 'agentFrames', outcomes: [], queuedMs: 0 });
   staged: Array<{ session: number; bytes: number }> = [];
+  /** How pushDefinitions answers (the job engine acknowledges each generation). */
+  definitions: (body: Request) => Response | EngineError = (body) => ({ type: 'definitionsApplied', generation: (body as { generation: number }).generation, failures: [] });
 
   async request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
     this.sent.push({ process, body, session, revision });
@@ -34,6 +37,7 @@ class FakeEngine implements AgentJobsEngine {
         case 'submitJob': return this.submit(body);
         case 'cancelJobs': return { type: 'jobsCancelled', jobs: ['x'] };
         case 'agentFrames': return this.frames(body);
+        case 'pushDefinitions': return this.definitions(body);
         default: throw new Error(`unexpected ${body.type}`);
       }
     })();
@@ -392,5 +396,111 @@ describe('Phase 3b delivery through the job engine', () => {
     expect((hq!.spec as any).settings).toMatchObject({ format: { kind: 'proRes', profile: 'hq' }, alpha: 'none', delivery: { audioCoding: 'pcm24' } });
     expect(listed).toEqual(['Frames: PNG sequence · 1280×720 queued', 'Launch: QuickTime · ProRes 422 HQ · 1280×720 queued']);
     await expect(jobs.exportVideo(7, 'run-1', project(), { format: 'h264', preset: 'bogus', range: 'all', audio: true, motionBlur: false, alpha: false })).rejects.toThrow('preset');
+  });
+});
+
+describe('definitions in the job engine (contract 10)', () => {
+  const snapshot = (id: string, source = 'void main(){}') => ({
+    id, kind: 'effect', version: 0, origin: 'local', renderer: null,
+    glsl: { source, bodyLineOffset: 0, bodyUtf16Len: source.length, bodyUtf8Len: source.length },
+    params: [], flags: { passes: 1, keepOrig: false, backdrop: false, rawShader: true, viewportSafe: false, viewportPadding: [], clamp: false }
+  }) as any;
+
+  it('push the window\'s set to an export snapshot and wait for the acknowledgment before submitting', async () => {
+    const engine = new FakeEngine();
+    const relay = new DefinitionRelay();
+    relay.update(7, { generation: 1, full: true, upserts: [snapshot('acme.glow'), snapshot('blur')], removals: [] });
+    // A removed registration stays missing for the job (skipped, as the window skips it).
+    relay.update(7, { generation: 2, full: false, upserts: [], removals: [{ kind: 'effect', id: 'blur' }] });
+    let acknowledge!: () => void;
+    const acknowledged = new Promise<void>((resolve) => { acknowledge = resolve; });
+    let pushes = 0;
+    const answers = engine.definitions;
+    engine.definitions = (body) => { pushes++; return answers(body); };
+    const original = engine.request.bind(engine);
+    engine.request = async (process, body, session, revision) => {
+      if (body.type === 'pushDefinitions' && pushes === 0) await acknowledged;
+      return original(process, body, session, revision);
+    };
+    const jobs = new AgentJobs({ engine, definitions: (owner) => relay.current(owner) });
+    const result = jobs.exportVideo(7, 'run-d', project(), { name: 'Cut', format: 'mp4', range: 'all', audio: true, motionBlur: false, alpha: false });
+    await tick(); await tick();
+    // Not submitted while the definitions are unacknowledged.
+    expect(engine.of('submitJob')).toHaveLength(0);
+    acknowledge();
+    await tick(); await tick();
+    const order = engine.sent.filter((s) => s.session === 10 || s.body.type === 'submitJob').map((s) => s.body.type);
+    expect(order).toEqual(['resync', 'pushDefinitions', 'pushDefinitions', 'submitJob']);
+    const [full, missing] = engine.of('pushDefinitions').map((s) => s.body as any);
+    expect(full).toMatchObject({ generation: 1, full: true, removals: [] });
+    expect(full.upserts.map((d: any) => d.id)).toEqual(['acme.glow']);
+    expect(missing).toEqual({ type: 'pushDefinitions', generation: 2, full: false, upserts: [], removals: [{ kind: 'effect', id: 'blur' }] });
+    engine.status((engine.of('submitJob')[0]!.body as any).job, 'done', { path: '/x/Cut.mp4' });
+    await expect(result).resolves.toMatchObject({ status: 'done' });
+  });
+
+  it('fail the export instead of rendering without the window\'s definitions', async () => {
+    const engine = new FakeEngine();
+    engine.definitions = () => error('invalidMessage', 'bad definition');
+    const relay = new DefinitionRelay();
+    relay.update(7, { generation: 1, full: true, upserts: [snapshot('acme.glow')], removals: [] });
+    const jobs = new AgentJobs({ engine, definitions: (owner) => relay.current(owner) });
+    await expect(jobs.exportVideo(7, 'run-d', project(), { format: 'mp4', range: 'all', audio: true, motionBlur: false, alpha: false }))
+      .rejects.toThrow('refused the window\'s definitions: bad definition');
+    expect(engine.of('submitJob')).toHaveLength(0);
+    expect(engine.of('closeSession').map((s) => s.session)).toEqual([10]);
+  });
+
+  it('bring the window\'s frame session up to date after every publication, never with a stale set', async () => {
+    const engine = new FakeEngine();
+    const relay = new DefinitionRelay();
+    relay.update(3, { generation: 1, full: true, upserts: [snapshot('blur')], removals: [] });
+    const jobs = new AgentJobs({ engine, definitions: (owner) => relay.current(owner) });
+    const plan = { project: project(), times: [0], width: 640, revision: 1 };
+    await jobs.renderFrames(3, 'run-f', plan);
+    let pushes = engine.of('pushDefinitions').map((s) => s.body as any);
+    expect(pushes.map((p) => [p.generation, p.full])).toEqual([[1, true]]);
+    // The batch was asked for after the acknowledgment.
+    const types = engine.sent.map((s) => s.body.type);
+    expect(types.indexOf('pushDefinitions')).toBeLessThan(types.indexOf('agentFrames'));
+    // Nothing changed: no push.
+    await jobs.renderFrames(3, 'run-f', plan);
+    expect(engine.of('pushDefinitions')).toHaveLength(1);
+    // An agent publishes an effect: the next batch gets the whole set at
+    // the session's next generation first.
+    relay.update(3, { generation: 2, full: false, upserts: [snapshot('acme.new')], removals: [] });
+    await jobs.renderFrames(3, 'run-f', plan);
+    pushes = engine.of('pushDefinitions').map((s) => s.body as any);
+    expect(pushes.map((p) => [p.generation, p.full])).toEqual([[1, true], [2, true]]);
+    expect(pushes[1].upserts.map((d: any) => d.id).sort()).toEqual(['acme.new', 'blur']);
+    const lastFrames = engine.of('agentFrames').at(-1)!;
+    expect(engine.sent.indexOf(lastFrames)).toBeGreaterThan(engine.sent.indexOf(engine.of('pushDefinitions').at(-1)!));
+    // Concurrent batches after another change push once, in order.
+    relay.update(3, { generation: 3, full: false, upserts: [], removals: [{ kind: 'effect', id: 'acme.new' }] });
+    await Promise.all([jobs.renderFrames(3, 'run-f', plan), jobs.renderFrames(3, 'run-g', plan)]);
+    pushes = engine.of('pushDefinitions').map((s) => s.body as any);
+    expect(pushes.map((p) => [p.generation, p.full])).toEqual([[1, true], [2, true], [3, true], [4, false]]);
+    expect(pushes[3].removals).toEqual([{ kind: 'effect', id: 'acme.new' }]);
+  });
+
+  it('run queue jobs with the set captured when they were queued', async () => {
+    const engine = new FakeEngine();
+    const jobs = new AgentJobs({ engine });
+    const captured = [{ generation: 1, full: true, upserts: [snapshot('acme.fork')], removals: [] }];
+    await jobs.exportQueued(project(), { format: 'mp4', fps: 30, scale: 1, start: 0, end: 1, quality: 'high', audio: true, motionBlur: false, alpha: false } as any, '/x/out.mp4', 'replace', captured as any);
+    const [push] = engine.of('pushDefinitions');
+    expect(push!.body).toMatchObject({ generation: 1, full: true, upserts: [{ id: 'acme.fork' }] });
+    expect(engine.sent.indexOf(push!)).toBeLessThan(engine.sent.indexOf(engine.of('submitJob')[0]!));
+  });
+
+  it('compile definitions on a scratch session and give back their failures (validate_effect)', async () => {
+    const engine = new FakeEngine();
+    const failure = { code: 'shaderCompile', scope: { kind: 'definition', definition: 'acme.glow' }, message: 'no', retry: { kind: 'afterUserAction' }, detail: null };
+    engine.definitions = (body) => ({ type: 'definitionsApplied', generation: (body as any).generation, failures: [failure] } as any);
+    const jobs = new AgentJobs({ engine });
+    await expect(jobs.compileDefinitions([snapshot('acme.glow')])).resolves.toEqual([failure]);
+    expect(engine.of('openSession')[0]!.body).toMatchObject({ role: 'job' });
+    expect(engine.of('pushDefinitions')[0]!.body).toMatchObject({ generation: 1, full: true, upserts: [{ id: 'acme.glow' }], removals: [] });
+    expect(engine.of('closeSession').map((s) => s.session)).toEqual([10]);
   });
 });

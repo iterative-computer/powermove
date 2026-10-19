@@ -491,7 +491,11 @@ for (const path of localPaths) {
       const entry = join(path, dir, 'index.ts');
       if (!existsSync(entry)) continue;
       const text = await readFile(entry, 'utf8');
-      addRegistered('local', `ext-${hash8(text)}`, await activate(entry), 'local extension (private)', { private: true });
+      // A local extension that does not load here (an import the folder
+      // does not hold) is noted, not fatal: the others still go in.
+      let registered: Awaited<ReturnType<typeof activate>>;
+      try { registered = await activate(entry); } catch (error) { notes.push(`local extension ${hash8(text)} skipped (${String(error).slice(0, 120)})`); continue; }
+      addRegistered('local', `ext-${hash8(text)}`, registered, 'local extension (private)', { private: true });
     }
   }
 }
