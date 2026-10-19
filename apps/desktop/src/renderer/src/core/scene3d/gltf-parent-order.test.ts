@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import * as THREE from 'three';
 import { imports, PmWasm } from '../../engine-doc/wasm';
 import { object3dFromEngine } from './compat-object3d';
 import { disposeModel, loadGltf } from './import-model';
@@ -80,6 +81,81 @@ function glbFixture(source: Uint8Array): Uint8Array {
   out.writeUInt32LE(binLength, 20 + jsonLength); out.writeUInt32LE(0x004e4942, 24 + jsonLength);
   bin.copy(out, 28 + jsonLength);
   return new Uint8Array(out);
+}
+
+function embeddedImageFixture(cache: 'single' | 'sameSampler' | 'differentSampler'): Uint8Array {
+  const document = JSON.parse(new TextDecoder().decode(fixture([
+    { name: 'first', mesh: 0, children: [2] },
+    { name: 'second', mesh: 1, children: [2] },
+    { name: 'shared', mesh: 2 },
+  ], [0, 1])));
+  const positions = Buffer.from(new Float32Array([-1, -1, 0, 1, -1, 0, 0, 1, 0]).buffer);
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');
+  const bin = Buffer.concat([positions, png]);
+  document.buffers = [{ byteLength: bin.length }, { byteLength: positions.length,
+    uri: `data:application/octet-stream;base64,${positions.toString('base64')}` }];
+  document.bufferViews = [
+    { buffer: 0, byteOffset: 0, byteLength: positions.length },
+    { buffer: 0, byteOffset: positions.length, byteLength: png.length },
+    { buffer: 1, byteOffset: 0, byteLength: positions.length },
+  ];
+  document.accessors = [0, 2].map(bufferView => ({ bufferView, componentType: 5126,
+    count: 3, type: 'VEC3', min: [-1, -1, 0], max: [1, 1, 0] }));
+  document.images = [{ bufferView: 1, mimeType: 'image/png' }];
+  document.samplers = cache === 'differentSampler' ? [{}, { wrapS: 33071 }] : [{}];
+  document.textures = cache === 'single' ? [{ source: 0, sampler: 0 }] : [
+    { source: 0, sampler: 0 }, { source: 0, sampler: cache === 'differentSampler' ? 1 : 0 },
+  ];
+  document.materials = [{ pbrMetallicRoughness: {
+    baseColorTexture: { index: 0 },
+    ...(cache === 'single' ? {} : { metallicRoughnessTexture: { index: 1 } }),
+  } }];
+  document.meshes = [
+    { primitives: [{ attributes: { POSITION: 0 }, material: 0 }] },
+    { primitives: [{ attributes: { POSITION: 1 } }] },
+    { primitives: [{ attributes: { POSITION: 0 } }] },
+  ];
+  const json = Buffer.from(JSON.stringify(document));
+  const jsonLength = (json.length + 3) & ~3;
+  const binLength = (bin.length + 3) & ~3;
+  const out = Buffer.alloc(12 + 8 + jsonLength + 8 + binLength);
+  out.writeUInt32LE(0x46546c67, 0); out.writeUInt32LE(2, 4); out.writeUInt32LE(out.length, 8);
+  out.writeUInt32LE(jsonLength, 12); out.writeUInt32LE(0x4e4f534a, 16);
+  json.copy(out, 20); out.fill(0x20, 20 + json.length, 20 + jsonLength);
+  out.writeUInt32LE(binLength, 20 + jsonLength); out.writeUInt32LE(0x004e4942, 24 + jsonLength);
+  bin.copy(out, 28 + jsonLength);
+  return new Uint8Array(out);
+}
+
+async function withDecodedImages<T>(run: () => Promise<T>): Promise<T> {
+  const g = globalThis as any;
+  const hadSelf = 'self' in g;
+  const previousSelf = g.self;
+  const previousBitmap = g.createImageBitmap;
+  const fileLoad = THREE.FileLoader.prototype.load;
+  const bitmapLoad = THREE.ImageBitmapLoader.prototype.load;
+  g.self = g;
+  g.createImageBitmap = async () => ({ width: 1, height: 1, close() {} });
+  // FileLoader's data-URI buffer and ImageBitmapLoader's already-decoded
+  // bitmap both complete as ordered tasks. GLTFLoader's own Promise chains,
+  // caches, and Blob-URL creation still run unchanged.
+  (THREE.FileLoader.prototype as any).load = function (url: string, onLoad: (bytes: ArrayBuffer) => void) {
+    const encoded = url.split(',')[1];
+    if (!url.startsWith('data:') || !encoded) throw new Error(`Unexpected buffer URL: ${url}`);
+    const bytes = Buffer.from(encoded, 'base64');
+    setTimeout(() => onLoad(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)), 0);
+  };
+  (THREE.ImageBitmapLoader.prototype as any).load = function (_url: string, onLoad: (bitmap: ImageBitmap) => void) {
+    setTimeout(() => onLoad({ width: 1, height: 1, close() {} } as ImageBitmap), 0);
+  };
+  try {
+    return await run();
+  } finally {
+    THREE.FileLoader.prototype.load = fileLoad;
+    THREE.ImageBitmapLoader.prototype.load = bitmapLoad;
+    g.createImageBitmap = previousBitmap;
+    if (hadSelf) g.self = previousSelf; else delete g.self;
+  }
 }
 
 function multiSceneFixture(): Uint8Array {
@@ -320,6 +396,22 @@ describe('three r180 shared-node promise order', () => {
         expect(adapted.object3d.getObjectByName('shared')?.parent?.name ?? null).toBe(expected);
         disposeModel(adapted.object3d);
       }
+    }
+  });
+
+  it('orders embedded decoded images after competing data-URI buffers and reuses texture/source caches', async () => {
+    const required = process.env.PM_WASM_REQUIRED === '1';
+    if (required) expect(existsSync(MODULE)).toBe(true);
+    const wasm = required ? await WebAssembly.compile(readFileSync(MODULE)) : null;
+    for (const cache of ['single', 'sameSampler', 'differentSampler'] as const) {
+      const bytes = embeddedImageFixture(cache);
+      const expected = await withDecodedImages(() => parentOf(bytes));
+      expect(expected, cache).toBe('first');
+      if (!wasm) continue;
+      const data = new PmWasm(new WebAssembly.Instance(wasm, imports)).importModel(bytes);
+      const adapted = await withDecodedImages(() => object3dFromEngine(data, bytes));
+      expect(adapted.object3d.getObjectByName('shared')?.parent?.name ?? null, cache).toBe(expected);
+      disposeModel(adapted.object3d);
     }
   });
 });

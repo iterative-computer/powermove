@@ -62,6 +62,7 @@ type P = usize;
 enum Job {
     Resolve(P),
     AllMember(P),
+    StartImage(P),
     Attach {
         node: usize,
         done: P,
@@ -94,6 +95,7 @@ struct Schedule<'a> {
     shallow: HashMap<usize, P>,
     geometry: HashMap<String, P>,
     images: HashMap<usize, P>,
+    texture_images: HashMap<String, P>,
     parents: Vec<Option<usize>>,
     root_owner: Vec<Option<usize>>,
     bad: bool,
@@ -110,6 +112,7 @@ impl<'a> Schedule<'a> {
             shallow: HashMap::new(),
             geometry: HashMap::new(),
             images: HashMap::new(),
+            texture_images: HashMap::new(),
             parents: vec![None; nodes],
             root_owner: vec![None; nodes],
             bad: false,
@@ -179,6 +182,7 @@ impl<'a> Schedule<'a> {
                             self.resolve(p);
                         }
                     }
+                    Job::StartImage(p) => self.external.push(p),
                     Job::Attach { node, done } => {
                         for child in members(&self.json["nodes"][node]["children"]) {
                             if child >= self.parents.len() {
@@ -545,31 +549,61 @@ impl<'a> Schedule<'a> {
         let source = id(&def["source"])
             .or_else(|| id(&def["extensions"]["EXT_texture_webp"]["source"]))
             .or_else(|| id(&def["extensions"]["EXT_texture_avif"]["source"]));
-        let p = match source {
-            Some(j) => self.image(j),
-            None => self.ready(),
+        let Some(j) = source else {
+            let p = self.ready();
+            self.cache.insert(("texture", i), p);
+            return p;
         };
-        let done = self.then(p);
+        let image = &self.json["images"][j];
+        // GLTFParser.loadTextureImage caches by `(uri || bufferView) + ':' +
+        // sampler`, independently of the getDependency(texture) index cache.
+        let key = format!(
+            "{}:{}",
+            image["uri"]
+                .as_str()
+                .filter(|uri| !uri.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| js_key(image.get("bufferView"))),
+            js_key(def.get("sampler"))
+        );
+        let p = if let Some(&cached) = self.texture_images.get(&key) {
+            cached
+        } else {
+            let source = self.image(j);
+            let configured = self.then(source); // flipY, name, sampler, associations
+            let done = self.then(configured); // catch(null) on the fulfilled path
+            self.texture_images.insert(key, done);
+            done
+        };
+        let done = p;
         self.cache.insert(("texture", i), done);
         done
     }
 
     fn image(&mut self, i: usize) -> P {
         if let Some(&p) = self.images.get(&i) {
-            return self.then(p);
+            return self.then(p); // sourceCache clone for another sampler
         }
         let def = self.json["images"][i].clone();
-        let source = id(&def["bufferView"]).map(|j| self.view(j));
+        let uri = match id(&def["bufferView"]) {
+            // Creating the Blob URL is the bufferView.then callback. The
+            // following Promise.resolve(sourceURI).then starts the loader.
+            Some(j) => {
+                let view = self.view(j);
+                self.then(view)
+            }
+            None => self.ready(),
+        };
         let decoded = self.pending();
-        // ImageBitmapLoader completion is task-scheduled. The caller's
-        // deterministic policy assumes already-decoded images and preserves
-        // request order. Decoding live images is inherently race-dependent.
-        if let Some(source) = source {
-            self.on(source, Job::Resolve(decoded));
-        } else {
-            self.external.push(decoded);
-        }
-        let done = self.then(decoded);
+        // The decoded-image policy resolves ImageBitmapLoader's onLoad in a
+        // task, in request order. Even a GLB-embedded image needs that task:
+        // loadImageSource creates a fresh Blob URL and calls loader.load only
+        // after the bufferView/URI Promise chain. Live decoder completion can
+        // race and is deliberately outside this deterministic policy.
+        self.on(uri, Job::StartImage(decoded));
+        let adopted = self.then(decoded); // outer Promise adopts the loader Promise
+        let configured = self.then(adopted); // source extras and mimeType
+        let done = self.then(configured); // catch on the fulfilled path
         self.images.insert(i, done);
         done
     }

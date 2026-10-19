@@ -333,10 +333,16 @@ a later scene root attachment can move a node out of the default scene,
 and the engine importer and renderer both omit that node from the
 default scene. For live image decoding, the completion order can vary
 between loads; the scheduler's deterministic image policy is decoded
-images completed in request order. Multiple independent data-URI buffer
-loads likewise use request order. Texture-bearing material extension
-chains and asynchronous image loading beyond that policy are not yet
-proven against all accepted inputs. A normal-only or color-only morph
+images completed in request order, after URI and Blob construction. An
+embedded GLB image waits for its bufferView, then schedules bitmap
+completion as a task. Source and texture cache hits retain r180's distinct
+Promise continuations. A deterministic test stubs ImageBitmapLoader's
+decoded completion and compares a textured shared parent against a
+competing data-URI buffer parent, including same-sampler texture and
+different-sampler image-source cache hits. Multiple independent data-URI
+buffer loads likewise use request order. Texture-bearing material
+extension chains and live asynchronous image decoding beyond that policy
+are not yet proven against all accepted inputs. A normal-only or color-only morph
 with no position target hits an unconditional `morphTargets[i].count`
 read in r180's texture packer and fails the legacy render. The native
 renderer now returns that error when the mesh reaches a draw, while
@@ -352,7 +358,7 @@ second buffer delays a scene and moves the shared node out of the
 default scene, and data-URI/GLB cases with instancing, geometry cache
 sharing, Standard/Physical/Unlit material chains, and an off-scene
 animation target. The round 7 parent-order and acceptance tests pass
-7/7 against the rebuilt WASM. Native short-morph texture-packing unit tests and the
+8/8 against the rebuilt WASM, including the decoded-image policy oracle. Native short-morph texture-packing unit tests and the
 Chromium attribute/pixel-capture checks are added for the next central
 test run; their outcomes are recorded in that run's evidence, not
 assumed here.
