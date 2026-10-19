@@ -192,7 +192,8 @@ export class SvgRasters {
   private readonly canvas: SvgRasterCanvas;
   private active = 0;
   private readonly queue: (() => void)[] = [];
-  readonly stats = { drawn: 0, posted: 0, failed: 0, stale: 0 };
+  /** Counts, and the slowest viewer ask answered (ms from the ask to its last band). */
+  readonly stats = { drawn: 0, posted: 0, produced: 0, failed: 0, stale: 0, slowestMs: 0 };
 
   constructor(private readonly options: SvgRastersOptions) {
     this.canvas = options.canvas ?? new SvgRasterCanvas();
@@ -315,9 +316,11 @@ export class SvgRasters {
       const id = keyText(request.key);
       let running = this.inFlight.get(id);
       if (!running) {
+        const asked = performance.now();
         running = this.slot(async () => {
           try {
             this.post(target, request.key, await this.draw(request));
+            this.stats.slowestMs = Math.max(this.stats.slowestMs, performance.now() - asked);
           } catch (error) {
             this.fail(target, request.key, error);
           }
@@ -334,6 +337,7 @@ export class SvgRasters {
     const svg = request.svg;
     if (!svg) throw new SvgRasterError('missing', 'The ask names no SVG raster.');
     const data = await this.slot(() => this.draw(svg));
+    this.stats.produced++;
     return { key: keyText(svg.key), width: svg.key.width, height: svg.key.height, format: 'rgba8Premultiplied', origin: [0, 0], scale: 1, data };
   }
 }

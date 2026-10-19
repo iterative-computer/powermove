@@ -800,12 +800,21 @@ impl Renderer {
             ) {
                 Err(RenderError::SvgRastersPending(needs)) if self.svg_source.is_some() => {
                     let source = self.svg_source.clone().expect("checked");
+                    // Every raster the frame needs is asked for, even after
+                    // one fails, so a source sees the whole frame's needs.
+                    let mut first_error = None;
                     for need in &needs {
-                        let pixels = source.fetch(need).map_err(RenderError::SvgRaster)?;
-                        self.vector
-                            .svg
-                            .put(need.request.key.clone(), pixels)
-                            .map_err(RenderError::SvgRaster)?;
+                        match source.fetch(need).and_then(|pixels| {
+                            self.vector.svg.put(need.request.key.clone(), pixels)
+                        }) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                first_error.get_or_insert(e);
+                            }
+                        }
+                    }
+                    if let Some(e) = first_error {
+                        return Err(RenderError::SvgRaster(e));
                     }
                 }
                 other => return other,
