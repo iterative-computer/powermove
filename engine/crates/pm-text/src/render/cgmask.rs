@@ -313,7 +313,10 @@ impl super::scene::MaskSource for CgMasks {
         let path = self
             .fonts
             .font_of(face.id, &run)
-            .and_then(|font| glyph_path_with(&font, glyph, 1.0, 0.0, 0.0))
+            // setupForAsPaths re-enables subpixel positioning after
+            // MakePath clears it. The Mac scaler therefore removes x
+            // hinting with its 4x path query even for the 64px strike.
+            .and_then(|font| glyph_path_with(&font, glyph, 4.0, 0.0, 0.0))
             .map(Arc::new);
         self.bytes += path.as_ref().map_or(0, |p| p.points().len() * 8 + 64);
         self.canonical.insert(key, path.clone());
@@ -458,7 +461,8 @@ fn glyph_path(
 }
 
 /// The glyph's outline from CoreText through `x_scale` horizontally (4 for
-/// subpixel-positioned glyphs, scaled back by its inverse; 1 for paths)
+/// subpixel-positioned glyphs, including the canonical path strike,
+/// scaled back by its inverse)
 /// and the shear `skew`, y down, moved right by `dx`.
 fn glyph_path_with(
     font: &CFRetained<CTFont>,
