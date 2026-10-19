@@ -51,7 +51,9 @@ export function installHiddenCpu(PM: PMRegistry): void {
   let bound: HTMLCanvasElement | null = null, output: HTMLCanvasElement | null = null, originalVisibility = '';
   const syncStyle = () => {
     if (!bound || !output) return;
-    output.className = bound.className; output.style.cssText = bound.style.cssText;
+    const style = getComputedStyle(bound);
+    output.className = bound.className;
+    output.style.cssText = `position:absolute;display:block;left:${bound.offsetLeft}px;top:${bound.offsetTop}px;width:${style.width};height:${style.height};background:${style.backgroundColor};${bound.style.cssText}`;
     output.style.visibility = originalVisibility; output.style.pointerEvents = 'none';
   };
   let pending: { time: number; options: any } | null = null, drawing = false;
@@ -85,6 +87,7 @@ export function installHiddenCpu(PM: PMRegistry): void {
         const sx = width / project.w, sy = height / project.h;
         ctx.drawImage(offscreen, view.x * sx, view.y * sy, view.width * sx, view.height * sy, 0, 0, target.width, target.height);
         PM.bus.emit('preview:presented', { viewport, time: frame.time, version, project, quality });
+        syncStyle();
       }
     } catch (error) { log('error', String(error)); }
     finally { drawing = false; if (pending) void draw(); }
