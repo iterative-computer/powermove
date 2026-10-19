@@ -118,7 +118,10 @@ export class NativeHiddenHost {
       },
       shaderFallback: (session, request, textures) => options.browser.shader(session, request, textures) });
     this.jobs = new AgentJobs({ engine: this.engine, definitions: id => this.engine.definitions.current(id),
-      sessionOwner: (session, owner) => this.jobFonts.setSessionOwner(session, owner),
+      sessionOwner: (session, owner) => {
+        const project = owner === null ? undefined : this.aliases.get(owner);
+        return this.jobFonts.setSessionOwner(session, project ? this.owner(project).id : owner);
+      },
       bindMediaSession: async (session, project) => { if (project) await this.migrateMedia(project); await this.media.bindJob(session, project); },
       packProject: (project, session, document) => packAgentProject(project, { directory: options.exportsDir,
         resolveAsset: id => this.media.resolveAsset(id, { process: 'job', session }) }, document), log: (level, message) => log(`[jobs:${level}] ${message}`) });
