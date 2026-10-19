@@ -26,6 +26,13 @@ use crate::exec::Region;
 use crate::shader_layers::{FallbackPixels, FallbackUnit};
 use pm_protocol::error::{EngineError, ErrorCode, ErrorScope};
 
+pub(crate) fn parity_failure() -> pm_glsl::Failure {
+    pm_glsl::Failure::new(
+        pm_glsl::FailureStage::AngleParity,
+        "first-use native/ANGLE parity probe or persisted ANGLE pin",
+    )
+}
+
 /// `fullQuad(w, h)` as the column-major mat3 uniform.
 fn full_quad(w: u32, h: u32) -> [f32; 9] {
     [w as f32, 0.0, 0.0, 0.0, h as f32, 0.0, 0.0, 0.0, 1.0]
@@ -91,7 +98,7 @@ fn runner_param_calls(params: &[Param], calls: &mut Vec<(String, Call)>) {
 
 /// A target's pixels as binary16 RGBA in its row order (GL order for
 /// every pm-render target).
-fn read_half(
+pub(crate) fn read_half(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     target: &Target,
@@ -319,6 +326,38 @@ impl<'c> Gpu<'c> {
         let format = input.format();
         let (w, h) = (input.width(), input.height());
         let device = self.device;
+        let source = self
+            .effects
+            .parity_source(DefinitionKind::Effect, &step.definition);
+        let probe = source
+            .as_ref()
+            .map(|source| self.effects.parity.verdict(source));
+        let present = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.has_present(source));
+        let pending = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.pending(source));
+        if probe == Some(super::parity::Verdict::Runner)
+            || (probe == Some(super::parity::Verdict::Unknown) && pending)
+        {
+            let mut result = self.runner_effect(
+                layer,
+                step,
+                input,
+                backdrop,
+                time,
+                parity_failure(),
+                (uv, origin, resolution),
+                None,
+            )?;
+            if step.clamp {
+                let clamped = self.take(w, h);
+                self.simple_pass(SimpleOp::Clamp, &result, &clamped);
+                self.taken.push(std::mem::replace(&mut result, clamped));
+            }
+            return Some(result);
+        }
         if let Err(failure) =
             self.effects
                 .program(device, DefinitionKind::Effect, &step.definition, format)
@@ -337,6 +376,7 @@ impl<'c> Gpu<'c> {
                 time,
                 failure,
                 (uv, origin, resolution),
+                None,
             )?;
             if step.clamp {
                 let clamped = self.take(w, h);
@@ -409,6 +449,23 @@ impl<'c> Gpu<'c> {
         }
         let mut result = outputs.pop().expect("at least one pass");
         self.taken.extend(outputs);
+        if probe == Some(super::parity::Verdict::Unknown) || present {
+            let answer = self.runner_effect(
+                layer,
+                step,
+                input,
+                backdrop,
+                time,
+                parity_failure(),
+                (uv, origin, resolution),
+                Some(&result),
+            );
+            self.taken.push(result);
+            // `None` is the runner's own outcome for the step (its request
+            // waits, or its failure is handled as for a pinned program):
+            // the unverified native frame is never presented.
+            result = answer?;
+        }
         if step.clamp {
             let clamped = self.take(w, h);
             self.simple_pass(SimpleOp::Clamp, &result, &clamped);
@@ -430,6 +487,31 @@ impl<'c> Gpu<'c> {
         let format = before.format();
         let (w, h) = (before.width(), before.height());
         let device = self.device;
+        let source = self
+            .effects
+            .parity_source(DefinitionKind::Transition, &step.definition);
+        let probe = source
+            .as_ref()
+            .map(|source| self.effects.parity.verdict(source));
+        let present = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.has_present(source));
+        let pending = source
+            .as_ref()
+            .is_some_and(|source| self.effects.parity.pending(source));
+        if probe == Some(super::parity::Verdict::Runner)
+            || (probe == Some(super::parity::Verdict::Unknown) && pending)
+        {
+            return self.runner_transition(
+                layer,
+                step,
+                before,
+                with_layer,
+                time,
+                parity_failure(),
+                None,
+            );
+        }
         if let Err(failure) =
             self.effects
                 .program(device, DefinitionKind::Transition, &step.definition, format)
@@ -438,7 +520,7 @@ impl<'c> Gpu<'c> {
                 self.fallback(layer, &step.definition);
                 return None;
             }
-            return self.runner_transition(layer, step, before, with_layer, time, failure);
+            return self.runner_transition(layer, step, before, with_layer, time, failure, None);
         }
         let builtin = self.builtin(DefinitionKind::Transition, &step.definition);
         if !builtin && self.held(DefinitionKind::Transition, &step.definition) {
@@ -490,6 +572,21 @@ impl<'c> Gpu<'c> {
         if let (Some(timer), Some((_, e))) = (self.timer.as_deref(), span) {
             timer.mark(device, self.encoder, &out.view, e);
         }
+        if probe == Some(super::parity::Verdict::Unknown) || present {
+            let answer = self.runner_transition(
+                layer,
+                step,
+                before,
+                with_layer,
+                time,
+                parity_failure(),
+                Some(&out),
+            );
+            self.taken.push(out);
+            // As for an effect: the runner's outcome, never the unverified
+            // native frame.
+            return answer;
+        }
         Some(out)
     }
 
@@ -506,6 +603,7 @@ impl<'c> Gpu<'c> {
         time: f64,
         failure: pm_glsl::Failure,
         (uv, origin, resolution): ([f64; 4], [f64; 2], [f64; 2]),
+        native: Option<&Target>,
     ) -> Option<Target> {
         let (w, h) = (input.width(), input.height());
         let passes: Vec<Vec<(String, Call)>> = (0..step.passes.max(1))
@@ -561,11 +659,12 @@ impl<'c> Gpu<'c> {
             Some(&step.instance),
             self.builtin(DefinitionKind::Effect, &step.definition),
         );
-        self.runner_step(span, passes, units, &textures, failure)
+        self.runner_step(span, passes, units, &textures, failure, native)
     }
 
     /// A transition only the fallback runner draws: `u_from` and `u_to`
     /// the stack without and with the layer.
+    #[allow(clippy::too_many_arguments)]
     fn runner_transition(
         &mut self,
         layer: &str,
@@ -574,6 +673,7 @@ impl<'c> Gpu<'c> {
         with_layer: &Target,
         time: f64,
         failure: pm_glsl::Failure,
+        native: Option<&Target>,
     ) -> Option<Target> {
         let (w, h) = (before.width(), before.height());
         let (from, to) = if step.edge_in {
@@ -614,7 +714,7 @@ impl<'c> Gpu<'c> {
             None,
             self.builtin(DefinitionKind::Transition, &step.definition),
         );
-        self.runner_step(span, vec![calls], units, &[from, to], failure)
+        self.runner_step(span, vec![calls], units, &[from, to], failure, native)
     }
 
     /// The runner's pixels for a step, written into a working target, or
@@ -629,6 +729,7 @@ impl<'c> Gpu<'c> {
         units: Vec<FallbackUnit>,
         textures: &[&Target],
         failure: pm_glsl::Failure,
+        native: Option<&Target>,
     ) -> Option<Target> {
         let Subject::Definition { kind, id } = &span.subject else {
             return None;
@@ -648,6 +749,14 @@ impl<'c> Gpu<'c> {
         let program = super::fallback::program_id_of(pm_glsl::VERTEX, &source);
         let (w, h) = (textures[0].width(), textures[0].height());
         if let Some(why) = self.effects.fallback.failure(&program, w, h).cloned() {
+            // A probe whose reference can never be drawn (the failure was
+            // learned from another request of the program): pinned, so
+            // later frames take the runner's path without a native draw.
+            if native.is_some()
+                && self.effects.parity.verdict(&source) == super::parity::Verdict::Unknown
+            {
+                self.effects.parity.pin(&source);
+            }
             self.runner_failed(&span, &program, &why);
             return None;
         }
@@ -719,10 +828,37 @@ impl<'c> Gpu<'c> {
             &pixels.iter().map(|p| p.as_ref()).collect::<Vec<_>>(),
             &failure,
         );
+        if let Some(native) = native {
+            if let Some(probed_frame) = self.effects.parity.take_present(&request.fragment) {
+                if probed_frame != request.key {
+                    // The caller returns the native target to the pool;
+                    // keep a distinct lease for the chain's output.
+                    return Some(self.copy_of(native));
+                }
+            } else if self.effects.parity.verdict(&request.fragment)
+                == super::parity::Verdict::Unknown
+                && !self.effects.parity.pending(&request.fragment)
+            {
+                match read_half(device, queue, native) {
+                    Ok(pixels) => {
+                        self.effects
+                            .parity
+                            .start(&request.key, &request.fragment, pixels)
+                    }
+                    Err(error) => self.effects.watchdog.report(EngineError::new(
+                        ErrorCode::Internal,
+                        span_scope(&span),
+                        format!("{id}: shader parity readback failed ({error})"),
+                    )),
+                }
+            }
+        }
         if let Some(result) = self.effects.fallback.result(&request.key)
             && result.width == w
             && result.height == h
         {
+            self.effects.parity.answer(&request.key, &result);
+            self.effects.parity.take_present(&request.fragment);
             let out = self.take(w, h);
             write_half(queue, &out, &result);
             return Some(out);
