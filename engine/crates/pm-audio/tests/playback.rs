@@ -1589,6 +1589,10 @@ fn starved_playback_recovers_without_poisoning_dsp() {
                 stats.underruns, 0,
                 "{rate}x/{device_rate}: a patient device never reads an empty ring"
             );
+            assert_eq!(
+                stats.dropped_renders, 0,
+                "{rate}x/{device_rate}: cold DSP priming must retain its no-loss hold: {stats:?}"
+            );
             captures.push(samples[first..first + 48_000].to_vec());
             if cold {
                 assert!(
@@ -2607,6 +2611,409 @@ fn voices_own_their_waits_and_notifications() {
         playback.stats().underruns,
         start_underruns,
         "no underrun after the start hold"
+    );
+    drop(playback);
+    cache.shutdown();
+}
+
+/// A6.1/2: once a run has started, even an all-missing mix commits tagged
+/// silence before its ring empties. Large callbacks must first leave a real
+/// per-voice wait: the initial fixed 160 ms ring could not do this at 8192.
+#[test]
+fn every_missing_voice_keeps_the_clock_running() {
+    callback_decode_wait(256, false, false);
+}
+
+#[test]
+fn large_callbacks_keep_per_voice_waits() {
+    for frames in [4096, 8192] {
+        callback_decode_wait(frames, true, true);
+        callback_decode_wait(frames, true, false);
+        callback_decode_wait(frames, false, false);
+    }
+}
+
+fn callback_decode_wait(buffer: usize, with_ready: bool, recover_in_budget: bool) {
+    let _load = stress_enabled().then(CpuContention::start);
+    let dir = temp_dir(&format!("a6-{buffer}-{with_ready}-{recover_in_budget}"));
+    let late_file = dir.join("late.wav");
+    let good_file = dir.join("good.wav");
+    let n = 4 * pm_audio::source::BLOCK;
+    let late: Vec<f32> = (0..n).map(|i| 0.2 + (i % 991) as f32 / 10_000.0).collect();
+    let good: Vec<f32> = (0..n).map(|i| 0.1 + (i % 997) as f32 / 10_000.0).collect();
+    write_wav(&late_file, SR, &[vec![0.0; n], late.clone()]);
+    write_wav(&good_file, SR, &[good.clone(), vec![0.0; n]]);
+    let cache = SourceCache::new(64 << 20, 2);
+    let late_source = cache.open(&late_file, None).unwrap();
+    cache.block(&late_source, 0, true).unwrap();
+    cache.set_decode_blocked(&late_source, true);
+    let good_source = cache.open(&good_file, None).unwrap();
+    for b in 0..4 {
+        cache.block(&good_source, b, true).unwrap();
+    }
+    let (playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig {
+            preroll_ms: 0,
+            preroll_wait_ms: 0,
+            lookahead_ms: 0,
+            ..PlaybackConfig::default()
+        },
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    // The first callback tells the producer the device size while paused.
+    let mut out = vec![0.0; buffer * 2];
+    side.callback(&mut out, 2, host_now_us());
+    let base_underruns = playback.stats().underruns;
+    let dur = n as f64 / SR as f64;
+    let mut clips = vec![audio("late", "s", 0.0, dur, "", "")];
+    if with_ready {
+        clips.push(audio("good", "g", 0.0, dur, "", ""));
+    }
+    let resolver = |id: &str| {
+        Some(if id == "s" {
+            late_file.clone()
+        } else {
+            good_file.clone()
+        })
+    };
+    playback
+        .set_project(
+            Arc::new(project(30.0, dur, &clips, &[], "")),
+            "C",
+            &resolver,
+        )
+        .unwrap();
+    let from = pm_audio::source::BLOCK - 3 * buffer - 8192;
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(from as f64 / SR as f64),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let target = (3 * buffer + 1920).max(3840) / 256 * 256;
+    until(|| side.queued_frames() >= target);
+    let host = host_now_us();
+    let mut samples = Vec::new();
+    let mut missed_at = None;
+    let mut dropped_at = None;
+    let mut released = false;
+    let turns = (3 * buffer + 8192 + 24000).div_ceil(buffer);
+    for turn in 0..turns {
+        // This device does not wait for the source or for a full buffer.
+        assert!(
+            side.queued_frames() >= buffer,
+            "{buffer}: ring empty: {:?}",
+            playback.stats()
+        );
+        let at = host + turn as u64 * buffer as u64 * 1_000_000 / SR as u64;
+        side.callback(&mut out, 2, at);
+        samples.extend_from_slice(&out);
+        let clock = playback.clock().unwrap();
+        let heard = clock
+            .media_time_at(HostMicros::new(at + LATENCY_US as u64).unwrap())
+            .get();
+        let want = (from + turn * buffer) as i64 * TICKS_PER_SECOND / SR as i64;
+        assert!(
+            (heard - want).abs() <= TICKS_PER_SECOND / 500_000,
+            "{buffer}: clock {heard} vs {want}"
+        );
+        std::thread::sleep(Duration::from_secs_f64(buffer as f64 / SR as f64));
+        if missed_at.is_none() && playback.stats().starved_renders > 0 {
+            missed_at = Some(turn);
+            assert_eq!(
+                playback.stats().dropped_renders,
+                0,
+                "{buffer}: no per-voice wait budget"
+            );
+            if recover_in_budget {
+                // Spending wall time without a callback cannot spend the
+                // voice's device-time budget, even on an 8192-frame device.
+                std::thread::sleep(Duration::from_millis(130));
+                assert_eq!(playback.stats().dropped_renders, 0);
+                cache.set_decode_blocked(&late_source, false);
+                until(|| cache.is_ready(&late_source, pm_audio::source::BLOCK as i64, buffer));
+                released = true;
+            }
+        }
+        if playback.stats().dropped_renders > 0 {
+            dropped_at.get_or_insert(turn);
+            if !released && turn > missed_at.unwrap() + 1 {
+                cache.set_decode_blocked(&late_source, false);
+                until(|| cache.is_ready(&late_source, pm_audio::source::BLOCK as i64, buffer));
+                released = true;
+            }
+        }
+    }
+    assert!(
+        missed_at.is_some() && released,
+        "{buffer}: miss/recovery not exercised"
+    );
+    let mut missing = 0;
+    let mut resumed = false;
+    for (i, pair) in samples.chunks_exact(2).enumerate() {
+        assert_eq!(pair[0], if with_ready { good[from + i] } else { 0.0 });
+        if pair[1] == 0.0 {
+            assert!(!resumed);
+            missing += 1;
+        } else {
+            resumed |= missing > 0;
+            assert_eq!(
+                pair[1],
+                late[from + i],
+                "{buffer}: sample-accurate re-entry at {i}"
+            );
+        }
+    }
+    assert_eq!(playback.stats().underruns - base_underruns, 0);
+    if recover_in_budget {
+        assert_eq!(missing, 0);
+        assert!(playback.take_errors().is_empty());
+    } else {
+        assert!(missing > 0 && resumed);
+        assert!(
+            (dropped_at.unwrap() - missed_at.unwrap()) * buffer
+                <= SR as usize * 120 / 1000 + buffer
+        );
+        assert_eq!(playback.take_errors().len(), 1);
+    }
+    drop(playback);
+    cache.shutdown();
+}
+
+/// A6.3: both decoded (warm) and initially cold sources prepare every voice
+/// while paused, including a distinct work-area start. Play and a paused
+/// seek use those exact vocoder histories with no source wait or lost sample.
+#[test]
+fn paused_prefetch_starts_within_one_callback() {
+    let _load = stress_enabled().then(CpuContention::start);
+    let dir = temp_dir("a6-paused-start");
+    let file = dir.join("tone.wav");
+    write_wav(
+        &file,
+        SR,
+        &[tone(SR, 12.0, 997.0, 0.2), tone(SR, 12.0, 631.0, 0.1)],
+    );
+    for buffer in [256, BUFFER] {
+        for warm in [false, true] {
+            let cache = SourceCache::new(64 << 20, 2);
+            let source = cache.open(&file, None).unwrap();
+            if warm {
+                for b in 0..9 {
+                    cache.block(&source, b, true).unwrap();
+                }
+            } else {
+                cache.set_decode_delay(Duration::from_millis(8));
+            }
+            let (playback, mut side) = Playback::start_headless(
+                MixFormat::stereo(SR),
+                cache.clone(),
+                PlaybackConfig::default(),
+                SR,
+                2,
+                LATENCY_US,
+            )
+            .unwrap();
+            let doc = Arc::new(project(
+                30.0,
+                8.0,
+                &[
+                    audio("stretched", "s", 0.0, 8.0, r#", "speed":1.5"#, ""),
+                    audio("plain", "s", 0.0, 8.0, "", ""),
+                ],
+                &[],
+                "",
+            ));
+            playback
+                .set_project(doc.clone(), "C", &|_: &str| Some(file.clone()))
+                .unwrap();
+            playback
+                .command(TransportCommand::SetLoop {
+                    range: Some(TickRange {
+                        start: ticks(4.0),
+                        end: ticks(6.0),
+                    }),
+                })
+                .unwrap();
+            let mut out = vec![0.0; buffer * 2];
+            // Preparation of the work start happens without seeking there.
+            until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
+            for target in [0, 4 * SR as i64, 2 * SR as i64] {
+                playback.command(TransportCommand::Pause).unwrap();
+                // Retire previous epoch's queued chunks just as a live device
+                // does continuously while paused.
+                side.callback(&mut out, 2, host_now_us());
+                playback
+                    .command(TransportCommand::Seek {
+                        time: ticks(target as f64 / SR as f64),
+                        mode: SeekMode::Exact,
+                    })
+                    .unwrap();
+                until(|| playback.prepared_starts().contains(&target));
+                let before = playback.stats();
+                let start = std::time::Instant::now();
+                playback
+                    .command(TransportCommand::Play {
+                        rate: PlaybackRate::NORMAL,
+                    })
+                    .unwrap();
+                let deadline = start + Duration::from_secs_f64(buffer as f64 / SR as f64);
+                while side.queued_frames() < buffer && std::time::Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                assert!(
+                    side.queued_frames() >= buffer,
+                    "buffer={buffer} warm={warm} target={target}: first callback missed, {:?}",
+                    start.elapsed()
+                );
+                let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+                side.callback(&mut out, 2, host_now_us());
+                let rig = Rig::new(&[("s", file.as_path())]);
+                let mut mixer = rig.mixer((*doc).clone(), "C", MixFormat::stereo(SR));
+                let mut expected = vec![Vec::new(); 2];
+                mixer
+                    .render(
+                        target,
+                        buffer,
+                        &mut expected,
+                        &pm_audio::RenderOptions {
+                            wait: true,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                for i in 0..buffer {
+                    for c in 0..2 {
+                        assert_eq!(out[2 * i + c], expected[c][i]);
+                    }
+                }
+                assert_eq!(playback.stats().starved_renders, before.starved_renders);
+                assert_eq!(playback.stats().dropped_renders, before.dropped_renders);
+                eprintln!(
+                    "A6 start buffer={buffer} warm={warm} target={target}: {latency_ms:.3} ms (one callback {:.3} ms)",
+                    buffer as f64 * 1000.0 / SR as f64
+                );
+            }
+            drop(playback);
+            cache.shutdown();
+        }
+    }
+}
+
+/// A6 review: paused preparation renders every voice for up to three starts.
+/// Right after an edit (which clears prepared starts) with many stretched
+/// voices, a Play arriving mid-pass must not wait for the remaining starts.
+#[test]
+fn play_preempts_paused_preparation_after_an_edit() {
+    let _load = stress_enabled().then(CpuContention::start);
+    let dir = temp_dir("a6-preempt");
+    let file = dir.join("tone.wav");
+    write_wav(
+        &file,
+        SR,
+        &[tone(SR, 12.0, 997.0, 0.2), tone(SR, 12.0, 631.0, 0.1)],
+    );
+    let cache = SourceCache::new(128 << 20, 2);
+    let source = cache.open(&file, None).unwrap();
+    for b in 0..12 {
+        cache.block(&source, b, true).unwrap();
+    }
+    let (playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig::default(),
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let voices = 16;
+    let doc = |gain: f64| {
+        let layers: Vec<String> = (0..voices)
+            .map(|i| {
+                audio(
+                    &format!("v{i}"),
+                    "s",
+                    0.0,
+                    8.0,
+                    &format!(r#", "speed":{}, "gain":{gain}"#, 1.25 + i as f64 * 0.05),
+                    "",
+                )
+            })
+            .collect();
+        Arc::new(project(30.0, 8.0, &layers, &[], ""))
+    };
+    let path = |_: &str| Some(file.clone());
+    playback.set_project(doc(1.0), "C", &path).unwrap();
+    playback
+        .command(TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: ticks(4.0),
+                end: ticks(6.0),
+            }),
+        })
+        .unwrap();
+    // A whole pass: the playhead and both loop edges, every voice fresh.
+    let all = [
+        0,
+        4 * SR as i64,
+        6 * SR as i64 - pm_audio::ring::CHUNK as i64,
+    ];
+    playback.set_project(doc(0.9), "C", &path).unwrap();
+    let pass = std::time::Instant::now();
+    until(|| playback.prepared_starts().contains(&0));
+    let playhead_ms = pass.elapsed().as_secs_f64() * 1000.0;
+    until(|| all.iter().all(|s| playback.prepared_starts().contains(s)));
+    let pass_ms = pass.elapsed().as_secs_f64() * 1000.0;
+    let mut out = vec![0.0; 512 * 2];
+    let (mut acks, mut firsts) = (vec![], vec![]);
+    // Land Play at every phase of the restarted pass (2 ms steps).
+    for (trial, delay_ms) in (0..48u64).map(|i| i * 2).enumerate() {
+        playback.command(TransportCommand::Pause).unwrap();
+        side.callback(&mut out, 2, host_now_us());
+        // An edit invalidates every prepared start; preparation restarts.
+        let gain = if trial % 2 == 0 { 1.0 } else { 0.9 };
+        playback.set_project(doc(gain), "C", &path).unwrap();
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let at = std::time::Instant::now();
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        acks.push(at.elapsed().as_secs_f64() * 1000.0);
+        // First device buffer queued (prepared or fresh pre-roll).
+        until(|| side.queued_frames() >= 512);
+        firsts.push(at.elapsed().as_secs_f64() * 1000.0);
+    }
+    firsts.sort_by(f64::total_cmp);
+    let worst = acks.iter().copied().fold(0.0, f64::max);
+    let mut sorted = acks.clone();
+    sorted.sort_by(f64::total_cmp);
+    let pct = |q: f64| sorted[((sorted.len() as f64 * q).ceil() as usize).max(1) - 1];
+    eprintln!(
+        "A6 preempt: {voices} stretched voices, playhead prepared {playhead_ms:.1} ms, all starts {pass_ms:.1} ms after an edit; Play acknowledged p50/p95/max {:.2}/{:.2}/{worst:.2} ms; first 512-frame buffer queued p50/p95/max {:.2}/{:.2}/{:.2} ms over {} trials",
+        pct(0.5),
+        pct(0.95),
+        firsts[firsts.len() / 2],
+        firsts[(firsts.len() * 95).div_ceil(100) - 1],
+        firsts[firsts.len() - 1],
+        acks.len()
+    );
+    // The pass is spread over idle turns; Play must never wait for a
+    // pass's remaining starts, only (at most) the one being rendered.
+    assert!(
+        worst < pass_ms / 3.0,
+        "Play waited {worst:.1} ms of a {pass_ms:.1} ms preparation pass: {acks:.2?}"
     );
     drop(playback);
     cache.shutdown();
