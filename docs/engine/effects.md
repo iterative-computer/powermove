@@ -1164,7 +1164,11 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
   texture sample at computed coordinates) that is not in the Store and not
   listed would draw natively and could differ at isolated pixels. The
   listing is by fingerprint, so it is extended as the gate finds programs;
-  nothing detects such a program on its own.
+  nothing detects such a program on its own. Chike's installed extensions (38
+  effects, 2 extension layers) are now in the gate corpus and all match
+  natively (`docs/engine/shaders.md`); a runtime probe (draw a user
+  program's first frame both ways, pin it to the runner on a difference)
+  is not built and is a decision for the orchestrator.
 - **ANGLE parity residue** (shader level, within 1 CV): `radians`/`degrees`
   probes (6 of 36,864 pixels at 1 CV even with ANGLE's operand order),
   `halftone-fragcoord`, `outer-product-twist`, `mix-bool`,
