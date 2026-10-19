@@ -823,3 +823,35 @@ Neither equal-to-today mount stalls nor repeated J/K/L A/V performance is claime
 from the simulation. Re-run paired mount, cadence, and A/V probes on an awake,
 unlocked display with load at most 8. The between-deadline worker submission
 change above also still needs its common-compositor-clock validation.
+
+### Repeating the paired perf3 rows
+
+All app commands below require the machine-wide `pm-electron-lock` wrapper,
+`--workers=1` for Playwright, at least 40 GiB free before builds/launches, load
+at most 8, and an awake, unlocked display. Evidence defaults to `/tmp` for the
+new probes. These are measurement entry points, not completed gate results.
+
+- Cadence: `PM_FIXUPS2_MEASURE=1 PM_PERF3_RATES=30,25,23.976023976023978`
+  with `e2e/path-mask-playback-measure.spec.ts`. It uses fixups2's common
+  `Graphics.Pipeline.DrawAndSwap` timeline for both paths. Set `PM_PERF3_HD=1`
+  for HD only; `PM_PERF3_SOLID=1` isolates pacing with an animated solid and is
+  diagnostic only, not a replacement for the mask case.
+- Typing: `PM_TEXT_TYPING_MEASURE=1 PM_TEXT_TYPING_PAIRED=1` with
+  `e2e/native-engine-text-typing.spec.ts` (fonts lane harness, with p99,
+  keydown/handler, patch/barrier revision, frame and worker traces added).
+- Mount: `PM_MOUNT_MEASURE=1` with
+  `e2e/native-engine-mount-measure.spec.ts`; `PM_MOUNT_PAIRS` controls repeats.
+  It alternates which mode runs first, starts with no viewer, and records the
+  page clock, playhead, and native line through the same mount probe.
+- Drag/pan/orbit: `scripts/frame-bridge-measure.mjs --max-load 8
+  --evidence-dir /tmp/powermove-perf3 --only <paired-run-names>`. Explicit
+  `--only` order is preserved so today's row can immediately precede native.
+  The orbit rows use the threed lane's measurement hooks and synthetic shadow
+  scene; integrating its viewport runtime is a separate lane responsibility.
+
+The perf3 attempt produced no valid final paired rows: the cadence run locked
+mid-pair, drag/pan/orbit were skipped by the display guard, and typing remains
+unmeasured. SVG exact-pixel and fallback PBO tests establish correctness only;
+export throughput and animated fallback playback still need the integrated defs
+runner's paired measurements. A 135 ms SVG scale edit was observed in an
+unpaired locked-session correctness run and is not a speed pass.
