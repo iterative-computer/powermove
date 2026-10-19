@@ -28,7 +28,8 @@ export default function activate(api: PowermoveAPI): void {
     w.__watermark.frames++;
     w.__watermark.times.push(Number(frame?.time ?? NaN));
     const canvas = gl.canvas as HTMLCanvasElement;
-    if (w.__watermark.reads.length < 8 && canvas.width > 64) {
+    if (canvas.width > 64) {
+      if (w.__watermark.reads.length >= 8) w.__watermark.reads.shift();
       w.__watermark.reads.push({ size: [canvas.width, canvas.height], mark: read(canvas, 20, 16), center: read(canvas, Math.floor(canvas.width / 2), Math.floor(canvas.height / 2)) });
     }
   });

@@ -295,7 +295,21 @@ export default function activate(api: PowermoveAPI): void {
         const r: any = api.render.raster(text, 1.5, t);
         const today: any = pm.__rasterBase(text, 1.5, t);
         const geometry = (s: any) => s && { w: s.w, h: s.h, cw: s.cv.width, ch: s.cv.height, anchorX: s.anchorX, anchorY: s.anchorY };
-        return { ok: !!r && !(r instanceof Promise) && near(geometry(r), geometry(today)) && near(json(r.selection ?? null), json(today.selection ?? null)) && near(r.fontOffset ?? null, today.fontOffset ?? null), detail: [geometry(r), geometry(today)] };
+        // The pixels: a shape's raster as today's (section 25), and the
+        // text's ink where today's is (its glyph edges are text-render parity,
+        // gated by the typewriter test).
+        const shapeR: any = shape ? api.render.raster(shape, 2, t) : null;
+        const shapeToday: any = shape ? pm.__rasterBase(shape, 2, t) : null;
+        const shapePixels = shapeR && shapeToday && shapeR.cv.width === shapeToday.cv.width && shapeR.cv.height === shapeToday.cv.height ? compare(pixels(shapeR.cv), pixels(shapeToday.cv)) : null;
+        const inkBox = (c: HTMLCanvasElement) => {
+          const d = pixels(c);
+          let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
+          for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) if (d[(y * c.width + x) * 4 + 3]! > 127) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+          return [x0, y0, x1, y1];
+        };
+        const ink = r && today ? [inkBox(r.cv), inkBox(today.cv)] : null;
+        const inkOk = !!ink && ink[0]!.every((v, i) => Math.abs(v - ink[1]![i]!) <= 1);
+        return { ok: !!r && !(r instanceof Promise) && near(geometry(r), geometry(today)) && near(json(r.selection ?? null), json(today.selection ?? null)) && near(r.fontOffset ?? null, today.fontOffset ?? null) && !!shapePixels && same(shapePixels) && inkOk, detail: { geometry: [geometry(r), geometry(today)], shapePixels, ink } };
       });
       check('render.textLayout', () => { const a: any = api.render.textLayout(text, t), b: any = pm.textCaretLayout(text, t); return { ok: !!a && a.lines.length === b.lines.length && a.lines.every((l: any, i: number) => l.text === b.lines[i].text && Math.abs(l.width - b.lines[i].width) <= 0.25), detail: a?.lines?.map((l: any) => l.width) }; });
       let engineFrame: HTMLCanvasElement | null = null;

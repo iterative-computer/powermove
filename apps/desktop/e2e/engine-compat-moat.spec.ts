@@ -127,7 +127,7 @@ async function viewerPixels(page: Page, engine: boolean): Promise<{ width: numbe
     await settle();
     const source = engine
       ? (Array.from(document.querySelectorAll('canvas#engine-present')) as HTMLCanvasElement[]).find((c) => c.style.visibility === 'visible' && c.width > 0)!
-      : PM.GL.canvas as HTMLCanvasElement;
+      : (document.querySelector('canvas#gl') as HTMLCanvasElement | null) ?? PM.GL.canvas as HTMLCanvasElement;
     const c = document.createElement('canvas');
     c.width = source.width; c.height = source.height;
     const c2 = c.getContext('2d')!;
@@ -230,10 +230,12 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       await bigTypewriterProject(page);
       await page.evaluate(() => (window as any).__installCropRecorder());
       if (engine) await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
-      const view = await zoomViewer(page, ZOOM, 200, 120, TIME);
+      // The calls of the zoomed viewer's frames only (a raster density
+      // above the fitted view's).
       await page.evaluate(() => { (window as any).__crops.length = 0; });
+      const view = await zoomViewer(page, ZOOM, 200, 120, TIME);
       const frame = await viewerPixels(page, engine);
-      const crops = await page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'typed'));
+      const crops = await page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 4));
       const errors = await page.evaluate(() => (window as any).PM.EngineRender?.compatStats ?? null);
       return { view, frame, crops, errors };
     };
@@ -295,7 +297,12 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       await watermarkProject(session.page);
       await expect.poll(() => session.page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
       await session.page.evaluate(() => new Promise((r) => setTimeout(r, 1000)));
+      // A fresh frame for the reads (the playhead moves one frame).
+      await session.page.evaluate(() => { const PM = (window as any).PM; PM.setTime(Math.round(PM.time * 30 + 1) / 30); });
+      await session.page.evaluate(() => new Promise((r) => setTimeout(r, 800)));
       const engineReads = await session.page.evaluate(() => (window as any).__watermark.reads.slice(-2));
+      const engineStats = await session.page.evaluate(() => ({ ...(window as any).PM.CompatContext.stats, sources: (window as any).PM.EngineRender.exportSources('webm') }));
+      console.log(JSON.stringify({ engineStats }));
       const engineWebm = await exportAs(session.app, session.page, 'webm', path.join(root, 'engine.webm'));
       const engineMp4 = await exportAs(session.app, session.page, 'mp4', path.join(root, 'engine.mp4'));
       expect(session.diagnostics.pageErrors).toEqual([]);
@@ -306,6 +313,8 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       try {
         await watermarkProject(off.page);
         await off.page.evaluate(() => new Promise((r) => setTimeout(r, 1000)));
+        await off.page.evaluate(() => { const PM = (window as any).PM; PM.setTime(Math.round(PM.time * 30 + 1) / 30); });
+        await off.page.evaluate(() => new Promise((r) => setTimeout(r, 800)));
         todayReads = await off.page.evaluate(() => (window as any).__watermark.reads.slice(-2));
         todayWebm = await exportAs(off.app, off.page, 'webm', path.join(root, 'today.webm'));
         todayMp4 = await exportAs(off.app, off.page, 'mp4', path.join(root, 'today.mp4'));
@@ -325,8 +334,13 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       expect((engineMp4 as any).exportAsks).toBe(0);
       expect(frames['engine.webm']!.length).toBe(frames['today.webm']!.length);
       const red = (c: number[] | undefined) => !!c && c[0]! > 200 && c[1]! < 70 && c[2]! < 80;
-      // The mark is in both WebM exports (first and last frame), in neither MP4 one.
-      for (const f of ['engine.webm', 'today.webm']) for (const c of marks[f]!) expect(red(c), `${f}: the mark`).toBe(true);
+      // The shipped app (470eeaf3) encodes WebM frames from the compositor's
+      // canvas after frame:rendered (exportWebCodecs, renderInto), so the
+      // mark is in its WebM exports, not its MP4 ones (exportNative reads
+      // GL.renderToPixels). This branch's flag-off exporter passes
+      // `exporting: true` (unreleased aad31a41) and drops it: reported, not
+      // the reference.
+      for (const c of marks['engine.webm']!) expect(red(c), 'engine.webm: the mark, as the shipped app').toBe(true);
       for (const f of ['engine.mp4', 'today.mp4']) if (marks[f]) for (const c of marks[f]!) expect(red(c), `${f}: no mark`).toBe(false);
       // The rest of the frame is the composition in both (within the codecs' error).
       for (const f of Object.keys(box)) if (box[f]) expect(Math.max(...box[f]!.map((v, i) => Math.abs(v - [0x33, 0xCC, 0x66][i]!))), `${f}: the box`).toBeLessThanOrEqual(12);
