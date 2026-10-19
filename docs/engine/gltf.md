@@ -171,9 +171,9 @@ repository.
   (`scene3d-geometry.test.ts`). Edit Mode never reads a glTF model's mesh
   (`canEdit` refuses imported models); `objectMesh3d` answers `notMesh`
   for it, the runtime's group.
-- `assets.get().object3d` is still the importer's three.js object (built by
-  `GLTFLoader`), not one built from this engine's geometry
-  (docs/engine/scene3d.md, "What remains").
+- The round 5 import adapter supplies `assets.get().object3d` from engine
+  geometry when "Use New Engine" is on (see below). The adapter's browser
+  comparison of textured models and exact `prepareImport` bytes passes.
 - Skinned meshes are not culled and sort transparent items by the
   geometry's sphere (see Fidelity notes); three.js's history-dependent
   programs are generated fresh.
@@ -223,3 +223,45 @@ Blender run still fails six external AVIF map snapshots. See blender.md
 for the full-depth TIFF conversion and the remaining gaps. The public
 `assets.get().object3d` adapter and `prepareImport` backend are unchanged
 and remain required work.
+
+## Phase 3c round 5: engine import and the compatibility object
+
+With "Use New Engine" on, `pm_geom3d::model_import::import` checks and
+normalizes the selected glTF/GLB and `pm_model_import` exposes its scene
+graph, attributes, indices, morph targets, skins, materials, embedded
+images, cameras, lights, and animation through `pm-wasm`. The renderer's
+`object3dFromEngine` builds a traversable, cloneable three.js `Object3D`
+from that data, sharing repeated primitive geometry and material variants
+as the loader does. It carries glTF extras and unhandled extensions into
+`userData`, and reads original JSON material factors at their source
+precision. The existing scene runtime and frozen apiVersion 1–3 extensions
+can still consume `media.assets.get(id).object3d`; that property is
+deprecated and an agent warning is emitted once per asset. The flag-on
+import path does not invoke `GLTFLoader`.
+
+`Scene3D.prepareImport` sends the selected OBJ, MTL, and image files to
+`pm_prepare_model_import`. For a bundle that produces a GLB, the renderer
+imports that GLB through the engine adapter and runs the existing
+`GLTFExporter` with Chromium image encoding for the final asset bytes.
+The original OBJ name and MTL numeric factors are restored before export.
+For oversized bump maps, the original image is resized and converted to
+a normal map by the existing Chromium canvas path before export. This
+keeps the final encoder consistent with the flag-off importer while the
+geometry and import checks come from the engine. Unchanged/invalid
+selected-file outcomes follow the existing `prepareImport` return shape.
+
+Verification as of 2026-10-19: two adapter unit tests and seven real
+Khronos model comparisons pass against a test-only `GLTFLoader` reference.
+Those comparisons cover hierarchy, attributes and indices, material
+factors and sharing identity, `userData`, skin inverses, morphs, bounds,
+clip interpolants, and animated world and bone transforms at multiple
+times. The native `pm-wasm` check passes. In Electron, all eight
+`prepareImport` fixtures produce GLBs byte-for-byte equal to the flag-off
+importer: plain OBJ, PNG/JPEG/WebP color maps, texture transform,
+multi-material, normal-size bump, and >2048-pixel bump resize. Six
+textured Khronos models, including physical materials, match the flag-off
+loader's object graph, materials, maps, image pixels, and `userData`.
+The eight selected OBJ fixtures and six selected glTF models exercise
+the current parity suite; they do not exhaust every valid input. Embedded
+images currently cross the WASM boundary as base64 JSON, adding temporary
+memory use for large models.

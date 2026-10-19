@@ -405,23 +405,28 @@ Apple M4 Max, macOS 27, 2026-10-18, load average about 9 to 12.
 | `pm-render` `scene3d_document`, `headless`, `scene3d_layering`, `scene3d_resources` | Capability expectations updated (recipe parts and 3D objects in 3D groups draw) | Pass |
 | `pm-geom3d`, `pm-eval`, `pm-edit`, `pm-wasm` test suites; clippy `-D warnings` | | Pass |
 
-### Known differences from today (THREED-1, binding round 4 decisions)
+### THREED-1 behavior decisions (binding round 4; round 5 corrections)
 
 - Exactly equal-distance picks must match today's object insertion history.
-  The current scene-order tie break still needs that correction.
+  **Corrected in round 5:** the native geometry host retains insertion
+  history across source replacement and asset relinking, and synchronizes it
+  at presented-frame boundaries as well as geometry queries. Edits before
+  one frame do not create intermediate runtime objects.
 - The skinned bounding sphere uses the current pose: **KEEP**, a recorded
   bug fix. Today's first-pose sphere can miss a mesh after it moves outside
   that sphere. The loaded-pose bounding box still matches today.
 - Corrupted legacy scenes must throw the same `ZodError` as today's
-  `parseScene`. The current answer-instead-of-throw behavior still needs
-  that correction.
+  `parseScene`. **Corrected in round 5:** renderer geometry queries rethrow
+  the original parser error when they reach the scene, including its class,
+  message, and issues. The native frame-sync query uses the same parser.
 - Headless and agent picks return native 3D answers where today returns
   null: **KEEP**, a recorded fix.
 
 The local bounding-box pre-test always runs (three.js runs it only after a
 bounds question computed the box); it only prunes. These decisions are
-settled, with no further approval requested. The two required corrections
-above are open implementation gaps, not accepted differences.
+settled, with no further approval requested. Direct headless pm-wasm callers
+receive a serialized validation marker; the renderer rethrows today's
+original JavaScript `ZodError` object.
 
 ### Phase 3c round 2 (review fixes, 2026-10-19)
 
@@ -568,7 +573,7 @@ above are open implementation gaps, not accepted differences.
 | e2e `POWERMOVE_NEW_ENGINE=0` | `scene3d`, `viewport3d`, `blender-motion` | 15 of 15 |
 | `pm-render` `blender_snapshots` (v1 and `threed-20261019-roles-maps`; nothing allowed) | every Blender snapshot and frame list | 182 compared, 153 equal, 29 failures (23 glTF snapshots not built, 6 converted textures); fails by design until closed |
 
-### What remains (3D lane, Phase 3c)
+### Open items at the end of round 4 (historical)
 
 - The 3D viewport chrome (`core/scene3d/overlay.ts`) still renders the
   scene with three.js for grid occlusion and selection outlines, so the
@@ -670,3 +675,113 @@ Decisions D/E are unimplemented, so G was not re-measured: the earlier idle
 orbit regression remains a blocker. THREED-1's insertion-history tie break
 and corrupted-scene `ZodError` corrections also remain open. No visible
 difference is accepted by these test results.
+
+### Phase 3c round 5: query behavior corrections
+
+The geometry host now retains each scene's object insertion order across
+queries and native presented-frame syncs. A changed source or relinked asset
+removes and reinserts its object,
+matching `SceneRuntime.sync`'s `Map` behavior for equal-distance ray hits;
+document reordering alone leaves the existing order intact. The history is
+keyed by project and composition/layer and survives ordinary document edits.
+The skinned-model sphere still uses the current pose, per THREED-1.
+
+Renderer geometry queries validate legacy scene data with the same
+`parseScene` function as today's runtime. When a native pick or bounds query
+actually reaches a corrupted scene layer, it rethrows that parser's original
+error object, preserving the `ZodError` name, message, and issues. This does
+not run three.js geometry. Regression tests cover a tied pick after a source
+replacement, source/order history, a corrupt stored scene, and a corrupt
+generated model scene; the frame-sync path also checks the stored scene's
+original `ZodError`. The real-wasm geometry suite passes all 13 cases.
+
+
+### Phase 3c round 5: native viewport chrome and API compatibility
+
+The native presenter now owns the viewport geometry passes. A stage-sized
+`Depth32Float` target supplies window depth. Its f32 bits are split 11/11/10
+across an RGBA16F transport plane as exact binary fractions, so half-float
+storage does not reduce depth precision. A second plane carries the visible
+22-bit object ID and selected/active coverage. Selected objects are rendered
+independently of other objects' depth, in the same selected-then-active order
+as today's outline mask. The descriptor includes the object legend, expanded
+model-group selection and evaluated light/camera glyphs. Revision, view
+sequence, pool generation and frame sequence identify the complete pair.
+
+The fractional CSS composition rectangle determines the chrome projection,
+matching the overlay camera rather than the separately snapped color frame.
+`overlay.ts` restores the encoded depth for the existing grid shader and
+uses the independent coverage for the existing outline colors, radius and
+X-ray behavior. `controller.ts` does not synchronize `compositionRuntime`
+when the engine setting is on. Edit targets, navigation and glyph box select
+use native geometry and frame-aligned glyphs. A missing native answer is a
+named engine failure; it never selects the reference runtime.
+
+Chrome and color share slot ownership. The viewer retains the displayed
+chrome pair until replacement and until every WebGL read fence completes;
+color presentation alone cannot release a slot that the overlay still reads.
+Pool retirement also waits for those readers. The native bridge accepts 64
+slots, enough for both planes paired with each of the maximum 32 color slots.
+The preload's final-slot test and the replacement/drop/fence lease tests
+exercise this ownership boundary.
+
+The renderer's preview API uses the presenter's explicit Blender controls
+and status events. A render resolves only after its matching Blender frame
+is actually presented; cancel/restart invalidate the previous generation.
+Automatic viewer previews use separate generations. The native importer and
+Object3D compatibility adapter are described in gltf.md. The adapter keeps
+the deprecated API functional without loading engine-on models through
+GLTFLoader, and warns extension authors when they read it.
+
+Five paired hidden-window Chromium captures exercise grid occlusion by
+intersecting boxes, selected/active outlines including an occluded object,
+X-ray, box-selected light glyphs, and a transformed imported glTF. They pass
+the existing 3D comparison bar: 99.989–100% of pixels within 2 CV, zero CV
+outside the independently measured reference MSAA edges. An additional
+overlay-ink SSIM witness scores 0.999773–1.0 against a 0.995 threshold; it
+is an overlay quality check, separate from S7's per-object metric.
+Selected/active color masks have zero mismatching pixels, and X-ray is pixel-identical. The reference-only
+witness renders today's unchanged depth/grid pass with and without default
+framebuffer MSAA and dilates the difference by one pixel; it includes grid
+intersections inside meshes, where MSAA also changes depth-test coverage.
+It never reads native pixels to choose exclusions and never excludes an
+outline-color pixel. At most 879 of 864,000 captured pixels are excluded.
+The helper reads the actual transient camera through the public viewport
+API, avoiding a second bundled module's independent viewport WeakMap.
+
+The historical round 4 gaps and results above describe that earlier source,
+not accepted differences in the new implementation.
+
+
+### Round 5 synchronized verification and remaining gate
+
+The rebuilt native addon and generated TypeScript both speak
+`protocol-e0820481c9e45c9e`. With Use New Engine on, the synchronized app
+run passes **25/25 tests**, with no skips: all 19 required scene3d,
+viewport3d, Blender, motion, thumbnail and SVG-map checks, plus the new
+preview API, two live PNG-transport cases, chrome comparison, selected-file
+import parity and textured Object3D compatibility checks. Native gesture
+captures retain their nonempty-pixel and document/Undo assertions.
+
+The complete Blender corpus passes 182/182 snapshots (all 23 imported
+models included), 29 converted-map pixel comparisons and 90/90 frame lists.
+The real-wasm geometry suite passes 13 cases. Native preview failure tests
+pass 11/11, Blender compositor/chrome integration 7/7, and lossless depth
+packet boundaries 1/1. Protocol tests pass 96 unit, two integration and 11
+wire/generation cases; the fixture-update test remains intentionally
+ignored. All-target Clippy passes with warnings denied. Targeted renderer,
+main, preload and presenter tests pass, including replacement/fence lifetime,
+retired generations, cancellation and cache eviction. The restored flag-off
+Blender motion checks also pass 3/3. A follow-up preview API check passes
+cancellation and restart after an editor-camera orbit, with matching actual
+presented frame tags, nonempty native pixels, new native jobs and zero legacy
+preview jobs.
+
+**G is unmeasured after D.** The paired `p3c-orbit-today-idle` and
+`p3c-orbit-engine-idle` run was attempted under the Electron lock after the
+synchronized app checks. The harness skipped both because the main display
+was asleep and the session locked. No post-D p50/p95/p99 samples were
+produced, and no performance pass is claimed. Run this same pair with the
+display awake and session unlocked on a quiet machine; compare all three
+percentiles and profile any regression. The r1 values above remain
+historical pre-D results, not measurements of the new chrome.
