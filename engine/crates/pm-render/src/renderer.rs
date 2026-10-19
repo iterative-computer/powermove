@@ -5,6 +5,9 @@
 
 use std::sync::Arc;
 
+mod layer_raster;
+pub use layer_raster::{LayerPixels, LayerRaster};
+
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};
 use pm_model::Document;
@@ -184,6 +187,13 @@ pub struct Renderer {
     explicit_meshes: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
     text: crate::text::TextContext,
     text_gpu: crate::text::gpu::TextGpu,
+    /// Layer draws kept across frames of one paused time
+    /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
+    reuse: crate::reuse::DrawReuse,
+    reuse_enabled: bool,
+    /// The bottom of the last reusing frame kept on the GPU
+    /// (`crate::frame_prefix`).
+    prefix: crate::frame_prefix::FramePrefix,
 }
 
 impl Renderer {
@@ -214,6 +224,35 @@ impl Renderer {
             effect_host: None,
             shaders: Default::default(),
             explicit_meshes: Default::default(),
+            reuse: crate::reuse::DrawReuse::new(),
+            reuse_enabled: false,
+            prefix: Default::default(),
+        }
+    }
+
+    /// Whether [`Renderer::render_into`] plans with the layer draws kept
+    /// from the last frame that used them (`crate::reuse`). Off by
+    /// default; the interactive viewer turns it on around its own frames
+    /// of a long-lived document, which changes in place, and off for
+    /// everything else the renderer draws. Entries stay while it is off
+    /// (they are validated by revision when it is on again).
+    pub fn set_draw_reuse(&mut self, enabled: bool) {
+        self.reuse_enabled = enabled;
+    }
+
+    /// Drops the kept layer draws and the kept bottom of the last frame.
+    pub fn clear_draw_reuse(&mut self) {
+        self.reuse.clear();
+        self.prefix.clear(&mut self.pool);
+    }
+
+    /// The draw reuse's counters (with the frames drawn from a kept bottom
+    /// and the draws those did not draw again).
+    pub fn draw_reuse_stats(&self) -> crate::reuse::ReuseStats {
+        crate::reuse::ReuseStats {
+            prefix_frames: self.prefix.reused_frames,
+            prefix_draws: self.prefix.reused_draws,
+            ..self.reuse.stats()
         }
     }
 
@@ -745,7 +784,9 @@ impl Renderer {
         self.effects
             .watchdog
             .collect(&self.device, &self.queue, false);
-        let (mut plan, build) = plan::build_with(
+        let options3d = self.options3d.for_request(request);
+        let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        let (mut plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
             &project,
@@ -755,14 +796,23 @@ impl Renderer {
             scale,
             assets,
             effect_host(&self.effect_host, &self.effects),
-            self.options3d.for_request(request),
+            options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
+            blender,
+            self.reuse_enabled.then_some(&mut self.reuse),
         );
         if !request.background {
             plan.background = Background::Transparent;
         }
         let quads = LayerQuad::of_plan(&plan);
+        // Only the viewer's own frames (the reuse is on around them) keep
+        // their bottom; never with the depth and id surface, exports, or
+        // compositing nodes at the top level.
+        let prefix = self.reuse_enabled
+            && depth_id.is_none()
+            && !request.export
+            && !crate::composite::has_nodes(&plan);
         let mut failures = build.failures;
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
@@ -831,7 +881,36 @@ impl Renderer {
                 target.format(),
                 pm_gpu::target::working_usage(),
             );
-            let resolved = exec.render_comp(&mut encoder, &plan, region, &gl_rows);
+            // The viewer's frames draw from the kept bottom of the last one
+            // when they start with the same draws (`crate::frame_prefix`).
+            let (resolved, kept_legend) = if prefix {
+                let key = crate::frame_prefix::PrefixKey {
+                    composition: composition.to_owned(),
+                    width: size.width,
+                    height: size.height,
+                    format: target.format(),
+                    region,
+                    precision,
+                    working: color.working,
+                    blend_domain: color.blend_domain,
+                    background: plan.background.clone(),
+                    plan_size: (plan.width, plan.height),
+                };
+                crate::frame_prefix::render(
+                    &mut exec,
+                    &mut encoder,
+                    &plan,
+                    region,
+                    &gl_rows,
+                    &mut self.prefix,
+                    key,
+                )
+            } else {
+                (
+                    exec.render_comp(&mut encoder, &plan, region, &gl_rows),
+                    Vec::new(),
+                )
+            };
             // Something met at exec time is unsupported (media facts the
             // plan could not see): the frame fails, and the caller's
             // targets keep their previous contents. The commands still run,
@@ -859,7 +938,10 @@ impl Renderer {
                 exec.flip(&mut encoder, &id_rows, ids);
                 exec.taken.push(id_rows);
             }
-            let legend: Vec<String> = resolved.iter().map(|r| r.layer.clone()).collect();
+            let legend: Vec<String> = kept_legend
+                .into_iter()
+                .chain(resolved.iter().map(|r| r.layer.clone()))
+                .collect();
             let timer = exec.timer.take();
             let pending = std::mem::take(&mut exec.fallback_pending);
             (
@@ -881,6 +963,13 @@ impl Renderer {
         self.effects.watchdog.submitted(&self.queue);
         for t in taken {
             self.pool.give(t);
+        }
+        if prefix {
+            if unsupported.is_empty() && pending.is_empty() {
+                self.prefix.remember(std::mem::take(&mut plan.draws));
+            } else {
+                self.prefix.clear(&mut self.pool);
+            }
         }
         self.media.flush();
         self.media.scrub = scrub;
@@ -1178,11 +1267,13 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             crate::blender::PlanState::collecting(preview, options),
+            None,
         );
         Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
     }
 
-    /// The plan of a frame without rendering it (tests, `pm-cli parity`).
+    /// The plan of a frame without rendering it (tests, `pm-cli parity`),
+    /// with the draw reuse when it is on ([`Renderer::set_draw_reuse`]).
     pub fn plan(
         &mut self,
         document: &Document,
@@ -1204,7 +1295,9 @@ impl Renderer {
         let scale = request
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        let (plan, build) = plan::build_with(
+        let options3d = self.options3d.for_request(request);
+        let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        let (plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
             &project,
@@ -1214,9 +1307,11 @@ impl Renderer {
             scale,
             assets,
             effect_host(&self.effect_host, &self.effects),
-            self.options3d.for_request(request),
+            options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
+            blender,
+            self.reuse_enabled.then_some(&mut self.reuse),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

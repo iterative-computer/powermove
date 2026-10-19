@@ -97,6 +97,7 @@ mod tests {
 
     pub(crate) fn state(zoom: f64, pan: [f64; 2]) -> ViewerState {
         ViewerState {
+            headless: None,
             composition: "main".into(),
             size: Size::new(3840, 2160),
             device_pixel_ratio: 2.0,
@@ -110,6 +111,7 @@ mod tests {
             edr: false,
             view_seq: Seq::new(1).unwrap(),
             vsync: None,
+            depth_id: None,
         }
     }
 

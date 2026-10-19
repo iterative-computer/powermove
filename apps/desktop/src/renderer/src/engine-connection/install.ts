@@ -12,14 +12,10 @@
  * - gives each viewer session the window's canonical document and pm-wasm's
  *   patch stream (`DocumentSession`), so edits from the inspector, canvas
  *   gestures, Undo, and agents reach the engine as they reach pm-wasm;
- * - runs the transport through the engine while it draws the composition
- *   (`EngineTransport`, `PM.setTransportDriver`), the audio device clock as
- *   the master; when the engine routes the composition to the legacy viewer
- *   (capability routing) the legacy transport, compositor, and audio take
- *   over at the same time, and back;
- * - survives engine restarts: a crashed engine's sessions end, the legacy
- *   viewer shows, and the next launch's port opens new sessions that resync
- *   the whole document (section 19, "Crash handling").
+ * - keeps one window session for engine transport and pm-audio, independently
+ *   of presentation; a closed viewer keeps the device clock and sound;
+ * - survives engine restarts by resyncing the document and definitions on
+ *   the next native launch, keeping transport exclusive to the native engine.
  *
  * With the flag off nothing here runs.
  */
@@ -32,7 +28,15 @@ import type { ClockSample } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
-import { DocumentSession, type DocumentStream, type FallbackRunner } from './session';
+import { DocumentSession, documentId, type DocumentStream } from './session';
+import { EngineRenderTransport } from './render-transport';
+import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
+import { EngineCanvasBinding } from './canvas-binding';
+import { installAppCaptures, usesBlender } from './app-captures';
+// The presentation is platform code hosted in the viewer's folder; the
+// kernel's `render.gl.init` binding uses it for viewers that do not present
+// by themselves (old forks of the viewer).
+import { ViewerPresentation } from '../../../extensions/viewer/engine-present/presentation';
 import { ShaderFallbackRunner } from './shader-fallback';
 import { EngineTransport } from './transport';
 
@@ -78,6 +82,9 @@ export interface EngineConnectionHandle {
   onClock(listener: (sample: ClockSample) => void): () => void;
   /** The session the transport follows (the newest viewer session). */
   session(): DocumentSession | null;
+  /** Engine snapshots, compatibility pixels, and UI snapshots (the Phase 3c
+   *  render transport; also `PM.EngineRender`). */
+  render: EngineRenderTransport;
   hostClock: HostClock;
   transport: EngineTransport;
   dispose(): void;
@@ -107,8 +114,29 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const ready = new Set<() => void>();
   const sessions = new Set<DocumentSession>();
   let current: DocumentSession | null = null;
-  let fallbackRunner: FallbackRunner | null = null;
-  const transport = new EngineTransport(() => current, hostClock);
+  let fallbackRunner: ShaderFallbackRunner | null = null;
+  // One session owns this window's clock. A viewer attaches to it; closing
+  // that channel retires presentation only, leaving pm-audio and time alive.
+  let viewerHandlers: EngineViewerHandlers | null = null;
+  let viewerLease = 0;
+  let sessionReady: Promise<void> | null = null;
+  const transport = new EngineTransport(() => current, hostClock, {
+    exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); })
+  });
+  /** animVersion per revision sent, for `frame:rendered.version`. */
+  const versions = new RevisionVersions();
+  const noteVersion = (): void => {
+    const barrier = PM.EngineDoc?.barrier;
+    if (barrier) versions.note(barrier.revision, PM.animVersion?.());
+  };
+  const presentedEvents = new PresentedEvents(
+    (frame, quality) => emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj }),
+    (fn) => target.requestAnimationFrame(fn)
+  );
+  /** Engine stats for the status bar and the performance panel. */
+  const stats = new EngineStatsView();
+  (PM as any).EngineStats = stats;
+  (PM as any).EnginePresentedEvents = presentedEvents;
   PM.setTransportDriver?.(transport);
 
   // The engine's levels, monitor solo, and waveform peaks for today's audio
@@ -142,6 +170,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       flushing = true;
       try {
         PM.EngineDoc?.barrier?.flush();
+        noteVersion();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
@@ -159,6 +188,125 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     if (!doc?.enabled) throw new Error('the document mirror (pm-wasm) is not enabled');
     return doc as DocumentStream;
   };
+
+  const snapshotSession = (): DocumentSession | null => current;
+  /** Lazily opens a transport session for a snapshot, Play, or a viewer. */
+  const openSession = (): DocumentSession | null => {
+    if (current && !current.closed) return current;
+    const c = connection;
+    if (!c?.ready || c.closed || !PM.EngineDoc?.enabled) return null;
+    const session = new DocumentSession({
+      connection: c, stream: stream(), documentId: () => String(PM.proj?.id ?? ''),
+      stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
+      definitions: () => ((PM as any).EngineDefinitions ?? null),
+      fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
+      handlers: {
+        message: (message, arrivedMs) => {
+          if (message.type === 'frame' && !firstFrame) {
+            firstFrame = true;
+            performance.mark?.('powermove:engine-first-frame');
+          }
+          if (viewerHandlers) viewerHandlers.message(message as never, arrivedMs);
+          else if (message.type === 'frame') session.release(message.frame);
+        },
+        closed: (reason) => {
+          sessions.delete(session);
+          if (current === session) {
+            current = null;
+            sessionReady = null;
+            const handlers = viewerHandlers;
+            viewerHandlers = null;
+            handlers?.closed(reason);
+          }
+          transport.refresh();
+        }
+      },
+      log,
+      onClock: (sample) => {
+        transport.refresh();
+        for (const listener of clockListeners) listener(sample);
+      },
+      onAudio: (message) => audio.receive(message, session),
+      onStats: (message) => {
+        stats.receive(message, performance.now());
+        PM.invalidate?.('status');
+      },
+      // Replace a seek queued on the home screen before any old clock can
+      // overwrite the replacement document's requested UI position.
+      onLoading: () => transport.seek(Number(PM.time) || 0, false),
+      onLoaded: () => {
+        if (session.headless) session.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+        PM.bus?.emit?.('layout');
+      },
+      onRoute: (route, reason) => {
+        if (route === 'legacy') log('warn', `engine composition unavailable: ${reason ?? ''}`);
+        transport.refresh();
+        if (route === 'engine') audio.sync();
+        PM.bus?.emit?.('draw');
+      }
+    });
+    sessions.add(session);
+    current = session;
+    transport.resetLoop();
+    session.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+    sessionReady = session.start().catch((error: unknown) => {
+      log('warn', `engine session: ${error instanceof Error ? error.message : String(error)}`);
+      session.close();
+      sessions.delete(session);
+      if (current === session) { current = null; sessionReady = null; }
+    });
+    return session;
+  };
+  const wakeStandby = (): Promise<void> => {
+    openSession();
+    return sessionReady ?? Promise.resolve();
+  };
+  const documentEncoder = new TextEncoder();
+  const renderTransport = new EngineRenderTransport({
+    native,
+    session: snapshotSession,
+    revision: () => {
+      const barrier = PM.EngineDoc?.barrier;
+      if (!barrier) return null;
+      barrier.flush();
+      // A snapshot may block this thread until the engine has the revision:
+      // the batches this run holds (patch-coalesce.ts) leave now.
+      connection?.sendPatches();
+      noteVersion();
+      return barrier.revision;
+    },
+    composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
+    document: () => documentId(PM.proj?.id),
+    viewSeq: () => current?.viewSeq ?? null,
+    fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
+    wake: wakeStandby,
+    // A sync snapshot the window's session cannot serve carries the
+    // document to main's session for the window (main/engine/window-sessions.ts).
+    windowDocument: () => {
+      const doc = PM.EngineDoc;
+      const barrier = doc?.barrier;
+      if (!doc?.enabled || !barrier || typeof doc.snapshot !== 'function') return null;
+      barrier.flush();
+      connection?.sendPatches();
+      return {
+        id: documentId(PM.proj?.id),
+        revision: barrier.revision,
+        full: () => {
+          const snapshot = doc.snapshot();
+          if (!snapshot) throw new Error('the document mirror has no snapshot');
+          return { json: documentEncoder.encode(snapshot.json), hash: snapshot.hash, revision: snapshot.revision };
+        }
+      };
+    },
+    usesBlender: () => usesBlender(PM.proj),
+    log
+  });
+  (PM as any).EngineRender = renderTransport;
+  // The app's own still captures (the Library's section thumbnails, the
+  // agent's look and observe) draw through the engine too: with the new
+  // engine on, nothing asks the current engine for pixels. The exporter's
+  // methods ask `PM.EngineCaptures` (it installs after this module).
+  const unrouteCaptures = installAppCaptures(PM, renderTransport);
 
   async function connect(nextGeneration: number, port: PortLike): Promise<void> {
     connection?.close('a new interactive engine launch');
@@ -183,6 +331,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     void hostClock.measure();
     log('info', `connected to the interactive engine (launch ${nextGeneration})`);
     for (const listener of [...ready]) listener();
+    transport.refresh();
+
   }
 
   const onMessage = (event: MessageEvent): void => {
@@ -192,7 +342,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if (data.process !== 'interactive' || !event.ports[0]) return;
       void connect(Number(data.generation) || 0, event.ports[0] as unknown as PortLike);
     } else if (data?.type === ENGINE_WINDOW_MESSAGE.crash) {
-      log('warn', 'an engine crashed and is restarting; the current engine draws meanwhile');
+      log('warn', 'an engine crashed and is restarting; the native session will reconnect');
     }
   };
   target.addEventListener('message', onMessage);
@@ -207,12 +357,18 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const makeService = (): EngineViewerService & { trace?: boolean } => ({
     trace,
     source,
+    exclusive: true,
+    // Frame events on presentation (presentation-events.ts), at most once
+    // per animation frame for the newest frame on screen, as today's frame
+    // loop emits them once per frame it draws.
+    presented: (frame, quality) => presentedEvents.push(frame, quality),
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     hostOffsetUs: () => hostClock.offsetUs(),
     revision: () => {
       const barrier = PM.EngineDoc?.barrier;
       if (!barrier) return null;
       barrier.flush();
+      noteVersion();
       return barrier.revision;
     },
     onReady(listener) {
@@ -222,81 +378,51 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     open(handlers: EngineViewerHandlers): EngineViewerChannel | null {
       const c = connection;
       if (!c?.ready || c.closed || !PM.EngineDoc?.enabled) return null;
-      let session: DocumentSession | null = null;
-      const forget = (s: DocumentSession): void => {
-        sessions.delete(s);
-        if (current === s) current = [...sessions].at(-1) ?? null;
-        transport.refresh();
-      };
-      session = new DocumentSession({
-        connection: c,
-        stream: stream(),
-        documentId: () => String(PM.proj?.id ?? ''),
-        stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
-        definitions: () => ((PM as any).EngineDefinitions ?? null),
-        // One WebGL2 context for the window's sessions (decision 19).
-        fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
-        handlers: {
-          message: (message, arrivedMs) => {
-            if (message.type === 'frame' && !firstFrame) {
-              firstFrame = true;
-              performance.mark?.('powermove:engine-first-frame');
-            }
-            handlers.message(message as never, arrivedMs);
-          },
-          closed: (reason) => {
-            if (session) forget(session);
-            handlers.closed(reason);
-          }
-        },
-        log,
-        onClock: (sample) => {
-          for (const listener of clockListeners) listener(sample);
-        },
-        onAudio: (message) => {
-          if (session) audio.receive(message, session);
-        },
-        // The viewer lays out for the new document, as opening a project
-        // makes it do: its state names the new composition, so the engine
-        // draws and plays it (a `PM.proj` assignment emits nothing).
-        onLoaded: () => PM.bus?.emit?.('layout'),
-        onRoute: (route, reason) => {
-          if (route === 'legacy') log('info', `the current engine draws this composition: ${reason ?? ''}`);
-          transport.refresh();
-          if (route === 'engine') audio.sync();
-          PM.bus?.emit?.('draw');
-        }
-      });
-      sessions.add(session);
-      current = session;
-      transport.resetLoop();
-      const opened = session;
-      void opened.start().catch((error: unknown) => {
-        log('warn', `engine viewer session: ${error instanceof Error ? error.message : String(error)}`);
-      });
+      const opened = openSession();
+      if (!opened) return null;
+      const lease = ++viewerLease;
+      const previous = viewerHandlers;
+      viewerHandlers = handlers;
+      previous?.closed('another viewer attached to the engine session');
       return {
-        sendViewerState: (state) => opened.sendViewerState(state as never),
+        sendViewerState: (state) => {
+          if (lease === viewerLease) opened.sendViewerState({ ...state, headless: false } as never);
+        },
         release: (release) => opened.release(release),
         close: () => {
-          opened.close();
-          forget(opened);
+          if (lease !== viewerLease || opened.closed) return;
+          viewerHandlers = null;
+          opened.sendHeadless(String(PM.proj?.compId ?? PM.proj?.id ?? ''));
+          transport.refresh();
         }
       };
     }
   });
-  let registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, makeService());
+  let service = makeService();
+  let registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, service);
   target.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
+  // `render.gl.init` / `resize` bind engine presentation to the caller's
+  // canvas (canvas-binding.ts; also `PM.EngineCanvas`).
+  const canvasBinding = new EngineCanvasBinding({
+    service: () => service,
+    composition: () => (PM.proj ? { w: Number(PM.proj.w) || 0, h: Number(PM.proj.h) || 0 } : null),
+    quality: () => Number(PM.quality ?? 1),
+    present: (options) => new ViewerPresentation({ ...options, log: (level, message) => log(level, message) })
+  });
+  (PM as any).EngineCanvas = canvasBinding;
 
   const handle: EngineConnectionHandle = {
     hostClock,
     transport,
     audio,
+    render: renderTransport,
     session: () => current,
     setTrace: (on) => {
       if (on === trace) return;
       trace = on;
       registration.dispose();
-      registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, makeService());
+      service = makeService();
+      registration = PM.Kernel.services.register(ENGINE_VIEWER_SERVICE, service);
       target.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
     },
     onClock: (listener) => {
@@ -332,6 +458,14 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       for (const s of [...sessions]) s.close();
       sessions.clear();
       current = null;
+      viewerHandlers = null;
+      sessionReady = null;
+      unrouteCaptures();
+      renderTransport.dispose();
+      if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
+      if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;
+      canvasBinding.unbind();
+      if ((PM as any).EngineCanvas === canvasBinding) (PM as any).EngineCanvas = null;
       connection?.close('the engine connection was removed');
       connection = null;
       hostClock.stop();

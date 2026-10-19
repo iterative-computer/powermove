@@ -62,5 +62,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 name = "fonts"
 harness = false
 
+[[test]]
+# The engine's render fonts: the child's host runs on its main thread.
+name = "render_fonts"
+harness = false
+
 [build-dependencies]
 napi-build = "2.6"

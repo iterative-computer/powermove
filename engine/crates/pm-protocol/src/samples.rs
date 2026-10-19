@@ -51,7 +51,7 @@ use crate::host::{
     CacheKind, CapabilityHandle, CapabilityKind, CommitOutput, HandleAccess, HandleGrant,
     HandleResolved, HardwareSessionGrant, HardwareSessionKind, HardwareSessionRequest, MintHandle,
     OutputChoice, OutputCommitted, OutputDestination, OutputDestinationRequest, OutputVerification,
-    OverwritePolicy, ResolveHandle,
+    OverwritePolicy, PortId, ResolveHandle,
 };
 use crate::interop::{PlatformSurface, SurfaceDescriptor, SurfaceFormat, SurfacePool};
 use crate::lease::{Lease, LeaseCategories, LeaseReason, LeaseRequest, LeaseUsage};
@@ -230,8 +230,9 @@ pub fn frame_descriptor() -> FrameDescriptor {
             }),
         }),
         depth_id: Some(DepthIdSurface {
-            pool_index: 9,
+            pool_index: 3,
             seq: seq(11),
+            pool_generation: seq(4),
         }),
         view_seq: seq(17),
         duration: Some(ticks(11_760_000)),
@@ -807,7 +808,48 @@ pub fn requests() -> Vec<Envelope> {
                 interpret: Some(r#"{"primaries":"displayP3","fieldOrder":"progressive"}"#.into()),
             }),
         ),
+        request(
+            id(27),
+            Request::Snapshot(crate::snapshot::HostSnapshot {
+                renderer: PortId(3),
+                session: session(),
+                snapshot: snapshot_request(),
+            }),
+        )
+        .with_revision(rev(42)),
+        request(
+            id(28),
+            Request::CompatFrame(crate::snapshot::CompatFrameRequest {
+                document: "doc-1".into(),
+                composition: "comp-1".into(),
+                layer: "L7".into(),
+                time: ticks(705_600_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                scale: 1.0,
+                revision: rev(42),
+            }),
+        ),
     ]
+}
+
+/// A synchronous `renderFrameTo` snapshot (the compatibility path).
+pub fn snapshot_request() -> crate::snapshot::SnapshotRequest {
+    crate::snapshot::SnapshotRequest {
+        composition: "comp-1".into(),
+        time: ticks(352_800_000),
+        output_size: Size::new(480, 270),
+        target: crate::snapshot::SnapshotTarget::Frame {
+            motion_blur_samples: 16,
+            background: true,
+            draft_3d: false,
+        },
+        pixels: crate::snapshot::SnapshotPixels::Opaque,
+        class: crate::snapshot::SnapshotClass::Sync,
+        view_seq: Some(seq(12)),
+        wait_ms: 5_000,
+        blender_wait_ms: 0,
+        uploaded: vec!["5e".repeat(32)],
+    }
 }
 
 /// Every response kind, in declaration order.
@@ -1045,6 +1087,48 @@ pub fn responses() -> Vec<Envelope> {
                 duration: Some(12.5),
             })),
         ),
+        response(
+            25,
+            Response::Snapshot(Box::new(crate::snapshot::SnapshotOutcome::Rendered(
+                crate::snapshot::SnapshotResult {
+                    revision: rev(42),
+                    view_seq: Some(seq(12)),
+                    width: 2,
+                    height: 1,
+                    pixels: crate::snapshot::SnapshotPixels::Opaque,
+                    payload: crate::snapshot::PixelPayload::Inline {
+                        bytes: crate::common::Bytes(vec![0, 0, 0, 255, 255, 255, 255, 255]),
+                    },
+                    origin: [0.0, 0.0],
+                    layer_box: None,
+                    raster: None,
+                    quality: FrameQuality {
+                        resolution: PreviewResolution::Full,
+                        representation: Representation::Original,
+                        draft_3d: false,
+                        cached: false,
+                        stand_in: false,
+                    },
+                    waited_us: 1_200,
+                    render_us: 8_400,
+                },
+            ))),
+        ),
+        response(
+            26,
+            Response::CompatFrame(Box::new(crate::snapshot::CompatFrame {
+                key: "typewriter:L7:42".into(),
+                width: 1024,
+                height: 512,
+                format: crate::snapshot::CompatFormat::Rgba8Premultiplied,
+                origin: [-12.0, -40.0],
+                scale: 1.0,
+                payload: crate::snapshot::PixelPayload::SharedMemory {
+                    name: "/pm.0123456789abcdef01234567".into(),
+                    length: bytes(1024 * 512 * 4),
+                },
+            })),
+        ),
     ]
 }
 
@@ -1101,8 +1185,10 @@ pub fn events() -> Vec<Envelope> {
                     },
                 })
                 .collect(),
+            role: Some(crate::interop::PoolRole::DepthId),
         })),
         event(Event::Viewer(ViewerState {
+            headless: None,
             composition: "main".into(),
             size: Size::new(3024, 1964),
             device_pixel_ratio: 2.0,
@@ -1119,6 +1205,7 @@ pub fn events() -> Vec<Envelope> {
                 host_time: HostMicros::new(123_456_700_000).expect("micros"),
                 period_us: 8_333.333_333_333_334,
             }),
+            depth_id: Some(true),
         })),
         event(Event::Transport(TransportCommand::Seek {
             time: ticks(-705_600_000),
@@ -1179,6 +1266,45 @@ pub fn events() -> Vec<Envelope> {
                 message: "the program does not link".into(),
             },
         )),
+        event(Event::Compat(crate::snapshot::CompatMessage::Pixels(
+            crate::snapshot::CompatPixels {
+                id: crate::snapshot::CompatKey {
+                    composition: "comp-1".into(),
+                    layer: "L7".into(),
+                    time: ticks(705_600_000),
+                    source: crate::snapshot::CompatSource::CompatContext,
+                    key: "glsl-sparkle:L7:42".into(),
+                },
+                revision: rev(42),
+                width: 2,
+                height: 2,
+                format: crate::snapshot::CompatFormat::Rgba8Premultiplied,
+                origin: [0.0, 0.0],
+                scale: 1.0,
+                row: 1,
+                rows: 1,
+                data: crate::common::Bytes(vec![255, 0, 0, 255, 0, 0, 0, 0]),
+            },
+        ))),
+        event(Event::Compat(crate::snapshot::CompatMessage::Forget {
+            composition: "comp-1".into(),
+            layer: "L7".into(),
+        })),
+        event(Event::RenderStats(crate::snapshot::RenderStats {
+            frames: Count::new(1_800).expect("count"),
+            timed_frames: Count::new(1_790).expect("count"),
+            late_skipped: Count::new(2).expect("count"),
+            cpu_us: 3_100,
+            gpu_us: 6_400,
+            layers: 14,
+            frame_us_avg: 9_700,
+            programs: 22,
+            rasters: 31,
+            layer_failures: Count::ZERO,
+            snapshots: Count::new(3).expect("count"),
+            snapshot_us_max: 48_000,
+            revision: rev(42),
+        })),
         event(Event::Audio(AudioMessage::PeaksWanted {
             asset: "asset-7".into(),
         })),
@@ -1402,6 +1528,11 @@ pub fn all() -> Vec<(String, Envelope)> {
                 } => serde_json::to_value(message)
                     .ok()
                     .and_then(|v| v["fallback"].as_str().map(str::to_owned)),
+                Message::Event {
+                    body: Event::Compat(message),
+                } => serde_json::to_value(message)
+                    .ok()
+                    .and_then(|v| v["compat"].as_str().map(str::to_owned)),
                 _ => None,
             };
             if let Some(inner) = inner {
@@ -1450,9 +1581,11 @@ pub const fn request_index(request: &Request) -> usize {
         Request::ToolCall(_) => 23,
         Request::ResolveHandle(_) => 24,
         Request::ProbeMedia(_) => 25,
+        Request::Snapshot(_) => 26,
+        Request::CompatFrame(_) => 27,
     }
 }
-pub const REQUEST_VARIANTS: usize = 26;
+pub const REQUEST_VARIANTS: usize = 28;
 
 /// Exhaustive index of response variants.
 pub const fn response_index(response: &Response) -> usize {
@@ -1481,9 +1614,11 @@ pub const fn response_index(response: &Response) -> usize {
         Response::ToolResult(_) => 21,
         Response::HandleResolved(_) => 22,
         Response::MediaFacts(_) => 23,
+        Response::Snapshot(_) => 24,
+        Response::CompatFrame(_) => 25,
     }
 }
-pub const RESPONSE_VARIANTS: usize = 24;
+pub const RESPONSE_VARIANTS: usize = 26;
 
 /// Exhaustive index of event variants.
 pub const fn event_index(event: &Event) -> usize {
@@ -1508,9 +1643,11 @@ pub const fn event_index(event: &Event) -> usize {
         Event::InFlight(_) => 17,
         Event::Audio(_) => 18,
         Event::ShaderFallback(_) => 19,
+        Event::Compat(_) => 20,
+        Event::RenderStats(_) => 21,
     }
 }
-pub const EVENT_VARIANTS: usize = 20;
+pub const EVENT_VARIANTS: usize = 22;
 
 /// A sample color description for a 10-bit 4:2:2 ProRes source.
 pub fn prores_422_color() -> ColorDescription {

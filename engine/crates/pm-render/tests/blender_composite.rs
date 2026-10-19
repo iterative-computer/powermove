@@ -71,6 +71,11 @@ fn surface(w: u32, h: u32, x0: u32, y0: u32, x1: u32, y1: u32, seed: u32) -> Vec
             };
         }
     }
+    // ImageBitmap's straight upload keeps this fringe even at zero alpha.
+    if x0 > 0 {
+        let fringe = ((y0 * w + x0 - 1) * 4) as usize;
+        rgba[fringe..fringe + 4].copy_from_slice(&[40000, 50000, 60000, 0]);
+    }
     // Color chunks the engine must ignore.
     encode_rgba16(
         w,
@@ -107,14 +112,43 @@ fn reference(
     order: &[String],
     surfaces: &HashMap<String, Arc<DecodedSurface>>,
     opacity: &HashMap<&str, f64>,
+    compatibility: bool,
+    precision: Precision,
 ) -> Vec<f64> {
     let bg = [16.0 / 255.0, 32.0 / 255.0, 48.0 / 255.0, 1.0];
     let mut out = Vec::with_capacity((W * H * 4) as usize);
     for y in 0..H {
         for x in 0..W {
-            let mut c = bg;
+            // Metal truncates f16 target writes after each blend. Model
+            // that storage in the straight-upload reference too; the
+            // original level-2 reference and tolerances stay unchanged.
+            let round = |v: f64| {
+                if !compatibility || precision != Precision::Float16 {
+                    return v;
+                }
+                let mut bits = pm_gpu::readback::f32_to_half(v as f32);
+                if f64::from(pm_gpu::readback::half_to_f32(bits)).abs() > v.abs() {
+                    bits -= 1;
+                }
+                f64::from(pm_gpu::readback::half_to_f32(bits))
+            };
+            let mut c = bg.map(round);
             for id in order {
-                let p = surfaces[id].pixel(x, y);
+                let surface = &surfaces[id];
+                let p = if compatibility
+                    && x >= surface.crop.x
+                    && y >= surface.crop.y
+                    && x < surface.crop.x + surface.crop.width
+                    && y < surface.crop.y + surface.crop.height
+                {
+                    let i = (((y - surface.crop.y) * surface.crop.width + x - surface.crop.x) * 4)
+                        as usize;
+                    std::array::from_fn(|k| {
+                        (surface.straight[i + k] * 255.0).round_ties_even() / 255.0
+                    })
+                } else {
+                    surface.pixel(x, y)
+                };
                 let o = opacity[id.as_str()];
                 let s = [
                     f64::from(p[0]) * o,
@@ -123,7 +157,7 @@ fn reference(
                     f64::from(p[3]) * o,
                 ];
                 for k in 0..4 {
-                    c[k] = s[k] + c[k] * (1.0 - s[3]);
+                    c[k] = round(s[k] + c[k] * (1.0 - s[3]));
                 }
             }
             out.extend(c);
@@ -140,8 +174,23 @@ fn max_diff(a: &[f32], b: &[f64]) -> f64 {
 }
 
 #[test]
-fn surfaces_composite_exactly_per_layer() {
-    let doc = load(&scene(true));
+fn surfaces_composite_exactly_per_layer_at_level2() {
+    check_surfaces(2);
+}
+
+#[test]
+fn level1_matches_the_straight_imagebitmap_upload_including_zero_alpha_rgb() {
+    check_surfaces(1);
+}
+
+fn check_surfaces(compat: u8) {
+    let mut exact = scene(true);
+    for layer in exact["layers"].as_array_mut().unwrap() {
+        if compat >= 2 {
+            layer["compat"] = json!(compat);
+        }
+    }
+    let doc = load(&exact);
     let mut r = Renderer::headless().expect("a Metal device");
     let assets = MapResolver::default();
     // The frame's Blender snapshots: one frame, both layers.
@@ -160,6 +209,15 @@ fn surfaces_composite_exactly_per_layer() {
     assert_eq!(snaps.snapshots.len(), 1);
     let snap = &snaps.snapshots[0];
     assert_eq!(snap.layers(), ["a", "b"]);
+    let legacy = snap
+        .json
+        .get("compatibilityLayers")
+        .and_then(pm_model::Value::as_array);
+    if compat < 2 {
+        assert_eq!(legacy.unwrap().len(), 2);
+    } else {
+        assert!(legacy.is_none());
+    }
     assert_eq!(snap.size(), (W, H));
     assert_eq!(snap.frame.composition_path, ["Ptest-root"]);
     let decoded: HashMap<String, Arc<DecodedSurface>> = [
@@ -187,7 +245,7 @@ fn surfaces_composite_exactly_per_layer() {
             .unwrap();
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
         let got = r.read_rgba(&frame).unwrap();
-        let want = reference(&order, &decoded, &opacity);
+        let want = reference(&order, &decoded, &opacity, compat < 2, precision);
         let d = max_diff(&got, &want);
         eprintln!("{precision:?}: max |engine − f64 reference| = {d:e}");
         match precision {
