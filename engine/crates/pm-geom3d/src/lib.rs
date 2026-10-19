@@ -21,8 +21,8 @@ pub mod earcut;
 pub mod gltf;
 #[cfg(feature = "import")]
 mod js;
-pub mod model_import;
 pub mod layering;
+pub mod model_import;
 pub mod normals;
 pub mod obj;
 pub mod primitives;

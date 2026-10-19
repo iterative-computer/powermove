@@ -332,7 +332,11 @@ fn f(a: &[Value], i: usize) -> f64 {
 
 fn ids(v: &Value) -> Vec<usize> {
     v.as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_u64().map(|v| v as usize)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_u64().map(|v| v as usize))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -408,9 +412,9 @@ pub fn load(bytes: &[u8]) -> Result<Model> {
         .into_iter()
         .flatten()
     {
-        let color = l["color"].as_array().map_or([1.0; 3], |c| {
-            [f(c, 0), f(c, 1), f(c, 2)]
-        });
+        let color = l["color"]
+            .as_array()
+            .map_or([1.0; 3], |c| [f(c, 0), f(c, 1), f(c, 2)]);
         let kind = match l["type"].as_str().unwrap_or("") {
             "directional" => LightKind::Directional,
             "point" => LightKind::Point,
@@ -431,7 +435,9 @@ pub fn load(bytes: &[u8]) -> Result<Model> {
         });
     }
     for c in raw["cameras"].as_array().into_iter().flatten() {
-        model.camera_names.push(c["name"].as_str().unwrap_or("").into());
+        model
+            .camera_names
+            .push(c["name"].as_str().unwrap_or("").into());
         model.cameras.push(match c["type"].as_str().unwrap_or("") {
             "orthographic" => {
                 let o = &c["orthographic"];
@@ -492,11 +498,14 @@ fn texture_ref(v: &Value) -> Option<TextureRef> {
 fn load_materials(raw: &Value, model: &mut Model) {
     for m in raw["materials"].as_array().into_iter().flatten() {
         let pbr = &m["pbrMetallicRoughness"];
-        let base = pbr["baseColorFactor"]
-            .as_array()
-            .map_or([1.0; 4], |a| {
-                [f(a, 0) as f32, f(a, 1) as f32, f(a, 2) as f32, f(a, 3) as f32]
-            });
+        let base = pbr["baseColorFactor"].as_array().map_or([1.0; 4], |a| {
+            [
+                f(a, 0) as f32,
+                f(a, 1) as f32,
+                f(a, 2) as f32,
+                f(a, 3) as f32,
+            ]
+        });
         let ext = &m["extensions"];
         model.materials.push(Material {
             name: m["name"].as_str().unwrap_or("").into(),
@@ -515,11 +524,10 @@ fn load_materials(raw: &Value, model: &mut Model) {
             normal_texture: texture_ref(&m["normalTexture"]),
             normal_scale: m["normalTexture"]["scale"].as_f64().unwrap_or(1.0) as f32,
             occlusion_texture: texture_ref(&m["occlusionTexture"]),
-            occlusion_strength: m["occlusionTexture"]["strength"].as_f64().unwrap_or(1.0)
-                as f32,
-            emissive: m["emissiveFactor"]
-                .as_array()
-                .map_or([0.0; 3], |a| [f(a, 0) as f32, f(a, 1) as f32, f(a, 2) as f32]),
+            occlusion_strength: m["occlusionTexture"]["strength"].as_f64().unwrap_or(1.0) as f32,
+            emissive: m["emissiveFactor"].as_array().map_or([0.0; 3], |a| {
+                [f(a, 0) as f32, f(a, 1) as f32, f(a, 2) as f32]
+            }),
             emissive_texture: texture_ref(&m["emissiveTexture"]),
             emissive_strength: ext["KHR_materials_emissive_strength"]["emissiveStrength"]
                 .as_f64()
@@ -672,22 +680,31 @@ fn load_meshes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                         .transpose()?,
                 });
             }
-            if [joints.as_ref().map(Vec::len), weights.as_ref().map(Vec::len)]
-                .iter()
-                .any(|l| l.is_some_and(|l| l < positions.len()))
+            if [
+                joints.as_ref().map(Vec::len),
+                weights.as_ref().map(Vec::len),
+            ]
+            .iter()
+            .any(|l| l.is_some_and(|l| l < positions.len()))
             {
                 // three.js reads past the skin attributes and throws.
-                return err(format!("mesh {mi}: skin attributes are shorter than POSITION"));
+                return err(format!(
+                    "mesh {mi}: skin attributes are shorter than POSITION"
+                ));
             }
             if targets.iter().any(|t| {
-                [t.position.as_ref().map(Vec::len), t.normal.as_ref().map(Vec::len)]
-                    .iter()
-                    .any(|l| l.is_some_and(|l| l < positions.len()))
+                [
+                    t.position.as_ref().map(Vec::len),
+                    t.normal.as_ref().map(Vec::len),
+                ]
+                .iter()
+                .any(|l| l.is_some_and(|l| l < positions.len()))
             }) {
-                undrawable.get_or_insert(format!("mesh {mi}: a morph target is shorter than POSITION"));
+                undrawable.get_or_insert(format!(
+                    "mesh {mi}: a morph target is shorter than POSITION"
+                ));
             }
-            let accessor_bounds =
-                accessor_bounds(raw, pos_index as usize, p["targets"].as_array());
+            let accessor_bounds = accessor_bounds(raw, pos_index as usize, p["targets"].as_array());
             primitives.push(Primitive {
                 topology,
                 positions,
@@ -741,9 +758,9 @@ fn load_nodes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
             let t = n["translation"]
                 .as_array()
                 .map_or([0.0; 3], |a| [f(a, 0), f(a, 1), f(a, 2)]);
-            let r = n["rotation"]
-                .as_array()
-                .map_or([0.0, 0.0, 0.0, 1.0], |a| [f(a, 0), f(a, 1), f(a, 2), f(a, 3)]);
+            let r = n["rotation"].as_array().map_or([0.0, 0.0, 0.0, 1.0], |a| {
+                [f(a, 0), f(a, 1), f(a, 2), f(a, 3)]
+            });
             let s = n["scale"]
                 .as_array()
                 .map_or([1.0; 3], |a| [f(a, 0), f(a, 1), f(a, 2)]);
@@ -780,7 +797,12 @@ fn load_nodes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
                         [q(v[3 * k]), q(v[3 * k + 1]), q(v[3 * k + 2])]
                     });
                     let ro = r.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |v| {
-                        [q(v[4 * k]), q(v[4 * k + 1]), q(v[4 * k + 2]), q(v[4 * k + 3])]
+                        [
+                            q(v[4 * k]),
+                            q(v[4 * k + 1]),
+                            q(v[4 * k + 2]),
+                            q(v[4 * k + 3]),
+                        ]
                     });
                     let sc = s.as_ref().map_or([1.0; 3], |v| {
                         [q(v[3 * k]), q(v[3 * k + 1]), q(v[3 * k + 2])]
@@ -825,7 +847,8 @@ fn load_nodes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
         }
         let n = &model.nodes[i];
         if n.mesh.is_some_and(|m| m >= model.meshes.len())
-            || n.skin.is_some_and(|s| s >= raw["skins"].as_array().map_or(0, Vec::len))
+            || n.skin
+                .is_some_and(|s| s >= raw["skins"].as_array().map_or(0, Vec::len))
         {
             return err(format!("node {i}: reference out of range"));
         }
@@ -1058,7 +1081,11 @@ fn base64_encode(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         for i in 0..4 {
             if i <= chunk.len() {
@@ -1077,7 +1104,14 @@ mod tests {
 
     #[test]
     fn base64_round_trips() {
-        for s in [&b""[..], b"a", b"ab", b"abc", b"abcd", &[0u8, 255, 128, 7, 9][..]] {
+        for s in [
+            &b""[..],
+            b"a",
+            b"ab",
+            b"abc",
+            b"abcd",
+            &[0u8, 255, 128, 7, 9][..],
+        ] {
             assert_eq!(base64_decode(&base64_encode(s)).unwrap(), s);
         }
         assert_eq!(base64_encode(b"Man"), "TWFu");
