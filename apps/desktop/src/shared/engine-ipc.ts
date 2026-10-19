@@ -245,6 +245,11 @@ export type EngineSnapshotRequest = {
   /** Shader fallback pixels drawn for an earlier `needsRenderer` answer of
    *  a `document` snapshot (a window's own session gets them on its port). */
   fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];
+  /** Level 1 SVG rasters (premultiplied RGBA8, top-down) drawn for an
+   *  earlier `needsRenderer` answer of a `document` snapshot: main posts
+   *  them on its session for the window before asking again (the window
+   *  may have no session of its own yet; decision S1). */
+  svgPixels?: { key: import('./engine-protocol').SvgRasterKey; data: Uint8Array }[];
 };
 
 export type EngineSnapshotDocument = { id: string; revision: number; hash?: string | null; json?: Uint8Array | null };

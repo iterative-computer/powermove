@@ -274,6 +274,24 @@ export class EngineRenderTransport {
   }
 
   /**
+   * Draws the level 1 SVG rasters a `needsRenderer` answer names on this
+   * thread for main's session (`svgPixels`), and names them in `uploaded`.
+   */
+  private drawSvgFor(needs: readonly SvgRasterRequest[] | undefined, uploaded: string[]): { key: SvgRasterKey; data: Uint8Array }[] {
+    const list = needs ?? [];
+    if (!list.length) return [];
+    const rasters = this.options.svgRasters?.();
+    if (!rasters) throw new EngineSnapshotError('unavailable', 'This window draws no SVG rasters.');
+    return list.map((request) => {
+      const key = svgUploadKey(request.key);
+      if (uploaded.includes(key)) throw new EngineSnapshotError('internal', `The engine asked again for an SVG raster ${request.key.width}×${request.key.height}.`);
+      const data = rasters.drawSync(request);
+      uploaded.push(key);
+      return { key: request.key, data };
+    });
+  }
+
+  /**
    * Draws the level 1 SVG rasters a `needsRenderer` answer names, posts
    * them on a session of this window (the engine keeps them for every
    * session it serves), and names them in `uploaded`. `draw` is the
@@ -374,6 +392,7 @@ export class EngineRenderTransport {
     const revision = flushed ?? doc.revision;
     const uploaded: string[] = [];
     let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
+    let svgPixels: { key: SvgRasterKey; data: Uint8Array }[] = [];
     let send = !(this.sentToMain && this.sentToMain.id === doc.id && this.sentToMain.revision === doc.revision);
     let body: { json: Uint8Array; hash: string; revision: number } | null = null;
     for (let round = 0; round < MAX_ROUNDS + 1; round++) {
@@ -384,9 +403,11 @@ export class EngineRenderTransport {
         session: null,
         revision,
         document: body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
-        ...(fallbackPixels.length ? { fallbackPixels } : {})
+        ...(fallbackPixels.length ? { fallbackPixels } : {}),
+        ...(svgPixels.length ? { svgPixels } : {})
       });
       fallbackPixels = [];
+      svgPixels = [];
       if (reply.status === 'failed' && reply.code === 'needsDocument' && !send) {
         // Main's session lost that revision (an engine restart): send it.
         send = true;
@@ -405,9 +426,9 @@ export class EngineRenderTransport {
       this.stats.rounds++;
       const unmet = this.compatUnmet(reply.compat);
       if (unmet) throw unmet;
-      // Main's session renders with the engine's SVG rasters too: they are
-      // posted on this window's own session, when it has one.
-      this.postSvg(reply.svg, uploaded, (rasters, request) => rasters.drawSync(request));
+      // The SVG rasters go with the next ask: main posts them on its
+      // session before asking again (this window may have no session yet).
+      svgPixels = this.drawSvgFor(reply.svg, uploaded);
       if (!reply.fallback.length) continue;
       const runner = this.options.fallbackRunner();
       if (!runner) throw new EngineSnapshotError('unavailable', 'No shader fallback runner to draw the frame’s programs.');

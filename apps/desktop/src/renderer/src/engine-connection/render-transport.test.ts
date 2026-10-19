@@ -297,6 +297,23 @@ describe('EngineRenderTransport', () => {
       expect((asked[1] as any).fallbackPixels[0]).toMatchObject({ key: 'c'.repeat(64), width: 2, height: 2 });
     });
 
+    it('level 1 SVG rasters go along with the next round, with no session of the window\'s (boot)', () => {
+      const d = doc();
+      const svg = { key: { content: 'c'.repeat(64), width: 3, height: 2 }, asset: 'art' };
+      const svgRasters: TransportSvgRasters = { drawSync: vi.fn(() => new Uint8Array(24).fill(7)), draw: vi.fn(async () => new Uint8Array(24)), post: vi.fn(() => true) };
+      const { transport, asked } = setup([
+        { status: 'needsRenderer', revision: 12, fallback: [], compat: [], svg: [svg] },
+        rendered(2, 2)
+      ], { session: null, windowDocument: d.windowDocument, svgRasters });
+      expect(transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+      expect(svgRasters.drawSync).toHaveBeenCalledWith(svg);
+      expect(svgRasters.post).not.toHaveBeenCalled();
+      expect(asked[0]!.svgPixels).toBeUndefined();
+      expect(asked[1]).toMatchObject({ session: null, snapshot: { uploaded: [svgUploadKey(svg.key)] } });
+      // (`asked` holds JSON copies: the bytes as an index map.)
+      expect(asked[1]!.svgPixels!.map((p) => ({ key: p.key, data: Object.values(p.data) }))).toEqual([{ key: svg.key, data: Array(24).fill(7) }]);
+    });
+
     it('a session with the document and no resync on its way serves it directly', () => {
       const d = doc();
       const { transport, asked } = setup([rendered(2, 2)], { session: { ...session(), applied: 12 }, windowDocument: d.windowDocument });
