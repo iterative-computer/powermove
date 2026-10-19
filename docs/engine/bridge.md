@@ -1792,9 +1792,12 @@ mount/A/V gates; neither physical-display gate is claimed from unit tests.
 
 ## Today's viewer canvas (decision V1, 2026-10-19)
 
-With "Use New Engine" on, the viewer looks like today's at every zoom and
-preview resolution, including the resolution today draws at and the
-browser's upscale of it.
+With "Use New Engine" on, the viewer renders at today's canvas resolution
+and scales it as the browser scales today's canvas, at every zoom and
+preview resolution. What was measured, and the differences that remain
+(the video's editing copy, the sub-pixel origin of a crop above 100%, the
+crop past the largest output, the P3 canvas), are below: it does not yet
+look like today's in every case.
 
 **Today.** The legacy viewer draws a view into a WebGL canvas it sizes
 itself (`V.layout` in `extensions/viewer/viewer.ts`):
@@ -1832,89 +1835,182 @@ sends the one a `render.gl.resize` caller sized. pm-node's
 - without a canvas (the integration harnesses, older callers), draws the
   composition at zoom × DPR × the preview resolution as before.
 
+**Beyond the largest output.** pm-render's output starts at the
+composition's origin (it has no output origin), so a cropped canvas's
+output runs from the composition's origin to the crop's far edge, and
+must fit the largest output (16,384 pixels a side, also the GPU's largest
+viewport). Past it (a 1920-pixel composition from 500% on a 2x display
+once the crop passes composition x ≈ 1,638; at 800% from x ≈ 1,024; a 4K
+composition from about 213%), `canvas_placement` draws the same crop from
+the largest smaller canvas that fits (`Placement::reduced`, the fraction of
+today's resolution) into today's snapped box, so every layer lands where
+today's does, only from fewer pixels: a visible softening. The frame
+reports it (`Composed::reduced`), the viewer thread counts
+`reducedFrames` and logs a warning once each time a view starts drawing
+that way. Until this lane, the placement fell back silently to zoom × DPR,
+which clamped the output and drew the composition too small. The same
+applies without a canvas: a view larger than the largest output keeps its
+rectangle and draws fewer pixels. Matching today exactly here needs an
+output origin in pm-render (the crop drawn from its own origin), which is
+also what the sub-pixel origin below needs.
+
 The preview quality is honoured exactly as today because the canvas is
 today's: Auto follows `api.transport.quality` (the adaptive ladder),
 explicit Full and Half draw the composition at their quality whatever the
 zoom (Full at 25% is a 2× downscale by the browser, as today). During a
 paused zoom or pan gesture today keeps its committed canvas and shows its
 last frame scaled by CSS until the gesture settles (`canRetainNavigation`,
-100 ms after the last event); the engine view keeps the committed canvas
-the same way (its box follows the gesture) and takes the new one when the
-gesture settles. Below 100% the canvas holds the whole composition, so a
-frame rendered at the old canvas is today's stale frame, rescaled.
+100 ms after the last event). The engine view keeps its committed canvas by
+the same rule (`engine-present/canvas-hold.ts`, unit tested): inside an
+unsettled, paused gesture; while the engine's frame on screen is current
+(drawn at the committed canvas, at the engine's revision and today's time,
+not a stand-in; today's `presentationIsCurrent`) and the project object,
+its size, the animation version, time and quality are unchanged; and, for
+a crop, while the visible part of the composition stays inside it. Its box
+follows the gesture, and when the gesture settles the hold lays the viewer
+out again so the engine takes the new canvas (today's frame loop commits
+it the same way). Below 100% the canvas holds the whole composition, so a
+frame rendered at the old canvas is today's stale frame, rescaled. Today
+keeps a crop's pan buffer (`previewRenderViewport`'s `previous`, the
+compositor's `previewViewport`) while it covers the view; while the
+engine presents, the compositor never resizes, so the viewer passes the
+crop committed for the engine instead, and the engine draws the crop today
+would.
 
 GPU work below 100% falls with the canvas: a 1920 × 1080 composition at
 61% on a 2x display renders 2.07 MP instead of 3.09 MP, at 100% 2.07 MP
 instead of 8.29 MP.
 
 **Measured** (`e2e/engine-viewer-canvas.spec.ts`, Electron lock, one
-worker; a 640 × 360 project with two text layers, a rotated rounded
-rectangle, a 1 px line, a blurred star, a rotated level 1 SVG image and a
-video; stage 748 × 452 CSS at DPR 2, captured with `capturePage`,
-1496 × 904 pixels; corpus bound: every channel within 1 CV for 99.9% of
-pixels, none beyond 4):
+worker, 2026-10-19 run 3; a 640 × 360 project with two text layers, a
+rotated rounded rectangle, a 1 px line, a blurred star, a rotated level 1
+SVG image and a video, crop-safe; and a 1920 × 1080 project with text, a
+rotated box and a hairline at its right edge; stage 748 × 452 CSS at DPR
+2, captured with `capturePage`, 1496 × 904 pixels; both windows with
+`--force-color-profile=srgb`; corpus bound: every channel within 1 CV for
+99.9% of pixels, none beyond 4). "Content" compares the engine's snapshot
+with today's `renderToPixels` at the canvas size (whole-canvas cases only;
+today's ran twice, with the same result both times):
 
-| Case | Today's canvas | Whole stage: within 1 CV, max | Outside the video layer | Display profile (P3 canvas), whole stage |
-|---|---|---|---|---|
-| 25% Auto | 320 × 180 | 99.997%, 49 | 100.0000%, 1 | 99.919%, 49 |
-| 50% Auto | 640 × 360 | 100.000%, 1 | 100.0000%, 1 | 99.778%, 2 |
-| 61% Auto | 640 × 360 | 100.000%, 2 | 99.9995%, 2 | 99.892%, 4 |
-| 100% Auto | 640 × 360 | 99.999%, 2 | 99.9997%, 2 | 99.714%, 4 |
-| 25% Full | 640 × 360 | 100.000%, 1 | 100.0000%, 1 | 99.979%, 3 |
-| 50% Full | 640 × 360 | 100.000%, 1 | 100.0000%, 1 | 99.781%, 2 |
-| 61% Full | 640 × 360 | 100.000%, 2 | 99.9995%, 2 | 99.895%, 4 |
-| 100% Full | 640 × 360 | 100.000%, 2 | 99.9997%, 2 | 99.723%, 4 |
-| 25% Half | 320 × 180 | 99.997%, 49 | 100.0000%, 1 | 99.919%, 49 |
-| 50% Half | 320 × 180 | 99.972%, 37 | 99.9997%, 2 | 99.905%, 37 |
-| 61% Half | 320 × 180 | 99.957%, 44 | 99.9983%, 2 | 99.873%, 44 |
-| 100% Half | 320 × 180 | 99.888%, 43 | 99.9963%, 2 | 99.620%, 43 |
+| Case | Today's canvas | Whole stage: within 1 CV, max | Outside the video layer | Content | Display profile (P3), run 1 |
+|---|---|---|---|---|---|
+| 25% Auto | 320 × 180 | 99.997%, 49 | 100.0000%, 1 | 93.75%, 228 | 99.919%, 49 |
+| 50% Auto | 640 × 360 | 100.000%, 1 | 100.0000%, 1 | 100%, 1 | 99.778%, 2 |
+| 61% Auto | 640 × 360 | 99.999%, 2 | 99.9995%, 2 | 100%, 1 | 99.892%, 4 |
+| 100% Auto | 640 × 360 | 99.999%, 2 | 99.9997%, 2 | 100%, 1 | 99.714%, 4 |
+| 25% Full | 640 × 360 | 100.000%, 1 | 100.0000%, 1 | 100%, 1 | 99.979%, 3 |
+| 50% Full | 640 × 360 | 100.000%, 1 | 100.0000%, 1 | 100%, 1 | 99.781%, 2 |
+| 61% Full | 640 × 360 | 100.000%, 2 | 99.9998%, 2 | 100%, 1 | 99.895%, 4 |
+| 100% Full | 640 × 360 | 100.000%, 2 | 99.9996%, 2 | 100%, 1 | 99.723%, 4 |
+| 25% Half | 320 × 180 | 99.997%, 49 | 100.0000%, 1 | 100%, 1 | 99.919%, 49 |
+| 50% Half | 320 × 180 | 99.973%, 37 | 99.9998%, 2 | 100%, 1 | 99.905%, 37 |
+| 61% Half | 320 × 180 | 99.957%, 44 | 99.9980%, 2 | 100%, 1 | 99.873%, 44 |
+| 100% Half | 320 × 180 | 99.888%, 43 | 99.9962%, 2 | 100%, 1 | 99.620%, 43 |
+| 237% Auto (crop) | 2056 × 1464 | 99.080%, 59 | 99.0627%, 59 | cropped | not run |
+| 237% panned Auto | 2056 × 1464 | 98.315%, 58 | 98.2941%, 58 | cropped | not run |
+| 237% Full (crop) | 2056 × 1464 | 99.080%, 59 | 99.0627%, 59 | cropped | not run |
+| 237% panned Full | 2056 × 1464 | 98.315%, 58 | 98.2941%, 58 | cropped | not run |
+| 237% Half (crop) | 1052 × 756 | 98.524%, 55 | 98.4970%, 55 | cropped | not run |
+| 237% panned Half | 1052 × 756 | 96.556%, 171 | 96.5193%, 55 | cropped | not run |
+| 800% right edge Full (1920 × 1080) | 2008 × 1416 | 96.719%, 226 | 96.7187%, 226 | cropped | not run |
 
-All cases hold the bound outside the video layer, and the whole stage holds
-it at every Full case and at Auto from 50% up. Where the stage misses it
-(Auto at 25% and every Half case, all with a half-scale canvas: 45 to 1,468
-pixels, up to 49 CV) the differences sit on the video layer's edges and
-nowhere else. Today's viewer draws a video's editing copy when the preview
-resolution is Auto or its quality is below 1 (`previewVideoElement`, the
-intra-1280 derivative) and the engine draws the original (its media
-preference has no proxies yet, section 14); the edges of the two decodes
-differ when sampled at half scale. That is the likely cause, not proven
-pixel by pixel. The same frame's content without the scaling (the engine's snapshot
-against today's `renderToPixels`, both from the original, at the canvas
-size) is within 1 CV in 11 of 12 cases; the exception is the session's
-first legacy `renderToPixels` (25% Auto: 6.25% of pixels, up to 228 CV, in
-both runs), and the same 320 × 180 canvas at 25% Half is within 1 CV. Both windows ran with
-`--force-color-profile=srgb`; with the display's own profile (last column,
-the first run) the engine's display-p3 canvas moves single channels of
-smooth gradients by 2 CV through the 8-bit P3 round trip, at every zoom,
-including 50% where both canvases map 1:1, so that column measures the
-presentation's color space, not the scaling. Before V1 the engine drew 61%
-at 1.22 and 100% at 2 device pixels per composition pixel, sharper than
-today everywhere. Evidence (today, engine, differences in red), outside the
-repository: `/tmp/ne-w5/viewer-canvas-evidence2/` and
-`/tmp/ne-w5/viewer-canvas-display/`.
+The control: today's viewer captured again with the video's editing copy
+removed (it then draws the original):
 
-Also run after V1 (Electron lock, one worker): `engine-svg.spec.ts` 6 of 7
-(the seventh is the exported still, E1 in vector.md, unchanged);
-`engine-render-transport.spec.ts` 7 of 7; the `viewer-*.spec.ts` specs 22 of
-24, the two failures in `viewer-resize.spec.ts` (a handle drag leaves
-`scale.x` at 100) failing the same way with the branch's base `viewer.ts`.
-The svg and text gates: `svg_corpus` 34 projects, 105 frames, 0 failed;
-`text_corpus` 576 frames, 0 failed; `text_raster` 0 failed. pm-node
-`tests/compose.rs` checks the snapped box, the rendered texels and the
-bilinear values against the 8-bit canvas.
+| Case | Whole stage against the engine |
+|---|---|
+| 25% Auto | 100.000%, 1 |
+| 25% Half | 100.000%, 1 |
+| 50% Half | 100.000%, 2 |
+| 61% Half | 99.996%, 2 |
+| 100% Half | 99.996%, 2 |
+
+What the numbers say:
+
+- At 25 to 100% (today's whole-composition canvas) every case holds the
+  bound outside the video layer, and the whole stage holds it at every
+  Full case and at Auto from 50% up. Where it misses (Auto at 25% and
+  every Half case, up to 49 CV, on the video layer's edges only), the
+  cause is now proven: today's viewer draws a video's editing copy when the
+  preview resolution is Auto or its quality is below 1
+  (`previewVideoElement`, the intra-1280 derivative) and the engine draws
+  the original (no proxies yet, section 14). With the copy removed, today's
+  viewer matches the engine on the whole stage in all five cases. This
+  belongs to Phase 4a (proxies).
+- **Above 100%, cropped, the engine does not match today.** Every 237% case
+  (Auto, Full, Half, unpanned and panned) misses the bound outside the
+  video too: 1 to 3.5% of pixels, up to 59 CV. The differences are on the
+  hard edges of every layer and nowhere else
+  (`/tmp/ne-w5/viewer-canvas-evidence3/237-*-diff.png`): the engine's crop
+  is today's (its crop, scale and canvas size are checked equal), but its
+  pixel grid starts at the nearest output pixel, while today's starts at
+  the crop's fractional origin (`crop.x × sx`, here 488.8 output pixels),
+  so every edge moves by a fraction of a device pixel (F4). Fixing it
+  needs an output origin in pm-render (below).
+- At 800% flush with a 1920-pixel composition's right edge, today's crop
+  starts about 28,700 output pixels from the composition's origin; the
+  engine draws it at 53% of today's resolution into today's box: the
+  geometry is today's, the edges softer (up to 226 CV on 3.3% of
+  pixels). The viewer thread counted 2 reduced frames in the run.
+- Content without the scaling holds within 1 CV in 11 of 12 cases. 25%
+  Auto misses it on exactly the video layer (3,600 pixels, the 80 × 45 the
+  video covers in that 320 × 180 canvas), in both of today's renders, so
+  it is not a first-render effect: today's `renderToPixels` at Auto draws
+  the video's editing copy at a different frame there. The same canvas at
+  25% Half, where today draws the original, is within 1 CV.
+- With the display's own profile (last column, run 1) the engine's
+  display-p3 canvas moves single channels of smooth gradients by 2 CV
+  through the 8-bit P3 round trip at every zoom, including 50% where both
+  canvases map 1:1: the presentation's color space, not the scaling.
+
+Before V1 the engine drew 61% at 1.22 and 100% at 2 device pixels per
+composition pixel, sharper than today everywhere. Evidence (today, engine,
+differences in red), outside the repository:
+`/tmp/ne-w5/viewer-canvas-evidence3/` (this table),
+`/tmp/ne-w5/viewer-canvas-evidence2/` (run 2) and
+`/tmp/ne-w5/viewer-canvas-display/` (display profile).
+
+The spec asserts the bound on the whole stage and outside the video for
+every case, and lists the cases above that are known to miss it, with
+their issue, in `KNOWN`; a known case that starts passing fails the test,
+so none can pass by accident.
+
+Also run after V1 (Electron lock, one worker; again after round 2 with
+the same results): `engine-svg.spec.ts` 6 of 7 (the seventh is the exported
+still, E1 in vector.md, unchanged); `engine-render-transport.spec.ts` 7 of
+7; the `viewer-*.spec.ts` specs 21 of 23, the two failures in
+`viewer-resize.spec.ts` (a handle drag leaves `scale.x` at 100) failing the
+same way with the branch's base `viewer.ts`. The svg and text gates (round
+1): `svg_corpus` 34 projects, 105 frames, 0 failed; `text_corpus` 576
+frames, 0 failed; `text_raster` 0 failed. pm-node `tests/compose.rs` checks
+the snapped box, the rendered texels, the bilinear values against the
+8-bit canvas, and a crop past the largest output landing in today's box;
+the compose unit tests check its geometry for 1920 and 4K compositions.
+`canvas-hold.test.ts` checks the gesture hold: holding inside a gesture,
+releasing on a version, time, quality, project or size change, before the
+engine presented the committed canvas, and when the view leaves the crop,
+and the settle's re-layout.
 
 Remaining:
 
-- Above 100% in a crop-safe project the engine renders the crop at today's
-  scale and size, but the crop's pixel grid starts at the nearest output
-  pixel rather than at the crop's fractional origin (`previewRenderViewport`
-  pans in fractions of a pixel; pm-render has no preview-viewport origin).
-  Not measured here.
+- Above 100% in a crop-safe project (the usual case for 2D projects), the
+  crop's pixel grid starts at the nearest output pixel rather than at the
+  crop's fractional origin: measured above, up to 59 CV on 1 to 3.5% of the
+  pixels, on every hard edge. A visible difference. It needs an output
+  origin in pm-render: the comp-to-output transform `x · sx − origin`
+  (today's `scaledWorld` subtracts the viewport), with the effect
+  coordinates' origin (`effectViewportCoordinates`) and the background
+  view (`backgroundView`) following, the output then being the canvas
+  itself. That also removes the largest-output limit above.
+- Crops past the largest output draw below today's resolution (above).
+- The video's editing copy (Phase 4a).
 - The engine presents a display-p3 canvas on a wide-gamut display where
   today's canvas is sRGB; the 8-bit P3 round trip moves single channels of
   smooth gradients by 2 CV (above), at every zoom.
-- The gesture hold (above) is covered by code review only: no e2e drives
-  a pinch with the engine on and compares frames.
+- No e2e drives a pinch with the engine on and compares frames during it;
+  the hold's rule is unit tested.
 - The stage origin is assumed to sit on whole device pixels (Blink snaps
-  the canvas box in window coordinates; the engine snaps it in the stage's).
+  the canvas box in window coordinates; the engine snaps it in the stage's),
+  and an edge exactly halfway between device pixels rounds away from zero
+  (Rust's `f64::round`), which may differ from Blink on negative ties.
 

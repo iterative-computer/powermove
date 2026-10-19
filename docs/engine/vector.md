@@ -676,7 +676,19 @@ Measured:
   32-bit still pipeline, not the rasters.
 - `svg_corpus`: 34 projects, 105 frames, 9,640,652 SVG pixels, 0 failed.
 
+Round 2 (2026-10-19): the 237% cropped views were captured against
+today's: the buckets are today's, but the frame's hard edges, SVG edges
+included, move by a fraction of a device pixel because the crop's pixel
+grid starts at the nearest output pixel (F4; bridge.md, "Today's viewer
+canvas", measured table). `svg-buckets.test.ts` now sizes today's canvas
+with the viewer's own `viewerCanvasSize` instead of a copy of its rule;
+today's `outputScale` is still copied (it is private to the compositor).
+
 Remaining: a level 1 SVG inside a level 2 precomp keeps the engine's
 continuous density (today has no level 2). Above 100% in a crop-safe
 project the crop's pixel grid starts at the nearest output pixel, not at
-the crop's fractional origin (bridge.md, "Today's viewer canvas").
+the crop's fractional origin (bridge.md, "Today's viewer canvas"). A crop
+past the largest output (bridge.md, "Beyond the largest output") is drawn
+from a smaller canvas, so its SVG buckets are picked at that smaller
+scale: smaller than today's there, and the frame still waits for exactly
+the bucket it draws.
