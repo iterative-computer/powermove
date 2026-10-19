@@ -4,8 +4,9 @@
 // item drawn onto the coverage canvas with `source-over` or
 // `destination-out`.
 //
-// Every image is single-channel 8-bit (the canvases are white: each
-// premultiplied channel is the coverage) with a transparent 1-pixel border,
+// Path masks use one 8-bit channel (each white premultiplied channel is
+// coverage); text save layers use premultiplied RGBA8. Both share these
+// passes and a transparent 1-pixel border on filter intermediates,
 // sampled with clamp to edge, so samples outside an image are transparent
 // as Skia's decal tiling and pixel-outset images make them. The SkSL blur
 // effects declare `half` sums, weights, and offsets, which Graphite runs at
@@ -26,7 +27,7 @@ struct Pass {
     map_s: vec2<f32>,
     map_t: vec2<f32>,
     dir: vec2<f32>,
-    pad: vec2<f32>,
+    mode: vec2<u32>,
     // 2D: weights, four per entry.
     k: array<vec4<f32>, 7>,
     // 1D: (offset, weight, offset, weight); 2D: offsets (x, y, x, y).
@@ -44,15 +45,19 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 }
 
 // Bilinear at a source space position.
-fn sample_at(s: vec2<f32>) -> f32 {
-    return textureSampleLevel(src, bilinear, (s - p.src_org) * p.src_inv, 0.0).r;
+fn sample_at(s: vec2<f32>) -> vec4<f32> {
+    let v = textureSampleLevel(src, bilinear, (s - p.src_org) * p.src_inv, 0.0);
+    if (p.mode.x == 0u) { return vec4<f32>(v.r); }
+    return v;
 }
 
 // The texel containing a source space position.
-fn texel_at(s: vec2<f32>) -> f32 {
+fn texel_at(s: vec2<f32>) -> vec4<f32> {
     let size = vec2<i32>(textureDimensions(src));
     let t = clamp(vec2<i32>(floor(s - p.src_org)), vec2<i32>(0), size - 1);
-    return textureLoad(src, t, 0).r;
+    let v = textureLoad(src, t, 0);
+    if (p.mode.x == 0u) { return vec4<f32>(v.r); }
+    return v;
 }
 
 fn dst_center(pos: vec4<f32>) -> vec2<f32> {
@@ -73,30 +78,30 @@ fn fs_rescale(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 fn fs_blur1d(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let coord = dst_center(pos);
     let dir = vec2<f32>(p.dir);
-    var sum = f32(0.0);
+    var sum = vec4<f32>(0.0);
     for (var i = 0u; i < p.n; i++) {
         let s = vec4<f32>(p.o[i]);
-        sum += s.y * f32(sample_at(coord + vec2<f32>(s.x * dir)));
-        sum += s.w * f32(sample_at(coord + vec2<f32>(s.z * dir)));
+        sum += s.y * vec4<f32>(sample_at(coord + vec2<f32>(s.x * dir)));
+        sum += s.w * vec4<f32>(sample_at(coord + vec2<f32>(s.z * dir)));
     }
-    return vec4<f32>(f32(sum));
+    return sum;
 }
 
 // `make_blur_2D_shader` (nearest sampling).
 @fragment
 fn fs_blur2d(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let coord = dst_center(pos);
-    var sum = f32(0.0);
+    var sum = vec4<f32>(0.0);
     for (var i = 0u; i < p.n; i++) {
         let k = vec4<f32>(p.k[i]);
         var o = vec4<f32>(p.o[2u * i]);
-        sum += k.x * f32(texel_at(coord + vec2<f32>(o.xy)));
-        sum += k.y * f32(texel_at(coord + vec2<f32>(o.zw)));
+        sum += k.x * vec4<f32>(texel_at(coord + vec2<f32>(o.xy)));
+        sum += k.y * vec4<f32>(texel_at(coord + vec2<f32>(o.zw)));
         o = vec4<f32>(p.o[2u * i + 1u]);
-        sum += k.z * f32(texel_at(coord + vec2<f32>(o.xy)));
-        sum += k.w * f32(texel_at(coord + vec2<f32>(o.zw)));
+        sum += k.z * vec4<f32>(texel_at(coord + vec2<f32>(o.xy)));
+        sum += k.w * vec4<f32>(texel_at(coord + vec2<f32>(o.zw)));
     }
-    return vec4<f32>(f32(sum));
+    return sum;
 }
 
 // The item (or its blur) drawn onto the coverage canvas; the pipeline's
@@ -104,7 +109,7 @@ fn fs_blur2d(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 @fragment
 fn fs_draw(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let s = pos.xy * p.map_s + p.map_t;
-    var v: f32;
+    var v: vec4<f32>;
     if (p.linear == 1u) {
         v = sample_at(s);
     } else {

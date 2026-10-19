@@ -25,7 +25,10 @@ impl PathRasterizer for Rasterizer {
         opacity: f64,
         blur: f64,
     ) -> Option<Item> {
-        let mut cx = Context::new(viewport.0, viewport.1);
+        // A filtered draw can contribute ink from beyond the canvas edge.
+        // Its save layer covers the canvas outset by the kernel bounds.
+        let pad = pm_text::render::scene::blur_radius(blur);
+        let mut cx = Context::new(viewport.0 + 2 * pad, viewport.1 + 2 * pad);
         let alpha = (color[3] * opacity) as f32;
         let paint = Paint::Solid([
             color[0] as f32 * alpha,
@@ -73,8 +76,11 @@ impl PathRasterizer for Rasterizer {
                     V::Close => p.close(),
                 }
             }
-            cx.set_transform(glyph.matrix.map(f64::from));
-            let m = Affine::new(glyph.matrix.map(f64::from));
+            let mut matrix = glyph.matrix;
+            matrix[4] += pad as f32;
+            matrix[5] += pad as f32;
+            cx.set_transform(matrix.map(f64::from));
+            let m = Affine::new(matrix.map(f64::from));
             let b = glyph.path.bounds();
             let b = Rect::new(
                 b.left() as f64,
@@ -92,7 +98,7 @@ impl PathRasterizer for Rasterizer {
                 cx.fill_path(&p).ok()?;
             }
         }
-        let b = bounds?.intersect(Rect::new(0.0, 0.0, viewport.0 as f64, viewport.1 as f64));
+        let b = bounds?.intersect(Rect::new(0.0, 0.0, cx.width() as f64, cx.height() as f64));
         let r = [
             b.x0.floor() as i32,
             b.y0.floor() as i32,
@@ -110,12 +116,17 @@ impl PathRasterizer for Rasterizer {
                     height: (r[3] - r[1]) as u32,
                     data,
                 }),
-                transform: Affine::translate((r[0] as f64, r[1] as f64)),
+                transform: Affine::translate((r[0] as f64 - pad as f64, r[1] as f64 - pad as f64)),
             },
             color: [1.0; 4],
             opacity: 1.0,
             blur,
-            bounds: Rect::new(r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64),
+            bounds: Rect::new(
+                r[0] as f64 - pad as f64,
+                r[1] as f64 - pad as f64,
+                r[2] as f64 - pad as f64,
+                r[3] as f64 - pad as f64,
+            ),
         })
     }
 }
