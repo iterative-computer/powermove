@@ -77,13 +77,23 @@ export class EngineTransport implements TransportDriver {
   constructor(
     private readonly session: () => DocumentSession | null,
     private readonly clock: HostClock,
-    private readonly options: { exclusive?: boolean; wake?: () => void } = {}
+    private readonly options: {
+      exclusive?: boolean;
+      wake?: () => void;
+      /** Before each command reaches the session (a viewerless session
+       *  follows the open composition first). */
+      prepare?: () => void;
+    } = {}
   ) {}
 
-  /** Whether a session draws and takes transport commands now. */
+  /**
+   * Whether a session takes transport commands now: its route is decided
+   * (the engine draws the composition, or cannot and shows why; either
+   * way its clock and audio run, amendment 21) and its clock is heard.
+   */
   private drawing(): boolean {
     const s = this.session();
-    return !!s && !s.closed && s.route === 'engine' && (s.frames > 0 || s.clock !== null) && s.id !== null;
+    return !!s && !s.closed && s.route !== 'pending' && (s.frames > 0 || s.clock !== null) && s.id !== null;
   }
 
   active(): boolean {
@@ -131,6 +141,7 @@ export class EngineTransport implements TransportDriver {
   }
 
   private send(command: TransportCommand): void {
+    this.options.prepare?.();
     this.session()?.transport(command);
   }
 

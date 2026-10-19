@@ -194,7 +194,9 @@ function fakeGl(active: string[], fence: () => number, maxTextureSize = 16384) {
     uploads: [] as Array<{ id: number; data: Uint16Array | null }>,
     draws: [] as Array<Record<number, unknown>>,
     uniforms: [] as string[],
-    lostBy: 0
+    lostBy: 0,
+    finishes: 0,
+    waits: 0
   };
   const gl: Record<string, unknown> = {
     ...C,
@@ -215,7 +217,9 @@ function fakeGl(active: string[], fence: () => number, maxTextureSize = 16384) {
     uniformMatrix3fv: (l: { name: string }) => state.uniforms.push(l.name),
     getError: () => 0,
     drawArrays: () => { state.draws.push(Object.fromEntries([0, 1, 2].map((u) => [u, (bound.get(u) as { id: number } | null)?.id ?? null]))); },
-    fenceSync: () => ({}), flush: () => {}, clientWaitSync: () => fence(), deleteSync: () => {},
+    fenceSync: () => ({}), flush: () => {}, clientWaitSync: () => { state.waits++; return fence(); }, deleteSync: () => {},
+    // `finish` blocks until the pass ran: the fake's draw time is `fence`'s clock step.
+    finish: () => { state.finishes++; fence(); },
     readPixels: () => {}, isContextLost: () => lost, deleteFramebuffer: () => {}, deleteTexture: () => {},
     getParameter: (p: number) => (p === C.MAX_TEXTURE_SIZE ? maxTextureSize : null)
   };
@@ -503,8 +507,8 @@ describe('the runner on the calling thread (the synchronous snapshot path)', () 
 
   it('keeps the watchdog: a draw past its deadline loses the context and the program is never run again', () => {
     let clock = 0;
-    // The fence never signals; the clock moves each poll.
-    const { canvas, state } = fakeGl([], () => { clock += 100; return 27; });
+    // The pass takes 3 s of GPU time (the fake's `finish` moves the clock).
+    const { canvas, state } = fakeGl([], () => { clock += 3000; return 27; });
     const runner = new ShaderFallbackRunner({ createCanvas: () => canvas, drawDeadlineMs: 2000, now: () => clock });
     const r = effect();
     const textures = [new Uint16Array(8), new Uint16Array(8)];
@@ -513,6 +517,22 @@ describe('the runner on the calling thread (the synchronous snapshot path)', () 
     expect(state.draws).toHaveLength(1);
     expect(() => runner.renderSync(r, textures)).toThrow(expect.objectContaining({ reason: 'watchdog' }));
     expect(state.draws).toHaveLength(1);
+  });
+
+  it('draws on the calling thread although a fence never signals within the task (WebGL)', () => {
+    let clock = 0;
+    // WebGL signals a fence only once the event loop runs again: within the
+    // synchronous snapshot's task every poll answers TIMEOUT_EXPIRED. Each
+    // poll (and each pass) moves the clock, so polling would end at the deadline.
+    const { canvas, state } = fakeGl([], () => { clock += 100; return 27; });
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas, drawDeadlineMs: 2000, now: () => clock });
+    const out = runner.renderSync(effect(), [new Uint16Array(8), new Uint16Array(8)]);
+    expect(out).toMatchObject({ width: 2, height: 1 });
+    // One `finish` per pass, no fence polled, and the draw well inside its deadline.
+    expect(state.finishes).toBe(2);
+    expect(state.waits).toBe(0);
+    expect(state.draws).toHaveLength(2);
+    expect(state.lostBy).toBe(0);
   });
 
   it('fails a target past MAX_TEXTURE_SIZE with tooLarge', () => {
