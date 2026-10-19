@@ -1065,3 +1065,58 @@ alone neither sends a changed view nor retires the surface pool. Genuine size,
 DPR, zoom and host-window changes retain their existing behavior. This is the
 owner's explicit round-3 compatibility policy, superseding round 2's unresolved
 question about whether a frozen canvas configuration was appropriate.
+
+
+### Round-3 paired playback results
+
+After the integration merge, the rebuilt release addon speaks
+`protocol-2f8d7cab61015d02`. Both engines run the same animated feathered mask,
+Full resolution and adaptive quality off, with two seconds warmup and twelve
+seconds measured. One Electron process at a time runs under `pm-electron-lock`;
+the guard observed 67.37–68.04 GiB free before these four launches. The table
+uses the same Graphics.Pipeline receive → DrawAndSwap feedback parser for both
+canvas sinks. Worker-predicted display times and legacy submission times are
+retained only as separate diagnostics.
+
+| Canvas | Engine | Shown / skips | Feedback p50 / p95 / p99 / max |
+|---|---|---|---|
+| 1920×1080 | Today | 360 / 0 | 33.327 / 33.379 / 34.141 / 36.567 ms |
+| 1920×1080 | Native | 360 / 0 | 33.333 / 41.668 / 41.685 / 49.762 ms |
+| 3840×2160 | Today | 360 / 0 | 33.327 / 33.456 / 35.491 / 36.530 ms |
+| 3840×2160 | Native | 360 / 0 | 33.331 / 41.681 / 42.225 / 50.657 ms |
+
+Every row maps all 360 submissions to 360 unique feedback events, with zero
+missing, superseded or duplicate mappings. Both native rows keep generation 2,
+viewSeq 4 and the session count constant throughout the measured span, with
+zero skipped or repeated frames, render errors, layer failures or legacy routes.
+The steady-playback assertion passes at both resolutions. The legacy context
+stays the same object with `drawingBufferColorSpace: srgb` and unchanged context
+attributes before/after each span.
+
+This runtime sample did not observe a gamut/EDR query flip: both native hosts
+reported P3/EDR throughout. The deterministic regression covers the flip itself
+in both directions: native frames continue through independently changing gamut
+and EDR queries, retaining generation 7 and viewSeq 1 with no drops; later real
+DPR/geometry updates retain the configured color tuple. Logs record observed
+changes, repeated unchanged updates do not spam them, and dispose removes the
+listeners. The three targeted viewer suites pass 39/39 tests; renderer typecheck
+has zero errors and the existing IconCropper warning.
+
+The 125 ms generation-change stall is addressed by matching today's canvas
+lifetime, and the observed playback now has zero skips. **The no-slower playback
+performance gate is still not green:** the common-clock HD and UHD native tails
+are slower than today's. UHD's earlier different-clock p95 35.1/33.8 ms comparison
+is superseded by this completed common-clock row, not waived. No cadence samples
+or tails were removed, and no performance tolerance was introduced.
+
+Raw rows, all four traces, generation assertions, legacy context snapshots and
+logs are outside Git in `/tmp/ne-fixups2-evidence/r3/` (`summary.json`,
+`path-mask-playback-r3.jsonl`, `mask-r3-*.trace.json`, `playback.log`,
+`viewer-unit.log`, `types-web.log`, `addon-build.log`). The opt-in spec passed in
+1.3 minutes; that means collection and functional/generation assertions passed,
+not that the timing comparison passed. `PM_FIXUPS2_RUN` gives evidence a unique
+run tag; the extra hidden diagnostic is explicitly opt-in. After deleting
+`engine/target`, run with `POWERMOVE_PM_BRIDGE` pointing to the absolute built
+`apps/desktop/native/pm_bridge.node` path (as this run did), so the development
+bridge remains available. The build target is deleted and all own app/build
+processes exited.
