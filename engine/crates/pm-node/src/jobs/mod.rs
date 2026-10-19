@@ -33,6 +33,9 @@
 #![allow(clippy::result_large_err)]
 
 pub(crate) mod blender;
+mod compile;
+mod definitions;
+mod fallback;
 pub mod gate;
 mod svg;
 
@@ -47,8 +50,8 @@ use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
 use pm_engine::priority::Scheduler;
 use pm_export::render::{
     ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
-    encode_jpeg, encode_png, offline_media, plan_export_with, render_still,
-    run_export_with_blender, sink_for, to_rgba8,
+    encode_jpeg, encode_png, offline_media, plan_export_for, render_still, run_export_with_blender,
+    sink_for, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
 use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
@@ -137,6 +140,8 @@ struct State {
     stats: ServiceStats,
     /// Blender surfaces received for the lanes' Blender requests.
     blender: blender::Delivered,
+    /// Definition pushes waiting for the compile worker's answer.
+    compiles: compile::Queue,
 }
 
 /// Ended job records kept.
@@ -326,13 +331,23 @@ impl Shared {
     }
 
     fn renderer(&self) -> Result<Renderer, String> {
+        let (device, queue) = self.gpu()?;
+        Ok(Renderer::new(device, queue))
+    }
+
+    /// The service's device (one per process, shared by the lanes).
+    fn gpu(&self) -> Result<(wgpu::Device, wgpu::Queue), String> {
         let mut gpu = self.gpu.lock().unwrap_or_else(|e| e.into_inner());
         if gpu.is_none() {
             let g = pm_gpu::Gpu::new("pm-job").map_err(|e| e.to_string())?;
             *gpu = Some((g.device, g.queue));
         }
         let (device, queue) = gpu.as_ref().expect("set above");
-        Ok(Renderer::new(device.clone(), queue.clone()))
+        Ok((device.clone(), queue.clone()))
+    }
+
+    fn device(&self) -> Result<wgpu::Device, String> {
+        self.gpu().map(|(device, _)| device)
     }
 }
 
@@ -445,6 +460,13 @@ impl JobEngineService {
                 run_probes(&probes)
             })
             .map_err(|e| format!("could not start the pm-job-probes lane: {e}"))?;
+        threads.push(handle);
+        let compiles = shared.clone();
+        let handle =
+            pm_engine::qos::spawn_engine_thread(EngineProcess::Job, "pm-job-compile", move || {
+                compile::run(&compiles)
+            })
+            .map_err(|e| format!("could not start the pm-job-compile worker: {e}"))?;
         threads.push(handle);
         Ok(JobEngineService { shared, threads })
     }
@@ -744,6 +766,23 @@ impl JobService for JobEngineService {
         (self.shared.wake)();
     }
 
+    fn definitions_pushed(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        session: SessionId,
+        update: &pm_protocol::definitions::DefinitionsUpdate,
+    ) -> bool {
+        self.shared.lock().compiles.0.push_back(compile::Pending {
+            port,
+            id,
+            session,
+            update: update.clone(),
+        });
+        self.shared.work.notify_all();
+        true
+    }
+
     fn port_closed(&mut self, port: PortId) {
         let mut st = self.shared.lock();
         let keep: VecDeque<Work> = st
@@ -801,6 +840,7 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
     };
     let mut renderer: Option<Renderer> = None;
     let mut blender = LaneBlender::default();
+    let mut definitions = definitions::LaneDefinitions::default();
     while let Some(work) = next_work(shared, lane) {
         if renderer.is_none() {
             match shared.renderer() {
@@ -812,6 +852,31 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
             }
         }
         let r = renderer.as_mut().expect("set above");
+        // The work's own definitions (contract 10), before it is planned.
+        let loaded = match &work {
+            Work::Frames { document, .. } | Work::Export { document, .. } => {
+                definitions.use_for(r, document)
+            }
+        };
+        if let Err(message) = loaded {
+            fail_work(shared, work, ErrorCode::InvalidMessage, &message);
+            continue;
+        }
+        // Programs only the WebGL runner draws run in a window's runner
+        // through the host (contract 14): the job waits for them.
+        let (session, cancel) = match &work {
+            Work::Frames {
+                document, cancel, ..
+            }
+            | Work::Export {
+                document, cancel, ..
+            } => (document.session, cancel.clone()),
+        };
+        r.set_fallback_host(Some(Arc::new(fallback::HostFallback::new(
+            shared.clone(),
+            session,
+            cancel,
+        ))));
         // Level 1 SVG rasters come from the document's window through host
         // services (decision S1); job frames (exports, agent frames) never
         // draw a stand-in for one.
@@ -1315,7 +1380,7 @@ fn run_job(
         Err(e) => return finish(JobState::Failed, None, Some(e)),
     };
     // Routing first: nothing is created for work the engine cannot do.
-    let mut plan = match plan_export_with(&export, stage.is_some()) {
+    let mut plan = match plan_export_for(&export, stage.is_some(), renderer) {
         Ok(plan) => plan,
         Err(e) => {
             let state = if matches!(e, JobError::Cancelled) {

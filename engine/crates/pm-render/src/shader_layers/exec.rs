@@ -30,6 +30,11 @@ pub struct ShaderState {
     /// not uploaded again for every frame.
     uploads: HashMap<String, (Arc<FallbackPixels>, Target, u64)>,
     uploaded: u64,
+    /// Requests asked for and not answered: their program (`program_id`).
+    pub(crate) waiting: HashMap<String, String>,
+    /// Programs the runner could not draw, by `program_id`, and whether
+    /// the failure was reported.
+    pub(crate) failed: HashMap<String, (super::FallbackFailure, bool)>,
     /// Tests: the device refuses every shader-layer pipeline, as Metal
     /// would a translation it cannot compile.
     #[cfg(test)]
@@ -145,6 +150,13 @@ impl ShaderState {
 
 /// Why a source could not be drawn.
 pub(crate) enum Missed {
+    /// The watchdog turned the program off (an overrun or a runaway): the
+    /// layer draws nothing, as a program that does not compile, and the
+    /// watchdog's report names it.
+    Disabled,
+    /// The hang guard holds the program (a frame that drew it may be
+    /// running away): the frame leaves it out and is not presented.
+    Held,
     /// The program WebGL draws failed in the native pipeline at pipeline
     /// creation (the Metal compiler): it needs the fallback runner.
     NeedsFallback(String),
@@ -260,11 +272,7 @@ pub(crate) fn upload(
         wgpu::TextureFormat::Rgba16Float,
         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
     );
-    let bytes: Vec<u8> = pixels
-        .rgba16f
-        .iter()
-        .flat_map(|h| h.to_le_bytes())
-        .collect();
+    let bytes = super::fallback::half_bytes(&pixels.rgba16f);
     queue.write_texture(
         target.texture.as_image_copy(),
         &bytes,
@@ -291,6 +299,94 @@ impl crate::exec::Exec<'_> {
         source: &ShaderSource,
     ) -> Result<(Target, bool), Missed> {
         if let ProgramRef::Fallback(request) = &source.program {
+            // A program the runner could not draw draws nothing, as one
+            // WebGL refuses, and is reported once (a draw past the
+            // runner's deadline by the watchdog).
+            let program = super::fallback::program_id(request);
+            // Its last request failed for a transient reason (the runner's
+            // context was lost): asked for again once the backoff passed,
+            // drawing nothing until then, reported once.
+            // A job's host already tried it again in place: the job stops.
+            if self.effects.watchdog.policy() == crate::effects::watchdog::Policy::Job
+                && let Some(retry) = self.effects.fallback.retries.last(&program)
+            {
+                let why = retry.failure.clone();
+                self.effects.fallback.fatal.get_or_insert_with(|| {
+                    format!(
+                        "Layer {} needs the WebGL fallback runner, which could not draw it ({}: {}).",
+                        source.layer, why.reason, why.message
+                    )
+                });
+                return Err(Missed::Disabled);
+            }
+            let now = self.effects.watchdog.now();
+            if let Some(crate::effects::fallback::RetryState::Wait { failure, report }) =
+                self.effects.fallback.retries.state(&program, now)
+            {
+                if report {
+                    self.effects.watchdog.report(pm_protocol::error::EngineError::new(
+                        pm_protocol::error::ErrorCode::NotHeadlessRenderable,
+                        pm_protocol::error::ErrorScope::Layer {
+                            layer: source.layer.as_str().into(),
+                        },
+                        crate::effects::truncate(format!(
+                            "Layer {} could not be drawn by the WebGL fallback runner for now ({}: {}); it draws nothing until the runner draws it again.",
+                            source.layer, failure.reason, failure.message
+                        )),
+                    ));
+                }
+                return Err(Missed::Disabled);
+            }
+            if let Some((why, reported)) = self.shaders.failed.get_mut(&program) {
+                let first = !std::mem::replace(reported, true);
+                let why = why.clone();
+                let span = crate::effects::watchdog::Span {
+                    subject: crate::effects::watchdog::Subject::Definition {
+                        kind: DefinitionKind::Layer,
+                        id: format!("fallback:{program}").as_str().into(),
+                    },
+                    layer: source.layer.as_str().into(),
+                    instance: None,
+                    builtin: false,
+                };
+                if why.reason == "watchdog" {
+                    self.effects.watchdog.runner_runaway(
+                        &span,
+                        &format!("the shader of layer {}", source.layer),
+                        format!(
+                            "The shader of layer {} did not finish drawing in the WebGL fallback runner ({}), so it is turned off until its code changes.",
+                            source.layer, why.message
+                        ),
+                    );
+                } else if self.effects.watchdog.policy() == crate::effects::watchdog::Policy::Job
+                    && why.reason != "compile"
+                {
+                    self.effects.fallback.fatal.get_or_insert_with(|| {
+                        format!(
+                            "Layer {} needs the WebGL fallback runner, which could not draw it ({}: {}).",
+                            source.layer, why.reason, why.message
+                        )
+                    });
+                } else if first {
+                    self.effects.watchdog.report(
+                        pm_protocol::error::EngineError::new(
+                            if why.reason == "unavailable" {
+                                pm_protocol::error::ErrorCode::NotHeadlessRenderable
+                            } else {
+                                pm_protocol::error::ErrorCode::ShaderCompile
+                            },
+                            pm_protocol::error::ErrorScope::Layer {
+                                layer: source.layer.as_str().into(),
+                            },
+                            crate::effects::truncate(format!(
+                                "Layer {} could not be drawn by the WebGL fallback runner ({}: {}); it draws nothing.",
+                                source.layer, why.reason, why.message
+                            )),
+                        ),
+                    );
+                }
+                return Err(Missed::Disabled);
+            }
             return match self
                 .shaders
                 .fallback_target(self.device, self.queue, request)
@@ -298,6 +394,39 @@ impl crate::exec::Exec<'_> {
                 Some(target) => Ok((target, false)),
                 None => Err(Missed::Pending(request.clone())),
             };
+        }
+        // The watchdog's subject: the code's source key, or the fragment
+        // layer's definition.
+        let span = match &source.program {
+            ProgramRef::Code { key, .. } => {
+                crate::effects::watchdog::Span::code(*key, &source.layer)
+            }
+            ProgramRef::Definition { id, .. } => crate::effects::watchdog::Span::definition(
+                DefinitionKind::Layer,
+                id,
+                &source.layer,
+                None,
+                self.effects
+                    .get(DefinitionKind::Layer, id)
+                    .is_some_and(|d| {
+                        d.origin == pm_protocol::definitions::DefinitionOrigin::BuiltIn
+                    }),
+            ),
+            ProgramRef::Fallback(_) => unreachable!("handled above"),
+        };
+        let disabled = match &span.subject {
+            crate::effects::watchdog::Subject::Code(key) => {
+                self.effects.watchdog.is_code_disabled(key)
+            }
+            crate::effects::watchdog::Subject::Definition { kind, id } => {
+                self.effects.watchdog.is_disabled(*kind, id.as_str())
+            }
+        };
+        if disabled {
+            return Err(Missed::Disabled);
+        }
+        if !span.builtin && self.effects.watchdog.hold(&span.subject) {
+            return Err(Missed::Held);
         }
         let out = self
             .pool
@@ -379,6 +508,10 @@ impl crate::exec::Exec<'_> {
                 .expect("built above"),
             ProgramRef::Fallback(_) => unreachable!("handled above"),
         };
+        let queries = self.timer.as_mut().and_then(|t| t.begin(span));
+        if let (Some(timer), Some((b, _))) = (self.timer.as_ref(), queries) {
+            timer.mark(device, encoder, &out.view, b);
+        }
         draw_program(
             device,
             queue,
@@ -390,6 +523,9 @@ impl crate::exec::Exec<'_> {
             linear,
             &out,
         );
+        if let (Some(timer), Some((_, e))) = (self.timer.as_ref(), queries) {
+            timer.mark(device, encoder, &out.view, e);
+        }
         Ok((out, true))
     }
 }
@@ -501,6 +637,72 @@ mod tests {
             assert!(frame.chunks_exact(4).all(|p| p == [0.5, 0.25, 0.125, 1.0]));
         }
         assert_eq!(r.shader_state().fallback_uploads(), 1);
+    }
+
+    /// A lost runner context says nothing about the layer's code: it is
+    /// asked for again (at once, then after a backoff, drawing nothing in
+    /// between and reported once) and draws when the runner answers, as
+    /// today's compositor draws again once its context is restored. A
+    /// refusal (`compile`) is final.
+    #[test]
+    fn a_lost_runner_context_is_retried_and_the_layer_draws_again() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{Duration, Instant};
+        let code = "void main(){ fragColor = vec4(0.125, 0.5, 0.75, 1.0) + vec4(uv * 0.0, 0.0, 0.0); } // lost context probe";
+        let doc = document(code);
+        let mut r = Renderer::headless().unwrap();
+        r.set_shader_fallback_runner(true);
+        r.shaders_mut().refuse_pipelines = true;
+        let base = Instant::now();
+        let offset = Arc::new(AtomicU64::new(0));
+        let o = offset.clone();
+        r.effects_mut().watchdog.set_clock(Some(Arc::new(move || {
+            base + Duration::from_millis(o.load(Ordering::Relaxed))
+        })));
+        let pending = |r: &mut Renderer| match render(r, &doc) {
+            Err(RenderError::ShaderFallbackPending(requests)) => requests,
+            other => panic!("expected a fallback request, got {other:?}"),
+        };
+        let lost = || super::super::FallbackFailure {
+            reason: "contextLost".into(),
+            message: "the WebGL context was lost".into(),
+        };
+        let first = pending(&mut r);
+        r.shaders_mut().refuse_pipelines = false;
+        assert_eq!(
+            r.put_fallback_failure(&first[0].key, lost()),
+            Some(Duration::ZERO)
+        );
+        let second = pending(&mut r);
+        assert_eq!(second[0].key, first[0].key, "asked for again at once");
+        assert_eq!(
+            r.put_fallback_failure(&second[0].key, lost()),
+            Some(Duration::from_millis(250))
+        );
+        for _ in 0..2 {
+            let frame = render(&mut r, &doc).unwrap();
+            assert!(frame.iter().all(|v| *v == 0.0), "draws nothing meanwhile");
+        }
+        let reports = r.watchdog_reports(true);
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].code, ErrorCode::NotHeadlessRenderable);
+        offset.store(250, Ordering::Relaxed);
+        let third = pending(&mut r);
+        let px: Vec<u16> = (0..16 * 8)
+            .flat_map(|_| [0x3800u16, 0x3400, 0x3000, 0x3c00])
+            .collect();
+        r.put_fallback_pixels(
+            third[0].key.clone(),
+            FallbackPixels {
+                width: 16,
+                height: 8,
+                rgba16f: px,
+            },
+        );
+        let frame = render(&mut r, &doc).unwrap();
+        assert!(frame.chunks_exact(4).all(|p| p == [0.5, 0.25, 0.125, 1.0]));
+        assert!(r.fallback_retry_at().is_none(), "the streak is over");
     }
 
     /// Without a runner (every headless host) the same refusal fails the

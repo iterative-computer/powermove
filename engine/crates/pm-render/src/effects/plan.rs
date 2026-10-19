@@ -268,6 +268,9 @@ pub fn effect_steps<'d>(
         };
         match effects.status(DefinitionKind::Effect, &ty) {
             Some(Status::Ready) => {}
+            // Drawn by the fallback runner when one is attached
+            // (`super::fallback`), else routed.
+            Some(Status::NeedsFallback(_)) if effects.fallback.runner => {}
             Some(Status::NeedsFallback(_)) => {
                 refused.get_or_insert(Feature::ShaderFallback(ty.clone()));
                 continue;
@@ -315,8 +318,10 @@ pub fn transition_at<'d>(
         return Ok(Err(Feature::Definition(format!("transition {ty}"))));
     };
     match effects.status(DefinitionKind::Transition, &ty) {
-        Some(Status::NeedsFallback(_)) => return Ok(Err(Feature::ShaderFallback(ty))),
-        Some(Status::Ready)
+        Some(Status::NeedsFallback(_)) if !effects.fallback.runner => {
+            return Ok(Err(Feature::ShaderFallback(ty)));
+        }
+        Some(Status::Ready | Status::NeedsFallback(_))
             if !effects
                 .watchdog
                 .is_disabled(DefinitionKind::Transition, &ty) => {}

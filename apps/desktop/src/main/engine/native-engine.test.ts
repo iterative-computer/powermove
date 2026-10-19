@@ -330,6 +330,18 @@ describe('NativeEngine with fake engines', () => {
     expect(await pending).toBeNull();
   });
 
+  it("keeps the interactive engine's fallback texture bands for the snapshot answer they precede", async () => {
+    const key = 'c'.repeat(64);
+    const band = { type: 'shaderFallback', fallback: 'input', key, texture: 0, width: 2, height: 1, row: 0, rows: 1, rgba16f: new Uint8Array(16).fill(5) } as unknown as Event;
+    live('job').tell(band);
+    await settle();
+    expect(host.fallbackTextures(key, 1, 2, 1)).toBeNull();
+    live('interactive').tell(band);
+    await settle();
+    expect(host.fallbackTextures(key, 1, 2, 1)).toEqual([new Uint8Array(16).fill(5)]);
+    expect(host.fallbackTextures(key, 1, 2, 1)).toBeNull();
+  });
+
   it('drops control messages to a launch that is exiting and closes the ports they carried', async () => {
     const launch = host.supervisor('job').current!;
     launch.connection.close();

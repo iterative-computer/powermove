@@ -22,11 +22,16 @@ import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallba
 
 /** What the session needs of the shader fallback runner (`ShaderFallbackRunner`). */
 export interface FallbackRunner {
-  render(request: ShaderFallbackRequest): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array }>;
+  render(request: ShaderFallbackRequest, textures?: Uint16Array[]): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array }>;
 }
+
+/** A request whose textures are still arriving (`input` bands). */
+interface WaitingFallback { request: ShaderFallbackRequest; textures: Uint16Array[]; rows: Set<number>[] }
 
 /** Largest pixel band in one message (pm_protocol shader_fallback::MAX_BAND_BYTES). */
 export const MAX_FALLBACK_BAND_BYTES = 8 * 1024 * 1024;
+/** Effect and transition requests waiting for their textures at once (the engine's `effects::fallback::WAITING`). */
+export const MAX_FALLBACK_WAITING = 32;
 
 /** What the session needs from `PM.EngineDoc` (engine-doc/install.ts). */
 export interface DocumentStream {
@@ -62,7 +67,8 @@ export type ViewerMessage =
 export interface DefinitionsSource {
   session(send: (update: DefinitionsUpdate) => boolean | void): DefinitionStream;
   applied(applied: DefinitionsApplied): void;
-  failure(report: FailureReport): void;
+  /** `stream`: this session's stream (a definition failure older than its latest push of that definition is stale). */
+  failure(report: FailureReport, stream?: DefinitionStream | null): void;
   /** A frame at this revision is shown: layer reports it did not repeat are cleared. */
   frame?(revision: number): void;
 }
@@ -73,6 +79,8 @@ export interface DefinitionStream {
   full(): void;
   /** Makes the next registry change send the whole set. */
   stale(): void;
+  /** The generation of the latest update sent that changed a definition. */
+  changedAt?(kind: string, id: string): number | undefined;
   dispose(): void;
 }
 
@@ -172,6 +180,8 @@ export class DocumentSession {
   private queued: StreamBatch[] = [];
   private resyncing: Promise<void> | null = null;
   private fallbackRunner: FallbackRunner | null = null;
+  /** Effect and transition requests waiting for their textures, by key. */
+  private fallbackWaiting = new Map<string, WaitingFallback>();
   private resyncAgain = false;
   /** The revision the stream will base its next batch on. */
   private streamRevision = 0;
@@ -429,8 +439,34 @@ export class DocumentSession {
         this.applied = Math.max(this.applied, Number(event['revision']) || 0);
         return;
       case 'shaderFallback': {
+        if (event['fallback'] === 'input') {
+          this.fallbackInput(event);
+          return;
+        }
         if (event['fallback'] !== 'requests') return;
-        for (const request of (event['requests'] as ShaderFallbackRequest[]) ?? []) void this.runFallback(request);
+        for (const request of (event['requests'] as ShaderFallbackRequest[]) ?? []) {
+          const n = request.textures ?? 0;
+          if (n === 0) {
+            void this.runFallback(request, []);
+            continue;
+          }
+          // An effect's or a transition's textures follow in row bands.
+          // At most as many wait as the engine keeps textures for (its
+          // `WAITING`); the oldest is failed as transient, so the engine
+          // asks for it again rather than wait for it.
+          while (this.fallbackWaiting.size >= MAX_FALLBACK_WAITING && !this.fallbackWaiting.has(request.key)) {
+            const [oldest] = this.fallbackWaiting.keys();
+            this.fallbackWaiting.delete(oldest!);
+            if (this.id !== null && !this.closed) {
+              this.options.connection.event({ type: 'shaderFallback', fallback: 'failed', key: oldest, reason: 'unavailable', message: 'its textures did not arrive before newer requests' } as never, this.id);
+            }
+          }
+          this.fallbackWaiting.set(request.key, {
+            request,
+            textures: Array.from({ length: n }, () => new Uint16Array(request.width * request.height * 4)),
+            rows: Array.from({ length: n }, () => new Set<number>())
+          });
+        }
         return;
       }
       case 'compat': {
@@ -460,7 +496,7 @@ export class DocumentSession {
         this.failures.push(`${error.code}: ${error.message}`);
         if (this.failures.length > 32) this.failures.shift();
         // Shader meta and compile errors at the report's revision.
-        this.options.definitions?.()?.failure(event as unknown as FailureReport);
+        this.options.definitions?.()?.failure(event as unknown as FailureReport, this.definitions);
         if (error.retry.kind === 'afterResync' || error.code === 'staleRevision') {
           void this.resync(error.code);
           return;
@@ -470,6 +506,35 @@ export class DocumentSession {
       }
       default:
         return;
+    }
+  }
+
+  /** One band of a texture a waiting request samples; the request runs
+   *  once every row of every texture has arrived. */
+  private fallbackInput(event: Record<string, unknown>): void {
+    const key = String(event['key'] ?? '');
+    const waiting = this.fallbackWaiting.get(key);
+    if (!waiting) return;
+    const texture = Number(event['texture']);
+    const row = Number(event['row']);
+    const rows = Number(event['rows']);
+    const width = Number(event['width']);
+    const bytes = event['rgba16f'] as Uint8Array;
+    const target = waiting.textures[texture];
+    const { request } = waiting;
+    if (!target || width !== request.width || Number(event['height']) !== request.height
+      || !(bytes instanceof Uint8Array) || bytes.byteLength !== width * rows * 8 || row + rows > request.height) {
+      this.fallbackWaiting.delete(key);
+      void this.runFallback(request, null);
+      return;
+    }
+    const values = new Uint16Array(bytes.byteLength / 2);
+    new Uint8Array(values.buffer).set(bytes);
+    target.set(values, row * width * 4);
+    for (let r = row; r < row + rows; r++) waiting.rows[texture]!.add(r);
+    if (waiting.rows.every((set) => set.size === request.height)) {
+      this.fallbackWaiting.delete(key);
+      void this.runFallback(request, waiting.textures);
     }
   }
 
@@ -507,24 +572,27 @@ export class DocumentSession {
 
   /**
    * Draws one program the engine's pipeline cannot translate with the
-   * fallback runner and uploads its pixels in row bands that fit a message
-   * (plan section 11, decision 19), or tells the engine why it could not.
+   * fallback runner (with the textures an effect or transition samples)
+   * and uploads its pixels in row bands that fit a message (plan section
+   * 11, decision 19), or tells the engine why it could not. `null`
+   * textures: they arrived damaged (the request fails as `size`).
    */
-  private async runFallback(request: ShaderFallbackRequest): Promise<void> {
+  private async runFallback(request: ShaderFallbackRequest, textures: Uint16Array[] | null): Promise<void> {
     const session = this.id;
     if (session === null || this.closed) return;
     const send = (body: Record<string, unknown>) => {
       if (this.id === session && !this.closed) this.options.connection.event({ type: 'shaderFallback', ...body } as never, session);
     };
     try {
+      if (textures === null) throw new ShaderFallbackError(request.key, 'size', 'a texture band did not fit its request');
       this.fallbackRunner ??= this.options.fallbackRunner?.() ?? null;
       if (!this.fallbackRunner) throw new ShaderFallbackError(request.key, 'unavailable', 'no shader fallback runner');
-      const pixels = await this.fallbackRunner.render(request);
+      const pixels = await this.fallbackRunner.render(request, textures);
       if (this.id === session) this.uploadFallback(pixels);
     } catch (error) {
       const reason = error instanceof ShaderFallbackError ? error.reason : 'unavailable';
       const message = error instanceof Error ? error.message : String(error);
-      this.options.log('warn', `engine: the shader fallback runner could not draw layer ${request.layer} (${reason}: ${message})`);
+      this.options.log('warn', `engine: the shader fallback runner could not draw a program of layer ${request.layer} (${reason}: ${message})`);
       send({ fallback: 'failed', key: request.key, reason, message: message.slice(0, 1024) });
     }
   }
@@ -606,6 +674,7 @@ export class DocumentSession {
     this.offClose?.();
     this.offClose = null;
     this.queued = [];
+    this.fallbackWaiting.clear();
     this.setRoute('pending', null);
   }
 }

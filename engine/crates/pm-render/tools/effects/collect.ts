@@ -199,6 +199,55 @@ for (const g of GENERATED as any[]) {
   }
 }
 
+/* Decision 19 for effects and transitions: programs WebGL draws that the
+   native pipeline cannot translate (amendment 9: a sampler other than a
+   float sampler2D) run in the app's fallback runner with their textures.
+   A sampler of another type is drawable in WebGL only on a unit no float
+   sampler uses, so these name it after a unit the compositor sets
+   (`u_orig` → 1 with keepOrig, `u_to` → 1 for transitions), where nothing
+   of its type is bound and it reads (0, 0, 0, 1). They cover every pass of
+   a multi-pass chain, `setParam`'s positional alias (`u_p0`) and named
+   parameters of every type, the backdrop, and a transition's two frames
+   (`tests/effects_webgl.rs` `fallback_effects_match_webgl`). */
+const RAW_EFFECT_HEAD = '#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform int u_pass;\nout vec4 o;\n';
+const FALLBACK_EFFECTS = [
+  {
+    id: 'fallbackPasses', label: 'Fallback passes', group: 'Fallback', passes: 3, keepOrig: true, rawShader: true,
+    params: [{ k: 'amount', label: 'Amount', type: 'number', def: 0.4, min: 0, max: 1 }],
+    frag: RAW_EFFECT_HEAD + 'uniform float u_p0;\nuniform highp sampler3D u_orig;\nvoid main(){\n'
+      + '  float k = texture(u_orig, vec3(v_st, 0.5)).a;\n'
+      + '  vec2 d = u_texel * float(u_pass + 1) * 2.0;\n'
+      + '  vec4 c = (texture(u_tex, v_st + vec2(d.x, 0.0)) + texture(u_tex, v_st - vec2(d.x, 0.0)) + texture(u_tex, v_st + vec2(0.0, d.y)) + texture(u_tex, v_st - vec2(0.0, d.y))) * 0.25;\n'
+      + '  vec4 here = texture(u_tex, v_st);\n'
+      + '  o = mix(c, here, u_p0) * k + vec4(0.0, 0.0, 0.05 * sin(u_time + float(u_pass)), 0.0) * c.a;\n}\n',
+  },
+  {
+    id: 'fallbackBackdrop', label: 'Fallback backdrop', group: 'Fallback', keepOrig: true, backdrop: true, rawShader: true,
+    params: [
+      { k: 'mix', label: 'Mix', type: 'number', def: 0.5, min: 0, max: 1 },
+      { k: 'tint', label: 'Tint', type: 'color', def: '#FF8800' },
+      { k: 'flip', label: 'Flip', type: 'toggle', def: false },
+    ],
+    frag: RAW_EFFECT_HEAD + 'uniform float u_mix;\nuniform vec3 u_tint;\nuniform float u_p2;\nuniform sampler2D u_backdrop;\nuniform highp sampler2DArray u_orig;\nvoid main(){\n'
+      + '  vec2 st = u_p2 > 0.5 ? vec2(1.0 - v_st.x, v_st.y) : v_st;\n'
+      + '  vec4 c = texture(u_tex, st);\n'
+      + '  vec4 b = texture(u_backdrop, v_st);\n'
+      + '  float k = texture(u_orig, vec3(v_st, 0.0)).a;\n'
+      + '  o = vec4(mix(c.rgb, b.rgb * u_tint, u_mix), c.a) * k;\n}\n',
+  },
+];
+for (const def of FALLBACK_EFFECTS) cases.push(effectCase(`fallback/effect/${def.id}`, 'fallback', def, 'local', {}, SETS.slice(0, 2).concat(SETS.slice(6, 7))));
+cases.push(transitionCase('fallback/transition/fallbackWipe', 'fallback', {
+  id: 'fallbackWipe', label: 'Fallback wipe', group: 'Fallback', rawShader: true,
+  params: [{ k: 'soft', label: 'Softness', type: 'number', def: 0.1, min: 0, max: 0.5 }, { k: 'edge', label: 'Edge', type: 'color', def: '#3FA7D6' }],
+  frag: '#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st;\nuniform sampler2D u_from;\nuniform highp sampler3D u_to;\nuniform float u_prog;\nuniform vec2 u_res, u_texel;\nuniform float u_time;\nuniform float u_p0;\nuniform vec3 u_edge;\nout vec4 o;\nvoid main(){\n'
+    + '  vec4 a = texture(u_from, v_st);\n'
+    + '  vec4 b = texture(u_to, vec3(v_st, 0.5));\n'
+    + '  float w = smoothstep(u_prog - u_p0, u_prog + u_p0, v_st.x);\n'
+    + '  float e = 1.0 - abs(w * 2.0 - 1.0);\n'
+    + '  o = mix(b, a, w) + vec4(u_edge * e * 0.5, 0.0);\n}\n',
+}, 'local'));
+
 /* The coverage sweep: one-pass raw effects over `layer`. */
 probes.forEach((probe, index) => {
   const def = { id: `probe${index}`, label: `${probe.group}/${probe.name}`, group: 'Probes', params: [], frag: program(probe), rawShader: true };
@@ -226,4 +275,4 @@ await writeFile(join(OUT, 'corpus.json'), JSON.stringify({
   vertex: VERTEX, images: images.map(({ bytes: _, ...rest }) => rest), cases,
 }));
 const variants = cases.reduce((n, c) => n + c.variants.length, 0);
-console.log(`${cases.length} cases (${BUILTIN_EFFECTS.length} built-in effects, ${BUILTIN_TRANSITION_DEFS.length} transitions, ${generated} generated, ${probes.length} probes), ${variants} variants → ${OUT}`);
+console.log(`${cases.length} cases (${BUILTIN_EFFECTS.length} built-in effects, ${BUILTIN_TRANSITION_DEFS.length} transitions, ${generated} generated, ${FALLBACK_EFFECTS.length + 1} fallback, ${probes.length} probes), ${variants} variants → ${OUT}`);

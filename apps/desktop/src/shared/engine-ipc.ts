@@ -65,7 +65,12 @@ export const ENGINE_IPC = {
   compatAsk: 'engine:compat-ask',
   /** renderer → main (send): the pixels for a `compatAsk`, or why not
    *  (`EngineCompatAnswer`). */
-  compatAnswer: 'engine:compat-answer'
+  compatAnswer: 'engine:compat-answer',
+  /** main → renderer: run a job engine request in the window's shader
+   *  fallback runner (`ShaderFallbackJob`, main/engine/shader-fallback-relay.ts). */
+  shaderFallback: 'engine:shader-fallback',
+  /** renderer → main (send): the runner's answer (`{ id, ok, rgba16f }` or `{ id, ok: false, reason, message }`). */
+  shaderFallbackResult: 'engine:shader-fallback-result'
 } as const;
 
 /** The `window.postMessage` types the preload uses to hand things to the page. */
@@ -286,6 +291,11 @@ export type EngineSnapshotReply =
       revision: number;
       fallback: import('./engine-protocol').ShaderFallbackRequest[];
       compat: import('./engine-protocol').CompatNeed[];
+      /** The textures of the `fallback` requests that sample them (effects
+       *  and transitions): binary16 RGBA bytes in GL row order, one per
+       *  texture, as the engine sent them to main ahead of the answer
+       *  (main/engine/fallback-inputs.ts). */
+      fallbackTextures?: { key: string; textures: Uint8Array[] }[];
       /** Level 1 SVG rasters to draw and post before asking again (decision S1). */
       svg?: import('./engine-protocol').SvgRasterRequest[];
     }
@@ -345,4 +355,7 @@ export interface EngineBridge {
    *  listener answers with `answerCompat`. Returns an unsubscribe. */
   onCompatAsk?(listener: (ask: EngineCompatAsk) => void): () => void;
   answerCompat?(answer: EngineCompatAnswer): void;
+  /** Runs the job engine's fallback requests in this window's runner
+   *  (`run` answers each); returns an unsubscribe. */
+  onShaderFallback?(run: (job: { request: import('./engine-protocol').ShaderFallbackRequest; textures: Uint16Array[] }) => Promise<Uint16Array>): () => void;
 }

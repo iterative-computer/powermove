@@ -231,6 +231,8 @@ pub enum Request {
     /// Job engine → host: a layer's compatibility pixels for an export
     /// frame, drawn by the document's renderer. Answer: `compatFrame`.
     CompatFrame(crate::snapshot::CompatFrameRequest),
+    /// Job engine → host. Answer: `ack` once the output file is written.
+    ShaderFallback(crate::shader_fallback::HostShaderFallback),
 }
 
 /// Responses, one per request kind.
@@ -375,6 +377,7 @@ impl Request {
             Request::CloseSession
             | Request::BlenderRender(_)
             | Request::BlenderModel(_)
+            | Request::ShaderFallback(_)
             | Request::CloseProject(_) => ResponseKind::Ack,
             Request::Resync(_) => ResponseKind::PatchesApplied,
             Request::CheckConsistency(_) => ResponseKind::Consistency,
@@ -420,7 +423,8 @@ impl Request {
             | Request::CommitOutput(_)
             | Request::HardwareSessions(_)
             | Request::ProbeMedia(_)
-            | Request::CompatFrame(_) => ContractId::HostServices,
+            | Request::CompatFrame(_)
+            | Request::ShaderFallback(_) => ContractId::HostServices,
             Request::Snapshot(_) => ContractId::Frame,
             Request::BlenderRender(_) | Request::BlenderStatus | Request::BlenderModel(_) => {
                 ContractId::Blender
@@ -555,6 +559,7 @@ impl Validate for Request {
             Request::ProbeMedia(probe) => probe.validate(),
             Request::Snapshot(snapshot) => snapshot.validate(),
             Request::CompatFrame(request) => request.validate(),
+            Request::ShaderFallback(fallback) => fallback.validate(),
             Request::CloseSession
             | Request::Resync(_)
             | Request::CheckConsistency(_)

@@ -272,6 +272,15 @@ pub struct Engine {
     jobs: Option<Box<dyn JobService>>,
     /// Shared snapshots of session mirrors handed to the service, by revision.
     job_docs: BTreeMap<SessionId, (Revision, std::sync::Arc<pm_model::Document>)>,
+    /// The definition set snapshots jobs and agent frames embed, per session
+    /// and generation (shared by every job until the next push).
+    job_definitions: BTreeMap<
+        SessionId,
+        (
+            u64,
+            std::sync::Arc<pm_protocol::definitions::DefinitionSetSnapshot>,
+        ),
+    >,
     /// Agent frame requests waiting for their revision.
     waiting_frames: Vec<WaitingFrames>,
     /// Breadcrumbs of the service's running work, by its token.
@@ -331,6 +340,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::RegisterExtension(_) => "registerExtension",
         Request::ToolCall(_) => "toolCall",
         Request::ProbeMedia(_) => "probeMedia",
+        Request::ShaderFallback(_) => "shaderFallback",
         Request::Snapshot(_) => "snapshot",
         Request::CompatFrame(_) => "compatFrame",
     }
@@ -400,6 +410,7 @@ impl Engine {
             pending_updates: Vec::new(),
             jobs: None,
             job_docs: BTreeMap::new(),
+            job_definitions: BTreeMap::new(),
             waiting_frames: Vec::new(),
             job_work: BTreeMap::new(),
             logged_once: BTreeSet::new(),
@@ -579,6 +590,7 @@ impl Engine {
         self.waiting_frames.retain(|w| w.port != port);
         for id in &closed {
             self.job_docs.remove(id);
+            self.job_definitions.remove(id);
         }
         if let Some(jobs) = self.jobs.as_mut() {
             for id in &closed {
@@ -856,6 +868,7 @@ impl Engine {
                 self.with_presenter(out, |p, ctx| p.session_closed(ctx, port, sid));
                 self.viewers_stopped(|key| *key == (port, sid), out);
                 self.job_docs.remove(&sid);
+                self.job_definitions.remove(&sid);
                 self.waiting_frames.retain(|w| w.session != sid);
                 if let Some(jobs) = self.jobs.as_mut() {
                     jobs.session_closed(sid);
@@ -872,6 +885,7 @@ impl Engine {
                 };
                 let session = self.sessions.get_mut(&sid).expect("owned");
                 let result = session.definitions.apply(&update);
+                let mut deferred = false;
                 if result.is_ok() {
                     // The presenter renders with the session's definitions.
                     let (session_port, set) = (session.port, session.definitions.snapshot());
@@ -887,8 +901,15 @@ impl Engine {
                     self.with_presenter(out, |p, ctx| {
                         p.definitions(ctx, session_port, sid, &set, &registered)
                     });
+                    // The job engine compiles what it was given and answers
+                    // with the failures itself (validate_effect, contract 10).
+                    deferred = self
+                        .jobs
+                        .as_mut()
+                        .is_some_and(|jobs| jobs.definitions_pushed(port, id, sid, &update));
                 }
                 match result {
+                    Ok(()) if deferred => {}
                     Ok(()) => self.respond(
                         port,
                         id,
@@ -2210,10 +2231,22 @@ impl Engine {
                 doc
             }
         };
+        let definitions = session.definitions.generation().map(|generation| {
+            match self.job_definitions.get(&sid) {
+                Some((g, set)) if *g == generation.get() => set.clone(),
+                _ => {
+                    let set = std::sync::Arc::new(session.definitions.snapshot());
+                    self.job_definitions
+                        .insert(sid, (generation.get(), set.clone()));
+                    set
+                }
+            }
+        });
         Some(JobDocument {
             session: sid,
             revision,
             document,
+            definitions,
         })
     }
 
