@@ -197,14 +197,6 @@ export async function run(wasmPath: string) {
         const answers = [];
         const effects = { structuralDiffs: 0, batches: 0, ops: 0, interned: 0 };
         const profile = { flushUs: 0, batchUs: 0, frameUs: 0, evaluated: 0 };
-  if (doc) {
-    // Counts ids evaluated by frame runs (an integer add per run, not per id).
-    const prepare = doc.wasm!.prepareBatch.bind(doc.wasm!);
-    doc.wasm!.prepareBatch = ids => {
-      const evaluate = prepare(ids);
-      return (time, start = 0, count = ids.length - start) => { profile.evaluated += count; return evaluate(time, start, count); };
-    };
-  }
         const plansBefore = f.doc?.wasm?.stats();
         let sum = 0;
         for (let index = 0; index < stepsPerPair; index++) {
