@@ -1212,6 +1212,64 @@ fn a_pause_during_a_seek_pre_roll_stops_at_the_target() {
     let stopped = playback.clock().unwrap();
     assert_eq!(stopped.state, TransportState::Stopped);
     assert_eq!(stopped.media_time, ticks(4.0), "paused at the seek target");
+    drop(playback);
+
+    // Force the source-hold branch too: a warm seek can finish before Pause
+    // arrives and cannot prove that a deferred control interrupts that hold.
+    let cache = SourceCache::new(64 << 20, 2);
+    let source = cache.open(&file, None).unwrap();
+    cache.block(&source, 0, true).unwrap();
+    cache.set_decode_blocked(&source, true);
+    let (playback, side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig {
+            lookahead_ms: 0,
+            preroll_wait_ms: 400,
+            ..PlaybackConfig::default()
+        },
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let doc = project(30.0, 6.0, &[audio("A", "s", 0.0, 6.0, "", "")], &[], "");
+    playback
+        .set_project(Arc::new(doc), "C", &|_: &str| Some(file.clone()))
+        .unwrap();
+    playback
+        .commands([
+            TransportCommand::Seek {
+                time: ticks(4.0),
+                mode: SeekMode::Exact,
+            },
+            TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            },
+        ])
+        .unwrap();
+    until(|| cache.blocked_decoders() > 0);
+    assert_eq!(side.queued_frames(), 0, "blocked seek has published no PCM");
+    let sent = std::time::Instant::now();
+    let pause = playback.command(TransportCommand::Pause);
+    let elapsed = sent.elapsed();
+    let queued = side.queued_frames();
+    // Always release the test decoder before reporting a failure.
+    cache.set_decode_blocked(&source, false);
+    pause.unwrap();
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "Pause waited for the source hold: {elapsed:?}"
+    );
+    assert_eq!(
+        queued, 0,
+        "no PCM is filled before dispatching deferred Pause"
+    );
+    let stopped = playback.clock().unwrap();
+    assert_eq!(stopped.state, TransportState::Stopped);
+    assert_eq!(stopped.media_time, ticks(4.0));
+    drop(playback);
+    cache.shutdown();
 }
 
 /// A run from a playhead before the loop (the work area set, the playhead
@@ -3158,7 +3216,7 @@ fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
     for b in 0..9 {
         cache.block(&source, b, true).unwrap();
     }
-    let (playback, mut side) = Playback::start_headless(
+    let (mut playback, mut side) = Playback::start_headless(
         MixFormat::stereo(SR),
         cache.clone(),
         PlaybackConfig::default(),
@@ -3185,6 +3243,7 @@ fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
     let path = |_: &str| Some(file.clone());
     playback.set_project(doc(1.0, 1.5), "C", &path).unwrap();
     let mut out = vec![0.0; 512 * 2];
+    let mut violations = Vec::new();
     for (trial, gain) in [0.3, 0.7, 0.2, 1.0].into_iter().enumerate() {
         let target = if cold {
             if trial % 2 == 0 { 2 } else { 3 }
@@ -3232,16 +3291,60 @@ fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
         side.callback(&mut out, 2, host_now_us());
         let timing = playback.start_timing().unwrap();
         #[cfg(target_os = "macos")]
-        assert!(
-            matches!(
-                timing.producer_scheduling.as_str(),
-                "device-workgroup" | "mach-time-constraint"
-            ) && timing.worker_workgroup_joins + timing.worker_mach_joins > 0
-                && timing.worker_scheduling_failures == 0
-                && timing.scheduling_constraint_overruns == 0
-                && timing.scheduling_restore_failures == 0,
-            "actual audio scheduling: {timing:?}"
-        );
+        if !(matches!(
+            timing.producer_scheduling.as_str(),
+            "device-workgroup" | "custom-audio-interval" | "mach-time-constraint"
+        ) && timing.worker_workgroup_joins + timing.worker_mach_joins > 0
+            && timing.worker_scheduling_failures == 0
+            && timing.producer_mach_error.is_none()
+            && timing.producer_hint_error.is_none()
+            && timing.scheduling_computation_overruns == 0
+            && timing.scheduling_constraint_overruns == 0
+            && timing.scheduling_restore_failures == 0
+            && timing.scheduling_hint_failures == 0
+            && timing.scheduling_constraint_readback_failures == 0
+            && timing.scheduling_interval_failures == 0
+            && timing.scheduling_interval_expired == 0
+            && timing.profile_worker_log_drops == 0
+            && timing.profile_worker_flush_failures == 0
+            && timing.idle_startup_arm.starts_with("Armed")
+            && timing
+                .idle_lease
+                .as_ref()
+                .is_some_and(|lease| lease.active && !lease.conflict)
+            && timing.idle_pool.arm_failures == 0
+            && timing.idle_pool.arm_timeouts == 0
+            && timing.idle_pool_since_play.conflicts == 0
+            && timing.idle_pool.computation_overruns == 0
+            && timing.idle_pool.constraint_overruns == 0
+            && timing.idle_pool.restore_failures == 0
+            && timing.idle_pool.hint_failures == 0
+            && timing.idle_pool.constraint_readback_failures == 0)
+        {
+            violations.push(format!(
+                "trial {trial}: actual audio scheduling: {timing:?}"
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        if timing.producer_scheduling == "custom-audio-interval" {
+            assert_eq!(
+                timing.scheduling_first_interval_requested_us,
+                timing.requested_us
+            );
+            assert_eq!(
+                timing.scheduling_first_interval_deadline_us,
+                timing.requested_us + 10_667
+            );
+            assert!(timing.scheduling_first_interval_start_tick > 0);
+            assert!(
+                timing.scheduling_first_interval_deadline_tick
+                    > timing.scheduling_first_interval_anchor_tick
+            );
+            assert!(
+                timing.scheduling_first_interval_anchor_tick
+                    >= timing.scheduling_first_interval_start_tick
+            );
+        }
         let published_us = publication.visible_by_us;
         assert!(
             published_us >= timing.requested_us,
@@ -3258,12 +3361,16 @@ fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
             ms(timing.applied_us, timing.ready_us),
             ms(timing.ready_us, published_us)
         );
-        // Both prepared and cold starts must publish complete PCM within one
-        // 512-frame callback after Play, including the cold pre-roll work.
-        assert!(
-            published <= bound,
-            "first 512 frames visible {published:?} after Play (bound {bound:?}, cold={cold}, distinct={distinct}, {publication:?})"
-        );
+        if std::env::var_os("PM_AUDIO_PROFILE").is_some() {
+            eprintln!("A8 first-buffer scopes cold={cold} distinct={distinct}: {timing:?}");
+        }
+        // Retain every raw deadline miss, then complete the exact PCM check
+        // and remaining trials before failing the unchanged callback bound.
+        if published > bound {
+            violations.push(format!(
+                "trial {trial}: first 512 frames visible {published:?} after Play (bound {bound:?}, cold={cold}, distinct={distinct}, {publication:?}, {timing:?})"
+            ));
+        }
         // Distinct signals cannot share an immutable head; identical cold
         // starts do (the representative job's prefix serves all sixteen).
         if distinct {
@@ -3395,9 +3502,70 @@ fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
             assert_eq!(playback.stats().starved_renders, before.starved_renders);
             assert_eq!(playback.stats().dropped_renders, before.dropped_renders);
         }
+        let proof = playback.start_timing().unwrap();
+        eprintln!(
+            "A8 start gates cold={cold} distinct={distinct} trial={trial}: omittedPrefixFrames={} startSpreadFrames={} safetyNetFires={} programUnderruns={} voices={} historyClaims={} workerSchedulingFailures={} computationOverruns={} constraintOverruns={} restoreFailures={} hintFailures={} readbackFailures={} idleConflicts={} idleComputationOverruns={} idleConstraintOverruns={} poolClaims={} poolRequeues={} poolCompletions={} poolWakes={} poolIdleEntries={}",
+            proof.omitted_prefix_frames,
+            proof.start_spread_frames,
+            proof.safety_net_fires,
+            proof.program_underruns,
+            proof.voice_start_samples.len(),
+            proof.history_claims,
+            proof.worker_scheduling_failures,
+            proof.scheduling_computation_overruns,
+            proof.scheduling_constraint_overruns,
+            proof.scheduling_restore_failures,
+            proof.scheduling_hint_failures,
+            proof.scheduling_constraint_readback_failures,
+            proof.idle_pool_since_play.conflicts,
+            proof.idle_pool.computation_overruns,
+            proof.idle_pool.constraint_overruns,
+            proof.idle_pool_since_play.job_claims,
+            proof.idle_pool_since_play.job_requeues,
+            proof.idle_pool_since_play.job_completions,
+            proof.idle_pool_since_play.wake_count,
+            proof.idle_pool_since_play.successful_idle_entries,
+        );
+    }
+    playback.command(TransportCommand::Pause).unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let timing = playback.start_timing().unwrap();
+        if timing.worker_scheduling_failures != 0
+            || timing.producer_mach_error.is_some()
+            || timing.producer_hint_error.is_some()
+            || timing.scheduling_computation_overruns != 0
+            || timing.scheduling_constraint_overruns != 0
+            || timing.scheduling_restore_failures != 0
+            || timing.scheduling_hint_failures != 0
+            || timing.scheduling_constraint_readback_failures != 0
+            || timing.scheduling_interval_failures != 0
+            || timing.scheduling_interval_expired != 0
+            || timing.profile_worker_log_drops != 0
+            || timing.profile_worker_flush_failures != 0
+            || !timing.idle_startup_arm.starts_with("Armed")
+            || !timing
+                .idle_lease
+                .as_ref()
+                .is_some_and(|lease| lease.active && !lease.conflict)
+            || timing.idle_pool.arm_failures != 0
+            || timing.idle_pool.arm_timeouts != 0
+            || timing.idle_pool_since_play.conflicts != 0
+            || timing.idle_pool.computation_overruns != 0
+            || timing.idle_pool.constraint_overruns != 0
+            || timing.idle_pool.restore_failures != 0
+            || timing.idle_pool.hint_failures != 0
+            || timing.idle_pool.constraint_readback_failures != 0
+        {
+            violations.push(format!("final audio scheduling: {timing:?}"));
+        }
+    }
+    if !playback.shutdown() {
+        violations.push("shutdown worker-profile flush failed".into());
     }
     drop(playback);
     cache.shutdown();
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
 
 /// A first callback is submitted before its presentation time. Pausing in

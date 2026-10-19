@@ -2796,3 +2796,376 @@ A/B and diagnostic rows, breakdown scripts) and `/tmp/ne-w5/audioa7-r6`
 - Earlier items stand: trim drags on stretched clips (map key), pool load
   during drags (D6/S1), Linux and Windows priorities, the running-history
   wait without a timer, and the headless cold-start bound.
+
+
+### A7/A8: real-time scheduling and enforced cold-start timing (2026-10-19)
+
+AUDIO-1 accepts the recorded AirPods Pro / 256-frame latency difference
+(0.3–3.5 ms on about 175 ms). The earlier raw figures remain in the round-5
+table. That decision does not accept dropped audio. Ordinary starts still
+require all voices, complete and simultaneous, with no omitted prefix.
+
+The producer and every preparation job request a callback-matched Mach time
+constraint. Device playback explicitly constructs a schedule that attempts
+the retained CoreAudio output-device workgroup
+(`kAudioDevicePropertyIOThreadOSWorkgroup`). A device without a usable group,
+and `AudioSchedule::new(..., None)` used outside headless playback, keep the
+Mach-only fallback. Headless playback explicitly calls
+`AudioSchedule::headless(...)`, which creates a dedicated AudioWorkInterval
+with the public `AudioWorkIntervalCreate` API. Its producer and workers join
+after installing the callback-matched Mach policy. A missing device ID alone
+does not request a custom interval.
+
+The headless producer alone owns interval cycles. An edit starts detached
+preparation immediately; the first Play/Seek cycle is anchored to the
+original request timestamp, including after producer guard re-entry. A
+partial first callback keeps that cycle across retries, and publication
+completes successive 512-frame output cycles. Finishing ring refill closes a
+cycle before idle or metadata work; guard teardown closes an active cycle
+before leaving the group. An expired or failed first-cycle start is recorded
+for its epoch and is not retried with a newer timestamp. If the producer
+cannot install the unique master, it leaves the custom group, restores its
+prior scheduling policy, and reports an unavailable schedule; a worker's
+membership cannot masquerade as a producer master. Failed creation, joins,
+expired requests and lifecycle operations remain observable and fail
+ordinary-start gates. Deliberate A3 decoder holds can finish a cycle after its
+declared deadline; late finishes
+are reported separately, while the atomic first-buffer assertion keeps its
+original deadline. Workgroup membership is attempted only after real-time policy
+succeeds. The per-thread guard leaves the group and restores the prior real-time
+policy, or standard scheduling with an explicit idle Mach base priority of
+at least 47 on these owned audio threads. Legacy Mach scheduling permanently
+opts a pthread out of QoS, so restoring a cached QoS label is insufficient.
+Restoration checks return codes and kernel priority; a bounded feedback
+adjustment handles the task's niceness offset. Dedicated-thread and leased
+preparation-worker tests verify the actual kernel policy and idle priority. The producer reserves real-time CPU for preroll and ring refill, and releases
+it before full-ring boundary scheduling and read-ahead metadata, as well as
+document/control work, paused preparation and device-property polling.
+The optional master shuttle is warmed before receiving project controls. Edits still launch
+preparation before Play. The producer retains its real-time guard across
+control waits for at most 20 ms after a paused edit while urgent preparation is pending,
+and while playing unless
+boundary or look-ahead metadata is actually due. A complete batch becomes
+visible under one queue lock before workers wake. Boundary and secondary-start jobs use the same
+real-time schedule, with one nonurgent background replenishment job at a time. Installing a
+head promotes its queued independent histories to urgent work and wakes
+the pool, bypassing that serial background limit.
+
+Preparation workers reserve 95% of a callback period and have a full-period
+constraint. The producer retains that callback period with an 80% computation
+allowance and an earlier 85% constraint, so a new control can take precedence
+over older preparation jobs. Both are preemptible; exact role parameters are
+read back from the kernel. The producer's earlier deadline is a candidate
+until the measurements below qualify it. Cooperative checkpoints precede vocoder initialization, seek and processing,
+voice mixing and bounded map/read-ahead groups. The existing Signalsmith
+internal-step hook also checkpoints inside seek, process and flush without
+changing DSP arithmetic or process-call boundaries. Scheduled shuttle calls
+use it too. A cheap wall-clock gate limits expensive thread-CPU samples to
+at most one per 100 µs (or one-sixteenth of a shorter callback period);
+forced outer checkpoints still sample immediately. They leave up to 500 µs
+(minimum of that and half the computation reservation) for the next unit,
+then sleep to the next period when the CPU budget is spent. Known indivisible
+stretcher construction/reset units require a 1 ms admission reserve. A new Play
+does not reset or forgive CPU already charged in the same period. CPU debt is
+retained across job guards and viewers sharing a worker, while CPU spent
+outside those guards is excluded. Unknown callback size uses the 512-frame
+headless period; an actual 64-frame callback keeps its 1.333 ms period. Per-context
+telemetry records maximum CPU between sampled checkpoints (including the
+coalescing window, rather than one vendor step), maximum period CPU,
+and computation/constraint CPU exceedances against each role's actual limits; blocked wall time is not
+reported as CPU service. Per-start counters expose throttle sleeps and
+total sleep time. Scheduling entry counters include preparation before
+Play; CPU maxima aggregate producer and workers rather than identifying a producer
+per-period distribution. CPU maxima and restoration failures cover the current device context
+and restart when that context changes. Actual audio delivery is checked separately by
+program-underrun and A7 ring counters.
+
+Public Mach latency and throughput tier-0 hints supplement the real-time
+policy on owned audio threads. Entry reads back both hints, the requested
+time-constraint parameters, and the effective non-timeshare mode. The hints
+do not guarantee P-core placement. Their prior values are restored on exit;
+readback, hint and restoration failures remain separate zero gates. Kernel
+fail-safe demotion after entry is not continuously polled.
+
+The schedule also captures the SDK's `os_workgroup_max_parallel_threads`
+recommendation once at creation and exposes it as
+`scheduling_workgroup_recommended_threads` in start telemetry. Zero means
+no group or no recommendation. This advisory value is not used as the pool
+cap and does not establish affinity or current available CPU capacity.
+
+The producer's serial history-claim budget is zero. Independent vocoder
+histories stay on preparation workers; the old synchronous paused/boundary
+preparation helper is removed too. The producer only marks decoded plain
+voices ready. On a heterogeneous Mac reporting named performance and efficiency clusters,
+the preparation cap is the larger of eight workers and the performance-core
+count minus two, within the total-core-count-minus-two ceiling (minimum one).
+This host has 12 performance and 4 efficiency cores, so the candidate uses
+10 workers. The tested 14-worker control and bounded launch-gate candidate
+both missed all 32 strict cold-start deadlines; the extra concurrency and
+launch gate are not retained as latency fixes. Neither worker cap provides
+core affinity. Other hardware remains unqualified. Complete voice batches enter the pool under one queue lock
+before workers wake, preventing early real-time workers from preempting
+the producer while it is still submitting the remaining voices. Rewritten
+regressions exercise the current worker-only handoff, released live-history
+ownership and fresh loop histories through the real preparation pool.
+Each control carries an atomic pending ticket through the existing FIFO and
+any deferred slot until producer dispatch. Detached preparation workers alone
+install a thread-local view of that counter. Existing forced and wall-gated
+DSP checkpoints block once for 50 µs if a control is pending, allowing the
+producer to run even when older real-time jobs have earlier deadlines.
+The producer never installs this worker gate. Failed sends, shutdown and
+queued-control destruction release tickets; no history is cancelled from the
+sender thread. Per-worker opt-in profiles distinguish these control waits
+from CPU-budget throttle sleeps. Aggregate control-yield count and wait time
+appear in capture telemetry as both a per-start delta from its scheduling
+baseline and explicit current-context totals. The context totals can include
+preparation before Play and must not be attributed solely to that start.
+Opt-in producer profiles record whether a real-time guard was already held
+at each control receipt as a zero-duration event. The worker profile's
+`host_claim_us` is captured at actual queue dequeue, before closure entry
+(`host_start_us`) and its worker control yield; cancelled jobs also emit a
+record. Profile-only worker lines are formatted outside any real-time guard
+and sent with `try_send` to a process-wide ordinary stderr writer.
+Its 2,048-entry channel never waits for capacity on a preparation worker;
+full or disconnected sends increment a visible dropped-event counter. An
+ordinary shutdown caller can request a flush barrier that waits at most
+100 ms and records failure separately. The barrier drains records already
+queued; a worker finishing afterward can enqueue a later record. This changes
+diagnostic delivery, not DSP or the timing bound. V17 runtime probing is
+pending, so no latency gain or complete profile capture is claimed.
+Forced checkpoints each perform their own bounded
+50 µs wait while controls remain pending. A queued control now interrupts
+both preroll waits and is dispatched before any audio is filled. Same-epoch
+retries preserve the original device-frame origin and phase wall deadlines,
+so a nonrestart control cannot renew the 120 ms A3 hold. A new transport epoch
+gets a new origin. The existing Seek→Pause regression also forces a blocked
+decoder, asserting prompt acknowledgement, no queued PCM and the seek target. Canonical pre-roll, source evaluation,
+per-voice processing order and offline PCM comparisons are unchanged.
+
+The headless first-buffer test again enforces 512 frames within 10.667 ms
+after Play for both prepared and cold starts, identical and distinct. Each
+ring slot publishes PCM with Release ordering and records an atomic host
+timestamp afterward. The consumer acquires that same publication and
+records its observation time. The earlier available time is an upper bound
+on visibility: neither a pre-publication timestamp nor a delayed observer
+can turn late output into a pass. The old post-push trace remains diagnostic;
+it no longer determines the deadline.
+
+Final qualification must be recorded below against the active output device;
+no qualification is implied by the scheduling code or compiler checks alone.
+The AirPods latency acceptance does not apply to new program underruns.
+
+Detailed profile DSP scopes include any cooperative throttle sleeps. Cost
+comparisons use per-job CPU and throttle times rather than treating those
+wall-clock scopes as pure DSP computation.
+
+Runtime captures use the pinned Rust 1.96.1 toolchain at niceness 15 with
+four build workers, release optimization, default thin LTO, debug level zero
+and symbol stripping disabled. Disabling stripping avoids the pinned toolchain's
+[Mach-O string-pool alignment bug](https://github.com/rust-lang/rust/issues/157750);
+the native addons must be loaded and checked before final measurements.
+A minimal adjacent `pm-media/build.rs` change links the native CrabbyAVIF
+archive without bundling it into the Rust rlib. Bundling put native Rust
+objects without LLVM bitcode inside that rlib and broke default thin-LTO
+links. The codec archive and decoder implementation are unchanged; the
+final verification includes the affected image tests and addon load.
+
+#### Cold-start scheduling experiments (qualification pending)
+
+These are preflight experiments, not final campaign results. The strict
+atomic first-512 bound is 10.666667 ms. Each row ran eight fresh stressed
+processes with four cold distinct-voice starts each, at niceness 15, with
+two headless busy/yield threads. The device campaign separately uses four
+busy threads. Percentiles use nearest rank; every raw miss is retained.
+
+| Candidate | Deadline misses / 32 | p50 / p95 / max (ms) |
+| --- | ---: | ---: |
+| P-core-aware cap, 10 workers | 20 | 11.595 / 13.089 / 13.126 |
+| Earlier producer constraint, 10 workers | 18 | 11.455 / 12.329 / 12.888 |
+| Pending-control yields and paused urgency, 10 workers | 13 | 10.142 / 15.763 / 28.716 |
+| Same control handoff, 14 workers | 32 | 14.962 / 17.856 / 18.145 |
+| Bounded launch gate, 14 workers | 32 | 15.753 / 19.001 / 25.649 |
+| Custom headless work interval, 10 workers | 13 | 10.122 / 12.678 / 13.288 |
+| Interleaved control, 10 workers | 14 | 10.504 / 13.098 / 45.321 |
+| Interleaved candidate, 8 workers | 27 | 12.180 / 14.263 / 14.659 |
+
+All completed cold-start trials in these rows compared the first 8,192
+frames against independently rendered offline voices, summed in voice
+order, with exact PCM and zero omitted prefix, start spread, A3 use and
+program underruns. Deadline misses still fail the tests. The 14-worker,
+launch-gate and 8-worker candidates are rejected. The two worker-count
+variants ran interleaved under one shared lease, with the 10-worker variant
+first in every pair; that order limits causal comparisons. The final device
+campaign counterbalances the engine order across paired rows.
+
+The control-handoff change reduced request-to-apply time to 0.049–0.250 ms
+in its measured cold starts. Remaining costs are chiefly canonical DSP
+preparation and worker wake/claim handoff. Typical profiled jobs use about
+3.6–4.5 ms of CPU; some take 5.3–5.5 ms. In a representative 10-worker
+capture, the first ten claims occurred 0.64–1.44 ms after submission and
+the second wave at 4.9–5.8 ms. These timings include contention and scheduling;
+they do not isolate OS wake latency. The 45.321 ms outlier was profiled,
+with claims continuing to 40 ms while job CPU stayed about 4.3–4.7 ms and
+no budget throttle occurred in those jobs. Worker stderr serialization was
+a possible contributor; the bounded asynchronous writer is awaiting runtime
+validation. No outlier is classified as noise.
+
+One custom-interval library preflight failed because an existing worker
+priority test expected the Mach-only diagnostic label after the test began
+using a custom interval. The assertion now expects the actual custom group;
+the later 8-worker library run passed 86 tests with one existing ignored
+measurement. The earlier producer/preroll control regression runs passed
+plain and stressed, including Pause during a blocked seek, a hold governed
+by device time, and the A3 missing-decoder-only safety net. Those runs do
+not qualify the current source revision.
+
+An isolated compiler scheduling experiment retained the same baseline ISA,
+strict arithmetic and process boundaries, and changed only the CPU tuning
+from the default to Apple M4. Its 201,600 output floats per variant were
+identical over 1,680 callbacks, but 48 interleaved canonical-job CPU samples
+were not faster: default p50/p95/max 2.84046/2.86537/2.87550 ms, tuned
+2.84383/2.86821/2.87879 ms. That compiler change is rejected.
+
+The atomic deadline remains a blocker. No final paired rows, six loop
+windows, or 30 plain plus 30 stressed repetition suites have yet run on the
+current revision. Earlier round-5 statements about ordinary producer
+priority, report-only cold timing and unbounded serial history claims are
+historical; the implementation above supersedes them, while qualification
+remains pending.
+
+### R7 worker wake policy and cold-start preflight (not qualification)
+
+The preparation pool now has an explicit idle scheduling lease. The caller
+arms workers before returning a newly constructed playback; Play does not wait
+for an arm command to reach the producer. A parked worker holds a verified
+Mach-only reservation matching the output callback. It drops that guard before
+queue locking, readiness evaluation, job dispatch, or diagnostics, and joins
+the actual playback workgroup and reservation for DSP work. Idle contexts do
+not retain the output workgroup. A revoked lease shares a tombstone with its
+clones. Different simultaneous callback periods select ordinary idle waiting;
+actual preparation still uses each job's own callback-matched policy. This
+fallback has no multi-viewer cold-start latency qualification.
+
+A wake generation and waiting flag use a sequentially consistent handshake:
+a publisher either sees and wakes a parked worker, or the worker observes the
+new generation and retries its queue scan. Wake diagnostics expose successful
+idle entries, wake count, guard-drop time, queue-lock wait, and wake-to-claim.
+The current lease and construction arm result are exported alongside process
+pool counters. Counter deltas since Play are separate from lifetime peaks;
+in particular, an idle context's period CPU peak includes work inherited from
+the preceding job in the same physical thread's reservation window.
+
+A physical thread keeps CPU debt when changing jobs, playback contexts, or
+idle contexts with the same policy. Overrun flags belong to that reservation
+window, so inherited debt is not charged as a new idle overrun. When the
+numeric policy changes, the worker waits for the previous genuine period to
+end before installing a fresh reservation. This wait holds no queue mutex,
+TLS borrow, or real-time guard. Scheduling metrics retain those waits. The
+first headless interval also retains the actual SDK anchor, start, and deadline
+ticks; reentry is tied to the original Play request, not a renewed deadline.
+
+V19 kept ten preparation workers, the canonical 11,520-frame pre-roll, and the
+unchanged strict atomic first-512 bound of 10.666667 ms. Its eight stressed
+cold-distinct preflight processes produced 32 complete bit-exact comparisons:
+30 met the deadline and two missed at 10.946 and 12.228 ms. The distribution
+was 8.644/10.946/12.228 ms (p50/p95/max). All 32 had zero omitted prefix,
+zero start spread, zero A3 fires, and zero program underruns. The profiled
+10.946 ms miss had all first ten claims within 64 microseconds; its last two
+voices claimed about 5.7 ms later and each incurred roughly 0.5 ms of CPU-budget
+throttle. Aggregate preparation CPU was 77.09 ms. These are raw misses.
+
+The V19 library preflight passed 100 tests, failed one new policy-observation
+test, and retained one existing ignored test. That new test incorrectly
+assumed a real-time thread had no readable priority; the supported extended
+query reported priority 97. The correction verifies exact Mach parameters and
+the effective scheduling mode separately. Ten targeted seek, Pause, decoder,
+and A3 regressions passed (five plain and five stressed). The complete playback
+preflight passed 40/40 plain and 39/40 stressed; the stressed cold-distinct
+case had two further deadline misses, 11.952 and 11.578 ms. Their complete
+PCM, omission, spread, A3, and underrun checks still passed.
+
+Timing suite processes now run one test at a time, within the brief's limit
+of four, because different simulated device periods share the pool. All 40
+public tests remain and all assertions are retained. Library checks still use
+up to four test threads. Device pairs retain four busy stress threads. Earlier
+four-test-thread failures remain evidence; a serial preflight is not the final
+30 plain plus 30 stressed campaign.
+
+Earlier logger-only V17 and idle-reservation V18 probes also failed the
+same strict deadline. V17 passed 2/32 trials, with p50/p95/max
+11.867/14.178/14.651 ms; V18 passed 12/32 at 11.023/12.519/13.069 ms.
+V17's library passed 87 tests with one existing ignore. V18 passed 93,
+failed three new scheduling/wake tests, and retained that ignore. Two failures
+came from invalid 100 ms synthetic reservation expectations; the third
+exposed a park-token handshake defect that was fixed before V19. Both V17
+and V18 full preflights passed 37/40 plain and 37/40 stressed, with two
+critical-vector indexing panics and the cold deadline failure in each mode.
+The vector remap defect was fixed before V19. These failures remain recorded.
+
+### R7 fair preparation and ownership preflight
+
+A prepared voice now has one owned task through initialization, deterministic
+join, optional continuous lead, and immutable head publication. The task keeps
+its evaluator, retiming memo, constant map, scratch, and vocoder history when it
+moves between workers. A CPU yield is distinct from missing decoded input and
+from completion. Yielding happens only after a complete native process call
+(or completed initialization), after its output and phase state have committed;
+it never changes native call boundaries, canonical pre-roll, map arithmetic,
+or output length. A request that has reached its end finishes copying and
+pruning before it can yield.
+
+A yielded task releases its history mutex and real-time guard, then returns to
+the ordinary queue at the tail of its priority band. It remains pending, so no
+duplicate job may claim that history. Only terminal completion sends Done and
+sets finished; only a complete head becomes visible. Cancellation of a queued
+continuation releases its dependent gate and completion ownership once. The
+thread's CPU ledger survives both task migration and policy reentry. There is
+no new CPU allowance per slice.
+
+Per-voice profiling sums scopes, thread CPU, entry time, control waits, and
+throttle across workers, and records first claim, intervening queue wait,
+slices, requeues, and maximum slice CPU. Pool counters expose claims, requeues,
+completions, wakes, and idle entries; these are process-wide and the exported
+per-Play view subtracts counters, while maxima remain lifetime observations.
+A completion only wakes sleepers when ready work exists; a requeue wakes one.
+
+The exactness regressions compare every f32 bit and the native read-call
+sequence at five speeds in both directions, plus a resumable join and actual
+missing-input retry. Mixer checks compare through the head and 8,192 further
+frames against both the unsliced path and a fresh offline render. Queue tests
+use the production loop for FIFO rotation and the scan-to-park race. The
+64-frame policy check still requires exactly seven logical jobs; its entry
+count includes every slice. Construction arming keeps an acknowledgment for
+the lease epoch; incompatible-period transitions are counted and gated for
+each start. Actual output periods, not project sample rates, select the lease.
+
+V20's eight stressed cold-start processes passed all 32 strict first-buffer
+assertions: p50/p95/max 8.405/9.563/9.733 ms. V21 passed all 32 at
+8.871/9.823/9.826 ms. Every trial compared complete PCM bit for bit, with
+zero omitted prefix, start spread, A3 fires, or program underruns. V20's
+library passed 106 tests; V21 passed 110, each with one existing ignored
+measurement. Each candidate passed ten targeted regressions and one complete
+40-test plain and stressed playback suite. These candidates predate the
+latest integration merge and are preflight evidence, not qualification.
+
+In V20's 16 fully logged cold preparation cohorts, all 16 voices completed
+in 304 slices and 288 requeues per cohort, with zero budget throttles. First
+claim to last completion was 6.842/8.379/9.285 ms (min/p50/max); summed
+thread CPU was 60.059/71.292/77.015 ms and summed policy-entry time was
+2.620/3.197/3.622 ms. Entry totals span parallel workers; they are not wall
+time. Profile scopes overlap and include checkpoint waits. The raw scope,
+queue, slice, entry and wake measurements are retained outside Git.
+
+Independent review found two ownership races introduced or exposed by
+slicing. A project edit can cancel a worker while it waits for a history
+mutex, so cancellation is checked again after locking. Solo can transfer
+history ownership without changing the project generation. A worker now
+checks the finished ownership flag before initialization and after locking,
+then retires silently without rewriting the head, completion flag, or live
+history. Tests force both lock-wait interleavings and compare subsequent PCM
+with a fresh offline render. Queued and mid-slice Solo retirement, dynamic
+speed evaluation, missing-input recovery, and two mixer-level loop passes
+also have exactness regressions.
+
+The final merged revision and full device/repetition campaign remain
+unqualified at this point. No historical miss is classified as noise.

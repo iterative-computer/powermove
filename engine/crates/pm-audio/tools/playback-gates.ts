@@ -9,6 +9,9 @@
  * vocoder pre-roll and native starts cannot reuse an immutable shared head
  * (asserted per sample through prefillReadyUs).
  * PM_AUDIO_START_WAIT_MS=0 alternates 2 s / 3 s same-task cold seeks.
+ * PM_AUDIO_START_ORDER=today-native|native-today counterbalances paired rows.
+ * PM_AUDIO_CONTROL_READY_WAIT_MS adds a post-edit wait for explicitly
+ * prepared controls and requires the immutable first output to predate Play.
  * Each run continues 120 ms after its first clock so late-voice omission
  * spans include re-entry; PM_AUDIO_START_OBSERVE_MS overrides this window.
  * All load processes are joined on exit. Run under pm-electron-lock.
@@ -30,12 +33,23 @@ const edit = process.env.PM_AUDIO_START_EDIT ?? 'gain';
 const loopSeconds = Number(process.env.PM_AUDIO_LOOP_SECONDS ?? 60);
 const stressThreads = Number(process.env.PM_AUDIO_LOAD_THREADS ?? 0);
 const waitMs = Number(process.env.PM_AUDIO_START_WAIT_MS ?? 250);
+const readyWaitMs = Number(process.env.PM_AUDIO_CONTROL_READY_WAIT_MS ?? 0);
+if (!Number.isFinite(readyWaitMs) || readyWaitMs < 0) throw new Error('PM_AUDIO_CONTROL_READY_WAIT_MS must be nonnegative');
 const observeMs = Number(process.env.PM_AUDIO_START_OBSERVE_MS ?? 120);
 const distinct = process.env.PM_AUDIO_START_DISTINCT ?? 'none';
+const order = process.env.PM_AUDIO_START_ORDER ?? 'today-native';
 if (distinct !== 'none' && distinct !== 'trim') throw new Error('PM_AUDIO_START_DISTINCT must be none or trim');
+if (order !== 'today-native' && order !== 'native-today') throw new Error('PM_AUDIO_START_ORDER must be today-native or native-today');
 const trimStep = distinct === 'trim' ? 0.0613 : 0;
 const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs, observeMs, voices, speed: 1.5, edit, loopSeconds, stressThreads, distinct, trims: Array.from({ length: voices }, (_, i) => i * trimStep), targets: waitMs === 0 ? [2, 3] : [4] };
-const modes = process.env.PM_AUDIO_START_MODE === 'today' ? [false] : process.env.PM_AUDIO_START_MODE === 'native' ? [true] : [false, true];
+result.controlReadyWaitMs = readyWaitMs;
+const modes = process.env.PM_AUDIO_START_MODE === 'today' ? [false] : process.env.PM_AUDIO_START_MODE === 'native' ? [true] : order === 'today-native' ? [false, true] : [true, false];
+result.modeOrder = modes.map(native => native ? 'native' : 'today');
+const idlePoolFailed = (timing: any) => !timing?.idleStartupArm?.startsWith('Armed')
+  || timing?.idleLease?.active !== true || timing?.idleLease?.conflict !== false
+  || timing?.idlePoolSincePlay?.conflicts !== 0
+  || ['armFailures', 'armTimeouts', 'computationOverruns', 'constraintOverruns', 'restoreFailures', 'hintFailures', 'constraintReadbackFailures']
+    .some(key => timing?.idlePool?.[key] !== 0);
 for (const native of modes) {
   process.env.POWERMOVE_NEW_ENGINE = native ? '1' : '0';
   const session = await launchLegacyApp();
@@ -117,24 +131,26 @@ for (const native of modes) {
         else Object.assign(loop, { underruns: after.stats.underrunEvents - before.stats.underrunEvents });
         result[native ? 'nativeLoop' : 'todayLoop'] = loop;
         await writeFile(output, JSON.stringify(result, null, 2));
-        if (native && (loop.underruns !== 0 || after.startTiming?.programUnderruns !== 0
-          || (process.platform === 'darwin' && (after.startTiming?.workerSchedulingFailures !== 0
-            || after.startTiming?.schedulingConstraintOverruns !== 0 || after.startTiming?.schedulingRestoreFailures !== 0)))) {
+        if (native && (loop.underruns !== 0 || loop.starvedRenders !== 0 || loop.overloads !== 0 || after.startTiming?.programUnderruns !== 0
+          || (process.platform === 'darwin' && (after.startTiming?.workerSchedulingFailures !== 0 || after.startTiming?.producerMachError !== null || after.startTiming?.producerHintError !== null
+            || after.startTiming?.schedulingComputationOverruns !== 0 || after.startTiming?.schedulingConstraintOverruns !== 0 || after.startTiming?.schedulingRestoreFailures !== 0 || after.startTiming?.schedulingHintFailures !== 0 || after.startTiming?.schedulingConstraintReadbackFailures !== 0 || after.startTiming?.schedulingIntervalFailures !== 0 || after.startTiming?.schedulingIntervalExpired !== 0 || after.startTiming?.profileWorkerLogDrops !== 0 || after.startTiming?.profileWorkerFlushFailures !== 0 || idlePoolFailed(after.startTiming))))) {
           throw new Error(`loop delivery or real-time scheduling failed: ${JSON.stringify({ underruns: loop.underruns, timing: after.startTiming })}`);
         }
       }
-      const samples = [];
+      const samples: any[] = [];
+      // Keep completed and failing raw starts in the catch report too.
+      result[native ? 'native' : 'today'] = { samples, n: 0, partial: true };
       for (let run = 0; run < Number(count); run++) {
         const target = waitMs === 0 ? (run % 2 === 0 ? 2 : 3) : 4;
         if (waitMs > 0) {
           await page.evaluate(t => { const PM = (window as any).PM; PM.pause(); PM.setTime(t); }, target);
           await page.waitForTimeout(waitMs);
         }
-        const preEditAudio = native ? await session.evaluateMain(async () => {
+        const preEditAudio: any = native ? await session.evaluateMain(async () => {
           const r = await (globalThis as any).__powermoveNativeEngine.engine.report('interactive');
           return Object.values(r.presenter.audio)[0];
         }) : null;
-        const sample = await page.evaluate(async ({ native, target, inline, edit, run }) => {
+        const sample = await page.evaluate(async ({ native, target, inline, edit, run, readyWaitMs }) => {
           const PM = (window as any).PM;
           const starts = (window as any).__a6starts as any[];
           starts.length = 0;
@@ -146,6 +162,9 @@ for (const native of modes) {
             if (edit === 'speed') layer.d.speed = run % 2 ? 1.6 : 1.5;
           }
           if (edit !== 'none') { PM.touch(); PM.bus.emit('layers'); PM.invalidate(); }
+          // Only the separately named prepared control rows enable this.
+          // The A8 edit/Play rows execute no await between edit and Play.
+          if (readyWaitMs > 0) await new Promise(resolve => setTimeout(resolve, readyWaitMs));
           const requested = performance.now();
           PM.play();
           const deadline = requested + 5000;
@@ -169,7 +188,10 @@ for (const native of modes) {
             }
             await new Promise(r => setTimeout(r, 1));
           }
-        }, { native, target, inline: waitMs === 0, edit, run });
+        }, { native, target, inline: waitMs === 0, edit, run, readyWaitMs });
+        const captured: any = { ...sample, preEditAudio };
+        samples.push(captured);
+        result[native ? 'native' : 'today'].n = samples.length;
         await page.waitForTimeout(observeMs);
         await page.evaluate(() => (window as any).PM.pause());
         if (native) {
@@ -177,31 +199,35 @@ for (const native of modes) {
           // this request on the shared host clock, after the 33 ms status poll.
           const deadline = performance.now() + 1000;
           for (;;) {
-            const timing = await session.evaluateMain(async () => {
-              const report = await (globalThis as any).__powermoveNativeEngine.engine.report('interactive');
-              return (Object.values(report.presenter.audio)[0] as any)?.startTiming;
-            });
+            const postEditAudio: any = await status();
+            const timing = postEditAudio?.startTiming;
             if (timing && timing.requestedUs >= sample.requestedHostUs) {
+              const deviceOverloads = postEditAudio.deviceOverloads - preEditAudio.deviceOverloads;
+              Object.assign(captured, { timing, postEditAudio, deviceOverloads });
+              if (deviceOverloads !== 0) {
+                throw new Error(`device overloaded during start: ${JSON.stringify(captured)}`);
+              }
               if (timing.omittedPrefixFrames !== 0 || timing.startSpreadFrames !== 0 || timing.safetyNetFires !== 0 || timing.programUnderruns !== 0 || timing.historyClaims !== 0
                 || timing.voiceStartSamples.length !== voices) {
                 throw new Error(`ordinary start must be complete and simultaneous: ${JSON.stringify(timing)}`);
               }
-              if (process.platform === 'darwin' && (!['device-workgroup', 'mach-time-constraint'].includes(timing.producerScheduling)
-                || timing.workerWorkgroupJoins + timing.workerMachJoins === 0 || timing.workerSchedulingFailures !== 0 || timing.schedulingConstraintOverruns !== 0 || timing.schedulingRestoreFailures !== 0)) {
+              if (process.platform === 'darwin' && (!['device-workgroup', 'custom-audio-interval', 'mach-time-constraint'].includes(timing.producerScheduling)
+                || timing.workerWorkgroupJoins + timing.workerMachJoins === 0 || timing.workerSchedulingFailures !== 0 || timing.producerMachError !== null || timing.producerHintError !== null || timing.schedulingComputationOverruns !== 0 || timing.schedulingConstraintOverruns !== 0 || timing.schedulingRestoreFailures !== 0 || timing.schedulingHintFailures !== 0 || timing.schedulingConstraintReadbackFailures !== 0 || timing.schedulingIntervalFailures !== 0 || timing.schedulingIntervalExpired !== 0 || timing.profileWorkerLogDrops !== 0 || timing.profileWorkerFlushFailures !== 0 || idlePoolFailed(timing))) {
                 throw new Error(`audio threads did not enter a real-time schedule: ${JSON.stringify(timing)}`);
               }
               // Distinct signals must not be served by a shared immutable head.
               if (distinct !== 'none' && timing.prefillReadyUs !== 0) {
                 throw new Error(`distinct voices used a shared head: ${JSON.stringify(timing)}`);
               }
-              Object.assign(sample, { timing });
+              if (readyWaitMs > 0 && !(timing.prefillReadyUs > 0 && timing.prefillReadyUs <= timing.requestedUs)) {
+                throw new Error(`prepared control first output was not ready before Play: ${JSON.stringify(timing)}`);
+              }
               break;
             }
             if (performance.now() >= deadline) throw new Error('first-buffer timing missing');
             await Bun.sleep(10);
           }
         }
-        samples.push({ ...sample, preEditAudio });
       }
       const audio = native ? await session.evaluateMain(async () => {
         const report = await (globalThis as any).__powermoveNativeEngine.engine.report('interactive');
