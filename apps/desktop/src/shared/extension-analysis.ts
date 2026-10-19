@@ -57,7 +57,7 @@ export const DEPRECATED_MEMBERS: readonly DeprecatedMember[] = [
     id: 'render.gl.context',
     path: ['render', 'gl', 'context'],
     replacement: "api.layers.register({ renderer: { kind: 'fragment', fragment } }) to draw, await api.render.renderFrameToAsync(time, width, height) to read the frame",
-    note: 'A registered GLSL layer is drawn by the engine in preview and export; the compatibility context is a separate offscreen context that reads the frame on screen back and shows its drawing only in the viewer, until the next frame.'
+    note: 'A registered GLSL layer is drawn by the engine in preview and export; the compatibility context is a separate offscreen context that reads the frame on screen back and shows its drawing in the viewer until the next frame and in WebM exports after each frame:rendered handler; MP4, ProRes, PNG and still captures read the engine frame without that drawing.'
   },
   {
     id: 'services.raster',
