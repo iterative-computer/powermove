@@ -33,7 +33,7 @@ type Status = {
 const status = (page: Page): Promise<Status> => page.evaluate(() => (window as any).PM.EngineConnection.status());
 
 /** A 640×360, 30 fps, 4 s composition with a background and two solids. */
-async function tracerProject(page: Page, extra: { fx?: boolean; pathMask?: boolean } = {}): Promise<string> {
+async function tracerProject(page: Page, extra: { fx?: boolean; pathMask?: boolean; unknownEffect?: boolean } = {}): Promise<string> {
   return page.evaluate((extra) => {
     const PM = (window as any).PM;
     // A bezier path mask (drawn by the engine since compclose).
@@ -57,6 +57,13 @@ async function tracerProject(page: Page, extra: { fx?: boolean; pathMask?: boole
     bar.p['position.x'].v = 300; bar.p['position.y'].v = 250;
     if (extra.fx) box.fx.push(PM.mkEffect('invert'));
     if (extra.pathMask) box.masks.push(pathMask(PM, project));
+    if (extra.unknownEffect) {
+      // An effect no extension defines (a disabled or removed extension's):
+      // the engine has no definition to draw it with.
+      const fx = PM.mkEffect('invert');
+      fx.type = 'e2e-unknown-effect';
+      box.fx.push(fx);
+    }
     project.layers = [box, bar];
     PM.replaceProject(project);
     PM.Projects?.put?.(PM.proj);
@@ -129,7 +136,7 @@ async function windowPixel(session: LaunchedApp, cssX: number, cssY: number): Pr
   }, { x: origin.x + cssX, y: origin.y + cssY });
 }
 
-async function openTracer(session: LaunchedApp, extra: { fx?: boolean; pathMask?: boolean } = {}): Promise<string> {
+async function openTracer(session: LaunchedApp, extra: { fx?: boolean; pathMask?: boolean; unknownEffect?: boolean } = {}): Promise<string> {
   await session.openEditor();
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.EngineConnection));
@@ -348,6 +355,71 @@ test.describe('Use New Engine: the tracer bullet', () => {
     const errors = session.diagnostics.console.filter((c) => c.type === 'error');
     expect(errors.map((e) => e.text)).toEqual([]);
     expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('switching between a composition the engine cannot draw and one it can, with the viewer attached', async ({ session }) => {
+    const { page } = session;
+    await openTracer(session, { unknownEffect: true });
+    const first = await page.evaluate(() => (window as any).PM.proj.compId as string);
+    await waitRoute(page, 'legacy');
+    const why = /cannot draw this composition yet: .*e2e-unknown-effect/;
+    /** The renderer's view of the stage, the session, and the engine frame on screen. */
+    const view = () => page.evaluate(() => {
+      const PM = (window as any).PM;
+      const V = PM.Kernel.services.get('viewer');
+      const line = V.stage.querySelector('[data-engine-status]') as HTMLElement | null;
+      const canvas = document.getElementById('engine-present');
+      const s = PM.EngineConnection.status();
+      const doc = PM.EngineDoc;
+      doc.barrier.flush();
+      const frame = V.engineFrame?.() ?? null;
+      return {
+        comp: PM.proj.compId as string, session: PM.EngineConnection.session()?.composition ?? null,
+        route: s.route as string, reason: s.routeReason as string | null, status: line?.textContent ?? null,
+        presenting: !!canvas && canvas.style.visibility === 'visible', legacy: V.el.style.visibility as string,
+        revision: doc.barrier.revision as number, frameRevision: frame?.revision ?? null
+      };
+    });
+    const unsupported = async (comp: string) => {
+      await expect.poll(async () => { const v = await view(); return { comp: v.comp, session: v.session, route: v.route, presenting: v.presenting }; }, { timeout: 20_000 })
+        .toEqual({ comp, session: comp, route: 'legacy', presenting: false });
+      await expect.poll(async () => (await view()).status, { timeout: 10_000 }).toMatch(why);
+      const v = await view();
+      expect(v.reason).toMatch(why);
+      expect(v.legacy).toBe('hidden');
+      return v;
+    };
+    const drawn = async (comp: string) => {
+      // The engine draws the switched-to composition at the revision it
+      // reported the other one at: that frame must reach the stage.
+      await expect.poll(async () => { const v = await view(); return { comp: v.comp, session: v.session, route: v.route, presenting: v.presenting, status: v.status, reason: v.reason }; }, { timeout: 20_000 })
+        .toEqual({ comp, session: comp, route: 'engine', presenting: true, status: null, reason: null });
+      const v = await view();
+      expect(v.frameRevision).toBe(v.revision);
+      expect(v.legacy).toBe('hidden');
+      return v;
+    };
+    const report = async () => (await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'))).presenter;
+    const a0 = await unsupported(first);
+    const routed0 = (await report()).routedLegacy as number;
+    // A drawable composition of the same project, opened (a document
+    // batch, not a load): the engine hears the batch before the viewer state.
+    const second = await page.evaluate(() => (window as any).PM.Comps.create({ name: 'Plain', w: 640, h: 360, fps: 30, dur: 3 }, { open: true }) as string);
+    const b1 = await drawn(second);
+    console.log(`switch A ${JSON.stringify(a0)} -> B ${JSON.stringify(b1)}`);
+    await page.evaluate((id) => (window as any).PM.Comps.open(id), first);
+    await unsupported(first);
+    await page.evaluate((id) => (window as any).PM.Comps.open(id), second);
+    const b2 = await drawn(second);
+    // And it stays drawn: nothing comes back to cover it.
+    await page.waitForTimeout(1_000);
+    expect(await view()).toMatchObject({ comp: second, route: 'engine', presenting: true, status: null });
+    const presenter = await report();
+    console.log(`switch B again ${JSON.stringify(b2)}; routedLegacy ${routed0} -> ${presenter.routedLegacy}; routes ${JSON.stringify(presenter.routes)}`);
+    expect(presenter.routedLegacy).toBeGreaterThan(routed0);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    const errors = session.diagnostics.console.filter((c) => c.type === 'error');
+    expect(errors.map((e) => e.text)).toEqual([]);
   });
 
   test('path masks are drawn by the engine', async ({ session }) => {

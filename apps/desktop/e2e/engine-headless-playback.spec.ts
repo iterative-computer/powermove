@@ -197,6 +197,29 @@ test('plays, shuttles, seeks and loops without a viewer; follows the open compos
   expect(quiet.peak).toBeLessThan(0.01);
   const silentAfter = (await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'))).presenter.silentRuns;
   expect(silentAfter).toBe(silentBefore + 1);
+  // Without a viewer the route is heard from the engine's clock: a project
+  // color setting this engine does not know makes the project one it
+  // cannot draw (a reason its static check names; definitions are only
+  // checked by drawing, which a viewerless session does not do), and
+  // removing it makes it the engine's again: the route, its reason, and the
+  // audio prefs follow, with no frame to say so.
+  const headlessRoute = () => page.evaluate(() => {
+    const PM = (window as any).PM, s = PM.EngineConnection.status();
+    return { route: s.route as string, reason: s.routeReason as string | null, headless: PM.EngineConnection.session()?.headless as boolean };
+  });
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.hist.do('Color', () => { PM.proj.color = { mode: 'unknown-to-this-engine' }; });
+    PM.touch(); PM.bus.emit('project');
+  });
+  await expect.poll(headlessRoute, { timeout: 20_000 }).toMatchObject({ route: 'legacy', headless: true });
+  expect((await headlessRoute()).reason).toMatch(/project color/);
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.hist.do('Color', () => { delete PM.proj.color; });
+    PM.touch(); PM.bus.emit('project');
+  });
+  await expect.poll(headlessRoute, { timeout: 20_000 }).toEqual({ route: 'engine', reason: null, headless: true });
   // And back: the first composition's tone plays again.
   await page.evaluate((first) => {
     const PM = (window as any).PM;
@@ -213,7 +236,7 @@ test('plays, shuttles, seeks and loops without a viewer; follows the open compos
   expect(audio.deviceCallbacks).toBeGreaterThan(20);
   expect(audio.problems).toEqual([]);
   expect(session.diagnostics.pageErrors).toEqual([]);
-  console.log(`headless playback: ${JSON.stringify({ initial: hidden, maxJoinError, closedAgain, deviceCallbacks: audio.deviceCallbacks, hostClockRuns: report.presenter.hostClockRuns, stalls: report.presenter.stalls, stallMs: report.presenter.stallUsMax / 1000, lastStall: report.presenter.lastStall })}`);
+  console.log(`headless playback: ${JSON.stringify({ initial: hidden, maxJoinError, closedAgain, deviceCallbacks: audio.deviceCallbacks, hostClockRuns: report.presenter.hostClockRuns, stalls: report.presenter.stalls, stallMs: report.presenter.stallUsMax / 1000, lastStall: report.presenter.lastStall, slowTurns: report.presenter.slowTurns, turnMs: report.presenter.turnUsMax / 1000 })}`);
 });
 });
 

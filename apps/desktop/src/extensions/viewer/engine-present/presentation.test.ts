@@ -441,16 +441,17 @@ describe('ViewerPresentation', () => {
     runFrames(rafs, performance.now() + 40);
     expect(presentation.status).toBeNull();
     // A composition the engine cannot draw (amendment 21): the stage says
-    // why and is never handed back; frames of that revision or older that
-    // land late stay off it; the next frame the engine draws clears it.
+    // why and is never handed back; a frame the engine produced before the
+    // report, still in the presenter, stays off it; the next frame the
+    // engine draws clears it.
     const why = 'The new engine cannot draw this composition yet: path masks (layer box in C).';
+    second.handlers.message({ type: 'frame', frame: { ...desc(2, 1), revision: 9 } }, performance.now());
     second.handlers.message({ type: 'routed', route: 'legacy', reason: why, revision: 9 } as never, performance.now());
     expect(hidden).toEqual([]);
     expect(presentation.presenting).toBe(false);
     expect(presentation.latest).toBeNull();
     expect(presentation.status).toBe(why);
     expect(stage.querySelector('[data-engine-status]')?.getAttribute('role')).toBe('status');
-    second.handlers.message({ type: 'frame', frame: { ...desc(2, 1), revision: 9 } }, performance.now());
     runFrames(rafs, performance.now() + 60);
     expect(presentation.presenting).toBe(false);
     expect(presentation.status).toBe(why);
@@ -461,6 +462,23 @@ describe('ViewerPresentation', () => {
     runFrames(rafs, performance.now() + 100);
     expect(presentation.presenting).toBe(true);
     expect(presentation.status).toBeNull();
+    expect(hidden).toEqual([]);
+    // A composition switch, A (cannot draw) to B and back, twice: the
+    // document batch reaches the engine before the viewer state, so it
+    // reports A at the revision it then draws B at. B's frame at that very
+    // revision shows and clears the line; A's report hides it again.
+    let seq = 3;
+    for (const revision of [11, 12]) {
+      second.handlers.message({ type: 'routed', route: 'legacy', reason: why, revision } as never, performance.now());
+      expect(presentation.status).toBe(why);
+      expect(presentation.presenting).toBe(false);
+      second.handlers.message({ type: 'frame', frame: { ...desc(++seq, 1), revision } }, performance.now());
+      runFrames(rafs, performance.now() + 120 + seq * 20);
+      runFrames(rafs, performance.now() + 130 + seq * 20);
+      expect(presentation.presenting).toBe(true);
+      expect(presentation.latest?.revision).toBe(revision);
+      expect(presentation.status).toBeNull();
+    }
     expect(hidden).toEqual([]);
     presentation.dispose();
     expect(stage.querySelector('[data-engine-status]')).toBeNull();

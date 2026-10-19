@@ -201,8 +201,14 @@ export class ViewerPresentation {
   private host: Window | null = null;
   private mediaOffs: (() => void)[] = [];
   private latestFrame: PresentedFrame | null = null;
-  /** The revision the engine routed the composition away at (`routed`). */
-  private routedRevision: number | null = null;
+  /** The newest frame `seq` the channel had delivered when the engine said
+   *  it cannot draw the composition (`routed`): frames up to it, still in
+   *  the presenter, are stale. A frame delivered after the report is a
+   *  later decision even at the same revision (a composition switch: the
+   *  document batch reaches the engine before the viewer state). */
+  private routedSeq: number | null = null;
+  /** The newest frame `seq` the current channel delivered. */
+  private deliveredSeq = 0;
   private readonly listeners = new Set<(frame: PresentedFrame) => void>();
   private readonly hiddenListeners = new Set<() => void>();
   private readonly offReady: () => void;
@@ -662,8 +668,8 @@ export class ViewerPresentation {
       // A frame drawn before the engine routed the composition to the
       // current engine, presented late: it must not cover the current
       // engine's canvas.
-      if (this.routedRevision !== null && Number(frame.revision) <= this.routedRevision) return;
-      this.routedRevision = null;
+      if (this.routedSeq !== null && frame.seq <= this.routedSeq) return;
+      this.routedSeq = null;
       // A canvas that was hidden shows a frame only once the GPU finished
       // it and the display took it (the drawing's canvas and this page
       // commit separately; at a cold start the drawing's pipelines compile
@@ -707,7 +713,7 @@ export class ViewerPresentation {
         if (message.type === 'routed') {
           // The engine cannot draw this composition at this revision: its
           // frames (older ones still in flight too) leave the stage.
-          this.routedRevision = typeof message.revision === 'number' ? message.revision : null;
+          this.routedSeq = this.deliveredSeq;
           this.latestFrame = null;
           if (this.exclusive) {
             // "Use New Engine" on (amendment 21): nothing else draws it, so
@@ -722,6 +728,7 @@ export class ViewerPresentation {
           this.hide(this.canvasElement);
           return;
         }
+        if (message.type === 'frame') this.deliveredSeq = Math.max(this.deliveredSeq, Number(message.frame.seq) || 0);
         if (this.presenter) this.presenter.receive(message, arrivedMs);
         else this.hold(opened!, message, arrivedMs);
       },
@@ -730,6 +737,9 @@ export class ViewerPresentation {
     if (!channel) return;
     opened = channel;
     this.channel = channel;
+    // A new session numbers its frames from 1.
+    this.deliveredSeq = 0;
+    this.routedSeq = null;
     this.sessions++;
     this.startPresenter(channel);
   }

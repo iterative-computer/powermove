@@ -14,6 +14,7 @@ import { bestOffset, HostClock } from './host-clock';
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, missedRoute } from './install';
 import { DEFINITIONS_RETRIES, DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
 import { EngineTransport, mediaTicksAt, ticks, TICKS_PER_SECOND } from './transport';
+import { followOpenComposition } from './composition-follow';
 import { createEngineDefinitions } from '../kernel/engine-definitions';
 import { createKernel } from '../kernel/registries';
 
@@ -149,19 +150,34 @@ describe('the engine connection', () => {
 
     // A frame says the engine draws the composition; an `unsupported`
     // failure routes it to the legacy viewer.
-    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, revision: 5 } } as never, 5));
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 1, revision: 5 } } as never, 5));
     port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 6, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'Drawn by the current engine: effects.', retry: { kind: 'never' }, detail: null } } } as never, 5));
     expect(routes).toEqual(['engine', 'legacy']);
     expect(messages).toEqual(['frame', 'routed']);
     expect(session.routeReason).toMatch(/effects/);
-    // A frame of the routed revision or older, still in flight, is stale: it
-    // neither shows nor brings the engine back; a newer one does.
-    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, revision: 6 } } as never, 5));
+    // A frame the engine produced before the report is stale: it neither
+    // shows nor brings the engine back.
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 1, revision: 5 } } as never, 5));
     expect(routes).toEqual(['engine', 'legacy']);
     expect(messages).toEqual(['frame', 'routed']);
-    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, revision: 7 } } as never, 5));
+    // A composition switch: the document batch reached the engine before the
+    // viewer state, so it reported the old composition at revision 6 and
+    // then drew the new one at the same revision. That frame is a later
+    // decision and brings the engine back.
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, seq: 2, revision: 6 } } as never, 5));
     expect(routes).toEqual(['engine', 'legacy', 'engine']);
     expect(messages).toEqual(['frame', 'routed', 'frame']);
+    expect(session.routeReason).toBeNull();
+    // Back to the composition the engine cannot draw and over again (A, B,
+    // A, B), every report and frame at revision 7.
+    const failure = (revision: number) => envelope({ kind: 'event', body: { type: 'failure', revision, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'Drawn by the current engine: effects.', retry: { kind: 'never' }, detail: null } } } as never, 5);
+    port.deliver(failure(7));
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 1, seq: 2, revision: 6 } } as never, 5));
+    expect(routes).toEqual(['engine', 'legacy', 'engine', 'legacy']);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, seq: 3, revision: 7 } } as never, 5));
+    expect(routes).toEqual(['engine', 'legacy', 'engine', 'legacy', 'engine']);
+    expect(messages).toEqual(['frame', 'routed', 'frame', 'routed', 'frame']);
+    expect(session.lastFrame?.seq).toBe(3);
   });
 
   it('streams the kernel\'s definitions to the session before its document, and their failures back', async () => {
@@ -502,9 +518,19 @@ describe('the transport driver', () => {
     await session.start();
     session.sendHeadless('C1');
     let open = 'C1';
-    // install.ts's followComposition.
-    const follow = () => { if (session.headless && session.composition !== open) session.sendHeadless(open); };
-    const driver = new EngineTransport(() => session, new HostClock(async () => 0), { exclusive: true, wake: () => {}, prepare: follow });
+    // install.ts's follower, on a bus like the kernel's.
+    const listeners = new Map<string, Set<() => void>>();
+    const bus = {
+      on: (event: string, listener: () => void) => {
+        if (!listeners.has(event)) listeners.set(event, new Set());
+        listeners.get(event)!.add(listener);
+        return () => listeners.get(event)!.delete(listener);
+      },
+      emit: (event: string) => { for (const listener of listeners.get(event) ?? []) listener(); }
+    };
+    const follower = followOpenComposition({ session: () => session, open: () => open, bus });
+    expect([...listeners.keys()].sort()).toEqual(['comps', 'project']);
+    const driver = new EngineTransport(() => session, new HostClock(async () => 0), { exclusive: true, wake: () => {}, prepare: follower.follow });
     port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5, 0));
     driver.refresh();
     expect(session.route).toBe('engine');
@@ -524,6 +550,20 @@ describe('the transport driver', () => {
     const again = port.events('viewer').length;
     driver.pause();
     expect(port.events('viewer')).toHaveLength(again);
+    // compositions.open (and its undo) announce `comps`; a project change `project`.
+    open = 'C3';
+    bus.emit('comps');
+    expect(session.composition).toBe('C3');
+    open = 'C1';
+    bus.emit('project');
+    expect(session.composition).toBe('C1');
+    // A session with a viewer sends its own state: the follower leaves it.
+    session.sendViewerState({ composition: 'C1', viewSeq: 9, headless: false } as never);
+    open = 'C2';
+    bus.emit('comps');
+    expect(session.composition).toBe('C1');
+    follower.dispose();
+    expect([...listeners.values()].every((set) => set.size === 0)).toBe(true);
     session.close(); connection.close('test complete');
   });
 
@@ -535,14 +575,23 @@ describe('the transport driver', () => {
     session.sendHeadless('C');
     const driver = new EngineTransport(() => session, new HostClock(async () => 0), { exclusive: true, wake: () => {} });
     port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 0, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'The new engine cannot draw this composition yet: path masks.', retry: { kind: 'never' }, detail: null } } } as never, 5, 0));
-    // Its tagged clock (the engine runs the transport) keeps the reason.
-    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5, 0));
+    // Its clock (the engine runs the transport) comes untagged and keeps the reason.
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 1, epoch: 1, state: 'stopped', hostTime: 0, mediaTime: 0, rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
     driver.refresh();
     expect(session.route).toBe('legacy');
     expect(session.routeReason).toMatch(/path masks/);
     expect(driver.active()).toBe(true);
     driver.play(0.5);
     expect(port.events('transport').map(e => (e.message as any).body.command)).toEqual(['audioScrub', 'seek', 'play']);
+    // An edit or a composition switch makes it drawable: the engine's clock
+    // comes tagged with the revision again, and the session is the engine's.
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 2, epoch: 2, state: 'playing', hostTime: 0, mediaTime: 0, rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5, 1));
+    expect(session.route).toBe('engine');
+    expect(session.routeReason).toBeNull();
+    // And back: the next report routes it again.
+    port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 2, error: { code: 'unsupported', scope: { kind: 'session', session: 5 }, message: 'The new engine cannot draw this composition yet: path masks.', retry: { kind: 'never' }, detail: null } } } as never, 5, 2));
+    port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq: 3, epoch: 2, state: 'playing', hostTime: 0, mediaTime: 0, rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    expect(session.route).toBe('legacy');
     session.close(); connection.close('test complete');
   });
 
