@@ -1,9 +1,10 @@
 # Powermove's pinned Blender worker (plan sections 9 and 17, contract 11).
 # Shipped code only: projects supply bounded JSON snapshots, recipes and node
-# graphs, never Python. Output is pinned: 16-bit RGBA PNG, AgX with look None,
-# sRGB display, gamma 1, no dither, image color management following the
-# scene, compression 15, metadata stamps off (byte-stable files). The engine
-# hashes this file into every surface cache key.
+# graphs, never Python. Level 2 output is pinned: 16-bit RGBA PNG, AgX
+# with look None, sRGB display, gamma 1, no dither, scene-following color
+# management, compression 15, stamps off. Level 1 retains today's PNG8
+# and dither 1 to preserve existing pixels (owner amendment 22). The engine
+# hashes this file and the per-layer compatibility metadata into cache keys.
 import bpy, sys, json, math, os, platform, traceback
 from mathutils import Matrix, Vector
 
@@ -400,6 +401,14 @@ def execute(req):
         shadows={obj:obj.visible_shadow for objects in layers.values() for obj in objects};light_shadows={light:light.use_shadow for light in bpy.data.lights if hasattr(light,'use_shadow')}
         for layer_id in outputs:
             if layer_id not in layers:continue
+            # Existing projects use today's PNG8 + Blender dither, then
+            # straight ImageBitmap upload. Level 2 keeps pinned PNG16.
+            if layer_id in req['snapshot'].get('compatibilityLayers',[]):
+                bpy.context.scene.render.image_settings.color_depth='8'
+                bpy.context.scene.render.dither_intensity=1
+            else:
+                bpy.context.scene.render.image_settings.color_depth='16'
+                bpy.context.scene.render.dither_intensity=0
             block=blocks.get(layer_id,list(layers));receive=next((obj.get('receiveShadow',True) for obj in req['snapshot']['objects'] if obj['id']==layer_id),True)
             for light,shadow in light_shadows.items():light.use_shadow=shadow and receive
             for other_id,objects in layers.items():

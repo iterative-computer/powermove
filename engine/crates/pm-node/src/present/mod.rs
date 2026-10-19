@@ -386,8 +386,9 @@ impl BridgePresenter {
         key: Key,
         state: &ViewerState,
     ) -> Option<Option<PoolSpec>> {
-        let wanted =
-            state.depth_id == Some(true) && self.config.source == Some(FrameSource::Document);
+        let wanted = state.headless != Some(true)
+            && state.depth_id == Some(true)
+            && self.config.source == Some(FrameSource::Document);
         let size = Size::new(state.size.width, state.size.height);
         let count = pool_size(RING, self.config.thread.lead);
         let meta = self.views.get_mut(&key)?;
@@ -480,7 +481,19 @@ impl FramePresenter for BridgePresenter {
         // cache takes what the lease has left after it.
         ctx.release_frame_cache(self.frame_cache_reserved);
         self.frame_cache_reserved = 0;
-        let pool = self.plan_pool(ctx, key, &state);
+        let pool = if state.headless == Some(true) {
+            self.forget(ctx, key);
+            self.views.insert(
+                key,
+                Meta {
+                    pool: None,
+                    depth: None,
+                },
+            );
+            None
+        } else {
+            self.plan_pool(ctx, key, &state)
+        };
         let depth = self.plan_depth(ctx, key, &state);
         self.sync_frame_cache(ctx);
         self.send(Command::Configure {

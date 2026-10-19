@@ -172,6 +172,18 @@ describe('text editing session', () => {
     expect(raster).toHaveBeenCalledTimes(2);
   });
 
+  it('retries a blank font raster at the same revision and time after loading', () => {
+    const { api, V, layer } = fixture('Hello brave world');
+    layer.d.fontAnchorBounds = { x0: 0, y0: 0, x1: 170, y1: 48 };
+    (api as any).project = { revision: () => 1 };
+    const raster = vi.fn().mockReturnValueOnce({ blank: true }).mockReturnValue({ fontOffset: { x: 5, y: 0 } });
+    (api as any).render.raster = raster;
+    const session = beginTextEdit(api, V, layer)!;
+    session.contains({ x: 150, y: 210 });
+    session.contains({ x: 160, y: 210 });
+    expect(raster).toHaveBeenCalledTimes(2);
+  });
+
   it('selects everything on entry when asked and mirrors external text changes', () => {
     const { api, V, layer } = fixture('Hello');
     const session = beginTextEdit(api, V, layer, { selectAll: true })!;

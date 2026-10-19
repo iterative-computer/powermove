@@ -112,6 +112,11 @@ fn snapshots_render_the_session_document_at_its_revision() {
 }
 
 #[test]
+fn headless_snapshots_are_scheduled_around_audio_only_playback() {
+    run_child("child_headless_scheduling");
+}
+
+#[test]
 fn snapshots_are_scheduled_around_playback() {
     run_child("child_scheduling");
 }
@@ -710,6 +715,7 @@ fn child_snapshots() {
 
 fn viewer_state() -> ViewerState {
     ViewerState {
+        headless: None,
         composition: "Psnap-root".into(),
         size: Size::new(640, 360),
         device_pixel_ratio: 2.0,
@@ -733,22 +739,94 @@ fn child_scheduling() {
     if std::env::var(CHILD_ENV).is_err() {
         return;
     }
+    scheduling(false);
+}
+
+#[test]
+#[ignore = "run by headless_snapshots_are_scheduled_around_audio_only_playback"]
+fn child_headless_scheduling() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    scheduling(true);
+}
+
+fn scheduling(headless: bool) {
     let mut c = Child::start();
     let session = c.session;
+    let mut state = viewer_state();
+    state.headless = Some(headless);
+    if headless {
+        c.event(Event::Viewer(state.clone()));
+        // A cold Play must survive the document/media pending state.
+        c.event(Event::Transport(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        }));
+    }
     c.resync(2, 1, &project(100.0));
-    c.event(Event::Viewer(viewer_state()));
-    let first = c
-        .inbox
-        .wait(Duration::from_secs(20), |port, m| match &m.message {
-            Message::Event {
-                body: Event::Frame(d),
-            } if port == WINDOW => Some(d.clone()),
-            _ => None,
-        });
-    c.event(Event::ReleaseFrame(FrameRelease {
-        pool_index: first.pool_index,
-        seq: first.seq,
-    }));
+    if !headless {
+        c.event(Event::Viewer(state));
+    }
+    if headless {
+        c.inbox
+            .wait(Duration::from_secs(20), |_, m| match &m.message {
+                Message::Event {
+                    body: Event::Clock(clock),
+                } if m.revision == Some(Revision::new(1).unwrap())
+                    && clock.state == TransportState::Playing =>
+                {
+                    Some(())
+                }
+                _ => None,
+            });
+        c.event(Event::Transport(TransportCommand::Pause));
+        c.inbox
+            .wait(Duration::from_secs(5), |_, m| match &m.message {
+                Message::Event {
+                    body: Event::Clock(clock),
+                } if clock.state == TransportState::Stopped => Some(()),
+                _ => None,
+            });
+        // A newer document while paused must publish a fresh readiness
+        // clock, even though the composition remains supported and ready.
+        c.resync(3, 2, &project(100.0));
+        c.inbox
+            .wait(Duration::from_secs(5), |_, m| match &m.message {
+                Message::Event {
+                    body: Event::Clock(_),
+                } if m.revision == Revision::new(2).ok() => Some(()),
+                _ => None,
+            });
+        // Presentation warms the GPU before the timed section below. A
+        // headless session has drawn nothing: warm it with an offscreen
+        // capture too, without allocating a presentation pool.
+        c.snapshot(
+            19,
+            frame_request(
+                SnapshotClass::Sync,
+                Size::new(160, 90),
+                SnapshotPixels::Opaque,
+                10_000,
+            ),
+            None,
+            WINDOW,
+            session,
+        );
+        rendered(c.inbox.wait(Duration::from_secs(20), answer(19)));
+    } else {
+        let first = c
+            .inbox
+            .wait(Duration::from_secs(20), |port, m| match &m.message {
+                Message::Event {
+                    body: Event::Frame(d),
+                } if port == WINDOW => Some(d.clone()),
+                _ => None,
+            });
+        c.event(Event::ReleaseFrame(FrameRelease {
+            pool_index: first.pool_index,
+            seq: first.seq,
+        }));
+    }
     c.event(Event::Transport(TransportCommand::Play {
         rate: PlaybackRate::NORMAL,
     }));
@@ -776,6 +854,17 @@ fn child_scheduling() {
         WINDOW,
         session,
     );
+    if headless {
+        c.snapshot(
+            22,
+            frame_request(SnapshotClass::Async, small, SnapshotPixels::Opaque, 10_000),
+            None,
+            WINDOW,
+            session,
+        );
+    }
+    let mut sent_frames = 0;
+    let mut async_at = None;
     let mut sync_at = None;
     let mut idle_early = false;
     while asked.elapsed() < Duration::from_millis(800) {
@@ -792,7 +881,14 @@ fn child_scheduling() {
             },
         );
         if let Some(release) = release {
+            sent_frames += 1;
             c.event(Event::ReleaseFrame(release));
+        }
+        if headless
+            && async_at.is_none()
+            && c.inbox.try_wait(Duration::ZERO, &mut answer(22)).is_some()
+        {
+            async_at = Some(asked.elapsed());
         }
         if sync_at.is_none() && c.inbox.try_wait(Duration::ZERO, &mut answer(21)).is_some() {
             sync_at = Some(asked.elapsed());
@@ -806,22 +902,31 @@ fn child_scheduling() {
         sync_at < Duration::from_millis(500),
         "sync answered after {sync_at:?}"
     );
+    if headless {
+        assert!(
+            async_at.is_some(),
+            "foreground async snapshot must not wait on a nonexistent presentation deadline"
+        );
+    }
     assert!(!idle_early, "an idle snapshot ran during playback");
     c.event(Event::Transport(TransportCommand::Pause));
     let result = rendered(c.inbox.wait(Duration::from_secs(5), answer(20)));
-    // Presentation stats reached the session's renderer (at most 2 Hz),
-    // counting the frames it was sent and the snapshots served for it.
-    let stats = c
-        .inbox
-        .wait(Duration::from_secs(5), |port, m| match &m.message {
-            Message::Event {
-                body: Event::RenderStats(s),
-            } if port == WINDOW && s.snapshots.get() >= 1 => Some(s.clone()),
-            _ => None,
-        });
-    assert!(stats.frames.get() >= 2, "{stats:?}");
-    assert!(stats.timed_frames.get() >= 1, "{stats:?}");
-    assert!(stats.frame_us_avg > 0, "{stats:?}");
+    if headless {
+        assert_eq!(sent_frames, 0, "snapshots allocate no presentation frames");
+    } else {
+        // Presentation stats reach a drawing viewer at most twice a second.
+        let stats = c
+            .inbox
+            .wait(Duration::from_secs(5), |port, m| match &m.message {
+                Message::Event {
+                    body: Event::RenderStats(s),
+                } if port == WINDOW && s.snapshots.get() >= 1 => Some(s.clone()),
+                _ => None,
+            });
+        assert!(stats.frames.get() >= 2, "{stats:?}");
+        assert!(stats.timed_frames.get() >= 1, "{stats:?}");
+        assert!(stats.frame_us_avg > 0, "{stats:?}");
+    }
     assert_eq!((result.width, result.height), (160, 90));
     println!("CHILD-OK sync={sync_at:?}");
 }

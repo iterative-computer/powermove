@@ -5,6 +5,8 @@
 //! sRGB display, gamma 1, dither 0, image color management following the
 //! scene, compression 15 (S7's "fast compression"), and metadata stamps off
 //! (S7 defect 7: date and render-time text chunks made files differ). It
+//! preserves PNG8 with dither 1 for `compatibilityLayers` (level 1); the
+//! snapshot and script hashes separate those surfaces from level 2. It
 //! renders the layers a request lists in `outputs` (one invocation per
 //! layer, or every layer of a frame when batching) and records the device
 //! it rendered on. Shading, framing, and texture orientation are today's

@@ -247,15 +247,15 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 
 ## Found along the way
 
-- **Today's still export draws Blender surfaces off by up to a pixel.**
-  Against today's own Blender surfaces of the same frame (recorded at
-  main's IPC) composited per layer, the current exporter's still is 97.7%
-  within 2 CV with a maximum of 207 CV: model edges move by a pixel and
-  read as aliased, while the job engine's still is 100% within 2 CV (the
-  8-bit dither of today's PNGs). Today's worker and the pinned worker
-  cover the same pixels (same bounding boxes; the 16-bit surfaces keep
-  faint edge pixels the 8-bit ones round to 0). Candidate for appendix A;
-  the engine does not reproduce it.
+- **Existing-project alpha upload reproduced (2026-10-18).** The apparent
+  one-pixel offset was not geometry: today's ImageBitmap keeps straight RGB
+  (including RGB under zero alpha), which WebGL blends as premultiplied.
+  Level 1 now reproduces that upload and the Canvas2D alpha-derived crop,
+  plus today's PNG8/dither 1 settings. Level 2 keeps PNG16/dither 0 and the
+  exact premultiplied path. Viewer, snapshots and export use the same source.
+  Against today's capture JPEG and still PNG, each is 100% within 2 CV,
+  max 0 CV in the app e2e. Raw surfaces remain diagnostic for level 1.
+  See RFC 11's `compatibilityLayers` snapshot field and bridge.md round 4.
 
 ## Changes outside the lane's files
 
@@ -321,5 +321,6 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 - **Native-pass limits on Blender compositions**: the static check still
   routes Blender compositions for limits only the native pass has (texture
   maps with transparency, image formats the native pass cannot draw).
-- **Surfaces stay 16-bit PNG** (decision 15); RFC 11 open question 1 (raw
-  or EXR) is unchanged.
+- **Level 2 surfaces stay 16-bit PNG** (decision 15); level 1 retains
+  PNG8/dither 1 for existing-project parity. RFC 11 open question 1 (raw
+  or EXR for level 2) is unchanged.

@@ -63,6 +63,7 @@ fn main() {
     // Fit the composition in the view at DPR 2, as the viewer does.
     let zoom = (f64::from(width) / 2.0 / cw).min(f64::from(height) / 2.0 / ch);
     let state = ViewerState {
+        headless: None,
         composition: composition.as_str().into(),
         size: Size::new(width, height),
         device_pixel_ratio: 2.0,

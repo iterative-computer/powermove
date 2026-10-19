@@ -90,6 +90,23 @@ const emit = (PM: any) => {
   for (const fn of state(PM).listeners) fn(renderState(PM));
   PM.invalidate?.("render");
 };
+/** Mirrors prepareBlenderFrame's controls state while the native engine prepares
+ * an async capture. Pixels and Blender supervision stay in the engine. */
+export async function engineBlenderCapture<T>(PM: any, capture: () => Promise<T>): Promise<T> {
+  const s = state(PM), project = PM.proj;
+  s.busy = true;
+  s.error = null;
+  emit(PM);
+  try {
+    return await capture();
+  } catch (error) {
+    if (PM.proj === project) s.error = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    s.busy = false;
+    emit(PM);
+  }
+}
 export function onRenderState(
   PM: any,
   listener: (value: RenderPreviewState) => void,

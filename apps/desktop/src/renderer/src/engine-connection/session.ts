@@ -103,6 +103,8 @@ export type SessionOptions = {
    * not, so the connection asks for that layout here.
    */
   onLoaded?: () => void;
+  /** Before resyncing a replacement document, preserve its requested UI time. */
+  onLoading?: () => void;
   /** Resync bodies above this are staged as a cache file (bytes). */
   inlineLimit?: number;
   /** Definition snapshots for the session (with "Use New Engine" on). */
@@ -302,6 +304,7 @@ export class DocumentSession {
   private onBatch(batch: StreamBatch): void {
     if (this.closed || this.id === null) return;
     if (batch.origin === 'load') {
+      this.options.onLoading?.();
       const loaded = (): void => {
         if (!this.closed) this.options.onLoaded?.();
       };
@@ -372,6 +375,15 @@ export class DocumentSession {
       case 'clock': {
         const { type: _t, ...sample } = event;
         this.clock = sample as unknown as ClockSample;
+        if (this.headless && message.revision !== null && Number(message.revision) >= this.applied) {
+          // Headless clocks are published only once the engine has the
+          // document/media and accepts transport, tagged with that revision.
+          const revision = Number(message.revision) || 0;
+          if (this.legacyRevision === null || revision > this.legacyRevision) {
+            this.legacyRevision = null;
+            this.setRoute('engine', null);
+          }
+        }
         this.options.onClock?.(this.clock);
         this.options.handlers.message({ type: 'clock', sample: this.clock }, arrivedMs);
         return;
@@ -478,8 +490,26 @@ export class DocumentSession {
   /** The newest viewer state's sequence number sent (`ViewerState.viewSeq`). */
   viewSeq: number | null = null;
 
+  /** A session owns the clock independently of any presentation channel. */
+  headless = false;
+  private lastState: ViewerState | null = null;
+
+  sendHeadless(composition: string): void {
+    this.sendViewerState({
+      size: { width: 1, height: 1 }, devicePixelRatio: 1,
+      zoom: 1, pan: [0, 0], resolution: 'full', media: 'automatic',
+      colorSpace: 'srgb', view: null, playEveryFrame: false, edr: false,
+      ...this.lastState, viewSeq: (this.viewSeq ?? 0) + 1,
+      headless: true, depthId: false,
+      // Always follow the open composition, including a project load.
+      composition
+    });
+  }
+
   sendViewerState(state: ViewerState): void {
     if (this.closed) return;
+    this.lastState = state;
+    this.headless = state.headless === true;
     this.viewSeq = Number(state.viewSeq);
     if (this.id === null || this.resyncing && this.applied === 0) {
       this.pendingState = state;

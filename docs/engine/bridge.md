@@ -1257,6 +1257,82 @@ and `engine-render-transport.spec.ts` (7): 10 of 10.
   GPU work finished: 0 of 25 probe runs (see the lane report for the
   tracer's own first-of-batch runs).
 
+### Round 4: viewerless playback and existing Blender pixels (2026-10-18)
+
+One `DocumentSession` per window now owns transport independently of the
+viewer. `ViewerState.headless` retires presentation pools and depth/ID
+surfaces while retaining pm-audio, its device clock, levels and periodic
+clock messages. Play, seek and captures lazily start this session; readiness
+requires the document/media and a revision-tagged clock, rather than a drawn
+frame. Paused headless document updates publish a new readiness clock too,
+so Play cannot remain held behind an older clock revision. The presenter
+also retains the latest Play/play-around request while media is pending,
+replays it on readiness, and clears it on Pause; a Play that races an import
+is never dropped. Closing a presentation sends headless state; opening it reuses the
+session and epoch without Play or seek. Foreground async snapshots have no
+headless draw deadline to compete with; idle snapshots still wait for playback.
+Removing presentation cancels Blender preview demand while preserving captures
+owned by the retained session.
+Pending loop and scrub settings replay before a cold session's Play. A load
+batch immediately synchronizes the replacement document's requested UI time,
+so a queued home-screen seek cannot survive into a shorter new composition. The
+legacy canvas stays hidden on viewer removal when the service is exclusive.
+
+The app's stock workspace always retains its viewer slot. The headless e2e
+therefore disables the viewer extension, relaunches without it, and enables
+it mid-play. It checks advancing time, nonzero audio levels, seek/reverse,
+work-area looping, zero headless frames, the same session/epoch after joining,
+continuous time, device callbacks, no host-clock fallback, and no page errors.
+The Rust document test also proves no pools or draws before joining.
+
+The apparent Blender geometry offset was the old compositor's alpha upload:
+`createImageBitmap(..., {premultiplyAlpha: 'none'})` preserves straight RGB,
+including RGB under alpha zero, despite WebGL's pixel-store premultiply flag.
+Today blends that upload as premultiplied. Correctly premultiplying removed
+its bright fringe and visibly changed existing projects. Level 1 now retains
+that upload, crop and normalized rectangle plus today's PNG8/dither 1 output;
+level 2 retains PNG16/dither 0 and exact premultiplied E. `compatibilityLayers`
+in the canonical snapshot and the worker-script hash prevent cache mixing.
+Both buffers count against the surface-cache budget. Viewer, capture and
+export share this source path. No case or tolerance was removed or widened.
+
+The real-app capture JPEG and still export each match today's corresponding
+output at **100% within 2 CV, max 0 CV** (192×108, Blender 4.5.14 EEVEE).
+`render.snapshotAsync` and the prepared sync capture also match the async
+capture exactly. Raw surfaces are diagnostic references only for level 1.
+The engine Blender stage took 1,134 ms in the final parity run.
+
+Additional fixes: an undefined font offset is never cached while fonts load;
+Blender preparation gets one total deadline across replans; a missing worker
+always answers with an error; and native async Blender captures mirror today's
+scene3d busy/error state, including clearing busy on failure. These controls
+are covered by focused tests.
+
+The final headless app run recorded 526 device callbacks, peak 0.24994,
+zero frames before opening the viewer, and no host-clock fallback. Joining
+kept the session and epoch; the largest adjacent UI-time step discrepancy was
+37.8 ms (the test bounds it at 80 ms). After closing again, the epoch stayed
+22, frames stayed 14, levels advanced 68 → 76, and the playhead advanced
+300.2 ms during a 300 ms observation.
+
+Final validation (including a serialized native rerun under the Electron lock):
+
+- pm-node: 87 library tests, 3 document integrations and 7 snapshot
+  integrations; ignored child entry points are executed by their parent tests.
+- pm-protocol: 91 library, 2 routing and 11 wire tests; pm-blender: 21 tests.
+- pm-render: 5 compositor tests and the snapshot corpus comparison;
+  pm-export: all 5 Blender export integrations.
+- Vitest: 474 tests in the affected directories; the 64 connection tests
+  were rerun after the final TypeScript changes. Svelte: 0 errors, 1 existing
+  ImageCrop warning. Boundary lint passes. Node tsc passes with composite mode
+  disabled; standard tsc still fails the known T0 TS6307 file-list issue.
+- App: all 10 existing bridge/Blender tests pass, plus the new headless
+  lifecycle test (separate final run). The expanded recovery/tracer/transport
+  batch passed 15 of 17. Its path-mask test expects the legacy canvas to show,
+  contrary to native exclusivity; path masks still need renderer support. Its
+  2× reverse A/V check recorded 14 samples above 10 ms, max 11.8 ms, the
+  previously documented sawtooth. Neither gate was relaxed or marked passing.
+
 ### What remains
 
 - **The job engine's fonts.** Export and agent frames still refuse text:
@@ -1272,32 +1348,17 @@ and `engine-render-transport.spec.ts` (7): 10 of 10.
   `compatFrame`, but pm-render does not draw a layer from them yet and
   pm-export does not ask for them yet; `needsRenderer.compat` is always
   empty (lanes L1, L4, L6).
-- **Today's capture draws Blender surfaces about a pixel off (decision).**
-  The engine's async capture of a Blender composition equals today's own
-  Blender surfaces of the frame composited (100% within 2 CV, max 1 CV),
-  but today's capture itself draws them about a pixel larger with a light
-  edge (against those surfaces: mean 3.58 CV, p99 149 CV; the engine's
-  JPEG against today's JPEG: mean 3.36 CV, p99 130 CV, 93.8% within
-  8 CV). Today's still export does the same (docs/engine/blender.md).
-  Reproducing today's offset or accepting the engine's exact drawing is
-  the orchestrator's call; side by side (outside the repository):
-  `/tmp/ne-bridge-blender/captures/side-by-side-today-surfaces-engine.png`
-  (today's capture, today's surfaces composited, the engine's capture).
 - **Blender frames that cannot be built** (imported models, model-group
   recipe parts: the snapshot builder's refusals that exports route) fail
   an async capture with `unsupported`, where today's capture has Blender
   convert and render them (3D lane).
-- **Playback with no viewer session.** The engine transport is exclusive
-  with the flag on: with no viewer session open (the viewer panel
-  closed), Play is held until a viewer session draws, so the playhead does
-  not move and no audio plays; today's playback runs with the viewer
-  closed. The engine needs a session that plays without a view (a
-  headless clock and audio) to match it.
 - **What the engine still refuses** (masks the renderer cannot draw yet,
   and the other `pm_render::unsupported` reasons) fails a snapshot with
-  the engine's reasons, while the viewer still routes such compositions to
-  the current engine (capability routing, the derouter lane's). L1 closes
-  the reasons.
+  the engine's reasons. The `legacy` routing label remains development
+  scaffolding, but an exclusive viewer keeps the legacy canvas hidden and
+  shows failure instead of falling back. L1 must implement the remaining
+  features and the derouter lane must remove that scaffolding; these projects
+  remain cutover blockers.
 - **Performance panel.** `FX passes` reads 0 (the engine counts no effect
   passes) and `GL draws` shows the layers the engine drew (not WebGL draw
   calls).
@@ -1308,9 +1369,9 @@ and `engine-render-transport.spec.ts` (7): 10 of 10.
   bridge: the 3D lane's chrome sets `ViewParams.depthId` and samples it.
 - **Old custom viewers** are covered by unit tests of the binding; no e2e
   loads a frozen viewer fork yet (the extcompat lane's fork corpus).
-- Capability routing (`routed`) still hands the stage, transport, and audio
-  back: it is development scaffolding the derouter lane removes; crashes,
-  GPU loss, and cold starts no longer do.
+- Capability routing (`routed`) remains in the document/presentation
+  scaffolding for the derouter lane to remove. With the flag on, transport
+  and audio remain exclusive to the native engine through these failures.
 
 ## Gaps and next steps
 

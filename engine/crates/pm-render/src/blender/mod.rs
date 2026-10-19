@@ -100,6 +100,7 @@ impl PartialEq for BlenderRender {
 #[derive(Clone)]
 pub struct BlenderSource {
     pub layer: String,
+    pub compatibility: bool,
     pub surface: Arc<DecodedSurface>,
 }
 
@@ -115,7 +116,9 @@ impl std::fmt::Debug for BlenderSource {
 
 impl PartialEq for BlenderSource {
     fn eq(&self, other: &Self) -> bool {
-        self.layer == other.layer && Arc::ptr_eq(&self.surface, &other.surface)
+        self.layer == other.layer
+            && self.compatibility == other.compatibility
+            && Arc::ptr_eq(&self.surface, &other.surface)
     }
 }
 
@@ -212,12 +215,25 @@ fn frame_of(
     }
 }
 
-fn draw(layer: &str, surface: Arc<DecodedSurface>, width: u32, height: u32) -> Planned {
-    let r = surface.rect();
+fn draw(
+    layer: &str,
+    surface: Arc<DecodedSurface>,
+    width: u32,
+    height: u32,
+    compatibility: bool,
+) -> Planned {
+    let crop = gpu::crop(&surface, compatibility);
+    let r = [
+        f64::from(crop.x) / f64::from(surface.size.width),
+        f64::from(crop.y) / f64::from(surface.size.height),
+        f64::from(crop.width) / f64::from(surface.size.width),
+        f64::from(crop.height) / f64::from(surface.size.height),
+    ];
     let (w, h) = (f64::from(width), f64::from(height));
     Planned::Draw(
         BlenderSource {
             layer: layer.to_owned(),
+            compatibility,
             surface,
         },
         [r[0] * w, r[1] * h, r[2] * w, r[3] * h],
@@ -243,6 +259,8 @@ pub(crate) fn plan_object<'d>(
     let comp_id = scope.comp.id().to_string_lossy();
     let enabled = blender_enabled(scope.comp);
     let id = js::layer_id(layer);
+    let level2 = pm_eval::node::to_number(pm_eval::node::member(Some(layer), "compat")) >= 2.0;
+    let compatibility = !level2;
     if let Some(collect) = &state.collect {
         let preview = collect.preview;
         if !(enabled || preview) || (preview && in_samples) {
@@ -273,7 +291,7 @@ pub(crate) fn plan_object<'d>(
             }
             let key = frame_of(state, &comp_id, time, width, height, false).lookup();
             Ok(Some(match surfaces.get(&key).and_then(|f| f.get(&id)) {
-                Some(s) => draw(&id, s.clone(), width, height),
+                Some(s) => draw(&id, s.clone(), width, height, compatibility),
                 None => Planned::Fail(NOT_PREPARED.to_owned()),
             }))
         }
@@ -301,7 +319,7 @@ pub(crate) fn plan_object<'d>(
             };
             Ok(snapshot
                 .and_then(|s| host.lookup(&s, &id))
-                .map(|surface| draw(&id, surface, width, height)))
+                .map(|surface| draw(&id, surface, width, height, compatibility)))
         }
     }
 }

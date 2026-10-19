@@ -522,6 +522,8 @@ struct View {
     /// µs after which it starts on the host clock instead, and the audio
     /// epoch that was current when it was asked (not the answer).
     awaiting: Option<(i64, Option<u32>, PlaybackRateValue)>,
+    /// Latest Play intent while the document or media is not ready.
+    deferred_transport: Option<TransportCommand>,
     /// The audio clock version last followed.
     audio_version: u64,
     /// Paused after a `seek {scrub}`: frames may show stand-ins for video
@@ -1215,6 +1217,11 @@ impl Thread {
         self.refresh_timing(key);
         if let Some(view) = self.views.get_mut(&key) {
             view.dirty = true;
+            // A paused headless session has no frame to announce this
+            // revision. Refresh its readiness clock after every update.
+            if view.state.headless == Some(true) {
+                view.sample_due = true;
+            }
             // Frames already rendered ahead show the older revision.
             if view.clock.is_playing() {
                 view.schedule.invalidate();
@@ -1284,13 +1291,16 @@ impl Thread {
         }
         match command {
             TransportCommand::Play { rate } => {
+                if view.reported != Some(Route::Engine) {
+                    if !matches!(view.reported, Some(Route::Legacy(_))) {
+                        view.deferred_transport = Some(TransportCommand::Play { rate });
+                    }
+                    return;
+                }
+                view.deferred_transport = None;
                 if view.awaiting.is_some_and(|a| a.2 == rate)
                     || (view.clock.is_playing() && view.clock.rate() == rate)
                 {
-                    return;
-                }
-                // Routed to the legacy viewer: the legacy transport plays.
-                if view.reported != Some(Route::Engine) {
                     return;
                 }
                 let from = view.clock.media_at(at);
@@ -1330,8 +1340,15 @@ impl Thread {
                 post_roll,
             } => {
                 if view.reported != Some(Route::Engine) {
+                    if !matches!(view.reported, Some(Route::Legacy(_))) {
+                        view.deferred_transport = Some(TransportCommand::PlayAround {
+                            pre_roll,
+                            post_roll,
+                        });
+                    }
                     return;
                 }
+                view.deferred_transport = None;
                 let here = view.clock.media_at(at);
                 if !host_clock && self.audio_for(key).is_some() {
                     let audio = &self.audio[&key];
@@ -1360,6 +1377,7 @@ impl Thread {
                 }
             }
             TransportCommand::Pause => {
+                view.deferred_transport = None;
                 view.awaiting = None;
                 if view.clock.apply(TransportCommand::Pause, at) {
                     view.schedule.reset();
@@ -1670,6 +1688,7 @@ impl Thread {
             reported: None,
             layer_reports: Default::default(),
             awaiting: None,
+            deferred_transport: None,
             audio_version: 0,
             scrub: false,
             stand_in: None,
@@ -1717,6 +1736,22 @@ impl Thread {
             self.refresh_timing(key);
         }
         self.warm_audio(key);
+        if self.views[&key].state.headless == Some(true) {
+            if let Some(blender) = &self.blender {
+                // Presentation leaves; captures still belong to this session.
+                blender.submit(key, None, self.views[&key].revision, None);
+            }
+            if let Some(old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
+                self.retire_pool(key, old);
+            }
+            self.configure_depth(key, None);
+            let view = self.views.get_mut(&key).expect("configured");
+            view.retry = None;
+            view.stand_in = None;
+            view.schedule.reset();
+            view.sample_due = true;
+            return;
+        }
         let Some(spec) = pool else {
             return;
         };
@@ -2159,7 +2194,11 @@ impl Thread {
             if let Some(at) = view.retry.and_then(|r| r.at) {
                 wake = wake.min(at);
             }
-            if view.dirty || !view.requests.is_empty() || view.sample_due {
+            if (view.dirty && view.state.headless != Some(true))
+                || !view.requests.is_empty()
+                || (view.sample_due
+                    && (view.state.headless != Some(true) || view.reported == Some(Route::Engine)))
+            {
                 return Duration::ZERO;
             }
             if view.stand_in.is_some() {
@@ -2179,6 +2218,9 @@ impl Thread {
             if view.clock.is_playing() {
                 let sample_at = view.last_sample.unwrap_or(now) + SAMPLE_INTERVAL_US;
                 wake = wake.min(sample_at);
+                if view.state.headless == Some(true) {
+                    continue;
+                }
                 let mut schedule = view.schedule.clone();
                 let phase = Self::phase(&self.config, &view.state);
                 match schedule.next_in_phase(&view.clock, now, self.config.lead, phase) {
@@ -2359,13 +2401,23 @@ impl Thread {
         if changed {
             view.reported = Some(route.clone());
             match &route {
-                Route::Engine => view.dirty = true,
+                Route::Engine => {
+                    view.dirty = true;
+                    view.sample_due = true;
+                }
                 Route::Legacy(_) | Route::Pending(_) => {
                     stop = view.clock.is_playing() || view.awaiting.is_some();
                 }
             }
         }
         if stop {
+            if matches!(route, Route::Pending(_)) {
+                let rate = view.awaiting.map_or(view.clock.rate(), |a| a.2);
+                view.deferred_transport
+                    .get_or_insert(TransportCommand::Play { rate });
+            } else {
+                view.deferred_transport = None;
+            }
             view.awaiting = None;
             view.clock.apply(TransportCommand::Pause, t);
             view.schedule.reset();
@@ -2396,6 +2448,15 @@ impl Thread {
             }
             if let Route::Legacy(reasons) = &route {
                 self.report_legacy(key, reasons);
+            }
+        }
+        if route == Route::Engine {
+            let deferred = self
+                .views
+                .get_mut(&key)
+                .and_then(|v| v.deferred_transport.take());
+            if let Some(command) = deferred {
+                self.transport(key, command, t);
             }
         }
         if let Some(link) = self.audio.get(&key) {
@@ -2443,11 +2504,17 @@ impl Thread {
                 && view
                     .last_sample
                     .is_none_or(|last| t - last >= SAMPLE_INTERVAL_US);
-            if view.sample_due || periodic {
+            if (view.sample_due || periodic) && (!view.state.headless.is_some_and(|h| h) || draws) {
                 view.sample_due = false;
                 view.last_sample = Some(t);
                 let sample = view.clock.sample(t);
-                self.event(key, Event::Clock(sample), None);
+                let revision = view
+                    .state
+                    .headless
+                    .filter(|h| *h)
+                    .and_then(|_| self.docs.get(&key))
+                    .and_then(|doc| Revision::new(doc.revision()).ok());
+                self.event(key, Event::Clock(sample), revision);
             }
         }
         if !draws {
@@ -2464,6 +2531,32 @@ impl Thread {
                     "The current engine draws this composition.",
                 );
             }
+            return;
+        }
+        // Headless sessions follow the device and publish clock/levels and
+        // stats, but allocate and render no presentation frame. Offscreen
+        // callers use snapshots; a frame request needs an attached viewer.
+        if self
+            .views
+            .get(&key)
+            .is_some_and(|v| v.state.headless == Some(true))
+        {
+            while let Some((id, _, _)) = self
+                .views
+                .get_mut(&key)
+                .and_then(|v| v.requests.pop_front())
+            {
+                self.error(
+                    key,
+                    id,
+                    ErrorCode::Unsupported,
+                    "Attach a viewer before requesting a presentation frame.",
+                );
+            }
+            if let Some(view) = self.views.get_mut(&key) {
+                view.dirty = false;
+            }
+            self.send_stats(key);
             return;
         }
         // Frame requests (viewer and scrub): shown at the next refresh.
@@ -3153,6 +3246,11 @@ impl Thread {
                 continue;
             }
             pressure.playing = true;
+            // Headless transport has no presentation deadline to compete with
+            // foreground captures. Idle captures still wait for playback.
+            if view.state.headless == Some(true) {
+                continue;
+            }
             let mut schedule = view.schedule.clone();
             let phase = Self::phase(&self.config, &view.state);
             let due = match schedule.next_in_phase(&view.clock, now, self.config.lead, phase) {
@@ -3306,24 +3404,33 @@ impl Thread {
             video_end: pm_render::VideoEnd::of(purpose),
         };
         if needs_blender {
-            match blender_frames(
-                renderer,
-                doc,
-                &job,
-                &request,
-                self.blender.as_deref(),
-            ) {
+            match blender_frames(renderer, doc, &job, &request, self.blender.as_deref()) {
                 BlenderFrames::Draw(surfaces) => {
                     request.blender = pm_render::blender::BlenderRender::Final(surfaces);
                 }
                 BlenderFrames::Prepare(snapshots) => {
                     let Some(blender) = self.blender.clone() else {
+                        self.stats().snapshot_failures += 1;
+                        self.snapshot_error(
+                            &job,
+                            ErrorCode::BlenderFailed,
+                            "The Blender capture worker is unavailable.",
+                        );
                         return;
                     };
                     self.blender_token += 1;
                     let token = self.blender_token;
                     let mut job = job;
                     job.start_blender(token, now());
+                    if job.expires_at() <= now() {
+                        self.stats().snapshot_failures += 1;
+                        self.snapshot_error(
+                            &job,
+                            ErrorCode::Timeout,
+                            "The Blender capture exceeded its time limit.",
+                        );
+                        return;
+                    }
                     blender.capture(token, job.key, snapshots);
                     self.stats().snapshot_blender += 1;
                     self.snapshots.requeue(job);
@@ -3810,7 +3917,9 @@ fn blender_frames(
     let hashes: Vec<[u8; 32]> = snaps.snapshots.iter().map(|s| s.hash().0).collect();
     let own = match &job.blender {
         Some(BlenderPrep::Ready(frames))
-            if hashes.iter().all(|h| frames.iter().any(|(fh, _, _)| fh == h)) =>
+            if hashes
+                .iter()
+                .all(|h| frames.iter().any(|(fh, _, _)| fh == h)) =>
         {
             Some(frames.clone())
         }
