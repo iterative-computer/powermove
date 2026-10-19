@@ -41,6 +41,14 @@ const HOST_ROUNDS: usize = 1024;
 /// Attempts a fallback host gets at a request that fails transiently.
 const HOST_ATTEMPTS: u32 = 3;
 
+/// Answers a fallback host may give that the program is still compiling
+/// (`deadline`: the runner keeps the compile going, and the request waits
+/// for the same compile again) before they count as attempts. Each answer
+/// waits the runner's compile deadline (10 s), so a job waits about ten
+/// minutes for a program WebGL takes long to compile, as today's exporter
+/// waits for its compile; one the driver never finishes still stops the
+/// job with an error naming the program.
+pub const HOST_COMPILE_WAITS: u32 = 60;
 
 /// Whether a frame's `rounds`-th round through a fallback host makes
 /// progress: it asks for at least one request not asked before in the
@@ -639,9 +647,10 @@ impl Renderer {
     }
 
     /// Runs requests through a fallback host and stores what it answers.
-    /// A transient failure (the runner's context was lost, its compile
-    /// deadline passed, no runner answered) is tried again in place, up to
-    /// [`HOST_ATTEMPTS`] times, before it is stored
+    /// A transient failure (the runner's context was lost, no runner
+    /// answered) is tried again in place, up to [`HOST_ATTEMPTS`] times; a
+    /// program still compiling (`deadline`) is waited for again first, up to
+    /// [`HOST_COMPILE_WAITS`] times. Then the failure is stored
     /// ([`Renderer::put_fallback_failure`]); the frame drawn again then
     /// stops a job with an error naming the program, so nothing is
     /// delivered without a program WebGL draws today. Each frame of a job
@@ -659,8 +668,8 @@ impl Renderer {
                 textures,
             };
             let mut attempt = 0;
+            let mut waits = 0;
             let failure = loop {
-                attempt += 1;
                 let failure = match host.run(&job) {
                     Ok(pixels) if pixels.fits(&job.request) => {
                         self.put_fallback_pixels(key.clone(), pixels);
@@ -675,13 +684,25 @@ impl Renderer {
                     },
                     Err(failure) => failure,
                 };
+                if failure.reason == "deadline" && waits < HOST_COMPILE_WAITS {
+                    waits += 1;
+                    continue;
+                }
+                attempt += 1;
                 if failure.is_final() || attempt >= HOST_ATTEMPTS {
                     break Some(failure);
                 }
             };
             if let Some(mut failure) = failure {
                 if !failure.is_final() {
-                    failure.message = format!("{} (after {attempt} attempts)", failure.message);
+                    failure.message = if waits > 0 {
+                        format!(
+                            "{} (after {attempt} attempts and {waits} waits for its compile)",
+                            failure.message
+                        )
+                    } else {
+                        format!("{} (after {attempt} attempts)", failure.message)
+                    };
                 }
                 self.put_fallback_failure(&key, failure);
             }

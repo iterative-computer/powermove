@@ -556,6 +556,55 @@ fn a_job_tries_a_lost_context_again_and_draws_the_program() {
     assert!(job.watchdog_reports(true).is_empty());
 }
 
+fn still_compiling() -> FallbackFailure {
+    FallbackFailure {
+        reason: "deadline".into(),
+        message: "the program has not finished compiling after 10 s; it is still compiling and is drawn once it has".into(),
+    }
+}
+
+#[test]
+fn a_job_waits_for_a_program_webgl_takes_long_to_compile() {
+    // Today's exporter waits for the compile: a job does too, past the
+    // attempts a lost context gets (each answer is one 10 s deadline).
+    let _gpu = gpu();
+    let doc = stack(fx("acme.cube-invert"), Value::Null);
+    let mut expected_r = renderer();
+    expected_r.effects_mut().watchdog.set_policy(Policy::Job);
+    expected_r.set_fallback_host(Some(Arc::new(Cpu::default())));
+    let expected = render(&mut expected_r, &doc).unwrap();
+    let mut job = renderer();
+    job.effects_mut().watchdog.set_policy(Policy::Job);
+    let host = Arc::new(Cpu::default());
+    *host.fail.lock().unwrap() = Some(still_compiling());
+    *host.fail_times.lock().unwrap() = Some(12);
+    job.set_fallback_host(Some(host.clone()));
+    assert_eq!(render(&mut job, &doc).unwrap(), expected);
+    assert_eq!(host.seen.lock().unwrap().len(), 13);
+}
+
+#[test]
+fn a_job_whose_program_never_finishes_compiling_stops_naming_it() {
+    let _gpu = gpu();
+    let doc = stack(fx("acme.cube-invert"), Value::Null);
+    let mut job = renderer();
+    job.effects_mut().watchdog.set_policy(Policy::Job);
+    let host = Arc::new(Cpu::default());
+    *host.fail.lock().unwrap() = Some(still_compiling());
+    job.set_fallback_host(Some(host.clone()));
+    match render(&mut job, &doc) {
+        Err(RenderError::Fallback(m)) => assert!(
+            m.contains("acme.cube-invert") && m.contains("still compiling") && m.contains("60 waits for its compile"),
+            "{m}"
+        ),
+        other => panic!("expected a named failure, got {:?}", other.map(|_| ())),
+    }
+    assert_eq!(
+        host.seen.lock().unwrap().len() as u32,
+        pm_render::HOST_COMPILE_WAITS + 3
+    );
+}
+
 #[test]
 fn a_job_whose_runner_keeps_losing_its_context_stops_naming_the_program() {
     let _gpu = gpu();

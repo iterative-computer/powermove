@@ -59,8 +59,8 @@ pub use capability::{
 pub use effects::{Effects, builtin_definitions};
 pub use error::{LayerFailure, RenderError};
 pub use renderer::{
-    CommandBracket, Frame, LayerPixels, LayerQuad, LayerRaster, PassThrough, Rendered, Renderer,
-    TextRaster,
+    CommandBracket, Frame, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster, PassThrough,
+    Rendered, Renderer, TextRaster,
 };
 pub use request::{RenderRequest, VideoEnd};
 pub use shader_layers::all_builtin_definitions;
