@@ -171,6 +171,7 @@ export class ViewerPresentation {
   /** The CSS size the engine last got, and the pending settle. */
   private appliedSize: { width: number; height: number } | null = null;
   private settleTimer = 0;
+  private pendingSize: { width: number; height: number } | null = null;
   private settleDue = false;
   /** The display's refresh grid, sent with every state (amendment 18). */
   private vsync: VsyncHint | null = null;
@@ -296,10 +297,16 @@ export class ViewerPresentation {
       this.settleDue = false;
       if (this.settleTimer) this.clearTimer(view, this.settleTimer);
       this.settleTimer = 0;
+      this.pendingSize = null;
       this.appliedSize = { width, height };
       return this.appliedSize;
     }
+    // Param/overlay updates repeat during playback. They do not mean the
+    // stage resized again: extending this deadline on every repeat can leave
+    // the old pool alive for seconds, then reallocate it in steady playback.
+    if (this.settleTimer && this.pendingSize?.width === width && this.pendingSize.height === height) return applied;
     if (this.settleTimer) this.clearTimer(view, this.settleTimer);
+    this.pendingSize = { width, height };
     const fire = (): void => {
       this.settleTimer = 0;
       this.settleDue = true;
@@ -337,6 +344,14 @@ export class ViewerPresentation {
     const view = this.options.stage.ownerDocument.defaultView;
     if (!view || view === this.host) return view;
     const moved = this.host !== null;
+    if (this.host) {
+      // A popout owns a different timer queue; closing the old host cancels
+      // its timer, so a pending size must start a fresh deadline here.
+      if (this.settleTimer) this.clearTimer(this.host, this.settleTimer);
+      this.settleTimer = 0;
+      this.pendingSize = null;
+      this.settleDue = false;
+    }
     this.host = view;
     for (const off of this.mediaOffs.splice(0)) off();
     const refresh = (): void => {

@@ -399,6 +399,54 @@ describe('ViewerPresentation', () => {
     presentation.dispose();
   });
 
+  it('settles a stable pending size while repeated playback updates continue', async () => {
+    const service = new Service();
+    const { stage } = stageIn(window as unknown as Window);
+    const timers: { fn: () => void; live: boolean }[] = [];
+    const presentation = new ViewerPresentation({ service, stage, createPainter: async () => new Painter(), timers: {
+      set: (fn) => timers.push({ fn, live: true }), clear: (id) => { timers[id-1]!.live = false; }
+    } });
+    await settle();
+    presentation.update(PARAMS, { width: 640, height: 360 });
+    stage.getBoundingClientRect = () => ({ width: 960, height: 540 }) as DOMRect;
+    presentation.update(PARAMS);
+    // The same 150ms pending size must not be postponed every animation frame.
+    for (let frame = 0; frame < 120; frame++) presentation.update(PARAMS);
+    expect(timers).toHaveLength(1);
+    timers[0]!.fn();
+    const channel = service.channels[0]!;
+    expect(channel.states.at(-1)!.size).toEqual({ width: 1920, height: 1080 });
+    const stable = channel.states.at(-1)!.viewSeq;
+    for (let frame = 0; frame < 120; frame++) presentation.update(PARAMS);
+    expect(channel.states.at(-1)!.viewSeq).toBe(stable);
+    expect(channel.states).toHaveLength(2);
+    presentation.dispose();
+  });
+
+  it('starts a pending resize deadline again when its stage moves to another window', async () => {
+    const service = new Service();
+    const { stage } = stageIn(window as unknown as Window);
+    const timers: { fn: () => void; live: boolean }[] = [];
+    const presentation = new ViewerPresentation({ service, stage, createPainter: async () => new Painter(), timers: {
+      set: (fn) => timers.push({ fn, live: true }), clear: (id) => { timers[id-1]!.live = false; }
+    } });
+    await settle();
+    presentation.update(PARAMS, { width: 640, height: 360 });
+    stage.getBoundingClientRect = () => ({width:960,height:540}) as DOMRect;
+    presentation.update(PARAMS);
+    const popout = new HappyWindow() as unknown as Window;
+    stageIn(popout);
+    popout.document.body.appendChild(stage);
+    presentation.update(PARAMS);
+    expect(timers).toHaveLength(2);
+    expect(timers[0]!.live).toBe(false);
+    expect(timers[1]!.live).toBe(true);
+    timers[1]!.fn();
+    expect(service.channels[0]!.states.at(-1)!.size).toEqual({width:1920,height:1080});
+    presentation.dispose();
+    await (popout as unknown as HappyWindow).happyDOM.close();
+  });
+
   it('presents from a worker when the viewer can start one: frames, tags, releases, and teardown', async () => {
     const service = new Service();
     const { stage, overlay } = stageIn(window as unknown as Window);
