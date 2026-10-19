@@ -181,7 +181,7 @@ const content = (page: Page) => page.evaluate(() => {
 async function capture(session: LaunchedApp, view: View, engine: boolean): Promise<Capture> {
   const { page } = session;
   await page.locator('select[aria-label="Preview resolution"]').selectOption(view.resolution);
-  const geometry = await page.evaluate(({ zoom, pan }) => {
+  const geometry = await page.evaluate(({ zoom, pan, engine }) => {
     const PM = (window as any).PM, V = PM.Kernel.services.get('viewer');
     PM.selectLayers?.([]);
     V.setZoom(zoom);
@@ -192,7 +192,7 @@ async function capture(session: LaunchedApp, view: View, engine: boolean): Promi
     const viewport = PM.GL.previewViewport;
     return { shown: V.shown, pan: [...V.pan], stage: [V._sw, V._sh], dpr: window.devicePixelRatio, quality: PM.quality, resolution: PM.previewResolution,
       ...(engine ? {} : { crop: viewport ? [viewport.x, viewport.y, viewport.width, viewport.height, viewport.renderWidth, viewport.renderHeight] : null }) };
-  }, { zoom: view.zoom, pan: view.pan });
+  }, { zoom: view.zoom, pan: view.pan, engine });
   // Settled: today's frame drawn (video decoded) or the engine's frame for
   // this view on screen, then nothing new for half a second.
   await page.waitForTimeout(800);
