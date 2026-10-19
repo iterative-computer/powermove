@@ -771,7 +771,7 @@ const commitPendingResize = () => {
      wasted main-thread work, all of it inside live resizes (3.3 s of a
      60 s profiled run with the corpus project). The size waits here and is
      committed once the engine stops presenting. */
-  if (enginePresentation?.presenting) return;
+  if (disposed || enginePresentation?.presenting) return;
   const pending = pendingResize; pendingResize = null;
   if (pending) api.render.gl.resize(pending.width, pending.height, pending.viewport);
 };
@@ -995,7 +995,11 @@ V.attach = (stage: HTMLElement) => {
 V.layout = (panOnly = false, gesture = panOnly === true) => {
   const now = window.performance.now();
   if (gesture) { navigationUntil = now + 250; zoomGestureUntil = now + 100; }
-  if (!V.el || !V.stage) return;
+  // A layout queued before this runtime was disposed (the animation frame
+  // attach schedules) must not size the compositor's canvas afterwards: with
+  // the engine on, that resize would bind engine presentation to a canvas
+  // whose viewer is gone (canvas-binding.ts).
+  if (disposed || !V.el || !V.stage) return;
   const gl = V.el as HTMLCanvasElement;
   const p = api.project.get();
   const r = gesture && stageGeometry ? stageGeometry : V.stage.getBoundingClientRect();
