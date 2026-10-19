@@ -75,13 +75,12 @@ pub fn world_aim(edit: &mut Edit<'_>, layer: usize, time: f64) -> JsResult<Optio
 ///
 /// A camera or light whose new parent space reads its own transform (it is
 /// reparented onto a member of a group that is itself parented to the
-/// camera: `PM.wouldCycle` checks group ancestors only for groups) is left
-/// to the legacy edit ([`crate::LEGACY_ONLY`]). There the legacy aim reads
-/// the layer's keyframed channels through the evaluation cache the pose
-/// write left stale (`preserveParentPose` writes the pose and reads
-/// `parent3D` without `PM.touch()`), a mix of old and new values no
-/// document-only kernel can reproduce, and the pose cannot be preserved in
-/// such a space anyway.
+/// camera: `PM.wouldCycle` checks group ancestors only for groups) gets the
+/// legacy aim exactly: `preserveParentPose` writes the pose and then reads
+/// `parent3D` without `PM.touch()`, so that read sees the layer's channels
+/// as `anim.ts` caches them within one touch version
+/// ([`stale_keyed_channels`]): a keyed channel answers its value from before
+/// the pose write, a static value or a rewritten expression its value after.
 pub fn reparent(
     edit: &mut Edit<'_>,
     layer: usize,
@@ -89,25 +88,111 @@ pub fn reparent(
     time: f64,
 ) -> JsResult<()> {
     let aim = world_aim(edit, layer, time)?;
-    if aim.is_some()
+    let self_space = aim.is_some()
         && edit.read(|s| {
             let l = layer_at(s, layer)?;
             let p = parent.and_then(|i| s.layers().get(i));
             space_reads_layer(s, l, p)
-        })?
-    {
-        return Err(crate::legacy_only(
-            "Reparenting a camera or light into a space that moves with it",
-        ));
-    }
+        })?;
+    let stale = if self_space {
+        stale_keyed_channels(edit, layer, time)?
+    } else {
+        Vec::new()
+    };
     let world = world_pose(edit, layer, time)?;
     preserve_world_pose(edit, layer, world, time, ParentArg::Layer(parent))?;
-    let parent3 = edit.read(|s| {
-        let l = layer_at(s, layer)?;
-        let p = parent.and_then(|i| s.layers().get(i));
-        s.parent3d(l, time, Some(p))
-    })?;
+    let read_parent3 = |edit: &mut Edit<'_>| {
+        edit.read(|s| {
+            let l = layer_at(s, layer)?;
+            let p = parent.and_then(|i| s.layers().get(i));
+            s.parent3d(l, time, Some(p))
+        })
+    };
+    let parent3 = if stale.is_empty() {
+        read_parent3(edit)?
+    } else {
+        // The keyed channels read as the cache has them (their keys from
+        // before the pose write), then the written keys come back.
+        let base = edit.layer_path(layer);
+        let path =
+            |k: &pm_model::JsString| join(&base, &[key("p"), PathPart::Key(k.clone()), key("kf")]);
+        let written: Vec<Patch> = stale
+            .iter()
+            .map(|(k, _)| {
+                let now = edit.node(&path(k)).map(Node::to_value);
+                Patch {
+                    path: path(k),
+                    exists: now.is_some(),
+                    value: now,
+                }
+            })
+            .collect();
+        edit.write(
+            stale
+                .iter()
+                .map(|(k, before)| Patch::set(path(k), before.clone()))
+                .collect(),
+        )?;
+        let parent3 = read_parent3(edit);
+        edit.write(written)?;
+        parent3?
+    };
     preserve_world_aim(edit, layer, aim, time, Some(parent3))
+}
+
+/// The layer's channels whose value `anim.ts` would answer from its
+/// evaluation cache after a write without `PM.touch()`, with their keys as
+/// they are now (before the write). `applyPoseValues` evaluates each channel
+/// it writes at `time` just before writing it, so `temporalEvaluate`'s state
+/// for the current touch version holds that value (`evaluatedTime`) and the
+/// keys' values (`values`, copied when the version first evaluated them,
+/// before any write of that version: every edit ends with `PM.touch()`).
+/// That cache is used for a channel `PM.ev` evaluates with `evalKfs` (no
+/// expression, a non-empty `kf`) at a finite layer-local time
+/// (`time - layer.from`) when its first and last keys hold numbers. Static
+/// values, expressions, and keys with other values read the document.
+fn stale_keyed_channels(
+    edit: &mut Edit<'_>,
+    layer: usize,
+    time: f64,
+) -> JsResult<Vec<(pm_model::JsString, pm_model::Value)>> {
+    let Some(l) = edit.layer(layer) else {
+        return Ok(Vec::new());
+    };
+    let local = js_sem::sub(&JsValue::Number(time), &node::get(l, b"from").to_js());
+    if !local.is_finite() {
+        return Ok(Vec::new());
+    }
+    let p = node::get(l, b"p");
+    let Some(pm_model::NodeKind::Object(members)) = p.node().map(Node::kind) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for (k, prop) in members.iter() {
+        if !matches!(prop.kind(), pm_model::NodeKind::Object(_))
+            || node::get(prop, b"expr").truthy()
+        {
+            continue;
+        }
+        let kf = node::get(prop, b"kf");
+        let Some(pm_model::NodeKind::Array(keys)) = kf.node().map(Node::kind) else {
+            continue;
+        };
+        let number = |k: &Node| {
+            matches!(
+                node::get(k, b"v").node().map(Node::kind),
+                Some(pm_model::NodeKind::Number(_))
+            )
+        };
+        if keys.is_empty() || !number(&keys[0]) || !number(&keys[keys.len() - 1]) {
+            continue;
+        }
+        out.push((
+            k.clone(),
+            kf.node().expect("an array member is a node").to_value(),
+        ));
+    }
+    Ok(out)
 }
 
 /// Whether `parent3D(PM, layer, time, parent)` multiplies in `layer`'s own

@@ -1,6 +1,9 @@
 # RFC 15: The headless document host interface
 
-Status: draft, version 0. Module: `pm_protocol::document_host`. Gates
+Status: the TypeScript worker interface is frozen at version 1
+(`apps/desktop/src/engine/document-host/protocol.ts`, docs/engine/document-host.md,
+2026-10-18); the Rust types below are its wire description. Open question 1 is
+decided: one child process per project. Module: `pm_protocol::document_host`. Gates
 Phase 2 (drafted with the rest); freezes when Phase 3c starts, when the
 hidden MCP host moves onto it. Owners: Renderer write path (the headless
 document host and its per-project instances, section 27), with Export and

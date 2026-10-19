@@ -64,6 +64,7 @@ export interface NativeFontRegistry {
   clearProjectFonts(): void;
   answer(queries: string): string;
   subset(blob: string, index: number): Uint8Array;
+  whole?(blob: string, index: number): Uint8Array;
 }
 
 type MaybePromise<T> = T | Promise<T>;
@@ -213,18 +214,18 @@ export function registerEngineFontsIpc(ipc: IpcLike, ctx: EngineFontsContext, so
   handle(ENGINE_FONTS_IPC.subset, (_, blob, index) => (typeof blob === 'string' && BLOB_KEY.test(blob) && isIndex(index) ? run(() => provider.subset(blob, index)) : invalid('subset key')));
   handle(ENGINE_FONTS_IPC.manifest, (_, base) => (isText(base, ENGINE_FONTS_LIMITS.familyChars) ? run(() => provider.manifest(base)) : invalid('family')));
   handle(ENGINE_FONTS_IPC.familyFaces, (_, family) => (isText(family, ENGINE_FONTS_LIMITS.familyChars) ? run(() => provider.familyFaces(family)) : invalid('family')));
-  handle(ENGINE_FONTS_IPC.addProjectFont, (_, family, data, desc, index) => {
+  handle(ENGINE_FONTS_IPC.addProjectFont, (senderId, family, data, desc, index) => {
     const bytes = fontBytes(data);
     const d = descriptors(desc);
     if (!isText(family, ENGINE_FONTS_LIMITS.familyChars) || !bytes || !d || (index !== undefined && !isIndex(index))) return invalid('project font');
-    return run(() => provider.addProjectFont(family, bytes, d, index as number | undefined));
+    return run(() => { syncRegistry.get(ipc)?.(senderId)?.addProjectFont(family, bytes, d, index as number | undefined); return provider.addProjectFont(family, bytes, d, index as number | undefined); });
   });
-  handle(ENGINE_FONTS_IPC.setFontSource, (_, family, data) => {
+  handle(ENGINE_FONTS_IPC.setFontSource, (senderId, family, data) => {
     const bytes = fontBytes(data);
     if (!isText(family, ENGINE_FONTS_LIMITS.familyChars) || !bytes) return invalid('font source');
-    return run(() => provider.setFontSource(family, bytes));
+    return run(() => { syncRegistry.get(ipc)?.(senderId)?.setFontSource(family, bytes); return provider.setFontSource(family, bytes); });
   });
-  handle(ENGINE_FONTS_IPC.clearProjectFonts, () => run(() => provider.clearProjectFonts()));
+  handle(ENGINE_FONTS_IPC.clearProjectFonts, (senderId) => run(() => { syncRegistry.get(ipc)?.(senderId)?.clearProjectFonts(); return provider.clearProjectFonts(); }));
   handle(ENGINE_FONTS_IPC.generation, () => run(() => provider.generation()));
   handle(ENGINE_FONTS_IPC.seeds, (sender) => run(() => ctx.seedsFor?.(sender) ?? '{"seeds":[]}'));
   handle(ENGINE_FONTS_IPC.uiFonts, (sender, json) => (isText(json, ENGINE_FONTS_LIMITS.censusJsonChars)
@@ -245,6 +246,9 @@ export interface EngineFontsSetup {
  *  Engine" off. Returns the registry, or null when off, unavailable, or when
  *  the engine's font service already serves the channels. */
 export function setupEngineFonts({ ipc, ctx, env, appPath, log = console.warn, load }: EngineFontsSetup): NativeFontRegistry | null {
+  if ('on' in ipc && typeof ipc.on === 'function') {
+    installSyncFonts(ipc as IpcLike & Pick<IpcMain, 'on'>, ctx, () => loadNativeFontRegistry(bridgeAddonPath(env, appPath), load));
+  }
   if (owners.get(ipc) === 'engine') return null;
   if (!engineFontsEnabled(env)) return null;
   const file = bridgeAddonPath(env, appPath);
@@ -752,4 +756,41 @@ export function installEngineFontService(ipc: IpcLike & Pick<IpcMain, 'removeHan
     for (const channel of Object.values(ENGINE_FONTS_IPC)) ipc.removeHandler(channel);
     owners.delete(ipc);
   };
+}
+
+
+/** Per-window registries: synchronous geometry questions cannot wait on the
+ * engine's asynchronous font port. Project font mutations reach both in the
+ * same IPC handler, before their acknowledgements. No nested main event loop. */
+const syncRegistry = new WeakMap<object, (sender: number) => NativeFontRegistry>();
+export function installSyncFonts(ipc: IpcLike & Pick<IpcMain, 'on'>, ctx: EngineFontsContext, load: () => NativeFontRegistry): void {
+  if (syncRegistry.has(ipc)) return;
+  const registries = new Map<number, NativeFontRegistry>();
+  const watching = new Set<number>();
+  const registry = (sender: number): NativeFontRegistry => {
+    let value = registries.get(sender);
+    if (!value) { value = load(); registries.set(sender, value); }
+    return value;
+  };
+  syncRegistry.set(ipc, registry);
+  const handle = (channel: string, fn: (registry: NativeFontRegistry, ...args: unknown[]) => unknown) => {
+    ipc.on(channel, (event, ...args: unknown[]) => {
+      if (!ctx.isTrustedSender(event as unknown as IpcMainInvokeEvent)) { event.returnValue = null; return; }
+      if (!watching.has(event.sender.id) && typeof event.sender.once === 'function') {
+        const id = event.sender.id; watching.add(id);
+        event.sender.once('destroyed', () => { registries.delete(id); watching.delete(id); });
+      }
+      try { event.returnValue = { ok: true, value: fn(registry(event.sender.id), ...args) }; }
+      catch (error) { event.returnValue = { ok: false, error: message(error) }; }
+    });
+  };
+  handle(ENGINE_FONTS_IPC.answerSync, (r, queries) => {
+    if (!isText(queries, ENGINE_FONTS_LIMITS.queryJsonChars)) throw new Error('invalid queries');
+    return r.answer(queries);
+  });
+  handle(ENGINE_FONTS_IPC.wholeSync, (r, blob, index) => {
+    if (typeof blob !== 'string' || !BLOB_KEY.test(blob) || !isIndex(index)) throw new Error('invalid whole key');
+    if (!r.whole) throw new Error('FontRegistry.whole is unavailable; rebuild pm-bridge');
+    return r.whole(blob, index);
+  });
 }

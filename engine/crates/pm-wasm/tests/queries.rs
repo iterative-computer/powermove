@@ -103,3 +103,11 @@ fn text_queries_ask_for_fonts_and_scenes_answer() {
     let r = q(&mut e, r#"{"op":"captionBounds","comp":"C1","t":0}"#);
     assert!(r.get("throw").is_some(), "no layer: {r:?}");
 }
+
+#[test]
+fn nested_paths_and_replacement_scopes_are_native() {
+    let mut e = Engine::new();
+    e.resync(br#"{"id":"P","compId":"main","comps":{"main":{"fps":30,"layers":[]},"outer":{"comps":{"same":{"fps":24,"layers":[{"id":"L","from":0,"p":{"x":{"v":7}}}]}}},"same":{"fps":30,"layers":[{"id":"L","from":0,"p":{"x":{"v":99}}}]}}}"#, 1).unwrap();
+    assert_eq!(q(&mut e, r#"{"op":"ev","comp":"@path:[\"comps\",\"outer\",\"comps\",\"same\"]","open":"main","layer":0,"key":"x","t":0}"#).get("ok").and_then(Value::as_f64), Some(7.0));
+    assert_eq!(q(&mut e, r#"{"op":"ev","comp":"detached","open":"main","compJson":{"fps":24,"layers":[{"id":"L","from":0,"p":{"x":{"v":12}}}]},"layer":0,"key":"x","t":0}"#).get("ok").and_then(Value::as_f64), Some(12.0));
+}

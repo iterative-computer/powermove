@@ -89,7 +89,7 @@ describe('engine fonts flag', () => {
     });
     const env = { POWERMOVE_ENGINE_FONTS: '1', POWERMOVE_PM_BRIDGE: __filename };
     expect(setupEngineFonts({ ipc: { handle }, ctx: { isTrustedSender: () => true }, env, appPath: '/app', load: () => ({ FontRegistry }) })).toBe(registry);
-    expect(handle.mock.calls.map(c => c[0]).sort()).toEqual(Object.values(ENGINE_FONTS_IPC).sort());
+    expect(handle.mock.calls.map(c => c[0]).sort()).toEqual(Object.entries(ENGINE_FONTS_IPC).filter(([k]) => !k.endsWith('Sync')).map(([, v]) => v).sort());
   });
 });
 
@@ -603,7 +603,7 @@ describe('the engine font client', () => {
     port.serve({ generation: 0 });
     const trusted = { id: 7 };
     const uninstall = installEngineFontService(ipc as any, { isTrustedSender: (e: any) => e.sender === trusted }, client);
-    expect([...handlers.keys()].sort()).toEqual(Object.values(ENGINE_FONTS_IPC).sort());
+    expect([...handlers.keys()].sort()).toEqual(Object.entries(ENGINE_FONTS_IPC).filter(([k]) => !k.endsWith('Sync')).map(([, v]) => v).sort());
     expect(() => installEngineFontService(ipc as any, { isTrustedSender: () => true }, client)).toThrow(/already registered/);
     const load = vi.fn();
     expect(setupEngineFonts({ ipc, ctx: { isTrustedSender: () => true }, env: { POWERMOVE_ENGINE_FONTS: '1', POWERMOVE_PM_BRIDGE: __filename }, appPath: '/app', load })).toBeNull();
@@ -632,5 +632,36 @@ describe('the preload channels', () => {
     const { IPC } = await import('../shared/ipc');
     expect(IPC.engineFontsAnswer).toBe(ENGINE_FONTS_IPC.answer);
     expect(IPC.engineFontsSubset).toBe(ENGINE_FONTS_IPC.subset);
+  });
+});
+
+// Synchronous answers are scoped to the asking editor and reject subframes
+// through the same main-frame trust check as the asynchronous channels.
+describe('synchronous whole-face font channel', () => {
+  it('isolates windows and mirrors project fonts before acknowledging mutations', async () => {
+    const { installSyncFonts } = await import('./engine-fonts');
+    const asyncHandlers = new Map<string, any>();
+    const syncHandlers = new Map<string, any>();
+    const ipc = { handle: (name: string, fn: any) => asyncHandlers.set(name, fn), on: (name: string, fn: any) => syncHandlers.set(name, fn) };
+    const created: ReturnType<typeof fakeRegistry>[] = [];
+    installSyncFonts(ipc as any, { isTrustedSender: e => (e as any).trusted }, () => {
+      const registry = fakeRegistry(); created.push(registry); return registry;
+    });
+    registerEngineFontsIpc(ipc, { isTrustedSender: e => (e as any).trusted }, fakeRegistry());
+    const event = (id: number, trusted = true) => ({ trusted, sender: { id }, returnValue: undefined as any });
+    const one = event(1);
+    syncHandlers.get(ENGINE_FONTS_IPC.answerSync)(one, '[]');
+    expect(one.returnValue.ok).toBe(true);
+    const two = event(2);
+    syncHandlers.get(ENGINE_FONTS_IPC.answerSync)(two, '[]');
+    expect(created).toHaveLength(2);
+    const invalid = event(1, false);
+    syncHandlers.get(ENGINE_FONTS_IPC.answerSync)(invalid, '[]');
+    expect(invalid.returnValue).toBeNull();
+    await asyncHandlers.get(ENGINE_FONTS_IPC.addProjectFont)(one, 'Project Face', new Uint8Array([1, 2, 3]), {}, 0);
+    expect(created[0]!.calls.some((c: any) => c[0] === 'addProjectFont')).toBe(true);
+    expect(created[1]!.calls.some((c: any) => c[0] === 'addProjectFont')).toBe(false);
+    syncHandlers.get(ENGINE_FONTS_IPC.wholeSync)(one, 'a'.repeat(32), 0);
+    expect(one.returnValue).toEqual({ ok: false, error: 'FontRegistry.whole is unavailable; rebuild pm-bridge' });
   });
 });

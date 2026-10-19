@@ -109,7 +109,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   /* The native evaluator's document mirror and write barrier (behind the
      "native evaluator" flag; only `PM.doc` no-ops when it is off). It wraps
      PM.touch and PM.proj, so it follows anim and history. */
-  ['engine-doc', (PM) => void installEngineDoc(PM, { mode: withNewEngine(safeRendererMode(), newEngineOn()) })],
+  ['engine-doc', (PM) => void installEngineDoc(PM, { mode: withNewEngine(safeRendererMode(), NEW_ENGINE), strict: NEW_ENGINE })],
   ['core/library', installLibrary],
   ['core/projects', installProjects],
   ['core/editing', installEditing],
@@ -165,6 +165,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['kernel/boot', (PM) => void bootExtensions(PM.Kernel, BUILTIN_EXTENSIONS).then(() => PM.Kernel.events.emit('extensions:ready', {})).catch((error) => console.error('[kernel] boot failed', error))]
 ];
 
+const NEW_ENGINE = newEngineOn();
 for (const [name, install] of INSTALLS) {
   try {
     install(PM);
@@ -172,4 +173,9 @@ for (const [name, install] of INSTALLS) {
     // Keep independent engine failures isolated while the registry boots.
     console.error(`[legacy] install failed: ${name}`, error);
   }
+}
+if (NEW_ENGINE) {
+  // Warm in the background after installation: UI availability never waits on fonts or wasm.
+  void PM.EngineDoc?.whenReady?.then(() => PM.EngineDoc?.warmFonts?.());
+  PM.bus?.on?.('projects:open', () => { void PM.EngineDoc?.warmFonts?.(); });
 }
