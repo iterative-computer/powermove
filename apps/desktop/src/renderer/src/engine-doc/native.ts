@@ -308,6 +308,10 @@ export class NativeApi {
   private indexed = new WeakMap<any[], Indexed>();
   /** `expressionErrors` for channels evaluated natively (live objects). */
   readonly errors = new WeakMap<object, string>();
+  /** Entries set in `errors` and not deleted since (an upper bound: a
+   * collected key is not subtracted). Zero lets a frame skip a WeakMap delete
+   * per channel read. */
+  private errorEntries = 0;
   private definitions = new Map<string, string>();
   /** Where text layout gets registry answers and subsets (null: none). */
   fonts: FontLoader | null = null;
@@ -759,7 +763,7 @@ export class NativeApi {
     if (!prop || typeof prop !== 'object') return;
     const raw = this.unwrap(prop);
     if (!raw.expr) {
-      this.errors.delete(raw);
+      this.clearError(raw);
       this.expressionFrames.release(id);
       return;
     }
@@ -769,8 +773,8 @@ export class NativeApi {
       if (entry?.id === id) entry.frame = slot;
     }
     const message = (wasm.evaluationStatus() & 0x80) ? wasm.expressionError(id) : null;
-    if (message == null) this.errors.delete(raw);
-    else this.errors.set(raw, message);
+    if (message == null) this.clearError(raw);
+    else this.setError(raw, message);
   }
 
   private evById(wasm: PmWasm, id: number, t: number): Native<any> {
@@ -852,6 +856,15 @@ export class NativeApi {
     return true;
   }
 
+  private setError(raw: object, message: string): void {
+    if (!this.errors.has(raw)) this.errorEntries += 1;
+    this.errors.set(raw, message);
+  }
+
+  private clearError(raw: object): void {
+    if (this.errorEntries && this.errors.delete(raw)) this.errorEntries -= 1;
+  }
+
   private wrapperFreeChannel(raw: any): boolean {
     // `PM.ev`/`PM.evP` without an expression: `evalKfs(prop.kf, T - L.from)` or `prop.v`.
     return !!raw && typeof raw === 'object' && !raw.expr;
@@ -880,8 +893,8 @@ export class NativeApi {
     if ((status & 0x7f) !== 0) return MISS; // not a number, or a throw: ask the slow path
     this.stats.fastPath += 1;
     if (raw) {
-      if (raw.expr) { const m = (status & 0x80) ? wasm.expressionError(id) : null; if (m == null) this.errors.delete(raw); else this.errors.set(raw, m); }
-      else this.errors.delete(raw);
+      if (raw.expr) { const m = (status & 0x80) ? wasm.expressionError(id) : null; if (m == null) this.clearError(raw); else this.setError(raw, m); }
+      else this.clearError(raw);
     }
     return n;
   }
@@ -934,7 +947,7 @@ export class NativeApi {
         if (!rawProp.expr && entry.frame) {
           this.expressionFrames.release(entry.id);
           entry.frame = undefined;
-          this.errors.delete(rawProp);
+          this.clearError(rawProp);
         }
         // The value was already answered by pm-wasm at this exact time and
         // revision. Like its own last-answer memo, keep numeric answers only.
@@ -955,7 +968,7 @@ export class NativeApi {
           if (status >= 0 && (status & 0x7f) === 0) {
             const value = this.expressionFrames.value;
             const message = (status & 0x80) ? entry.wasm.expressionError(entry.id) : null;
-            if (message == null) this.errors.delete(rawProp); else this.errors.set(rawProp, message);
+            if (message == null) this.clearError(rawProp); else this.setError(rawProp, message);
             entry.time = T; entry.number = value;
             this.stats.fastPath += 1;
             this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1;

@@ -45,8 +45,8 @@ it('evaluates resident expression channels in runs, exactly, across time, edits,
   for (const time of [2, 3, 0, -0, 1.5]) {
     runs.length = 0; error.mockClear();
     compare(time);
-    // In-order reads: runs of 4, 8, 16, … cover the 120 members exactly once.
-    expect(runs.map(r => r[3])).toEqual([4, 8, 16, 32, 60]);
+    // The last epoch read all 120 in order: one run covers them exactly once.
+    expect(runs.map(r => r[3])).toEqual([120]);
     expect(evaluated()).toBe(120);
     expect(error.mock.calls.length).toBe(time === 0 ? 60 : 0);
     for (let i = 0; i < 120; i++) expect(api.errors.has(PM.proj.layers[i].p.opacity)).toBe(time === 0 && i % 2 === 0);
