@@ -862,7 +862,8 @@ and pop cases therefore use
 [SkScalerContext::GenerateImageFromPath](https://github.com/google/skia/blob/chrome/m152/src/core/SkScalerContext.cpp),
 with CPU analytic coverage, horizontal LCD filtering and mask gamma. They
 retain that route; moving them to Graphite would change today's rendering.
-Their remaining CPU outline/coverage differences are still blockers.
+Their remaining CPU outline/coverage differences were strict failures in
+Round 6; FONTS-R below supersedes that blocker classification.
 A counterfactual run forcing the six pop cases through Graphite produced
 1,009–11,151 pixels beyond 1 CV (max 156–214), compared with 0–74 pixels
 (max 0–13) on the production mask route. The counterfactual is not shipped
@@ -952,20 +953,69 @@ selections, max 1.191e-4 px).
 Round 6 measurements and every remaining side-by-side are recorded in the
 lane report. The round 5 counts above remain historical.
 
+## Round 7: FONTS-R residual ratchet
+
+Orchestrator decision **FONTS-R** (2026-10-19), after side-by-side inspection
+of `caption-pop-0459` and `real_powermove-ad-18`, classifies the 23 remaining
+Round 6 residual checks as visually identical edge-sample decisions, not
+owner-rule blockers. This supersedes their earlier blocker classification.
+It does not claim byte equality or change a pixel tolerance.
+
+The explicit RATCHET is
+[`tests/fixtures/text-residuals.json`](../../engine/crates/pm-render/tests/fixtures/text-residuals.json).
+It contains exactly those 23 measurements: 19 raster checks (main, closure,
+source textures and the independent large-path capture) and four composed
+frames. Every entry records its measured number of pixels beyond the
+original bound, maximum channel delta, one-line cause boundary and review
+PNG basename. Images and private directory paths stay outside Git; the
+lane report resolves the names to the private Round 6 review sheets.
+
+`text_raster` and `text_corpus` share the same checker. The original strict
+bounds remain **1 CV for raster/source textures** and **2 CV for composed
+text**. All unlisted cases still must meet their original strict bound.
+The checker requires exact equality with both listed measurements:
+
+- Increasing either the pixel count or maximum delta fails.
+- Decreasing either one fails until its budget is lowered to the observed
+  value; remove the entry when the case meets the strict bound.
+- Adding new cases or increasing budgets is forbidden by FONTS-R.
+- A selected listed measurement cannot disappear through an empty shot,
+  refusal, missing media or an early return. Corpus identities include
+  the exact project, frame time and original/isolation pass.
+- Geometry, text-routing and non-text Standard-class checks remain in
+  force. The ratchet cannot waive them.
+
+This is a case-specific, downward-only snapshot ratchet, **not a widened
+tolerance**. The summaries retain the strict counts and print ratcheted
+counts separately. Existing residual images are still exported for review.
+Six capture-independent contract tests cover new residuals, both regression
+axes, improvements with stale budgets, lowering/removal, missing selected
+measurements, corpus identity collisions and fixture/path validation.
+
+The follow-up **textexact** lane owns reducing these measurements to zero
+before beta: line-for-line ports of Skia's CPU AAA scan converter and
+SkStroke for glyph masks, Graphite's stroke tessellation for large-path
+cases, and the Fontations COLR route. Keep the SDF edge residual in its
+coverage list too. Lower the ratchet after each measured improvement and
+retain the original references. These ports are not started in Round 7.
+
 ## Gaps
 
-The round 6 gates accept no pinned level 1 differences. Any remaining
-difference or refusal fails the same unchanged bound (1 CV for raster
-captures, 2 CV for composed text pixels). A failing comparison is a blocker,
-not an accepted difference. Earlier round 4 and round 5 measurements are
-historical; the round 6 report records the current strict failures.
+FONTS-R governs the 23 nonzero Round 6 residual checks. They pass only at
+their exact recorded snapshot budgets and are not owner-rule blockers.
+Every unlisted case keeps its original strict bound; any regression, new
+residual or improvement with a stale budget still fails. The Round 4–6
+strict-failure counts above are historical; Round 7 adds the explicit
+orchestrator-approved ratchet without changing the renderer or references.
 
-- Caption-pop, colored caption stroke, whisper and paper retain failures.
-  The remaining counts and side-by-side paths are in the round 6 report.
+- Caption-pop, colored caption stroke, whisper and paper remain nonexact.
+  Counts and review filenames are in the ratchet; the lane report resolves
+  their side-by-side paths.
   Round joins, miter limits, fake-bold interpolation, descriptor relaxation,
   inverse/forward scale order, normalization precision and tangent storage
   were checked against Chromium's configured Skia. No tolerance or profile
-  parameter was changed. The larger caption-pop cause is still unresolved.
+  parameter was changed. The larger caption-pop cause is still unresolved
+  and assigned to textexact under FONTS-R.
 - The closure distance-field residual `sdf-sizes-0004` remains (4 pixels by
   2 CV). The three stroke/bold SDF failures are closed by the tangent fix.
   The row-local backward distance walk still works with debug overflow
@@ -984,8 +1034,9 @@ historical; the round 6 report records the current strict failures.
   pass decisions reduce its actual t16/18/24 source-texture residuals to
   6/6/2 pixels beyond 1 CV, max 64/64/5. Sparse curved-edge/MSAA sample
   disagreements remain, including with the shared path renderer. These
-  are failing comparisons, not a reason to change the 2-CV composition
-  bound. The round 6 report lists each composed frame separately.
+  remain nonexact and are covered only by their exact FONTS-R snapshots;
+  the 2-CV composition bound is unchanged. The ratchet lists each composed
+  frame separately.
 - Animator blur now meets the unchanged 2-CV corpus bound through the
   shared quantized Graphite plan/executor, including isolation and the
   original project. It no longer uses the text-only float Gaussian.
@@ -1016,6 +1067,14 @@ historical; the round 6 report records the current strict failures.
   reports missing bitcode.
 
 ## Changes outside the lane
+
+2026-10-19 (lane ne-fonts, round 7):
+
+- `pm-render/tests/{text_raster,text_corpus,text_residuals}.rs`,
+  `tests/support/{mod,text_residuals}.rs` and
+  `tests/fixtures/text-residuals.json`: shared FONTS-R enforcement,
+  metadata-only snapshots and contract tests. No production rendering,
+  font selection, pixel-reference or tolerance changes.
 
 2026-10-18 (lane ne-fonts, round 6):
 

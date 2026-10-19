@@ -493,3 +493,13 @@ The fresh round 6 app matrix passes 22/22. Its live seed comparison includes
 error 0.00001525879 px (unchanged bound 0.001 px). This validates the
 census-derived table as applied through the synchronous provider, in
 addition to the earlier static-startup parity run.
+
+## Round 7 gate policy
+
+Orchestrator decision **FONTS-R** (2026-10-19) places the 23 measured Round 6
+pixel residuals in an explicit downward-only ratchet; see `text-render.md`,
+“Round 7”. Font selection, layout and the existing 1-CV raster / 2-CV
+composition bounds are unchanged. Unlisted failures and stale budgets after
+an improvement fail. The textexact follow-up owns the CPU AAA/SkStroke,
+Graphite stroke tessellation and Fontations COLR ports; this closing round
+changes test policy only.
