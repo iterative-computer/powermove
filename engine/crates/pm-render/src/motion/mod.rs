@@ -41,9 +41,23 @@ use pm_protocol::frame::MotionBlurKind;
 
 pub(crate) mod plan;
 
-/// Layer types whose motion blur is drawn and compared with today's
-/// (the capability check routes the others).
-pub const DRAWN_TYPES: [&str; 5] = ["solid", "image", "video", "precomp", "group"];
+/// Layer types whose motion blur is drawn and compared with today's: every
+/// type the renderer draws (shapes and text re-rasterize at each sample's
+/// density, 3D object layers draw their scene at each sample time,
+/// adjustment layers are never blurred, as today).
+pub const DRAWN_TYPES: [&str; 11] = [
+    "solid",
+    "image",
+    "video",
+    "precomp",
+    "group",
+    "shape",
+    "text",
+    "captions",
+    "shader",
+    "extension",
+    "adjustment",
+];
 
 /// How a render applies motion blur.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

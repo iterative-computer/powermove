@@ -801,7 +801,7 @@ fn level2_precomps_rasterize_at_their_drawn_density() {
 }
 
 #[test]
-fn level2_raster_content_is_drawn_and_other_level2_content_routed() {
+fn level2_content_of_every_layer_type_is_drawn() {
     use pm_render::{Feature, unsupported};
     let mk = |ty: &str, d: Value, format: Option<&str>| {
         let mut l = layer("l", ty, d, 0.0, 0.0, 2.0);
@@ -823,5 +823,29 @@ fn level2_raster_content_is_drawn_and_other_level2_content_routed() {
     // Level 2 SVG images and solids are drawn by `crate::vector`.
     assert!(!level2(&mk("image", json!({ "asset": "a" }), Some("svg"))));
     assert!(!level2(&mk("solid", json!({ "color": "#FFFFFF" }), None)));
-    assert!(level2(&mk("text", json!({ "text": "Level 2" }), None)));
+    // Text and captions at output resolution, shader layers resampled, and
+    // layers without content of their own.
+    for (ty, d) in [
+        ("text", json!({ "text": "Level 2" })),
+        ("captions", json!({})),
+        ("shader", json!({ "code": "void main(){ o = vec4(1.0); }" })),
+        ("group", json!({})),
+        ("null", json!({})),
+        ("audio", json!({})),
+        ("adjustment", json!({})),
+    ] {
+        assert!(!level2(&mk(ty, d, None)), "{ty}");
+    }
+    // Level 2 text the text renderer does not lay out yet is named.
+    let animated = mk(
+        "text",
+        json!({ "text": "x", "animators": [{ "id": "a" }] }),
+        None,
+    );
+    assert!(
+        animated
+            .iter()
+            .any(|f| matches!(f, Feature::Text(t) if t.contains("compat level 2"))),
+        "{animated:?}"
+    );
 }
