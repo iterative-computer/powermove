@@ -235,13 +235,25 @@ describe('EnginePresenter', () => {
     source.arrive(1, 1);
     presenter.receive({ type: 'frame', frame: desc(1) });
     presenter.receive({ type: 'surfacePool', pool: { generation: 2, surfaces: [] } });
-    expect(link.releases).toEqual([]);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(source.retired).toEqual([1]);
     expect(source.frames[0]!.closed).toBe(true);
     // A descriptor of the retired generation still in flight is ignored.
     presenter.receive({ type: 'frame', frame: desc(2) });
     expect(presenter.stats.staleGeneration).toBe(1);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+  });
+
+  it('reports a color GPU completion after its pool was retired', async () => {
+    const { source, painter, link, presenter } = setup();
+    source.arrive(1, 1);
+    presenter.receive({ type: 'frame', frame: desc(1) });
+    presenter.refresh(16.7);
+    presenter.receive({ type: 'surfacePool', pool: { generation: 3, surfaces: [] } });
     expect(link.releases).toEqual([]);
+    painter.finishGpu();
+    await flush();
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
   });
 
   it('a depth and object-id pool never replaces the frames, and tags the frames that name it', () => {

@@ -1,3 +1,4 @@
+import { engineGeometry } from './engine-access';
 /*
  * What transform targets (the gizmo, modal G/R/S, the snap and pivot
  * operators) read of the 3D scene: each object layer's `matrixWorld` and,
@@ -83,7 +84,7 @@ class EngineTargets implements TargetScene {
 
 /** The scene transform targets read at `time`: the engine's with the native evaluator on, else the three.js runtime. */
 export function targetScene(PM: any, time: number = PM.time): TargetScene {
-  const engine = PM?.EngineDoc?.enabled ? PM.EngineDoc.api : null;
+  const engine = engineGeometry(PM, ['objectWorlds3d', 'objectBoxes3d']);
   if (engine?.objectWorlds3d && engine?.objectBoxes3d) return new EngineTargets(PM, engine, time);
   return new RuntimeTargets(compositionRuntime(PM, time));
 }

@@ -20,7 +20,7 @@ export type ViewerLayoutState = {
   /** `api.transport.previewResolution`: 'auto', a scale, or its text. */
   previewResolution: string | number | null | undefined;
   /** The 3D viewport's state when the composition has a 3D scene. */
-  scene3d?: { hasScene: boolean; shading: Shading3d; xray: boolean; camera?: EditorCamera | null; localView?: string[] | null } | null;
+  scene3d?: { hasScene: boolean; shading: Shading3d; xray: boolean; overlays?: boolean; selected?: string[]; active?: string | null; camera?: EditorCamera | null; localView?: string[] | null } | null;
   playEveryFrame?: boolean;
 };
 
@@ -41,6 +41,6 @@ export function viewParamsFor(state: ViewerLayoutState): ViewParams {
     resolution: previewResolution(state.previewResolution),
     media: 'automatic',
     playEveryFrame: !!state.playEveryFrame,
-    ...(scene ? { camera: scene.camera ?? null, shading: scene.shading, xray: scene.xray, ...(scene.localView?.length ? { localView: scene.localView } : {}) } : {})
+    ...(scene ? { depthId: scene.overlays !== false, ...(scene.selected ? { chromeSelection: { selected: scene.selected, active: scene.active ? [scene.active] : [] } } : {}), camera: scene.camera ?? null, shading: scene.shading, xray: scene.xray, ...(scene.localView?.length ? { localView: scene.localView } : {}) } : {})
   };
 }

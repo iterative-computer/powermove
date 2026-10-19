@@ -331,6 +331,24 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(pair.terminated).toBe(true);
   });
 
+  it('returns held slots when a disposed worker must be terminated', () => {
+    const pair = new Pair(), source = new Source(), link = new Link();
+    // A stuck realm receives transfers but never responds to Close/Dispose.
+    pair.worker.postMessage = () => {};
+    let terminate!: () => void;
+    const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas,
+      timers: { set: fn => { terminate = fn; return 1; }, clear: () => {} } });
+    const presenter = host.open({ source, link });
+    source.imports.add('1:1');
+    presenter.receive({ type: 'frame', frame: desc(1) }, 0);
+    host.dispose();
+    expect(link.releases).toEqual([]);
+    terminate();
+    expect(pair.terminated).toBe(true);
+    expect(source.frames[0]!.closed).toBe(true);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+  });
+
   it('forwards the vsync hint fitted on the worker animation frames', async () => {
     const { pair, presenter, hints } = setup();
     const sample = clock({ state: 'stopped', rate: { num: 0, den: 1 } });

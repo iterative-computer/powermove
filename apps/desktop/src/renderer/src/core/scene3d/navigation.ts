@@ -1,3 +1,4 @@
+import { engineGeometry } from './engine-access';
 import * as THREE from 'three';
 import {compositionRuntime} from './service';
 import {renderCamera} from './render-camera';
@@ -60,7 +61,7 @@ export function viewportBounds(PM:any,selected=true,exclude:string|null=null):TH
   // development modes' dual answers read); otherwise from the composition's
   // three.js runtime.
   const objects=members.filter((layer:any)=>layer3DRole(layer)==='object').map((layer:any)=>layer.id);
-  const engine=PM.EngineDoc?.enabled?PM.EngineDoc.api:null;
+  const engine=engineGeometry(PM, ['objectBoxes3d']);
   const boxes=!objects.length?{}:engine?engine.objectBoxes3d(objects,PM.time,()=>runtimeBoxes(PM,objects,PM.time)):runtimeBoxes(PM,objects,PM.time);
   for(const layer of members){
     if(layer3DRole(layer)==='object'){const b=boxes[layer.id];if(b)box.union(new THREE.Box3(new THREE.Vector3(b[0],b[1],b[2]),new THREE.Vector3(b[3],b[4],b[5])));}

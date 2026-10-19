@@ -1,3 +1,4 @@
+import { engineGeometry } from './engine-access';
 /*
  * The composition's 3D render camera for the viewport (camera view, framing,
  * the view's field of view, transform gizmos): `compositionRuntime(PM).camera`
@@ -48,7 +49,7 @@ const cameras = new WeakMap<object, { persp: THREE.PerspectiveCamera; ortho: THR
  * its `matrixWorld` exactly the engine's.
  */
 export function renderCamera(PM: any, time: number = PM.time): THREE.PerspectiveCamera | THREE.OrthographicCamera {
-  const engine = PM?.EngineDoc?.enabled ? PM.EngineDoc.api : null;
+  const engine = engineGeometry(PM, ['camera3d']);
   if (!engine?.camera3d) return compositionRuntime(PM, time).camera as THREE.PerspectiveCamera | THREE.OrthographicCamera;
   const facts: RenderCameraFacts = engine.camera3d(time, () => runtimeCameraFacts(PM, time));
   let pair = cameras.get(PM);

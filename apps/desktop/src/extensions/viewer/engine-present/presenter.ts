@@ -67,7 +67,7 @@ export type PresentedFrame = {
   displayUs: number | null;
   /** The frame's depth and object-id surface (`FrameDescriptor.depthId`),
    *  when the viewer asked for it and its pool arrived. */
-  depthId?: { poolIndex: number; seq: number; poolGeneration: number } | null;
+  depthId?: import('./protocol').DepthIdSurface | null;
   /** The frame's size in pixels (the canvas takes it when the frame lands). */
   width?: number;
   height?: number;
@@ -349,7 +349,11 @@ export class EnginePresenter implements Presenter {
     this.generation = pool.generation;
     this.stats.generation = pool.generation;
     for (const item of this.buffer.clear((i) => i.desc.poolGeneration !== pool.generation)) this.dropItem(item, 'generation');
-    this.parked = this.parked.filter((p) => p.desc.poolGeneration === pool.generation);
+    this.parked = this.parked.filter((p) => {
+      if (p.desc.poolGeneration === pool.generation) return true;
+      this.releaseDesc(p.desc, 'generation');
+      return false;
+    });
     if (previous) this.options.source.retire(previous);
   }
 
@@ -549,7 +553,8 @@ export class EnginePresenter implements Presenter {
   }
 
   private release(desc: FrameDescriptor): void {
-    if (this.disposed || desc.poolGeneration < this.generation) return;
+    // The chrome lease also needs completion of retired color reads. Native
+    // ownership is sequence checked, so a late release cannot free a new slot.
     this.stats.released++;
     this.options.link.release({ poolIndex: desc.poolIndex, seq: desc.seq });
   }

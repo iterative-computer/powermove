@@ -1,3 +1,4 @@
+import { engineGeometry } from './engine-access';
 /*
  * What Edit Mode and the 3D cursor read of the scene's geometry:
  *
@@ -18,7 +19,7 @@ import * as THREE from 'three';
 import { compositionRuntime } from './service';
 import type { ObjectMesh3d } from '../../engine-doc/native';
 
-const engineOf = (PM: any) => (PM?.EngineDoc?.enabled ? PM.EngineDoc.api : null);
+const engineOf = (PM: any) => engineGeometry(PM, ['objectMesh3d', 'cursorHit3d']);
 
 /** Today's answer: `runtime.objects.get(id)` and its geometry's buffers. */
 export function runtimeObjectMesh(PM: any, id: string, time: number = PM.time): ObjectMesh3d {

@@ -30,6 +30,7 @@ export type ViewInput = {
   localView?: string[];
   /** The 3D chrome wants each frame's depth and object-id surface. */
   depthId?: boolean;
+  chromeSelection?: import('./protocol').ChromeSelection;
 };
 
 const MAX_EDGE = 16384;
@@ -82,7 +83,8 @@ export class ViewSequencer {
       playEveryFrame: input.playEveryFrame,
       edr: input.edr,
       viewSeq: this.seq,
-      ...(input.depthId ? { depthId: true } : {})
+      ...(input.depthId ? { depthId: true } : {}),
+      ...(input.chromeSelection ? { chromeSelection: input.chromeSelection } : {})
     };
     if (this.last && sameState(this.last, candidate)) return { state: this.last, changed: false };
     this.seq += 1;
