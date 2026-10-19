@@ -252,20 +252,67 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host poo
   }, 60_000);
 
   it('waits for an edit made during the reconciliation send before answering', async () => {
-    await reconciliationWindow(false, 0);
+    await reconciliationWindow(false);
   }, 60_000);
 
   it('rechecks a same-path remote patch received during the reconciliation send', async () => {
-    await reconciliationWindow(true, 0);
+    await reconciliationWindow(true);
   }, 60_000);
 
-  it('preserves read-your-writes under 32 seeded reconciliation interleavings', async () => {
-    let seed = 0x5eed;
-    for (let i = 0; i < 32; i++) {
-      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-      await reconciliationWindow((seed & 1) === 1, (seed >>> 8) % 7);
+  // Seeded schedules over the same windows (order, collisions, refusals, join and send phases): sync-schedule.test.ts.
+
+  it('keeps an edit made during the reconciliation send over a later same-path remote patch', async () => {
+    // The edit reaches the host after the remote patch (the host has not seen
+    // it yet), so the host must end with it, as it does outside a reconciliation.
+    const host = hostServices();
+    host.seed('Prace', 'Race');
+    host.sessions.join(host.tab, 'Prace', null);
+    const base = host.services.session;
+    const gates: Array<() => void> = [];
+    let sends = 0;
+    let joins = 0;
+    let releaseJoin: (() => void) | undefined;
+    host.services.session = {
+      ...base,
+      join: async (id) => { const snapshot = await base.join(id); if (++joins === 2) await new Promise<void>(resolve => { releaseJoin = resolve; }); return snapshot; },
+      patch: async (id, patches) => { sends++; await new Promise<void>(resolve => gates.push(resolve)); return base.patch(id, patches); },
+    };
+    const until = async (what: string, ok: () => boolean | Promise<boolean>) => {
+      for (let n = 0; n < 500; n++) { if (await ok()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+      throw new Error(`timed out waiting for ${what}`);
+    };
+    const pool = newPool(host.services);
+    await pool.open('Prace');
+    const edit = async (name: string, commands: unknown[]) => pool.call('Prace', { runId: name, callId: name, tool: 'apply_commands', arguments: { commands, label: name }, baseRevision: (await pool.stats('Prace')).revision });
+    let draining: ReturnType<typeof setInterval> | undefined;
+    try {
+      const t1 = edit('T1', [{ type: 'set_composition', patch: { name: 'Agent 1' } }]);
+      await until('send 1', () => sends === 1);
+      host.sessions.patch(host.tab, 'Prace', [{ path: ['name'], exists: true, value: 'Remote 1' }] as never);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      gates.shift()!();
+      await until('reconcile join', () => !!releaseJoin);
+      const r0 = (await pool.stats('Prace')).revision;
+      const t2 = edit('T2', [{ type: 'add_layer', layerType: 'solid', name: 'During join' }]);
+      await until('T2 applied', async () => (await pool.stats('Prace')).revision > r0);
+      releaseJoin!();
+      await until('reconcile send', () => sends === 2);
+      const r = (await pool.stats('Prace')).revision;
+      const t3 = edit('T3', [{ type: 'set_composition', patch: { name: 'Agent 3' } }]);
+      await until('T3 applied', async () => (await pool.stats('Prace')).revision > r);
+      host.sessions.patch(host.tab, 'Prace', [{ path: ['name'], exists: true, value: 'Remote 2' }] as never);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      draining = setInterval(() => { while (gates.length) gates.shift()!(); }, 2);
+      expect((await Promise.all([t1, t2, t3])).map(a => a.ok)).toEqual([true, true, true]);
+      expect(doc(host, 'Prace').name).toBe('Agent 3');
+      expect(names(host, 'Prace')).toEqual(['During join']);
+      expect((await pool.stats('Prace')).hash).toBe(canonicalProjectHash(doc(host, 'Prace')));
+    } finally {
+      if (draining) clearInterval(draining);
+      while (gates.length) gates.shift()!();
+      releaseJoin?.();
     }
-  }, 180_000);
+  }, 60_000);
 
   it('fails by name, with retry, when pm-wasm is missing and the new engine is on; never a legacy evaluator', async () => {
     const host = hostServices();
@@ -326,7 +373,7 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('the document host poo
 });
 
 /** Gate the reconcile's own join and send, not just ordinary batch sends. */
-async function reconciliationWindow(remoteDuringSend: boolean, delay: number): Promise<void> {
+async function reconciliationWindow(remoteDuringSend: boolean): Promise<void> {
   const host = hostServices();
   host.seed('Prace', 'Race');
   host.sessions.join(host.tab, 'Prace', null);
@@ -362,7 +409,7 @@ async function reconciliationWindow(remoteDuringSend: boolean, delay: number): P
     const t1 = edit('T1', [{ type: 'set_composition', patch: { name: 'Agent 1' } }]);
     await until('ordinary send', () => sends === 1);
     host.sessions.patch(host.tab, 'Prace', [{ path: ['name'], exists: true, value: 'Remote 1' }] as never);
-    await new Promise(resolve => setTimeout(resolve, 30 + delay));
+    await new Promise(resolve => setTimeout(resolve, 30));
     gates.shift()!();
     await until('reconcile join', () => !!releaseJoin);
     const r = (await pool.stats('Prace')).revision;
@@ -374,10 +421,10 @@ async function reconciliationWindow(remoteDuringSend: boolean, delay: number): P
     const r2 = (await pool.stats('Prace')).revision;
     const t3 = edit('T3', [{ type: 'add_layer', layerType: 'solid', name: 'During reconcile' }]).then(answer => { answered = true; expect(names(host, 'Prace')).toContain('During reconcile'); return answer; });
     await until('edit during reconcile send', async () => (await pool.stats('Prace')).revision > r2);
-    await new Promise(resolve => setTimeout(resolve, 20 + delay));
+    await new Promise(resolve => setTimeout(resolve, 20));
     expect(answered).toBe(false);
     if (remoteDuringSend) host.sessions.patch(host.tab, 'Prace', [{ path: ['name'], exists: true, value: 'Remote 2' }] as never);
-    await new Promise(resolve => setTimeout(resolve, 20 + delay));
+    await new Promise(resolve => setTimeout(resolve, 20));
     draining = setInterval(() => { while (gates.length) gates.shift()!(); }, 2);
     expect((await Promise.all([t1, t2, t3])).map(a => a.ok)).toEqual([true, true, true]);
     expect(doc(host, 'Prace').name).toBe('Agent 2');

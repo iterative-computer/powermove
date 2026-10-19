@@ -397,6 +397,10 @@ export class DocumentWorker {
   private unacked = new Set<Patch[]>();
   /** A reconciliation with the host's copy, queued behind the sends; it sends every local edit. */
   private reconciling: Promise<void> | null = null;
+  /** Patches of unacknowledged batches that a remote patch overwrote here while they were in flight. */
+  private overwritten = new WeakSet<Patch>();
+  /** Remote patches received while a reconciliation's join is in flight. */
+  private joinBuffer: SessionPatch[] | null = null;
 
   /**
    * Diffs the document against what the session last had from us, marks it
@@ -438,19 +442,34 @@ export class DocumentWorker {
    * order (which this worker cannot see) decides the value. Until it has run,
    * no new batch is cut (`flushLocal` chains a fresh flush behind it) and remote
    * patches advance `synced` and the document alike, so `synced` stays what
-   * the host had from us.
+   * the host had from us; edits the host has not seen go back on top of each
+   * remote patch (`applyRemote`), since the host applies them after it. A
+   * remote patch that arrives while the join is in flight is applied to the
+   * host's copy too when its seq is newer than the copy's.
    */
   private startReconcile(): Promise<void> {
     const projectId = this.projectId!;
     this.diverged = false;
     const run = this.sending.then(async () => {
       try {
-        const joined = await this.service<{ seq: number; doc: unknown | null }>('session.join', projectId);
+        this.joinBuffer = [];
+        let joined: { seq: number; doc: unknown | null };
+        let late: SessionPatch[];
+        try {
+          joined = await this.service<{ seq: number; doc: unknown | null }>('session.join', projectId);
+        } finally {
+          late = this.joinBuffer ?? [];
+          this.joinBuffer = null;
+        }
         if (!this.chain || this.projectId !== projectId || !joined?.doc) return;
         const PM = this.chain.PM;
         const local = diffPatches(JSON.parse(this.synced), JSON.parse(JSON.stringify(PM['proj']))).forward;
-        const host = JSON.stringify(joined.doc);
-        this.seq = joined.seq;
+        // Remote patches the host applied after its copy was taken, but that
+        // reached us first (they are already in `synced` and the document).
+        let hostDoc = joined.doc;
+        for (const patch of late) if (patch.seq > joined.seq) hostDoc = applyPatch(hostDoc, structuredClone(patch.patches));
+        const host = JSON.stringify(hostDoc);
+        this.seq = Math.max(joined.seq, ...late.map((patch) => patch.seq));
         const retry = [...this.retryPaths.values()].map(path => currentPatch(PM['proj'], path));
         this.retryPaths.clear();
         const next = applyPatch(JSON.parse(host), [...retry, ...local]);
@@ -475,8 +494,25 @@ export class DocumentWorker {
     return run;
   }
 
+  /**
+   * A refused batch (still in `unacked`): its paths are retried with their
+   * current values. Where a remote patch overwrote one of its values while it
+   * was in flight, the host never applied ours, so ours comes after that
+   * patch: it goes back into the document, unless a later local edit (a later
+   * batch, or one not yet cut) wrote the same path since.
+   */
   private retain(patches: Patch[]): void {
     for (const patch of patches) this.retryPaths.set(JSON.stringify(patch.path), patch.path);
+    if (!this.chain || this.readOnly) return;
+    const PM = this.chain.PM;
+    const batches = [...this.unacked];
+    const later = batches.slice(batches.indexOf(patches) + 1).flat();
+    const now = JSON.stringify(PM['proj']);
+    const pending = now === this.synced ? [] : diffPatches(JSON.parse(this.synced), JSON.parse(now)).forward;
+    const restore = patches.filter((mine) => this.overwritten.has(mine)
+      && !later.some((other) => overlaps(other.path, mine.path))
+      && !pending.some((other) => overlaps(other.path, mine.path)));
+    if (restore.length) PM['replaceProject'](applyPatch(PM['proj'], structuredClone(restore)), { selection: PM['sel'] });
   }
 
   /** Sends what changed since the last sync; resolves once the host applied it. */
@@ -493,17 +529,38 @@ export class DocumentWorker {
   private applyRemote(patch: SessionPatch): void {
     if (!this.chain || patch.projectId !== this.projectId) return;
     const PM = this.chain.PM;
+    // A reconciliation waiting for its join: the host's copy may predate this
+    // patch (its seq says), so the reconciliation applies it on top.
+    this.joinBuffer?.push(patch);
     // Our own unsent edits are queued first (now, synchronously), then the
-    // remote patch applies at once, as remote-sync does in a tab.
+    // remote patch applies at once, as remote-sync does in a tab. While a
+    // reconciliation is pending no batch is cut; those edits stay unsent.
     void this.flushLocal().catch(() => { /* reported by flushLocal; resent on the next sync */ });
     // Patches on disjoint paths commute. When the remote patch writes a path
     // one of our unacknowledged batches also writes, the host's order decides
     // the value: reconcile with its copy once our sends have landed.
-    const conflicts = [...this.unacked].some((batch) => batch.some((mine) => patch.patches.some((theirs) => overlaps(mine.path, theirs.path))));
+    let conflicts = false;
+    for (const batch of this.unacked) for (const mine of batch) {
+      if (!patch.patches.some((theirs) => overlaps(mine.path, theirs.path))) continue;
+      conflicts = true;
+      this.overwritten.add(mine);
+    }
+    // Edits the host has not seen (not yet sent, or refused and kept for a
+    // retry) reach it after this patch whatever path they write, so they go
+    // back on top of it: the patch never overwrites them here, and they are
+    // still sent (diffed against `synced`, or retried by path).
+    const before = JSON.stringify(PM['proj']);
+    const synced = JSON.parse(this.synced);
+    const unsent = this.readOnly ? [] : [
+      ...(before === this.synced ? [] : diffPatches(synced, JSON.parse(before)).forward),
+      ...[...this.retryPaths.values()].map((path) => currentPatch(PM['proj'], path)),
+    ];
     // What the host has from us, and the document, both take the patch.
-    this.synced = JSON.stringify(applyPatch(JSON.parse(this.synced), structuredClone(patch.patches)));
-    PM['replaceProject'](applyPatch(PM['proj'], patch.patches), { selection: PM['sel'] });
-    if (!this.reconciling) this.synced = JSON.stringify(PM['proj']);
+    this.synced = JSON.stringify(applyPatch(synced, structuredClone(patch.patches)));
+    let next = applyPatch(PM['proj'], patch.patches);
+    if (unsent.length) next = applyPatch(next, unsent);
+    PM['replaceProject'](next, { selection: PM['sel'] });
+    if (!this.reconciling && !unsent.length) this.synced = JSON.stringify(PM['proj']);
     this.seq = patch.seq;
     if (conflicts) {
       if (this.reconciling) this.diverged = true;
