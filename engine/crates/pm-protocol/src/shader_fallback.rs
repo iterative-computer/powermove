@@ -31,8 +31,13 @@ use crate::common::Bytes;
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
-/// Largest target edge (the compositor's 4,096 px cap on shader layers).
-pub const MAX_EDGE: u32 = 4096;
+/// Largest target edge: WebGL's `MAX_TEXTURE_SIZE` on the GPUs the app
+/// runs on (16,384 on Apple GPUs through ANGLE), the limit today's
+/// compositor draws effects and transitions under (decision DEFS-3). The
+/// runner fails a target past its own context's limit as `tooLarge`.
+/// Shader layers reach the runner already capped at 4,096 px by the engine
+/// (`pm_render::shader_layers`, the compositor's own cap on them).
+pub const MAX_EDGE: u32 = 16_384;
 /// Largest pixel band in one message (binary16 RGBA bytes).
 pub const MAX_BAND_BYTES: usize = 8 * 1024 * 1024;
 /// Largest wrapped program (`definitions::limits::WRAPPED_SOURCE_BYTES`).
@@ -442,6 +447,24 @@ mod tests {
                 .is_ok()
         );
         assert!(host(vec!["in-0.rgba16f"]).validate().is_err());
+        // Effect and transition targets past the old 4,096 px cap travel
+        // (DEFS-3: WebGL's MAX_TEXTURE_SIZE, 16,384 on Apple GPUs), in the
+        // job engine's host request, the viewer's requests, and its bands.
+        let mut wide = effect.clone();
+        wide.width = 7680;
+        wide.height = 4320;
+        assert!(HostShaderFallback { request: wide.clone(), ..host(vec!["a", "b"]) }.validate().is_ok());
+        assert!(ShaderFallbackMessage::Requests { requests: vec![wide] }.validate().is_ok());
+        let band = ShaderFallbackMessage::Input(ShaderFallbackInput {
+            key: key(),
+            texture: 0,
+            width: 7680,
+            height: 4320,
+            row: 4000,
+            rows: 1,
+            rgba16f: Bytes(vec![0; 7680 * 8]),
+        });
+        assert!(band.validate().is_ok());
         assert!(host(vec!["../x", "in-1"]).validate().is_err());
         for bad in [
             request(MAX_EDGE + 1, vec![]),
