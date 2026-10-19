@@ -129,8 +129,10 @@ export interface DocumentHostServices {
   };
   /** Agent media and captions find a project's media through the host's store. */
   mediaPath?: { lookup(request: MediaPathLookupRequest): Promise<MediaPathResult | null> };
-  /** Native hidden-host import preparation: durable bytes and engine facts. */
-  mediaImport?: { prepare(args: { path: string; storage?: string }): Promise<{ fingerprint: string; storageKey: string; sourcePath: string; kind: string; prepared: Record<string, unknown> }> };
+  /** Agent media imports (macOS hidden host): today's editor import, run in
+   *  the host's project-pinned editor tab; its commit reaches the worker as a
+   *  session patch before the answer (import-media.ts). */
+  mediaImport?: { run(projectId: string, args: Record<string, unknown>, replace: boolean): Promise<Record<string, unknown>> };
   /** On-device transcription (captions). Absent: `generate_captions` says no model is available. */
   transcription?: {
     status(): Promise<TranscriptionStatus>;
@@ -256,7 +258,7 @@ export type FromWorker =
 export type ServiceName =
   | 'store.read' | 'store.write' | 'store.remove' | 'store.snapshot'
   | 'session.join' | 'session.patch' | 'session.leave'
-  | 'mediaPath.lookup' | 'mediaImport.prepare'
+  | 'mediaPath.lookup' | 'mediaImport.run'
   | 'transcription.status' | 'transcription.transcribe' | 'transcription.cancelTranscribe'
   | 'extensions.list' | 'extensions.bundle' | 'extensions.values';
 

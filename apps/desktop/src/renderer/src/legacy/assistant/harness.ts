@@ -965,6 +965,10 @@ nativeAgentTools?.onRequest((request) => {
 PM.AgentHarness = {
   /** The hidden host invokes the same dispatcher in its project-pinned DOM tab. */
   dispatch: answerLiveAgentTool,
+  /** The macOS hidden host's document worker cannot decode media: its agent
+   *  import_media/replace_media run today's import here, in the project's tab
+   *  (engine/document-host/import-media.ts), while the worker keeps the run. */
+  importMedia: (args: Record<string, unknown>, replace: boolean, file?: File) => importMedia(PM, args, replace, () => true, file),
   MAX_REPAIRS, projectState, defaultTimes, observe, observeVisual, capture, sanitizeProposal,
   describeCommand, sceneSchema, promptContext, execute, rollback, cleanCommand,
   test: { cleanCommand, safeTimes, reviewSchema, handleLiveAgentTool, answerLiveAgentTool },

@@ -65,7 +65,8 @@ async function writeAtomically(destination: string, container: Blob, sources: So
     const handle = await open(temporary, 'wx', 0o600);
     try {
       try {
-        for await (const chunk of container.stream()) await handle.write(chunk);
+        const reader = container.stream().getReader();
+        for (let next = await reader.read(); !next.done; next = await reader.read()) await handle.write(next.value);
       } catch (error) {
         if ((error as Error)?.name !== 'NotReadableError') throw error;
         await assertUnchanged(sources);

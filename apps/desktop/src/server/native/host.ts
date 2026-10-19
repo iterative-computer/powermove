@@ -1,6 +1,5 @@
 import { NativeSnapshotBridge } from './snapshot-bridge';
 import type { BridgeAddon } from '../../main/engine/bridge';
-import { prepareHostMedia } from './media';
 import { profileStore } from './profile-store';
 import { createRequire } from 'node:module';
 import { SnapshotService } from '../../main/engine/snapshots';
@@ -38,6 +37,8 @@ export interface NativeBrowser {
   call(project: string, request: AgentToolRequestEvent): Promise<AgentToolResponseEvent>;
   compat(project: string, request: import('../../shared/engine-protocol').CompatFrameRequest): Promise<import('../../shared/engine-ipc').EngineCompatAnswer>;
   shader(session: number, request: import('../../shared/engine-protocol').ShaderFallbackRequest, textures: Uint16Array[]): Promise<import('../../main/engine/shader-fallback-relay').ShaderFallbackResult>;
+  /** Agent import_media/replace_media: today's editor import in the project's tab (engine/document-host/import-media.ts). */
+  importMedia(project: string, args: Record<string, unknown>, replace: boolean): Promise<Record<string, unknown>>;
   close(): Promise<void>;
 }
 export interface HiddenHostOptions {
@@ -77,7 +78,6 @@ export class NativeHiddenHost {
   private readonly definitionBytes = new Map<number, string>();
   readonly fonts = new EngineFontClient();
   private readonly jobFonts = new EngineFontClient();
-  private readonly probes = new Map<string, { path: string; contentHash: Uint8Array }>();
   private readonly hashes: WorkerPool;
   private readonly owners = new Map<string, NativeOwner>();
   private readonly aliases = new Map<number, string>();
@@ -108,7 +108,7 @@ export class NativeHiddenHost {
       ? this.snapshotBridge.spawn(env => spawn(role, env)) : spawn(role), channel: transport.channel,
       cacheDirectory: path.join(userData, 'Engine Cache'), automaticOutputDirectory: options.exportsDir,
       physicalMemory: os.totalmem(), hostNow: this.nowUs,
-      log: (level, message) => log(`[native:${level}] ${message}`), resolveAsset: (id, context) => this.probes.has(id) ? Promise.resolve(this.probes.get(id)!) : context?.process === 'interactive' && this.interactiveProjects.has(context.session)
+      log: (level, message) => log(`[native:${level}] ${message}`), resolveAsset: (id, context) => context?.process === 'interactive' && this.interactiveProjects.has(context.session)
         ? this.resolveProjectAsset(this.interactiveProjects.get(context.session)!, id) : this.media.resolveAsset(id, context),
       blender: { tempRoot: os.tmpdir(), locate: async () => {
         const configured = await readFile(path.join(userData, 'blender-path.json'), 'utf8').then(raw => { const value = JSON.parse(raw)?.path; return typeof value === 'string' && path.isAbsolute(value) ? value : undefined; }).catch(() => undefined);
@@ -149,7 +149,7 @@ export class NativeHiddenHost {
         onPatch: listener => { this.patches.add(listener); return () => { this.patches.delete(listener); }; }
       },
       extensions: options.extensions,
-      mediaImport: { prepare: args => prepareHostMedia(this.media, this.engine, this.probes, args) },
+      mediaImport: { run: (project, args, replace) => options.browser.importMedia(project, args, replace) },
       mediaPath: { lookup: async request => {
         const doc = sessions.document(request.projectId ?? this.active) as any;
         const meta = doc?.assets?.[request.assetId];

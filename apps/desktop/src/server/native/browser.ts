@@ -1,4 +1,8 @@
 import { pinNativeDocument } from './pin-document';
+import { importFileInPage } from '../page-import';
+import { randomUUID } from 'node:crypto';
+import { stat } from 'node:fs/promises';
+import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import type { AgentToolRequestEvent, AgentToolResponseEvent } from '../../shared/ipc';
 import type { ShaderFallbackRequest } from '../../shared/engine-protocol';
@@ -66,6 +70,42 @@ export class LazyNativeBrowser implements NativeBrowser {
       await PM.RemoteSync.flush();
       return result;
     }, { project, request });
+  }
+  /** Agent import_media/replace_media: today's editor import (legacy/assistant/
+   *  media-management.ts) in the project's tab, current with the session first.
+   *  Its commit reaches the session, and so the document worker, before this answers. */
+  async importMedia(project: string, args: Record<string, unknown>, replace: boolean): Promise<Record<string, unknown>> {
+    const page = await this.page(project);
+    // The tab cannot open host paths: the host hands it the file at args.path
+    // (a missing or irregular file is left for the import to name, as a desktop read would).
+    const source = typeof args['path'] === 'string' && path.isAbsolute(args['path'])
+      ? await stat(args['path']).then(info => info.isFile() ? args['path'] as string : null, () => null) : null;
+    const input = `powermove-agent-import-${randomUUID()}`;
+    await page.evaluate(id => { const element = document.createElement('input'); element.type = 'file'; element.id = id; element.hidden = true; document.body.appendChild(element); }, input);
+    try {
+      if (source) await page.locator(`#${input}`).setInputFiles(source);
+      return await page.evaluate(async ({ project, args, replace, input }) => {
+        const PM = (window as any).PM;
+        await PM.RemoteSync.refresh();
+        if (PM.proj.id !== project) throw new Error('The DOM tab left its pinned project.');
+        const file = (document.getElementById(input) as HTMLInputElement).files?.[0];
+        const result = await PM.AgentHarness.importMedia(args, replace, file);
+        await PM.RemoteSync.flush();
+        return result;
+      }, { project, args, replace, input });
+    } finally { await page.locator(`#${input}`).evaluate(element => element.remove()).catch(() => {}); }
+  }
+  /** `import_media_to_timeline` and external `import_media`: today's hidden-host import (../page-import.ts). */
+  async importFile(project: string, args: Record<string, unknown>): Promise<unknown> {
+    const page = await this.page(project);
+    await page.evaluate(async project => {
+      const PM = (window as any).PM;
+      await PM.RemoteSync.refresh();
+      if (PM.proj.id !== project) throw new Error('The DOM tab left its pinned project.');
+    }, project);
+    const result = await importFileInPage(page, args);
+    await page.evaluate(async () => { await (window as any).PM.RemoteSync.flush(); });
+    return result;
   }
   async compat(project: string, request: import('../../shared/engine-protocol').CompatFrameRequest): Promise<import('../../shared/engine-ipc').EngineCompatAnswer> {
     const page = await this.page(project);

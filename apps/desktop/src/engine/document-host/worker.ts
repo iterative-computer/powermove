@@ -234,7 +234,7 @@ export class DocumentWorker {
     // Media status from the host's media store, as the editor's decoded registry gives it (media.ts).
     this.media = new WorkerMedia((request) => this.service('mediaPath.lookup', request), () => this.projectId, (line) => this.log(line));
     PM['assets'] = this.media;
-    installWorkerImports(PM, this.media, args => this.service('mediaImport.prepare', args));
+    installWorkerImports(PM, (project, args, replace) => this.service<Record<string, unknown>>('mediaImport.run', project, args, replace), () => this.projectId);
     PM['replaceProject'](joined.doc ?? PM['mkProject']({ name: 'Home' }), {});
     this.media.refresh(PM['proj']?.assets);
     PM['bus']?.emit('projects:open');

@@ -212,7 +212,7 @@ export class DocumentHostPool implements DocumentHostPoolApi {
       case 'session.join': return s.session.join(String(args[0]));
       case 'session.patch': return s.session.patch(String(args[0]), args[1] as never);
       case 'session.leave': s.session.leave(String(args[0])); return null;
-      case 'mediaImport.prepare': return s.mediaImport ? s.mediaImport.prepare(args[0] as never) : missing('Native media import');
+      case 'mediaImport.run': return s.mediaImport ? s.mediaImport.run(String(args[0]), args[1] as Record<string, unknown>, args[2] === true) : missing('Media import');
       case 'mediaPath.lookup': return s.mediaPath ? s.mediaPath.lookup(args[0] as never) : missing('Project media lookup');
       case 'transcription.status':
         // No transcription service: captions say so, as the web host does.

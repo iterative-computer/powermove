@@ -37,6 +37,8 @@ const profile = path.join(root, 'profile'), exportsDir = path.join(root, 'export
 const audio = path.join(root, 'tone.wav');
 const sourceVideo = path.join(root, 'source.mov');
 execFileSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=160x90:r=24', '-t', '1', '-c:v', 'prores_videotoolbox', '-profile:v', '0', sourceVideo]);
+const svg = path.join(root, 'mark.svg');
+await writeFile(svg, '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32" viewBox="0 0 64 32"><rect x="4" y="4" width="20" height="20" fill="#e83a5e"/><path d="M30 4 L60 4 L45 28 Z" fill="#3a5ee8"/></svg>');
 const frames = 48000, bytes = Buffer.alloc(44 + frames * 2);
 bytes.write('RIFF', 0); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
 bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
@@ -98,6 +100,19 @@ const tool = async (name, args = {}) => {
   return result;
 };
 const text = result => JSON.parse(result.content.find(item => item.type === 'text').text);
+/** A saved .pmv's document (today's agent save: PMV3). */
+const savedDocument = async file => {
+  const packed = await readFile(file);
+  assert.equal(packed.subarray(0, 5).toString(), 'PMV3\n');
+  return JSON.parse(packed.subarray(9, 9 + packed.readUInt32LE(5))).document;
+};
+/** Imported asset records by file name, for comparing the hidden hosts (POWERMOVE_MCP_EVIDENCE). */
+const recordImports = async (document, mode) => {
+  const assets = Object.fromEntries(Object.values(document.proj?.assets ?? document.assets ?? {}).map(({ id: _id, ...asset }) => [asset.name, asset]));
+  const layers = (document.proj ?? document).layers.filter(layer => layer.d?.svgSourceAsset).map(({ id: _id, d, ...layer }) => ({ type: layer.type, name: layer.name, from: layer.from, paths: d.paths?.length, svgWidth: d.svgWidth, svgHeight: d.svgHeight, p: layer.p }));
+  if (process.env.POWERMOVE_MCP_EVIDENCE) { await mkdir(process.env.POWERMOVE_MCP_EVIDENCE, { recursive: true }); await writeFile(path.join(process.env.POWERMOVE_MCP_EVIDENCE, `imports-${mode}.json`), JSON.stringify({ assets, layers }, null, 2)); }
+  return { assets, layers };
+};
 const probe = (file, entries) => JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_entries', entries, '-of', 'json', file], { encoding: 'utf8' }));
 const quit = async () => {
   child.stdin.end();
@@ -120,6 +135,11 @@ async function desktopSmoke() {
     }
   }
   const started = text(await tool('start_session', { prompt: 'Create a red video with an audible tone' }));
+  if (native) {
+    await tool('get_project_state');
+    assert.equal((await tool('render_frames', { times: [0], width: 160 })).content.filter(item => item.type === 'image').length, 1);
+    assert(!diagnostics.includes('Chromium started on demand'), 'plain native edits and frames must not start Chromium');
+  }
   const videoAsset = text(await tool('import_media', { path: sourceVideo }));
   assert.equal(videoAsset.persisted, true);
   const imported = text(await tool('import_media', { path: audio }));
@@ -133,13 +153,13 @@ async function desktopSmoke() {
   assert(images.every(item => item.mimeType === 'image/jpeg'), 'agent frames from the job engine are JPEG');
   assert(!/render_frames routed/.test(appLog), `render_frames was routed to the current engine: ${appLog.match(/render_frames routed[^\n]*/)?.[0]}`);
   if (native) {
-    assert(!diagnostics.includes('Chromium started on demand'), 'plain native edits/media/frames must not start Chromium');
+    // Imports are today's editor import in the project tab: it decodes the media and writes its record.
+    assert(diagnostics.includes('Chromium started on demand'), 'imports run today\'s editor import in the project-pinned tab');
     const listed = text(await tool('list_media'));
     assert(listed.assets.every(asset => asset.status === 'available'), 'host-store imports are available to the worker');
     await tool('check_project');
     await tool('replace_media', { assetId: imported.assetId, path: audio });
     await tool('open_panel', { panelId: 'timeline' });
-    assert(diagnostics.includes('Chromium started on demand'), 'the first panel tool starts Chromium lazily');
     const workspace = text(await tool('get_workspace_state'));
     assert(workspace.layout?.registeredPanels?.length > 0, 'native hidden workspace keeps the full production panel registry');
     await tool('open_panel', { panelId: 'viewer' });
@@ -220,7 +240,22 @@ export default function activate(api: PowermoveAPI) {
   await tool('apply_commands', { label: 'Published effect', commands: [JSON.stringify({ type: 'add_effect', target: title.id, effect: 'mcp-render-smoke.effect' })] });
   const publishedFrames = await tool('render_frames', { times: [0.75], width: 320 });
   assert.equal(publishedFrames.content.filter(item => item.type === 'image').length, 1);
+  if (native) {
+    // Without `at`, import_media_to_timeline imports the asset only (placement null), as today.
+    const assetOnly = text(await tool('import_media_to_timeline', { path: svg }));
+    assert.equal(assetOnly.layers.length, 0, JSON.stringify(assetOnly));
+    await tool('get_project_state');
+    const placed = text(await tool('import_media_to_timeline', { path: svg, at: 0 }));
+    assert.equal(placed.layers[0]?.type, 'shape', `an SVG with paths lands as an editable shape layer: ${JSON.stringify(placed)}`);
+    await tool('get_project_state');
+  }
   const saved = text(await tool('save_project'));
+  if (native) {
+    const { assets, layers } = await recordImports(await savedDocument(saved.path), 'native');
+    assert.equal(assets['mark.svg']?.format, 'svg'); assert.equal(assets['mark.svg']?.editablePaths, 2);
+    assert(assets['mark.svg']?.poster === true || assets['mark.svg']?.poster === undefined);
+    assert.equal(layers.length, 1);
+  }
   const packed = await readFile(saved.path);
   // Today's agent save: a PMV3 container (shared/project-container.ts).
   assert.equal(packed.subarray(0, 5).toString(), 'PMV3\n');
@@ -246,9 +281,17 @@ try {
     await tool('start_session', { prompt: 'Inspect the workspace' });
     const result = await rpc('tools/call', { name: 'get_workspace_state', arguments: {} });
     assert(result.isError && result.content.some(c => /chromium-unavailable/.test(c.text ?? '')), JSON.stringify(result));
+    // Imports run today's editor import in the tab, so they name the missing browser too.
+    for (const name of ['import_media', 'import_media_to_timeline']) {
+      const failed = await rpc('tools/call', { name, arguments: { path: audio } });
+      assert(failed.isError && failed.content.some(c => /chromium-unavailable/.test(c.text ?? '')), JSON.stringify(failed));
+    }
+    await tool('get_project_state');
+    await tool('apply_commands', { label: 'Red', commands: [JSON.stringify({ type: 'add_layer', layerType: 'solid', name: 'Red', content: { color: '#e83a5e', w: 320, h: 180 }, duration: 1 })] });
+    assert.equal((await tool('render_frames', { times: [0], width: 160 })).content.filter(item => item.type === 'image').length, 1);
     assert(!diagnostics.includes('Chromium started on demand'));
     await tool('finish_session', { commit: true }); await quit();
-    console.log('Native missing-browser case passed: document work succeeds and the first DOM tool returns chromium-unavailable.');
+    console.log('Native missing-browser case passed: document edits and frames succeed; DOM tools and imports return chromium-unavailable.');
     throw Object.assign(new Error('done'), { done: true });
   }
   if (desktop || native) { await desktopSmoke(); throw Object.assign(new Error('done'), { done: true }); }
@@ -285,8 +328,15 @@ try {
   assert(decodedAudio.length > 40000 && decodedAudio.some(byte => byte !== 0), 'MP4 audio must be present and audible');
   const pixel = execFileSync(ffmpeg, ['-v', 'error', '-i', video.path, '-frames:v', '1', '-vf', 'crop=2:2:0:0', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
   assert(pixel[0] > 150 && pixel[1] < 120, `Unexpected output pixel: ${pixel.subarray(0, 3)}`);
+  const assetOnly = text(await tool('import_media_to_timeline', { path: svg }));
+  assert.equal(assetOnly.layers.length, 0, JSON.stringify(assetOnly));
+  await tool('get_project_state');
+  const placedSvg = text(await tool('import_media_to_timeline', { path: svg, at: 0 }));
+  assert.equal(placedSvg.layers[0]?.type, 'shape', JSON.stringify(placedSvg));
+  await tool('get_project_state');
   const saved = text(await tool('save_project'));
   assert(saved.path.endsWith('.pmv')); assert((await stat(saved.path)).size > 1000);
+  await recordImports(await savedDocument(saved.path), 'legacy');
   await tool('finish_session', { commit: true });
   await tool('open_project', { projectId: project.projectId });
   await tool('start_session', { prompt: 'Check rollback' });
@@ -294,7 +344,7 @@ try {
   await tool('apply_commands', { label: 'Temporary', commands: [JSON.stringify({ type: 'add_layer', layerType: 'text', name: 'Temporary', content: { text: 'Rollback me' } })] });
   await tool('finish_session', { commit: false });
   await tool('start_session', { prompt: 'Verify', access: 'editor' });
-  assert.equal(text(await tool('get_project_state')).layerCount, 2);
+  assert.equal(text(await tool('get_project_state')).layerCount, 3);
   const rejected = await rpc('tools/call', { name: 'apply_commands', arguments: { commands: [] } });
   assert.equal(rejected.isError, true);
   await tool('finish_session', { commit: true });

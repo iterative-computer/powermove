@@ -2,7 +2,6 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { packProjectFileBlob } from '../../renderer/src/legacy/core/project-file';
 import { decodeProjectContainer } from '../../shared/project-container';
 import { packAgentProject } from './project-packer';
 
@@ -39,6 +38,9 @@ it('writes today\'s agent save byte for byte, skipping media whose bytes are gon
     get: async (asset: any) => paths[asset.id] ? new Blob([await readFile(paths[asset.id]!)], { type: asset.type }) : null,
     put: async () => true
   };
+  // The renderer module stays out of the node project's type graph (its own tsconfig checks it).
+  const rendererPacker = '../../renderer/src/legacy/core/project-file';
+  const { packProjectFileBlob } = await import(/* @vite-ignore */ rendererPacker) as { packProjectFileBlob(document: unknown, store: unknown): Promise<Blob> };
   const today = new Uint8Array(await (await packProjectFileBlob(structuredClone(document), store)).arrayBuffer());
   const written = new Uint8Array(await readFile(output));
   expect(Buffer.from(written).subarray(0, 5).toString()).toBe('PMV3\n');
