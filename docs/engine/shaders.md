@@ -255,6 +255,17 @@ Again on 2026-10-19 with ANGLE's built-in calls and the ANGLE-only listing
 the runner); all groups 507 of 522 match (7 through the runner), 15 both
 refuse, 0 WebGL-unstable, 0 failures.
 
+**No WebGL-unstable allowance** (second review, 2026-10-19). The gate no
+longer has the column: a variant that differs from WebGL fails, and when
+WebGL also moves against its own perturbed runs the failure says so (with
+the side-by-side under `PM_SHADER_GATE_DIFFS`) and points at
+`pm_render::effects::ANGLE_ONLY`, where such a program goes once proved
+(`a_difference_webgl_is_unstable_under_fails_the_gate`). Only the
+undefined-behavior probes (`known_open`, not user content) are listed
+apart. On `shaders-20261018-022611` with the rule (and `PIPELINE_REVISION`
+2, `pm_round` exact): 507 of 522 match (7 through the runner), 15 both
+refuse, 0 failures, the same as before it.
+
 By kind: 44 shader layers, 13 extension fragment layers, 73 effects, 14
 transitions. Variants: layers at their defaults (1.25 s), at 70% of each range
 with other colors and flipped toggles (3.7 s), and with coerced values (numbers
@@ -387,8 +398,9 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
   all effects; no Store extension registers a
   shader layer or a fragment layer yet. Local projects (`--local`) were not
   collected for this run.
-- **WebGL-unstable class** (one Store shader): a visible difference,
-  escalated to Jude with side-by-sides (above); not matched.
+- **WebGL-unstable class** (one Store shader): resolved by DEFS-2 (the
+  program draws through WebGL's runner, above), and the gate no longer
+  passes such a difference (above).
 - **One machine, one GPU family** (M4 Max); the runner was measured in
   headless Chromium, not inside the Electron renderer (the session path is
   covered by the vitest and the pm-node test, the WebGL path by the gate).

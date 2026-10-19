@@ -61,12 +61,25 @@ comparison are kept outside the repository with the review evidence).
 | `pow` | `metal::pow` | `metal::powr` | `powr` |
 | `normalize` (vectors) | `metal::normalize` | `metal::fast::normalize` | `fast::normalize` |
 | `tanh` | `metal::tanh` | `metal::precise::tanh` | `precise::tanh` |
-| `round` | `metal::rint` (glslang and naga fold it into `roundEven`) | `metal::round` (ties away from zero) | `metal::round` inside `pm_glsl`'s `pm_round` polyfill (`ANGLE_POLYFILL_CALLS`) |
+| `round` | `metal::rint` (glslang and naga fold it into `roundEven`) | `metal::round` (ties away from zero) | `pm_glsl`'s `pm_round` polyfill (exact ties away from zero on every back end), whose Metal body is `return metal::round(x);` (`ANGLE_POLYFILLS`) |
 | `radians`, `degrees` | `(x) * c` | `ANGLE_radians`: `c * x` | `pm_glsl` polyfill, `c * x` |
 
 `round` is a correctness fix as well: `round(0.5)` was 0 in the engine and is
 1 in WebGL (`tests/effects.rs` `round_ties_away_from_zero_as_in_webgl`, which
-fails without the mapping). The other calls ANGLE writes as its own helpers
+fails without the mapping). Since the second review (2026-10-19) `pm_round` no longer
+wraps `roundEven`: it computes ties away from zero itself (`t = trunc(x)`,
+then `t + sign(x)` where `abs(x - t) >= 0.5`; `x - t` is exact, so the
+largest float below 0.5 rounds to 0, which `floor(x + 0.5)` gets wrong), so a
+back end without the passthrough MSL (wgpu's own translation, e.g. a future
+DX12 path) rounds as WebGL too; on Metal the MSL writer replaces its body
+with ANGLE's `metal::round` (the same value). `pm_glsl::normalize::tests`
+`pm_round_rounds_ties_away_from_zero_exactly` (200,000 values and the edge
+cases against `f32::round`) and `pm_round_does_not_reach_a_back_end_as_ties_to_even`;
+`glsl::tests::round_polyfill_reaches_naga_as_a_named_function` (each Metal
+overload body is the single call). Measured after the change (`effects_webgl`, `PM_SHADER_STATS=1`,
+`glsl-20261018-193347`): the same 16 variants not bit-exact as before it
+(none a `round` probe; every built-in variant bit-exact), and the shader
+gate on `shaders-20261018-022611` unchanged (507 of 522 match, 0 failures). The other calls ANGLE writes as its own helpers
 (`ANGLE_inverse`, `ANGLE_mod`, `ANGLE_outerProduct`, the scalar
 `faceforward`/`reflect`/`refract`/`distance`, `ANGLE_componentWiseMultiply`)
 have the same expressions as `pm_glsl`'s polyfills or naga's output; `dFdx`
@@ -121,7 +134,10 @@ ANGLE that draws it today; a renderer without one (`pm-cli`) draws the
 native translation. Its GPU program is still built, so `validate_effect`
 compiles it. Built-ins (all bit-exact natively) and layers are never
 listed; the Store's other `liquid-glass-ios27` (zellzoi 2.0.1) matches
-natively and has another fingerprint. Through the runner the program is
+natively and has another fingerprint. (Correction, second review: the
+`liquid-glass-ios27` in Chike's setup snapshot, `user-setups/chike-20261018`,
+is manifest 2.0.1, byte-identical to zellzoi 2.0.1's `index.ts`, not
+mrsigma 2.0.8; earlier notes said he uses 2.0.8.) Through the runner the program is
 bit-exact against WebGL in all four variants (`effects_webgl`
 `fallback_effects_match_webgl` on a private mini corpus of the gate case,
 `PM_SHADER_STATS=1`: 36,864 of 36,864 pixels each); the shader gate draws
@@ -436,6 +452,33 @@ machine) runs in the renderer's own WebGL2 runner
    `Feature::ShaderFallback` (`Renderer::unsupported_with_media`).
 4. **`pm-cli`** has no runner: such a program is a named, deterministic
    "not headless-renderable" failure (exit 4).
+5. **Snapshots** (the render transport: `renderFrameTo`, `raster`, the
+   thumbnails; 2026-10-19, with the merge of the bridge lane). A snapshot
+   that needs the runner answers `needsRenderer` naming the requests; the
+   renderer draws them and asks again. The caller may be the renderer
+   thread blocked in `sendSync`, which reads no port, so an effect's or a
+   transition's textures cannot follow on the session port as for the
+   viewer: the interactive engine sends them to main on the host port,
+   ahead of the answer on the same port (`present/render.rs`
+   `fallback_inputs`); main keeps them by request key
+   (`main/engine/fallback-inputs.ts`, bounded to 16 requests and 1 GiB) and
+   hands them back with the answer (`EngineSnapshotReply.fallbackTextures`);
+   the transport passes them to the runner (`render-transport.ts`
+   `fallbackTextures`), on the calling thread through
+   `ShaderFallbackRunner.renderSync(request, textures)`. `renderSync`
+   shares the asynchronous path's draw (a generator over the passes): it
+   links as WebGL's `LINK_STATUS` query does (blocking, no compile
+   deadline; a compile an asynchronous request started is reused) and
+   polls each pass's fence on the thread within the same draw deadline, so
+   the watchdog holds there too. A request whose textures did not come
+   fails as `internal` rather than drawing unsampled. Tests: pm-node
+   `snapshot.rs` `snapshots_send_an_effects_textures_to_main_ahead_of_the_answer`
+   (every band on the host port before the answer, none on the window's,
+   and the frame drawn with the runner's pixels); `fallback-inputs.test.ts`;
+   `snapshots.test.ts` "hands an effect request its textures";
+   `native-engine.test.ts` (bands kept from the interactive engine only);
+   `render-transport.test.ts` (textures on both paths; missing textures
+   fail); `shader-fallback.test.ts` "the runner on the calling thread".
 
 **Transient failures** (review fix, 2026-10-19). Only two failures say
 something about a program and are kept until its source changes
@@ -490,6 +533,13 @@ after three attempts and the viewer retried every 8 s, while today's
   the limit, after one attempt. Main's relay sends it as `budgetExceeded`,
   which the job host reads back as `tooLarge`.
 - A malformed request (texture count or length) stays `size`, transient.
+- The protocol carries those sizes (second review, 2026-10-19):
+  `pm_protocol::shader_fallback::MAX_EDGE` was still 4,096, and every
+  envelope is validated when it is encoded, so a job's `ShaderFallback`
+  host request, a viewer's request, and their texture bands past 4,096 px
+  could not be sent at all (the earlier 4,500 px test drove the renderer
+  with a test host, not the protocol). It is 16,384 now
+  (`shader_fallback::tests`, an 8K effect request, host request, and band).
 - Tests: `effects_fallback.rs`
   `a_job_draws_a_runner_step_wider_than_4096_px_at_the_compositions_size`
   (4,500 px), `a_target_past_the_gpus_webgl_limit_is_a_final_named_failure`;
@@ -514,6 +564,9 @@ each other, so a chain of them would have asked forever. Test:
 job's 20 requests are all new and its frame equals the viewer's);
 `shader_layers::fallback`
 `a_pinned_frame_keeps_every_result_past_the_budget_until_unpinned`.
+Pinned results have no ceiling within a frame (20 8K steps would hold about
+5 GB): a ceiling would fail an export today draws, and today's compositor
+draws such a chain too; it is left to the memory arbiter.
 
 **Compile deadline** (review note, 2026-10-19). A request waits up to 10 s
 for its program to compile (`KHR_parallel_shader_compile`). A compile past
@@ -521,8 +574,14 @@ it is no longer deleted: it goes on in the driver, and the program's next
 request (the engine retries `deadline` as transient) waits for the same
 compile, so a program WebGL takes long to compile draws once it has, as
 today's compositor waits for it (`shader-fallback.test.ts` "a program WebGL
-takes long to compile"). A job's three attempts give a compile 30 s before
-the job stops naming the program; the viewer keeps retrying with backoff.
+takes long to compile"). In a job, an answer that the program is still
+compiling does not count as an attempt: the job asks again for up to
+`pm_render::HOST_COMPILE_WAITS` (60) such answers, about ten minutes of
+10 s deadlines, as today's exporter waits for its compile; past that it
+stops naming the program (`effects_fallback`
+`a_job_waits_for_a_program_webgl_takes_long_to_compile`,
+`a_job_whose_program_never_finishes_compiling_stops_naming_it`). The viewer
+keeps retrying with backoff.
 
 The runner (`ShaderFallbackRunner.render(request, textures)`) uploads each
 texture as RGBA16F (linear, clamp to edge, as the compositor's `grab`
@@ -604,7 +663,14 @@ in `dir/glsl` (`pm_glsl::Cache`; 3D programs in `dir`). Main passes
 (`POWERMOVE_ENGINE_SHADER_CACHE`) and the interactive engine's composer uses it, so only
 the first launch translates the built-ins on the render thread. Measured
 (`tests/effects.rs`, release, M4 Max): the 20 built-ins in 120 ms cold, 1.4 ms from the
-folder.
+folder. The folder outlives the engine build that wrote it, so every change to what
+`pm_glsl` emits bumps `pm_glsl::PIPELINE_REVISION`, which is part of every key and every
+entry: revision 2 (2026-10-19) is the `round`, `radians`, and `degrees` polyfills, so a
+machine that ran an earlier build translates programs calling them again rather than
+loading revision 1's SPIR-V (where `round` was ties to even). `cache::tests`
+`an_entry_written_under_an_earlier_revision_is_not_reused` plants revision 1 entries
+under both keys; `emitted_programs_match_the_pipeline_revision` hashes what a set of
+programs over every polyfill prepares to and fails when it changes without a bump.
 
 **Shader meta.** `EngineShaderMeta` fills `uiState.getShaderMeta` and the compile errors
 from engine reports at their revision: definition failures go to every extension layer
@@ -930,16 +996,25 @@ For the owners of these files (derouter, device, bridge, dochost, jobs):
   `WatchdogPending`, `Fallback(String)`, `Watchdog(String)`; outside
   pm-render they reach generic error arms, and pm-node's presenter handles
   `WatchdogPending` itself), `exec.rs`, `lib.rs` (`pub mod glsl`), and
-  `tests/corpus.rs` (the review side-by-side dump under `PM_RENDER_DIFFS`;
-  `CORPUS_UNSTABLE` is now empty). 2026-10-19: `renderer.rs` also pins a
-  job frame's runner results and replaces the 16-round limit with the
-  progress rule (`host_progress`).
+  `tests/corpus.rs` (the review side-by-side dump under `PM_RENDER_DIFFS`,
+  now for every failing frame; the `CORPUS_UNSTABLE` machinery is removed).
+  2026-10-19: `renderer.rs` also pins a job frame's runner results and
+  replaces the 16-round limit with the progress rule (`host_progress`); in
+  the second review it waits for a program still compiling
+  (`HOST_COMPILE_WAITS`, exported from `lib.rs`). Merging the bridge and
+  perf2 lanes: `renderer.rs` keeps the job watchdog stop ahead of
+  `plan::build_blender`, `lib.rs` lists `frame_prefix` and `glsl`.
 - **pm-engine**: `engine.rs`, `jobs.rs` (`job_definitions`;
   `JobService::definitions_pushed` defers the push's acknowledgement until
   the job engine holds the set).
 - **pm-protocol**: `envelope.rs` (`Request::ShaderFallback`,
-  `Event::ShaderFallback` with `Input`), `samples.rs`, `shader_fallback.rs`,
-  wire fixtures; the generated `shared/engine-protocol/` types.
+  `Event::ShaderFallback` with `Input`), `samples.rs`, `shader_fallback.rs`
+  (second review: `MAX_EDGE` 16,384), wire fixtures; the generated
+  `shared/engine-protocol/` types. Merging the bridge lane, `ShaderFallback`
+  became the last request variant (index 28, sample id 29), after the
+  bridge's `Snapshot` and `CompatFrame`, which keep their indices.
+- **pm-glsl**: `pipeline.rs` (`PIPELINE_REVISION` 2), `cache.rs`
+  (`Key::at_revision` and the revision tests), `normalize.rs` (`pm_round`).
 - **RFCs**: `rfcs/07-errors-and-isolation.md` and
   `rfcs/10-definition-snapshots.md`: a definitions failure report's
   `FailureReport.revision` carries the definitions generation it answers
@@ -949,11 +1024,13 @@ For the owners of these files (derouter, device, bridge, dochost, jobs):
   generation per entry, so a push is acknowledged against the generation it
   carried).
 - **pm-node**: `present/render.rs` (texture bands, failures without
-  routing, transient retry wake-ups), `jobs/{fallback,definitions,compile,mod}.rs`,
-  `tests/document.rs`.
+  routing, transient retry wake-ups; second review: a snapshot's texture
+  bands to main ahead of `needsRenderer`, `fallback_inputs`),
+  `jobs/{fallback,definitions,compile,mod}.rs`, `tests/document.rs`,
+  `tests/snapshot.rs` (bridge's: one child test).
 - **pm-export** `render.rs`, **pm-cli** `main.rs`, `render.rs`,
-  `render_parity.rs` (2026-10-19: `WEBGL_UNSTABLE` is empty, and its fx
-  stripping threads the type list through arrays).
+  `render_parity.rs` (second review: the WebGL-unstable review class and
+  its fx stripping are removed; a departing frame fails).
 - **Corpus**: `engine/corpus/src/projects/render-effects.ts` (2026-10-19:
   `render/fx-steps-{color,levels,posterize}`, the effects at their step
   parameters).
@@ -964,7 +1041,17 @@ For the owners of these files (derouter, device, bridge, dochost, jobs):
   `legacy/assistant/harness.ts` and `legacy/core/exporter.ts` (a
   `PM.EngineDefinitions.settle()` call before a render or export),
   `main/engine/shader-fallback-relay.ts` (2026-10-19: `tooLarge` as
-  `budgetExceeded`).
+  `budgetExceeded`). Second review, with the bridge lane's render
+  transport merged: `main/engine/fallback-inputs.ts` (new),
+  `native-engine.ts` (the interactive engine's texture bands kept, ahead of
+  the session-event filter; `fallbackTextures`), `snapshots.ts` (bridge's:
+  `fallbackTextures` on `needsRenderer`), `shared/engine-ipc.ts` (the
+  reply's `fallbackTextures`), `engine-connection/render-transport.ts`
+  (bridge's: textures to `render`/`renderSync`), `install.ts` (the job
+  runner hook and `setRoute` re-applied to the bridge's `openSession`),
+  `session.ts` (the bridge's `uploadFallback` for runner results), and
+  `pm-render/tools/shaders/collect.ts` (a local extension that does not
+  load is noted, not fatal).
   `kernel/api.ts`, `main/index.ts`, `legacy/core/editing.ts`, and
   `legacy/gl/raster.ts` are untouched.
 
@@ -1056,6 +1143,18 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
 - **Linear blending with an alpha above 1:** in Standard such a pixel darkens the stack
   beneath by the excess (WebGL's arithmetic, kept); with linear blending on the
   composite is in linear light and there is no reference for it.
+- **WebGL-unstable class: no longer an allowance anywhere** (2026-10-19,
+  second review). The shader gate fails a variant that differs from WebGL
+  whether or not WebGL moves against its own perturbed runs (the
+  perturbation result stays in the failure as the explanation, with the
+  side-by-side under `PM_SHADER_GATE_DIFFS`; `shader_gate`
+  `a_difference_webgl_is_unstable_under_fails_the_gate`); before, such a
+  variant was counted apart and passed, the mechanism that hid
+  liquid-glass 2.0.8. `tests/corpus.rs` and `pm-cli parity` lost their
+  (empty) listing machinery: a departing frame fails. The three built-ins
+  exposed to rounding drift moved from `pm_render::effects::WEBGL_UNSTABLE`
+  to a fixture in `effects_webgl` (`EXPOSED_BUILTINS`): the perturbation
+  test fails when a built-in outside it turns out ill-conditioned.
 - **WebGL-unstable class: resolved for level 1 content** (2026-10-19).
   Posterize, Color, and Levels are bit-exact against today (Parity); the
   Store liquid-glass-ios27 2.0.8 glass effect draws through WebGL's runner
