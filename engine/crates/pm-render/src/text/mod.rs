@@ -482,7 +482,10 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
 }
 
 impl TextContext {
-    fn painter(&mut self) -> (Painter<'_>, &mut dyn TextFonts, &mut Vec<String>) {
+    fn painter(
+        &mut self,
+        viewport: (u32, u32),
+    ) -> (Painter<'_>, &mut dyn TextFonts, &mut Vec<String>) {
         let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
         (
             Painter {
@@ -497,6 +500,7 @@ impl TextContext {
                 } else {
                     None
                 },
+                viewport: Some(viewport),
                 profile: self.profile.clone(),
                 unsupported: Vec::new(),
             },
@@ -571,7 +575,7 @@ impl TextContext {
                     height: ch,
                     items: Vec::new(),
                 };
-                let (mut painter, fonts, unsupported) = self.painter();
+                let (mut painter, fonts, unsupported) = self.painter((cw, ch));
                 for (g, baseline) in a.glyphs.iter().zip(&a.baselines) {
                     if g.opacity.is_nan() || g.opacity <= 0.0 {
                         continue;
@@ -628,7 +632,7 @@ impl TextContext {
             height: ch,
             items: Vec::new(),
         };
-        let (mut painter, fonts, unsupported) = self.painter();
+        let (mut painter, fonts, unsupported) = self.painter((cw, ch));
         let lines = fonts.line_runs(&tc);
         let m = Affine::scale(density);
         for line in &lines {
@@ -710,6 +714,7 @@ impl TextContext {
             outlines: &mut self.outlines,
             bitmaps: &mut self.bitmaps,
             masks: None,
+            viewport: None,
             profile: Profile::CORETEXT,
             unsupported: Vec::new(),
         };
@@ -873,7 +878,7 @@ impl TextContext {
         // keeps the canvas default, black.
         let stroke_color =
             hex_to_rgba(&style.stroke_color.to_string_lossy(), 1.0).unwrap_or(color::BLACK);
-        let (mut painter, fonts, unsupported) = self.painter();
+        let (mut painter, fonts, unsupported) = self.painter((scene.width, scene.height));
         for line in &layout.lines {
             for word in &line.words {
                 let state =

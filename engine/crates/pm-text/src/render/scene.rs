@@ -285,6 +285,9 @@ pub struct Painter<'c> {
     /// Level 1 glyph masks from the platform rasterizer, when it has one;
     /// glyphs Canvas2D draws from masks are then drawn from these.
     pub masks: Option<&'c mut dyn MaskSource>,
+    /// Full Canvas2D backing dimensions used by Graphite's device-to-NDC
+    /// and viewport round trip before subpixel snapping.
+    pub viewport: Option<(u32, u32)>,
     pub profile: Profile,
     /// What the scene could not draw (color vector glyphs): the renderer
     /// refuses such a layer rather than drawing it wrong.
@@ -666,7 +669,11 @@ impl Painter<'_> {
                             .and_then(|masks| masks.canonical_path(run.face, coords, g.id as u16))
                     {
                         let gm = place.glyph_matrix(origin, (g.x, g.y), run.size / 64.0);
-                        if let Some(cov) = tessellated_coverage(&local, gm) {
+                        if let Some(cov) = analytic_rect_coverage(&local, gm) {
+                            sdf_glyphs.push(cov);
+                        } else if let Some(cov) =
+                            tessellated_coverage_in_viewport(&local, gm, self.viewport)
+                        {
                             msaa_glyphs.push(cov);
                         }
                         continue;
@@ -1589,6 +1596,123 @@ pub fn fill_rounded_rect_msaa(
     msaa_item(Rect::new(x0, y0, x1, y1), inside, color, opacity)
 }
 
+/// `Device::drawPath` recognizes a rectangular glyph outline and calls
+/// `drawRect`, whose Graphite AnalyticRRectRenderStep evaluates continuous
+/// edge distances. Such a glyph must not use the path renderer's 4x MSAA.
+#[cfg(feature = "cg-masks")]
+fn analytic_rect_coverage(
+    path: &pm_skia_path::Path,
+    m: [f32; 6],
+) -> Option<(i64, i64, usize, usize, Vec<f32>)> {
+    use pm_skia_path::PathSegment;
+    let mut points = Vec::new();
+    let mut contours = 0;
+    for seg in path.segments() {
+        match seg {
+            PathSegment::MoveTo(p) => {
+                contours += 1;
+                points.push((p.x, p.y));
+            }
+            PathSegment::LineTo(p) => points.push((p.x, p.y)),
+            PathSegment::Close => {}
+            _ => return None,
+        }
+    }
+    if contours != 1 {
+        return None;
+    }
+    if points.last() == points.first() {
+        points.pop();
+    }
+    // SkPath::isRect permits collinear subdivisions of an edge.
+    loop {
+        if points.len() < 4 {
+            return None;
+        }
+        let index = (0..points.len()).find(|&i| {
+            let (p, q, r) = (
+                points[(i + points.len() - 1) % points.len()],
+                points[i],
+                points[(i + 1) % points.len()],
+            );
+            (p.0 == q.0 && q.0 == r.0) || (p.1 == q.1 && q.1 == r.1)
+        });
+        if let Some(i) = index {
+            points.remove(i);
+        } else {
+            break;
+        }
+    }
+    if points.len() != 4
+        || (0..4).any(|i| {
+            let (p, q) = (points[i], points[(i + 1) % 4]);
+            p.0 != q.0 && p.1 != q.1
+        })
+    {
+        return None;
+    }
+    let [a, b, c, d, e, f] = m;
+    let dev = |p: (f32, f32)| {
+        (
+            a.mul_add(p.0, c.mul_add(p.1, e)),
+            b.mul_add(p.0, d.mul_add(p.1, f)),
+        )
+    };
+    let q: Vec<_> = points.into_iter().map(dev).collect();
+    let area = (q[1].0 - q[0].0) * (q[2].1 - q[1].1) - (q[1].1 - q[0].1) * (q[2].0 - q[1].0);
+    if !area.is_finite() || area == 0.0 {
+        return None;
+    }
+    let sign = area.signum();
+    let mut edges = Vec::new();
+    for i in 0..4 {
+        let (p, r) = (q[i], q[(i + 1) % 4]);
+        let (dx, dy) = (r.0 - p.0, r.1 - p.1);
+        let length = (dx * dx + dy * dy).sqrt();
+        if length == 0.0 {
+            return None;
+        }
+        edges.push((p, dx / length, dy / length));
+    }
+    let distance = |p: (f32, f32), i: usize| {
+        let (q, dx, dy) = edges[i];
+        sign * (dx * (p.1 - q.1) - dy * (p.0 - q.0))
+    };
+    // The source contour is an all-AA local rectangle, so Graphite's
+    // subpixelCoverage condition holds even under a shearing transform.
+    let scale = distance(q[2], 0).min(distance(q[3], 1)).min(1.0);
+    let bias = 1.0 - 0.5 * scale;
+    let (x0, y0) = (
+        q.iter().map(|p| p.0).fold(f32::INFINITY, f32::min).floor() as i64 - 1,
+        q.iter().map(|p| p.1).fold(f32::INFINITY, f32::min).floor() as i64 - 1,
+    );
+    let (x1, y1) = (
+        q.iter()
+            .map(|p| p.0)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil() as i64
+            + 1,
+        q.iter()
+            .map(|p| p.1)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil() as i64
+            + 1,
+    );
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return None;
+    }
+    let mut coverage = Vec::with_capacity(w * h);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = (x as f32 + 0.5, y as f32 + 0.5);
+            let dist = (0..4).map(|i| distance(p, i)).fold(f32::INFINITY, f32::min);
+            coverage.push(super::sdf::half((scale * (dist + bias)).clamp(0.0, 1.0)));
+        }
+    }
+    Some((x0, y0, w, h, coverage))
+}
+
 /// A path drawn as the GPU canvas tessellates it (Graphite's wedges): each
 /// quad as its cubic, each cubic cut at `T = k / 2^L` (`L` from Wang's
 /// formula at precision 4 in device space, at most 5), evaluated in local
@@ -1600,13 +1724,35 @@ pub fn tessellated_coverage(
     path: &pm_skia_path::Path,
     m: [f32; 6],
 ) -> Option<(i64, i64, usize, usize, Vec<u8>)> {
+    tessellated_coverage_in_viewport(path, m, None)
+}
+
+#[cfg(feature = "cg-masks")]
+fn tessellated_coverage_in_viewport(
+    path: &pm_skia_path::Path,
+    m: [f32; 6],
+    viewport: Option<(u32, u32)>,
+) -> Option<(i64, i64, usize, usize, Vec<u8>)> {
     use pm_skia_path::PathSegment;
     let [a, b, c, d, e, f] = m;
     let dev = |x: f32, y: f32| {
+        // Graphite's localToDevice multiplication is fused. NDC and the
+        // viewport then round to f32 separately, before the 1/256 grid.
+        // The same round trip is used by pm-vector's Canvas2D tessellator.
+        let (mut x, mut y) = (a.mul_add(x, c.mul_add(y, e)), b.mul_add(x, d.mul_add(y, f)));
+        if let Some((w, h)) = viewport {
+            let (hw, hh) = (w as f32 * 0.5, h as f32 * 0.5);
+            x = ((x - hw) / hw) * hw + hw;
+            y = ((y - hh) / hh) * hh + hh;
+        }
         let snap = |v: f32| f64::from((v * 256.0).round() / 256.0);
-        (snap(a * x + c * y + e), snap(b * x + d * y + f))
+        (snap(x), snap(y))
     };
-    let mix = |p: (f32, f32), q: (f32, f32), t: f32| (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t);
+    // The shader uses mix(a,b,t), not its separate unchecked_mix
+    // helper (fma(b-a,t,a)); preserve the weighted endpoint form.
+    let mix = |p: (f32, f32), q: (f32, f32), t: f32| {
+        (p.0 * (1.0 - t) + q.0 * t, p.1 * (1.0 - t) + q.1 * t)
+    };
     let mut contours: Vec<Vec<(f64, f64)>> = Vec::new();
     let mut last = (0.0f32, 0.0f32);
     let cubic = |out: &mut Vec<(f64, f64)>,
@@ -1650,8 +1796,16 @@ pub fn tessellated_coverage(
             PathSegment::QuadTo(p1, p2) => {
                 let (q1, q2) = ((p1.x, p1.y), (p2.x, p2.y));
                 // `writeQuadPatch`: the quad's cubic.
-                let c1 = mix(last, q1, 2.0 / 3.0);
-                let c2 = mix(q2, q1, 2.0 / 3.0);
+                // PatchWriter::mix runs on the CPU and uses (b-a)*T+a.
+                // It differs from the shader's weighted mix above.
+                let cpu_mix = |p: (f32, f32), q: (f32, f32)| {
+                    (
+                        p.0 + (q.0 - p.0) * (2.0 / 3.0),
+                        p.1 + (q.1 - p.1) * (2.0 / 3.0),
+                    )
+                };
+                let c1 = cpu_mix(last, q1);
+                let c2 = cpu_mix(q2, q1);
                 cubic(contours.last_mut()?, last, c1, c2, q2);
                 last = q2;
             }
@@ -2001,6 +2155,7 @@ mod tests {
                 outlines: &mut outlines,
                 bitmaps: &mut bitmaps,
                 masks: None,
+                viewport: None,
                 profile: Profile::CANVAS2D,
                 unsupported: Vec::new(),
             };
@@ -2036,6 +2191,35 @@ mod tests {
         assert!(n >= 2 && unsupported.is_empty(), "{unsupported:?}");
         #[cfg(not(feature = "cg-masks"))]
         assert!(!unsupported.is_empty());
+    }
+
+    /// Rectangular glyph stems use analytic coverage, even at sizes where
+    /// curved glyphs use four samples. A 1/16-pixel edge is continuous.
+    #[cfg(feature = "cg-masks")]
+    #[test]
+    fn rectangular_glyph_edges_keep_continuous_coverage() {
+        let mut b = pm_skia_path::PathBuilder::new();
+        b.move_to(0.0, 0.0);
+        b.line_to(4.0, 0.0);
+        b.line_to(4.0, 4.0);
+        b.line_to(0.0, 4.0);
+        b.close();
+        let square = b.finish().unwrap();
+        let (x, y, w, _, coverage) =
+            analytic_rect_coverage(&square, [1.0, 0.0, 0.0, 1.0, 1.0625, 2.0]).unwrap();
+        let row = &coverage[((3 - y) as usize) * w..((4 - y) as usize) * w];
+        assert_eq!(row[(1 - x) as usize], 0.9375);
+        assert_eq!(row[(5 - x) as usize], 0.0625);
+        let (x, y, w, _, coverage) =
+            analytic_rect_coverage(&square, [0.0625, 0.0, 0.0, 1.0, 0.375, 2.0]).unwrap();
+        assert_eq!(coverage[(3 - y) as usize * w + (0 - x) as usize], 0.25);
+        let mut b = pm_skia_path::PathBuilder::new();
+        b.move_to(0.0, 0.0);
+        b.quad_to(2.0, 4.0, 4.0, 0.0);
+        b.close();
+        assert!(
+            analytic_rect_coverage(&b.finish().unwrap(), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]).is_none()
+        );
     }
 
     /// Text drawn as paths: a square covers its pixels with all four

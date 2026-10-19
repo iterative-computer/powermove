@@ -224,6 +224,7 @@ mod review {
                 outlines: &mut outlines,
                 bitmaps: &mut bitmaps,
                 masks: None,
+                viewport: None,
                 profile: Profile::CORETEXT,
                 unsupported: Vec::new(),
             };

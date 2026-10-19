@@ -124,6 +124,7 @@ fn main() {
             outlines: &mut outlines,
             bitmaps: &mut bitmaps,
             masks: None,
+            viewport: None,
             profile: profile.clone(),
             unsupported: Vec::new(),
         };

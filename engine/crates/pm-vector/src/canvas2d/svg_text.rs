@@ -124,6 +124,7 @@ impl<'a, R: FontResolver> TextRenderer<'a, R> {
                         outlines: &mut self.outlines,
                         bitmaps: &mut self.bitmaps,
                         masks: None,
+                        viewport: None,
                         profile: Profile::CANVAS2D,
                         unsupported: Vec::new(),
                     };
