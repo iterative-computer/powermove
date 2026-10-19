@@ -7,7 +7,6 @@
 // Based on SkStroke.cpp
 
 use crate::{Path, Point, Transform};
-use alloc::vec::Vec;
 
 use crate::floating_point::{NonZeroPositiveF32, NormalizedF32, NormalizedF32Exclusive};
 use crate::path::{PathSegment, PathSegmentsIter, PathVerb};
