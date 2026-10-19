@@ -233,3 +233,15 @@ pub stand_in: bool, // #[serde(default)], TypeScript `standIn: boolean`
   The build id moved (`protocol-a6aa78d4b8a57c0d` →
   `protocol-2e87c1a0e6d5735f`), so draft-contract peers rebuild against it,
   as with the `vsync` note above.
+
+### Version note: optional headless state (bridge round 4, 2026-10-18)
+
+`ViewerState.headless?: boolean | null` defaults to presentation when absent,
+false or null. True releases color/depth presentation pools and suppresses
+presentation draws while preserving the session, transport and pm-audio.
+Headless clocks are revision-tagged and sent only when the composition/media
+are ready for commands. Normal viewer state reattaches to the same clock;
+there is no implicit seek, Play, epoch change or audio-device restart. Explicit
+presentation frame requests fail without a viewer; offscreen captures use the
+snapshot path. See RFC 16 for the renderer lifecycle. The generated build is
+`protocol-2f8d7cab61015d02`; addons and TypeScript must be rebuilt together.

@@ -194,6 +194,24 @@ export class ShaderFallbackRunner {
     return run;
   }
 
+  /**
+   * Renders one request on the calling thread: the synchronous snapshot
+   * path (render-transport.ts), where the thread is blocked on a snapshot
+   * that needs these pixels and nothing may wait for a task. The program
+   * links as WebGL's `LINK_STATUS` query does (blocking, so no compile
+   * deadline), and every pass's fence is polled on this thread within the
+   * same draw deadline, so the watchdog holds here too. A context lost
+   * under it is made again and the request drawn once more, as `render`.
+   */
+  renderSync(request: ShaderFallbackRequest, textures: Uint16Array[] = []): ShaderFallbackPixels {
+    try {
+      return this.runSync(request, textures);
+    } catch (error) {
+      if (!(error instanceof ShaderFallbackError) || error.reason !== 'contextLost') throw error;
+      return this.runSync(request, textures);
+    }
+  }
+
   private now(): number {
     return this.options.now?.() ?? performance.now();
   }
@@ -227,6 +245,34 @@ export class ShaderFallbackRunner {
           throw error;
         }
         await this.sleep(POLL_MS);
+      }
+    } finally {
+      if (!gl.isContextLost()) gl.deleteSync(sync);
+    }
+  }
+
+  /** `finished` on the calling thread: the fence is polled without
+   *  yielding, within the same draw deadline. */
+  private finishedSync(gl: GL, id: string, request: ShaderFallbackRequest): void {
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!sync) return;
+    gl.flush();
+    const ms = this.options.drawDeadlineMs ?? DRAW_DEADLINE_MS;
+    const deadline = this.now() + ms;
+    try {
+      for (;;) {
+        const status = gl.clientWaitSync(sync, 0, 0);
+        if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return;
+        if (status === gl.WAIT_FAILED || this.lost || gl.isContextLost()) {
+          this.lost = true;
+          throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
+        }
+        if (this.now() > deadline) {
+          const error = this.fail(id, request, 'watchdog', `its draw did not finish within ${Math.round(ms / 1000)} s`);
+          gl.getExtension('WEBGL_lose_context')?.loseContext();
+          this.lost = true;
+          throw error;
+        }
       }
     } finally {
       if (!gl.isContextLost()) gl.deleteSync(sync);
@@ -267,8 +313,9 @@ export class ShaderFallbackRunner {
     return gl;
   }
 
-  private async program(gl: GL, request: ShaderFallbackRequest): Promise<Program> {
-    const id = `${request.vertex}\u0000${request.fragment}`;
+  /** The program's linked entry (most recently used last), or its kept
+   *  failure; null when it has not been linked. */
+  private cached(id: string, request: ShaderFallbackRequest): Program | null {
     const cached = this.programs.get(id);
     if (cached) {
       this.programs.delete(id);
@@ -277,37 +324,64 @@ export class ShaderFallbackRunner {
     }
     const failure = this.failed.get(id);
     if (failure) throw new ShaderFallbackError(request.key, failure.reason, failure.message);
+    return null;
+  }
+
+  /** The program's compile: one already going on in the driver (a request
+   *  past its deadline, or another request waiting for it), or a new one. */
+  private start(gl: GL, id: string, request: ShaderFallbackRequest): { program: WebGLProgram; vs: WebGLShader; fs: WebGLShader } {
+    const going = this.compiling.get(id);
+    if (going) return going;
+    const vs = gl.createShader(gl.VERTEX_SHADER)!, fs = gl.createShader(gl.FRAGMENT_SHADER)!, program = gl.createProgram()!;
+    gl.shaderSource(vs, request.vertex); gl.compileShader(vs);
+    gl.shaderSource(fs, request.fragment); gl.compileShader(fs);
+    gl.attachShader(program, vs); gl.attachShader(program, fs); gl.linkProgram(program);
+    const started = { program, vs, fs };
+    this.compiling.set(id, started);
+    return started;
+  }
+
+  private async program(gl: GL, request: ShaderFallbackRequest): Promise<Program> {
+    const id = `${request.vertex}\u0000${request.fragment}`;
+    const cached = this.cached(id, request);
+    if (cached) return cached;
     // A compile that passed an earlier request's deadline goes on in the
     // driver: this request waits for the same compile, not a new one, so a
     // program WebGL takes long to compile (today's compositor waits for it)
     // draws once it is done.
-    let started = this.compiling.get(id);
-    if (!started) {
-      const vs = gl.createShader(gl.VERTEX_SHADER)!, fs = gl.createShader(gl.FRAGMENT_SHADER)!, program = gl.createProgram()!;
-      gl.shaderSource(vs, request.vertex); gl.compileShader(vs);
-      gl.shaderSource(fs, request.fragment); gl.compileShader(fs);
-      gl.attachShader(program, vs); gl.attachShader(program, fs); gl.linkProgram(program);
-      started = { program, vs, fs };
-    }
-    const { program, vs, fs } = started;
-    this.compiling.delete(id);
+    const started = this.start(gl, id, request);
     if (this.parallel) {
       const deadline = this.now() + (this.options.compileDeadlineMs ?? COMPILE_DEADLINE_MS);
-      while (!gl.getProgramParameter(program, this.parallel.COMPLETION_STATUS_KHR)) {
+      while (!gl.getProgramParameter(started.program, this.parallel.COMPLETION_STATUS_KHR)) {
         if (this.lost || gl.isContextLost()) throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while compiling');
         if (this.now() > deadline) {
           // Kept compiling for the next request (at most a few programs).
-          this.compiling.set(id, started);
           while (this.compiling.size > MAX_COMPILING) {
-            const [oldest, c] = this.compiling.entries().next().value!;
+            const [oldest, c] = [...this.compiling.entries()].find(([key]) => key !== id)!;
             gl.deleteProgram(c.program); gl.deleteShader(c.vs); gl.deleteShader(c.fs);
             this.compiling.delete(oldest);
           }
           throw this.fail(id, request, 'deadline', `the program has not finished compiling after ${Math.round((this.options.compileDeadlineMs ?? COMPILE_DEADLINE_MS) / 1000)} s; it is still compiling and is drawn once it has`);
         }
         await this.sleep(POLL_MS);
+        // A synchronous request may have linked (or refused) it meanwhile.
+        const done = this.cached(id, request);
+        if (done) return done;
       }
     }
+    return this.linked(gl, id, request, started);
+  }
+
+  /** The program for the synchronous path: `LINK_STATUS` blocks until the
+   *  compile (a new one, or one already going on) is done. */
+  private programSync(gl: GL, request: ShaderFallbackRequest): Program {
+    const id = `${request.vertex}\u0000${request.fragment}`;
+    return this.cached(id, request) ?? this.linked(gl, id, request, this.start(gl, id, request));
+  }
+
+  private linked(gl: GL, id: string, request: ShaderFallbackRequest, started: { program: WebGLProgram; vs: WebGLShader; fs: WebGLShader }): Program {
+    const { program, vs, fs } = started;
+    this.compiling.delete(id);
     const linked = gl.getProgramParameter(program, gl.LINK_STATUS);
     const log = (gl.getShaderInfoLog(fs) || '') + (gl.getProgramInfoLog(program) || '');
     // A lost context answers every query with null: not a refusal.
@@ -350,6 +424,35 @@ export class ShaderFallbackRunner {
   }
 
   private async run(request: ShaderFallbackRequest, textures: Uint16Array[]): Promise<ShaderFallbackPixels> {
+    const { gl, id } = this.prepare(request, textures);
+    const steps = this.draw(gl, await this.program(gl, request), id, request, textures);
+    for (let step = steps.next(); ; step = steps.next()) {
+      if (step.done) return step.value;
+      try {
+        await this.finished(gl, id, request);
+      } catch (error) {
+        steps.return(undefined as never);
+        throw error;
+      }
+    }
+  }
+
+  private runSync(request: ShaderFallbackRequest, textures: Uint16Array[]): ShaderFallbackPixels {
+    const { gl, id } = this.prepare(request, textures);
+    const steps = this.draw(gl, this.programSync(gl, request), id, request, textures);
+    for (let step = steps.next(); ; step = steps.next()) {
+      if (step.done) return step.value;
+      try {
+        this.finishedSync(gl, id, request);
+      } catch (error) {
+        steps.return(undefined as never);
+        throw error;
+      }
+    }
+  }
+
+  /** Checks a request against its textures and the context's limit. */
+  private prepare(request: ShaderFallbackRequest, textures: Uint16Array[]): { gl: GL; id: string } {
     const { width, height } = request;
     if (!(Number.isInteger(width) && Number.isInteger(height) && width >= 1 && height >= 1)) {
       throw new ShaderFallbackError(request.key, 'size', `target ${width}×${height} is not a size`);
@@ -364,7 +467,18 @@ export class ShaderFallbackRunner {
     if (width > max || height > max) {
       throw new ShaderFallbackError(request.key, 'tooLarge', `target ${width}×${height} is larger than this GPU's ${max} px WebGL texture limit`);
     }
-    const p = await this.program(gl, request);
+    return { gl, id };
+  }
+
+  /**
+   * Draws a request's passes, yielding after each pass's draw is issued so
+   * the caller waits for its fence (`finished` or `finishedSync`), and
+   * returns the read-back pixels. Every pass binds all it uses, and the
+   * target is bound again before the read: a synchronous request may run
+   * on the context between an asynchronous request's passes.
+   */
+  private *draw(gl: GL, p: Program, id: string, request: ShaderFallbackRequest, textures: Uint16Array[]): Generator<void, ShaderFallbackPixels, void> {
+    const { width, height } = request;
     const created: WebGLTexture[] = [];
     const framebuffers: WebGLFramebuffer[] = [];
     const texture = (data: Uint16Array | null): WebGLTexture => {
@@ -414,9 +528,10 @@ export class ShaderFallbackRunner {
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         // A draw WebGL rejects renders nothing (the target stays transparent), as in the compositor.
         while (gl.getError() !== gl.NO_ERROR) { /* drained */ }
-        await this.finished(gl, id, request);
+        yield;
         previous = target;
       }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[framebuffers.length - 1]!);
       // The target's binary16 values as stored: read as half floats when
       // the implementation reads RGBA16F that way (ANGLE does), else as
       // floats, which convert back exactly.

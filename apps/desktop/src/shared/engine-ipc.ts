@@ -52,6 +52,20 @@ export const ENGINE_IPC = {
   /** main → renderer: locate offline media (`string[]` asset ids) after the
    *  offline message's "Locate Media…". */
   locateMedia: 'engine:locate-media',
+  /** renderer → main (sendSync): a snapshot the calling thread waits for
+   *  (`EngineSnapshotRequest` → `EngineSnapshotReply`; the synchronous
+   *  compatibility path, apiVersion 1 to 3). */
+  snapshotSync: 'engine:snapshot-sync',
+  /** renderer → main (invoke): the same, asynchronously (async siblings,
+   *  thumbnails, library cards, posters, the project thumbnail). */
+  snapshot: 'engine:snapshot',
+  /** main → renderer: the job engine needs a layer's compatibility pixels
+   *  for an export frame (`EngineCompatAsk`); the window answers with
+   *  `compatAnswer`. */
+  compatAsk: 'engine:compat-ask',
+  /** renderer → main (send): the pixels for a `compatAsk`, or why not
+   *  (`EngineCompatAnswer`). */
+  compatAnswer: 'engine:compat-answer',
   /** main → renderer: run a job engine request in the window's shader
    *  fallback runner (`ShaderFallbackJob`, main/engine/shader-fallback-relay.ts). */
   shaderFallback: 'engine:shader-fallback',
@@ -215,6 +229,76 @@ export type EngineProbeResult =
   | { status: 'facts'; facts: MediaFacts }
   | { status: 'unavailable'; reason: string };
 
+/* ── The Phase 3c render transport (docs/engine/rfcs/16-render-transport.md) ── */
+
+/** A snapshot the renderer asks main for. `session` and `generation` name
+ *  the window's engine session on its current interactive engine launch
+ *  (main refuses another window's session and a stale launch's);
+ *  `revision` is the document revision the caller has (read-your-writes). */
+export type EngineSnapshotRequest = {
+  generation: number;
+  /** The window's engine session, or null with `document` (main serves the
+   *  snapshot from a session of its own for the window). */
+  session: number | null;
+  revision: number | null;
+  snapshot: import('./engine-protocol').SnapshotRequest;
+  /** The window's document, for a sync snapshot its own session cannot
+   *  serve (none yet, or a staged resync in flight). `json` is left out
+   *  when main already has this revision; main answers `needsDocument`
+   *  when it does not. */
+  document?: EngineSnapshotDocument;
+  /** Shader fallback pixels drawn for an earlier `needsRenderer` answer of
+   *  a `document` snapshot (a window's own session gets them on its port). */
+  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];
+};
+
+export type EngineSnapshotDocument = { id: string; revision: number; hash?: string | null; json?: Uint8Array | null };
+
+/** What a snapshot came back with. `data` is RGBA8, rows top-down, in
+ *  `pixels`'s encoding. `empty`: a layer target that draws nothing then
+ *  (today's `render.raster()` returns null). `needsRenderer`: draw these with the shader
+ *  fallback runner (and the compatibility producers), upload them on the
+ *  session's port, and ask again. `failed`: `code` is the engine's error
+ *  code (`timeout`, `unsupported`, `unknownSession`, …) or `unavailable`
+ *  (the new engine is off or not running) or `refused` (main's caps). */
+export type EngineSnapshotReply =
+  | {
+      status: 'rendered';
+      revision: number;
+      viewSeq: number | null;
+      width: number;
+      height: number;
+      pixels: import('./engine-protocol').SnapshotPixels;
+      data: Uint8Array;
+      origin: [number, number];
+      /** A layer raster's box in layer pixels (`RasterSurface` w, h). */
+      layerBox: [number, number] | null;
+      /** A layer raster's canvas, crop window, and selection. */
+      raster: import('./engine-protocol').RasterGeometry | null;
+      quality: import('./engine-protocol').FrameQuality;
+      waitedUs: number;
+      renderUs: number;
+      /** Time the whole round trip took in main (ms). */
+      mainMs: number;
+    }
+  | {
+      status: 'needsRenderer';
+      revision: number;
+      fallback: import('./engine-protocol').ShaderFallbackRequest[];
+      compat: import('./engine-protocol').CompatNeed[];
+    }
+  | { status: 'empty'; revision: number }
+  | { status: 'failed'; code: string; message: string };
+
+/** main → renderer: compatibility pixels the job engine needs for an export
+ *  frame (contract 14 `compatFrame`). */
+export type EngineCompatAsk = { ask: number; request: import('./engine-protocol').CompatFrameRequest };
+
+/** renderer → main: the answer to an `EngineCompatAsk`. */
+export type EngineCompatAnswer =
+  | { ask: number; status: 'pixels'; key: string; width: number; height: number; format: import('./engine-protocol').CompatFormat; origin: [number, number]; scale: number; data: Uint8Array }
+  | { ask: number; status: 'unavailable'; message: string };
+
 /** The renderer's view (`window.powermove.nativeEngine`, present on the
  *  desktop host). Ports, crashes, and status arrive as window messages
  *  (`ENGINE_WINDOW_MESSAGE`) because a `MessagePort` cannot cross the
@@ -245,6 +329,15 @@ export interface EngineBridge {
   playback(playing: boolean): void;
   /** Interpret Footage's facts of an asset's file (the job engine reads it). */
   probeMedia(request: EngineProbeRequest): Promise<EngineProbeResult>;
+  /** A snapshot the calling thread waits for (the synchronous
+   *  compatibility path). Never throws: failures are `status: 'failed'`. */
+  snapshotSync?(request: EngineSnapshotRequest): EngineSnapshotReply;
+  /** A snapshot, asynchronously. Never rejects: failures are `status: 'failed'`. */
+  snapshot?(request: EngineSnapshotRequest): Promise<EngineSnapshotReply>;
+  /** Compatibility pixels the job engine needs for an export frame; the
+   *  listener answers with `answerCompat`. Returns an unsubscribe. */
+  onCompatAsk?(listener: (ask: EngineCompatAsk) => void): () => void;
+  answerCompat?(answer: EngineCompatAnswer): void;
   /** Runs the job engine's fallback requests in this window's runner
    *  (`run` answers each); returns an unsubscribe. */
   onShaderFallback?(run: (job: { request: import('./engine-protocol').ShaderFallbackRequest; textures: Uint16Array[] }) => Promise<Uint16Array>): () => void;

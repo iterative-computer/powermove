@@ -302,15 +302,16 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        // Each 4 × 4 surface decodes to 256 bytes; budget for two.
-        let mut c = SurfaceCache::new(512, Some(dir.clone()));
+        // Each 4 × 4 surface keeps straight and premultiplied RGBA
+        // (512 bytes total); budget for two, including both buffers.
+        let mut c = SurfaceCache::new(1024, Some(dir.clone()));
         let keys: Vec<ContentHash> = (1..=3u8).map(|n| ContentHash([n; 32])).collect();
         for (i, k) in keys.iter().enumerate() {
             c.insert_bytes(k, &png(1000 * (i as u16 + 1)), (4, 4))
                 .unwrap();
         }
         assert_eq!(c.len(), 2);
-        assert!(c.usage() <= 512);
+        assert!(c.usage() <= 1024);
         // The first was evicted from memory but comes back from disk.
         let s = c.get(&keys[0]).unwrap();
         assert_eq!(s.pixel(0, 0)[3], 1000.0 / 65535.0);

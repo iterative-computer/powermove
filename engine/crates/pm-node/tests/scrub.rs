@@ -51,6 +51,7 @@ fn doc() -> pm_model::Document {
 
 fn state() -> ViewerState {
     ViewerState {
+        headless: None,
         composition: "P-root".into(),
         size: Size::new(320, 180),
         device_pixel_ratio: 2.0,
@@ -64,6 +65,7 @@ fn state() -> ViewerState {
         edr: false,
         view_seq: Seq::new(1).unwrap(),
         vsync: None,
+        depth_id: None,
     }
 }
 

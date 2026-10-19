@@ -1,0 +1,658 @@
+{
+  "run": "tracer-playback-today-25-load-perf2c1",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 25,
+    "lead": 4,
+    "durationMs": 60000,
+    "synthetic": {
+      "layers": 500,
+      "images": 2,
+      "fps": 25,
+      "dur": 90
+    }
+  },
+  "synthetic": {
+    "layers": 500,
+    "byType": {
+      "solid": 432,
+      "precomp": 10,
+      "image": 35,
+      "null": 4,
+      "group": 19
+    },
+    "groups": 19,
+    "precomps": 10,
+    "compositions": 5,
+    "keyframed": 301,
+    "images": 2,
+    "fps": 25,
+    "w": 1920,
+    "h": 1080
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      8.43505859375,
+      8.7236328125,
+      9.03173828125
+    ],
+    "after": [
+      7.0625,
+      8.26806640625,
+      8.83251953125
+    ]
+  },
+  "project": {
+    "name": "Synthetic 500 layers",
+    "w": 1920,
+    "h": 1080,
+    "fps": 25,
+    "dur": 90,
+    "layers": 450
+  },
+  "clock": {
+    "rttUs": 43,
+    "offsetUs": 543464529076.49994
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.00033300000359,
+        "max": 50.024999999999636
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1171,
+      "replies": 1171,
+      "replyBytes": 92148454,
+      "mainMsP50": 0.06850000000122236
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": null,
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "displayHz": 120.0006103515625,
+      "contentFps": 25,
+      "reporterFrames": 14568
+    },
+    "presentation": {
+      "thread": "main",
+      "timing": "PipelineReporter"
+    },
+    "app": {
+      "project": {
+        "name": "Synthetic 500 layers",
+        "w": 1920,
+        "h": 1080,
+        "fps": 25,
+        "layers": 450
+      },
+      "stage": {
+        "width": 1228,
+        "height": 632,
+        "dpr": 2
+      },
+      "quality": 1,
+      "line": {
+        "realOffsetMs": 5716.5,
+        "offsetSpreadMs": 0
+      },
+      "qualityDuringRun": {
+        "n": 1500,
+        "p50": 1,
+        "p95": 1,
+        "p99": 1,
+        "max": 1
+      }
+    },
+    "frames": {
+      "expected": 1494,
+      "notDrawn": 0,
+      "notPresented": 90,
+      "drops": 90,
+      "presented": 1404,
+      "offSlot": 621
+    },
+    "jitterAbsMs": {
+      "n": 1404,
+      "p50": 3.334,
+      "p95": 25.162,
+      "p99": 33.448,
+      "max": 59.913
+    },
+    "intervalErrorAbsMs": {
+      "n": 1335,
+      "p50": 1.667,
+      "p95": 15,
+      "p99": 23.334,
+      "max": 40
+    },
+    "irregularIntervals": 578,
+    "rafToPresentMs": {
+      "n": 1404,
+      "p50": 19.12,
+      "p95": 44.11,
+      "p99": 52.44,
+      "max": 60.77
+    },
+    "dueToPresentMs": {
+      "n": 1404,
+      "p50": 24.86,
+      "p95": 50.02,
+      "p99": 58.3,
+      "max": 84.77
+    },
+    "rafGapMs": {
+      "n": 6661,
+      "p50": 8.3,
+      "p95": 16.6,
+      "p99": 23.7,
+      "max": 33.4
+    },
+    "rafGapsOver25Ms": 27,
+    "missing": [
+      {
+        "k": 64,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 67,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 69,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 71,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 78,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 84,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 88,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 91,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 187,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 191,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 192,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 194,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 196,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 198,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 199,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 205,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 206,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 209,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 212,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 216,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 313,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 320,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 323,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 328,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 329,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 334,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 436,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 438,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 456,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 460,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 461,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 463,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 464,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 564,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 565,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 569,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 571,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 582,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 586,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 590,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 689,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 692,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 693,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 694,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 695,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 696,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 698,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 699,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 709,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 712,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 714,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 812,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 818,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 822,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 831,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 832,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 836,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 840,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 841,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 948,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 949,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 952,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 956,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 957,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 958,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 960,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 962,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 965,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1062,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1069,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1072,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1075,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1076,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1082,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1087,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1191,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1204,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1208,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1209,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1211,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1212,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1213,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1216,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1316,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1318,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1324,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1334,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1335,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1339,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1341,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "1": 116,
+      "2": 928,
+      "3": 188,
+      "4": 65,
+      "5": 73,
+      "6": 31,
+      "7": 3
+    },
+    "presenter": null,
+    "receiver": null
+  }
+}

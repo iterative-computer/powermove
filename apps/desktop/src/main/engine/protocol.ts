@@ -175,6 +175,8 @@ export const RESPONSE_FOR: Readonly<Record<Request['type'], Response['type'] | r
   registerExtension: 'extensionRegistered',
   toolCall: 'toolResult',
   probeMedia: 'mediaFacts',
+  snapshot: 'snapshot',
+  compatFrame: 'compatFrame',
   shaderFallback: 'ack'
 };
 

@@ -1,0 +1,108 @@
+// @vitest-environment happy-dom
+import { describe, expect, it } from 'vitest';
+
+import type { EngineViewerService, ViewParams } from '../../../extensions/viewer/engine-present/presentation';
+import { ENGINE_STAGE_EVENT as PRESENTATION_STAGE_EVENT } from '../../../extensions/viewer/engine-present/presentation';
+import { ENGINE_STAGE_EVENT, EngineCanvasBinding, type BoundPresentation } from './canvas-binding';
+
+class FakePresentation implements BoundPresentation {
+  readonly exclusive = true;
+  updates: Array<{ params: ViewParams; stage?: { width: number; height: number } }> = [];
+  disposed = false;
+  constructor(readonly stage: HTMLElement, readonly before: Element | null) {}
+  update(params: ViewParams, stage?: { width: number; height: number }): void {
+    this.updates.push({ params, ...(stage ? { stage } : {}) });
+  }
+  dispose(): void {
+    this.disposed = true;
+  }
+}
+
+function rect(el: Element, r: { left: number; top: number; width: number; height: number }): void {
+  (el as HTMLElement).getBoundingClientRect = () => ({ ...r, x: r.left, y: r.top, right: r.left + r.width, bottom: r.top + r.height, toJSON: () => r }) as DOMRect;
+}
+
+function setup() {
+  const made: FakePresentation[] = [];
+  const service = { exclusive: true } as unknown as EngineViewerService;
+  let enabled = true;
+  const binding = new EngineCanvasBinding({
+    service: () => (enabled ? service : null),
+    composition: () => ({ w: 1920, h: 1080 }),
+    quality: () => 0.5,
+    present: ({ stage, before }) => {
+      const p = new FakePresentation(stage, before);
+      made.push(p);
+      return p;
+    }
+  });
+  const stage = document.createElement('div');
+  const canvas = document.createElement('canvas');
+  const overlay = document.createElement('canvas');
+  stage.append(canvas, overlay);
+  document.body.append(stage);
+  rect(stage, { left: 0, top: 0, width: 1000, height: 600 });
+  rect(canvas, { left: 20, top: 30, width: 960, height: 540 });
+  return { binding, made, stage, canvas, overlay, disable: () => (enabled = false) };
+}
+
+describe('EngineCanvasBinding (render.gl.init/resize with the engine on)', () => {
+  it('presents where the passed canvas sits, under the caller overlay, and hides the canvas', () => {
+    const { binding, made, stage, canvas, overlay } = setup();
+    expect(ENGINE_STAGE_EVENT).toBe(PRESENTATION_STAGE_EVENT);
+    expect(binding.bind(canvas)).toBe(true);
+    expect(made).toHaveLength(0);
+    binding.resize();
+    expect(made).toHaveLength(1);
+    const p = made[0]!;
+    expect(p.stage).toBe(stage);
+    // Right after the passed canvas: the caller's overlay stays on top.
+    expect(p.before).toBe(overlay);
+    expect(canvas.style.visibility).toBe('hidden');
+    // 960 CSS px for 1920 composition px; centered 20 px right, 30 px down of center.
+    expect(p.updates[0]).toEqual({ params: { zoom: 0.5, pan: [0, 0], resolution: 'half', media: 'automatic', playEveryFrame: false }, stage: { width: 1000, height: 600 } });
+    rect(canvas, { left: 100, top: 30, width: 480, height: 270 });
+    binding.resize();
+    expect(made).toHaveLength(1);
+    expect(p.updates[1]!.params).toMatchObject({ zoom: 0.25, pan: [-160, -135] });
+    binding.unbind();
+    expect(p.disposed).toBe(true);
+    expect(canvas.style.visibility).toBe('');
+  });
+
+  it('never competes with a viewer that presents by itself', () => {
+    const { binding, made, stage, canvas } = setup();
+    binding.bind(canvas);
+    binding.resize();
+    expect(made).toHaveLength(1);
+    // The built-in viewer's own presentation starts over the same stage.
+    stage.dataset['engineStage'] = 'viewer';
+    canvas.style.visibility = 'hidden';
+    stage.dispatchEvent(new Event(ENGINE_STAGE_EVENT, { bubbles: true }));
+    expect(made[0]!.disposed).toBe(true);
+    // It hid its canvas itself; the binding leaves that alone.
+    expect(canvas.style.visibility).toBe('hidden');
+    binding.resize();
+    expect(made).toHaveLength(1);
+  });
+
+  it('one binding per window: a new canvas replaces the old; a detached canvas unbinds', () => {
+    const { binding, made, canvas } = setup();
+    binding.bind(canvas);
+    binding.resize();
+    const other = document.createElement('canvas');
+    document.body.append(other);
+    binding.bind(other);
+    expect(made[0]!.disposed).toBe(true);
+    expect(binding.bound).toBe(other);
+    other.remove();
+    binding.resize();
+    expect(binding.bound).toBeNull();
+  });
+
+  it('does nothing with the engine off', () => {
+    const { binding, canvas, disable } = setup();
+    disable();
+    expect(binding.bind(canvas)).toBe(false);
+  });
+});

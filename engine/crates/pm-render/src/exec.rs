@@ -396,6 +396,7 @@ impl Exec<'_> {
                             self.queue,
                             &blender.surface,
                             self.precision,
+                            blender.compatibility,
                         ));
                         // Premultiplied E like the native 3D output: linear
                         // light decodes it (section 9).
@@ -564,7 +565,7 @@ impl Exec<'_> {
     /// pass: cleared to the plan's background first (`clear`), or drawn
     /// over what it holds.
     #[allow(clippy::too_many_arguments)]
-    fn render_draws(
+    pub(crate) fn render_draws(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         plan: &CompPlan,

@@ -5,12 +5,14 @@ import type { BlenderModelJob } from "./BlenderModelJob";
 import type { CancelJobs } from "./CancelJobs";
 import type { CloseProject } from "./CloseProject";
 import type { CommitOutput } from "./CommitOutput";
+import type { CompatFrameRequest } from "./CompatFrameRequest";
 import type { ConsistencyCheck } from "./ConsistencyCheck";
 import type { DefinitionsUpdate } from "./DefinitionsUpdate";
 import type { EvaluateRequest } from "./EvaluateRequest";
 import type { FrameRequest } from "./FrameRequest";
 import type { HardwareSessionRequest } from "./HardwareSessionRequest";
 import type { HostShaderFallback } from "./HostShaderFallback";
+import type { HostSnapshot } from "./HostSnapshot";
 import type { Lease } from "./Lease";
 import type { LeaseRequest } from "./LeaseRequest";
 import type { MintHandle } from "./MintHandle";
@@ -28,4 +30,4 @@ import type { ToolCall } from "./ToolCall";
 /**
  * Requests. Each names its direction; a peer answers only requests it serves.
  */
-export type Request = { "type": "openSession" } & OpenSession | { "type": "closeSession" } | { "type": "resync" } & Resync | { "type": "checkConsistency" } & ConsistencyCheck | { "type": "renderFrame" } & FrameRequest | { "type": "evaluate" } & EvaluateRequest | { "type": "agentFrames" } & AgentFrameRequest | { "type": "submitJob" } & SubmitJob | { "type": "cancelJobs" } & CancelJobs | { "type": "pushDefinitions" } & DefinitionsUpdate | { "type": "grantLease" } & Lease | { "type": "requestLease" } & LeaseRequest | { "type": "mintHandle" } & MintHandle | { "type": "resolveHandle" } & ResolveHandle | { "type": "outputDestination" } & OutputDestinationRequest | { "type": "commitOutput" } & CommitOutput | { "type": "hardwareSessions" } & HardwareSessionRequest | { "type": "blenderRender" } & BlenderJobRequest | { "type": "blenderStatus" } | { "type": "blenderModel" } & BlenderModelJob | { "type": "openProject" } & OpenProject | { "type": "closeProject" } & CloseProject | { "type": "persist" } & Persist | { "type": "registerExtension" } & RegisterExtension | { "type": "toolCall" } & ToolCall | { "type": "probeMedia" } & ProbeMedia | { "type": "shaderFallback" } & HostShaderFallback;
+export type Request = { "type": "openSession" } & OpenSession | { "type": "closeSession" } | { "type": "resync" } & Resync | { "type": "checkConsistency" } & ConsistencyCheck | { "type": "renderFrame" } & FrameRequest | { "type": "evaluate" } & EvaluateRequest | { "type": "agentFrames" } & AgentFrameRequest | { "type": "submitJob" } & SubmitJob | { "type": "cancelJobs" } & CancelJobs | { "type": "pushDefinitions" } & DefinitionsUpdate | { "type": "grantLease" } & Lease | { "type": "requestLease" } & LeaseRequest | { "type": "mintHandle" } & MintHandle | { "type": "resolveHandle" } & ResolveHandle | { "type": "outputDestination" } & OutputDestinationRequest | { "type": "commitOutput" } & CommitOutput | { "type": "hardwareSessions" } & HardwareSessionRequest | { "type": "blenderRender" } & BlenderJobRequest | { "type": "blenderStatus" } | { "type": "blenderModel" } & BlenderModelJob | { "type": "openProject" } & OpenProject | { "type": "closeProject" } & CloseProject | { "type": "persist" } & Persist | { "type": "registerExtension" } & RegisterExtension | { "type": "toolCall" } & ToolCall | { "type": "probeMedia" } & ProbeMedia | { "type": "snapshot" } & HostSnapshot | { "type": "compatFrame" } & CompatFrameRequest | { "type": "shaderFallback" } & HostShaderFallback;

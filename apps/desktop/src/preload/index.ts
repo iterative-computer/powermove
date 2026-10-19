@@ -40,10 +40,34 @@ import { MEDIA_PATH_IPC } from '../shared/media-tools';
 import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/cloud-ipc';
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
-import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineExportStart, type EngineExportStatus, type EngineProbeResult, type EngineStatusMessage, type RenderQueueState, type StageDocumentResult } from '../shared/engine-ipc';
+import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineCompatAsk, type EngineExportStart, type EngineExportStatus, type EngineProbeResult, type EngineSnapshotReply, type EngineSnapshotRequest, type EngineStatusMessage, type RenderQueueState, type StageDocumentResult } from '../shared/engine-ipc';
 import { ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
 import { MEDIA_STORE_IPC, type MediaStoreConfig } from '../shared/media-store';
 import { installFrameBridgeReceiver, RELEASE_NOTICE_CHANNEL, type ReceiverModule } from './frame-bridge';
+
+/** A snapshot request as plain data (the page's object may carry getters or
+ *  prototypes; main validates every field). */
+function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest {
+  // Byte fields travel as bytes (structured clone); the rest as JSON.
+  const bytes = (value: unknown): Uint8Array | null => (value instanceof Uint8Array ? new Uint8Array(value) : null);
+  const target = request?.snapshot?.target as { kind?: string; content?: unknown } | undefined;
+  const plain = JSON.parse(JSON.stringify({
+    generation: request?.generation,
+    session: request?.session ?? null,
+    revision: request?.revision ?? null,
+    snapshot: request?.snapshot ? { ...request.snapshot, target: target ? { ...target, content: undefined } : target } : request?.snapshot,
+    document: request?.document ? { id: request.document.id, revision: request.document.revision, hash: request.document.hash ?? null } : undefined
+  })) as EngineSnapshotRequest;
+  if (target?.kind === 'layer' && plain.snapshot?.target?.kind === 'layer') (plain.snapshot.target as { content?: Uint8Array | null }).content = bytes(target.content);
+  if (plain.document) {
+    const json = bytes(request.document?.json);
+    if (json) plain.document.json = json;
+  }
+  if (Array.isArray(request?.fallbackPixels)) {
+    plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0) }));
+  }
+  return plain;
+}
 
 /** One typed invoke for every `cloud:*` channel (store plan §2.7). */
 function cloudInvoke<C extends CloudChannel>(channel: C, request?: CloudChannels[C]['req']): Promise<CloudChannels[C]['res']> {
@@ -586,6 +610,23 @@ const bridge: PowermoveBridge = {
       asset: String(request.asset),
       interpret: request.interpret && typeof request.interpret === 'object' ? JSON.parse(JSON.stringify(request.interpret)) : null
     }) as Promise<EngineProbeResult>,
+    /* The Phase 3c render transport (docs/engine/rfcs/16-render-transport.md):
+       snapshots of the window's engine session. Main validates the shape. */
+    snapshotSync: (request) => {
+      try {
+        return ipcRenderer.sendSync(ENGINE_IPC.snapshotSync, snapshotRequest(request)) as EngineSnapshotReply;
+      } catch (error) {
+        return { status: 'failed', code: 'internal', message: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    snapshot: (request) => (ipcRenderer.invoke(ENGINE_IPC.snapshot, snapshotRequest(request)) as Promise<EngineSnapshotReply>)
+      .catch((error: unknown): EngineSnapshotReply => ({ status: 'failed', code: 'internal', message: error instanceof Error ? error.message : String(error) })),
+    onCompatAsk: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, ask: EngineCompatAsk) => listener(ask);
+      ipcRenderer.on(ENGINE_IPC.compatAsk, handler);
+      return () => { ipcRenderer.removeListener(ENGINE_IPC.compatAsk, handler); };
+    },
+    answerCompat: (answer) => ipcRenderer.send(ENGINE_IPC.compatAnswer, answer),
     // The job engine's fallback requests, run in this window's runner
     // (main/engine/shader-fallback-relay.ts).
     onShaderFallback: (run) => {

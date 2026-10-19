@@ -11,7 +11,11 @@ import type { VsyncHint } from "./VsyncHint";
 /**
  * The viewer's state, sent whenever it changes (section 18, view override).
  */
-export type ViewerState = { composition: CompositionId, 
+export type ViewerState = { 
+/**
+ * Keep the transport and audio alive without allocating or drawing a view.
+ */
+headless?: boolean | null, composition: CompositionId, 
 /**
  * Canvas size in device pixels.
  */
@@ -40,4 +44,10 @@ viewSeq: Seq,
  * `None`, and a change of the hint alone is not a new view (it keeps
  * `view_seq`).
  */
-vsync?: VsyncHint | null, };
+vsync?: VsyncHint | null, 
+/**
+ * The 3D viewport chrome wants each frame's depth and object-id
+ * surface (plan section 8; the Phase 3c render transport). Absent or
+ * false: no depth pool. A change of it is a new view.
+ */
+depthId?: boolean | null, };
