@@ -1,5 +1,5 @@
-//! Skia chrome/m152 `SkPath::computeConvexity` and its `Convexicator`,
-//! in f32. The analytic scan converter selects a different edge walk for
+//! Skia chrome/m152 (747cf654) `SkPathPriv::ComputeConvexity` and its
+//! `Convexicator` (src/core/SkPathPriv.cpp:422-648), in f32. The analytic scan converter selects a different edge walk for
 //! convex paths, so it must classify their control polygons the same way.
 //!
 //! Portions are derived from Skia, Copyright Google LLC, used under the BSD
@@ -79,6 +79,8 @@ struct Convexicator {
     first_vec: P,
     last_vec: P,
     expected: Dir,
+    /// `fFirstDirection` is kUnknown (neither CW nor CCW).
+    first_direction_unknown: bool,
     reversals: u32,
 }
 
@@ -90,6 +92,7 @@ impl Convexicator {
             first_vec: [0.0; 2],
             last_vec: [0.0; 2],
             expected: Dir::Invalid,
+            first_direction_unknown: true,
             reversals: 0,
         }
     }
@@ -125,7 +128,9 @@ impl Convexicator {
             d @ (Dir::Left | Dir::Right) => {
                 if self.expected == Dir::Invalid {
                     self.expected = d;
+                    self.first_direction_unknown = false;
                 } else if d != self.expected {
+                    self.first_direction_unknown = true;
                     return false;
                 }
                 self.last_vec = cur;
@@ -146,8 +151,12 @@ impl Convexicator {
         if self.last_pt == p {
             return true;
         }
-        // The first non-zero vector after the move.
-        if self.first_pt == self.last_pt && self.expected == Dir::Invalid {
+        // The first non-zero vector after the move. The contour may have
+        // doubled back to its start, so the last vector must still be zero.
+        if self.first_pt == self.last_pt
+            && self.expected == Dir::Invalid
+            && self.last_vec == [0.0, 0.0]
+        {
             self.last_vec = sub(p, self.last_pt);
             self.first_vec = self.last_vec;
         } else if !self.add_vec(sub(p, self.last_pt)) {
@@ -210,7 +219,9 @@ fn by_sign(points: &[P]) -> Option<bool> {
 }
 
 impl SkPath {
-    /// `SkPath::isConvex()`.
+    /// `SkPath::isConvex()`: `SkPath::computeConvexity` (SkPath.cpp:638-654)
+    /// and `SkPathPriv::ComputeConvexity` (SkPathPriv.cpp:584-648), then
+    /// `SkPathConvexity_IsConvex`.
     pub fn is_convex(&self) -> bool {
         if !self
             .pts
@@ -219,36 +230,19 @@ impl SkPath {
         {
             return false;
         }
-        let verbs = &self.verbs;
+        // trim_trailing_moves.
+        let mut verbs = &self.verbs[..];
         let mut point_count = self.pts.len();
-        let leading_moves = verbs.iter().take_while(|v| **v == Verb::Move).count();
-        let skip = leading_moves.saturating_sub(1);
-        // The index of the last move's point.
-        let mut last_move = None;
-        let mut pi = 0usize;
-        for v in verbs {
-            if *v == Verb::Move {
-                last_move = Some(pi);
-            }
-            pi += points_in(*v);
+        while let [rest @ .., Verb::Move] = verbs {
+            verbs = rest;
+            point_count -= 1;
         }
-        if let Some(lm) = last_move {
-            if lm + 1 == point_count {
-                // Trailing moves do not affect convexity.
-                let mut k = verbs.len();
-                while k > 1 && verbs[k - 1] == Verb::Move {
-                    k -= 1;
-                    point_count -= 1;
-                }
-            } else if lm != skip {
-                // A move between two blocks of other verbs: more than one contour.
-                return false;
-            }
+        if verbs.is_empty() {
+            // kConvex_Degenerate.
+            return true;
         }
-        let start = skip.min(point_count);
-        match by_sign(&self.pts[start..point_count]) {
-            Some(true) => {}
-            _ => return false,
+        if by_sign(&self.pts[..point_count]) != Some(true) {
+            return false;
         }
         let mut state = Convexicator::new();
         let mut contours = 0;
@@ -256,6 +250,7 @@ impl SkPath {
         let mut pi = 0usize;
         for v in verbs {
             let n = points_in(*v);
+            // The last move before non-move verbs start.
             if contours == 0 {
                 if *v == Verb::Move {
                     state.set_move_pt(self.pts[pi]);
@@ -278,12 +273,20 @@ impl SkPath {
                         }
                     }
                 }
-            } else if contours > 1 && *v != Verb::Move {
+            } else if *v != Verb::Move {
+                // After the first contour closes, anything but spurious
+                // moves is a second contour.
                 return false;
             }
             pi += n;
         }
-        !needs_close || state.close()
+        if needs_close && !state.close() {
+            return false;
+        }
+        // kUnknown first direction with three reversals is concave;
+        // every other outcome is kConvex_CW, kConvex_CCW or
+        // kConvex_Degenerate.
+        !(state.first_direction_unknown && state.reversals >= 3)
     }
 }
 
