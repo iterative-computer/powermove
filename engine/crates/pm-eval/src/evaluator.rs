@@ -1123,19 +1123,18 @@ impl Evaluator {
                     let address = self.slots[index].address.clone();
                     let entry = self.resolve_batch_comp(doc, &address.comp, resolved);
                     let value = match &resolved.0[entry].1 {
-                        Some((cx, _)) => self.eval_expression_plan(
-                            cx,
-                            &cx.layers()[position],
-                            &address,
-                            plan,
-                            from,
-                            time,
-                        ),
-                        None => Ok(JsValue::Undefined),
+                        Some((cx, _)) => cx.layers().get(position).map(|layer| {
+                            self.eval_expression_plan(cx, layer, &address, plan, from, time)
+                        }),
+                        None => Some(Ok(JsValue::Undefined)),
                     };
-                    self.slots[index].state.as_mut().expect("state").memo =
-                        Some((time_bits, value.clone()));
-                    return value;
+                    // The revision proves the position; should it not hold,
+                    // revalidate below instead of trusting it.
+                    if let Some(value) = value {
+                        self.slots[index].state.as_mut().expect("state").memo =
+                            Some((time_bits, value.clone()));
+                        return value;
+                    }
                 }
                 Plan::Live { .. } => {}
             }
