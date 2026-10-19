@@ -1328,6 +1328,74 @@ Final validation (including a serialized native rerun under the Electron lock):
   2× reverse A/V check recorded 14 samples above 10 ms, max 11.8 ms, the
   previously documented sawtooth. Neither gate was relaxed or marked passing.
 
+### Round 5: unsupported compositions, composition switches, the headless gate (2026-10-18)
+
+Review of round 4 found three blockers; all are fixed.
+
+**A composition the engine cannot draw is no longer silent.** Round 4 kept
+the current engine's canvas hidden (amendment 21) but still cleared the
+status line and dropped Play on the `legacy` route, so a path-mask project
+showed an empty stage and Play did nothing. Now the engine runs Play, play
+around, paused seeks, scrub grains and audio for that route exactly as for
+a drawn one (`takes_transport` in `pm-node/src/present/render.rs`), a
+headless view publishes its clock for it, and the route change no longer
+stops a run (only `pending` defers and resumes). The failure reads `The new
+engine cannot draw this composition yet: <reasons>.`, is repeated when a
+viewer attaches to a viewerless session, and the kernel connection replays
+it to a viewer that replaces another (`missedRoute`). The exclusive
+presentation shows it as the stage's status line (wrapping to three lines so
+the named reasons fit), never hands the stage back, and clears it at the
+next engine frame. The renderer's `EngineTransport` takes commands for every
+decided route. `native-engine-tracer.spec.ts` now asserts this contract: the
+legacy canvas stays hidden, the line names the path mask, Play runs on the
+engine clock (state `playing`, `PM.time` advancing), the line clears when the
+mask goes and returns when it comes back, and no console errors.
+
+**A viewerless session follows the open composition.** Switching
+compositions inside a project is a document batch, not a load, so nothing
+told the headless session; Play then followed the previous composition's
+clock and audio. The kernel connection now sends the headless state on
+`comps`/`project` and before every transport command (`prepare`), so Play
+right after a switch plays the composition just opened. The headless e2e
+creates and opens a silent second composition with the viewer closed: Play
+plays it (session composition is the new id, the engine counts one more
+silent run, peak 0), and switching back plays the first composition's tone.
+
+**The headless gate.** The review's failing runs had a viewer attached
+(`headless:false`, 3 pools) and a run whose clock samples, device callbacks
+and levels all stopped while the transport said `playing`. Neither
+reproduced here: 3 runs of the review's procedure on the round-4 head,
+8 runs of two variants of its scenario (a viewer present at a cold Play with
+media still resolving, and a viewer enabled 60 ms after Play), and 4 + 1
+runs of the new spec (including after the Blender captures spec, the
+review's batch order) passed without a stall. The premise is now checked
+(the relaunched app's extension list must have the viewer off, and Play
+throws a named error if a viewer is attached), so a setup race fails as
+such instead of as a freeze. For the freeze itself the presenter now counts
+render-thread turns over 250 ms (`stalls`, `stallUsMax`, `lastStall` in
+the status report, and a warning naming the command or the view pass), and
+the spec takes a native stack sample of the interactive engine on failure
+with `PM_SAMPLE_ON_FAIL=1`. The symptom pattern (levels from the audio
+thread stopping as well as the render thread's clock samples) points at the
+audio thread rather than the transport; the next occurrence will name it.
+
+**The join.** The join probe now measures two things separately: the
+engine's line (how far `transport.now()` strays from wall time across the
+mount: at most 0.1 ms) and `PM.time` (how far the playhead strays: the
+page's main thread mounting the viewer). The playhead is back on the line
+within two animation frames (at most 0.4 ms off). The same probe on the
+current engine (flag off) is the baseline, run in the same session of the
+suite: playhead error 22.3 to 23.7 ms there against 21.6 to 34.1 ms with the
+engine in 4 runs, and 56.3 against 70.3 ms in the loaded batch run. The
+mount of the engine viewer (its presentation worker and painter) costs the
+main thread up to about 11 to 14 ms more than today's; this is recorded, not
+bounded, and listed as an open difference. The engine's line itself does not
+move (0.1 ms), and no render-thread stall was recorded (`stalls` 0).
+
+Smaller items: rustfmt is clean on pm-node; the viewer's version lock entry
+matches 1.2.2 (inspector, keymap-default and timeline remain stale on the
+base, other lanes).
+
 ### What remains
 
 - **The job engine's fonts.** Export and agent frames still refuse text:
@@ -1347,13 +1415,13 @@ Final validation (including a serialized native rerun under the Electron lock):
   recipe parts: the snapshot builder's refusals that exports route) fail
   an async capture with `unsupported`, where today's capture has Blender
   convert and render them (3D lane).
-- **What the engine still refuses** (masks the renderer cannot draw yet,
-  and the other `pm_render::unsupported` reasons) fails a snapshot with
-  the engine's reasons. The `legacy` routing label remains development
-  scaffolding, but an exclusive viewer keeps the legacy canvas hidden and
-  shows failure instead of falling back. L1 must implement the remaining
-  features and the derouter lane must remove that scaffolding; these projects
-  remain cutover blockers.
+- **What the engine still refuses** (path masks and the other
+  `pm_render::unsupported` reasons) fails a snapshot with the engine's
+  reasons, and the viewer shows `The new engine cannot draw this
+  composition yet: <reasons>.` on an empty stage while the transport and
+  audio run on the engine. That is a visible difference from today, so these
+  projects remain cutover blockers until L1 draws the features; the
+  derouter lane removes the `legacy` route name and the `routed` message.
 - **Performance panel.** `FX passes` reads 0 (the engine counts no effect
   passes) and `GL draws` shows the layers the engine drew (not WebGL draw
   calls).

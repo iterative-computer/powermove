@@ -354,6 +354,26 @@ A document load synchronizes the UI time before resyncing, replacing any
 queued seek from the home screen. The protocol build changes; regenerate
 TypeScript and rebuild the addons.
 
+A headless session follows the open composition: switching compositions
+inside a project is a document batch, not a load, so the kernel connection
+sends a new headless state on `comps`/`project` and before every transport
+command (`EngineTransport` option `prepare`). Play right after a switch
+plays the composition just opened.
+
+**Compositions the engine cannot draw (round 5).** The route the engine
+decides is `engine`, `legacy` (the scaffolding name: something the renderer
+cannot draw yet) or `pending`. With "Use New Engine" on, only `pending`
+defers transport. For `legacy` the engine runs Play, play around, seeks,
+scrub grains and audio exactly as for `engine` (a headless view publishes
+its clock), never stops a run on the route change, and draws nothing. The
+session-scope `unsupported` failure reads `The new engine cannot draw this
+composition yet: <reasons>.`; the engine repeats it when a viewer attaches
+to a viewerless session, and the kernel connection replays it to a viewer
+that replaces another (`missedRoute`). An exclusive presentation shows that
+sentence as the stage's status line, keeps the current engine's canvas
+hidden, never hands the stage back, and clears the line at the next frame
+the engine draws. `EngineTransport` takes commands for every decided route.
+
 Headless playback carries playback pressure for idle snapshots but has no draw
 schedule against which foreground async captures should wait. A Blender
 capture's `blenderWaitMs` is one total wall-clock deadline across all replans;
