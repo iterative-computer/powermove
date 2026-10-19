@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import {compositionRuntime} from './service';
+import {renderCamera} from './render-camera';
 import {layer3DRole} from './layers';
 import {parent3D,world3D} from '../../legacy/core/space-3d';
 import {viewportPose,applyViewportPose,getViewportMode,setViewportMode,viewportState,activeCameraLayer,viewPosition,orbitPose,type ViewPose} from './viewport';
@@ -69,7 +70,7 @@ export function viewportBounds(PM:any,selected=true,exclude:string|null=null):TH
 const viewAspect=(PM:any)=>{const c=comp(PM);return (c?.w||16)/Math.max(1,c?.h||9);};
 const viewFov=(PM:any)=>{
   if(getViewportMode(PM)==='editor')return viewportState(PM).fov;
-  const camera=compositionRuntime(PM).camera;return camera instanceof THREE.PerspectiveCamera?camera.fov:50;
+  const camera=renderCamera(PM);return camera instanceof THREE.PerspectiveCamera?camera.fov:50;
 };
 /** Numpad . (View Selected) and Home (View All). Returns false when there is nothing to frame. */
 export function frameComposition(PM:any,selected=true):boolean {

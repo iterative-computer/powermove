@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import {compositionRuntime} from './service';
+import {renderCamera} from './render-camera';
 import {layer3DRole,isModelGroup} from './layers';
 import {viewportCamera,viewportState,viewLabel,getViewportMode,activeCameraLayer,viewportPose,setViewAxis,setViewportMode,toggleViewProjection,onViewportChange,applyViewportPose,localViewIds,OPPOSITE_VIEW,type ViewAxis} from './viewport';
 import {viewportPreferences,onViewportSettings,selected3D,activeObject,cursorLocation,setCursorLocation,isViewportItem,type ViewportTool} from './editor-state';
@@ -85,7 +86,7 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
   const warn=(error:unknown)=>PM.toast?.(error instanceof Error?error.message:String(error),2200,{key:'scene3d-viewport',error:true});
   const stagePoint=(clientX:number,clientY:number):Point=>{const bounds=stage.getBoundingClientRect();return {x:clientX-bounds.left,y:clientY-bounds.top};};
   const available=()=>!disposed&&hasScene3D(PM);
-  const viewCamera=()=>fitCamera(viewportCamera(PM,compositionRuntime(PM).camera),rect);
+  const viewCamera=()=>fitCamera(viewportCamera(PM,renderCamera(PM)),rect);
   const excluded=()=>getViewportMode(PM)==='camera'?activeCameraLayer(PM)?.id??null:null;
   /** In Edit Mode transforms act on the selected points; otherwise on the selected layers. */
   const targets=()=>editModeLayer(PM)?[pointsTarget(PM)].filter(t=>!!t) as ReturnType<typeof resolveTargets>:resolveTargets(PM,selected3D(PM),compositionRuntime(PM),{excludeCamera:excluded()});

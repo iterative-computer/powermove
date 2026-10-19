@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import {parent3D} from '../../legacy/core/space-3d';
-import {compositionRuntime} from './service';
+import {renderCamera} from './render-camera';
 import {layer3DRole} from './layers';
 
 /*
@@ -65,7 +65,7 @@ export function activeCameraLayer(PM:any,time=PM.time):any|null {
 }
 /** The render camera expressed as a view pose: it orbits around its own aim point. */
 export function cameraPose(PM:any):ViewPose {
-  const world=compositionRuntime(PM),camera=world.camera,layer=activeCameraLayer(PM);
+  const camera=renderCamera(PM),layer=activeCameraLayer(PM);
   camera.updateMatrixWorld(true);
   const position=new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld),rotation=new THREE.Quaternion();
   camera.matrixWorld.decompose(new THREE.Vector3(),rotation,new THREE.Vector3());
@@ -77,7 +77,7 @@ export function cameraPose(PM:any):ViewPose {
   return {target,rotation,distance:Math.max(.05,position.distanceTo(target))};
 }
 function initialize(PM:any,entry:ViewState):void {
-  const camera=compositionRuntime(PM).camera;
+  const camera=renderCamera(PM);
   entry.pose=cameraPose(PM);entry.axis=null;entry.autoOrtho=false;
   entry.projection=camera instanceof THREE.OrthographicCamera?'orthographic':'perspective';
   entry.fov=camera instanceof THREE.PerspectiveCamera?camera.fov:50;
@@ -121,7 +121,7 @@ export function viewportPose(PM:any):ViewPose {
   return entry.mode==='camera'||!entry.initialized?cameraPose(PM):clonePose(entry.pose);
 }
 export function viewportState(PM:any):{mode:ViewMode;projection:ViewProjection;axis:ViewAxis|null;fov:number} {
-  const entry=state(PM),camera=entry.mode==='camera'?compositionRuntime(PM).camera:null;
+  const entry=state(PM),camera=entry.mode==='camera'?renderCamera(PM):null;
   return {mode:entry.mode,projection:camera?camera instanceof THREE.OrthographicCamera?'orthographic':'perspective':entry.projection,axis:entry.mode==='camera'?null:entry.axis,fov:entry.fov};
 }
 /** Blender's view name, e.g. "User Perspective", "Front Orthographic", "Camera Perspective". */

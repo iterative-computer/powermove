@@ -886,6 +886,20 @@ export class NativeApi {
     }, legacy, () => ({ ids: [...ids], t: T }));
   }
 
+  /**
+   * `compositionRuntime(PM, T).camera` of the composition being viewed
+   * (core/scene3d/render-camera.ts): lens and `matrixWorld` from pm-wasm.
+   * `legacy` is today's runtime camera, run only where every legacy
+   * fallback runs (counted, refused by strict hosts) and in dual mode.
+   */
+  camera3d(T: number, legacy: () => { orthographic: boolean; fov: number | null; zoom: number; near: number; far: number; world: number[] }): { orthographic: boolean; fov: number | null; zoom: number; near: number; far: number; world: number[] } {
+    return this.answer('camera3d', () => {
+      const c = this.comps();
+      if (!c) return { fallback: 'context' };
+      return this.query('camera3d', { comp: c.comp, open: c.open, t: T, ...geometryRequest(this.PM) });
+    }, legacy, () => ({ t: T }));
+  }
+
   textLayout(L: any, T: number): any {
     return this.answer('textLayout', () => this.layerQuery('textLayout', L, { t: T }), () => this.legacy.textLayout(L, T), () => ({ layer: L?.id, t: T }));
   }

@@ -25,6 +25,7 @@ import { setViewportMode, orbitViewStep, enterLocalView, exitLocalView, toggleVi
 import { loadGltf } from '../core/scene3d/import-model';
 import { compositionRuntime } from '../core/scene3d/service';
 import { runtimeBoxes } from '../core/scene3d/navigation';
+import { renderCamera, runtimeCameraFacts } from '../core/scene3d/render-camera';
 import * as THREE from 'three';
 import { parseObj } from '../kernel/obj';
 
@@ -446,6 +447,42 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     exercise(PM, doc, rng(9), 40);
     expect(mismatches(doc)).toEqual([]);
     expect(fellBack(doc)).toEqual([]);
+  });
+
+  it('gives the viewport the render camera three.js holds, exactly', async () => {
+    let compared = 0;
+    for (const seed of [21, 22, 23, 24]) {
+      const { PM, doc } = await editor();
+      const random = rng(seed);
+      populate(PM, random, ['cube', 'wedge']);
+      // A camera of each projection, animated, sometimes inside a 3D group.
+      for (const l of PM.proj.layers.filter((l: any) => l.d?.definition === 'powermove.3d.camera')) PM.Edit.apply({ type: 'delete_layer', target: l.id });
+      const ortho = seed % 2 === 0;
+      editScene(PM, { operation: 'add_camera', id: 'shot', camera: { ...(ortho ? { projection: 'orthographic' } : {}), p: { x: 1.5, y: 2, z: 7, fov: 35 + seed, zoom: 1.2, targetX: 0.3, targetY: 0, targetZ: 0 } } });
+      const shot = PM.proj.layers.find((l: any) => l.d?.definition === 'powermove.3d.camera');
+      PM.Edit.apply({ type: 'replace_keyframes', target: shot.id, path: 'position.x', keyframes: [{ time: 0, value: -2 }, { time: 3, value: 2.5 }] });
+      if (seed > 22) {
+        const group = PM.groupLayers([shot.id], 'Dolly');
+        PM.Edit.apply([{ type: 'set_layer', target: group.id, patch: { threeD: true } }, { type: 'set_property', target: group.id, path: 'rotation.y', value: 25 }]);
+      }
+      PM.touch();
+      for (const t of [0, 0.9, 2.2]) {
+        let asked = 0;
+        const native = doc.api!.camera3d(t, () => { asked++; return runtimeCameraFacts(PM, t); });
+        const today = runtimeCameraFacts(PM, t);
+        expect(asked).toBeLessThanOrEqual(1);
+        expect(native, `seed ${seed} t ${t}`).toEqual(today);
+        compared++;
+      }
+      // The viewport's camera with the engine on is the engine's, matrixWorld exactly.
+      PM.time = 0.9;
+      const camera = renderCamera(PM);
+      expect(Array.from(camera.matrixWorld.elements)).toEqual(runtimeCameraFacts(PM, 0.9).world);
+      expect(!!(camera as any).isOrthographicCamera).toBe(ortho);
+      expect(mismatches(doc)).toEqual([]);
+      expect(Object.keys(doc.api!.stats.fallbacks).filter(k => k.startsWith('camera3d:'))).toEqual([]);
+    }
+    expect(compared).toBe(12);
   });
 
   it('names a model three.js holds that the engine cannot load instead of answering with the missing box', async () => {

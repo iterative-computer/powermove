@@ -1160,6 +1160,40 @@ impl Engine {
                 }
                 out.raw("}");
             }
+            "camera3d" => {
+                // `compositionRuntime(PM, t).camera`: lens and `matrixWorld`.
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let camera = scope.composition_camera3d(t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                let camera = try_js!(camera);
+                let (orthographic, fov, zoom, near, far) = match camera.lens {
+                    pm_geom3d::query::Lens::Perspective { fov, zoom, near, far } => {
+                        (false, fov, zoom, near, far)
+                    }
+                    pm_geom3d::query::Lens::Orthographic { zoom, near, far } => {
+                        (true, f64::NAN, zoom, near, far)
+                    }
+                };
+                out.raw("{\"orthographic\":");
+                out.bool(orthographic);
+                out.raw(",\"fov\":");
+                if orthographic {
+                    out.raw("null");
+                } else {
+                    out.num(fov);
+                }
+                out.raw(",\"zoom\":");
+                out.num(zoom);
+                out.raw(",\"near\":");
+                out.num(near);
+                out.raw(",\"far\":");
+                out.num(far);
+                out.raw(",\"world\":");
+                out.nums(&camera.world);
+                out.raw("}");
+            }
             "bounds" | "groupBounds" | "pick" | "textLayout" | "textRaster" => {
                 fonts.clear_reports();
                 let mut host = crate::geometry::GeomHost::new(models, request);

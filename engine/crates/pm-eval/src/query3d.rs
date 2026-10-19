@@ -823,6 +823,20 @@ impl<'d> Scope<'_, 'd> {
             .collect())
     }
 
+    /// `compositionRuntime(PM, time).camera`: the composition's render
+    /// camera after `sync` (lens and `matrixWorld`; the viewport's camera
+    /// view, framing, and transform gizmos read it).
+    pub fn composition_camera3d(
+        &mut self,
+        time: f64,
+        host: &mut dyn LayerHost,
+    ) -> JsResult<Camera> {
+        let Some(g) = host.geometry() else {
+            return Err(host_only("The 3D render camera"));
+        };
+        Ok(self.composition_scene3d(time, g)?.camera)
+    }
+
     /// The camera a pick or bound uses: the editor's, or the render camera.
     fn view3d(&self, scene: &CompositionScene3d, g: &dyn Geometry3d) -> Camera {
         g.view_camera().unwrap_or(scene.camera)
