@@ -484,6 +484,83 @@
     "accepted": true
   },
   {
+    "name": "valid UTF16 shader input socket key",
+    "scene": {
+      "objects": [
+        {
+          "id": "a",
+          "source": {
+            "primitive": "box"
+          },
+          "material": {
+            "shader": {
+              "id": "mat",
+              "name": "Material",
+              "graph": {
+                "nodes": [
+                  {
+                    "id": "out",
+                    "type": "ShaderNodeOutputMaterial",
+                    "inputs": {
+                      "\ud800": 1
+                    }
+                  }
+                ],
+                "links": []
+              }
+            }
+          }
+        }
+      ]
+    },
+    "accepted": true
+  },
+  {
+    "name": "valid subnormal positive shader input step",
+    "scene": {
+      "objects": [
+        {
+          "id": "a",
+          "source": {
+            "primitive": "box"
+          },
+          "material": {
+            "shader": {
+              "id": "mat",
+              "name": "Material",
+              "graph": {
+                "nodes": [
+                  {
+                    "id": "out",
+                    "type": "ShaderNodeOutputMaterial"
+                  }
+                ],
+                "links": []
+              },
+              "inputs": [
+                {
+                  "id": "value",
+                  "label": "Value",
+                  "kind": "number",
+                  "node": "out",
+                  "socket": 0,
+                  "step": 5e-324
+                }
+              ],
+              "p": {
+                "value": {
+                  "v": 0.5,
+                  "kf": []
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "accepted": true
+  },
+  {
     "name": "scene strict key",
     "scene": {
       "objects": [

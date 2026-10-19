@@ -573,11 +573,10 @@ fn graph(v: &Value, path: &str) -> Result<HashSet<String>, String> {
         if let Some(v) = n.get("inputs") {
             let m = object(v, &format!("{p}.inputs"))?;
             for (k, v) in m.iter() {
-                let key = k.as_str().ok_or_else(|| bad(&p, "invalid input key"))?;
-                if key.is_empty() || k.utf16_len() > 160 {
+                if k.utf16_len() == 0 || k.utf16_len() > 160 {
                     return Err(bad(&p, "invalid input key"));
                 }
-                shader_value(v, &format!("{p}.inputs.{key}"))?;
+                shader_value(v, &format!("{p}.inputs.{}", k.to_string_lossy()))?;
             }
         }
         if let Some(v) = n.get("properties") {
@@ -840,7 +839,7 @@ fn shader(v: &Value, path: &str) -> Check {
             .map(|v| number(v, &format!("{p}.max"), -f64::MAX, f64::MAX, false))
             .transpose()?;
         if let Some(v) = f.get("step") {
-            number(v, &format!("{p}.step"), f64::MIN_POSITIVE, f64::MAX, false)?;
+            number(v, &format!("{p}.step"), f64::from_bits(1), f64::MAX, false)?;
         }
         let prop = props
             .get(id)

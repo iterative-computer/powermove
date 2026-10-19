@@ -36,6 +36,16 @@ add('valid shader input', s => {
   material(s).shader = sh;
 });
 
+add('valid UTF16 shader input socket key', s => {
+  const sh = shader(); (sh.graph.nodes[0] as any).inputs = { ['\ud800']: 1 };
+  material(s).shader = sh;
+});
+add('valid subnormal positive shader input step', s => {
+  const sh = shader();
+  Object.assign(sh, { inputs: [{ id: 'value', label: 'Value', kind: 'number', node: 'out', socket: 0, step: Number.MIN_VALUE }], p: { value: { v: .5, kf: [] } } });
+  material(s).shader = sh;
+});
+
 add('scene strict key', s => { s.foreign = true; });
 add('object strict key', s => { obj(s).foreign = true; });
 add('light strict key', s => { s.lights = [{ id: 'sun', foreign: true }]; });
