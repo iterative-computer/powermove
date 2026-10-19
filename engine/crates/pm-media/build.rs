@@ -179,7 +179,10 @@ fn main() {
         "cargo:rustc-link-search=native={}",
         native.join("lib").display()
     );
-    println!("cargo:rustc-link-lib=static=crabby_avif");
+    // This Rust-produced native staticlib contains Mach-O .rcgu.o members
+    // without LLVM bitcode. Keep them out of pm-media's rlib so Thin LTO sees
+    // them only at the final native link, where bitcode is not required.
+    println!("cargo:rustc-link-lib=static:-bundle=crabby_avif");
     println!("cargo:rustc-link-lib=static=skcms");
     println!("cargo:rustc-link-lib=static=dav1d");
     println!("cargo:rustc-link-lib=static=OpenEXRCore-3_5");
