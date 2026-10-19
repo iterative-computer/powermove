@@ -23,7 +23,7 @@ import { inspectorService, shaderHooks, timelineService, viewerService } from '.
 import { bridge as hostBridge } from '../kernel/bridge';
 import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requiredReaderVersion } from '../../../shared/reader-version';
 import { touchedDocument, writeDocument } from '../engine-doc/write';
-import { waitForDocumentReady } from '../engine-doc/readiness';
+import { documentPending, waitForDocumentReady } from '../engine-doc/readiness';
 import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../../shared/engine-stamp';
 
 export function install(PM: PMRegistry): void {
@@ -945,7 +945,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (!mediaRestored) { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
     // Parsing and restoring media have already overlapped module loading.
     // Do not publish the new document to renderer readers before its mirror can answer.
-    await waitForDocumentReady(PM);
+    if (documentPending(PM)) await waitForDocumentReady(PM);
     // File opens receive a fresh document ID to keep independent copies safe.
     // Recover the most recent layout for this file, rather than reverting to
     // the older workspace embedded the last time its content was saved.
@@ -1010,7 +1010,7 @@ PM.openFiles = () => {
   inp.click();
 };
 async function openFiles(files: File[]) {
-  await waitForDocumentReady(PM);
+  if (documentPending(PM)) await waitForDocumentReady(PM);
   const projectFile = files.find(f => PROJECT_FILE.test(f.name));
   const media = files.filter(f => !PROJECT_FILE.test(f.name));
   if (projectFile) {
@@ -1043,7 +1043,7 @@ PM.newProject = () => {
   PM.modal({ title: 'New project', body: form.element, width: 420, actions: [
     { label: 'Cancel' },
     { label: 'Create', pri: true, run: async () => {
-      await waitForDocumentReady(PM);
+      if (documentPending(PM)) await waitForDocumentReady(PM);
       const values = form.values();
       switchProject(PM.mkProject({
         ...values,
@@ -1057,7 +1057,7 @@ PM.newProject = () => {
 /** A default-format project without the New project dialog. Onboarding opens
  * one so an imported workspace is arranged around a real composition. */
 PM.newBlankProject = (options: any = {}) => {
-  if (PM.EngineDoc?.enabled && !PM.EngineDoc.ready) {
+  if (documentPending(PM)) {
     void waitForDocumentReady(PM).then(() => PM.newBlankProject(options)).catch(() => {});
     return;
   }
@@ -1639,7 +1639,7 @@ window.addEventListener('beforeunload', () => {
 window.addEventListener('pm-open-project', (e: any) => {
   const p = e.detail;
   if (p && typeof p === 'object' && !refusedByEngine(p)) {
-    if (PM.EngineDoc?.enabled && !PM.EngineDoc.ready) {
+    if (documentPending(PM)) {
       void waitForDocumentReady(PM).then(() => switchProject(p)).catch(() => {});
     } else switchProject(p);
   }
@@ -1653,8 +1653,10 @@ window.addEventListener('pm-open-project', (e: any) => {
  */
 PM.openProjectHere = async (id: string) => {
   if (!id) return true;
-  try { await waitForDocumentReady(PM); }
-  catch { return false; } // EngineDoc has already reported the named load failure.
+  if (documentPending(PM)) {
+    try { await waitForDocumentReady(PM); }
+    catch { return false; } // EngineDoc has already reported the named load failure.
+  }
   if (id === PM.proj.id) return true;
   if (!parkedTabs.has(id) && !PM.Projects.list().some((meta: any) => meta.id === id)) {
     PM.toast('Could not open this project because its local data is missing.');
@@ -1740,7 +1742,7 @@ PM.bus.on('store:external', (keys: string[]) => {
 
 /* first full frame after persistent panels have measured */
 window.requestAnimationFrame(() => window.requestAnimationFrame(async () => {
-  if (PM.EngineDoc?.enabled && !PM.EngineDoc.ready) {
+  if (documentPending(PM)) {
     try { await waitForDocumentReady(PM); }
     catch { return; } // The document module reported its named load failure.
   }

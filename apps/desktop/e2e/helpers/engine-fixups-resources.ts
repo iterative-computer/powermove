@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
 
-/** Shared Mac: check the actual data volume immediately before each launch. */
+/** Opt-in measurement runs only (they build and launch repeatedly on a shared
+ * Mac): check the data volume immediately before each launch. Ordinary e2e
+ * tests never call this. */
 export function requireEngineDiskSpace(): void {
   const output = execFileSync('df', ['-k', '/System/Volumes/Data'], { encoding: 'utf8' });
   console.log(output.trim());

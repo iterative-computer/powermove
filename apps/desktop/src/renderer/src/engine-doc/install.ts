@@ -103,6 +103,13 @@ export interface EngineDoc {
   tracker: Tracker | null;
   /** Resolves when the module is loaded and the mirror synced (or failed). */
   whenReady: Promise<boolean>;
+  /** Named failures replace legacy answers (the "Use New Engine" setting). */
+  strict: boolean;
+  /**
+   * Readiness once the load in flight settles: the boot load, a `retry()`, or
+   * a revival after a trap. Resolves at once with `ready` when none is.
+   */
+  settled(): Promise<boolean>;
   check(reason: string): ConsistencyResult | null;
   beforeSave(reason?: string): void;
   beforeExport(reason?: string): void;
@@ -154,7 +161,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     PM.doc = noopDoc;
     const off: EngineDoc = {
       mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
-      whenReady: Promise.resolve(false),
+      whenReady: Promise.resolve(false), strict: false, settled: () => Promise.resolve(false),
       check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
       failures: () => [], retry: () => Promise.resolve(false), onReady: () => () => {}, warmFonts: () => Promise.resolve(),
     };
@@ -441,6 +448,8 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const startup = { startedAt: performance.now(), moduleMs: 0, instantiateMs: 0, mirrorMs: 0, readyMs: 0 };
   const state: EngineDoc = {
     mode, enabled: true, ready: false, api, edits, barrier: null, wasm: null, auditor, dual, tracker, whenReady,
+    strict: !!options.strict,
+    settled: () => loading ?? Promise.resolve(state.ready),
     check(reason) {
       if (!state.ready || !barrier) return null;
       try { return barrier.check(reason); } catch (error) { console.warn('[engine-doc] consistency check failed to run', error); return null; }
@@ -511,7 +520,14 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     state.ready = true;
     reporter.emit({ type: 'ready', mode: mode.name, bytes: wasm.x.memory.buffer.byteLength });
   };
-  const start = async (): Promise<boolean> => {
+  /** The load in flight (see `settled`). */
+  let loading: Promise<boolean> | null = null;
+  const start = (): Promise<boolean> => {
+    const attempt = load().finally(() => { if (loading === attempt) loading = null; });
+    loading = attempt;
+    return attempt;
+  };
+  const load = async (): Promise<boolean> => {
     try {
       const started = performance.now();
       compiledModule = await loadModule();

@@ -36,7 +36,6 @@ async function waitForQuietMachine(): Promise<void> {
 // compilation and the production loader, with each launch's actual engine.
 test('an extension evaluates a property during activate without a boot-window failure', async () => {
   const root = await profile();
-  requireEngineDiskSpace();
   const app = await launchApp({ userData: root });
   try {
     await app.page.waitForFunction(() => Boolean((window as any).PM?.Kernel?.services.get('boot-evaluation-probe')));
@@ -64,7 +63,6 @@ test('an agent connects at launch and immediately evaluates the restored project
   let app: Awaited<ReturnType<typeof launchApp>> | null = null;
   let releaseWasm: () => void = () => {};
   try {
-    requireEngineDiskSpace();
     setup = await launchApp({ userData: root, env: { POWERMOVE_NEW_ENGINE: '1' } });
     await setup.openEditor();
     const projectId = await setup.page.evaluate(async () => {
@@ -80,7 +78,6 @@ test('an agent connects at launch and immediately evaluates the restored project
     });
     await setup.close(); setup = null;
 
-    requireEngineDiskSpace();
     app = await launchApp({ userData: root, env: { POWERMOVE_NEW_ENGINE: '1' } });
     // Reload into a fresh renderer with the real module response held. Route
     // interception must happen before reload; a request that slipped through

@@ -1,7 +1,7 @@
 /* Ported from js/core/scripting.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { bridge as hostBridge } from '../../kernel/bridge';
-import { waitForDocumentReady } from '../../engine-doc/readiness';
+import { documentPending, waitForDocumentReady } from '../../engine-doc/readiness';
 
 export function install(PM: PMRegistry): void {
 const LIMITS = Object.freeze({ source: 40_000, commands: 240, result: 600_000, runtime: 900 });
@@ -174,7 +174,7 @@ function describe(commands: any) {
 }
 
 async function prepare(code: any, input: any = {}, meta: any = {}) {
-  await waitForDocumentReady(PM);
+  if (documentPending(PM)) await waitForDocumentReady(PM);
   const clean = sourceCode(code);
   if (!clean) return { ok: false, message: `Script source must be between 1 and ${LIMITS.source.toLocaleString()} characters`, commands: [], changes: [] };
   try {
