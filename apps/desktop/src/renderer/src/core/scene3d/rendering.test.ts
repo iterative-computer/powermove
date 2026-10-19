@@ -45,3 +45,59 @@ describe('Blender snapshot of source materials', () => {
     });
   });
 });
+
+describe('cancelRender with the engine on', () => {
+  // A host bridge whose Blender worker behaves like main's (blender-ipc.ts):
+  // cancel disposes the window's worker, which rejects the running job.
+  const worker = () => {
+    const calls = { cancel: 0, run: 0 };
+    let fail: ((error: Error) => void) | null = null;
+    const blender = {
+      status: async () => ({ available: true }),
+      run: () => { calls.run++; return new Promise<never>((_, reject) => { fail = reject; }); },
+      cancel: async () => { calls.cancel++; fail?.(new Error('Blender job cancelled')); fail = null; },
+    };
+    return { calls, blender };
+  };
+  const enginePM = (preview: { cancel(): Promise<void> }) => ({ EngineConnection: { preview }, EngineDoc: { enabled: true }, bus: { emit() {} } });
+
+  it('stops the window Blender worker that runs Regenerate and .blend import', async () => {
+    const { installBridgeForTests } = await import('../../kernel/bridge');
+    const { cancelBlender } = await import('./rendering');
+    const { editModel } = await import('./modeling');
+    const { calls, blender } = worker();
+    installBridgeForTests({ blender } as any);
+    try {
+      let previewCancels = 0;
+      const PM: any = enginePM({ cancel: async () => { previewCancels++; } });
+      PM.proj = { assets: {} }; PM.sel = { layers: [] }; PM._scene3dRevision = 0;
+      const job = editModel(PM, { operation: 'create_model', recipe: { kind: 'rocket', parameters: {}, modifiers: [] } });
+      await Promise.resolve();
+      expect(calls.run).toBe(1);
+      await cancelBlender(PM);
+      expect(calls.cancel).toBe(1);
+      expect(previewCancels).toBe(1);
+      expect(await job).toEqual({ ok: false, message: 'Blender job cancelled' });
+    } finally {
+      installBridgeForTests(undefined);
+    }
+  });
+
+  it('resolves as today when no native viewer session can take the cancel', async () => {
+    const { installBridgeForTests } = await import('../../kernel/bridge');
+    const { cancelBlender } = await import('./rendering');
+    const { calls, blender } = worker();
+    installBridgeForTests({ blender } as any);
+    try {
+      for (const name of ['EnginePreviewUnavailable', 'EnginePreviewCancelled']) {
+        const PM = enginePM({ cancel: async () => { throw Object.assign(new Error('no session'), { name }); } });
+        await expect(cancelBlender(PM)).resolves.toBeUndefined();
+      }
+      expect(calls.cancel).toBe(2);
+      const broken = enginePM({ cancel: async () => { throw new Error('protocol fault'); } });
+      await expect(cancelBlender(broken)).rejects.toThrow('protocol fault');
+    } finally {
+      installBridgeForTests(undefined);
+    }
+  });
+});

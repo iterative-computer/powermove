@@ -848,11 +848,27 @@ export async function cancelBlender(PM: any) {
   if (s.timer) clearTimeout(s.timer);
   s.timer = null;
   emit(PM);
+  // The window's Blender worker runs scene3d.model jobs (Regenerate, .blend
+  // import) with the engine on too, so cancelling always stops it, as today.
+  const worker = bridge()?.blender?.cancel();
   if (nativePreviewEnabled(PM)) {
     if (!PM.EngineConnection?.preview) throw Object.assign(new Error("The native preview controller is unavailable"), { name: "EnginePreviewUnavailable" });
-    await PM.EngineConnection.preview.cancel();
+    await Promise.all([worker, cancelNativePreview(PM.EngineConnection.preview)]);
   } else {
-    await bridge()?.blender?.cancel();
+    await worker;
+  }
+}
+/** Cancels the interactive engine's preview. Without a native viewer
+    session (no mounted viewer, a route still pending) there is no native
+    preview to stop, so the cancel resolves as today's does. */
+async function cancelNativePreview(preview: { cancel(): Promise<void> }) {
+  try {
+    await preview.cancel();
+  } catch (error) {
+    const name = (error as Error | null)?.name;
+    // Unavailable: no session to cancel. Cancelled: the session restarted
+    // or a newer control replaced this one, which also ends the preview.
+    if (name !== "EnginePreviewUnavailable" && name !== "EnginePreviewCancelled") throw error;
   }
 }
 export function disposeBlenderFrames(PM: any) {
