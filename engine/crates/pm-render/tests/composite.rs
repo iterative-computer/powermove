@@ -846,6 +846,37 @@ fn a_failing_node_outputs_transparency() {
     assert!(close(px(&rgba, 8, 4, 4), hex("#336699"), 1e-6));
 }
 
+/// `masks` that is truthy but not an array fails the layer as today's
+/// `(L.masks || []).some(…)` throws: a named layer failure, not a route;
+/// the rest of the frame draws.
+#[test]
+fn masks_that_are_not_an_array_fail_the_layer() {
+    let mut r = Renderer::headless().unwrap();
+    let mut bad = layer(
+        "bad",
+        "solid",
+        json!({ "color": "#FFFFFF", "w": 8, "h": 8 }),
+        0.0,
+        0.0,
+        1.0,
+    );
+    bad["masks"] = json!({ "v": [], "kf": [], "expr": null });
+    let back = layer(
+        "back",
+        "solid",
+        json!({ "color": "#336699", "w": 8, "h": 8 }),
+        0.0,
+        0.0,
+        1.0,
+    );
+    let doc = project(8, 8, 1.0, no_fill(), vec![bad, back]);
+    assert!(pm_render::unsupported(&load(&doc), "Ptest-root").is_empty());
+    let (rgba, failures) = render_with(&mut r, &doc, 0.0, Precision::Float32, None);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].layer, "bad");
+    assert!(close(px(&rgba, 8, 4, 4), hex("#336699"), 1e-6));
+}
+
 /// A region of interest equals the same pixels of the full frame, bit for
 /// bit, with masks, mattes, blend modes, groups, and effects that read
 /// beyond the region (grown by their padding, or the whole frame).

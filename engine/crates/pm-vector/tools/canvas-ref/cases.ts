@@ -151,6 +151,20 @@ export function cases(): Case[] {
   for (const [id, paths] of pathCases) for (const scale of [0.5, 1, 1.75, 3]) out.push({ id: `paths-${id}-s${scale}`, kind: 'paths', paths, scale });
   // The rounded rectangle of the parity corpus's composition/metadata.
   for (const scale of [1, 1.25]) out.push({ id: `shape-corpus-rect-r24-s${scale}`, kind: 'shape', d: { shape: 'rect', color: '#3FCF8E', w: 100, h: 100, radius: 24, stroke: 0, strokeColor: '#ffffff', points: 5 }, scale });
+  // The cards of the parity corpus's space/groups-25d (radius 24 by default), drawn through a 3D group's plane.
+  for (const color of ['#FF6040', '#4060FF']) out.push({ id: `shape-groups25d-card-${color.slice(1).toLowerCase()}-s1`, kind: 'shape', d: { shape: 'rect', color, w: 130, h: 140, radius: 24, stroke: 0, strokeColor: '#ffffff', points: 5 }, scale: 1 });
+  // Viewport sweep (docs/engine/vector.md, "Residuals"): rounded rectangles
+  // and circles over sizes and radii whose MSAA edge samples depend on how
+  // the rasterizer's viewport maps vertices, at scale 1 and the r24 corner
+  // at other scales.
+  const rects: [number, number][] = [[60, 60], [100, 100], [130, 140], [90, 170], [200, 120], [256, 256], [333, 211]];
+  for (const radius of [12, 16, 20, 24, 28, 32, 40, 48]) {
+    for (const [w, h] of rects) out.push({ id: `viewport-rect-${w}x${h}-r${radius}`, kind: 'shape', d: { shape: 'rect', color: '#3FCF8E', w, h, radius, stroke: 0, strokeColor: '#ffffff', points: 5 }, scale: 1 });
+  }
+  for (const size of [37, 64, 99, 150, 222, 301, 410]) out.push({ id: `viewport-ellipse-${size}`, kind: 'shape', d: { shape: 'ellipse', color: '#FF6040', w: size, h: size, radius: 0, stroke: 0, strokeColor: '#ffffff', points: 5 }, scale: 1 });
+  for (const [w, h] of [[60, 60], [100, 100]] as const) {
+    for (const scale of [0.75, 1.5, 2, 2.5, 3]) out.push({ id: `viewport-rect-${w}x${h}-r24-s${scale}`, kind: 'shape', d: { shape: 'rect', color: '#4060FF', w, h, radius: 24, stroke: 0, strokeColor: '#ffffff', points: 5 }, scale });
+  }
   out.push(...diagnostics(), ...svgCases());
   return out;
 }

@@ -42,10 +42,19 @@ const FLAG_BLEND_IN_E: i32 = 32;
 // Intermediates are stored at half precision (each legacy pass writes an
 // RGBA16F target): round between fused steps.
 const FLAG_HALF: i32 = 64;
+// Bezier path masks: the layer times today's coverage canvas (`tcov`).
+const FLAG_PATH_MASKS: i32 = 128;
+// The device stores `rgba16float` outputs rounded to nearest (probed;
+// `composite/half_store.rs`), else toward zero.
+const FLAG_HALF_NEAREST: i32 = 256;
 
 @group(0) @binding(0) var<uniform> op: Op;
 @group(0) @binding(1) var ta: texture_2d<f32>;
 @group(0) @binding(2) var tb: texture_2d<f32>;
+// The path mask coverage canvas (top-down, output size) and today's
+// `texFor` filtering (linear, clamp to edge).
+@group(0) @binding(3) var tcov: texture_2d<f32>;
+@group(0) @binding(4) var scov: sampler;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -76,18 +85,49 @@ fn load_b(pos: vec4<f32>) -> vec4<f32> {
     return textureLoad(tb, vec2<i32>(pos.xy) + op.off.zw, 0);
 }
 
+// An RGBA16F render target stores a fragment's f32 output rounded toward
+// zero on this GPU (measured: 0.75 − 1 f32 ulp stores as 0.74951), so each
+// of today's intermediate passes truncates. Fused steps reproduce it.
+fn half_rtz(v: f32) -> f32 {
+    let a = abs(v);
+    if (a != a || a >= 65536.0) {
+        return v;
+    }
+    if (a >= 65504.0) {
+        return sign(v) * 65504.0;
+    }
+    if (a < 6.103515625e-05) {
+        // Subnormal halves: multiples of 2^-24, truncated.
+        return sign(v) * floor(a * 16777216.0) / 16777216.0;
+    }
+    return bitcast<f32>(bitcast<u32>(v) & 0xffffe000u);
+}
+
+// The same store on a device that rounds to nearest (ties to even).
+fn half_rne(v: f32) -> f32 {
+    let a = abs(v);
+    if (a != a || a >= 65520.0) {
+        return v;
+    }
+    if (a < 6.103515625e-05) {
+        return sign(v) * round(a * 16777216.0) / 16777216.0;
+    }
+    let b = bitcast<u32>(v);
+    return bitcast<f32>((b + 0xfffu + ((b >> 13u) & 1u)) & 0xffffe000u);
+}
+
 fn half(v: f32) -> f32 {
     if (has(FLAG_HALF)) {
-        return quantizeToF16(v);
+        if (has(FLAG_HALF_NEAREST)) {
+            return half_rne(v);
+        }
+        return half_rtz(v);
     }
     return v;
 }
 
 fn half4(v: vec4<f32>) -> vec4<f32> {
-    if (has(FLAG_HALF)) {
-        return quantizeToF16(v);
-    }
-    return v;
+    return vec4<f32>(half(v.x), half(v.y), half(v.z), half(v.w));
 }
 
 fn sd_box(p: vec2<f32>, b: vec2<f32>) -> f32 {
@@ -140,7 +180,21 @@ fn coverage(px: vec2<f32>) -> f32 {
     return cov;
 }
 
-// Masks (`FRAG_MASK` then `FRAG_MASK_APPLY`) and the track matte
+// `pathMaskApply`: the coverage canvas sampled through `u_covTransform`
+// (output pixels to canvas pixels; `inv` holds it on this route), zero
+// outside the canvas.
+fn path_coverage(px: vec2<f32>) -> f32 {
+    let t = mat3x3<f32>(op.inv0.xyz, op.inv1.xyz, op.inv2.xyz);
+    let q = t * vec3<f32>(px, 1.0);
+    let uv = q.xy / q.z / op.res.xy;
+    let c = textureSampleLevel(tcov, scov, uv, 0.0).r;
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+        return 0.0;
+    }
+    return c;
+}
+
+// Masks (`FRAG_MASK` then `FRAG_MASK_APPLY`, or `pathMaskApply`) and the track matte
 // (`applyTrackMatte`), in that order, on the layer in `ta`; the matte pass
 // is in `tb`.
 @fragment
@@ -149,8 +203,11 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
     if (has(FLAG_MASKS)) {
         c = c * half(coverage(in.px));
     }
+    if (has(FLAG_PATH_MASKS)) {
+        c = c * path_coverage(in.px);
+    }
     if (has(FLAG_MATTE)) {
-        if (has(FLAG_MASKS)) {
+        if (has(FLAG_MASKS) || has(FLAG_PATH_MASKS)) {
             c = half4(c);
         }
         var m = load_b(in.pos);
@@ -173,23 +230,17 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 // `FRAG_COMPOSITE`: the layer (`ta`) over the accumulator (`tb`) with a
-// blend mode, in the working encoding.
+// blend mode, in the working encoding, evaluated as today's program
+// evaluates it at every pixel of the frame: outside the layer the
+// destination goes through `(d.rgb / d.a) · d.a`, whose result the half
+// float target truncates, so a translucent stack drifts by up to an ulp per
+// blend layer exactly as today's frames do (docs/engine/composite.md).
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     var s = load_a(in.pos);
     let d = load_b(in.pos);
     s.a *= op.f.x;
     s = vec4<f32>(s.rgb * op.f.x, s.a);
-    if (s.a == 0.0) {
-        // Outside the layer the formula reduces to the destination
-        // (`(d.rgb / d.a) · d.a`, or zero color below the 0.0001 guard).
-        // Evaluating the round trip instead loses an ulp per pass to the
-        // render target's rounding, which today's frames do not show.
-        if (d.a > 0.0001) {
-            return d;
-        }
-        return vec4<f32>(0.0, 0.0, 0.0, d.a);
-    }
     var sc = vec3<f32>(0.0);
     if (s.a > 0.0001) {
         sc = s.rgb / s.a;

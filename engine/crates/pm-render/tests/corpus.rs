@@ -97,28 +97,14 @@ fn float_fraction_within_one(a: &[f32], b: &[f32]) -> f64 {
     within as f64 / pixels.max(1) as f64
 }
 
-/// Frames where today's renderer departs from the exact composite and the
-/// engine does not follow (docs/engine/composite.md, "Today's composite
-/// drift"; proposed appendix A item): `FRAG_COMPOSITE` runs over the whole
-/// frame for every blend layer and sends every pixel through unpremultiply
-/// and re-premultiply, so on a translucent stack the half-float target loses
-/// up to a few code values over many blend layers. The engine passes pixels
-/// outside the layer through exactly. Bounds as measured on the capture
-/// (largest transparent-float and opaque differences, in CV); the rest of the
-/// class still applies.
-const COMPOSITE_DRIFT: &[(&str, f64, u8)] = &[("composite/blend-modes-alpha", 5.0, 5)];
-
 /// Frames outside the render class by a measured, explained residual:
 /// (project, most pixels off by more than 1, largest difference). A frame
 /// within its pin is listed as known instead of failed; one beyond it fails.
 ///
-/// - `composition/metadata`: the radius-24 rectangle's Canvas2D raster has
-///   two pixels where one of Chromium's four MSAA samples falls on the other
-///   side of a tessellated arc edge (0.15/256 px from it); the compat level 1
-///   emulation reproduces the raster otherwise exactly
-///   (docs/engine/vector.md, "Residuals"; `shape-corpus-rect-r24-s1` in
-///   pm-vector's Canvas2D parity test).
-const KNOWN_RESIDUALS: &[(&str, usize, u8)] = &[("composition/metadata", 6, 43)];
+/// Empty: `composition/metadata` (the radius-24 rectangle's single flipped
+/// MSAA samples) is bit-exact since the compat level 1 emulation models the
+/// MSAA pass's approx-fit viewport (docs/engine/vector.md, "Residuals").
+const KNOWN_RESIDUALS: &[(&str, usize, u8)] = &[];
 
 #[test]
 fn corpus_render_parity() {
@@ -183,6 +169,16 @@ fn corpus_render_parity() {
             renderer.effects(),
         );
         seen.insert(p.name.clone(), issues.is_empty());
+        // Amendment 21: these classes are drawn natively; routing one of
+        // them is a failure, not a skip.
+        let forbidden: Vec<String> = issues
+            .iter()
+            .filter(|u| support::routing_forbidden(&u.feature))
+            .map(|u| u.to_string())
+            .collect();
+        if !forbidden.is_empty() {
+            failed.push(format!("{}: routed for {}", p.name, forbidden.join(", ")));
+        }
         if !issues.is_empty() {
             let mut reasons: Vec<String> = issues.iter().map(|u| u.feature.to_string()).collect();
             reasons.dedup();
@@ -378,11 +374,8 @@ fn corpus_render_parity() {
                     ))
                 );
                 eprintln!("{line}");
-                let drift = COMPOSITE_DRIFT.iter().find(|d| d.0 == p.name);
-                let bound = drift.map_or(1.0, |d| d.1);
-                if max > bound || bar.as_ref().is_some_and(|b| !b.pass()) {
+                if max > 1.0 || bar.as_ref().is_some_and(|b| !b.pass()) {
                     if bar.is_none()
-                        && drift.is_none()
                         && webgl_unstable(&p.document)
                         && float_fraction_within_one(&ours, &reference) >= 0.999
                     {
@@ -421,21 +414,14 @@ fn corpus_render_parity() {
                 ))
             );
             eprintln!("{line}");
-            let drift_max = COMPOSITE_DRIFT.iter().find(|x| x.0 == p.name).map(|x| x.2);
-            let class = match drift_max {
-                Some(m) => d.fraction_within_one() >= 0.999 && d.max <= m,
-                None => d.passes(),
-            };
+            let class = d.passes();
             let known = KNOWN_RESIDUALS.iter().any(|&(name, pixels, max)| {
                 p.name == name && bar.is_none() && d.pixels - d.within_one <= pixels && d.max <= max
             });
             if known && !class {
                 eprintln!("  known residual: {}", p.name);
             } else if !class || bar.as_ref().is_some_and(|b| !b.pass()) {
-                if bar.is_none()
-                    && drift_max.is_none()
-                    && webgl_unstable(&p.document)
-                    && d.fraction_within_one() >= 0.999
+                if bar.is_none() && webgl_unstable(&p.document) && d.fraction_within_one() >= 0.999
                 {
                     unstable.push(line);
                     continue;

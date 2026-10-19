@@ -248,6 +248,9 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 pub struct PathMask {
     /// Filled with the nonzero rule.
     pub path: BezPath,
+    /// The canvas calls that build `path` (`tracePath`, `ellipse`, or
+    /// `rect`), for the Canvas2D emulation.
+    pub outline: MaskOutline,
     /// The canvas calls placing the mask in layer pixels: `translate(x, y)`,
     /// `rotate(rotation)`, and for a bezier mask its path's own
     /// `translate`, `rotate`, and `scale`.
@@ -275,6 +278,18 @@ impl PathMask {
         let c = world.as_coeffs();
         self.feather * js::hypot(c[0], c[1]) / 2.0
     }
+}
+
+/// How a mask on the path route builds its outline on the canvas.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MaskOutline {
+    /// `tracePath(c, {...v, closed: true, trimStart: 0, trimEnd: 100})`:
+    /// the traced path (`path`).
+    Path,
+    /// `c.ellipse(0, 0, |w| / 2, |h| / 2, 0, 0, 2π)`.
+    Ellipse { rx: f64, ry: f64 },
+    /// `c.rect(-w / 2, -h / 2, w, h)` (signed size).
+    Rect { w: f64, h: f64 },
 }
 
 /// The path route: every enabled mask, drawn in order.
@@ -321,6 +336,7 @@ fn path_mask(m: &MaskValues) -> PathMask {
         TransformOp::Translate(x, y),
         TransformOp::Rotate(js::or0(m.rotation) * core::f64::consts::PI / 180.0),
     ];
+    let mut outline = MaskOutline::Path;
     let path = match &m.path {
         Some(v) => {
             ops.extend([
@@ -340,6 +356,10 @@ fn path_mask(m: &MaskValues) -> PathMask {
             match m.shape {
                 // Absolute radii never throw.
                 MaskShape::Ellipse => {
+                    outline = MaskOutline::Ellipse {
+                        rx: w.abs() / 2.0,
+                        ry: h.abs() / 2.0,
+                    };
                     let _ = ctx.ellipse(
                         0.0,
                         0.0,
@@ -350,13 +370,17 @@ fn path_mask(m: &MaskValues) -> PathMask {
                         core::f64::consts::TAU,
                     );
                 }
-                MaskShape::Rect => ctx.rect(-w / 2.0, -h / 2.0, w, h),
+                MaskShape::Rect => {
+                    outline = MaskOutline::Rect { w, h };
+                    ctx.rect(-w / 2.0, -h / 2.0, w, h)
+                }
             }
             ctx.finish()
         }
     };
     PathMask {
         path,
+        outline,
         transform: CanvasTransform::of(&ops).affine(),
         ops,
         mode: m.mode,

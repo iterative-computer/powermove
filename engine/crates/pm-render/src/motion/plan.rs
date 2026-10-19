@@ -6,7 +6,10 @@ use pm_model::Node;
 
 use super::{Blur, level_fps, sample_offset};
 use crate::js;
-use crate::plan::{Background, Build, CompPlan, Content, Draw, Source, comp_pass, layer_draw};
+use crate::plan::{
+    Background, Build, CompPlan, Content, Draw, Source, comp_pass, layer_draw, pop_sample_3d,
+    push_sample_3d,
+};
 
 fn full(width: u32, height: u32) -> [f64; 6] {
     [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0]
@@ -50,7 +53,19 @@ pub(crate) fn blur_layer<'d>(
     let mut result = Ok(());
     for s in 0..n {
         let t = time + sample_offset(s, n, blur.shutter_frames, fps);
-        match layer_draw(scope, b, layer, t, width, height, scale, sample_alpha) {
+        // A 3D object layer draws its scene at the sample time.
+        let pushed = match push_sample_3d(scope, b, layer, t, width, height) {
+            Ok(p) => p,
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        };
+        let drawn = layer_draw(scope, b, layer, t, width, height, scale, sample_alpha);
+        if pushed {
+            pop_sample_3d(b);
+        }
+        match drawn {
             Ok(Some(d)) => draws.push(d),
             Ok(None) => {}
             Err(e) => {
