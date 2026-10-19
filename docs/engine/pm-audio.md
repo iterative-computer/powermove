@@ -3169,3 +3169,84 @@ also have exactness regressions.
 
 The final merged revision and full device/repetition campaign remain
 unqualified at this point. No historical miss is classified as noise.
+
+### R7 callback preparation follow-up (qualification pending)
+
+V22, after the integration merge, passed 32/32 stressed cold first-512
+preflights at 7.351/7.957/8.899 ms (p50/p95/max). Each trial retained complete,
+bit-exact PCM, 16 simultaneous voices, zero omitted prefix, zero A3 fires,
+and zero program underruns. Its library passed 113 tests with one existing
+ignore; ten targeted regressions and one 40-test plain and stressed playback
+preflight passed. These results did not qualify the device path.
+
+The subsequent partial device campaign used the built-in output at 48 kHz
+with 64-frame callbacks and four busy stress threads. The following raw A8
+rows remained blockers. Each entry is p50/p95/max in milliseconds, with 30
+starts per engine. The third shared seek repeat passed; it does not erase
+the other two misses.
+
+| Scenario | Today | Native |
+| --- | --- | --- |
+| Shared unprepared seek, stressed repeat 1 | 29.512 / 32.507 / 32.511 | 32.249 / 35.243 / 36.027 |
+| Shared unprepared seek, stressed repeat 2 | 29.218 / 32.408 / 32.513 | 33.311 / 35.451 / 35.653 |
+| Shared unprepared seek, stressed repeat 3 | 29.627 / 32.212 / 32.295 | 28.631 / 30.344 / 30.614 |
+| Distinct speed edit, plain | 29.931 / 32.321 / 32.530 | 30.817 / 31.349 / 31.372 |
+| Distinct unprepared seek, plain | 30.222 / 32.414 / 32.611 | 30.879 / 32.112 / 32.200 |
+| Distinct speed edit, stressed repeat 1 | 30.436 / 32.329 / 32.429 | 30.648 / 31.267 / 31.305 |
+
+A separate stressed speed attempt recorded one computation-budget overrun:
+maximum guarded period CPU was 1.309376 ms, and maximum sampled work-unit CPU
+was 0.873375 ms. There was no constraint overrun, omitted audio, start spread,
+or program underrun. The later retry passed; the first failure remains. The
+old record did not identify the offending phase or its time within the
+120 ms observation window. It cannot be attributed to first-buffer work.
+Five completed 60-second loop pairs, including distinct voices, had zero
+underruns in either engine and zero native starvation or device overloads.
+The blocked revision's 60 repetition suites were not started. Three earlier
+setup attempts also failed before playback measurement; fresh native, Wasm,
+and desktop artifacts subsequently connected and played. Their precise API
+failure was not isolated, and they do not count as passing captures.
+
+Matched first-head profiles then captured two plain and two stressed native
+rows, 12 starts each, on the same 64-frame output. The representative job used
+19–21 slices. Across rows, median queue time was 4.026–4.373 ms, thread CPU
+3.391–3.595 ms, policy entry 0.175–0.188 ms, and budget sleep 1.668–2.454 ms.
+Cached input reads took about 0.027–0.029 ms; no inline decoder CPU was
+needed for these already decoded sources. DSP scopes include checkpoint
+sleeps and overlap the CPU and wait measures. Job logging followed head
+publication by a median 0.024 ms and as much as 1.572 ms, so these full-job
+totals are not all necessarily on the first-buffer critical path. They
+identify queue handoff as a candidate cost, rather than proving an avoidable
+four-millisecond delay.
+
+The revised executor keeps a sole ready foreground priority-zero job on its
+current worker for one more complete native DSP slice. It checks the ordinary
+queue again before every continuation. An equally urgent ready competitor
+puts the retained job at the FIFO tail. Each slice still releases its history
+mutex and real-time guard, then reenters and verifies the actual scheduling
+policy. The physical thread's CPU debt remains; retaining a worker can also
+retain its throttle, so the latency benefit requires measurement. Profiling
+separates CPU yields from actual queue reentries and records worker handoffs
+and local continuations. HEAD remains 4096 frames, LEAD 1024, and canonical
+pre-roll/grid remain 11,520/16,384. No voice is omitted to improve latency.
+
+Pure control-point scans and resampling loops now reach cooperative checks
+every 32 points and 64 output samples respectively, preserving arithmetic and
+native call boundaries. A fixed atomic record preserves the first observed
+computation-budget overrun: host time, role, phase, unit/prior/period CPU,
+wall elapsed, and exact limits. Publication is Release/Acquire and performs
+no allocation, lock, or logging on the audio thread. This is a schedule-lifetime
+record, not a per-Play counter; a simultaneous observer can briefly see an
+overrun count before its record is published. Phase changes occur after
+sampling the preceding unit; internal DSP checks keep the current label.
+Unlabeled work reports unknown. Small gain/mixing tails may remain within
+the preceding voice phase until the next checkpoint; phase names are not
+exclusive function-level CPU attribution.
+
+All final device and repetition gates remain pending for this revision.
+Independent source reviews found no blockers in the continuation and phase
+changes. Build and strict Clippy checks passed. Seven targeted queue and
+atomic-record unit regressions also passed; they exercise no audio device
+or actual scheduling policy. The full audio runtime gates remain pending.
+The historical AirPods 256-frame allowance above remains limited to that
+accepted device result and does not excuse the built-in-output misses.
