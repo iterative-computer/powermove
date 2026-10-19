@@ -189,8 +189,8 @@ test('C1 private setup: all extensions, contribution winners, host UI, wrappers 
         // restore. Wait for the real open operation before exercising the
         // loaded document; a layer count alone is not an open-completion gate.
         try {
-          await expect.poll(() => app.page.evaluate(() => (window as any).__c1OpenDone), { timeout: 180_000, message: 'C1: original project open must finish' }).toBe(true);
-        } catch (error) { results[mode].openCompletionError = String(error); }
+          await expect.poll(() => app.page.evaluate(() => (window as any).__c1OpenDone), { timeout: 600_000, message: 'C1: original project open must finish before captures' }).toBe(true);
+        } catch (error) { results[mode].openCompletionError = String(error); throw error; }
         if (engine) expect(await app.page.evaluate(() => !!(window as any).PM.EngineRender), 'C1: engine facade remains installed').toBe(true);
         const setup = await app.page.evaluate(() => { const PM = (window as any).PM; return { dur: PM.proj.dur, fps: PM.proj.fps, w: PM.proj.w, h: PM.proj.h, typewriters: PM.proj.layers.filter((l: any) => l.fx?.some((f: any) => f.type === 'typewriter')).map((l: any) => ({ from: l.from, dur: l.dur })) }; });
         console.log(`C1 ${mode}: project layers loaded`);

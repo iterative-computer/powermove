@@ -324,7 +324,10 @@ test.describe('Use New Engine: the customization moat, round two', () => {
     for (const zoom of [8, 16]) {
       const before = await page.evaluate(() => (window as any).PM.EngineConnection.status().frames);
       await page.evaluate(() => { (window as any).__crops.length = 0; });
-      await zoomViewer(page, zoom, 200, 120, .6);
+      // Keep the glyph bodies inside the much smaller 16x field of view.
+      // Centring on the baseline's top at y=120 legitimately clips every
+      // visible glyph at t=.2 (the i dot and cursor are outside its x range).
+      await zoomViewer(page, zoom, 200, 145, .6);
       await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().frames), { timeout: 20_000 }).toBeGreaterThan(before);
       await expect.poll(() => page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 16).length)).toBeGreaterThan(0);
       await viewerPixels(page, true); // let setZoom's intermediate pan state settle
