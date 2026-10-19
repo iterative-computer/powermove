@@ -18,7 +18,7 @@
  * after `SEGMENT_ORPHAN_MS`.
  */
 import type { CompatFrameRequest, Response } from '../../shared/engine-protocol';
-import type { EngineCompatAnswer, EngineCompatAsk } from '../../shared/engine-ipc';
+import { OTHER_DOCUMENT_OPEN, type EngineCompatAnswer, type EngineCompatAsk } from '../../shared/engine-ipc';
 import { ProtocolError } from './protocol';
 
 /** Largest answer inline (pm_protocol INLINE_PIXEL_BYTES). */
@@ -76,7 +76,11 @@ export class CompatFrames {
   async serve(request: CompatFrameRequest): Promise<Response> {
     if (this.pending.size >= MAX_ASKS) throw new ProtocolError('budgetExceeded', 'Too many compatibility frames are being drawn.');
     const windows = this.options.windows();
-    const closed = 'This layer is drawn by an extension in the editor; open the project in a window to export it.';
+    // Level 1 SVG images are Chromium's rasters, drawn by the window that
+    // has the project open (decision S1).
+    const closed = request.source === 'svgImage'
+      ? 'SVG images are drawn by the editor window that has this project open; open the project in a window to export it.'
+      : 'This layer is drawn by an extension in the editor; open the project in a window to export it.';
     if (!windows.length) throw new ProtocolError('notHeadlessRenderable', closed);
     const ask = this.next++;
     const answer = await new Promise<EngineCompatAnswer>((resolve) => {
@@ -103,13 +107,14 @@ export class CompatFrames {
 
   /** A window's answer (IPC input). Only an asked window may answer, once:
    *  the first pixels win; when every asked window said no, the last
-   *  reason is the answer. */
+   *  reason is the answer (a window with another document open gives
+   *  none: the request's own message stands). */
   answer(windowId: number, value: unknown): boolean {
     if (!validCompatAnswer(value)) return false;
     const pending = this.pending.get(value.ask);
     if (!pending || !pending.windows.delete(windowId)) return false;
     if (value.status === 'unavailable') {
-      pending.last = value.message;
+      if (value.message !== OTHER_DOCUMENT_OPEN) pending.last = value.message;
       if (pending.windows.size) return true;
     }
     this.pending.delete(value.ask);

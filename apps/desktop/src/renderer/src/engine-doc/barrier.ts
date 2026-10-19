@@ -46,6 +46,9 @@ export interface PatchBatch {
   origin: PatchOrigin;
   count: number;
   body: Uint8Array;
+  /** Whether the batch changes the project's assets (or its id, or the
+   *  whole document): listeners that only follow assets skip the rest. */
+  assets: boolean;
 }
 
 export interface ConsistencyResult {
@@ -285,7 +288,7 @@ export class DocumentBarrier {
     this.resyncPending = false;
     this.origin = 'metadata';
     this.stats.resyncs += 1;
-    this.emit({ baseRevision: this.revision - 1, revision: this.revision, origin: 'load', count: 1, body: encodePatchOps([{ path: [], exists: json !== undefined, value: this.shadow }]) });
+    this.emit({ baseRevision: this.revision - 1, revision: this.revision, origin: 'load', count: 1, body: encodePatchOps([{ path: [], exists: json !== undefined, value: this.shadow }]), assets: true });
   }
 
   /** The paths a structural diff covers: the open composition, the entered one, compositions added or removed, and every project member but `comps`. */
@@ -384,7 +387,8 @@ export class DocumentBarrier {
     this.stats.batches += 1;
     this.stats.ops += ops.length;
     this.stats.bytes += body.length;
-    this.emit({ baseRevision: base, revision: base + 1, origin, count: ops.length, body });
+    const assets = ops.some(op => op.path.length === 0 || op.path[0] === 'assets' || op.path[0] === 'id');
+    this.emit({ baseRevision: base, revision: base + 1, origin, count: ops.length, body, assets });
   }
 
   private emit(batch: PatchBatch): void {

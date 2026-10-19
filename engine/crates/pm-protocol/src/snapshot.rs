@@ -366,6 +366,11 @@ pub enum SnapshotOutcome {
         revision: Revision,
         fallback: Vec<crate::shader_fallback::ShaderFallbackRequest>,
         compat: Vec<CompatNeed>,
+        /// Level 1 SVG rasters the frame needs (decision S1): the renderer
+        /// draws them, posts them as `CompatMessage::SvgPixels`, and asks
+        /// again naming each `SvgRasterKey::upload_key` in `uploaded`.
+        #[serde(default)]
+        svg: Vec<crate::svg_raster::SvgRasterRequest>,
     },
     /// A `Layer` target that draws nothing at that time (no ink, no cue
     /// showing): today's `render.raster()` returns `null`.
@@ -380,12 +385,16 @@ impl Validate for SnapshotOutcome {
             SnapshotOutcome::Rendered(result) => result.validate(),
             SnapshotOutcome::Empty { .. } => Ok(()),
             SnapshotOutcome::NeedsRenderer {
-                fallback, compat, ..
+                fallback,
+                compat,
+                svg,
+                ..
             } => {
                 crate::shader_fallback::ShaderFallbackMessage::Requests {
                     requests: fallback.clone(),
                 }
                 .validate()?;
+                crate::svg_raster::validate_requests(svg)?;
                 ensure(
                     compat.len() <= crate::shader_fallback::MAX_REQUESTS
                         && compat.iter().all(|c| {
@@ -538,6 +547,9 @@ pub enum CompatSource {
     /// An extension's offscreen WebGL2 compatibility context
     /// (`render.gl.context` at apiVersion 1 to 3).
     CompatContext,
+    /// A level 1 SVG image's raster at a size bucket, drawn by Chromium
+    /// (decision S1; [`CompatFrameRequest::svg`] names it).
+    SvgImage,
 }
 
 /// The identity of one compatibility raster: one layer at one frame, as one
@@ -590,7 +602,8 @@ pub struct CompatPixels {
     pub data: Bytes,
 }
 
-/// Renderer → interactive engine (session-bound, the viewer's port).
+/// Renderer ↔ interactive engine (session-bound, the viewer's port):
+/// every variant travels from the renderer except `SvgRequests`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
@@ -606,6 +619,21 @@ pub enum CompatMessage {
     Forget {
         composition: CompositionId,
         layer: LayerId,
+    },
+    /// Interactive engine → renderer: level 1 SVG rasters a frame drew
+    /// without (`crate::svg_raster`).
+    SvgRequests {
+        requests: Vec<crate::svg_raster::SvgRasterRequest>,
+    },
+    /// Renderer → interactive engine: one band of an SVG raster.
+    SvgPixels(crate::svg_raster::SvgRasterPixels),
+    /// Renderer → interactive engine: the renderer could not draw an SVG
+    /// raster (`missing`: no such asset; `stale`: the window's bytes hash
+    /// differently; `decode`: Chromium could not draw it; `size`).
+    SvgFailed {
+        key: crate::svg_raster::SvgRasterKey,
+        reason: String,
+        message: String,
     },
 }
 
@@ -653,6 +681,15 @@ impl Validate for CompatMessage {
                     "invalid compatibility layer".into()
                 })
             }
+            CompatMessage::SvgRequests { requests } => {
+                crate::svg_raster::validate_requests(requests)
+            }
+            CompatMessage::SvgPixels(p) => p.validate(),
+            CompatMessage::SvgFailed {
+                key,
+                reason,
+                message,
+            } => crate::svg_raster::validate_failure(key, reason, message),
         }
     }
 }
@@ -675,6 +712,13 @@ pub struct CompatFrameRequest {
     pub scale: f64,
     /// The document revision the export snapshot was taken at.
     pub revision: Revision,
+    /// For [`CompatSource::SvgImage`] (and only then): the raster (its
+    /// SVG's content hash and bucket) and the asset. The answer is that
+    /// bucket's premultiplied RGBA8 pixels, keyed
+    /// `<content>:<width>x<height>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub svg: Option<crate::svg_raster::SvgRasterRequest>,
 }
 
 impl Validate for CompatFrameRequest {
@@ -685,6 +729,14 @@ impl Validate for CompatFrameRequest {
             C,
             || "invalid compatibility frame ids".into(),
         )?;
+        ensure(
+            (self.source == CompatSource::SvgImage) == self.svg.is_some(),
+            C,
+            || "an svgImage compatibility frame names its SVG raster, and only it".into(),
+        )?;
+        if let Some(svg) = &self.svg {
+            svg.validate()?;
+        }
         ensure(
             self.scale.is_finite() && self.scale > 0.0 && self.scale <= crate::frame::MAX_SCALE,
             C,
@@ -839,7 +891,10 @@ mod tests {
         // Blender waits: async and idle only, and bounded.
         let mut blender = request(8, 8);
         blender.blender_wait_ms = 60_000;
-        assert!(blender.validate().is_err(), "a sync snapshot never waits for Blender");
+        assert!(
+            blender.validate().is_err(),
+            "a sync snapshot never waits for Blender"
+        );
         blender.class = SnapshotClass::Async;
         assert!(blender.validate().is_ok());
         blender.blender_wait_ms = MAX_BLENDER_WAIT_MS + 1;

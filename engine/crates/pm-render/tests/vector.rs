@@ -582,12 +582,11 @@ fn level2_svg_images_are_vectors_at_output_resolution() {
         "{:?}",
         &rgba[center..center + 4]
     );
-    // Level 1 SVG images stay routed.
+    // Level 1 SVG images are drawn (Chromium's rasters; tests/svg_level1.rs).
     let (doc1, resolver1) = svg_project(SOLID_SVG, "solid1.svg", 100, 50, d, 1, 23.0);
-    let u = unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1);
     assert_eq!(
-        u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
-        vec![Feature::SvgImage]
+        unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1),
+        vec![]
     );
 }
 
@@ -635,8 +634,9 @@ fn level2_svg_fallbacks_and_text() {
 
 /// SVG bytes in another encoding Chromium honors (an XML declaration's
 /// ISO-8859-1, UTF-16 with a byte order mark) are valid SVG images: level
-/// 1 routes them without reading them (no layer failure), level 2 decodes
-/// them as Chromium does and draws the same pixels as the UTF-8 file.
+/// 1 asks the renderer for Chromium's raster of the bytes as they are (no
+/// layer failure), level 2 decodes them as Chromium does and draws the
+/// same pixels as the UTF-8 file.
 #[test]
 fn svg_images_in_declared_encodings_are_not_failures() {
     let mut renderer = Renderer::headless().unwrap();
@@ -660,23 +660,18 @@ fn svg_images_in_declared_encodings_are_not_failures() {
     for (name, bytes) in [("latin1.svg", &latin1), ("utf16.svg", &utf16)] {
         let (doc1, resolver1) = svg_project(utf8, name, 100, 50, d.clone(), 1, 0.0);
         std::fs::write(resolver1.paths["art"].clone(), bytes).unwrap();
-        let u = unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1);
         assert_eq!(
-            u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
-            vec![Feature::SvgImage],
+            unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1),
+            vec![],
             "{name}"
         );
-        // Rendering reports the route, not a corrupt file.
+        // Rendering asks for the raster, never reports a corrupt file.
         let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
-        match renderer.render(&load(&doc1), "Ptest-root", ticks(0.0), &request, &resolver1) {
-            Err(pm_render::RenderError::Unsupported(u)) => assert_eq!(
-                u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
-                vec![Feature::SvgImage],
-                "{name}"
-            ),
-            Err(e) => panic!("{name}: {e}"),
-            Ok(frame) => panic!("{name}: drawn with failures {:?}", frame.failures),
-        }
+        let frame = renderer
+            .render(&load(&doc1), "Ptest-root", ticks(0.0), &request, &resolver1)
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{name}: {:?}", frame.failures);
+        assert_eq!(frame.svg_misses.len(), 1, "{name}");
 
         let (doc2, resolver2) = svg_project(utf8, name, 100, 50, d.clone(), 2, 0.0);
         std::fs::write(resolver2.paths["art"].clone(), bytes).unwrap();
@@ -695,11 +690,12 @@ fn svg_images_in_declared_encodings_are_not_failures() {
 /// Level 1 SVGs that roxmltree rejects but Chromium's libxml2 paints (an
 /// external DTD subset with undeclared entities, a declared external
 /// entity, a parameter entity, nesting at Blink's 5,000-element limit) are
-/// an explicit unsupported SVG image, never an empty paint. Documents
-/// Chromium shows as a broken `<img>` (an undeclared entity without a DTD,
-/// nesting past the limit) draw nothing without a reason, as today.
+/// Chromium's rasters like any other: the frame asks the renderer for
+/// them, never paints them empty. Documents Chromium shows as a broken
+/// `<img>` (an undeclared entity without a DTD, nesting past the limit)
+/// draw nothing and ask for nothing, as today.
 #[test]
-fn level1_svgs_libxml2_accepts_are_gated_not_blank() {
+fn level1_svgs_libxml2_accepts_are_asked_for_not_blank() {
     let mut renderer = Renderer::headless().unwrap();
     let r = r#"<rect width="8" height="8" fill="red"/>"#;
     let ns = r#"xmlns="http://www.w3.org/2000/svg" width="8" height="8""#;
@@ -736,20 +732,13 @@ fn level1_svgs_libxml2_accepts_are_gated_not_blank() {
         let doc = load(&doc);
         let u = unsupported_with_media(&doc, "Ptest-root", &resolver);
         let result = renderer.render(&doc, "Ptest-root", ticks(0.0), &request, &resolver);
+        assert_eq!(u, vec![], "{name}");
+        let frame = result.unwrap();
+        assert!(frame.failures.is_empty(), "{name}");
         if i < painted.len() {
-            assert_eq!(
-                u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
-                vec![Feature::SvgImage],
-                "{name}"
-            );
-            assert!(
-                matches!(result, Err(pm_render::RenderError::Unsupported(_))),
-                "{name}"
-            );
+            assert_eq!(frame.svg_misses.len(), 1, "{name}");
         } else {
-            assert_eq!(u, vec![], "{name}");
-            let frame = result.unwrap();
-            assert!(frame.failures.is_empty(), "{name}");
+            assert!(frame.svg_misses.is_empty(), "{name}");
             assert!(
                 renderer
                     .read_rgba(&frame)
