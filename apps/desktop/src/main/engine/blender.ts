@@ -49,6 +49,38 @@ const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const MAX_INPUT_BYTES = 256 * 1024 * 1024;
 const MAX_OUTPUT_BYTES_PER_SURFACE = 8192 * 8192 * 8 + 16 * 1024 * 1024;
 const ASSET_EXTENSIONS = new Set(['.blend', '.glb', '.gltf', '.obj', '.png', '.jpg', '.jpeg', '.webp', '.exr', '.hdr']);
+
+/**
+ * The extension a Blender asset is copied in with. Media-store files are
+ * content-addressed and may have none: the format is then read from the
+ * file's first bytes, as today's renderer named them from the stored blob's
+ * type (`<id>.png|jpg|webp`) or by the asset's own format. Null when it is
+ * not a format the worker loads.
+ */
+export async function assetExtension(file: string): Promise<string | null> {
+  const own = path.extname(file).toLowerCase();
+  if (ASSET_EXTENSIONS.has(own)) return own;
+  const handle = await open(file, 'r').catch(() => null);
+  if (!handle) return null;
+  try {
+    const head = Buffer.alloc(16);
+    const { bytesRead } = await handle.read(head, 0, 16, 0);
+    const at = (offset: number, bytes: number[] | string) => {
+      const want = typeof bytes === 'string' ? Buffer.from(bytes, 'latin1') : Buffer.from(bytes);
+      return bytesRead >= offset + want.length && head.subarray(offset, offset + want.length).equals(want);
+    };
+    if (at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return '.png';
+    if (at(0, [0xff, 0xd8, 0xff])) return '.jpg';
+    if (at(0, 'RIFF') && at(8, 'WEBP')) return '.webp';
+    if (at(0, 'glTF')) return '.glb';
+    if (at(0, 'BLENDER')) return '.blend';
+    if (at(0, [0x76, 0x2f, 0x31, 0x01])) return '.exr';
+    if (at(0, '#?RADIANCE') || at(0, '#?RGBE')) return '.hdr';
+    return null;
+  } finally {
+    await handle.close();
+  }
+}
 const safeId = /^[a-zA-Z][a-zA-Z0-9_-]{0,159}$/;
 
 export type BlenderLocation = { available: boolean; path?: string; version?: string; error?: string };
@@ -382,7 +414,7 @@ export class EngineBlender {
     if (!info || info.size !== req.snapshot.bytes || info.size > MAX_SNAPSHOT_BYTES) throw new ProtocolError('invalidMessage', 'The Blender snapshot is missing or does not match its size.');
     const snapshot = JSON.parse(await readFile(snapshotPath, 'utf8'));
     // Assets: media files, or converted images in the area.
-    const assets: { id: string; file: string }[] = [];
+    const assets: { id: string; file: string; ext: string }[] = [];
     let inputBytes = 0;
     for (const a of req.assets) {
       const r = this.options.handles.resolve(a.handle, session, port);
@@ -394,15 +426,16 @@ export class EngineBlender {
         if (name) file = path.join(r.path, 'assets', name);
       }
       if (!file) throw new ProtocolError('blenderFailed', `Missing Blender asset ${a.asset}`);
-      if (!ASSET_EXTENSIONS.has(path.extname(file).toLowerCase())) throw new ProtocolError('blenderFailed', 'Unsupported Blender asset format');
+      const ext = await assetExtension(file);
+      if (!ext) throw new ProtocolError('blenderFailed', 'Unsupported Blender asset format');
       inputBytes += (await stat(file)).size;
       if (inputBytes > MAX_INPUT_BYTES) throw new ProtocolError('blenderFailed', 'Blender inputs exceed 256 MB');
-      assets.push({ id: a.asset, file });
+      assets.push({ id: a.asset, file, ext });
     }
     // Today's snapshot rules (sizes, cameras, lights, geometry, materials).
     let checked: any;
     try {
-      checked = validateBlenderJob({ id: 'render_check', operation: 'render', snapshot, assets: assets.map((a) => ({ id: a.id, name: path.basename(a.file), data: new Uint8Array(0) })) } as never);
+      checked = validateBlenderJob({ id: 'render_check', operation: 'render', snapshot, assets: assets.map((a) => ({ id: a.id, name: a.id + a.ext, data: new Uint8Array(0) })) } as never);
     } catch (error) {
       throw new ProtocolError('invalidMessage', error instanceof Error ? error.message : String(error));
     }
@@ -424,7 +457,7 @@ export class EngineBlender {
       try {
         const files: Record<string, string> = {};
         for (const a of assets) {
-          const target = path.join(dir, a.id + path.extname(a.file).toLowerCase());
+          const target = path.join(dir, a.id + a.ext);
           await copyFile(a.file, target);
           files[a.id] = target;
         }

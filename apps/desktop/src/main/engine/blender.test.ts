@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { BlenderJobRequest, Event } from '../../shared/engine-protocol';
-import { blenderVersion, EngineBlender, pngSize, resolvedDevice, sweepScratch, WORKER_FLAGS, WORKER_SCRIPT, WORKER_SCRIPT_SHA256, workerEnvironment } from './blender';
+import { assetExtension, blenderVersion, EngineBlender, pngSize, resolvedDevice, sweepScratch, WORKER_FLAGS, WORKER_SCRIPT, WORKER_SCRIPT_SHA256, workerEnvironment } from './blender';
 import { HandleTable } from './handles';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
@@ -105,6 +105,31 @@ describe('the pinned worker', () => {
     expect(blenderVersion('Blender 5.0')).toBe('5.0.0');
     expect(resolvedDevice({ resolvedDevice: { kind: 'oneapi', name: 'Arc' } })).toEqual({ kind: 'oneApi', name: 'Arc' });
     expect(resolvedDevice({})).toBeNull();
+  });
+});
+
+describe('asset extensions', () => {
+  it('come from the file, or from its first bytes when the media store keeps none', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'pm-blender-ext-'));
+    try {
+      const write = async (name: string, bytes: number[] | string) => {
+        const file = path.join(dir, name);
+        await writeFile(file, typeof bytes === 'string' ? Buffer.from(bytes, 'latin1') : Buffer.from(bytes));
+        return file;
+      };
+      expect(await assetExtension(await write('a.PNG', [0]))).toBe('.png');
+      expect(await assetExtension(await write('png', [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]))).toBe('.png');
+      expect(await assetExtension(await write('jpeg', [0xff, 0xd8, 0xff, 0xe0]))).toBe('.jpg');
+      expect(await assetExtension(await write('webp', 'RIFF\0\0\0\0WEBPVP8 '))).toBe('.webp');
+      expect(await assetExtension(await write('glb', 'glTF\x02\0\0\0'))).toBe('.glb');
+      expect(await assetExtension(await write('blend', 'BLENDER-v405'))).toBe('.blend');
+      expect(await assetExtension(await write('exr', [0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0]))).toBe('.exr');
+      expect(await assetExtension(await write('hdr', '#?RADIANCE\n'))).toBe('.hdr');
+      expect(await assetExtension(await write('tiff', [0x4d, 0x4d, 0, 0x2a]))).toBeNull();
+      expect(await assetExtension(path.join(dir, 'absent'))).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
