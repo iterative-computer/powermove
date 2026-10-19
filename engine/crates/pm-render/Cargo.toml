@@ -54,6 +54,11 @@ harness = false
 
 [[test]]
 # Runs on the main thread (the CoreText font registry).
+name = "svg_corpus"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
 name = "space25d_picks"
 harness = false
 
