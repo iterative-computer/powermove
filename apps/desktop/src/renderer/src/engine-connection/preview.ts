@@ -17,6 +17,7 @@ type Pending = {
   session: PreviewSession; status: PreviewStatus | null;
   resolve(): void; reject(error: Error): void;
 };
+type Waking = { reject(error: Error): void };
 export type CachePreviewOptions = {
   cacheOnly: true;
   size: { width: number; height: number };
@@ -28,8 +29,8 @@ export type CachePreviewOptions = {
  * viewer as well, including when GPU completion sends it after the status. */
 export class EnginePreview {
   private generation = 0;
-  private requestTicket = 0;
-  private wakingCache: number | null = null;
+  private wakingCache: Waking | null = null;
+  private disposed = false;
   private pending: Pending | null = null;
   private cancelPending: Pending | null = null;
   private frames = new Map<number, PreviewFrame>();
@@ -60,7 +61,7 @@ export class EnginePreview {
 
   private validSession(cacheOnly = false): PreviewSession {
     const session = this.session();
-    if (!session || session.closed || session.id === null || (!cacheOnly && session.route !== 'engine')) {
+    if (this.disposed || !session || session.closed || session.id === null || (!cacheOnly && session.route !== 'engine')) {
       const error = new Error('The native viewer is not ready to render this composition');
       error.name = 'EnginePreviewUnavailable';
       throw error;
@@ -77,6 +78,8 @@ export class EnginePreview {
   private abort(message: string): void {
     const error = new Error(message);
     error.name = 'EnginePreviewCancelled';
+    this.wakingCache?.reject(error);
+    this.wakingCache = null;
     this.pending?.reject(error);
     this.cancelPending?.reject(error);
     this.pending = null;
@@ -85,20 +88,28 @@ export class EnginePreview {
   }
 
   render(options?: CachePreviewOptions): Promise<void> {
-    const ticket = ++this.requestTicket;
+    if (this.disposed) {
+      const error = new Error('The native preview controller was disposed');
+      error.name = 'EnginePreviewUnavailable';
+      return Promise.reject(error);
+    }
+    this.abort('The preview was replaced by a newer render');
     if (!options?.cacheOnly) return this.postRender();
-    this.wakingCache = ticket;
-    return this.wake().then(() => {
-      if (this.wakingCache === ticket) this.wakingCache = null;
-      if (ticket !== this.requestTicket) {
-        const error = new Error('The preview was replaced before the engine session opened');
-        error.name = 'EnginePreviewCancelled';
-        throw error;
-      }
-      return this.postRender(options);
-    }, error => {
-      if (this.wakingCache === ticket) this.wakingCache = null;
-      throw error;
+    return new Promise<void>((resolve, reject) => {
+      const waking: Waking = { reject };
+      this.wakingCache = waking;
+      let awake: Promise<void>;
+      try { awake = this.wake(); }
+      catch (error) { this.wakingCache = null; reject(error); return; }
+      void awake.then(() => {
+        if (this.wakingCache !== waking) return;
+        this.wakingCache = null;
+        this.postRender(options).then(resolve, reject);
+      }, error => {
+        if (this.wakingCache !== waking) return;
+        this.wakingCache = null;
+        reject(error);
+      });
     });
   }
 
@@ -124,10 +135,10 @@ export class EnginePreview {
   }
 
   cancel(): Promise<void> {
-    ++this.requestTicket;
-    let session: PreviewSession;
-    try { session = this.validSession(!!this.pending?.status?.cacheOnly || this.wakingCache !== null); } catch (error) { return Promise.reject(error); }
+    const allowCache = !!this.pending?.status?.cacheOnly || this.wakingCache !== null;
     this.abort('The preview was cancelled');
+    let session: PreviewSession;
+    try { session = this.validSession(allowCache); } catch (error) { return Promise.reject(error); }
     const control = {
       type: 'previewControl', generation: ++this.generation,
       revision: Math.max(0, Math.trunc(this.revision())),
@@ -144,6 +155,7 @@ export class EnginePreview {
   }
 
   receiveStatus(session: PreviewSession, status: PreviewStatus): void {
+    if (this.disposed) return;
     if (status.automatic) {
       if (this.session() !== session || session.closed || this.pending) return;
       if (this.currentSession !== session) {
@@ -193,6 +205,7 @@ export class EnginePreview {
   }
 
   receiveFrame(session: PreviewSession, frame: PreviewFrame): void {
+    if (this.disposed) return;
     if (this.session() !== session || session.closed) return;
     if (this.currentSession !== session) {
       this.currentSession = session;
@@ -214,10 +227,20 @@ export class EnginePreview {
   }
 
   close(session: PreviewSession): void {
-    if (this.currentSession !== session) return;
+    if (this.currentSession !== session && this.session() !== session) return;
     this.abort('The native viewer session closed');
     this.currentSession = null;
     this.autoGeneration = 0;
     this.frames.clear();
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.abort('The native preview controller was disposed');
+    this.currentSession = null;
+    this.autoGeneration = 0;
+    this.frames.clear();
+    this.listeners.clear();
   }
 }

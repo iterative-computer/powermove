@@ -541,6 +541,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       clock: current?.clock ?? null
     }),
     dispose: () => {
+      preview.dispose();
       drawingWarmup.dispose();
       offShaderFallback();
       offPending();

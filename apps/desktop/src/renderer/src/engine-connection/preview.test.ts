@@ -102,12 +102,36 @@ describe('native paused preview control', () => {
     const session: PreviewSession = { id: 3, generation: 1, closed: false, route: 'pending', headless: true, post(event) { sent.push(event); return true; } };
     const preview = new EnginePreview(() => session, () => 'comp', () => 0, () => 1, undefined, () => new Promise<void>(resolve => { awake = resolve; }));
     const rendering = preview.render({ cacheOnly: true, size: { width: 10, height: 10 } });
+    await Promise.resolve();
+    await Promise.resolve();
     const cancelling = preview.cancel();
+    await expect(rendering).rejects.toMatchObject({ name: 'EnginePreviewCancelled' });
     preview.receiveStatus(session, { generation: 1, automatic: false, revision: 1, composition: 'comp', time: 0, phase: 'cancelled', frameSeq: null, error: null });
     await cancelling;
     awake();
-    await expect(rendering).rejects.toMatchObject({ name: 'EnginePreviewCancelled' });
+    await Promise.resolve();
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ action: 'cancel' });
+  });
+
+  it('closes a cache request while its session wake never completes', async () => {
+    const r = rig();
+    const preview = new EnginePreview(() => r.session, () => 'comp', () => 0, () => 1, undefined, () => new Promise<void>(() => {}));
+    const rendering = preview.render({ cacheOnly: true, size: { width: 10, height: 10 } });
+    preview.close(r.session);
+    await expect(rendering).rejects.toMatchObject({ name: 'EnginePreviewCancelled' });
+    expect(r.sent).toHaveLength(0);
+  });
+
+  it('disposes both a posted request and a cache wake without waiting for the engine', async () => {
+    const r = rig();
+    const posted = r.preview.render();
+    r.preview.dispose();
+    await expect(posted).rejects.toMatchObject({ name: 'EnginePreviewCancelled' });
+    await expect(r.preview.render()).rejects.toMatchObject({ name: 'EnginePreviewUnavailable' });
+    const preview = new EnginePreview(() => r.session, () => 'comp', () => 0, () => 1, undefined, () => new Promise<void>(() => {}));
+    const waking = preview.render({ cacheOnly: true, size: { width: 10, height: 10 } });
+    preview.dispose();
+    await expect(waking).rejects.toMatchObject({ name: 'EnginePreviewCancelled' });
   });
 });

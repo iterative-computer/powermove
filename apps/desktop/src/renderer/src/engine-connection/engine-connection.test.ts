@@ -189,6 +189,17 @@ describe('the engine connection', () => {
     expect(session.lastFrame?.seq).toBe(4);
   });
 
+  it('rejects startup when the initial resync is refused instead of opening a documentless session', async () => {
+    const { connection, port } = await connected(engine({ refuseResync: true }));
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    session.sendHeadless('comp');
+    await expect(session.start()).rejects.toThrow('the engine did not accept the initial document resync');
+    expect(session.resyncs).toBe(0);
+    expect(port.requests('resync')).toHaveLength(1);
+    expect(port.events('viewer')).toHaveLength(0);
+    session.close(); connection.close('test complete');
+  });
+
   it('streams the kernel\'s definitions to the session before its document, and their failures back', async () => {
     const pushes: Array<{ generation: number; full: boolean; ids: string[] }> = [];
     let refuseNext = false;
