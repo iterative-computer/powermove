@@ -33,8 +33,14 @@ function mcp(child) {
   const rpc = (method, params = {}) => new Promise((resolve, reject) => { const call = ++id, timer = setTimeout(() => { pending.delete(call); reject(new Error(`${method} timed out: ${diagnostics}`)); }, 120000); pending.set(call, { resolve, reject, timer }); child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: call, method, params }) + '\n'); });
   const tool = async (name, args = {}) => { const result = await rpc('tools/call', { name, arguments: args }); if (result.isError) throw new Error(`${name}: ${JSON.stringify(result)}\n${diagnostics}`); return JSON.parse(result.content.find(c => c.type === 'text').text); };
   return { child, rpc, tool, initialize: () => rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'native-parity', version: '1' } }),
-    async close() { const exited = new Promise(resolve => child.once('exit', resolve)); child.stdin.end(); await Promise.race([exited, delay(15000).then(() => { throw new Error('MCP did not close'); })]); } };
+    async close() {
+      const exited = new Promise(resolve => child.once('exit', resolve)); child.stdin.end();
+      let timer;
+      try { await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('MCP did not close')), 15000); })]); }
+      finally { clearTimeout(timer); }
+    } };
 }
+for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => { void Promise.all([...children].map(stop)).finally(() => process.exit(130)); });
 const pixels = file => execFileSync(ffmpeg, ['-v', 'error', '-i', file, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-']);
 const pngs = async folder => (await readdir(folder)).filter(n => n.endsWith('.png')).sort().map(n => path.join(folder, n));
 let app;
@@ -64,6 +70,9 @@ try {
   const layer = (await current.tool('get_project_state')).layers.find(l => l.name === 'Carrier');
   await current.tool('apply_commands', { commands: [JSON.stringify({ type: 'add_effect', target: layer.id, effect: 'host-parity.effect' })] });
   const desktopExport = await current.tool('export_video', { name: 'Pinned desktop', format: 'png', audio: false, motionBlur: false });
+  const desktopWorkspace = await current.tool('get_workspace_state');
+  const desktopPanels = desktopWorkspace.layout.registeredPanels;
+  for (const id of ['viewer', 'timeline', 'inspector', 'layer-effects', 'toolbar', 'host-parity.panel']) assert(desktopPanels.some(panel => panel.id === id), `desktop panel registry is incomplete: ${id}`);
   const pins = path.join(profile, 'Engine Cache/Shader Cache/angle-parity');
   const markers = await readdir(pins);
   assert(markers.some(name => name.endsWith('.runner')), 'the real desktop probe must persist a runner pin');
@@ -78,8 +87,9 @@ try {
   };
   const old = await open(legacyProfile, false); const expectedWorkspace = await old.tool('get_workspace_state'); await old.tool('finish_session', { commit: true }); await old.close();
   const native = await open(nativeProfile, true); const actualWorkspace = await native.tool('get_workspace_state');
-  if (evidence) { await mkdir(evidence, { recursive: true }); await writeFile(path.join(evidence, 'workspace-legacy.json'), JSON.stringify(expectedWorkspace)); await writeFile(path.join(evidence, 'workspace-native.json'), JSON.stringify(actualWorkspace)); }
+  if (evidence) { await mkdir(evidence, { recursive: true }); await writeFile(path.join(evidence, 'workspace-desktop.json'), JSON.stringify(desktopWorkspace)); await writeFile(path.join(evidence, 'workspace-legacy.json'), JSON.stringify(expectedWorkspace)); await writeFile(path.join(evidence, 'workspace-native.json'), JSON.stringify(actualWorkspace)); }
   const workspaceBytesEqual = JSON.stringify(actualWorkspace) === JSON.stringify(expectedWorkspace);
+  const completeRegistry = JSON.stringify(actualWorkspace.layout.registeredPanels) === JSON.stringify(desktopPanels) && JSON.stringify(expectedWorkspace.layout.registeredPanels) === JSON.stringify(desktopPanels);
   const userPanel = actualWorkspace.layout.registeredPanels.some(p => p.id === 'host-parity.panel');
   const hiddenExport = await native.tool('export_video', { name: 'Pinned hidden', format: 'png', audio: false, motionBlur: false });
   const before = await pngs(desktopExport.path), after = await pngs(hiddenExport.path);
@@ -87,12 +97,13 @@ try {
   const differentFrames = [];
   for (let i = 0; i < Math.min(before.length, after.length); i++) if (!pixels(before[i]).equals(pixels(after[i]))) differentFrames.push(i);
   const pixelsEqual = before.length > 0 && before.length === after.length && differentFrames.length === 0;
-  const result = { frames: before.length, hiddenFrames: after.length, pixelsEqual, differentFrames, workspaceBytesEqual, userPanel, pinnedPrograms: markers.filter(n => n.endsWith('.runner')).length };
+  const result = { frames: before.length, hiddenFrames: after.length, pixelsEqual, differentFrames, workspaceBytesEqual, userPanel, completeRegistry, panels: desktopPanels.length, pinnedPrograms: markers.filter(n => n.endsWith('.runner')).length };
   if (evidence) await writeFile(path.join(evidence, 'result.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));
   await native.tool('finish_session', { commit: true }); await native.close();
   assert(pixelsEqual, `pinned export pixels differ: ${JSON.stringify(result)}`);
   assert(workspaceBytesEqual, 'full persisted workspace answer must be byte-identical');
+  assert(completeRegistry, 'every desktop built-in and user panel remains registered in both hidden hosts');
   assert(userPanel, 'user panel remains registered');
   console.log(`Native hidden parity passed: ${before.length} pinned-program PNG frames pixel-identical to the desktop; complete workspace bytes equal today's hidden host, including a user panel.`);
 } finally { for (const child of [...children]) await stop(child); await rm(root, { recursive: true, force: true }); }

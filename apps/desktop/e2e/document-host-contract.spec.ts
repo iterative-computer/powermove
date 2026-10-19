@@ -1,3 +1,6 @@
+import { tmpdir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { runContractOnNativeHost } from '../src/server/native/contract-run';
 /*
  * Desktop vs document host worker (contract 15, invariant 8; plan section
@@ -7,7 +10,7 @@ import { runContractOnNativeHost } from '../src/server/native/contract-run';
  * minted during the run are renamed by order of appearance
  * (contract-run.ts normalizeMintedIds: ids are random on every host).
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test } from './helpers/app';
 import { CONTRACT_SEQUENCE, deterministicSeam } from '../src/engine/document-host/contract';
@@ -82,7 +85,8 @@ test('the agent-tool contract leaves byte-identical documents on the desktop and
     return { rasters, answers, documents, document: JSON.stringify(PM.proj), workspace: JSON.parse(JSON.stringify(workspace)) };
   }, CONTRACT_SEQUENCE);
 
-  const bundle = await buildEngineBundle();
+  const prebuilt = process.env['POWERMOVE_CONTRACT_ENGINE_SCRIPT'];
+  const bundle = prebuilt ? { script: prebuilt, dispose() {} } : await buildEngineBundle();
   let worker: ContractTranscript;
   let hidden: ContractTranscript | undefined;
   try {
@@ -117,4 +121,25 @@ test('the agent-tool contract leaves byte-identical documents on the desktop and
   }
   // get_workspace_state: what it reports of the document and the kernel is the same on both.
   expect(workerTranscript.workspace).toEqual(desktopTranscript.workspace);
+});
+
+// This exercises the complete no-window MCP answer rather than the worker's
+// document-only workspace projection. The harness uses real isolated profiles,
+// a persisted user panel and the full built-in extension registry.
+test('the native no-window workspace bytes match the existing hidden host including every panel', async () => {
+  test.skip(!process.env['POWERMOVE_NATIVE_HOST_DIST'], 'Build the native CLI host and set POWERMOVE_NATIVE_HOST_DIST.');
+  test.setTimeout(240_000);
+  const evidence = process.env['POWERMOVE_NATIVE_PARITY_EVIDENCE'] ?? mkdtempSync(path.join(tmpdir(), 'pm-workspace-contract-'));
+  const { stdout } = await promisify(execFile)(process.env['POWERMOVE_TEST_NODE'] ?? process.execPath,
+    [path.resolve(__dirname, '../scripts/test-native-hidden-parity.mjs')], {
+      env: { ...process.env, POWERMOVE_NATIVE_PARITY_EVIDENCE: evidence }, timeout: 225_000, maxBuffer: 4 * 1024 * 1024
+    });
+  console.log(stdout);
+  const expected = readFileSync(path.join(evidence!, 'workspace-legacy.json'));
+  const actual = readFileSync(path.join(evidence!, 'workspace-native.json'));
+  expect(actual).toEqual(expected);
+  const result = JSON.parse(readFileSync(path.join(evidence!, 'result.json'), 'utf8'));
+  expect(result.workspaceBytesEqual).toBe(true);
+  expect(result.userPanel).toBe(true);
+  expect(result.completeRegistry).toBe(true);
 });
