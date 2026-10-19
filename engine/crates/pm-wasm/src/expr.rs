@@ -9,6 +9,7 @@
 //! revisioned tree, and object identity (`comp.layers[0] === layer`) is node
 //! identity.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 
 use pm_eval::{Comp, CompiledExpression, ExprContext, ExprError, ExpressionEngine, JsValue};
@@ -31,13 +32,15 @@ impl ExpressionEngine for PmExpressions {
                 ["params", "value", "toString"].map(|s| (JsStr::from(s), JsString::from(s))),
             );
             let uses_layer = e.numeric_fixed_uses_layer();
+            let layer_local = e.numeric_fixed_is_layer_local();
             let source = Arc::new(Source {
                 expression: e,
                 channel,
                 keys,
                 empty: JsStr::default(),
                 uses_layer,
-                bindings: Mutex::new(Vec::new()),
+                layer_local,
+                bindings: Mutex::new(BindingPool::default()),
                 latest: Mutex::new(None),
             });
             Arc::new(Compiled {
@@ -51,7 +54,11 @@ impl ExpressionEngine for PmExpressions {
     }
 }
 
-type BindingPool = Vec<(Arc<[u64]>, Weak<Compiled>)>;
+#[derive(Default)]
+struct BindingPool {
+    entries: HashMap<Arc<[u64]>, Weak<Compiled>>,
+    order: VecDeque<Arc<[u64]>>,
+}
 
 struct Source {
     expression: Expression,
@@ -61,6 +68,7 @@ struct Source {
     // Weak entries avoid a Source -> Compiled -> Source ownership cycle.
     bindings: Mutex<BindingPool>,
     uses_layer: bool,
+    layer_local: bool,
     latest: Mutex<Option<(BindingStamp, Weak<Compiled>)>>,
 }
 
@@ -279,12 +287,7 @@ impl CompiledExpression for Compiled {
             .bindings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        pool.retain(|(_, binding)| binding.strong_count() != 0);
-        if let Some(existing) = pool
-            .iter()
-            .find(|(key, _)| key.as_ref() == bits.as_ref())
-            .and_then(|(_, binding)| binding.upgrade())
-        {
+        if let Some(existing) = pool.entries.get(bits.as_ref()).and_then(Weak::upgrade) {
             *self
                 .source
                 .latest
@@ -303,10 +306,14 @@ impl CompiledExpression for Compiled {
             verified: Mutex::new(None),
         });
         // The cache is only a reuse hint; live slots retain their own plans.
-        if pool.len() == 64 {
-            pool.remove(0);
+        if !pool.entries.contains_key(bits.as_ref()) {
+            if pool.entries.len() == 256 {
+                let oldest = pool.order.pop_front().expect("bounded pool order");
+                pool.entries.remove(oldest.as_ref());
+            }
+            pool.order.push_back(bits.clone());
         }
-        pool.push((bits, Arc::downgrade(&compiled)));
+        pool.entries.insert(bits, Arc::downgrade(&compiled));
         *self
             .source
             .latest
@@ -355,6 +362,10 @@ impl CompiledExpression for Compiled {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((stamp, result));
         Some(result)
+    }
+
+    fn binding_is_layer_local(&self) -> bool {
+        self.binding_bits.is_some() && self.source.layer_local
     }
 
     fn evaluate_scalars(&self, t: f64, time: f64, value: f64) -> Option<f64> {

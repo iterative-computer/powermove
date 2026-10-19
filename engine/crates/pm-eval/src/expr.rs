@@ -79,6 +79,12 @@ pub trait CompiledExpression: Send + Sync {
         None
     }
 
+    /// All bound inputs are in the layer or its index. Only used when the
+    /// caller has proved both unchanged; custom engines default conservative.
+    fn binding_is_layer_local(&self) -> bool {
+        false
+    }
+
     /// Optional revision-bound numeric plan needing no document context.
     /// The caller uses only finite answers; all other cases keep `evaluate`.
     fn evaluate_scalars(&self, _t: f64, _time: f64, _value: f64) -> Option<f64> {

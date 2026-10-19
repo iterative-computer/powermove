@@ -57,6 +57,7 @@ pub struct Comp<'d> {
     revision: u64,
     rate: std::cell::OnceCell<Option<IngestRate>>,
     expression_fps: std::cell::OnceCell<JsValue>,
+    layers_node: Option<&'d Node>,
     binding_token: u64,
     /// The open composition of a canonical document (see above).
     open_canonical: bool,
@@ -132,6 +133,7 @@ impl<'d> Comp<'d> {
             revision,
             rate: std::cell::OnceCell::new(),
             expression_fps: std::cell::OnceCell::new(),
+            layers_node: node::member(Some(node), "layers"),
             binding_token: NEXT_BINDING_TOKEN.fetch_add(1, Ordering::Relaxed),
             open_canonical,
             stored_root_view: false,
@@ -148,6 +150,7 @@ impl<'d> Comp<'d> {
             revision,
             rate: std::cell::OnceCell::new(),
             expression_fps: std::cell::OnceCell::new(),
+            layers_node: node::member(Some(node), "layers"),
             binding_token: NEXT_BINDING_TOKEN.fetch_add(1, Ordering::Relaxed),
             open_canonical: false,
             stored_root_view: false,
@@ -198,12 +201,12 @@ impl<'d> Comp<'d> {
 
     /// `comp.layers`, or no layers when it is not an array.
     pub fn layers(&self) -> &'d [Node] {
-        node::array(node::member(Some(self.node), "layers")).unwrap_or(&[])
+        node::array(self.layers_node()).unwrap_or(&[])
     }
 
     /// The `layers` array node.
     pub fn layers_node(&self) -> Option<&'d Node> {
-        node::member(Some(self.node), "layers")
+        self.layers_node
     }
 
     /// A member of the legacy composition object (see the type

@@ -1234,7 +1234,16 @@ impl Evaluator {
                     let same_from = from.to_bits() == state.from.to_bits();
                     match &state.plan {
                         Plan::Expression(plan) if cx.root().rev() > state.validated => {
-                            if plan.bound {
+                            if plan.bound
+                                && layer.rev() <= state.validated
+                                && pos == state.position
+                                && plan
+                                    .compiled
+                                    .as_ref()
+                                    .is_some_and(|c| c.binding_is_layer_local())
+                            {
+                                Some((same_from, from, None))
+                            } else if plan.bound {
                                 let fps = cx.expression_fps();
                                 let value = JsValue::Undefined;
                                 let context = ExprContext {

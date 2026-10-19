@@ -510,3 +510,105 @@ fn bound_scalar_plans_keep_revision_type_and_error_guards() {
         before = after;
     }
 }
+
+#[test]
+fn edits_rebind_only_changed_fixed_inputs_and_keep_layer_local_plans() {
+    let project = |amp: i32, fps: i32, opacity: i32, extra: bool, source: &str| {
+        parse(&format!(r#"{{"id":"P","compId":"C","params":{{"amp":{{"value":{amp}}}}},"comps":{{"C":{{"id":"C","fps":{fps},"layers":[{}{{"id":"L","from":0,"p":{{"opacity":{{"v":{opacity},"kf":[]}},"a":{{"v":5,"kf":[],"expr":"{source}"}},"b":{{"v":5,"kf":[],"expr":"layer.p.opacity.v + t"}},"c":{{"v":5,"kf":[],"expr":"idx + value"}},"d":{{"v":5,"kf":[],"expr":"fps + value"}},"e":{{"v":5,"kf":[],"expr":"param(\"amp\") + value"}},"f":{{"v":5,"kf":[],"expr":"comp.layers.length + value"}}}}}}]}}}}}}"#,
+            if extra { r#"{"id":"head"},"# } else { "" })).unwrap()
+    };
+    let mut before = project(7, 30, 100, false, "value + time");
+    let mut engine = Engine::new();
+    engine
+        .resync(
+            pm_model::json::write::to_canonical_string(&before).as_bytes(),
+            1,
+        )
+        .unwrap();
+    let ids: Vec<_> = ["a", "b", "c", "d", "e", "f"]
+        .map(|key| {
+            engine
+                .intern(
+                    &parse(&format!(
+                        r#"{{"comp":"C","layer":"L","key":"{key}","via":"channel"}}"#
+                    ))
+                    .unwrap(),
+                )
+                .unwrap()
+                .index()
+        })
+        .into();
+    let mut values = [0.0; 6];
+    let mut kinds = [0; 6];
+    engine.ev_batch(&ids, 1.0, &mut values, &mut kinds);
+    assert_eq!(values, [6.0, 101.0, 5.0, 35.0, 12.0, 6.0]);
+    for (amp, fps, opacity, extra, source, changed, expected) in [
+        (
+            9,
+            30,
+            100,
+            false,
+            "value + time",
+            1,
+            [6.0, 101.0, 5.0, 35.0, 14.0, 6.0],
+        ),
+        (
+            9,
+            60,
+            100,
+            false,
+            "value + time",
+            1,
+            [6.0, 101.0, 5.0, 65.0, 14.0, 6.0],
+        ),
+        (
+            9,
+            60,
+            8,
+            false,
+            "value + time",
+            1,
+            [6.0, 9.0, 5.0, 65.0, 14.0, 6.0],
+        ),
+        (
+            9,
+            60,
+            8,
+            true,
+            "value + time",
+            2,
+            [6.0, 9.0, 6.0, 65.0, 14.0, 7.0],
+        ),
+        (
+            9,
+            60,
+            8,
+            true,
+            "value + time * 2",
+            1,
+            [7.0, 9.0, 6.0, 65.0, 14.0, 7.0],
+        ),
+        (
+            9,
+            60,
+            8,
+            false,
+            "value + time * 2",
+            2,
+            [7.0, 9.0, 5.0, 65.0, 14.0, 6.0],
+        ),
+    ] {
+        let after = project(amp, fps, opacity, extra, source);
+        let body = binary::encode(&ops::diff_ops(Some(&before), Some(&after))).unwrap();
+        let revision = engine.revision();
+        let plans = engine.evaluation_cache_stats().plans;
+        engine.apply(&body, revision, revision + 1).unwrap();
+        for _ in 0..2 {
+            engine.ev_batch(&ids, 1.0, &mut values, &mut kinds);
+            assert_eq!(values, expected);
+            assert_eq!(kinds, [0; 6]);
+        }
+        assert_eq!(engine.evaluation_cache_stats().plans - plans, changed);
+        before = after;
+    }
+}

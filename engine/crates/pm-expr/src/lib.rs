@@ -258,6 +258,14 @@ impl Expression {
         self.numeric.as_ref().is_some_and(|n| n.fixed_uses_layer())
     }
 
+    /// Fixed inputs depend only on the layer and its index, not composition
+    /// fields, fps or project parameters. Dynamic inputs are still evaluated.
+    pub fn numeric_fixed_is_layer_local(&self) -> bool {
+        self.numeric
+            .as_ref()
+            .is_some_and(|n| n.fixed_is_layer_local())
+    }
+
     /// Exact bits of every fixed numeric input in the original typed plan.
     /// `None` means a field or parameter is not numeric, so a document-bound
     /// plan cannot be safely reused. Dynamic time, frame and value are omitted.

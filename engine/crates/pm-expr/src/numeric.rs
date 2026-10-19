@@ -27,6 +27,16 @@ pub(crate) enum Input {
 }
 
 impl Numeric {
+    pub fn fixed_is_layer_local(&self) -> bool {
+        match self {
+            Self::Input(Input::Fps) | Self::Field(Input::Comp, _) | Self::Param(..) => false,
+            Self::Negate(n) => n.fixed_is_layer_local(),
+            Self::Binary(_, l, r) => l.fixed_is_layer_local() && r.fixed_is_layer_local(),
+            Self::Math(_, args) => args.iter().all(Self::fixed_is_layer_local),
+            _ => true,
+        }
+    }
+
     /// Traverse fixed leaves in syntax order. A nonnumeric document leaf must
     /// decline the entire reusable binding, including if another leaf is
     /// numeric: partial folding could otherwise leave stale constants.
