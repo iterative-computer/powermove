@@ -187,11 +187,13 @@ export function cases(): Case[] {
         floor()] },
     matrices: { vase: matrix([-1.3, 0.3, 0]), star: matrix([0.2, 0.2, 0], [0, -20, 0]), tri: matrix([1.4, 0.1, 0.3], [0, 30, 0]), floor: floorMatrix() },
     outputs: set(['vase', 'star', 'tri', 'floor']) });
+  // Use the renderer's existing fallback name explicitly: parseScene rejects
+  // an empty slot name, while the material and recorded pixels stay Surface.
   add({ id: 'slots-and-groups', width: W, height: H,
     scene: { ...base([light('sun', 'sun')]),
       objects: [
         object('crate', { primitive: 'box' }, material(), { slots: [{ id: 's0', name: 'Red', material: material({ color: '#FF4040' }) },
-          { id: 's1', name: 'Green', material: material({ color: '#40FF40' }) }, { id: 's2', name: '', material: material({ color: '#4040FF', opacity: 0.5 }) },
+          { id: 's1', name: 'Green', material: material({ color: '#40FF40' }) }, { id: 's2', name: 'Surface', material: material({ color: '#4040FF', opacity: 0.5 }) },
           { id: 's3', name: 'Glow', material: material({ color: '#202020', emissive: '#FFAA00', emissiveIntensity: 2 }) }] }),
         object('sheet', { mesh: { positions: [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0, -1, -1, -1, 1, -1, -1], indices: [0, 1, 2, 0, 2, 3, 0, 4, 5, 0, 5, 1],
           groups: [{ start: 0, count: 6, materialIndex: 0 }, { start: 6, count: 6, materialIndex: 1 }], uvs: [0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1] } }, material(),

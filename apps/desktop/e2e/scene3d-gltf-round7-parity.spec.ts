@@ -74,7 +74,14 @@ async function capture(session: LaunchedApp, engine: boolean) {
         motionBlurSamples: 0, background: false }).data
       : PM.GL.renderToPixels(0, width, height, { transparent: true, mblur: false });
     const pixels = new Uint8Array(frame);
-    // Both capture APIs expose GL row order. Flip only for a viewable PNG.
+    // EngineSnapshot documents top-down RGBA; legacy readPixels is bottom-up.
+    // Normalize to GL row order before comparing either pixels or PNGs.
+    if (engine) {
+      const topDown = pixels.slice();
+      for (let y = 0; y < height; y++)
+        pixels.set(topDown.subarray(y * width * 4, (y + 1) * width * 4), (height - 1 - y) * width * 4);
+    }
+    // Flip the normalized GL rows only for a viewable PNG.
     const topDown = new Uint8ClampedArray(pixels.length);
     for (let y = 0; y < height; y++)
       topDown.set(pixels.subarray(y * width * 4, (y + 1) * width * 4), (height - 1 - y) * width * 4);

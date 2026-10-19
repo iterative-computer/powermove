@@ -437,10 +437,8 @@ impl Scene3dRenderer {
                 }
             }
         }
-        let out = if failed.is_empty() {
-            scene.clone()
-        } else {
-            let mut s = Scene3d::clone(scene);
+        let mut resolved = (!failed.is_empty()).then(|| Scene3d::clone(scene));
+        if let Some(s) = resolved.as_mut() {
             let mut warnings = Vec::new();
             for o in &mut s.objects {
                 for m in &mut o.meshes {
@@ -457,8 +455,29 @@ impl Scene3dRenderer {
                 }
             }
             s.warnings.extend(warnings);
-            Arc::new(s)
-        };
+        }
+        // The source model and scene plan keep every accepted mesh. Only the
+        // resolved render scene drops one whose final, loaded material binds
+        // an attribute shorter than the vertices this draw fetches. A map
+        // that failed above can therefore make a previously short UV inactive.
+        if resolved
+            .as_ref()
+            .unwrap_or(scene.as_ref())
+            .objects
+            .iter()
+            .any(|o| {
+                o.meshes
+                    .iter()
+                    .any(super::gltf::short_attribute_blocks_draw)
+            })
+        {
+            let s = resolved.get_or_insert_with(|| Scene3d::clone(scene));
+            for o in &mut s.objects {
+                o.meshes
+                    .retain(|m| !super::gltf::short_attribute_blocks_draw(m));
+            }
+        }
+        let out = resolved.map_or_else(|| scene.clone(), Arc::new);
         self.warning_scenes.insert(
             Arc::as_ptr(scene) as usize,
             (Arc::downgrade(scene), out.warnings.clone()),

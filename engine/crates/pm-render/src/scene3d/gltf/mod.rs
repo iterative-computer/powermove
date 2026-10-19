@@ -127,6 +127,10 @@ pub struct VertexExtra {
     pub mode: Mode,
     pub has_normal: bool,
     pub has_uv: bool,
+    /// Source counts before CPU-safe padding; checked against the final
+    /// material after late scene-map failures have been resolved.
+    pub short_attributes: Vec<(&'static str, usize)>,
+    pub fetched_vertices: usize,
     /// Morph targets: position, normal, color present; count; texture.
     pub morph: Option<(bool, bool, bool, u32, Arc<MorphTexture>)>,
 }
@@ -184,6 +188,8 @@ impl std::fmt::Debug for VertexExtra {
                 ),
             )
             .field("normal", &self.has_normal)
+            .field("short_attributes", &self.short_attributes)
+            .field("fetched_vertices", &self.fetched_vertices)
             .field("skin", &self.skin_index.is_some())
             .field("morph", &self.morph)
             .finish()
@@ -411,6 +417,8 @@ pub fn geometry(asset: &GltfAsset, index: usize) -> Geometry3d {
         mode: gm.mode,
         has_normal: gm.normal.is_some(),
         has_uv: gm.uv[0].is_some(),
+        short_attributes: gm.short_attributes.clone(),
+        fetched_vertices: fetched_vertex_count(gm),
         morph,
     };
     let g3 = Geometry3d {
@@ -749,16 +757,6 @@ pub fn instantiate(
                         id: base | n as u64,
                     })),
                 };
-                let fetched_vertices = fetched_vertex_count(gm);
-                if gm.short_attributes.iter().any(|(short, source_count)| {
-                    *source_count < fetched_vertices
-                        && mesh
-                            .materials
-                            .iter()
-                            .any(|m| material::consumes_short_attribute(&mesh, m, short))
-                }) {
-                    continue;
-                }
                 meshes.push(mesh);
             }
             ObjectKind::Light(l) => {
@@ -796,6 +794,23 @@ pub fn instantiate(
         }
     }
     Instance { meshes, lights }
+}
+
+/// Apply WebGL's active short-attribute rule to the resolved draw scene.
+/// The model and plan retain this mesh for queries, snapshots, and a map
+/// whose image fails only after planning. `resolve_maps` calls this after
+/// removing any late-failed scene maps from the final materials.
+pub(crate) fn short_attribute_blocks_draw(mesh: &Mesh3d) -> bool {
+    let Some(extra) = mesh.geometry.extra.as_deref() else {
+        return false;
+    };
+    extra.short_attributes.iter().any(|(name, count)| {
+        *count < extra.fetched_vertices
+            && mesh
+                .materials
+                .iter()
+                .any(|m| material::consumes_short_attribute(mesh, m, name))
+    })
 }
 
 /// The posed vertices of every triangle drawable of an instance, in world

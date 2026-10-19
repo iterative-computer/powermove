@@ -315,8 +315,11 @@ targets while padding CPU arrays for safe bounds and poses. An index past
 the vertex range always suppresses a WebGL draw. A short ordinary
 attribute suppresses it only if the *final* material program consumes
 that input and the draw fetches beyond the source count (an indexed draw
-may leave a short tail unused): the rule runs after the object's `useSourceMaterials` choice,
-including a Basic-to-Standard replacement, and considers active map UV
+may leave a short tail unused). The plan retains the mesh; the draw rule
+runs after the object's `useSourceMaterials` choice, including a
+Basic-to-Standard replacement, and after scene maps that failed to decode
+have been removed. A missing override map can therefore leave a short UV
+inactive and let the mesh draw. The rule considers active map UV
 channels 0–3, lighting normals, tangents, and vertex colors. The
 compatibility `Object3D` exposes `uv2` and `uv3`, too. Morph targets are
 packed into the GPU array texture as `WebGLMorphtargets` does: a short
@@ -358,7 +361,10 @@ second buffer delays a scene and moves the shared node out of the
 default scene, and data-URI/GLB cases with instancing, geometry cache
 sharing, Standard/Physical/Unlit material chains, and an off-scene
 animation target. The round 7 parent-order and acceptance tests pass
-8/8 against the rebuilt WASM, including the decoded-image policy oracle. Native short-morph texture-packing unit tests and the
-Chromium attribute/pixel-capture checks are added for the next central
-test run; their outcomes are recorded in that run's evidence, not
-assumed here.
+8/8 against the rebuilt WASM, including the decoded-image policy oracle.
+The Chromium r180 short-attribute capture passed all 20 cases and saved
+an image and active-program attribute list for each. In particular,
+Standard material keeps `NORMAL` active with no lights and with only an
+ambient light; both short-normal draws produced `INVALID_OPERATION`.
+Native short-morph and late-map regressions, and the corrected paired
+legacy/native capture, are checked by the central run's evidence.

@@ -2,18 +2,20 @@ import * as THREE from 'three';
 
 type Case = 'uvUnused' | 'uvUsed' | 'uvUsedIndexedTail' | 'uv1Unused' | 'uv1Used' |
   'uv2Unused' | 'uv2Used' | 'uv3Unused' | 'uv3Used' |
-  'normalUnlit' | 'normalLit' | 'normalOverride' |
+  'normalUnlit' | 'normalLit' | 'normalLitNoLights' | 'normalLitAmbientOnly' | 'normalOverride' |
   'tangentUnused' | 'tangentUsed' | 'shortMorph' | 'badIndex' |
   'normalOnlyMorph' | 'colorOnlyMorph';
 
-function run(): Record<Case, { rgb: number[]; error: number; exception: string | null; png: string }> {
+function run(): Record<Case, { rgb: number[]; error: number; exception: string | null;
+  activeAttributes: string[]; png: string }> {
   const canvas = document.createElement('canvas');
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, preserveDrawingBuffer: true });
   renderer.setSize(32, 32, false);
   renderer.setClearColor(0x000000, 1);
   const gl = renderer.getContext();
   const scene = new THREE.Scene();
-  scene.add(new THREE.AmbientLight(0xffffff, 1));
+  const ambient = new THREE.AmbientLight(0xffffff, 1);
+  scene.add(ambient);
   const directional = new THREE.DirectionalLight(0xffffff, 1);
   directional.position.set(0, 0, 3);
   scene.add(directional);
@@ -28,9 +30,11 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
   const white = tex([255, 255, 255, 255]);
   white.colorSpace = THREE.SRGBColorSpace;
   const flatNormal = tex([128, 128, 255, 255]);
-  const out = {} as Record<Case, { rgb: number[]; error: number; exception: string | null; png: string }>;
+  const out = {} as Record<Case, { rgb: number[]; error: number; exception: string | null;
+    activeAttributes: string[]; png: string }>;
   const cases: Case[] = ['uvUnused', 'uvUsed', 'uvUsedIndexedTail', 'uv1Unused', 'uv1Used',
-    'uv2Unused', 'uv2Used', 'uv3Unused', 'uv3Used', 'normalUnlit', 'normalLit', 'normalOverride',
+    'uv2Unused', 'uv2Used', 'uv3Unused', 'uv3Used', 'normalUnlit', 'normalLit',
+    'normalLitNoLights', 'normalLitAmbientOnly', 'normalOverride',
     'tangentUnused', 'tangentUsed', 'shortMorph', 'badIndex', 'normalOnlyMorph', 'colorOnlyMorph'];
   for (const name of cases) {
     const geometry = new THREE.BufferGeometry();
@@ -68,7 +72,7 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
       ];
       geometry.morphTargetsRelative = true;
     }
-    const material = name === 'normalLit' || name.startsWith('tangent')
+    const material = name.startsWith('normalLit') || name.startsWith('tangent')
       ? new THREE.MeshStandardMaterial({ color: 0xff0000, side: THREE.DoubleSide,
         normalMap: name === 'tangentUsed' ? flatNormal : null })
       : new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide,
@@ -78,6 +82,8 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
     if (name === 'normalOverride') mesh.material = new THREE.MeshStandardMaterial({
       color: 0xff0000, side: THREE.DoubleSide,
     });
+    ambient.visible = name !== 'normalLitNoLights';
+    directional.visible = name !== 'normalLitNoLights' && name !== 'normalLitAmbientOnly';
     scene.add(mesh);
     while (gl.getError()) {};
     let exception: string | null = null;
@@ -87,9 +93,11 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
       exception = String(error);
     }
     const error = gl.getError();
+    const active = (renderer.properties.get(mesh.material) as any).currentProgram?.getAttributes?.();
     const pixel = new Uint8Array(4);
     gl.readPixels(16, 16, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
     out[name] = { rgb: [...pixel.slice(0, 3)], error, exception,
+      activeAttributes: Object.keys(active ?? {}).sort(),
       png: canvas.toDataURL('image/png') };
     scene.remove(mesh);
     geometry.dispose();

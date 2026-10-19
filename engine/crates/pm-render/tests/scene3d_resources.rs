@@ -496,3 +496,80 @@ fn normal_or_color_only_morph_fails_when_drawn_not_when_imported() {
         );
     }
 }
+
+/// The plan retains a short-UV glTF mesh even when its scene override map
+/// would bind UV at draw time. If that map vanishes after planning, the final
+/// material no longer binds UV and the same mesh must draw normally.
+#[test]
+fn short_uv_model_draws_when_override_map_fails_after_planning() {
+    let dir = Dir::new("3d-short-uv-late-map");
+    let model_path = dir.0.join("short-uv.glb");
+    let map_path = dir.0.join("map.png");
+    let mut bin = Vec::new();
+    for value in [-1.0_f32, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [0.0_f32, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&value.to_le_bytes());
+    }
+    let mut json = serde_json::to_vec(&json!({
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}}]}],
+        "buffers": [{"byteLength": bin.len()}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36},
+            {"buffer": 0, "byteOffset": 36, "byteLength": 16}],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [-1, -1, 0], "max": [1, 1, 0]},
+            {"bufferView": 1, "componentType": 5126, "count": 2, "type": "VEC2"}
+        ]
+    }))
+    .unwrap();
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
+    let mut glb = Vec::new();
+    glb.extend_from_slice(b"glTF");
+    glb.extend_from_slice(&2_u32.to_le_bytes());
+    glb.extend_from_slice(&(12_u32 + 8 + json.len() as u32 + 8 + bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"JSON");
+    glb.extend_from_slice(&json);
+    glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"BIN\0");
+    glb.extend_from_slice(&bin);
+    std::fs::write(&model_path, glb).unwrap();
+    write_map(&map_path, [255, 255, 255], [255, 255, 255], 255);
+
+    let mut doc = obj_doc();
+    doc["assets"]["model"]["format"] = json!("glb");
+    doc["assets"]["model"]["name"] = json!("short-uv.glb");
+    doc["assets"]["tex"] =
+        json!({"id": "tex", "kind": "image", "format": "png", "name": "map.png"});
+    doc["layers"][2]["d"]["data"]["object"]["material"]["maps"] = json!({"color": "tex"});
+    let mut assets = resolver("model", &model_path);
+    assets.paths.insert("tex".into(), map_path.clone());
+    let mut planner = Renderer::headless().unwrap();
+    let mapped = object_plans(&mut planner, &doc, &assets).pop().unwrap();
+    assert_eq!(
+        mapped.scene.objects[0].meshes.len(),
+        1,
+        "plan retains model mesh"
+    );
+    let mut bare_doc = doc.clone();
+    bare_doc["layers"][2]["d"]["data"]["object"]["material"]["maps"] = json!({});
+    let bare = object_plans(&mut planner, &bare_doc, &assets)
+        .pop()
+        .unwrap();
+    let gpu = pm_gpu::Gpu::new("pm-render short UV late map test").unwrap();
+    let expected = render_plan(&gpu, &mut Scene3dRenderer::default(), &bare).unwrap();
+    let hidden = render_plan(&gpu, &mut Scene3dRenderer::default(), &mapped).unwrap();
+    assert_ne!(hidden, expected, "a loaded map binds the short UV");
+
+    std::fs::remove_file(&map_path).unwrap();
+    let recovered = render_plan(&gpu, &mut Scene3dRenderer::default(), &mapped).unwrap();
+    assert_eq!(recovered, expected, "late map failure leaves UV inactive");
+}
