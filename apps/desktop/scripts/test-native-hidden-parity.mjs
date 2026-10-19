@@ -70,7 +70,14 @@ try {
   const layer = (await current.tool('get_project_state')).layers.find(l => l.name === 'Carrier');
   await current.tool('apply_commands', { commands: [JSON.stringify({ type: 'add_effect', target: layer.id, effect: 'host-parity.effect' })] });
   const desktopExport = await current.tool('export_video', { name: 'Pinned desktop', format: 'png', audio: false, motionBlur: false });
+  await current.tool('set_panel_layout', { name: 'Saved host parity', docks: [
+    { id: 'left', size: 281, panels: [{ id: 'assets', flex: true }] },
+    { id: 'center', panels: [{ id: 'viewer', flex: true }] },
+    { id: 'bottom', size: 219, panels: [{ id: 'timeline', flex: true }] },
+    { id: 'right', size: 277, panels: [{ id: 'host-parity.panel', size: 183 }, { id: 'inspector', flex: true }] }
+  ] });
   const desktopWorkspace = await current.tool('get_workspace_state');
+  assert.equal(desktopWorkspace.layout.workspace.name, 'Saved host parity');
   const desktopPanels = desktopWorkspace.layout.registeredPanels;
   for (const id of ['viewer', 'timeline', 'inspector', 'layer-effects', 'toolbar', 'host-parity.panel']) assert(desktopPanels.some(panel => panel.id === id), `desktop panel registry is incomplete: ${id}`);
   const pins = path.join(profile, 'Engine Cache/Shader Cache/angle-parity');
@@ -91,19 +98,23 @@ try {
   const workspaceBytesEqual = JSON.stringify(actualWorkspace) === JSON.stringify(expectedWorkspace);
   const completeRegistry = JSON.stringify(actualWorkspace.layout.registeredPanels) === JSON.stringify(desktopPanels) && JSON.stringify(expectedWorkspace.layout.registeredPanels) === JSON.stringify(desktopPanels);
   const userPanel = actualWorkspace.layout.registeredPanels.some(p => p.id === 'host-parity.panel');
+  const persistedLayout = JSON.stringify(actualWorkspace.layout) === JSON.stringify(desktopWorkspace.layout) && JSON.stringify(expectedWorkspace.layout) === JSON.stringify(desktopWorkspace.layout);
+  const viewportEqual = JSON.stringify(actualWorkspace.viewport) === JSON.stringify(expectedWorkspace.viewport) && actualWorkspace.viewport?.width === 1440 && actualWorkspace.viewport?.height === 1000;
   const hiddenExport = await native.tool('export_video', { name: 'Pinned hidden', format: 'png', audio: false, motionBlur: false });
   const before = await pngs(desktopExport.path), after = await pngs(hiddenExport.path);
   if (evidence) { await cp(desktopExport.path, path.join(evidence, 'desktop-png'), { recursive: true }); await cp(hiddenExport.path, path.join(evidence, 'hidden-png'), { recursive: true }); }
   const differentFrames = [];
   for (let i = 0; i < Math.min(before.length, after.length); i++) if (!pixels(before[i]).equals(pixels(after[i]))) differentFrames.push(i);
   const pixelsEqual = before.length > 0 && before.length === after.length && differentFrames.length === 0;
-  const result = { frames: before.length, hiddenFrames: after.length, pixelsEqual, differentFrames, workspaceBytesEqual, userPanel, completeRegistry, panels: desktopPanels.length, pinnedPrograms: markers.filter(n => n.endsWith('.runner')).length };
+  const result = { frames: before.length, hiddenFrames: after.length, pixelsEqual, differentFrames, workspaceBytesEqual, userPanel, completeRegistry, persistedLayout, viewportEqual, panels: desktopPanels.length, pinnedPrograms: markers.filter(n => n.endsWith('.runner')).length };
   if (evidence) await writeFile(path.join(evidence, 'result.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));
   await native.tool('finish_session', { commit: true }); await native.close();
   assert(pixelsEqual, `pinned export pixels differ: ${JSON.stringify(result)}`);
   assert(workspaceBytesEqual, 'full persisted workspace answer must be byte-identical');
   assert(completeRegistry, 'every desktop built-in and user panel remains registered in both hidden hosts');
+  assert(persistedLayout, 'the custom saved workspace and dock sizes survive both hidden host restarts');
+  assert(viewportEqual, 'the complete hidden viewport matches');
   assert(userPanel, 'user panel remains registered');
   console.log(`Native hidden parity passed: ${before.length} pinned-program PNG frames pixel-identical to the desktop; complete workspace bytes equal today's hidden host, including a user panel.`);
 } finally { for (const child of [...children]) await stop(child); await rm(root, { recursive: true, force: true }); }
