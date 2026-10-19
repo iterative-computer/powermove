@@ -310,7 +310,13 @@ extcompat lane.
 
 `render.gl.init(canvas)` and `render.gl.resize(…)` bind engine presentation
 to the caller's canvas (`PM.EngineCanvas`,
-`engine-connection/canvas-binding.ts`).
+`engine-connection/canvas-binding.ts`). The binding never presents over a
+viewer that presents by itself: one whose stage is marked
+`data-engine-stage="viewer"` (its presentation) or
+`data-engine-self-presents` (`ENGINE_SELF_PRESENTS_ATTRIBUTE`, set by the
+built-in viewer from attach until it is disposed, round 6). It ends when
+its canvas leaves the document, at once (a ResizeObserver), not only at
+the caller's next resize.
 
 ### Frame events and stats (`engine-connection/presentation-events.ts`)
 
