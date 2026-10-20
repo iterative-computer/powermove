@@ -215,7 +215,77 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
   return { PM, memory, listeners, timers, clearedTimers, toasts };
 }
 
+async function reopenWithPendingMedia() {
+  const { PM } = appRegistry();
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  await Promise.resolve();
+  PM.bus.emit = (name: string, ...args: any[]) => {
+    for (const handler of PM.__busHandlers.get(name) || []) handler(...args);
+  };
+  const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Test.pmv' }));
+  installBridgeForTests({ saveFile } as any);
+  expect(await PM.saveProject()).toBe(true);
+  const data = saveFile.mock.calls[0]![0].data;
+  let release!: () => void;
+  PM.assets.restoreProject = () => new Promise(resolve => { release = () => resolve({ stale: false, missing: [] }); });
+  installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Test.pmv', projectId: 'reopened', data }) } as any);
+  await PM.openProject();
+  expect(PM.app.dirty).toBe(false);
+  return { PM, release };
+}
+
 describe('legacy app install', () => {
+  it('keeps a reopened saved document clean after runtime-only media restoration notifications', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const before = JSON.stringify(PM.proj), savedHash = PM.projectFileState(PM.proj.id).savedHash;
+    release(); await PM.projectAssetsReady;
+    expect(JSON.stringify(PM.proj)).toBe(before);
+    expect(PM.app.dirty).toBe(false);
+    expect(PM.projectFileState(PM.proj.id).savedHash).toBe(savedHash);
+  });
+  it.each(['user edit', 'persisted media metadata repair'])('keeps a %s dirty when restoration finishes', async kind => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const savedHash = PM.projectFileState(PM.proj.id).savedHash;
+    if (kind === 'user edit') PM.proj.name = 'Edited during loading';
+    else PM.proj.assets.repaired = { id: 'repaired', kind: 'image', format: 'svg', poster: true };
+    if (kind === 'user edit') PM.autosave();
+    release(); await PM.projectAssetsReady;
+    expect(PM.app.dirty).toBe(true);
+    expect(PM.projectFileState(PM.proj.id).savedHash).toBe(savedHash);
+    if (kind === 'user edit') expect(PM.proj.name).toBe('Edited during loading');
+    else expect(PM.proj.assets.repaired.format).toBe('svg');
+  });
+  it('keeps a newer edit dirty when it arrives during the restoration content comparison', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const savedHash = PM.projectFileState(PM.proj.id).savedHash;
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let finishHash!: () => void;
+    const hashing = vi.spyOn(crypto.subtle, 'digest').mockImplementationOnce(async (...args) => {
+      await new Promise<void>(resolve => { finishHash = resolve; });
+      return digest(...args);
+    });
+    try {
+      release();
+      await vi.waitFor(() => expect(hashing).toHaveBeenCalled());
+      PM.proj.name = 'Newer edit during comparison'; PM.autosave();
+      finishHash(); await PM.projectAssetsReady;
+      expect(PM.app.dirty).toBe(true);
+      expect(PM.proj.name).toBe('Newer edit during comparison');
+      expect(PM.projectFileState(PM.proj.id).savedHash).toBe(savedHash);
+    } finally { hashing.mockRestore(); }
+  });
+  it('does not clear another tab’s edits when an old restoration finishes', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const ready = PM.projectAssetsReady;
+    PM.proj = PM.mkProject({ id: 'other', name: 'Other unsaved project' });
+    PM.projectFileState('other');
+    PM.proj.name = 'Other edits'; PM.autosave();
+    release(); await ready;
+    expect(PM.proj.name).toBe('Other edits');
+    expect(PM.app.dirty).toBe(true);
+  });
+
   it('ignores runtime preview readiness while still autosaving asset metadata changes', () => {
     const { PM } = appRegistry();
     const previous = { timer: PM.app.saveTimer, dirty: PM.app.dirty };

@@ -485,12 +485,12 @@ async function restoreProjectAssets(project: any, warn: any = true) {
      panel shows loading, not offline: only a finished restore can say a
      file is missing. */
   PM.assetsRestoring = (PM.assetsRestoring || 0) + 1;
-  PM.bus.emit('assets');
+  PM.bus.emit('assets', { runtimeOnly: true });
   let result: any;
   try { result = await PM.assets.restoreProject(project); }
-  finally { PM.assetsRestoring = Math.max(0, (PM.assetsRestoring || 1) - 1); PM.bus.emit('assets'); }
+  finally { PM.assetsRestoring = Math.max(0, (PM.assetsRestoring || 1) - 1); PM.bus.emit('assets', { runtimeOnly: true }); }
   if (result.stale || PM.proj !== project) return result;
-  PM.bus.emit('assets');
+  PM.bus.emit('assets', { runtimeOnly: true });
   inspectorService(PM)?.refresh();
   PM.invalidate('all');
   if (warn && result.missing.length) {
@@ -502,6 +502,9 @@ async function restoreProjectAssets(project: any, warn: any = true) {
       ? 'One media file is missing · import it again to relink it'
       : `${count} media files are missing · import them again to relink them`, 5000);
   }
+  // Runtime pixels do not change the document. Compare persistent metadata
+  // against the existing saved baseline without clearing intervening edits.
+  if (await refreshFileDirty(project) && PM.proj === project) PM.autosave();
   return result;
 }
 
