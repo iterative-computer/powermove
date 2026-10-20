@@ -41,6 +41,33 @@ async function setup(session: any) {
   return { page, id, stagePoint, layerCenter, source, state, editor };
 }
 
+test('locked group text refuses canvas editing and works after unlocking with one Undo', async ({ session }) => {
+  const { page, id, layerCenter, source, editor } = await setup(session);
+  const fixture = await page.evaluate(id => {
+    const PM = (window as any).PM;
+    const inner = PM.groupLayers([id]), outer = PM.groupLayers([inner.id]);
+    outer.lock = true; PM.selectLayers(id); PM.hist.clear(); PM.touch(); PM.invalidate();
+    return { group: outer.id, source: JSON.stringify(PM.proj), edits: JSON.stringify(PM.proj.edits) };
+  }, id);
+  const center = await layerCenter(id);
+  await page.mouse.dblclick(center.x, center.y);
+  await expect(editor).toHaveCount(0);
+  expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj))).toBe(fixture.source);
+  expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj.edits))).toBe(fixture.edits);
+  await page.evaluate(({ group, id }) => {
+    const PM = (window as any).PM; PM.L(group).lock = false;
+    PM.selectLayers(id); PM.hist.clear(); PM.touch(); PM.invalidate();
+  }, { group: fixture.group, id });
+  await page.mouse.dblclick(center.x, center.y);
+  await expect(editor).toBeFocused();
+  await page.keyboard.insertText('Editable after unlocking');
+  await page.keyboard.press('Escape');
+  expect(await source()).toBe('Editable after unlocking');
+  expect(await page.evaluate(() => (window as any).PM.hist.undo())).toBe(true);
+  expect(await source()).toBe('ffagarrag');
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
 test('edits existing text in place: caret, selection, clipboard, multiline, commit and one-step undo', async ({ session }, testInfo) => {
   const { page, id, layerCenter, source, state, editor } = await setup(session);
   const center = await layerCenter(id);

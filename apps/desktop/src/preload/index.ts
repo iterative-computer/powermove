@@ -131,15 +131,10 @@ const bridge: PowermoveBridge = {
   clipboardWriteText: (text) => ipcRenderer.invoke(IPC.clipboardWriteText, text) as Promise<void>,
   pasteMedia: () => ipcRenderer.invoke(IPC.mediaPaste) as Promise<boolean>,
 
-  blender: {
-    status: () => ipcRenderer.invoke(IPC.blenderStatus),
-    choose: () => ipcRenderer.invoke(IPC.blenderChoose),
-    run: job => ipcRenderer.invoke(IPC.blenderRun, job),
-    cancel: () => ipcRenderer.invoke(IPC.blenderCancel),
-  },
   render: {
     start: options => ipcRenderer.invoke(IPC.renderStart,options),
-    write: (token,data,audio) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio}),
+    write: (token,data,audio,retain) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio,retain}),
+    repeat: (token,count) => ipcRenderer.invoke(IPC.renderWrite,{token,repeat:count}),
     finish: token => ipcRenderer.invoke(IPC.renderFinish,{token}),
     cancel: token => ipcRenderer.invoke(IPC.renderCancel,{token}),
   },
@@ -302,6 +297,7 @@ const bridge: PowermoveBridge = {
     snapshotSerializedSync: () => ipcRenderer.sendSync(IPC.storeSnapshotSerializedSync) as Record<string, string>,
     bootstrapSerializedSync: () => ipcRenderer.sendSync(IPC.storeBootstrapSync) as Record<string, string>,
     getEncodedSync: (key) => ipcRenderer.sendSync(IPC.storeGetEncodedSync, { key }) as string | null,
+    getEncoded: (key) => ipcRenderer.invoke(IPC.storeGetEncoded, { key }) as Promise<string | null>,
     snapshot: () => ipcRenderer.invoke(IPC.storeSnapshot) as Promise<StoreSnapshot>,
     set: (key, value) => {
       ipcRenderer.send(IPC.storeSet, { key, value });

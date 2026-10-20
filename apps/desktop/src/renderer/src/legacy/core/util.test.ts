@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install } from './util';
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/capture-bridge';
 
 function utilRegistry() {
   const listeners: Record<string, any[]> = {};
@@ -41,10 +42,46 @@ function fire(listeners: Record<string, any[]>, type: string, event: any) {
 }
 
 afterEach(() => {
+  resetBridgeForTests();
   vi.unstubAllGlobals();
 });
 
 describe('legacy util install', () => {
+  it('waits for every bounded upload chunk before finishing a download', async () => {
+    const { PM } = utilRegistry();
+    const bytes = new Uint8Array(1024 * 1024 + 3); bytes[bytes.length - 1] = 91;
+    const chunks: Uint8Array[] = [];
+    const upload = { begin: vi.fn(async () => 'upload'), chunk: vi.fn(async (_token: string, data: Uint8Array) => { chunks.push(data); }),
+      finish: vi.fn(async () => ({ ok: true as const, path: '/tmp/export.bin' })), abort: vi.fn(async () => undefined) };
+    installBridgeForTests({ fileUpload: upload } as any);
+    expect(await PM.download(new Blob([bytes]), 'export.bin')).toEqual({ ok: true, path: '/tmp/export.bin' });
+    expect(chunks.map(chunk => chunk.length)).toEqual([1024 * 1024, 3]);
+    expect(chunks[1]![2]).toBe(91);
+    expect(upload.finish).toHaveBeenCalledWith('upload', { name: 'export.bin' });
+    expect(upload.abort).toHaveBeenCalledWith('upload');
+  });
+
+  it('drains a speculative read before aborting a failed download and preserves the write error', async () => {
+    const { PM } = utilRegistry();
+    const failure = new Error('upload failed');
+    let rejectRead!: (error: Error) => void;
+    const pendingRead = new Promise<ArrayBuffer>((_resolve, reject) => { rejectRead = reject; });
+    const source = { size: 3 * 1024 * 1024, slice: vi.fn((start: number) => ({ arrayBuffer: () => start === 0 ? Promise.resolve(new ArrayBuffer(1024 * 1024)) : pendingRead })) };
+    const upload = { begin: vi.fn(async () => 'upload'), chunk: vi.fn(async () => { throw failure; }),
+      finish: vi.fn(), abort: vi.fn(async () => undefined) };
+    installBridgeForTests({ fileUpload: upload } as any);
+    const downloading = PM.download(source, 'export.bin');
+    const rejected = expect(downloading).rejects.toBe(failure);
+    await vi.waitFor(() => expect(upload.chunk).toHaveBeenCalledTimes(1));
+    expect(source.slice).toHaveBeenCalledTimes(2);
+    expect(upload.abort).not.toHaveBeenCalled();
+    rejectRead(new Error('later read failed'));
+    await rejected;
+    expect(upload.finish).not.toHaveBeenCalled();
+    expect(upload.abort).toHaveBeenCalledWith('upload');
+    expect(source.slice).toHaveBeenCalledTimes(2);
+  });
+
   it('signals rendering immediately while leaving UI work coalesced', () => {
     const { PM } = utilRegistry();
     const draw = vi.fn();

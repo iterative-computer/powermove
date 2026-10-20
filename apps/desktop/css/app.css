@@ -17,6 +17,9 @@ html,body{height:100%;overflow:hidden}
    must stay opaque mixes from --bg-window-solid instead. */
 :root{--bg-window-solid:#EEEEF1;--bg-window:rgb(238 238 241 / .86)}
 :root[data-theme="dark"]{--bg-window-solid:#0C0A09;--bg-window:rgb(12 10 9 / .86)}
+/* Floating surfaces share the agent panel's solid material. Keep their existing
+   shadows for depth, rather than switching to a lighter brown fill. */
+:root[data-theme="dark"]{--bg-float:var(--bg-panel)}
 /* Content areas of the full-screen views (projects, settings) are all but
    solid; the material is a whisper behind them. */
 :root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 94%,transparent)}
@@ -183,6 +186,12 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .project-doc.renaming{box-shadow:0 0 0 2px var(--accent-dim)}
 .project-doc-input{min-width:0;width:100%;height:20px;color:var(--tx);font:inherit;line-height:20px;background:transparent}
 @media (prefers-reduced-motion:reduce){.project-doc,.project-doc-close,.project-doc-close svg{transition:none}}
+/* A project still opening is selected at once; past the ghost's delay its name
+   breathes with the body's placeholders. The cold-boot chip only names it. */
+.project-doc.pending .project-doc-label{animation:project-ghost-breathe 3.6s var(--ease-io) 150ms infinite}
+.project-doc.pending:not([data-tab-id]){pointer-events:none}
+.tb-project-controls{display:contents}
+@media (prefers-reduced-motion:reduce){.project-doc.pending .project-doc-label{animation:project-ghost-dim 1ms linear 150ms forwards}}
 
 .tb-right{display:flex;align-items:center;gap:2px;margin-left:auto;position:relative;-webkit-app-region:no-drag}
 /* Export is the app's terminal action: the one labelled, filled control in the
@@ -634,11 +643,11 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .asset-card.is-folder.is-drop-target .asset-preview::after{box-shadow:inset 0 0 0 2px var(--accent)}
 .asset-rename{min-width:0;height:18px;margin:-1px -3px;padding:0 3px;border-radius:var(--r-xs);background:var(--bg-field);box-shadow:0 0 0 1px var(--accent);color:var(--tx);font:inherit;font-size:var(--fs-xs)}
 .asset-path{flex:none;display:flex;align-items:center;gap:2px;min-width:0;padding:8px 12px 0;color:var(--tx-4);font-size:var(--fs-xs)}
-.asset-path-up{flex:none;width:20px;height:20px;display:grid;place-items:center;border-radius:var(--r-xs);color:var(--tx-3)}
-.asset-path-up svg{width:11px;height:11px;transform:scaleX(-1)}
 .asset-path-crumb{min-width:0;max-width:120px;height:20px;padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-radius:var(--r-xs);color:var(--tx-3)}
+.asset-path-root{flex:none;display:inline-flex;align-items:center;gap:4px}
+.asset-path-root svg{flex:none;width:11px;height:11px;transform:scaleX(-1)}
 .asset-path-crumb[aria-current="location"]{color:var(--tx);font-weight:var(--fw-medium)}
-.asset-path-up:hover,.asset-path-crumb:hover{background:rgb(var(--ink-rgb) / .08);color:var(--tx)}
+.asset-path-crumb:hover{background:rgb(var(--ink-rgb) / .08);color:var(--tx)}
 .asset-path-crumb.is-drop-target{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent)}
 .asset-path-sep{flex:none;color:var(--tx-4)}
 /* Compositions in the Project/Media panel: the tile is the comp's frame at its own aspect, filled with its background. */
@@ -656,6 +665,39 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .codebar{display:flex;align-items:center;gap:6px;height:36px;padding:0 8px 0 12px;border-top:1px solid var(--line);
   font-size:var(--fs-xs);color:var(--tx-3);flex:none}
 .codebar .ok{color:var(--success)}.codebar .bad{color:var(--danger)}
+
+/* ── project loading ghost ─────────────────────────────── */
+/* While a project opens, quiet stand-ins for its panels cover #body (sized to
+   it by ProjectGhost.svelte), under the titlebar and full-screen views. They
+   appear only once a load outlasts 150ms (GHOST_DELAY_MS). index.html carries
+   the cold-boot copy, #boot-ghost, which has to paint before this sheet. */
+.project-ghost{position:fixed;z-index:34;pointer-events:none;opacity:0;animation:project-ghost-in var(--dur-3) var(--ease) 150ms forwards}
+.project-ghost.generic{display:grid;grid-template:"left center right" minmax(0,1fr) "bottom bottom right" min(300px,40%) / 250px minmax(0,1fr) 300px;gap:var(--gap);padding:0 var(--pad) 4px}
+body:has(#projects-screen.on) :is(.project-ghost,#boot-ghost),body:has(#settings-screen.on) :is(.project-ghost,#boot-ghost){visibility:hidden}
+.pg-tile{position:absolute;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:var(--bg-panel);border-radius:var(--r-lg);corner-shape:var(--ui-corner-smoothing);box-shadow:var(--shadow-panel)}
+.project-ghost.generic .pg-tile{position:relative}
+.pg-head{flex:none;height:var(--hdr-h);display:flex;align-items:center;padding:0 14px}
+.pg-head::before{content:'';width:64px;height:8px;border-radius:var(--r-pill);background:var(--ink-2)}
+.pg-rows{display:flex;flex-direction:column;gap:22px;padding:6px 14px;animation:project-ghost-breathe 3.6s var(--ease-io) infinite}
+.pg-row{flex:none;height:8px;width:62%;border-radius:var(--r-pill);background:var(--ink-1)}
+.pg-row:nth-child(4n+2){width:44%}
+.pg-row:nth-child(4n+3){width:71%}
+.pg-row:nth-child(4n){width:53%}
+/* Timeline rows read as clips on tracks rather than lines of text. */
+.pg-timeline .pg-rows{gap:10px}
+.pg-timeline .pg-row{height:16px;border-radius:var(--r-sm);margin-left:12%;width:46%}
+.pg-timeline .pg-row:nth-child(4n+2){margin-left:4%;width:58%}
+.pg-timeline .pg-row:nth-child(4n+3){margin-left:28%;width:34%}
+.pg-timeline .pg-row:nth-child(4n){margin-left:18%;width:50%}
+.pg-stage{flex:1 1 auto;min-height:0;margin:4px 24px 24px;border-radius:var(--r-md);background:var(--ink-1);animation:project-ghost-breathe 3.6s var(--ease-io) infinite}
+.project-loading-status{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+@keyframes project-ghost-in{to{opacity:1}}
+@keyframes project-ghost-breathe{50%{opacity:.55}}
+@keyframes project-ghost-dim{to{opacity:.6}}
+@media (prefers-reduced-motion:reduce){
+  .project-ghost{animation:project-ghost-in 1ms linear 150ms forwards}
+  .pg-rows,.pg-stage{animation:none}
+}
 
 /* ── modal / palette ───────────────────────────────────── */
 #scrim{position:fixed;inset:0;background:rgb(var(--ink-rgb) / .32);backdrop-filter:blur(3px);z-index:400;display:none}
@@ -726,7 +768,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 /* Palette: the same filled surfaces as the library, with concentric radii. */
 #palette{--pal-gutter:8px;--pal-r:24px;top:14vh;left:50%;transform:translateX(-50%);width:min(620px,92vw);max-height:64vh;
   padding:0 var(--pal-gutter) var(--pal-gutter);border-radius:var(--pal-r)}
-#palette{background:color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid))}
+#palette{background:color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid));animation:none}
+body:has(#palette) #scrim.on{animation:none}
 #palette .field{flex:none;height:46px;border-radius:0;box-shadow:none;background:transparent;padding:0 12px;gap:10px;font-size:var(--fs-lg)}
 #palette .field:focus-within{background:transparent;box-shadow:none}
 #palette .field .psearch{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;color:var(--tx-4)}
@@ -739,7 +782,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .pgroup:first-child{padding-top:6px}
 .pitem{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border-radius:calc(var(--pal-r) - var(--pal-gutter) - 6px);font-size:var(--fs-md);color:var(--tx)}
 .pitem{position:relative;z-index:1}
-.pglider{position:absolute;left:6px;right:6px;top:0;height:0;opacity:0;pointer-events:none;border-radius:calc(var(--pal-r) - var(--pal-gutter) - 6px);background:var(--ink-2);box-shadow:none;transition:transform var(--dur-3) var(--ease),height var(--dur-3) var(--ease),opacity var(--dur-1)}
+.pglider{position:absolute;left:6px;right:6px;top:0;height:0;opacity:0;pointer-events:none;border-radius:calc(var(--pal-r) - var(--pal-gutter) - 6px);background:var(--ink-2);box-shadow:none;transition:opacity var(--dur-1)}
 .pglider.on{opacity:1}
 .pitem .kb{margin-left:auto;font-family:var(--f-mono);font-size:var(--fs-xs);color:var(--tx-4)}
 .plist .empty{padding:22px 16px}
@@ -979,7 +1022,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
    Exactly one row carries motion. */
 .agent-trace{display:flex;flex-direction:column;gap:8px;min-width:0;padding-left:0}
 .agent-trace p{margin:0}
-.agent-trace.is-live>*{animation:agent-fade-up 300ms cubic-bezier(.23,1,.32,1) both}
+.agent-trace.is-live>*{animation:none}
 @keyframes agent-fade-up{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 @keyframes agent-pop-in{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}
 .agent-trace-prose,.agent-reply{display:flex;flex-direction:column;gap:8px;min-width:0;font-size:var(--fs-md);line-height:1.6;color:var(--tx)}
@@ -1193,9 +1236,9 @@ body:has(#projects-screen.on) #body,body:has(#projects-screen.on) #status{visibi
 .ps-navs{position:relative;display:flex;flex-direction:column;gap:12px}
 .ps-navbtn{position:relative;z-index:1}.ps-navbtn:hover{background:var(--ink-1);color:var(--tx)}.ps-navbtn.on{background:var(--ink-2);color:var(--tx)}
 /* Sidebar highlight: one layer that glides between rows (controls/nav-glide.ts). */
-.nav-glider{position:absolute;left:0;top:0;width:0;height:0;opacity:0;pointer-events:none;border-radius:var(--r-md);background:var(--ink-2);transition:transform 220ms var(--nav-glide-ease),width 220ms var(--nav-glide-ease),height 220ms var(--nav-glide-ease),opacity 150ms ease}
+.nav-glider{position:absolute;left:0;top:0;width:0;height:0;opacity:0;pointer-events:none;border-radius:var(--r-md);background:var(--ink-2);transition:opacity var(--dur-1)}
 .nav-glider.on{opacity:1}
-.nav-glider.settling{transition-duration:340ms,340ms,340ms,150ms}
+.nav-glider.settling{transition-duration:var(--dur-1)}
 @media (prefers-reduced-motion:reduce){.nav-glider{transition:none}}.ps-navbtn.on::after{display:none}
 .ps-navbtn svg{width:15px;height:15px;flex:none;color:var(--tx-3);transition:color var(--dur-1)}.ps-navbtn:hover svg,.ps-navbtn.on svg{color:var(--tx)}.ps-navbtn span:not(.count){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ps-navbtn .count{margin-left:auto;color:var(--tx-4);font-size:var(--fs-xs)}
 .ps-updates[hidden]{display:none}
@@ -1270,7 +1313,7 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 @keyframes pm-menu-in{from{opacity:0;transform:scale(.96) translateY(var(--pm-menu-slide,-4px))}to{opacity:1;transform:none}}
 @keyframes pm-menu-out{from{opacity:1;transform:none}to{opacity:0;transform:scale(.97)}}
 .pm-menu[data-side=top]{--pm-menu-slide:4px}
-.pm-menu-glider{position:absolute;left:4px;right:4px;top:0;height:0;opacity:0;pointer-events:none;border-radius:6px;background:var(--ink-2);transition:transform 220ms cubic-bezier(.23,1,.32,1),height 220ms cubic-bezier(.23,1,.32,1),opacity 150ms ease}
+.pm-menu-glider{position:absolute;left:4px;right:4px;top:0;height:0;opacity:0;pointer-events:none;border-radius:6px;background:var(--ink-2);transition:opacity var(--dur-1)}
 .pm-menu-glider.on{opacity:1}
 :has(> [data-blink]) > .pm-menu-glider{transition:none}
 :has(> [data-blink=off]) > .pm-menu-glider{opacity:0}
@@ -1439,7 +1482,7 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 /* Closing from the editor: its panel has already gone home, so the surface
    leaves empty rather than flashing the shelves on its way out. */
 #library-overlay.closing-editor #library-screen>*{visibility:hidden}
-.library-editor .library-chat{animation:library-view-fade var(--library-travel) var(--ease) both}
+.library-editor .library-chat{animation:none}
 /* A cropped cover fades out at the cut, so it reads as "continues" rather than broken. */
 .library-live.is-clipped>.library-live-frame{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 72px),transparent);mask-image:linear-gradient(to bottom,#000 calc(100% - 72px),transparent)}
 .library-live-frame.is-fresh{animation:library-view-fade var(--dur-3) var(--ease)}

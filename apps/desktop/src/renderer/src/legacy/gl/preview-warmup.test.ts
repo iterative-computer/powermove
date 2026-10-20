@@ -35,6 +35,18 @@ function opacityFixture() {
 }
 
 describe('preview source warmup', () => {
+  it('prepares visible children at an upcoming held ancestor scale cut', () => {
+    const f = opacityFixture();
+    const parent = f.layer('null');
+    parent.p['scale.x'].kf = [{ ...f.PM.KF(0, 150, 'linear'), outInterp: 'hold' }, f.PM.KF(4, 100, 'linear')];
+    const group = f.layer('group'); group.parent = parent.id;
+    const child = f.layer('shape'); child.group = group.id;
+    f.request(); f.drain();
+    expect(f.prepare).toHaveBeenCalledOnce();
+    expect(f.prepare).toHaveBeenCalledWith(child, 4);
+    f.state.time = 3; f.request(); f.drain();
+    expect(f.prepare).toHaveBeenCalledOnce();
+  });
   it('warms a text opacity entrance even when the layer starts at zero', () => {
     const f = opacityFixture();
     const text = f.layer('text', [{ t: 4, v: 0 }, { t: 4.5, v: 100 }]);

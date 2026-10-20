@@ -31,10 +31,21 @@ export function mountCompTabs(api: PowermoveAPI, host: HTMLElement): () => void 
   host.setAttribute('role', 'tablist');
   host.setAttribute('aria-label', 'Open compositions');
 
+  let pendingRender = 0, pendingScroll = 0;
+  let previousModel: Comps | null = null;
+  let previousTabs = '';
+  let previousActive: string | undefined;
+
   const render = () => {
     const model = comps();
-    if (!model) { host.replaceChildren(); return; }
+    if (!model) { host.replaceChildren(); previousModel = null; previousTabs = ''; return; }
     const tabs = model.openTabs().map(id => model.get(id)).filter(Boolean) as Array<{ id: string; name: string }>;
+    const signature = JSON.stringify(tabs.map(comp => [comp.id, comp.name, model.isOpen(comp.id)]));
+    if (model === previousModel && signature === previousTabs) return;
+    previousModel = model; previousTabs = signature;
+    const active = tabs.find(comp => model.isOpen(comp.id))?.id;
+    const reveal = active !== previousActive;
+    previousActive = active;
     const closable = tabs.length > 1;
     host.replaceChildren(...tabs.map(comp => {
       const tab = document.createElement('div');
@@ -74,14 +85,33 @@ export function mountCompTabs(api: PowermoveAPI, host: HTMLElement): () => void 
       });
       return tab;
     }));
-    host.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    // A project switch emits several model/history/assets notifications. Do
+    // not rebuild and force layout for each one, or scroll offscreen panels.
+    // Scrolling this strip alone also preserves the surrounding panel scroll.
+    cancelAnimationFrame(pendingScroll);
+    if (reveal && tabs.length > 1) pendingScroll = requestAnimationFrame(() => {
+      pendingScroll = 0;
+      if (!host.isConnected || host.closest('#pm-panel-pool') || host.clientWidth <= 0) return;
+      const selected = host.querySelector<HTMLElement>('[aria-selected="true"]');
+      if (!selected) return;
+      const bounds = selected.getBoundingClientRect();
+      const left = bounds.left - host.getBoundingClientRect().left + host.scrollLeft;
+      const right = left + bounds.width;
+      if (left < host.scrollLeft) host.scrollLeft = left;
+      else if (right > host.scrollLeft + host.clientWidth) host.scrollLeft = right - host.clientWidth;
+    });
   };
 
-  const offComps = comps()?.onChange(render);
-  const subscription = api.events.on('project:changed', ({ kind }) => { if (kind !== 'values') render(); });
+  const schedule = () => {
+    if (!pendingRender) pendingRender = requestAnimationFrame(() => { pendingRender = 0; render(); });
+  };
+  const offComps = comps()?.onChange(schedule);
+  const subscription = api.events.on('project:changed', ({ kind }) => { if (kind !== 'values') schedule(); });
   render();
   return () => {
     offComps?.();
     subscription.dispose();
+    cancelAnimationFrame(pendingRender);
+    cancelAnimationFrame(pendingScroll);
   };
 }

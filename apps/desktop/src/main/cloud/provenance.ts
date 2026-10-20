@@ -107,10 +107,11 @@ export function createProvenanceStore(userData: string, options: { uuid?: () => 
   const uuid = options.uuid ?? randomUUID;
   /* Every read-modify-write runs in order, so two quick `set`s from the
      renderer cannot both mint a key and lose one. */
-  let queue: Promise<unknown> = Promise.resolve();
+  let queue: Promise<void> = Promise.resolve();
   const serial = <T>(task: () => Promise<T>): Promise<T> => {
     const run = queue.then(task);
-    queue = run.catch(() => undefined);
+    // Only completion belongs to the queue; callers own returned metadata.
+    queue = run.then(() => undefined, () => undefined);
     return run;
   };
 

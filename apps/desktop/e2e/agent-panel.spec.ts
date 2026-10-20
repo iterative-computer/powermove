@@ -151,7 +151,8 @@ test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', (
     const last = (await grip.boundingBox())!;
     await page.mouse.move(last.x + last.width / 2, last.y + last.height / 2);
     await page.mouse.down();
-    await page.mouse.move(dock.x + dock.width / 2, dock.y + dock.height - 40, { steps: 16 });
+    // Floating panels dock within the column's edge zone, leaving its middle free.
+    await page.mouse.move(dock.x + dock.width / 2, dock.y + dock.height - 16, { steps: 16 });
     await expect(page.locator('.panel-drop-preview')).toHaveClass(/on/);
     await page.mouse.up();
     await expect(page.locator('#dock-right #panel-agent')).toBeVisible();

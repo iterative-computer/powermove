@@ -17,7 +17,7 @@
     "lint:boundaries": "node scripts/check-boundaries.mjs",
     "check:builtins": "bun scripts/check-builtin-versions.mjs",
     "publish:builtins": "bun scripts/publish-builtins.mjs",
-    "dist:mac": "electron-vite build && electron-builder --mac && node scripts/create-dmg.mjs",
+    "dist:mac": "node scripts/clean-renderer.mjs && electron-vite build && electron-builder --mac && node scripts/create-dmg.mjs",
     "dist:release": "node scripts/release-mac.mjs"
   },
   "dependencies": {
@@ -26,6 +26,7 @@
     "@anthropic-ai/claude-code-darwin-arm64": "2.1.280",
     "@lisse/core": "0.7.2",
     "@motion-core/motion-gpu": "0.15.1",
+    "@open-pencil/kiwi": "0.16.0",
     "@openai/codex": "0.159.1",
     "@openai/codex-darwin-arm64": "npm:@openai/codex@0.159.1-darwin-arm64",
     "@powermove/macos-haptics": "workspace:*",
@@ -35,6 +36,7 @@
     "electron-updater": "6.8.3",
     "esbuild": "0.25.12",
     "ffmpeg-static": "5.3.0",
+    "fzstd": "0.1.1",
     "hono": "4.13.8",
     "node-diff3": "3.2.1",
     "smol-toml": "1.9.0",

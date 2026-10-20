@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { makePM } from '../__tests__/make-pm';
-import { animatedGlyphs, animatorWeight, isIdentityGlyph, textAnimationKey, textAnimationState, unitRank } from './text-animation';
+import { animatedGlyphs, animatorWeight, countTextUnits, isIdentityGlyph, textAnimationKey, textAnimationState, unitRank } from './text-animation';
 import { ANIMATOR_PRESETS, makeAnimator, outDelay, setAnimatorMode } from '../../../../extensions/inspector/text-animators';
 
 function editor() {
@@ -20,6 +20,8 @@ const layout = {
   lines: [{ x: 0, w: 45, line: 0 }]
 };
 const preset = (id: string) => ANIMATOR_PRESETS.find((candidate) => candidate.id === id)!;
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('text animators', () => {
   it('staggers units in over time without keyframes', () => {
@@ -126,5 +128,63 @@ describe('text animators', () => {
     const glyphs = animatedGlyphs(PM, layer, 0.25, { size: 20, color: '#000000' }, layout);
     expect(glyphs[0].matrix[5]).toBeCloseTo(-3 * Math.sin(Math.PI / 2));
     expect(glyphs[0].color).toBe('#800000');
+  });
+
+  it('counts Unicode units using one segmenter across every line', () => {
+    const NativeSegmenter = Intl.Segmenter;
+    let constructions = 0;
+    class CountingSegmenter extends NativeSegmenter {
+      constructor() {
+        super(undefined, { granularity: 'grapheme' });
+        constructions++;
+      }
+    }
+    vi.stubGlobal('Intl', { Segmenter: CountingSegmenter });
+    const lines = Array.from({ length: 100 }, () => ({ text: '👨‍👩‍👧‍👦 e\u0301\tA' }));
+    expect(countTextUnits(lines, 'characters')).toBe(300);
+    expect(constructions).toBe(1);
+    expect(countTextUnits(lines, 'words')).toBe(300);
+    expect(countTextUnits([...lines, { text: '' }], 'lines')).toBe(100);
+    expect(constructions).toBe(1);
+  });
+
+  it('keeps code-point counting when Unicode segmentation is unavailable', () => {
+    vi.stubGlobal('Intl', { Segmenter: undefined });
+    expect(countTextUnits([{ text: '😀e\u0301 \t' }], 'characters')).toBe(3);
+  });
+
+  it('skips sparse input holes and avoids Unicode setup for an empty unit list', () => {
+    const lines = new Array<{ text: string }>(3);
+    lines[1] = { text: '😀A' };
+    expect(countTextUnits(lines, 'characters')).toBe(2);
+    vi.stubGlobal('Intl', { Segmenter: class { constructor() { throw new Error('Unexpected Unicode setup'); } } });
+    expect(countTextUnits([], 'characters')).toBe(0);
+    const characters = new Array<any>(3);
+    characters[1] = { text: 'A', line: 0, x: 10, w: 10, index: 1 };
+    const result = animatedGlyphs({}, {}, 0, { size: 20 }, { characters, words: [], lines: [] }, { animators: [], styles: [] });
+    expect(result).toHaveLength(3);
+    expect(0 in result).toBe(false);
+    expect(2 in result).toBe(false);
+    expect(result[1].x).toBe(10);
+    expect(result[1].trackingShift).toBe(0);
+  });
+
+  it('keeps tracking within each line even when glyphs are interleaved', () => {
+    const input = {
+      characters: [
+        { line: 2, x: 0, index: 0 }, { line: 1, x: 0, index: 1 },
+        { line: 2, x: 10, index: 2 }, { line: 1, x: 10, index: 3 },
+        { line: 2, x: 20, index: 4 },
+      ].map(glyph => ({ ...glyph, text: 'x', w: 10, y: glyph.line * 20 })),
+      words: [], lines: [],
+    };
+    const state = {
+      styles: [], animators: [{ id: 'track', mode: 'range' as const, unit: 'characters' as const,
+        values: { tracking: 10 }, weights: [1, -0.5, 0.25, 0.75, 2] }],
+    };
+    const glyphs = animatedGlyphs({}, {}, 0, { size: 20, align: 'center' }, input, state);
+    expect(glyphs.map((glyph: any) => glyph.trackingShift)).toEqual([-6.25, 2.5, 3.75, -2.5, 6.25]);
+    expect(glyphs.map((glyph: any) => glyph.x)).toEqual([-6.25, 2.5, 13.75, 7.5, 26.25]);
+    expect(input.characters.map(glyph => glyph.x)).toEqual([0, 0, 10, 10, 20]);
   });
 });

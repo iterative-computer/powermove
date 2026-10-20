@@ -465,7 +465,7 @@ in-realm API after the person installing the extension accepts the trust dialog.
 - **uiState** — layer/FX disclosure, key handles, timeline reveal state, and shader metadata via `getShaderMeta(layer)` / `setShaderMeta(layer, patch)`.
 - **ui** — API-backed controls, overlays, menus, pointer drag, parent picking, shader editor opening, edit/history-backed `gesture` construction, and `openExternal(url)` for https links.
 - **dnd** — canonical asset/FX MIME payloads, drag detection/parsing, live media drag state, and FX drop application.
-- **workspace** — active workspace mutation plus indexed panel add/move/hide/restore/refresh operations.
+- **workspace** — active workspace mutation plus indexed panel add/move/hide/restore/refresh operations. Appearance changes through `api.workspace.mutate` (density, theme overrides, chrome and dock/panel geometry) are owned by the mod: unloading restores the previous settings, including in workspaces no longer active. Later user changes are retained. Panel membership/order and explicitly authored workspaces remain saved layout edits.
 - **util** — numeric interpolation/snapping, timecode, ids, and colour conversion.
 - **ease** — easing preset lookup and handle-name matching.
 - **space3d** — PM-bound 3D transforms, perspective planes, projection, inversion, and containment.
@@ -489,6 +489,35 @@ typed namespaces above. Both forms, plus the standalone `PM` identifier, fail th
 built-in extension boundary lint.
 
 ## Patterns
+
+### Reversible themes
+
+A theme must fully unapply when its mod is disabled, removed, reloaded or fails
+activation. Use `api.theme.register` for CSS, tokens and root attributes; the
+host removes these together. Use `api.workspace.mutate` for density, workspace
+theme overrides, chrome and dock/panel geometry. The host records prior values,
+restores only settings still owned by that mod and remembers them across app
+restarts. Turning off overlapping mods in either order must not resurrect an
+already disabled mod. Cleanup also covers saved workspaces that are not active.
+
+Do not write appearance settings directly through `api.host.pm`, global DOM
+styles, local storage or saved workspace files. Keep panel membership/order and
+workspace creation separate from theme application: these are permanent layout
+edits requiring an explicit user request. Avoid custom theme side effects; if
+needed, register `api.onDispose` cleanup for every timer, listener and injected
+element. Save any original values needed across restarts in `api.storage`, and
+restore only values still matching your override. Do not reset an entire
+workspace or overwrite changes made later by the user.
+`api.workspace.current()` returns a read snapshot for user mods; apply changes
+through `mutate`, which owns them. Calls to a disposed mod's appearance API
+cannot apply new overrides.
+
+Before reporting a theme complete, verify enabled → disabled → enabled,
+reload, removal and restart in isolated test data. Check CSS, root attributes,
+light/dark appearance, timeline rows/gutter/ruler, spacing and panel sizes.
+Change one setting while enabled and confirm it survives disabling. Apply the
+theme in two workspaces, switch away, then disable it and check both. A
+successful compile or a separate "Restore appearance" command is insufficient.
 
 ### Global import defaults and Properties controls
 
@@ -683,7 +712,9 @@ and `Disclosure`. All visual fields accept `api`, live `get`, and `edit`, using
 the same undoable binding as `NumField`. SliderField accepts `min`, `max`, `step`,
 `unit`, and `angle: true` for a dial. PointField reads `[x,y]`, uses a composite
 `edit` writing both keys in one transaction, and separate `xEdit`/`yEdit` bindings
-for exact numbers. RampField reads `{id,color,position}[]`; omit `edit` for fixed
+for exact numbers. PointField accepts separate `stepX`/`stepY`; omitted steps use
+one hundredth of each axis range. A shared `step` still sets both axes. RampField
+reads `{id,color,position}[]`; omit `edit` for fixed
 endpoints and use `onSelect(id)` to open the existing color editor. Optional
 `midpoint()`/`midpointEdit` edit the midpoint. FillField already uses draggable
 stops in its shared color picker. Disclosure accepts `label`, `count`, `changed`,

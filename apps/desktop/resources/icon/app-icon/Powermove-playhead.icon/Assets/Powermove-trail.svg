@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><defs>
+  <linearGradient id="stem" x1="1" y1="0" x2="0" y2="0">
+    <stop offset="0" stop-color="#F0580A" stop-opacity="0.71"/>
+    <stop offset="1" stop-color="#F0580A" stop-opacity="0"/>
+  </linearGradient>
+  <linearGradient id="stemFadeY" gradientUnits="userSpaceOnUse" x1="0" y1="58.1" x2="0" y2="123.1">
+    <stop offset="0" stop-color="#fff"/>
+    <stop offset="0.6" stop-color="#fff"/>
+    <stop offset="1" stop-color="#000"/>
+  </linearGradient>
+  <mask id="stemFade" maskUnits="userSpaceOnUse" x="0" y="40" width="134" height="100">
+    <rect x="0" y="40" width="134" height="100" fill="url(#stemFadeY)"/>
+  </mask>
+</defs><g transform="translate(10.83 43.94) scale(7.7551)"><g mask="url(#stemFade)"><rect x="52.8" y="58.1" width="16" height="65" fill="url(#stem)"/></g></g></svg>

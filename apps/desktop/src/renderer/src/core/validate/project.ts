@@ -1,4 +1,5 @@
 import { CHANNELS_3D } from '../../legacy/core/space-3d';
+import { normalizeColorDepth } from '../color-depth';
 import { canAnimateContent, isProperty } from '../../legacy/core/content-properties';
 import { adoptTemporalEase } from '../anim/temporal-ease';
 import { compactEditLog } from '../edit-log';
@@ -499,7 +500,7 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     id,
     type,
     name: nonEmptyStringOr(source.name, `Layer ${index + 1}`),
-    from: Math.max(type === 'group' ? -Infinity : 0, finite(source.from)),
+    from: finite(source.from),
     dur: Math.max(0.01, finite(source.dur, 5)),
     on: isProperty(source.on) ? sanitizeLooseChannel(source.on, true) : source.on !== false,
     lock: !!source.lock,
@@ -665,6 +666,7 @@ export function sanitizeProject(raw: unknown): Project {
   const backgroundFill = normalizeFill(source.backgroundFill, fallbackBg);
   const project: Project = {
     ...source,
+    colorDepth: normalizeColorDepth(source.colorDepth),
     id: nonEmptyStringOr(source.id, uid('P')),
     name: nonEmptyStringOr(source.name, 'Untitled'),
     w, h, fps, dur,

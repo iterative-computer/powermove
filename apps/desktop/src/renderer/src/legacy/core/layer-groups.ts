@@ -3,6 +3,64 @@ import type { PMRegistry } from '../registry';
 import { preserveWorldPose, worldPoseValues,worldAim3D,preserveWorldAim,aimProperties3D,aimValues3D } from './parenting';
 import { isModelGroup } from '../../core/scene3d/layers';
 import { modelGroupBounds } from '../../core/scene3d/service';
+import { adoptTemporalEase, segmentControlPoints } from '../../core/anim/temporal-ease';
+
+const plain2DTypes = new Set(['shape', 'solid', 'text', 'image', 'video', 'precomp']);
+const hasVisualStyle = (layer: any): boolean => !!(layer.fx?.length || layer.masks?.length
+  || layer.matteSource || layer.transitionIn || layer.transitionOut
+  || typeof layer.blend === 'object' || layer.blend && layer.blend !== 'normal'
+  || typeof layer.mblur === 'object' || layer.mblur === true);
+const constantProperty = (prop: any, value: any): boolean => {
+  if (!prop || typeof prop !== 'object') return prop === value;
+  if (prop.expr) return false;
+  return prop.kf?.length ? prop.kf.every((key: any) => key.v === value
+    && (typeof value !== 'number' || (key.inInterp !== 'bezier' || !key.inEase?.speed)
+      && (key.outInterp !== 'bezier' || !key.outEase?.speed))) : prop.v === value;
+};
+
+const boundedOpacity = (prop: any): boolean => {
+  const bounded = (value: any) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
+  if (prop.expr) return false;
+  if (!prop.kf?.length) return bounded(prop.v);
+  // Inspect copies: rejecting an operation must not migrate saved keyframes.
+  const keys = adoptTemporalEase(prop.kf.map((key: any) => ({ ...key })));
+  if (keys.some((key: any) => !bounded(key.v) || key.spring)) return false;
+  return keys.every((key: any, index: number) => {
+    if (!index) return true;
+    const previous: any = keys[index - 1];
+    if (previous.outInterp === 'hold' || key.inInterp === 'hold') return true;
+    const curve = segmentControlPoints(previous, key);
+    return bounded(curve.p1.v) && bounded(curve.p2.v);
+  });
+};
+
+const nativeArrayFind = Array.prototype.find;
+// Custom find methods can retain their predicate. Keep its current binding
+// alive, including the result assigned after the method returns.
+function customTransformParent(layers: any[], find: typeof nativeArrayFind, current: any): any {
+  current = Reflect.apply(find,layers,[(item: any) => item.id === current.parent]);
+  return current;
+}
+function transformParent(layers: any[], current: any): any {
+  const find = layers.find;
+  if (find !== nativeArrayFind) return customTransformParent(layers,find,current);
+  // Match native find's length snapshot and live property reads, without
+  // allocating a predicate and its captured loop binding for every parent.
+  const size = +layers.length;
+  if (size <= 0xffffffff) {
+    for (let index = 0, length = size > 0 ? size >>> 0 : 0; index < length; index++) {
+      const item = layers[index];
+      if (item.id === current.parent) return item;
+    }
+    return;
+  }
+  // Native find also supports array-like receivers with longer lengths.
+  const length = size > 0 ? size < 9007199254740991 ? size - size % 1 : 9007199254740991 : 0;
+  for (let index = 0; index < length; index++) {
+    const item = layers[index];
+    if (item.id === current.parent) return item;
+  }
+}
 
 /** Membership supplies a transform space without changing parent links or layer time. */
 export function groupAncestors(layer: any, layers: any[], byId?: Map<string, any>): any[] {
@@ -45,17 +103,29 @@ export function installLayerGroups(PM: PMRegistry): void {
     const m = PM.worldMatrix(group, time), det = m[0]*m[3]-m[1]*m[2];
     if (Math.abs(det) < 1e-10) return null;
     const inv = [m[3]/det,-m[1]/det,-m[2]/det,m[0]/det,(m[2]*m[5]-m[3]*m[4])/det,(m[1]*m[4]-m[0]*m[5])/det];
-    const points: {x:number;y:number}[] = [];
+    let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity,hasPoint=false;
+    // Keep extrema local: a callback capturing fractional values boxes them
+    // on every corner. Math extrema also preserve NaN and signed zero.
     for (const child of PM.curComp().layers) {
       if (child.type === 'group' || !ancestors(child, PM.curComp().layers).some(item => item.id === group.id) || !PM.active(child,time)) continue;
       const bounds = PM.GL?.bounds?.(child,time);
       const world = PM.worldMatrix(child,time), local = PM.mul(inv,world);
-      if (bounds) for (const x of [bounds.x0,bounds.x1]) for (const y of [bounds.y0,bounds.y1]) points.push({x:local[0]*x+local[2]*y+local[4],y:local[1]*x+local[3]*y+local[5]});
-      else if (child.type !== 'audio') points.push({x:local[4],y:local[5]});
+      if (bounds) {
+        const left=bounds.x0,right=bounds.x1;
+        for(let side=0;side<2;side++) {
+          const x=side?right:left,top=bounds.y0,bottom=bounds.y1;
+          for(let edge=0;edge<2;edge++) {
+            const y=edge?bottom:top,px=local[0]*x+local[2]*y+local[4],py=local[1]*x+local[3]*y+local[5];
+            x0=Math.min(x0,px);x1=Math.max(x1,px);y0=Math.min(y0,py);y1=Math.max(y1,py);
+          }
+        }
+        hasPoint=true;
+      } else if (child.type !== 'audio') {
+        const x=local[4],y=local[5];
+        x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);hasPoint=true;
+      }
     }
-    if (!points.length) return null;
-    const x0=Math.min(...points.map(p=>p.x)), x1=Math.max(...points.map(p=>p.x));
-    const y0=Math.min(...points.map(p=>p.y)), y1=Math.max(...points.map(p=>p.y));
+    if (!hasPoint) return null;
     return {x0,y0,x1,y1,w:x1-x0,h:y1-y0,ax:0,ay:0};
   };
   PM.groupAncestors = (layer: any, layers = PM.curComp().layers) => ancestors(layer, layers);
@@ -65,7 +135,7 @@ export function installLayerGroups(PM: PMRegistry): void {
     const selectedIds = new Set(selected.map((layer: any) => layer.id));
     return selected.filter((layer: any) => {
       const seen = new Set<string>();
-      for (let current = layer; current && !seen.has(current.id); current = layers.find((item: any) => item.id === current.parent)) {
+      for (let current = layer; current && !seen.has(current.id); current = transformParent(layers,current)) {
         seen.add(current.id);
         if (current !== layer && selectedIds.has(current.id) || ancestors(current,layers).some(group => selectedIds.has(group.id))) return false;
       }
@@ -76,18 +146,39 @@ export function installLayerGroups(PM: PMRegistry): void {
     const index = indexFor(PM.proj.layers);
     if (index.spans.has(group.id)) return index.spans.get(group.id);
     const ids = new Set(PM.expandGroups([group.id]));
-    const children = PM.proj.layers.filter((layer: any) => ids.has(layer.id) && layer.type !== 'group');
-    const from = children.length ? Math.min(...children.map((layer: any) => layer.from)) : 0;
-    const end = children.length ? Math.max(...children.map((layer: any) => layer.from + layer.dur)) : PM.proj.dur;
+    // Snapshot membership before reading times, then keep the original from
+    // and end phases. Numeric getters may change other members while read.
+    const children=PM.proj.layers.filter((layer:any)=>ids.has(layer.id)&&layer.type!=='group');
+    let from=children.length?Infinity:0,end=children.length?-Infinity:PM.proj.dur;
+    for(let i=0,length=children.length;i<length;i++)from=Math.min(from,children[i].from);
+    for(let i=0,length=children.length;i<length;i++) {
+      const layer=children[i];end=Math.max(end,layer.from+layer.dur);
+    }
     const span = { from, dur: end - from }; index.spans.set(group.id, span); return span;
   };
-  PM.expandGroups = (ids: string[]) => PM.proj.layers.filter((layer: any) => ids.includes(layer.id)
-    || ancestors(layer, PM.proj.layers).some(group => ids.includes(group.id))).map((layer: any) => layer.id);
+  PM.expandGroups = (ids: string[]) => {
+    // Single-group queries are common; larger selections otherwise rescan the
+    // selected ID list for every layer and ancestor in the composition.
+    if(ids.length<8)return PM.proj.layers.filter((layer:any) => ids.includes(layer.id)
+      || ancestors(layer,PM.proj.layers).some(group => ids.includes(group.id))).map((layer:any)=>layer.id);
+    const selected=new Set(ids);
+    return PM.proj.layers.filter((layer:any) => selected.has(layer.id)
+      || ancestors(layer,PM.proj.layers).some(group => selected.has(group.id))).map((layer:any)=>layer.id);
+  };
   PM.normalizeGroupStack = () => {
     const layers = PM.proj.layers, ordered: any[] = [], seen = new Set<string>();
+    // Keep each parent's original stack order without scanning the whole
+    // composition again for every group encountered during traversal.
+    const children = new Map<string | null, any[]>();
+    for (const layer of layers) {
+      const parent = layer.group || null;
+      let members = children.get(parent);
+      if (!members) children.set(parent, members = []);
+      members.push(layer);
+    }
     const visit = (parent: string | null) => {
-      for (const layer of layers) {
-        if ((layer.group || null) !== parent || seen.has(layer.id)) continue;
+      for (const layer of children.get(parent) || []) {
+        if (seen.has(layer.id)) continue;
         seen.add(layer.id); ordered.push(layer);
         if (layer.type === 'group') visit(layer.id);
       }
@@ -140,14 +231,31 @@ export function installLayerGroups(PM: PMRegistry): void {
     if (!groups.length) throw new Error('Select a group to ungroup');
     if (groups.some((group: any) => group.lock || ancestors(group, PM.proj.layers).some(parent => parent.lock))) throw new Error('Unlock the group first');
     if (PM.proj.layers.some((layer: any) => layer.lock && ancestors(layer,PM.proj.layers).some(group => ids.includes(group.id)))) throw new Error('Unlock the group contents before ungrouping');
-    const styled = groups.find((group: any) => group.fx?.length || group.masks?.length
-      || group.matteSource || group.transitionIn || group.transitionOut
-      || typeof group.blend === 'object' || group.blend && group.blend !== 'normal'
-      || typeof group.mblur === 'object' || group.mblur === true);
+    if (groups.some((group: any) => group.solo)) throw new Error('Turn off Solo before ungrouping this group.');
+    const styled = groups.find(hasVisualStyle);
     if (styled) throw new Error(`Remove visual compositing from “${styled.name}” before ungrouping`);
+    if (groups.some((group: any) => !constantProperty(group.on, true) && !constantProperty(group.on, false))) {
+      throw new Error('Pre-compose this group to keep its animated visibility before ungrouping.');
+    }
+    // A shared alpha boundary cannot be distributed over overlapping children.
+    // Only plain single-leaf groups can transfer opacity into an editable child.
+    // Check the whole selection before changing any membership or animation.
+    for (const group of groups) {
+      if (constantProperty(group.p.opacity, 100) || constantProperty(group.on, false) && !group.solo) continue;
+      const descendants = PM.proj.layers.filter((layer: any) => ancestors(layer, PM.proj.layers).some(parent => parent.id === group.id));
+      const drawable = descendants.filter((layer: any) => layer.type !== 'group' && PM.TYPE_META[layer.type]?.visual !== false);
+      if (!drawable.length) continue;
+      const safe = drawable.length === 1 && plain2DTypes.has(drawable[0].type)
+        && !is3DLayer(PM, group) && constantProperty(group.on, true) && !group.solo
+        && descendants.every((layer: any) => !is3DLayer(PM, layer) && !hasVisualStyle(layer) && !layer.solo
+          && !layer.on?.expr && !PM.allProps(layer).some(({ prop }: any) => prop.expr) && boundedOpacity(layer.p.opacity)
+          && (layer.type !== 'group' || constantProperty(layer.on, true)));
+      if (!safe) throw new Error('Pre-compose this group to keep its appearance, or set its opacity to 100% before ungrouping.');
+    }
     const children: string[] = [];
     for (const group of groups) {
       const members = PM.proj.layers.filter((layer: any) => layer.group === group.id);
+      const invisible = constantProperty(group.on, false);
       // Ungrouping animation bakes editable channel keys at composition frames.
       // Include the playhead so this operation never jumps between frames either.
       const hasAnimation = (layer: any) => [...Object.values(layer.p),...aimProperties3D(layer).map(x=>x.prop)].some((prop: any) => prop.kf.length || prop.expr);
@@ -155,18 +263,19 @@ export function installLayerGroups(PM: PMRegistry): void {
       const changesPose = changes3D || PM.localMatrix(group,PM.time).some((value: number,index: number) => Math.abs(value-[1,0,0,1,0,0][index]!)>1e-8) || PM.ev(group,'opacity',PM.time)!==100;
       const animated = hasAnimation(group) || changesPose && PM.proj.layers.some(hasAnimation);
       const times = animated ? [...new Set([PM.time, ...Array.from({length:Math.ceil(PM.proj.dur*PM.proj.fps)+1}, (_,i)=>i/PM.proj.fps)])].sort((a,b)=>a-b) : [];
-      const samples = times.map(time => ({time, values:new Map<string,{world:number[];opacity:number;perspective:number;aim:number[]|null}>(members.filter((layer:any)=>layer.type!=='audio').map((layer:any)=>[layer.id,{world:worldPose(layer,time),aim:worldAim3D(PM,layer,time),perspective:perspectiveAmount(PM,layer,time),opacity:PM.ev(layer,'opacity',time)*PM.ev(group,'opacity',time)/100}]))}));
+      const samples = times.map(time => ({time, values:new Map<string,{world:number[];opacity:number;perspective:number;aim:number[]|null}>(members.filter((layer:any)=>layer.type!=='audio').map((layer:any)=>[layer.id,{world:worldPose(layer,time),aim:worldAim3D(PM,layer,time),perspective:perspectiveAmount(PM,layer,time),opacity:PM.ev(layer,'opacity',time)*PM.clamp(PM.ev(group,'opacity',time),0,100)/100}]))}));
       const poses = new Map<string,number[]>(members.filter((layer: any) => layer.type !== 'audio').map((layer: any) => [layer.id, worldPose(layer,PM.time)]));
       const aims = new Map<string,number[]|null>(members.map((layer:any)=>[layer.id,worldAim3D(PM,layer,PM.time)]));
       const perspectives = new Map(members.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
       for (const layer of members) {
         layer.group = group.group || null; children.push(layer.id);
+        if (invisible) layer.on = false;
         if (poses.get(layer.id)?.length === 16) {
           for (const [key,fallback] of Object.entries(CHANNELS_3D)) layer.p[key] ||= PM.P(fallback);
           layer.threeD = true;
           layer.p.perspective = PM.P(perspectives.get(layer.id));
         }
-        const opacity = layer.p.opacity, factor = PM.ev(group,'opacity',PM.time) / 100;
+        const opacity = layer.p.opacity, factor = PM.clamp(PM.ev(group,'opacity',PM.time),0,100) / 100;
         if (opacity && factor !== 1) {
           if (opacity.expr) opacity.expr = `(${opacity.expr}) * ${factor}`;
           else { opacity.v *= factor; for (const key of opacity.kf) { key.v *= factor; if (key.inEase) key.inEase.speed *= factor; if (key.outEase) key.outEase.speed *= factor; } }
@@ -203,7 +312,11 @@ export function installLayerGroups(PM: PMRegistry): void {
           PM.touch();
         }
       } else {rebase(members, poses);for(const layer of members)preserveWorldAim(PM,layer,aims.get(layer.id) || null,PM.time);}
-      PM.proj.layers = PM.proj.layers.filter((layer: any) => layer.id !== group.id);
+      // Outside layers can use this group as a transform parent. Keep that
+      // coordinate space and its keys while removing the grouping boundary.
+      if (PM.proj.layers.some((layer: any) => layer.parent === group.id)) {
+        group.type = 'null'; group.solo = false;
+      } else PM.proj.layers = PM.proj.layers.filter((layer: any) => layer.id !== group.id);
     }
     changed(); PM.selectLayers(children.filter(id => PM.L(id))); return { ids: children };
   };

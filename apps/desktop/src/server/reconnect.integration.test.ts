@@ -70,6 +70,25 @@ describe('reconnecting link against the host', () => {
     link.close();
   });
 
+  it('sends lazy snapshot names over the socket and fetches individual values with authentication', async () => {
+    const link = new ReconnectingLink({ open }); link.adopt(new Connection(await open()));
+    await link.invoke(IPC.storeSetSerialized, { key: 'project.network', serialized: '{"source":"on demand"}' });
+    const snapshot = await link.sync<Record<string, string>>(IPC.storeSnapshotSerializedSync);
+    expect(snapshot['project.network']).toBeUndefined();
+    expect(JSON.parse(snapshot.__powermoveLazyKeys!)).toContain('project.network');
+    expect(await link.invoke(IPC.storeGetEncoded, { key: 'project.network' })).toBe('{"source":"on demand"}');
+    const url = new URL('/__powermove/store?key=project.network', server.url);
+    expect((await fetch(url)).status).toBe(401);
+    const response = await fetch(url, { headers: { cookie: `pm_session=${server.token}` } });
+    expect(await response.json()).toBe('{"source":"on demand"}');
+    expect((await fetch(new URL('/__powermove/store?key=../theme', server.url), { headers: { cookie: `pm_session=${server.token}` } })).status).toBe(400);
+    await link.invoke(IPC.storeFlush);
+    link.send(IPC.storeDelete, { key: 'project.network' });
+    const fresh = await link.sync<Record<string, string>>(IPC.storeSnapshotSerializedSync);
+    expect(JSON.parse(fresh.__powermoveLazyKeys ?? '[]')).not.toContain('project.network');
+    link.close();
+  });
+
   it('accepts the resume form of run attachment', async () => {
     const link = new ReconnectingLink({ open });
     link.adopt(new Connection(await open()));

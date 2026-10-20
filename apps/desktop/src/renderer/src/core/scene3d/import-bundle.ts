@@ -1,7 +1,5 @@
 import * as THREE from 'three';
-import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
-import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
-import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import type { MTLLoader as MaterialLoader } from 'three/addons/loaders/MTLLoader.js';
 import { parseObj } from '../../kernel/obj';
 import { disposeModel } from './import-model';
 
@@ -21,6 +19,13 @@ export async function prepareModelImport(files:File[]):Promise<File> {
   if(!materials.length)throw new Error('Include the OBJ material (.mtl) file with its textures');
   const byName=new Map<string,File>();
   for(const file of files){const key=leaf(file.name);if(byName.has(key))throw new Error(`Duplicate file name: ${file.name}`);byName.set(key,file);}
+  // Ordinary editor startup and single-file models never need the OBJ material
+  // converter. Load it only after the selected bundle has passed validation.
+  const [{OBJLoader},{MTLLoader},{GLTFExporter}]=await Promise.all([
+    import('three/addons/loaders/OBJLoader.js'),
+    import('three/addons/loaders/MTLLoader.js'),
+    import('three/addons/exporters/GLTFExporter.js')
+  ]);
   const urls=new Map<string,string>(),manager=new THREE.LoadingManager(),failures:string[]=[];
   let settle:(()=>void)|undefined;
   const loaded=new Promise<void>(resolve=>{settle=resolve;});
@@ -32,7 +37,7 @@ export async function prepareModelImport(files:File[]):Promise<File> {
     if(!file||!/^image\/(png|jpeg|webp)$/.test(file.type)&&!/\.(png|jpe?g|webp)$/i.test(file.name))throw new Error(`Select the missing texture file: ${url}`);
     let local=urls.get(file.name);if(!local){local=URL.createObjectURL(file);urls.set(file.name,local);}return local;
   });
-  let root:THREE.Group|undefined,creator:ReturnType<MTLLoader['parse']>|undefined;
+  let root:THREE.Group|undefined,creator:ReturnType<MaterialLoader['parse']>|undefined;
   try {
     const text=(await Promise.all(materials.map(f=>f.text()))).join('\n');
     creator=new MTLLoader(manager).parse(text,'');creator.preload();

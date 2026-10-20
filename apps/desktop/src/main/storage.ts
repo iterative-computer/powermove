@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import * as nodeFs from 'node:fs/promises';
+import * as syncFs from 'node:fs';
 import path from 'node:path';
 import type { App, IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 
@@ -16,6 +17,8 @@ import { parseStoreKey, storeFileName } from '../shared/store-keys';
 import { HistoryRecords, isHistoryDictionary, packStoredHistory, unpackStoredHistory } from '../shared/history-memory';
 
 const WRITE_DELAY_MS = 150;
+const HEAVY_KEY = /^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./;
+const HEAVY_CACHE_BYTES = 64 * 1024 * 1024;
 const QUIT_FLUSH_CEILING_MS = 5_000;
 // Takes retain up to 24 complete editable snapshots; large tracked projects
 // can exceed the ordinary settings limit without being corrupt.
@@ -29,9 +32,14 @@ export type StoreFileSystem = Pick<
 export interface Store {
   load(): Promise<void>;
   snapshot(): StoreSnapshot;
+  preload?(key: string): Promise<void>;
+  preloadProject?(id: string): Promise<void>;
+  /** Independent consumers hold a lease until their project session ends. */
+  acquireProject?(id: string): () => void;
   get?(key: string): unknown;
   getSerialized?(key: string): string | null;
   getEncodedSerialized?(key: string): string | null;
+  getEncodedSerializedAsync?(key: string): Promise<string | null>;
   bootstrapSerialized?(): Record<string, string>;
   snapshotSerialized?(): Record<string, string>;
   set(key: string, value: unknown): void;
@@ -44,6 +52,8 @@ export interface Store {
 /** Test seams are optional; normal callers only pass the store directory. */
 export interface StoreOptions {
   fs?: StoreFileSystem;
+  syncFs?: Pick<typeof syncFs, 'readFileSync' | 'renameSync'>;
+  heavyCacheBytes?: number;
   writeDelayMs?: number;
   now?: () => number;
   randomSuffix?: () => string;
@@ -56,6 +66,13 @@ type PendingOperation =
 class FileStore implements Store {
   private readonly historyRecords = new HistoryRecords();
   private readonly values = new Map<string, unknown>();
+  private readonly keys = new Set<string>();
+  private readonly cacheBytes = new Map<string, number>();
+  private readonly projectLeases = new Map<string, number>();
+  private readonly versions = new Map<string, number>();
+  private readonly loading = new Map<string, Promise<unknown>>();
+  // A failed write still owns the only current copy; keep it until a successful write.
+  private readonly failedWrites = new Set<string>();
   private readonly listeners = new Set<(event: StoreErrorEvent) => void>();
   private readonly pending = new Map<string, PendingOperation>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -66,7 +83,9 @@ class FileStore implements Store {
     private readonly fs: StoreFileSystem,
     private readonly writeDelayMs: number,
     private readonly now: () => number,
-    private readonly randomSuffix: () => string
+    private readonly randomSuffix: () => string,
+    private readonly synchronousFs: Pick<typeof syncFs, 'readFileSync' | 'renameSync'>,
+    private readonly heavyCacheBytes: number
   ) {}
 
   async load(): Promise<void> {
@@ -76,6 +95,8 @@ class FileStore implements Store {
     const names = await this.fs.readdir(this.directory);
     const loadedProjectIds = new Set<string>();
     this.values.clear();
+    this.keys.clear();
+    this.cacheBytes.clear();
     this.historyRecords.clear();
 
     for (const name of names) {
@@ -87,6 +108,10 @@ class FileStore implements Store {
       // ever reaching a filesystem path.
       if (parsedKey === null || storeFileName(parsedKey) !== name) continue;
 
+      this.keys.add(candidateKey);
+      if (parsedKey.kind === 'dynamic' && parsedKey.prefix === 'project') loadedProjectIds.add(parsedKey.id);
+      if (HEAVY_KEY.test(candidateKey)) continue;
+
       const filePath = path.join(this.directory, name);
       let serialized: string;
       try {
@@ -97,20 +122,9 @@ class FileStore implements Store {
       }
 
       try {
-        const value: unknown = JSON.parse(serialized);
-        const packed = packStoredHistory(candidateKey, value, this.historyRecords);
-        this.values.set(candidateKey, packed);
-        const before = candidateKey.startsWith('projectState.') && isRecord(value) ? value.history : value;
-        const after = candidateKey.startsWith('projectState.') && isRecord(packed) ? packed.history : packed;
-        // Finish lossless migration through the normal atomic writer. Otherwise
-        // inactive legacy histories re-create the same huge parse peak each boot.
-        if (isHistoryDictionary(after) && !isHistoryDictionary(before)) {
-          this.schedule(candidateKey, { kind: 'set', serialized: JSON.stringify(packed) });
-        }
-        if (parsedKey.kind === 'dynamic' && parsedKey.prefix === 'project') {
-          loadedProjectIds.add(parsedKey.id);
-        }
+        this.acceptSerialized(candidateKey, serialized);
       } catch (error) {
+        this.keys.delete(candidateKey);
         await this.quarantine(name, candidateKey, error);
       }
     }
@@ -118,42 +132,214 @@ class FileStore implements Store {
     this.reportProjectReconciliation(loadedProjectIds);
   }
 
+  /** Snapshots are bootstrap metadata, never a full-store materialization. */
   snapshot(): StoreSnapshot {
-    const owned = structuredClone(Object.fromEntries(this.values));
-    return Object.fromEntries(Object.entries(owned).map(([key, value]) => [key, unpackStoredHistory(key, value)]));
+    return Object.fromEntries(Object.entries(this.bootstrapSerialized()).map(([key, value]) => [key, JSON.parse(value)]));
   }
 
   get(key: string): unknown {
     if (!parseStoreKey(key)) return undefined;
-    return unpackStoredHistory(key, structuredClone(this.values.get(key)));
+    return unpackStoredHistory(key, structuredClone(this.readThrough(key)));
   }
 
   getSerialized(key: string): string | null {
     if (!parseStoreKey(key)) return null;
-    const value = unpackStoredHistory(key, this.values.get(key));
+    const value = unpackStoredHistory(key, this.readThrough(key));
     return value === undefined ? null : JSON.stringify(value);
   }
 
-  snapshotSerialized(): Record<string, string> {
-    // Strings are immutable: serializing the owned values needs no clone of
-    // every project and undo stack before crossing the bootstrap IPC bridge.
-    return Object.fromEntries([...this.values].map(([key, value]) => [key, JSON.stringify(unpackStoredHistory(key, value))]));
-  }
+  snapshotSerialized(): Record<string, string> { return this.bootstrapSerialized(); }
 
   getEncodedSerialized(key: string): string | null {
     if (!parseStoreKey(key)) return null;
-    const value = this.values.get(key);
+    const value = this.readThrough(key);
     return value === undefined ? null : JSON.stringify(value);
   }
 
   bootstrapSerialized(): Record<string, string> {
-    const lazy: string[] = [], snapshot: Record<string, string> = {};
-    for (const [key, value] of this.values) {
-      if (/^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./.test(key)) lazy.push(key);
-      else snapshot[key] = JSON.stringify(value);
-    }
-    snapshot.__powermoveLazyKeys = JSON.stringify(lazy);
+    const snapshot: Record<string, string> = {};
+    for (const [key, value] of this.values) if (!HEAVY_KEY.test(key)) snapshot[key] = JSON.stringify(value);
+    const lazy = [...this.keys].filter(key => HEAVY_KEY.test(key));
+    if (lazy.length) snapshot.__powermoveLazyKeys = JSON.stringify(lazy);
     return snapshot;
+  }
+
+  async preload(key: string): Promise<void> { await this.loadValue(key); }
+
+  async getEncodedSerializedAsync(key: string): Promise<string | null> {
+    const value = await this.loadValue(key);
+    return value === undefined ? null : JSON.stringify(value);
+  }
+
+  private async loadValue(key: string): Promise<unknown> {
+    if (!parseStoreKey(key) || !this.keys.has(key)) return undefined;
+    if (this.values.has(key)) return this.readThrough(key);
+    const active = this.loading.get(key);
+    if (active) return active;
+    const version = this.versions.get(key);
+    const task = (async () => {
+      let serialized: string;
+      try { serialized = await this.fs.readFile(path.join(this.directory, this.fileNameFor(key, 'store:read')), 'utf8'); }
+      catch (error) {
+        if (this.keys.has(key) && this.versions.get(key) === version) this.emitError(key, `store file could not be read: ${errorText(error)}`);
+        return;
+      }
+      // A synchronous read, set or delete supersedes this disk snapshot.
+      if (!this.keys.has(key)) return undefined;
+      if (this.values.has(key) || this.versions.get(key) !== version) return this.readThrough(key);
+      try { return this.acceptSerialized(key, serialized); }
+      catch (error) { this.quarantineHeavy(key, error); }
+    })();
+    this.loading.set(key, task);
+    try { return await task; }
+    finally { if (this.loading.get(key) === task) this.loading.delete(key); }
+  }
+
+  async preloadProject(id: string): Promise<void> {
+    // Serial reads bound the parse peak; attachments are fetched individually.
+    const release = this.acquireProject(id);
+    try {
+      for (const prefix of ['project', 'projectHistory', 'projectState', 'projectJournal', 'agentThreads']) {
+        await this.preload(`${prefix}.${id}`);
+      }
+    } finally { release(); }
+  }
+
+  acquireProject(id: string): () => void {
+    if (!parseStoreKey(`project.${id}`)) throw new Error('Invalid project id');
+    this.projectLeases.set(id, (this.projectLeases.get(id) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.projectLeases.get(id) ?? 1) - 1;
+      if (remaining) this.projectLeases.set(id, remaining);
+      else this.projectLeases.delete(id);
+      this.evict();
+    };
+  }
+
+  private pinnedKeys(): Set<string> {
+    const projects = new Set(this.projectLeases.keys());
+    const add = (id: unknown): void => {
+      if (typeof id === 'string' && parseStoreKey(`project.${id}`)) projects.add(id);
+    };
+    add(this.values.get('lastActiveProject'));
+    for (const name of ['openWindows', 'windowTabs']) {
+      const entries = this.values.get(name);
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        add(entry);
+        if (isRecord(entry)) {
+          add(entry.active);
+          if (Array.isArray(entry.tabs)) for (const id of entry.tabs) add(id);
+        }
+      }
+    }
+    // Once current window metadata exists, the old single-window strip is stale.
+    if (!this.values.has('openWindows') && !this.values.has('windowTabs')) {
+      const tabs = this.values.get('openTabs');
+      if (Array.isArray(tabs)) for (const id of tabs) add(id);
+    }
+    const pinned = new Set<string>();
+    for (const id of projects) {
+      for (const prefix of ['project', 'projectHistory', 'projectState', 'projectJournal', 'agentThreads']) {
+        pinned.add(`${prefix}.${id}`);
+      }
+      // Attachment ids are independent of project ids; their owner is the
+      // loaded thread archive. Pin the archived payloads without loading them.
+      const archive = this.values.get(`agentThreads.${id}`);
+      if (!isRecord(archive) || !Array.isArray(archive.threads)) continue;
+      const attachments = (items: unknown): void => {
+        if (!Array.isArray(items)) return;
+        for (const item of items) if (isRecord(item) && item.payloadStored === true && typeof item.id === 'string') {
+          const key = `agentAttachment.${item.id}`;
+          if (parseStoreKey(key)) pinned.add(key);
+        }
+      };
+      for (const thread of archive.threads) if (isRecord(thread)) {
+        attachments(thread.attachments);
+        if (Array.isArray(thread.conversation)) for (const message of thread.conversation) {
+          if (isRecord(message)) attachments(message.attachments);
+        }
+      }
+    }
+    return pinned;
+  }
+
+  private readThrough(key: string): unknown {
+    if (!this.keys.has(key)) return undefined;
+    if (this.values.has(key)) {
+      const bytes = this.cacheBytes.get(key);
+      if (bytes !== undefined) { this.cacheBytes.delete(key); this.cacheBytes.set(key, bytes); }
+      return this.values.get(key);
+    }
+    let serialized: string;
+    try { serialized = this.synchronousFs.readFileSync(path.join(this.directory, this.fileNameFor(key, 'store:read')), 'utf8'); }
+    catch (error) { this.emitError(key, `store file could not be read: ${errorText(error)}`); return undefined; }
+    this.bumpVersion(key);
+    try { return this.acceptSerialized(key, serialized); }
+    catch (error) { this.quarantineHeavy(key, error); return undefined; }
+  }
+
+  private acceptSerialized(key: string, serialized: string): unknown {
+    const value: unknown = JSON.parse(serialized);
+    const packed = packStoredHistory(key, value, this.historyRecords);
+    this.values.set(key, packed);
+    const before = key.startsWith('projectState.') && isRecord(value) ? value.history : value;
+    const after = key.startsWith('projectState.') && isRecord(packed) ? packed.history : packed;
+    if (isHistoryDictionary(after) && !isHistoryDictionary(before)) {
+      this.schedule(key, { kind: 'set', serialized: JSON.stringify(packed) });
+    }
+    this.touchCache(key, Buffer.byteLength(serialized));
+    return packed;
+  }
+
+  private touchCache(key: string, bytes: number): void {
+    if (!HEAVY_KEY.test(key)) { this.evict(); return; }
+    this.cacheBytes.delete(key);
+    // Account conservatively for V8 strings, rather than retaining serialized copies.
+    this.cacheBytes.set(key, bytes * 2);
+    this.evict();
+  }
+
+  private evict(): void {
+    const pinned = this.pinnedKeys();
+    // Unknown consumers still need a warm project AND history, even when
+    // either exceeds the budget alone. Keep the MRU of each heavy family.
+    const latest = new Map<string, string>();
+    let bytes = 0;
+    for (const [key, size] of this.cacheBytes) {
+      latest.set(key.slice(0, key.indexOf('.')), key);
+      if (!pinned.has(key)) bytes += size;
+    }
+    for (const [key, size] of this.cacheBytes) {
+      if (bytes <= this.heavyCacheBytes) break;
+      if (pinned.has(key) || latest.get(key.slice(0, key.indexOf('.'))) === key) continue;
+      if (this.pending.has(key) || this.timers.has(key) || this.queues.has(key) || this.failedWrites.has(key)) continue;
+      this.values.delete(key);
+      this.cacheBytes.delete(key);
+      bytes -= size;
+    }
+    // HistoryRecords contains only WeakRefs; evicting one history must not clear
+    // the interning index still shared by other cached histories.
+  }
+
+  private bumpVersion(key: string): void { this.versions.set(key, (this.versions.get(key) ?? 0) + 1); }
+
+  private quarantineHeavy(key: string, cause: unknown): void {
+    this.keys.delete(key);
+    this.values.delete(key);
+    this.cacheBytes.delete(key);
+    this.bumpVersion(key);
+    const name = this.fileNameFor(key, 'store:read');
+    const destination = `${name}.corrupt-${this.now()}`;
+    let detail = `invalid store file quarantined as ${destination}: ${errorText(cause)}`;
+    // No await between detecting corruption and moving the file: a new write
+    // cannot replace it in that gap and accidentally be quarantined instead.
+    try { this.synchronousFs.renameSync(path.join(this.directory, name), path.join(this.directory, destination)); }
+    catch (error) { detail = `invalid store file could not be quarantined: ${errorText(cause)}; ${errorText(error)}`; }
+    this.emitError(key, detail);
   }
 
   set(key: string, value: unknown): void {
@@ -161,7 +347,8 @@ class FileStore implements Store {
 
     // Old renderers send session metadata without history. Such a partial
     // update must never erase the last recoverable undo stack.
-    const previous = this.values.get(key);
+    const previous = key.startsWith('projectState.') && isRecord(value) && !Object.hasOwn(value, 'history')
+      ? this.readThrough(key) : this.values.get(key);
     if (key.startsWith('projectState.') && isRecord(value) && !Object.hasOwn(value, 'history') && isRecord(previous) && previous.history !== undefined) {
       value = { ...value, history: previous.history };
     }
@@ -192,8 +379,11 @@ class FileStore implements Store {
       );
     }
 
+    this.bumpVersion(key);
+    this.keys.add(key);
     this.values.set(key, cloned);
     this.schedule(key, { kind: 'set', serialized });
+    this.touchCache(key, byteLength);
   }
 
   setSerialized(key: string, serialized: string): void {
@@ -207,14 +397,21 @@ class FileStore implements Store {
     catch { throw new IpcValidationError(IPC.storeSetSerialized, 'invalid JSON'); }
     if (key.startsWith('projectState.')) { this.set(key, value); return; }
     const packed = packStoredHistory(key, value, this.historyRecords);
+    this.bumpVersion(key);
+    this.keys.add(key);
     this.values.set(key, packed);
     this.schedule(key, { kind: 'set', serialized: packed === value ? serialized : JSON.stringify(packed) });
+    this.touchCache(key, Buffer.byteLength(serialized));
   }
 
   delete(key: string): void {
     this.fileNameFor(key, IPC.storeDelete);
+    this.bumpVersion(key);
+    this.keys.delete(key);
+    this.cacheBytes.delete(key);
     this.values.delete(key);
     this.schedule(key, { kind: 'delete' });
+    this.evict();
   }
 
   async flushAll(): Promise<void> {
@@ -252,13 +449,15 @@ class FileStore implements Store {
 
     const previous = this.queues.get(key) ?? Promise.resolve();
     const current = previous
-      .then(() => this.persist(key, operation))
+      .then(async () => { await this.persist(key, operation); this.failedWrites.delete(key); })
       .catch((error: unknown) => {
+        this.failedWrites.add(key);
         this.emitError(key, errorText(error));
       });
     this.queues.set(key, current);
     void current.finally(() => {
       if (this.queues.get(key) === current) this.queues.delete(key);
+      this.evict();
     });
   }
 
@@ -372,7 +571,9 @@ export function createStore(dir: string, options: StoreOptions = {}): Store {
     options.fs ?? nodeFs,
     options.writeDelayMs ?? WRITE_DELAY_MS,
     options.now ?? Date.now,
-    options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`)
+    options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`),
+    options.syncFs ?? syncFs,
+    options.heavyCacheBytes ?? HEAVY_CACHE_BYTES
   );
 }
 
@@ -450,6 +651,15 @@ export function registerStoreIpc(
     event.returnValue = store.getEncodedSerialized?.(payload.key) ?? store.getSerialized?.(payload.key) ?? null;
   });
 
+  ipcMain.handle(IPC.storeGetEncoded, async (event, payload: unknown) => {
+    if (!ctx.isTrustedSender(event) || !isRecord(payload) || typeof payload.key !== 'string') {
+      throw new IpcValidationError(IPC.storeGetEncoded, 'expected a trusted store key');
+    }
+    if (store.getEncodedSerializedAsync) return store.getEncodedSerializedAsync(payload.key);
+    await store.preload?.(payload.key);
+    return store.getEncodedSerialized?.(payload.key) ?? store.getSerialized?.(payload.key) ?? null;
+  });
+
   ipcMain.on(IPC.storeSnapshotSync, (event) => {
     if (!ctx.isTrustedSender(event)) {
       event.returnValue = {};
@@ -503,7 +713,7 @@ export function registerStoreIpc(
     }
     if (store.getSerialized) event.returnValue = store.getSerialized(payload['key'] as string);
     else {
-      const value = store.snapshot()[payload['key'] as string];
+      const value = store.get ? store.get(payload['key'] as string) : store.snapshot()[payload['key'] as string];
       event.returnValue = value === undefined ? null : JSON.stringify(value);
     }
   });

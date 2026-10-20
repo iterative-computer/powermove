@@ -84,7 +84,12 @@ export class MeterLoop {
   }
 
   setPalette(palette: MeterPalette): void {
-    this.palette = palette;
+    // Restoring a workspace can briefly detach the theme's CSS variables.
+    // Preserve the last resolved colours until that theme is mounted again.
+    for (const key of Object.keys(this.palette) as Array<keyof MeterPalette>) {
+      const color = palette[key]?.trim();
+      if (color) this.palette[key] = color;
+    }
     for (const view of this.views.values()) { view.gradient = null; view.drawn = ''; this.draw(view); }
   }
 

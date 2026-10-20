@@ -25,6 +25,10 @@ test.describe('@import-mp4 H.264 import smoke', () => {
     // A successful import promises an app-owned copy, not a session-only URL or
     // a dependency on the original in Downloads. No test-only store flush.
     await unlink(source);
+    await session.app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, path.join(session.userData, 'Imported video.pmv'));
+    expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
     await session.relaunch();
     await session.page.waitForFunction((id) => (window as any).PM.proj.id===id,id);
     await session.page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((a:any) => a.name==='temporary-import.mp4'));

@@ -12,8 +12,9 @@ import SettingsScreen, { type SettingsPage } from './SettingsScreen.svelte';
 
 function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
   return {
+    supportedColorDepths: () => PM.GL?.supportedColorDepths || [8, 16, 32],
     composition: () => ({
-      name: PM.proj.name, w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur
+      name: PM.proj.name, w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur, colorDepth: PM.proj.colorDepth
     }),
     applyComposition: (patch: CompositionPatch) => {
       /* Renaming goes through the project registry so the titlebar and the

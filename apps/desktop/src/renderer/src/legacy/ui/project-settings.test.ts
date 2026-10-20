@@ -9,14 +9,15 @@ import {
 } from './project-settings';
 
 function bridge(overrides: Partial<ProjectSettingsBridge> = {}) {
-  const state = { name: 'Reel', w: 1920, h: 1080, fps: 30, dur: 10 };
+  const state = { name: 'Reel', w: 1920, h: 1080, fps: 30, dur: 10, colorDepth: 16 };
   let defaults = normalizeExportDefaults({});
   const applyComposition = vi.fn((patch) => Object.assign(state, {
     name: patch.name ?? state.name,
     w: patch.width ?? state.w,
     h: patch.height ?? state.h,
     fps: patch.fps ?? state.fps,
-    dur: patch.duration ?? state.dur
+    dur: patch.duration ?? state.dur,
+    colorDepth: patch.colorDepth ?? state.colorDepth
   }));
   const applyExportDefaults = vi.fn((patch) => { defaults = normalizeExportDefaults({ ...defaults, ...patch }); });
   return {
@@ -39,6 +40,25 @@ const field = (control: { element: HTMLElement }, label: string) =>
 const change = (node: HTMLElement) => node.dispatchEvent(new Event('change'));
 
 describe('project settings control', () => {
+  it('changes working precision and refreshes it after external edits', () => {
+    const host = bridge({ supportedColorDepths: () => [8, 16, 32] });
+    const control = createProjectSettingsControl(host.api);
+    const depth = field(control, 'Color depth') as HTMLSelectElement;
+    expect(depth.value).toBe('16');
+    depth.value = '32'; change(depth);
+    expect(host.applyComposition).toHaveBeenCalledWith({ colorDepth: 32 });
+    expect(depth.value).toBe('32');
+    host.state.colorDepth = 8; control.refresh();
+    expect(depth.value).toBe('8');
+    control.destroy();
+  });
+
+  it('disables unsupported precision options', () => {
+    const control = createProjectSettingsControl(bridge({ supportedColorDepths: () => [8, 16] }).api);
+    const depth = field(control, 'Color depth') as HTMLSelectElement;
+    expect([...depth.options].map(item => item.disabled)).toEqual([false, false, true]);
+    control.destroy();
+  });
   it('shows composition and export sections seeded from the project', () => {
     const host = bridge();
     const control = createProjectSettingsControl(host.api);
@@ -208,6 +228,43 @@ describe('project settings control', () => {
 });
 
 describe('new project form', () => {
+  it('keeps a dimension field focused when deferred initial focus runs after navigation', () => {
+    const form = createNewProjectForm();
+    document.body.append(form.element);
+    const height = field(form, 'Height in pixels');
+    height.focus();
+    form.focus();
+    expect(document.activeElement).toBe(height);
+    form.element.remove();
+  });
+
+  it('preserves the caret after the user has started editing the name', () => {
+    const form = createNewProjectForm();
+    document.body.append(form.element);
+    const name = field(form, 'Project name') as HTMLInputElement;
+    name.focus();
+    name.value = 'Kinetic';
+    name.setSelectionRange(7, 7);
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    form.focus();
+    expect([name.selectionStart, name.selectionEnd]).toEqual([7, 7]);
+    form.element.remove();
+  });
+
+  it('selects the default name only before the user interacts', () => {
+    const form = createNewProjectForm();
+    document.body.append(form.element);
+    const name = field(form, 'Project name') as HTMLInputElement;
+    form.focus();
+    expect(document.activeElement).toBe(name);
+    expect([name.selectionStart, name.selectionEnd]).toEqual([0, name.value.length]);
+    name.setSelectionRange(2, 2);
+    name.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    form.focus();
+    expect([name.selectionStart, name.selectionEnd]).toEqual([2, 2]);
+    form.element.remove();
+  });
+
   it('uses an in-window background picker without a native colour input', () => {
     let read!: () => string;
     let write!: (value: string) => void;

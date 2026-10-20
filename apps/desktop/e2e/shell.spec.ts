@@ -99,15 +99,18 @@ test.describe('@shell Svelte shell', () => {
     expect(diagnostics.pageErrors).toEqual([]);
   });
 
-  test('tabs reorder by dragging and come back in that order after a relaunch', async ({ session }) => {
+  test('tabs reorder by dragging and relaunch opens the active document while retaining the others in Recents', async ({ session }) => {
     const { page, diagnostics } = session;
     await session.openEditor();
     const firstId = await page.evaluate(() => (window as any).PM.proj.id as string);
     const [secondId, thirdId] = await makeProjects(page, ['Second', 'Third']);
-    await page.evaluate(async (ids) => {
-      const PM = (window as any).PM;
-      for (const id of ids) await PM.Tabs.activate(id);
-    }, [secondId, thirdId]);
+    for (const id of [firstId, secondId, thirdId]) {
+      await session.app.evaluate(({ dialog }, filePath) => {
+        dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+      }, `${session.userData}/${id}.pmv`);
+      await page.evaluate((id) => (window as any).PM.Tabs.activate(id), id);
+      expect(await page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
+    }
 
     const dragged = page.locator(`#tabs .project-doc[data-project-id="${thirdId}"]`);
     const target = page.locator(`#tabs .project-doc[data-project-id="${firstId}"]`);
@@ -130,8 +133,10 @@ test.describe('@shell Svelte shell', () => {
     await session.relaunch();
     const { page: next } = session;
     await next.waitForFunction(() => Boolean((window as any).PM?.Tabs));
-    await expect.poll(() => tabOrder(next)).toEqual([thirdId, firstId, secondId]);
+    await expect.poll(() => tabOrder(next)).toEqual([secondId]);
     expect(await next.evaluate(() => (window as any).PM.proj.id)).toBe(secondId);
+    const recentIds = await next.evaluate(() => (window as any).PM.Projects.list().map((project: any) => project.id));
+    expect(recentIds).toEqual(expect.arrayContaining([firstId, secondId, thirdId]));
 
     expect(diagnostics.pageErrors).toEqual([]);
   });
@@ -282,9 +287,10 @@ test.describe('@shell Svelte shell', () => {
     await page.evaluate(() => (window as any).PM.LibraryUI.open());
     await expect(page.locator('#library-screen')).toHaveClass(/\bon\b/);
     expect(await dragArea()).toMatchObject({ hit: true, region: 'drag' });
-    const libraryBounds = await page.locator('#library-screen').boundingBox();
-    expect(libraryBounds!.y).toBeGreaterThanOrEqual(44);
-    expect(libraryBounds!.y + libraryBounds!.height).toBeLessThanOrEqual(640);
+    await expect.poll(async () => {
+      const library = (await page.locator('#library-screen').boundingBox())!;
+      return library.y >= 0 && library.y + library.height <= 640 + .1;
+    }).toBe(true);
     await page.evaluate(() => (window as any).PM.LibraryUI.close());
 
     await page.evaluate(() => {
@@ -341,14 +347,15 @@ test.describe('@shell Svelte shell', () => {
     expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(0);
     await page.evaluate(() => (window as any).PM.hist.redo());
 
-    // Past the live limit the oldest tab is written out, and comes back from storage intact.
+    // Empty tabs do not evict the document, its Undo state or its decoded media.
     await page.evaluate(async (ids) => {
       const PM = (window as any).PM;
       for (const id of ids) await PM.Tabs.activate(id);
     }, more);
     await page.evaluate((id) => (window as any).PM.Tabs.activate(id), firstId);
     await page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((asset: any) => asset.name === 'h264-aac.mp4'));
-    expect(await page.evaluate(() => (window as any).PM.proj === (window as any).__live.project)).toBe(false);
+    expect(await page.evaluate(() => (window as any).PM.proj === (window as any).__live.project)).toBe(true);
+    expect(await page.evaluate(() => [...(window as any).PM.assets.map.values()][0] === (window as any).__live.media)).toBe(true);
     expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(1);
 
     expect(diagnostics.pageErrors).toEqual([]);

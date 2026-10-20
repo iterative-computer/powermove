@@ -1,5 +1,6 @@
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
+import path from 'node:path';
 
 test.beforeEach(async ({ session }) => { await session.openEditor(); });
 
@@ -32,8 +33,16 @@ test.describe('@import-prores automatic playback proxy', () => {
       return PM.proj.id;
     });
 
+    await session.app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, path.join(session.userData, 'ProRes recovery.pmv'));
+    expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
     await session.relaunch();
     await session.page.waitForFunction((id) => (window as any).PM.proj.id === id, projectId);
+    await session.page.waitForFunction(() => {
+      const PM = (window as any).PM;
+      return [...PM.assets.map.values()].some((asset: any) => asset.name === 'prores422.mov' && asset.el?.readyState >= 2);
+    });
     const restored = await session.page.evaluate(async () => {
       const PM = (window as any).PM;
       const asset = [...PM.assets.map.values()].find((candidate: any) => candidate.name === 'prores422.mov') as any;

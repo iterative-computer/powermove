@@ -366,6 +366,7 @@
 
   /* ── drag out: asset cards → timeline / viewer ── */
   let draggingId = $state<string | null>(null);
+  let draggingAssetIds: string[] = [];
   function handleDragStart(event: DragEvent, asset: Asset): void {
     if ((event.target as Element).closest('button')) { event.preventDefault(); return; }
     const dt = event.dataTransfer;
@@ -378,11 +379,12 @@
     const tile = (event.currentTarget as HTMLElement).querySelector<HTMLElement>('.asset-preview');
     if (tile) dt.setDragImage(tile, tile.offsetWidth / 2, tile.offsetHeight / 2);
     draggingId = asset.id;
-    selectAsset(asset.id);
+    if (!selectedAssetIds.includes(asset.id)) selectAsset(asset.id);
+    draggingAssetIds = selectedAssets.map(item => item.id);
     /* dragover can't read payload data, so the timeline ghost reads this. */
     PM.mediaDrag = { id: asset.id, name: asset.name, kind: asset.kind, dur: asset.dur };
   }
-  function handleDragEnd(): void { draggingId = null; folderDropTarget = null; PM.mediaDrag = null; }
+  function handleDragEnd(): void { draggingId = null; draggingAssetIds = []; folderDropTarget = null; PM.mediaDrag = null; }
 
   /* ── drop in: OS files → project media only, no layer ── */
   let dropDepth = 0;
@@ -420,7 +422,17 @@
      waveform) selects, not only on the card's own box. */
   function handleRowPointerDown(event: PointerEvent, asset: Asset): void {
     if (event.button !== 0 || (event.target as Element).closest('button')) return;
+    // Keep the batch during a drag; a plain click collapses it on release.
+    if (!event.metaKey && !event.ctrlKey && !event.shiftKey && selectedAssetIds.length > 1 && selectedAssetIds.includes(asset.id)) {
+      (event.currentTarget as HTMLElement).focus();
+      return;
+    }
     selectAsset(asset.id, event.currentTarget as HTMLElement, event);
+  }
+
+  function handleRowClick(event: MouseEvent, asset: Asset): void {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || (event.target as Element).closest('button')) return;
+    if (selectedAssetIds.length > 1 && selectedAssetIds.includes(asset.id)) selectAsset(asset.id, event.currentTarget as HTMLElement);
   }
 
   function clearSelection(): void {
@@ -719,7 +731,7 @@
 
   /** What is being dragged inside the panel, for a folder or path drop. */
   function draggedItems(): { assets?: string[]; folders?: string[] } | null {
-    if (draggingId) return { assets: [draggingId] };
+    if (draggingId) return { assets: draggingAssetIds };
     if (draggingFolderId) return { folders: [draggingFolderId] };
     return null;
   }
@@ -878,18 +890,14 @@
 >
   {#if currentFolder}
     <nav class="asset-path" aria-label="Folder path">
-      <button class="asset-path-up" type="button" title="Up one level" aria-label="Up one level"
-        onclick={() => openFolder(crumbs.at(-2)?.id ?? null)}
-        ondragover={(event) => handleFolderDragOver(event, crumbs.at(-2)?.id ?? null)}
-        ondragleave={handleFolderDragLeave}
-        ondrop={(event) => handleFolderDrop(event, crumbs.at(-2)?.id ?? null)}>
-        <Icon {PM} name="chev" />
-      </button>
-      <button class="asset-path-crumb" type="button" class:is-drop-target={folderDropTarget === ''}
+      <button class="asset-path-crumb asset-path-root" type="button" class:is-drop-target={folderDropTarget === ''}
         onclick={() => openFolder(null)}
         ondragover={(event) => handleFolderDragOver(event, null)}
         ondragleave={handleFolderDragLeave}
-        ondrop={(event) => handleFolderDrop(event, null)}>Media</button>
+        ondrop={(event) => handleFolderDrop(event, null)}>
+        <Icon {PM} name="chev" />
+        Media
+      </button>
       {#each crumbs as crumb, index (crumb.id)}
         <span class="asset-path-sep" aria-hidden="true">/</span>
         <button class="asset-path-crumb" type="button" class:is-drop-target={folderDropTarget === crumb.id}
@@ -1005,6 +1013,7 @@
         data-asset-id={asset.id}
         title={loading ? 'Loading media…' : offline ? detail : 'Select media · double-click to preview, or drag onto the timeline'}
         onpointerdown={(event) => handleRowPointerDown(event, asset)}
+        onclick={(event) => handleRowClick(event, asset)}
         oncontextmenu={(event) => showAssetMenu(event, asset)}
         ondblclick={(event) => handleRowDoubleClick(event, asset)}
         onkeydown={(event) => handleRowKeydown(event, asset, index)}

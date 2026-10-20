@@ -143,6 +143,52 @@ describe('viewer extension', () => {
     expect(harness.viewer()).toBeNull();
   });
 
+  it.each(['layer', 'group', 'nested group', 'unlocked'])('Pen double-click respects %s protection', protection => {
+    const harness = apiHarness();
+    const path = { id: 'path', p: { closed: { v: false, kf: [] } } };
+    const layer = { id: 'shape', type: 'shape', lock: protection === 'layer', d: { paths: [path] }, masks: [] };
+    harness.api.selection.first = () => layer as any;
+    harness.api.groups.ancestors = () => [{ lock: protection === 'group' }, { lock: protection === 'nested group' }] as any;
+    harness.api.services.register('tool', { tool: 'pen' });
+    const mutate = vi.fn((_label, action) => action());
+    harness.api.edit.mutate = mutate;
+    activateExtension(harness.api);
+    const body = document.createElement('div'); harness.panel!.build!(body, { spec: {} });
+    const runtime = harness.viewer() as any; runtime.activePath = path.id;
+    runtime.inner.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+    expect(path.p.closed.v).toBe(protection === 'unlocked');
+    expect(mutate).toHaveBeenCalledTimes(protection === 'unlocked' ? 1 : 0);
+    expect(runtime.activePath).toBe(protection === 'unlocked' ? null : path.id);
+    harness.dispose();
+  });
+
+  it('routes Escape to the active canvas drag without swallowing idle Escape', () => {
+    const context = new Proxy({} as Record<string, any>, {
+      get: (target, key: string) => target[key] ??= vi.fn(),
+    });
+    vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue(context as never);
+    const harness = apiHarness();
+    activateExtension(harness.api);
+    const body = document.createElement('div');
+    harness.panel!.build!(body, { spec: {} });
+    const runtime = harness.viewer() as any;
+    const rect = { left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700, x: 0, y: 0, toJSON() {} };
+    runtime.stage.getBoundingClientRect = () => rect;
+    runtime.inner.getBoundingClientRect = () => rect;
+    runtime.layout(); runtime.temporaryTool = 'zoom';
+    const cancel = vi.fn();
+    vi.mocked(harness.api.ui.drag).mockImplementation((_event, options) => ({ cancel: () => { cancel(); options.cancel?.(); } }));
+    runtime.stage.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 100, clientY: 100 }));
+    expect(harness.api.ui.drag).toHaveBeenCalledOnce();
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    window.dispatchEvent(escape);
+    expect(escape.defaultPrevented).toBe(true); expect(cancel).toHaveBeenCalledOnce();
+    const idle = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    window.dispatchEvent(idle);
+    expect(idle.defaultPrevented).toBe(false); expect(cancel).toHaveBeenCalledOnce();
+    harness.dispose();
+  });
+
   it.each(['select', 'zoom', 'shape', 'text'])('paints the %s tool outline at display cadence without rerendering the composition', (tool) => {
     const context = new Proxy({} as Record<string, any>, {
       get: (target, key: string) => target[key] ??= vi.fn(),

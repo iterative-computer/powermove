@@ -54,12 +54,8 @@
 
 <style>
   .agent-step { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; width: min(560px, calc(100vw - 96px)); padding-top: 48px; text-align: center; -webkit-app-region: no-drag; }
-  /* Same staggered entrance as the other steps (welcome-enter in welcome.css). */
-  .agent-step > * { animation: welcome-enter 800ms cubic-bezier(0.16, 1, 0.3, 1) calc(240ms + var(--i, 0) * 120ms) backwards; }
-  .agent-step > h1 { --i: 1; }
-  .agent-step > .intro { --i: 2; }
-  .agent-step > .choices { --i: 3; }
-  .agent-step > .actions { --i: 4; }
+  /* Same short entrance as the other steps (welcome-enter in welcome.css). */
+  .agent-step > * { animation: welcome-enter 200ms cubic-bezier(0.16, 1, 0.3, 1) backwards; }
   /* Lines up with the back arrow on the timeline and suitcase steps. */
   .back { position: absolute; top: 0; left: calc(50% - 170px); width: 32px; height: 32px; display: grid; place-items: center; background: transparent; color: var(--tx-3); }
   .back:hover { background: var(--ink-1); color: var(--tx); }

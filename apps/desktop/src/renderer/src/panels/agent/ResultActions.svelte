@@ -77,7 +77,7 @@
     {/if}
     {#if run.review?.critique}<Markdown text={run.review.critique} />{/if}
     {#if reversible && !run.autonomous}<p>Powermove source changes from this run are one Command-Z Undo step.</p>{/if}
-    {#if run.reviewError}
+    {#if run.reviewError && !run.reviewErrorInConversation}
       <div class="spatial-review-warning"><Markdown text={run.autonomous ? run.reviewError : `Visual review stopped: ${run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.`} /></div>
     {/if}
     {#if run.frames?.images?.length}

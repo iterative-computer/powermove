@@ -13,8 +13,25 @@ describe('prepared temporal evaluation', () => {
     expect(keys[1].eo).toEqual([.5, .125]);
     const moved = [keys[1], { t: 3, v: 200 }];
     temporalKeys(moved);
-    expect(Object.getOwnPropertyDescriptor(keys[1], 'eo')!.get).not.toBe(getter);
+    expect(Object.getOwnPropertyDescriptor(keys[1], 'eo')!.get).toBe(getter);
     expect(keys[1].eo).toEqual([.5, .5]);
+  });
+  it('shares compatibility accessors across dense tracks without mixing their timing or edits', () => {
+    const first: any[] = Array.from({ length: 2_000 }, (_, i) => ({ t: i, v: i * 100 }));
+    const second: any[] = [{ t: 0, v: 10 }, { t: 2, v: 30 }];
+    temporalKeys(first); temporalKeys(second);
+    for (const name of ['eo', 'ei', 'hold', 'bezierMode']) {
+      const descriptor = Object.getOwnPropertyDescriptor(first[0], name)!;
+      expect(new Set([...first, ...second].map(key => Object.getOwnPropertyDescriptor(key, name)!.get)).size).toBe(1);
+      expect(new Set([...first, ...second].map(key => Object.getOwnPropertyDescriptor(key, name)!.set)).size).toBe(1);
+      expect(descriptor.enumerable).toBe(false);
+    }
+    first[0].hold = true;
+    expect(temporalEvaluate(first, .5, 0, t => t)).toBe(0);
+    expect(temporalEvaluate(second, 1, 0, t => t)).toBe(20);
+    second[0].eo = [.8, 0];
+    expect(temporalEvaluate(second, 1, 0, t => t)).toBeLessThan(20);
+    expect(first[0].hold).toBe(true);
   });
   it('refreshes a same-time result after an edit and supports backward evaluation', () => {
     const keys = [{ t: 0, v: 0 }, { t: 1, v: 100 }];

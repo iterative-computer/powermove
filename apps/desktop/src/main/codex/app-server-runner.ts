@@ -14,6 +14,7 @@ import type {
 } from '../../shared/ipc';
 import { isRecord, isString } from '../../shared/guards';
 import { discoverCodexBinary } from './env';
+import { isConnectionRetry, RECONNECTING_PROGRESS, RECONNECTED_PROGRESS } from './connection-status';
 import { isolatedCodexEnvironment, prepareIsolatedCodexHome } from './isolation';
 import {
   POWERMOVE_LIVE_INSPECTION_TOOL_NAMES,
@@ -48,6 +49,7 @@ interface ActiveTurn extends RunCallbacks {
   directory: string;
   queuedSteering: CodexSteerRequest[];
   cancelRequested: boolean;
+  reconnecting: boolean;
   agentMessageDeltaItemIds: Set<string>;
   sawUnscopedAgentMessageDelta: boolean;
   /** Held `request_user_input` calls: trace item id → App Server request id. */
@@ -358,6 +360,7 @@ export class CodexAppServerRunner {
           directory: turnDirectory,
           queuedSteering: [],
           cancelRequested: false,
+          reconnecting: false,
           agentMessageDeltaItemIds: new Set(),
           sawUnscopedAgentMessageDelta: false,
           questions: new Map(),
@@ -624,7 +627,11 @@ export class CodexAppServerRunner {
     if (methodIs(method, 'warning') && isString(params.message, 2_000)) {
       const text = params.message.replace(/\s+/g, ' ').trim().slice(0, 320);
       for (const candidate of this.active.values()) {
-        if (text && (threadId === null || candidate.threadId === threadId)) candidate.onProgress?.(text);
+        if (!text || (threadId !== null && candidate.threadId !== threadId)) continue;
+        if (isConnectionRetry(text)) {
+          if (!candidate.reconnecting) candidate.onProgress?.(RECONNECTING_PROGRESS);
+          candidate.reconnecting = true;
+        } else candidate.onProgress?.(text);
       }
       return;
     }
@@ -653,8 +660,20 @@ export class CodexAppServerRunner {
     /* Provider housekeeping the person should see without it being mistaken
        for the agent's own words: retries, model reroutes, warnings. */
     if (methodIs(method, 'error') && isRecord(params.error)) {
-      if (params.willRetry === true) turn.onProgress?.('Connection interrupted. Retrying…');
+      if (params.willRetry === true) {
+        if (!turn.reconnecting) turn.onProgress?.(RECONNECTING_PROGRESS);
+        turn.reconnecting = true;
+      }
       return;
+    }
+    const resumed = ((methodIs(method, 'item/started') || methodIs(method, 'item/completed'))
+      && isRecord(params.item) && normalizedItemType(params.item.type) !== 'error')
+      || ((methodIs(method, 'item/agentMessage/delta') || methodIs(method, 'item/reasoning/textDelta')
+        || methodIs(method, 'item/reasoning/summaryTextDelta')) && isString(params.delta) && params.delta.length > 0)
+      || (methodIs(method, 'turn/completed') && isRecord(params.turn) && params.turn.status === 'completed');
+    if (turn.reconnecting && resumed) {
+      turn.reconnecting = false;
+      turn.onProgress?.(RECONNECTED_PROGRESS);
     }
     if (methodIs(method, 'model/rerouted') && isString(params.toModel, 120)) {
       turn.onProgress?.(`Continuing on ${params.toModel}`);

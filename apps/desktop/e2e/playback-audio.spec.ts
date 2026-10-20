@@ -1,5 +1,6 @@
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
+import { join } from 'node:path';
 
 async function openAudioProject(page: any) {
   await page.waitForFunction(() => Boolean((window as any).PM.GL.gl));
@@ -99,12 +100,18 @@ test('cached playback stops its own audio and hands back to normal playback', as
 
 test('the restored project keeps playing audio through quality changes', async ({ session }) => {
   await openAudioProject(session.page);
+  await session.app.evaluate(({ dialog }, path) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: path });
+  }, join(session.userData, 'Audio.pmv'));
   const id = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
-    await PM.flushProject();
+    if (!await PM.saveProject()) throw new Error('Audio project was not saved');
     return PM.proj.id;
   });
   await session.relaunch();
+  // A new window starts at Projects; reopen the persisted document as a user
+  // does instead of assuming the previous editor is restored automatically.
+  await session.page.evaluate(async id => (window as any).PM.openProjectHere(id), id);
   await session.page.waitForFunction(id => (window as any).PM.proj.id === id && [...(window as any).PM.assets.map.values()].some((a: any) => a.audioBlob?.size), id);
   await session.page.evaluate(() => { const PM = (window as any).PM; PM.setTime(0); PM.play(); });
   await session.page.waitForFunction(() => (window as any).PM.Audio.inspect().voices.length > 0);

@@ -1,6 +1,8 @@
 /* Ported from js/core/projects.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { parseAsync } from './parse-async';
+import { yieldTask } from './yield-task';
 
 export function install(PM: PMRegistry): void {
 const R: any = {
@@ -79,13 +81,35 @@ R.recover = (proj: any, thumb: any) => {
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
-  const raw = PM.store.get(R.SLOT + proj.id, null);
+  const raw = PM.store.has ? PM.store.has(R.SLOT + proj.id) : PM.store.get(R.SLOT + proj.id, null);
   const entries = journal(proj.id);
   if (!raw || !entries.length || journalBytes(entries) > MAX_JOURNAL_BYTES
       || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
     return R.put(proj, thumb);
   }
   return meta;
+};
+
+/** Playback-safe checkpoint. Explicit save/close still uses the synchronous
+ * barrier in put, which supersedes any in-progress background checkpoint. */
+R.recoverAsync = async (proj: any, thumb: any, isCurrent: () => boolean) => {
+  if (!proj?.id || !isCurrent()) return false;
+  if (!PM.store.setSnapshotAsync) { R.recover(proj, thumb); return true; }
+  const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
+  if (thumb) meta.thumb = thumb;
+  R.upsertMeta(meta);
+  PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
+  const entries = journal(proj.id);
+  if (PM.store.has(R.SLOT + proj.id) && entries.length && journalBytes(entries) <= MAX_JOURNAL_BYTES
+      && Number(proj.revision || 0) % CHECKPOINT_REVISIONS !== 0) return true;
+  const saved = await PM.store.setSnapshotAsync(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }, isCurrent);
+  if (!saved) return false;
+  // Edits can arrive while native storage commits. Retain patches newer than
+  // the captured prefix instead of deleting their recovery journal.
+  const remaining = journal(proj.id).slice(entries.length);
+  if (remaining.length) PM.store.set(R.JOURNAL + proj.id, remaining);
+  else PM.store.del(R.JOURNAL + proj.id);
+  return true;
 };
 
 /** Update metadata only — never touches stored project data. */
@@ -145,6 +169,37 @@ R.get = (id: any) => {
   project = clone(project);
   for (const entry of journal(id)) project = applyPatches(project, entry.patches);
   return project;
+};
+
+/** The opening path owns a fresh parsed copy, without synchronous IPC or a
+ * second full-document clone. Small journal patches are applied between yields. */
+R.getAsync = async (id: string) => {
+  if (!PM.store.getAsync) return R.get(id);
+  const entries = await PM.store.getAsync(R.JOURNAL + id, []);
+  const raw = await PM.store.getAsync(R.SLOT + id, null);
+  let project = R.unwrap(typeof raw === 'string' ? await parseAsync(raw) : raw);
+  if (!project) {
+    const autosave = await PM.store.getAsync('autosave', null);
+    const old = R.unwrap(typeof autosave === 'string' ? await parseAsync(autosave) : autosave);
+    project = old?.id === id ? old : null;
+  }
+  if (!project) return null;
+  let deadline = performance.now() + 4;
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (Number.isFinite(entry.revision) && Number.isFinite(project.revision) && entry.revision <= project.revision) continue;
+    project = applyPatches(project, entry.patches);
+    if (performance.now() >= deadline) { await yieldTask(); deadline = performance.now() + 4; }
+  }
+  return project;
+};
+
+R.getStateAsync = async (id: string) => {
+  if (!PM.store.getAsync) return R.getState(id);
+  const metadata = await PM.store.getAsync(`projectMeta.${id}`, null);
+  const history = await PM.store.getAsync(`projectHistory.${id}`, undefined);
+  const legacy = !metadata || history === undefined ? await PM.store.getAsync(R.STATE + id, null) : null;
+  const state = metadata ? { ...legacy, ...metadata } : legacy;
+  return history === undefined ? state : { ...state, history };
 };
 
 R.getState = (id: any, options: { history?: boolean } = {}) => {

@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { CodexAnswerRequest, CodexQuestion, CodexRunRequest, CodexRunResult, CodexTraceEvent } from '../../shared/ipc';
 import { isRecord, isString } from '../../shared/guards';
 import { collectArtifacts } from '../codex/artifacts';
-import { publishExtensionChanges, withStageSnapshot } from '../codex/change-history';
+import { ExtensionPublicationConflictError, publishExtensionChanges, withStageSnapshot } from '../codex/change-history';
 import { AgentResultValidationError, repairAgentResult } from '../codex/result-repair';
 import { validateStagedExtensions } from '../codex/validate-staged-extensions';
 import { consumeToken } from '../codex/consent';
@@ -345,10 +345,11 @@ export class ClaudeRunner {
         await this.cleanupCancelled(state, options.userData);
         return failure('The Claude run was cancelled.', true);
       }
-      if ((error instanceof AgentResultValidationError || repairingResult) && state.layout) {
+      if ((error instanceof AgentResultValidationError || error instanceof ExtensionPublicationConflictError || repairingResult) && state.layout) {
         await preserveCancelledRun(state.layout).catch(checkpointError => options.onWarning?.(`Could not save the agent checkpoint: ${String(checkpointError)}`));
       }
-      return failure(error instanceof Error ? error.message : String(error));
+      return { ...failure(error instanceof Error ? error.message : String(error)),
+        ...(error instanceof ExtensionPublicationConflictError ? { preserveLiveEdits: true } : {}) };
     } finally {
       if (state.killTimer) clearTimeout(state.killTimer);
       this.active.delete(req.id);

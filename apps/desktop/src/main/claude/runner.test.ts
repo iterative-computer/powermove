@@ -82,6 +82,31 @@ function successfulChild(output: unknown = { message: 'hello' }, onChild?: (chil
 }
 
 describe('Claude runner', () => {
+  it('retains conflicting extension work and live project edits without retrying the provider', async () => {
+    const userData = await mkdtemp(path.join(tmpdir(), 'claude-extension-conflict-'));
+    const id = 'conflicting-panel', live = path.join(userData, 'extensions', id);
+    const manifest = { id, name: 'Panel', version: '1.0.0', apiVersion: 1, entry: 'index.ts' };
+    mkdirSync(live, { recursive: true });
+    writeFileSync(path.join(live, 'manifest.json'), JSON.stringify(manifest));
+    writeFileSync(path.join(live, 'index.ts'), 'export default "before";');
+    const req = request({ mode: 'autonomous', access: 'project', projectJSON: '{}', threadId: 'conflict' });
+    const spawnProcess = vi.fn((_binary: string, args: readonly string[]) => {
+      const stage = args[args.indexOf('--add-dir') + 1]!;
+      writeFileSync(path.join(stage, id, 'index.ts'), 'export default function activate() {}');
+      writeFileSync(path.join(live, 'index.ts'), 'export default "newer-user-work";');
+      return successfulChild({ summary: 'Edited panel', commands: [], artifacts: [], extensions: [{ id, action: 'updated' }] }) as never;
+    });
+    try {
+      const result = await new ClaudeRunner().run(req, { userData, extensionsDir: path.join(userData, 'extensions'),
+        apiPackFiles: async () => [], binary: '/fake/claude', spawnProcess });
+      expect(result).toMatchObject({ ok: false, preserveLiveEdits: true, error: expect.stringContaining(id) });
+      expect(spawnProcess).toHaveBeenCalledOnce();
+      expect(await readFile(path.join(live, 'index.ts'), 'utf8')).toBe('export default "newer-user-work";');
+      const checkpoint = JSON.parse(await readFile(`${sessionPathFor(agentWorkspaceRoot(userData, req.projectId), 'project', req.threadId, 'claude')}.checkpoint.json`, 'utf8'));
+      expect(await readFile(path.join(checkpoint.stagingDirectory, id, 'index.ts'), 'utf8')).toContain('activate');
+    } finally { await rm(userData, { recursive: true, force: true }); }
+  });
+
   it('repairs broken mod source before publishing and resumes the same staged run', async () => {
     const userData = await mkdtemp(path.join(tmpdir(), 'claude-mod-repair-'));
     try {

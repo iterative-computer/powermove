@@ -28,6 +28,9 @@ files:
   # electron-builder auto-pack a second copy of either platform executable.
   - '!node_modules/@openai/codex-darwin-arm64/**'
   - '!node_modules/@anthropic-ai/claude-code-darwin-arm64/**'
+  # The SDK carries the same Claude executable as its optional platform
+  # package. Model discovery always receives the runtime copied below.
+  - '!**/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/**'
   - '!node_modules/@anthropic-ai/claude-code/bin/claude.exe'
   # esbuild/lib/main.js resolves the @esbuild platform package at runtime. The
   # install-time bin copy is the same executable and is not used by Powermove.
@@ -51,14 +54,11 @@ extraResources:
     to: builtin-extensions
     filter:
       - "**/*"
+      - "!**/*.test.*"
+      - "!**/*.spec.*"
+      - "!**/__tests__/**"
   - from: docs/EXTENSIONS.md
     to: api-pack/EXTENSIONS.md
-  - from: src/shared/blender.ts
-    to: api-pack/blender-schema.ts
-  - from: src/renderer/src/core/scene3d/materials.ts
-    to: api-pack/scene3d-materials.ts
-  - from: src/renderer/src/core/scene3d/modeling.ts
-    to: api-pack/scene3d-modeling.ts
   - from: docs/SCENE3D.md
     to: api-pack/SCENE3D.md
   - from: src/renderer/src/core/scene3d/schema.ts
@@ -131,7 +131,7 @@ mac:
   entitlementsInherit: resources/entitlements.mac.plist
   # Apple Icon Composer catalog. electron-builder invokes actool so macOS can
   # select light, dark, tinted, and clear renditions from icon.json.
-  icon: resources/icon/Powermove.icon
+  icon: resources/icon/app-icon/Powermove-playhead.icon
   extendInfo:
     UTExportedTypeDeclarations:
       - UTTypeIdentifier: com.zellzoi.powermove.project

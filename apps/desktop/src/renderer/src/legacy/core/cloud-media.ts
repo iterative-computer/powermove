@@ -5,29 +5,72 @@ import { bridge as hostBridge } from '../../kernel/bridge';
  *  Files read out of a dropped folder may also need their path named here. */
 export const cloudSourcePaths = new WeakMap<File, string>();
 type MediaBridge = PowermoveBridge['media'];
-export interface CloudAsset { id: string; name: string; sourcePath?: string; path?: string }
+export interface CloudAsset { id: string; name: string; sourcePath?: string; path?: string; type?: string; lastModified?: number }
 export interface CloudStatus {
   provider: 'iCloud' | 'Cloud';
   state: 'offloaded' | 'downloading' | 'error';
   error?: string;
 }
 
-async function readSourceFile(media: MediaBridge, result: { token: string; size: number }, meta: CloudAsset, current: () => boolean, maxBytes = Infinity) {
+const CLOUD_WAIT_MS = 5 * 60_000;
+
+/** Bound each provider operation, including metadata and chunk reads. */
+export async function cloudWait<T>(operation: Promise<T>, milliseconds = CLOUD_WAIT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([operation, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Cloud download timed out. Check your connection or download the file in Finder, then try again.')), milliseconds);
+    })]);
+  } finally { clearTimeout(timer!); }
+}
+
+/** Release an owned source even if its IPC response arrives after timeout. */
+export async function downloadCloudImportSource(media: MediaBridge, source: string) {
+  let expired = false;
+  return cloudWait(media.downloadCloudSource(source).then(result => {
+    // A late IPC response still owns a handle, even after our wait expires.
+    if (expired) { void media.releaseCloudSource(result.token).catch(() => undefined); throw new Error('Cloud download timed out'); }
+    return result;
+  })).finally(() => { expired = true; });
+}
+
+/** Never read a picker/drop snapshot while File Provider is changing it. */
+export async function prepareCloudImport(file: File, assertCurrent: () => void,
+  onStage?: (label: string, progress?: { completed: number; total: number }) => void): Promise<File> {
+  assertCurrent();
+  const media = hostBridge()?.media;
+  const source = cloudSourcePaths.get(file) || media?.sourcePath?.(file);
+  if (!source || !media?.cloudStatus || !media.downloadCloudSource) return file;
+  onStage?.('Checking file availability');
+  const state = (await cloudWait(media.cloudStatus([source])))[source];
+  assertCurrent();
+  if (state !== 'icloud' && state !== 'cloud') return file;
+  onStage?.(state === 'icloud' ? 'Downloading from iCloud…' : 'Downloading from cloud…');
+  const result = await downloadCloudImportSource(media, source);
+  const downloaded = await readSourceFile(media, result, { id: '', name: file.name, sourcePath: source, type: file.type, lastModified: file.lastModified },
+    () => { assertCurrent(); return true; }, Infinity,
+    (completed, total) => onStage?.('Loading downloaded file', { completed, total }));
+  assertCurrent();
+  return downloaded!;
+}
+
+async function readSourceFile(media: MediaBridge, result: { token: string; size: number }, meta: CloudAsset, current: () => boolean, maxBytes = Infinity, onProgress?: (completed: number, total: number) => void) {
   try {
     if (result.size > maxBytes) throw new Error(`Media file exceeds the ${maxBytes} byte import limit`);
     const parts: ArrayBuffer[] = [];
     for (let offset = 0; offset < result.size;) {
       if (!current()) return null;
-      const chunk = await media.readCloudSource(result.token, offset, Math.min(4 * 1024 * 1024, result.size - offset));
+      const chunk = await cloudWait(media.readCloudSource(result.token, offset, Math.min(4 * 1024 * 1024, result.size - offset)));
       if (!chunk.byteLength) throw new Error('The media file ended unexpectedly');
       const owned = new Uint8Array(chunk.byteLength);
       owned.set(chunk); parts.push(owned.buffer); offset += chunk.byteLength;
+      onProgress?.(offset, result.size);
     }
     if (!current()) return null;
-    const file = new window.File(parts, meta.name);
+    const file = new window.File(parts, meta.name, { type: meta.type, lastModified: meta.lastModified });
     cloudSourcePaths.set(file, meta.sourcePath || meta.path || '');
     return file;
-  } finally { await media.releaseCloudSource(result.token).catch(() => undefined); }
+  } finally { await cloudWait(media.releaseCloudSource(result.token), 10_000).catch(() => undefined); }
 }
 
 /** A missing browser cache does not mean the original file is missing. */
@@ -103,7 +146,7 @@ export function createCloudMedia(PM: Record<string, any>, recover: (meta: any, f
       emit();
       const operation = (async () => {
         try {
-          const result = await media.downloadCloudSource(source(meta));
+          const result = await downloadCloudImportSource(media, source(meta));
           const file = await readSourceFile(media, result, meta, current);
           if (!file || !current()) return;
           await recover(meta, file, current);

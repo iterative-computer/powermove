@@ -24,6 +24,14 @@ describe('legacy media install', () => {
     expect(PM.MediaTiming.earliestStart(video)).toBe(1.5);
   });
 
+  it('trims media before zero while respecting the beginning of its source', () => {
+    const PM = mediaRegistry();
+    const video = { type: 'video', from: -3, d: { trim: 1, speed: 2 } };
+    expect(PM.MediaTiming.earliestStart(video)).toBe(-3.5);
+    expect(PM.MediaTiming.trimAtStart(video, -3.5)).toBe(0);
+    expect(PM.MediaTiming.trimAtStart(video, -2)).toBe(3);
+  });
+
   it('preserves order without exceeding bounded work concurrency', async () => {
     const PM = mediaRegistry();
     let active = 0;

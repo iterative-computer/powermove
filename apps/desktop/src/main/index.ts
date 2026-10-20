@@ -7,7 +7,6 @@ import { installTextContextMenu } from './text-context-menu';
 import { installPermissionHandlers } from './permissions';
 import { registerRenderEncoder } from './render-encoder';
 import { registerExportSidecar } from './export-sidecar';
-import { registerBlenderIpc } from './blender-ipc';
 import {
   app,
   BrowserWindow,
@@ -58,6 +57,7 @@ import { createVarsService } from './env/service';
 import { createRemoveValuesPrompt, registerVarsIpc } from './env/ipc';
 import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
+import { installRendererRecovery, isRendererUnavailable, recoverRenderer } from './renderer-recovery';
 import { MIME_TYPES } from './mime';
 import { registerHapticsIpc } from './haptics';
 import { registerContextMenuIpc } from './context-menu';
@@ -75,13 +75,14 @@ import { openProjectForWindow, registerProjectOpenPathIpc, registerSaveIpc } fro
 import { ProjectFiles } from './project-files';
 import { registerShellIpc } from './shell';
 import { registerRemoteMediaIpc } from './remote-media';
+import { isVisualReplyUrl, VISUAL_REPLY_CSP } from '../shared/visual-reply';
 import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY, extensionSandboxCsp, sandboxFrameNavigationAllowed, sandboxHostOwner, sandboxProcessesToKill, type ContentsFrames } from './security-policy';
 import { SANDBOX_DOCUMENT, isSandboxHost, sandboxDocumentId, sandboxHost } from '../shared/sandbox-origin';
 import { EXTENSION_ID } from '../shared/extensions';
 import { createStore, installQuitFlush, registerStoreIpc, type Store } from './storage';
 import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
-import { EditorWindows, restorableSessions, windowUnderTabDrop } from './windows';
+import { EditorWindows, lastActiveSession, restorableSessions, windowUnderTabDrop } from './windows';
 import { isPanelPopoutRequest } from './panel-popout';
 import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboarding';
 /* ── transcription (on-device speech models) ── */
@@ -131,6 +132,7 @@ const currentEditor = (): BrowserWindow | null => {
 };
 /* Set once the store exists; before that a window cannot have a project yet. */
 let persistOpenWindows: () => void = () => {};
+let prefetchProject: (id: string | null) => Promise<void> = async () => {};
 let onboardingFlow: OnboardingFlow | null = null;
 let startupInitialized = false;
 let projects: ProjectFiles | null = null;
@@ -181,6 +183,7 @@ function drainPendingOpenFiles(): void {
 }
 async function prepareEditorClose(window: BrowserWindow): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
+    || window.webContents.isCrashed()
     || !isAllowedNavigation(window.webContents.getURL(), devRendererUrl)) return;
   // User decisions and large file saves must not be cut off by the recovery-flush timeout.
   const allowed = await window.webContents.executeJavaScript('window.PM?.prepareToClose?.() ?? true');
@@ -189,6 +192,7 @@ async function prepareEditorClose(window: BrowserWindow): Promise<void> {
 }
 async function flushEditor(window: BrowserWindow): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
+    || window.webContents.isCrashed()
     || !isAllowedNavigation(window.webContents.getURL(),devRendererUrl)) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -325,6 +329,7 @@ function registerAppProtocol(): void {
       const contentType = MIME_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
       const headers = responseHeaders(contentType);
       if (relativePath === SANDBOX_PATH) headers['Content-Security-Policy'] = SANDBOX_CSP;
+      if (relativePath === 'visual-reply.html') headers['Content-Security-Policy'] = VISUAL_REPLY_CSP;
       if (relativePath.startsWith('host/') && relativePath.endsWith('.js')) headers['Access-Control-Allow-Origin'] = '*';
       if (/\.(?:woff2?|ttf|otf)$/i.test(relativePath)) headers['Access-Control-Allow-Origin'] = '*';
       return new Response(contents, { headers });
@@ -358,6 +363,9 @@ function secureWebContents(webContents: WebContents, devRendererUrl: string | un
   // will-navigate on the host, so they need their own hook. A Store
   // extension's frame may load its sandbox document on its own host only.
   webContents.on('will-frame-navigate', (event) => {
+    if (!event.isMainFrame && [event.frame, event.initiator].some(frame => {
+      try { return !!frame && isVisualReplyUrl(frame.url); } catch { return false; }
+    })) { event.preventDefault(); return; }
     if (!event.isMainFrame && sandboxFrameNavigationAllowed(event.url, [frameUrl(event.frame), frameUrl(event.initiator)])) return;
     guard(event, event.url);
   });
@@ -494,13 +502,15 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
       autoplayPolicy: 'no-user-gesture-required'
     }
   });
 
   editors.add(window, projectId, tabs);
+  installRendererRecovery(window, dialog, () => openReadyEditors.delete(window.webContents));
   persistOpenWindows();
-  window.on('focus', () => editors.touch(window));
+  window.on('focus', () => { editors.touch(window); persistOpenWindows(); });
   // Drained once the page has both loaded and subscribed, in either order.
   window.webContents.on('did-finish-load', drainPendingOpenFiles);
   // A reload or navigation replaces the page that was listening.
@@ -531,7 +541,7 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
 
   let closing = false, closePrepared = false;
   window.on('close', event => {
-    if (closePrepared || quitPrepared() || window.webContents.isDestroyed()) return;
+    if (closePrepared || quitPrepared() || window.webContents.isDestroyed() || window.webContents.isCrashed()) return;
     event.preventDefault();
     if (closing) return;
     closing = true;
@@ -641,7 +651,7 @@ function registerWindowIpc(): void {
   // A window showing a document, as a new tab or one it already has. Refused
   // when another window has it, because two editors autosaving one slot would
   // lose edits.
-  ipcMain.handle(IPC.windowClaimProject, (event, payload: unknown): WindowClaimResult => {
+  ipcMain.handle(IPC.windowClaimProject, async (event, payload: unknown): Promise<WindowClaimResult> => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const window = senderWindow(event);
     if (!window) return { claimed: false, focused: false };
@@ -651,8 +661,11 @@ function registerWindowIpc(): void {
       editors.reveal(holder);
       return { claimed: false, focused: true };
     }
+    // Reserve ownership before yielding to disk I/O so another window cannot
+    // claim the same project while its cache is warming.
     editors.claim(window, projectId);
     persistOpenWindows();
+    await prefetchProject(projectId);
     return { claimed: true, focused: false };
   });
 
@@ -723,13 +736,19 @@ function registerWindowIpc(): void {
     return { placed: 'new' };
   });
 
-  ipcMain.handle(IPC.windowOpenProject, (event, payload: unknown): WindowOpenResult => {
+  ipcMain.handle(IPC.windowOpenProject, async (event, payload: unknown): Promise<WindowOpenResult> => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const projectId = readProjectId(payload, IPC.windowOpenProject);
     if (!projectId) return { opened: false, focused: false, error: 'A project is required' };
     const holder = editors.windowForProject(projectId);
     if (holder) {
       editors.reveal(holder);
+      return { opened: false, focused: true };
+    }
+    await prefetchProject(projectId);
+    const warmedHolder = editors.windowForProject(projectId);
+    if (warmedHolder) {
+      editors.reveal(warmedHolder);
       return { opened: false, focused: true };
     }
     createWindow({ projectId });
@@ -748,11 +767,10 @@ function registerWindowIpc(): void {
   });
 }
 
-/** Reopens last session's windows and their tabs, or opens one window when the
- *  preference is off, nothing was open, or those projects are gone. */
-function restoreWindows(store: Store): void {
+/** Reopens only the last active project in one window. */
+async function restoreWindows(store: Store): Promise<void> {
   const snapshot = store.get
-    ? Object.fromEntries(['restoreWindows', 'projects', 'windowTabs', 'openWindows', 'openTabs'].map(key => [key, store.get!(key)]))
+    ? Object.fromEntries(['restoreWindows', 'projects', 'windowTabs', 'openWindows', 'openTabs', 'lastActiveProject'].map(key => [key, store.get!(key)]))
     : store.snapshot();
   if (snapshot['restoreWindows'] === false) {
     createWindow();
@@ -762,12 +780,34 @@ function restoreWindows(store: Store): void {
   const known = new Set(
     metas.map((meta) => (meta as { id?: unknown } | null)?.id).filter((id): id is string => typeof id === 'string')
   );
+  // Pre-registry profiles kept only one autosave. Register that document so
+  // migration still restores one project instead of making it disappear.
+  if (!known.size && snapshot['lastActiveProject'] === undefined) {
+    let legacy = store.get?.('autosave') ?? snapshot['autosave'];
+    try { if (typeof legacy === 'string') legacy = JSON.parse(legacy); } catch { legacy = null; }
+    const record = legacy as { proj?: unknown } | null;
+    const project = (record?.proj || legacy) as { id?: unknown; name?: string; layers?: unknown; w?: unknown; h?: unknown } | null;
+    const trash = store.get?.('projectTrash') ?? snapshot['projectTrash'];
+    if (typeof project?.id === 'string' && PROJECT_ID.test(project.id) && Array.isArray(project.layers)
+        && Number.isFinite(project.w) && Number.isFinite(project.h)
+        && !(Array.isArray(trash) && trash.some(meta => meta?.id === project.id))) {
+      store.set('projects', [{ id: project.id, name: project.name || 'Untitled', at: Date.now(), w: project.w, h: project.h }]);
+      await prefetchProject(project.id);
+      createWindow({ projectId: project.id, tabs: [project.id] });
+      return;
+    }
+  }
   const sessions = restorableSessions(snapshot['windowTabs'], snapshot['openWindows'], snapshot['openTabs'], (id) => known.has(id));
-  if (!sessions.length) {
+  const session = lastActiveSession(snapshot['lastActiveProject'], sessions, id => known.has(id), id => {
+    const metadata = store.get?.(`projectMeta.${id}`) ?? store.get?.(`projectState.${id}`);
+    return Number((metadata as { lastActiveAt?: unknown } | null)?.lastActiveAt) || 0;
+  });
+  if (!session) {
     createWindow();
     return;
   }
-  for (const { tabs, active } of sessions) createWindow({ projectId: active, tabs });
+  for (const id of session.tabs) await prefetchProject(id);
+  createWindow({ projectId: session.active, tabs: session.tabs });
 }
 
 if (!hasSingleInstanceLock) {
@@ -889,10 +929,13 @@ if (!hasSingleInstanceLock) {
     installPermissionHandlers(session.defaultSession, isAppMainFrame);
 
     // Boot barrier: the legacy renderer reads PM.store synchronously while its
-    // scripts load, so the store must be in memory before the window exists.
+    // scripts load, so the settings and the active project must be ready before the window exists.
     configureRuntimeUpdates({ root: path.join(app.getPath('userData'), 'runtimes'), appVersion: app.getVersion() });
     const store = createStore(path.join(app.getPath('userData'), 'store'));
     await store.load();
+    prefetchProject = async id => { if (id) await store.preloadProject?.(id); };
+    const lastActive = store.get?.('lastActiveProject');
+    if (typeof lastActive === 'string') await prefetchProject(lastActive);
     registerStoreIpc(ipcMain, store, {
       isTrustedSender,
       // One window's write is another window's stale cache. Tell the others
@@ -914,6 +957,8 @@ if (!hasSingleInstanceLock) {
       // the per-window tabs are only for putting the windows back at launch.
       store.set('openWindows', editors.openProjectIds());
       store.set('windowTabs', editors.openSessions());
+      const recent = editors.mostRecent();
+      if (recent) store.set('lastActiveProject', editors.projectOf(recent));
     };
     registerWindowIpc();
     const quitBarrier = installQuitFlush(app, store, async () => {
@@ -1075,7 +1120,6 @@ if (!hasSingleInstanceLock) {
     app.once('will-quit', () => { void transcription.dispose(); });
 
     registerExportSidecar(ipcMain, ctx);
-    registerBlenderIpc(ipcMain,ctx);
     // Powermove Cloud account. Boot must never block the window: a broken
     // profile file degrades to "signed out".
     let cloud: CloudService | null = null;
@@ -1204,9 +1248,6 @@ if (!hasSingleInstanceLock) {
     const apiPackEntries: Array<[name: string, devPath: string]> = [
       ['EXTENSIONS.md', 'docs/EXTENSIONS.md'],
       ['SCENE3D.md', 'docs/SCENE3D.md'],
-      ['blender-schema.ts', 'src/shared/blender.ts'],
-      ['scene3d-materials.ts', 'src/renderer/src/core/scene3d/materials.ts'],
-      ['scene3d-modeling.ts', 'src/renderer/src/core/scene3d/modeling.ts'],
       ['scene3d-schema.ts', 'src/renderer/src/core/scene3d/schema.ts'],
       ['scene3d-layers.ts', 'src/renderer/src/core/scene3d/layers.ts'],
       ['scene3d-operations.ts', 'src/renderer/src/core/scene3d/operations.ts'],
@@ -1239,6 +1280,7 @@ if (!hasSingleInstanceLock) {
     };
 
     registerCodexIpc(ipcMain, {
+      acquireProject: id => store.acquireProject!(id),
       getWindow: () => currentEditor(),
       broadcast: (send) => {
         for (const window of editors.all()) {
@@ -1261,7 +1303,7 @@ if (!hasSingleInstanceLock) {
       refreshExtensions: refreshRestoredExtensions,
       externalMcp: { getOwner: () => {
         const editor = currentEditor();
-        return editor && openReadyEditors.has(editor.webContents) ? editor.webContents : null;
+        return editor && !isRendererUnavailable(editor.webContents) && openReadyEditors.has(editor.webContents) ? editor.webContents : null;
       } },
       storeAgent: () => storeAgentGateway,
       openExternal: async (url) => { await shell.openExternal(url); }
@@ -1350,7 +1392,7 @@ if (!hasSingleInstanceLock) {
     if (onboardingEnabled(process.env, isBackgroundTest, completedOnboarding)) {
       onboardingFlow.start();
     } else {
-      restoreWindows(store);
+      await restoreWindows(store);
     }
     startupInitialized = true;
     drainPendingOpenFiles();
@@ -1361,7 +1403,11 @@ if (!hasSingleInstanceLock) {
         onboardingFlow.focus();
         return;
       }
-      if (editors.size === 0) createWindow();
+      if (editors.size === 0) void restoreWindows(store);
+      else {
+        const editor = currentEditor();
+        if (editor && recoverRenderer(editor)) editors.reveal(editor);
+      }
     });
   });
 }

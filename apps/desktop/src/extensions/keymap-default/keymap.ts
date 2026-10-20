@@ -41,6 +41,7 @@ const MOD_CHORDS: Array<[string, string, boolean]> = [
   /* After Effects: ⌘N is New Composition, ⌥⌘N New Project, ⌥⌘K Composition Settings. */
   ['n', 'newComposition', false],
   ['alt+n', 'newProject', false],
+  ['alt+y', 'newAdjustment', false],
   ['alt+k', 'compositionSettings', false],
 ];
 for (const [chord, command, looseModifiers] of MOD_CHORDS) {

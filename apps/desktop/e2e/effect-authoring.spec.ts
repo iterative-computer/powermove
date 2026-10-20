@@ -6,20 +6,23 @@ test('the shipped effect sample validates, registers, animates and undoes withou
   await cp(path.resolve('docs/samples/gradient-tint'), path.join(session.userData, 'extensions/gradient-tint'), { recursive: true });
   await session.relaunch();
   await session.openEditor();
-  await session.page.waitForFunction(() => Boolean((window as any).PM?.Kernel?.effects?.get('gradient-tint')));
+  await session.page.waitForFunction(() => Boolean((window as any).PM?.Kernel?.effects?.get('gradient-tint.effect')));
 
   const proof = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
     const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({
       runId: 'effect-authoring-proof', callId: tool, tool, arguments: args, baseRevision: PM.proj.revision || 0
     });
-    const definition = PM.Kernel.effects.get('gradient-tint');
+    const definition = PM.Kernel.effects.get('gradient-tint.effect');
     const valid = await call('validate_effect', { definition });
+    const manyParams = { ...definition,
+      params: Array.from({ length: 36 }, (_, i) => ({ k: `p${i}`, label: `P${i}`, def: 0, min: 0, max: 1 }))
+    };
+    const large = await call('validate_effect', { definition: manyParams });
+    manyParams.params[1]!.k = manyParams.params[0]!.k;
     let rejected = '';
     try {
-      await call('validate_effect', { definition: { ...definition,
-        params: Array.from({ length: 36 }, (_, i) => ({ k: `p${i}`, label: `P${i}`, def: 0, min: 0, max: 1 }))
-      } });
+      await call('validate_effect', { definition: manyParams });
     } catch (error) { rejected = String(error); }
     const workspace = JSON.parse((await call('get_workspace_state')).content[0].text);
     const apply = (commands: any) => {
@@ -27,7 +30,7 @@ test('the shipped effect sample validates, registers, animates and undoes withou
       if (!result.ok) throw new Error(result.message);
     };
     apply({ type: 'add_layer', id: 'effect-proof-layer', layerType: 'shape', name: 'Effect proof', duration: 5 });
-    apply({ type: 'add_effect', target: 'effect-proof-layer', effect: 'gradient-tint' });
+    apply({ type: 'add_effect', target: 'effect-proof-layer', effect: 'gradient-tint.effect' });
     const layer = PM.L('effect-proof-layer');
     const effect = layer.fx[0];
     const prop = PM.allProps(layer).find((item: any) => item.key === `${effect.id}.amount`);
@@ -43,16 +46,17 @@ test('the shipped effect sample validates, registers, animates and undoes withou
     const keysAfterUndo = PM.L(layer.id).fx[0].p.amount.kf.length;
     PM.hist.undo();
     return {
-      valid: JSON.parse(valid.content[0].text), rejected,
-      registered: workspace.registeredEffects.find((item: any) => item.id === 'gradient-tint'),
+      valid: JSON.parse(valid.content[0].text), large: JSON.parse(large.content[0].text), rejected,
+      registered: workspace.registeredEffects.find((item: any) => item.id === 'gradient-tint.effect'),
       panels: PM.Kernel.panels.ownerEntries('gradient-tint').map((entry: any) => entry.id),
       changedPixels: untinted !== middle && middle !== tinted && untinted !== tinted,
       keys, keysAfterUndo, effectsAfterUndo: PM.L(layer.id).fx.length,
       errors: [...PM.GL.errors.values()]
     };
   });
-  expect(proof.valid).toMatchObject({ valid: true, id: 'gradient-tint', parameterCount: 4 });
-  expect(proof.rejected).toContain('too many params (36 > 32)');
+  expect(proof.valid).toMatchObject({ valid: true, id: 'gradient-tint.effect', parameterCount: 4 });
+  expect(proof.large).toMatchObject({ valid: true, parameterCount: 36 });
+  expect(proof.rejected).toContain('duplicate param key');
   expect(proof.registered).toMatchObject({ label: 'Gradient Tint', group: 'Stylize', parameters: ['startColor', 'endColor', 'angle', 'amount'] });
   expect(proof.panels).toEqual([]);
   expect(proof.changedPixels).toBe(true);

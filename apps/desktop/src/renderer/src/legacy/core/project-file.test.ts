@@ -1,8 +1,42 @@
 import { describe, expect, it, vi } from 'vitest';
-import { packProjectFile, restoreProjectFileMedia, unpackProjectFile, unpackProjectFileBlob, packProjectFileBlob, restoreProjectFileStream, saveIncrementalProject } from './project-file';
+import { packProjectFile, readProjectFileDocument, restoreProjectFileMedia, unpackProjectFile, unpackProjectFileBlob, packProjectFileBlob, restoreProjectFileStream, saveIncrementalProject } from './project-file';
 import { sha256Hex } from '../../../../shared/sha256';
 
 describe('portable project media', () => {
+  it('assembles a large document in bounded reads without splitting Unicode or losing Undo records', async () => {
+    const prefix = '{"proj":{"w":1920,"h":1080,"layers":[],"assets":{},"note":"';
+    const note = 'x'.repeat(1024 * 1024 - prefix.length - 1) + '🟢 Café';
+    const json = prefix + note + '"},"history":{"version":1,"index":0,"entries":[{"label":"Undo ☃",'
+      + '"forward":[{"path":["name"],"exists":true,"value":"Après"}],"backward":[]}]}}';
+    const data = new TextEncoder().encode(json), offset = 42;
+    expect(data.indexOf(0xf0)).toBe(1024 * 1024 - 1);
+    const read = vi.fn(async (at: number, length: number) => data.subarray(at - offset, at - offset + length));
+    const progress = vi.fn();
+    const document = await readProjectFileDocument({ offset, length: data.length, sha256: sha256Hex(data) }, offset + data.length, read, progress);
+    expect(document).toEqual(JSON.parse(json));
+    expect(document.proj.note).toBe(note);
+    expect(read.mock.calls).toEqual([[offset, 1024 * 1024], [offset + 1024 * 1024, data.length - 1024 * 1024]]);
+    expect(progress).toHaveBeenLastCalledWith(data.length, data.length);
+  });
+
+  it('handles short document reads and rejects truncation or altered content', async () => {
+    const data = new TextEncoder().encode('{"proj":{"layers":[]},"history":{"entries":[]}}');
+    const range = { offset: 0, length: data.length, sha256: sha256Hex(data) };
+    expect(await readProjectFileDocument(range, data.length, async (offset, length) => data.subarray(offset, offset + Math.min(3, length))))
+      .toEqual(JSON.parse(new TextDecoder().decode(data)));
+    await expect(readProjectFileDocument(range, data.length, async () => new Uint8Array())).rejects.toThrow('truncated');
+    const changed = data.slice(); changed[1] = changed[1]! ^ 1;
+    await expect(readProjectFileDocument(range, data.length, async () => changed)).rejects.toThrow('checksum');
+    await expect(readProjectFileDocument(range, data.length, async () => new Uint8Array(data.length + 1))).rejects.toThrow('truncated');
+  });
+
+  it.each([{ offset: -1 }, { length: 0 }, { offset: Number.MAX_SAFE_INTEGER }, { sha256: 'invalid' }])
+    ('rejects an invalid document range before requesting file bytes: %j', async override => {
+      const read = vi.fn();
+      await expect(readProjectFileDocument({ offset: 0, length: 2, sha256: 'a'.repeat(64), ...override }, 20, read)).rejects.toThrow('range');
+      expect(read).not.toHaveBeenCalled();
+    });
+
   it('uploads only requested media, including media reachable solely from Undo', async () => {
     const old = { id: 'deleted' }, current = { id: 'current' };
     const snapshot = { proj: { assets: { current } }, history: { entries: [{ backward: [{ exists: true, path: ['assets', 'deleted'], value: old }] }] } };
@@ -18,6 +52,42 @@ describe('portable project media', () => {
     expect(store.get).not.toHaveBeenCalled();
     expect(bridge.abort).toHaveBeenCalledWith('token');
   });
+
+  it.each(['memory', 'OPFS'])('keeps restored media revisions available for range reuse through %s staging', async staging => {
+    const data = new Uint8Array([1, 2, 3]);
+    const document = { proj: { assets: { clip: { id: 'clip', storageKey: 'media:clip' } } } };
+    const source = { id: 'clip', type: 'video/webm', offset: 9, length: data.length, revision: 'saved-revision', sha256: sha256Hex(data) };
+    const stored = new Map<string, { blob: Blob; revision: string }>();
+    const store = {
+      get: async (asset: any) => stored.get(asset.storageKey)?.blob || null,
+      put: vi.fn(async (_id: string, blob: Blob, asset: any, revision?: string) => {
+        stored.set(asset.storageKey, { blob, revision: revision || 'new-revision' });
+        return true;
+      }),
+      getForSave: async (asset: any) => stored.get(asset.storageKey) || null,
+    };
+    const parts: Uint8Array[] = [];
+    const writer = { write: async (chunk: Uint8Array) => { parts.push(chunk); }, close: async () => undefined };
+    const root = { getFileHandle: async () => ({ createWritable: async () => writer, getFile: async () => new Blob(parts as BlobPart[]) }), removeEntry: vi.fn(async () => undefined) };
+    vi.stubGlobal('navigator', { storage: staging === 'OPFS' ? { getDirectory: async () => root } : {} });
+    try {
+      await restoreProjectFileStream(document, [source], store, async (offset, length) => data.subarray(offset - source.offset, offset - source.offset + length));
+      expect(store.put).toHaveBeenCalledWith('clip', expect.any(Blob), document.proj.assets.clip, source.revision);
+      expect(new Uint8Array(await (await store.get(document.proj.assets.clip))!.arrayBuffer())).toEqual(data);
+      const blob = stored.get('media:clip')!.blob;
+      const slice = vi.fn(() => { throw new Error('Unchanged media was uploaded again'); });
+      Object.defineProperty(blob, 'slice', { value: slice });
+      const bridge = {
+        begin: vi.fn(async () => ({ ok: true as const, token: 'token', required: [] as string[] })),
+        chunk: vi.fn(async () => undefined), finish: async () => ({ ok: true as const, path: 'file.pmv' }), abort: async () => undefined,
+      };
+      expect(await saveIncrementalProject(document, JSON.stringify(document), store, bridge, { name: 'file.pmv', projectId: 'reopened', saveAs: false }, () => {})).toMatchObject({ ok: true });
+      expect(bridge.begin).toHaveBeenCalledWith(expect.objectContaining({ media: [{ id: 'clip', revision: source.revision, type: source.type, length: data.length }] }));
+      expect(slice).not.toHaveBeenCalled();
+      expect(bridge.chunk.mock.calls.map(call => (call as unknown as [string, string | null])[1])).toEqual([null]);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('rejects corrupted streamed media before putting it into the local store', async () => {
     const put = vi.fn(async () => true);
     vi.stubGlobal('navigator', { storage: {} });
@@ -154,6 +224,51 @@ describe('portable project media', () => {
       expect(writer.abort).toHaveBeenCalledOnce();
       expect(root.removeEntry).toHaveBeenCalledOnce();
       expect(put).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('preserves a corrupt-media error when removing its import staging file also fails', async () => {
+    const writer = { write: vi.fn(async () => undefined), close: vi.fn(async () => undefined), abort: vi.fn(async () => undefined) };
+    const root = { getFileHandle: vi.fn(async () => ({ createWritable: async () => writer })),
+      removeEntry: vi.fn(async () => { throw new Error('Could not remove staging file.'); }) };
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
+    const put = vi.fn(async () => true);
+    try {
+      await expect(restoreProjectFileStream({ proj: { assets: { video: { id: 'video' } } } },
+        [{ id: 'video', type: 'video/webm', offset: 9, length: 3, sha256: sha256Hex(new Uint8Array([1, 2, 3])) }],
+        { get: async () => null, put }, async () => new Uint8Array([4, 5, 6]))).rejects.toThrow('project media checksum');
+      expect(writer.close).toHaveBeenCalledOnce();
+      expect(root.removeEntry).toHaveBeenCalledOnce();
+      expect(put).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('still removes staging and preserves the read error when abort throws synchronously', async () => {
+    const writer = { write: vi.fn(), abort: vi.fn(() => { throw new Error('Writer abort failed.'); }) };
+    const root = { getFileHandle: vi.fn(async () => ({ createWritable: async () => writer })), removeEntry: vi.fn(async () => undefined) };
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
+    try {
+      await expect(restoreProjectFileStream({ proj: { assets: { video: { id: 'video' } } } },
+        [{ id: 'video', type: 'video/webm', offset: 9, length: 3 }], { get: async () => null, put: vi.fn() },
+        async () => { throw new Error('Native project media read failed.'); })).rejects.toThrow('Native project media read failed.');
+      expect(writer.abort).toHaveBeenCalledOnce();
+      expect(root.removeEntry).toHaveBeenCalledOnce();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('reports staging removal errors when the media import itself succeeded', async () => {
+    const data = new Uint8Array([1, 2, 3]);
+    const writer = { write: vi.fn(async () => undefined), close: vi.fn(async () => undefined) };
+    const root = { getFileHandle: vi.fn(async () => ({ createWritable: async () => writer, getFile: async () => new Blob([data]) })),
+      removeEntry: vi.fn(async () => { throw new Error('Could not remove staging file.'); }) };
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
+    const put = vi.fn(async () => true);
+    try {
+      await expect(restoreProjectFileStream({ proj: { assets: { video: { id: 'video' } } } },
+        [{ id: 'video', type: 'video/webm', offset: 9, length: data.length }],
+        { get: async () => null, put }, async () => data)).rejects.toThrow('Could not remove staging file.');
+      expect(put).toHaveBeenCalledOnce();
+      expect(root.removeEntry).toHaveBeenCalledOnce();
     } finally { vi.unstubAllGlobals(); }
   });
 

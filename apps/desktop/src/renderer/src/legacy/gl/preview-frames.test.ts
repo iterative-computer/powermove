@@ -27,3 +27,13 @@ it('declines frames larger than the cap and allocates nothing when disabled', ()
   expect(cache.bytes).toBe(0);
   expect(dispose).not.toHaveBeenCalled();
 });
+
+it('makes room for a new scene without disposing the picture still displayed', () => {
+  const dispose = vi.fn(), cache = new PreviewFrames<{ bytes: number; id: string }>(dispose);
+  const visible = { bytes: 16, id: 'visible' }, older = { bytes: 16, id: 'older' };
+  cache.put('visible', visible, 32); cache.put('older', older, 32);
+  cache.trim(0, new Set([visible]));
+  expect(cache.get('visible')).toBe(visible); expect(cache.bytes).toBe(16);
+  expect(dispose).toHaveBeenCalledExactlyOnceWith(older);
+  cache.clear(); expect(cache.bytes).toBe(0);
+});

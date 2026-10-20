@@ -1,0 +1,9 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><meta name="referrer" content="no-referrer"></head><body><script>
+// This static document receives exactly one display document from its parent.
+// It has an opaque origin, no preload, no host methods and no network access.
+addEventListener('message', function init(event) {
+  if(event.source !== parent || !(event.origin === 'app://powermove' || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(event.origin)) || !event.data || event.data.channel !== 'powermove-visual-init' || typeof event.data.html !== 'string' || event.data.html.length > 600000) return;
+  removeEventListener('message', init);
+  document.open(); document.write(event.data.html); document.close();
+});
+</script></body></html>

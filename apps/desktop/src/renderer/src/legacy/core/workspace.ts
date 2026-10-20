@@ -2,6 +2,7 @@
 import type { PMRegistry } from '../registry';
 import { ensureDockFill, keepPanelAtSetHeight } from '../../layout/model';
 import { timelineService } from './services';
+import { previewResolution } from './preview-resolution';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -537,7 +538,9 @@ WS.restoreSnapshot = (snapshot: any) => {
 
 function applyFeatures(w: any) {
   const f: any = w.features || {};
-  if (f.adaptiveQuality !== undefined) PM.perf.auto = !!f.adaptiveQuality;
+  // A workspace restores panel layout; the user's explicit preview choice
+  // remains in force across layout changes and project opens.
+  if (f.adaptiveQuality !== undefined && !previewResolution(PM.previewResolution)) PM.perf.auto = !!f.adaptiveQuality;
   const timeline = timelineService(PM);
   if (f.graphOnOpen !== undefined && timeline) timeline.graph = !!f.graphOnOpen;
   window.document.documentElement.dataset.previewCorners = w.chrome?.previewCornerRadius === 'rounded' ? 'rounded' : 'square';

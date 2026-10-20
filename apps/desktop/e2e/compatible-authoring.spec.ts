@@ -18,7 +18,8 @@ test('an API connection creates a keyframeable effect and verifies it through li
       seen.push(body);
       const previous = body.messages.filter((message: any) => message.role === 'tool').length;
       if (!previous) run++;
-      const stage = body.messages[0].content.match(/The extension staging directory is (.+)\. When the user/)?.[1];
+      const stage = body.messages[0].content.match(/Stage only in ([^;\n]+);/)?.[1];
+      if (!stage) throw new Error('Authoring instructions did not name the isolated staging directory');
       const result = { summary: run === 1 ? 'Created Gradient Tint.' : 'Verified Gradient Tint in Powermove.', commands: [], artifacts: [], extensions: [], notes: [], externalActions: [] };
       const sequence: [string, any][] = run === 1 ? [
         ['read_file', { path: 'powermove-api/samples/gradient-tint/README.md' }],
@@ -27,7 +28,7 @@ test('an API connection creates a keyframeable effect and verifies it through li
         ['compile_extension', { id: 'gradient-tint' }],
         ['complete_task', { ...result, extensions: [{ id: 'gradient-tint', action: 'created', summary: 'Keyframeable tint' }], commands: [
           JSON.stringify({ type: 'add_layer', id: 'api-effect-proof', layerType: 'shape', name: 'API effect proof', duration: 5 }),
-          JSON.stringify({ type: 'add_effect', target: 'api-effect-proof', effect: 'gradient-tint' })
+          JSON.stringify({ type: 'add_effect', target: 'api-effect-proof', effect: 'gradient-tint.effect' })
         ] }]
       ] : [
         ['get_workspace_state', {}],
@@ -44,21 +45,30 @@ test('an API connection creates a keyframeable effect and verifies it through li
   try {
     const port = (server.address() as { port: number }).port;
     await session.openEditor(); await session.openAgent();
-    await session.page.evaluate(async port => {
+    const page = session.page;
+    await page.getByRole('button', { name: 'Open settings', exact: true }).click();
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await settings.getByRole('button', { name: 'Accounts', exact: true }).click();
+    await settings.getByRole('textbox', { name: 'API base URL', exact: true }).fill(`http://127.0.0.1:${port}/v1`);
+    await settings.getByRole('textbox', { name: 'Model name', exact: true }).fill('test-author');
+    await settings.getByRole('checkbox', { name: 'This model supports images', exact: true }).check();
+    await settings.getByRole('button', { name: 'Test and connect', exact: true }).click();
+    await expect(settings).toContainText('Connected model: test-author');
+    await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
+    await session.page.evaluate(() => {
       const w = window as any;
-      await w.powermove.compatible.configure({ baseUrl: `http://127.0.0.1:${port}/v1`, model: 'test-author', vision: true });
       w.PM.AgentUI.setAccess('project');
       w.PM.AgentUI.setProvider('compatible');
       w.PM.SpatialAssistant.open();
       w.PM.AgentUI.submit('Create a reusable Gradient Tint effect with keyframeable controls and apply it to a shape.');
-    }, port);
+    });
     await expect.poll(() => session.page.evaluate(() => (window as any).PM.AgentUI.state.phase), { timeout: 25000 }).toBe('result');
     const proof = await session.page.evaluate(() => {
       const PM = (window as any).PM;
       const layer = PM.L('api-effect-proof');
       const effect = layer?.fx[0];
       const param = effect && PM.allProps(layer).find((item: any) => item.key === `${effect.id}.amount`);
-      return { registered: !!PM.Kernel.effects.get('gradient-tint'), effects: layer?.fx.length, param: !!param,
+      return { registered: !!PM.Kernel.effects.get('gradient-tint.effect'), effects: layer?.fx.length, param: !!param,
         access: PM.AgentUI.state.accessMode, conversation: JSON.stringify(PM.AgentUI.state.conversation) };
     });
     expect(proof).toMatchObject({ registered: true, effects: 1, param: true, access: 'project' });

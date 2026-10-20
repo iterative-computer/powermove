@@ -153,15 +153,22 @@ export function staggerLength(values: any, count: number, order?: TextAnimatorOr
   return Math.max(0, num(values.duration, .5)) + Math.max(0, num(values.stagger)) * rankSpan(order, count);
 }
 
-const graphemes = (value: string): string[] => typeof Intl !== 'undefined' && Intl.Segmenter
-  ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].map(item => item.segment)
-  : Array.from(value);
-
 /** Unit counts for wrapped lines, segmented exactly as the text layout does. */
 export function countTextUnits(lines: Array<{ text: string }>, unit: TextAnimatorUnit): number {
   if (unit === 'lines') return lines.filter(line => line.text.length).length;
   if (unit === 'words') return lines.reduce((sum, line) => sum + (line.text.match(/\S+/gu)?.length ?? 0), 0);
-  return lines.reduce((sum, line) => sum + graphemes(line.text).filter(segment => !/^\s+$/u.test(segment)).length, 0);
+  if (lines.length === 0) return 0;
+  const segmenter = typeof Intl !== 'undefined' && Intl.Segmenter
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  let count = 0;
+  lines.forEach(line => {
+    if (segmenter) {
+      for (const { segment } of segmenter.segment(line.text)) if (!/^\s+$/u.test(segment)) count++;
+    } else {
+      for (const segment of line.text) if (!/^\s+$/u.test(segment)) count++;
+    }
+  });
+  return count;
 }
 
 /** The window a stagger animator occupies, in seconds from the layer's in point. */
@@ -296,8 +303,14 @@ export function animatedGlyphs(PM: any, layer: any, time: number, d: any, layout
   });
   // Tracking widens the gap after each unit, pushing the rest of the line.
   const align = d.align === 'center' ? .5 : d.align === 'right' ? 1 : 0;
-  for (const line of new Set(glyphs.map((glyph: any) => glyph.line))) {
-    const run = glyphs.filter((glyph: any) => glyph.line === line);
+  const runs = new Map<any, any[]>();
+  glyphs.forEach((glyph: any) => {
+    // The old strict-equality scan ignored NaN line identifiers.
+    if (glyph.line !== glyph.line) return;
+    const run = runs.get(glyph.line);
+    if (run) run.push(glyph); else runs.set(glyph.line, [glyph]);
+  });
+  for (const run of runs.values()) {
     let shift = 0;
     for (const glyph of run) { glyph.trackingShift = shift; shift += glyph.tracking; }
     const lead = shift - (run.at(-1)?.tracking ?? 0);

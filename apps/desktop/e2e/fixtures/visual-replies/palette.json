@@ -1,0 +1,5 @@
+{
+  "title": "Dusk palette",
+  "height": 300,
+  "html": "<!doctype html><html><head><style>h1{font-size:20px}.colors{display:flex;gap:8px;margin:24px 0}button{flex:1;height:90px;border:0;border-radius:7px;color:white;text-shadow:0 1px 3px #000}output{color:var(--muted)}</style></head><body><h1>Dusk palette</h1><p>Select a color to inspect its value.</p><div class=\"colors\"><button style=\"background:#6366F1\" aria-label=\"Indigo\">Indigo</button><button style=\"background:#EC4899\" aria-label=\"Pink\">Pink</button><button style=\"background:#14B8A6\" aria-label=\"Teal\">Teal</button></div><output>Indigo \u00b7 #6366F1</output><script>const hex=['#6366F1','#EC4899','#14B8A6'];document.querySelectorAll('button').forEach((b,i)=>b.onclick=()=>document.querySelector('output').textContent=b.textContent+' \u00b7 '+hex[i]);</script></body></html>"
+}

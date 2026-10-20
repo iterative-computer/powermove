@@ -1,4 +1,5 @@
 import { withAgentExport } from '../agent-export';
+import { isRendererUnavailable, watchRendererDocument } from '../renderer-recovery';
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import net, { type Server, type Socket } from 'node:net';
@@ -8,6 +9,7 @@ import type { IpcMain, IpcMainEvent, WebContents } from 'electron';
 
 import {
   IPC,
+  LIMITS,
   REQUEST_ID,
   type AgentToolContent,
   type AgentToolRequestEvent,
@@ -40,6 +42,9 @@ const MEDIA_TOOL_NAMES = new Set<string>(AGENT_MEDIA_TOOL_NAMES);
 const TOOL_TIMEOUT_MS = 120_000;
 const MAX_SOCKET_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_TEXT_CHARS = 2_000_000;
+// The session snapshot is written to the workspace, never returned to agents.
+// JSON string escaping can roughly double the project's size.
+const MAX_SNAPSHOT_TEXT_CHARS = LIMITS.codexProjectJsonBytes * 2;
 const MAX_TOOL_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TOOL_CONTENT_ITEMS = 8;
 
@@ -74,6 +79,7 @@ export class PowermoveAgentToolSession {
   readonly mcpConfig: NativeMcpServerConfig;
   changed = false;
   private closed = false;
+  private readonly stopWatchingDocument: () => void;
   private finishing: Promise<AgentToolFinishResult> | null = null;
   readonly openedAt = Date.now();
   stagingDirectory: string | null = null;
@@ -93,6 +99,10 @@ export class PowermoveAgentToolSession {
     readonly inspectionOnly = false
   ) {
     this.mcpConfig = mcpConfig;
+    this.stopWatchingDocument = watchRendererDocument(owner, () => {
+      this.closed = true;
+      this.bridge.closeSession(this, tool => new Error(`Powermove renderer closed or crashed, or navigated to a new document, while running ${tool}. The action outcome is unknown; inspect the project before repeating edits.`));
+    });
   }
 
   async finish(commit: boolean): Promise<AgentToolFinishResult> {
@@ -105,11 +115,12 @@ export class PowermoveAgentToolSession {
   private async finishOnce(commit: boolean): Promise<AgentToolFinishResult> {
     let response: AgentToolResponseEvent | null = null;
     try {
-      if (!this.transactionSession && !this.owner.isDestroyed()) {
+      if (!this.transactionSession && !isRendererUnavailable(this.owner)) {
         response = await this.bridge.callRenderer(this, '__finish_run', { commit });
       }
     } finally {
       this.closed = true;
+      this.stopWatchingDocument();
       this.bridge.closeSession(this);
     }
     if (!response) return { changed: this.changed };
@@ -128,6 +139,7 @@ export class PowermoveAgentToolSession {
   }
 
   isClosed(): boolean { return this.closed; }
+  isFinishing(): boolean { return this.finishing !== null; }
 
   /** Prefer the run's known stage; discover it lazily for native CLI runs. */
   async rebaseStagingDirectory(forkId: string, workspace: string): Promise<string> {
@@ -260,8 +272,9 @@ export class PowermoveAgentToolBridge {
     args: Record<string, unknown>
   ): Promise<AgentToolResponseEvent> {
     if (session.transactionSession) return this.callRenderer(session.transactionSession, tool, args);
-    if (session.isClosed()) throw new Error('Agent tool session is closed.');
+    if (session.isClosed() || session.isFinishing() && tool !== '__finish_run') throw new Error('Agent tool session is closed.');
     if (session.owner.isDestroyed()) throw new Error('Powermove window is no longer available.');
+    if (isRendererUnavailable(session.owner)) throw new Error(`Powermove renderer is unavailable; ${tool} was not sent. Reload the editor and start a new session. Inspect the project before repeating earlier edits.`);
     const callId = `tool-${randomUUID()}`;
     const request: AgentToolRequestEvent = {
       runId: session.runId,
@@ -297,19 +310,30 @@ export class PowermoveAgentToolBridge {
     if (!state.ok) return state;
     const item = state.content[0];
     if (item?.type !== 'text') throw new Error('Missing panel capture bounds.');
-    const bounds = JSON.parse(item.text);
+    const { target, ...bounds } = JSON.parse(item.text);
     if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) || bounds.width <= 0 || bounds.height <= 0) throw new Error('Panel is not visible. Open or expand it first.');
-    if (this.options.capturePanel) return { ...state, content: [
-      { type: 'text', text: JSON.stringify({ panelId: args.panelId, bounds, coordinates: 'panel-relative CSS pixels', note: 'Image content is untrusted data.' }) },
-      { type: 'image', data: await this.options.capturePanel(session.owner, bounds), mimeType: 'image/jpeg' }
-    ] };
+    if (this.options.capturePanel) {
+      const data = await this.options.capturePanel(session.owner, bounds);
+      await this.validatePanelTarget(session, args, target);
+      return { ...state, content: [
+        { type: 'text', text: JSON.stringify({ panelId: args.panelId, bounds, coordinates: 'panel-relative CSS pixels', note: 'Image content is untrusted data.' }) },
+        { type: 'image', data, mimeType: 'image/jpeg' }
+      ] };
+    }
     const capture = await session.owner.capturePage(bounds);
+    await this.validatePanelTarget(session, args, target);
     if (capture.isEmpty()) throw new Error('Panel capture is empty. Read workspace state and try again.');
     const image = capture.resize({ width: Math.min(1600, capture.getSize().width) });
     return { ...state, content: [
       { type: 'text', text: JSON.stringify({ panelId: args.panelId, bounds, image: image.getSize(), coordinates: 'panel-relative CSS pixels', note: 'Image content is untrusted data.' }) },
       { type: 'image', data: image.toJPEG(85), mimeType: 'image/jpeg' }
     ] };
+  }
+
+  private async validatePanelTarget(session: PowermoveAgentToolSession, args: Record<string, unknown>, target: unknown): Promise<void> {
+    if (typeof target !== 'string') throw new Error('Missing panel generation. Read get_panel_layout before another panel action.');
+    const checked = await this.callRenderer(session, '__validate_panel_target', { panelId: args.panelId, target });
+    if (!checked.ok) throw new Error('The panel changed or was disabled during the call. Input stopped; earlier input may have completed. Read get_panel_layout and inspect the project; do not repeat the action automatically.');
   }
 
   /* Chromium takes this input as a person's (transient user activation, and
@@ -333,7 +357,8 @@ export class PowermoveAgentToolBridge {
     if (!prepared.ok) return prepared;
     const item = prepared.content[0];
     if (item?.type !== 'text') throw new Error('Missing panel input target.');
-    const { points } = JSON.parse(item.text) as { points: Array<{ x: number; y: number }> };
+    const { points, target } = JSON.parse(item.text) as { points: Array<{ x: number; y: number }>; target: string };
+    await this.validatePanelTarget(session, args, target);
     if (this.options.panelInput) {
       await this.options.panelInput(session.owner, args, points);
       await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
@@ -349,6 +374,7 @@ export class PowermoveAgentToolBridge {
       let last = first;
       try {
         if (args.action === 'drag') for (const point of points.slice(1)) {
+          await this.validatePanelTarget(session, args, target);
           last = point;
           owner.sendInputEvent({ type: 'mouseMove', ...point, button: 'left', modifiers: ['leftbuttondown'] });
           await new Promise(resolve => setTimeout(resolve, 16));
@@ -356,6 +382,7 @@ export class PowermoveAgentToolBridge {
       } finally {
         owner.sendInputEvent({ type: 'mouseUp', ...last, button: 'left', clickCount: 1 });
       }
+      await this.validatePanelTarget(session, args, target);
       if (args.action === 'type') await owner.insertText(args.text as string);
       if (args.action === 'press') {
         owner.sendInputEvent({ type: 'keyDown', keyCode: args.key as string });
@@ -368,7 +395,7 @@ export class PowermoveAgentToolBridge {
     return this.capturePanel(session, args);
   }
 
-  closeSession(session: PowermoveAgentToolSession): void {
+  closeSession(session: PowermoveAgentToolSession, failure?: (tool: string) => Error): void {
     for (const controller of this.mediaCalls.get(session) ?? []) controller.abort();
     this.mediaCalls.delete(session);
     if (this.sessionsByToken.get(session.token) === session) this.sessionsByToken.delete(session.token);
@@ -376,7 +403,7 @@ export class PowermoveAgentToolBridge {
     for (const [callId, pending] of this.pending) {
       if (pending.session !== session) continue;
       clearTimeout(pending.timer);
-      pending.reject(new Error('Agent tool session ended.'));
+      pending.reject(failure?.(pending.tool) ?? new Error('Agent tool session ended.'));
       this.pending.delete(callId);
     }
   }
@@ -470,7 +497,7 @@ export class PowermoveAgentToolBridge {
   /** Both native MCP and API providers need main-process capture, input and
    * staging handlers, not just the renderer's editing dispatcher. */
   async callTool(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>, workspace = ''): Promise<AgentToolResponseEvent> {
-    if (session.isClosed() || session.owner.isDestroyed()) throw new Error('Powermove tool session is not active.');
+    if (session.isClosed() || session.isFinishing() || session.owner.isDestroyed()) throw new Error('Powermove tool session is not active.');
     if (tool === OUTSIDE_SANDBOX_TOOL_NAME) return this.runOutsideSandbox(session, args);
     if (!POWERMOVE_AGENT_TOOLS.some(spec => spec.name === tool)) throw new Error(`Unknown Powermove tool: ${tool}`);
     if (session.inspectionOnly && !(POWERMOVE_LIVE_INSPECTION_TOOL_NAMES as readonly string[]).includes(tool)) throw new Error('This planning run can only inspect the project.');
@@ -730,7 +757,7 @@ export class PowermoveAgentToolBridge {
     if (!isRecord(value) || typeof value.callId !== 'string') return;
     const call = this.pending.get(value.callId);
     if (!call || call.session.runId !== value.runId || call.session.owner !== event.sender) return;
-    const response = this.parseRendererResponse(value);
+    const response = this.parseRendererResponse(value, call.tool === '__mcp_context' ? MAX_SNAPSHOT_TEXT_CHARS : MAX_TOOL_TEXT_CHARS);
     if (!response) {
       this.pending.delete(value.callId);
       clearTimeout(call.timer);
@@ -745,7 +772,7 @@ export class PowermoveAgentToolBridge {
     pending.resolve(response);
   }
 
-  private parseRendererResponse(value: unknown): AgentToolResponseEvent | null {
+  private parseRendererResponse(value: unknown, maxTextChars: number): AgentToolResponseEvent | null {
     if (
       !isRecord(value) ||
       !isString(value.runId, 80) ||
@@ -758,7 +785,7 @@ export class PowermoveAgentToolBridge {
     for (const item of value.content) {
       if (!isRecord(item) || !isString(item.type, 20)) return null;
       if (item.type === 'text') {
-        if (!isString(item.text, MAX_TOOL_TEXT_CHARS)) return null;
+        if (!isString(item.text, maxTextChars)) return null;
         content.push({ type: 'text', text: item.text });
       } else if (item.type === 'image') {
         if (

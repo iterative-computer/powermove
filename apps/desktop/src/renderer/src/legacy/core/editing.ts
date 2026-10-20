@@ -1,5 +1,5 @@
-import {shaderPeers} from '../../core/scene3d/materials';
-import { generatedModelSchema, render3DSchema, materialKeyframeMinimum } from '../../../../shared/blender';
+import { allPropertyRefs, simplificationLayer, simplifyProperties, snapshotKeyframes, noticeDenseKeyframes, keyframeWrites } from './keyframe-simplification';
+import { parseEditCommand, ValidationError } from '../../core/validate/commands';
 import { captureFontAnchor } from './font-anchor';
 import { captureSizeAnchor, sizeAnchorOffset, sizeBounds } from './size-anchor';
 import { temporalKeys } from './temporal-bridge';
@@ -15,9 +15,10 @@ import { validateSceneLayer } from '../../core/scene3d/operations';
 import { sceneProperties,parseScene,validateSceneChannel,SCENE3D_DEFINITION } from '../../core/scene3d/schema';
 /* Ported from js/core/editing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { applyPatch, type Patch } from '../../../../shared/patch';
 
 export function install(PM: PMRegistry): void {
-const validate3DChannel=(layer:any,path:string,prop:any)=>(layer3DRole(layer)||layer.d?.modeling)?validateLayer3DChannel(layer,path,prop):validateSceneChannel(path,prop);
+const validate3DChannel=(layer:any,path:string,prop:any)=>layer3DRole(layer)?validateLayer3DChannel(layer,path,prop):validateSceneChannel(path,prop);
 const FORBIDDEN_KEYS: any = new Set(['__proto__', 'prototype', 'constructor']);
 const AUDIO_CONTENT_FIELDS: any = new Set(['asset', 'trim', 'gain', 'fadeIn', 'fadeOut']);
 /* Trust classification for every command origin. Trust decisions use the RAW
@@ -100,21 +101,58 @@ function commandScopes(command: any): any[][] {
   const type = command?.type;
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions'].includes(type)) return [['layers'], ['comps']];
   if (type === 'set_composition') {
-    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['audioGain'], ['render3d']];
+    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['colorDepth'], ['audioGain']];
   }
   if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
-  if (type === 'add_marker') return [['markers']];
+  if (type === 'add_marker' || type === 'remove_marker') return [['markers']];
   if (type === 'create_section' || type === 'update_section') return [['library']];
-  if (type === 'set_easing') return keyframeLayers(command).flatMap((layer:any)=>[layer,...PM.allProps(layer).flatMap((item:any)=>shaderPeers(PM,layer,item.key).map(p=>p.layer))]).map((layer:any)=>layerPath(layer)).filter(Boolean);
+  if (type === 'simplify_keyframes') return [...new Set(simplificationRefs(command).map(ref => ref.layerId))].map(id => layerPath(simplificationLayer(PM, id))).filter((path): path is any[] => !!path);
+  if (type === 'set_easing') return keyframeLayers(command).map((layer: any) => layerPath(layer)).filter(Boolean);
   const layer = findLayer(command?.target || command?.layer || command?.targetId);
   const path = layerPath(layer);
-  const peers=layer?shaderPeers(PM,layer,channelPath(command.path || command.channel)):[];
-  return path ? [path,...peers.map(p=>layerPath(p.layer)).filter((path):path is any[]=>!!path)] : [[]];
+  return path ? [path] : [[]];
 }
 
 function trackCommands(list: any[]) {
   PM.hist.track([['revision'], ['edits']]);
   for (const command of list) PM.hist.track(commandScopes(command));
+}
+
+function liveCheckpoint(list: any[]): Patch[] {
+  const native = list.map(command => {
+    if (command.type !== 'set_property') return null;
+    const channel = channelPath(command.path || command.channel);
+    const layer = findLayer(command.target || command.layer || command.targetId);
+    const path = layerPath(layer);
+    return path && Object.hasOwn(PM.CH || {}, channel) && Object.hasOwn(layer.p || {}, channel)
+      ? { path, channel } : null;
+  });
+  const scopes = native.every(Boolean) ? native.flatMap(target => [
+    [...target!.path, 'p', target!.channel], [...target!.path, 'locked_intent'],
+    [...target!.path, 'd', 'fontAnchorBounds'], [...target!.path, 'd', 'sizeAnchorBounds'],
+  ]) : list.flatMap(commandScopes);
+  const paths = [['revision'], ['edits'], ...scopes];
+  const captionUpdates = list.every(command => command.type === 'edit_captions' && ['update', 'style'].includes(command.op));
+  // Restore this call's affected source without ending the enclosing gesture
+  // or replaying its earlier commands. Parent paths cover their descendants.
+  return paths.filter((path, index) => !paths.some((parent, other) =>
+    (parent.length < path.length || parent.length === path.length && other < index)
+    && parent.every((part: any, at: number) => part === path[at]))).map(path => {
+      if (!path.length) return { path, exists: true, value: clone(PM.proj) };
+      let parent = PM.proj;
+      for (const part of path.slice(0, -1)) parent = parent?.[part];
+      const key = path.at(-1)!;
+      const exists = parent != null && Object.hasOwn(parent, key);
+      if (!exists) return { path, exists };
+      const source = parent[key];
+      // Caption update/style commands replace cue arrays and never mutate
+      // existing cues. Keep that immutable list instead of copying every word
+      // on each drag frame; mixed batches retain the full defensive copy.
+      const sharedCues = captionUpdates && source?.type === 'captions' && Array.isArray(source.d?.cues);
+      const value = clone(sharedCues ? { ...source, d: { ...source.d, cues: [] } } : source);
+      if (sharedCues) value.d.cues = source.d.cues;
+      return { path, exists, value };
+    });
 }
 const channelPath: any = (path: any) => String(path || '')
   .replace(/^properties\./, '')
@@ -196,19 +234,29 @@ function record(label: any, origin: any, applied: any, detail: any = {}) {
   PM.proj.edits = compactEditLog([...PM.proj.edits, clone(entry)]);
 }
 
-function materialPeers(layer:any,channel:string,meta:any){
-  const peers=shaderPeers(PM,layer,channel);
-  for(const peer of peers){if(peer.layer.lock||(PM.groupAncestors?.(peer.layer)||[]).some((g:any)=>g.lock))throw new Error('This material is used by a locked layer. Make it unique first.');if(isGeneratedOrigin(meta.origin)&&lockedIntent(peer.layer,peer.path))throw new Error(`Preserved hand-edited ${peer.path}`);}
-  return peers;
+function constantVideoSpeed(layer: any): number | null {
+  if (layer.type !== 'video') return null;
+  const remap = layer.d.timeRemap;
+  if (isProperty(remap) ? remap.v || remap.kf.length || remap.expr : remap) return null;
+  const speed = layer.d.speed;
+  if (isProperty(speed) && (speed.kf.length || speed.expr)) return null;
+  const value = Number(isProperty(speed) ? speed.v : speed ?? 1);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
-function synchronizePeers(peers:any[],prop:any,source:any){
-  for(const peer of peers)if(peer.prop!==prop){
-    const next=clone(prop),old=peer.prop.kf;
-    next.kf=next.kf.map((key:any)=>{const time=key.t+source.from-peer.layer.from;return {...key,t:time,i:old.find((k:any)=>Math.abs(k.t-time)<1e-8)?.i||PM.uid('k')};});
-    Object.assign(peer.prop,next);
-  }
+
+function resizeVideoForSpeed(layer: any, previous: number | null): void {
+  const next = constantVideoSpeed(layer);
+  if (previous == null || next == null || previous === next) return;
+  // Keep the retained source range and in-point; only its timeline span changes.
+  const duration = layer.dur * previous / next;
+  if (!Number.isFinite(duration)) return;
+  layer.dur = Math.max(1 / PM.proj.fps, duration);
+  PM.ProjectIndex?.invalidate();
 }
-function setProperty(command: any, meta:any={}) {
+
+type KeyPresets = Map<any, Map<any, string>>;
+
+function setProperty(command: any, presets?: KeyPresets) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const { channel, prop }: any = property(layer, command.path || command.channel);
@@ -216,18 +264,27 @@ function setProperty(command: any, meta:any={}) {
   if (command.preserveHandEdits !== false && lockedIntent(layer, channel)) {
     throw new Error(`Preserved hand-edited ${channel}; explicitly allow overwrite to change it`);
   }
-  const peers=materialPeers(layer,channel,meta);
   const current: any = PM.evP(layer, prop, command.time == null ? PM.time : command.time, channel);
   let value: any = command.value;
   if (typeof current === 'number') value = finite(value, channel);
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || layer.d?.modeling))validate3DChannel(layer,channel,{...prop,v:value});
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer)))validate3DChannel(layer,channel,{...prop,v:value});
   const time: any = command.time == null ? PM.time : finite(command.time, 'time');
   const mode: any = command.mode || 'auto';
   if (mode === 'keyframe' || (mode === 'auto' && prop.kf.length)) {
-    const key: any = PM.setKeyOn(prop, time - layer.from, value, command.ease || 'linear', PM.proj.fps, materialKeyframeMinimum(channel));
+    const previousCount = prop.kf.length;
+    const key: any = PM.setKeyOn(prop, time - layer.from, value, command.ease || 'linear', PM.proj.fps);
     if (command.hold != null) key.hold = !!command.hold;
+    // Plain updates preserve native velocity. New keys and explicit presets
+    // are converted again once the batch supplies their final neighbours.
+    if (presets && (prop.kf.length !== previousCount || command.ease != null)) {
+      const keys = presets.get(prop) || new Map<any, string>();
+      keys.set(key, command.ease || 'linear');
+      presets.set(prop, keys);
+    }
   } else {
+    const previousSpeed = channel === 'c.speed' ? constantVideoSpeed(layer) : null;
     prop.v = value;
+    if (channel === 'c.speed') resizeVideoForSpeed(layer, previousSpeed);
     PM.touch();
   }
   if (command.markIntent) {
@@ -238,18 +295,10 @@ function setProperty(command: any, meta:any={}) {
       t: PM.round(time - layer.from, 3),
     };
   }
-  synchronizePeers(peers,prop,layer);
-  if(command.markIntent)for(const peer of peers){peer.layer.locked_intent||={};peer.layer.locked_intent[peer.path]=clone(layer.locked_intent[channel]);}
   return { id: layer.id, channel, value };
 }
 
-function offsetProperty(command:any,meta:any={}){
-  const layer=findLayer(command.target);if(!layer)throw new Error('Layer not found');const {channel,prop}=property(layer,command.path);if(!prop||typeof prop.v!=='number')throw new Error('Choose a numeric channel');
-  const peers=materialPeers(layer,channel,meta);if(lockedIntent(layer,channel)&&command.preserveHandEdits!==false)throw new Error(`Preserved hand-edited ${channel}`);const delta=finite(command.delta,'Offset');
-  const next={...prop,v:prop.v+delta,kf:prop.kf.map((k:any)=>({...k,v:k.v+delta}))};validate3DChannel(layer,channel,next);
-  prop.v+=delta;for(const key of prop.kf)key.v+=delta;synchronizePeers(peers,prop,layer);PM.touch();return {id:layer.id,channel,delta};
-}
-function replaceKeyframes(command: any,meta:any={}) {
+function replaceKeyframes(command: any) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const { channel, prop }: any = property(layer, command.path || command.channel);
@@ -257,33 +306,52 @@ function replaceKeyframes(command: any,meta:any={}) {
   if (command.preserveHandEdits !== false && lockedIntent(layer, channel)) {
     throw new Error(`Preserved hand-edited ${channel}; explicitly allow overwrite to change it`);
   }
-  const peers=materialPeers(layer,channel,meta);
   if (!Array.isArray(command.keyframes)) throw new Error('keyframes must be an array');
   const next: any = command.keyframes.map((key: any, index: any) => {
     if (!key || typeof key !== 'object') throw new Error(`Keyframe ${index + 1} is invalid`);
-    const time: any = Math.max(materialKeyframeMinimum(channel), finite(key.time, `keyframe ${index + 1} time`));
+    const time: any = Math.max(0, finite(key.time, `keyframe ${index + 1} time`));
     const value: any = typeof prop.v === 'number' ? finite(key.value, `keyframe ${index + 1} value`) : key.value;
-    return { time, value, ease: key.ease || 'linear', hold: !!key.hold, ...(Array.isArray(key.eo)&&Array.isArray(key.ei)?{eo:easingCurve([...key.eo,...key.ei]).slice(0,2),ei:easingCurve([...key.eo,...key.ei]).slice(2)}:{}), ...(key.spring?{spring:clone(key.spring)}:{}) };
+    return { time, value, ease: key.ease || 'linear', hold: !!key.hold, id: key.id, temporal: key.temporal, spring: key.spring, handles: key.handles };
   });
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || layer.d?.modeling)){
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer))){
     const candidate={...prop,kf:[...(command.replace===false?prop.kf:[]),...next.map((k:any)=>({t:k.time,v:k.value}))]};
     if(command.expression!==undefined){const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);candidate.expr=command.expression || null;}
     validate3DChannel(layer,channel,candidate);
   }
-  if (command.replace !== false) {
-    if (prop.kf.length && !next.length) prop.v = PM.evP(layer, prop, PM.time, channel);
-    prop.kf = [];
+  // Native edits preserve exact subframe times, identities and independent
+  // temporal sides. Existing named-easing callers retain frame snapping.
+  if (next.some((key: any) => key.temporal || key.id)) {
+    const existing = new Map(prop.kf.map((key: any) => [key.i, key]));
+    const native = next.map((key: any) => {
+      const old = key.id ? existing.get(key.id) as any : null;
+      const value: any = { ...(old || {}), ...(key.temporal || {}), t: key.time, v: key.value, i: key.id || PM.uid('k') };
+      if (key.spring === null) delete value.spring;
+      else if (key.spring !== undefined) value.spring = clone(key.spring);
+      if (!key.temporal) {
+        delete value.inInterp; delete value.outInterp;
+        delete value.inEase; delete value.outEase;
+        const handles = key.handles ? { eo: key.handles.slice(0, 2), ei: key.handles.slice(2) } : PM.Ease.handles(key.ease);
+        value.eo = handles.eo; value.ei = handles.ei; value.hold = key.hold;
+      }
+      return value;
+    });
+    const ids = new Set(native.map((key: any) => key.i));
+    if (ids.size !== native.length) throw new Error('Keyframe IDs must be unique within a track');
+    for (const candidate of projectLayers()) for (const item of PM.allProps(candidate)) {
+      if (item.prop !== prop && item.prop.kf.some((key: any) => ids.has(key.i))) throw new Error('Keyframe ID belongs to another property');
+    }
+    prop.kf = PM.normalizeKeyframes([...(command.replace === false ? prop.kf.filter((key: any) => !ids.has(key.i) && !native.some((n: any) => n.t === key.t)) : []), ...native], prop.v, PM.proj.fps);
+    temporalKeys(prop.kf);
+  } else {
+    if (command.replace !== false) {
+      if (prop.kf.length && !next.length) prop.v = PM.evP(layer, prop, PM.time, channel);
+      prop.kf = [];
+    }
+    PM.setKeysOn(prop, next.map((key: any) => ({ t: key.time, v: key.value, ease: key.ease, hold: key.hold })), PM.proj.fps);
   }
-  const madeKeys:any[]=[];
-  for (const key of next) {
-    const made: any = PM.setKeyOn(prop, key.time, key.value, key.ease, PM.proj.fps, materialKeyframeMinimum(channel));
-    made.hold = key.hold;madeKeys.push({made,key});
-  }
-  for(const {made,key} of madeKeys){if(key.eo){made.eo=key.eo;made.ei=key.ei;}if(key.spring)made.spring=key.spring;}
   if (command.expression !== undefined) {const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);prop.expr=command.expression||null;}
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || layer.d?.modeling))validate3DChannel(layer,channel,prop);
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer)))validate3DChannel(layer,channel,prop);
   PM.touch();
-  synchronizePeers(peers,prop,layer);
   return { id: layer.id, channel, keyframes: prop.kf.length };
 }
 
@@ -297,15 +365,15 @@ function easingCurve(value: any) {
   return curve;
 }
 
-function setEasing(command: any,meta:any={}) {
+function setEasing(command: any) {
   const ids: any = new Set((Array.isArray(command.keyframes) ? command.keyframes : [])
     .filter((id: any) => typeof id === 'string' && id).slice(0, 1000));
   if (!ids.size) throw new Error('Select at least one keyframe');
   const curve: any = easingCurve(command.curve);
-  const found: any = [],shared:any[]=[];
+  const found: any = [];
   for (const layer of projectLayers()) {
     for (const item of PM.allProps(layer)) {
-      if(item.prop.kf.some((key:any)=>ids.has(key.i))){temporalKeys(item.prop.kf);shared.push({layer,prop:item.prop,peers:materialPeers(layer,item.key,meta)});}
+      if(item.prop.kf.some((key:any)=>ids.has(key.i))) temporalKeys(item.prop.kf);
       for (const key of item.prop.kf) if (ids.has(key.i)) found.push(key);
     }
   }
@@ -315,7 +383,6 @@ function setEasing(command: any,meta:any={}) {
     key.ei = [curve[2], curve[3]];
     key.hold = false;
   });
-  for(const item of shared)synchronizePeers(item.peers,item.prop,item.layer);
   PM.touch();
   return { keyframes: found.length, curve };
 }
@@ -325,16 +392,14 @@ function setExpression(command: any, meta: any = {}) {
   if (!layer) throw new Error('Layer not found');
   const { channel, prop }: any = property(layer, command.path || command.channel);
   if (!prop) throw new Error(`Property “${channel}” was not found on “${layer.name}”`);
-  const peers=materialPeers(layer,channel,meta);
   const diagnostic = command.expression ? expressionDiagnostic(command.expression) : null;
   if (diagnostic) throw new Error(diagnostic);
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || layer.d?.modeling)){
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer))){
     if(isGeneratedOrigin(meta.origin)&&lockedIntent(layer,channel))throw new Error(`Preserved hand-edited ${channel}`);
     validate3DChannel(layer,channel,{...prop,expr:command.expression || null});
   }
   prop.expr = command.expression || null;
   PM.touch();
-  synchronizePeers(peers,prop,layer);
   return { id: layer.id, channel, expression: prop.expr };
 }
 
@@ -361,10 +426,6 @@ function setContent(command: any, meta: any = {}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const patch: any = safePatch(command.patch, 'content patch');
-  if(patch.modeling){
-    if(layer.type!=='group')throw new Error('Model recipes belong to groups');patch.modeling=generatedModelSchema.parse(patch.modeling);
-    if(isGeneratedOrigin(meta.origin))for(const [key,prop] of Object.entries(layer.d?.modeling?.p||{}))if(lockedIntent(layer,`model.${key}`)&&JSON.stringify(prop)!==JSON.stringify(patch.modeling.p[key]))throw new Error(`Preserved hand-edited model.${key}`);
-  }
   const role3d=layer3DRole(layer);
   if(role3d && patch.data){
     patch.data=parseLayer3DData(role3d,{...layer.d.data,...patch.data});
@@ -391,10 +452,12 @@ function setContent(command: any, meta: any = {}) {
     if (clearsLevel) PM.touch();
     return { id: layer.id };
   }
+  const previousSpeed = Object.hasOwn(patch, 'speed') ? constantVideoSpeed(layer) : null;
   if (layer.type === 'audio') setAudioContent(layer, patch);
   else if (layer.type === 'extension') setExtensionContent(layer, patch);
   else if (layer.type === 'captions') setCaptionsContent(layer, patch);
   else Object.assign(layer.d, patch);
+  if (Object.hasOwn(patch, 'speed')) resizeVideoForSpeed(layer, previousSpeed);
   if (layer.type === 'shader' && Object.hasOwn(patch, 'code')) {
     shaderHooks(PM)?.syncShaderUniforms(layer);
     if (layer._shaderKey && PM.GL) PM.GL.dropProgram(layer._shaderKey);
@@ -475,7 +538,7 @@ function setLayer(command: any) {
     if (patch.motionBlur !== undefined && patch.motionBlur !== false) throw new Error('Audio layers do not support motion blur');
   }
   if (patch.name != null) layer.name = String(patch.name).trim() || layer.name;
-  if (patch.from != null) layer.from = Math.max(layer.type === 'group' ? -Infinity : 0, finite(patch.from, 'layer start'));
+  if (patch.from != null) layer.from = finite(patch.from, 'layer start');
   if (patch.duration != null) layer.dur = Math.max(1 / PM.proj.fps, finite(patch.duration, 'layer duration'));
   if (patch.visible != null) layer.on = !!patch.visible;
   if (patch.locked != null) layer.lock = !!patch.locked;
@@ -516,10 +579,16 @@ function setLayer(command: any) {
 
 function setComposition(command: any) {
   const patch: any = safePatch(command.patch, 'composition patch');
-  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'audioGain', 'render3d']);
+  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'colorDepth', 'audioGain']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Composition field “${key}” is not editable`);
   const p: any = PM.proj;
-  if(patch.render3d!=null)p.render3d=render3DSchema.parse(patch.render3d);
+  if (patch.colorDepth != null) {
+    if (![8, 16, 32].includes(patch.colorDepth)) throw new Error('Color depth must be 8, 16, or 32');
+    if (PM.GL?.supportedColorDepths && !PM.GL.supportedColorDepths.includes(patch.colorDepth)) {
+      throw new Error(`${patch.colorDepth}-bit color is not supported by this GPU`);
+    }
+    p.colorDepth = patch.colorDepth;
+  }
   if (patch.name != null) p.name = String(patch.name).trim() || p.name;
   if (patch.width != null) p.w = Math.max(16, Math.round(finite(patch.width, 'width')));
   if (patch.height != null) p.h = Math.max(16, Math.round(finite(patch.height, 'height')));
@@ -562,7 +631,6 @@ function addLayer(command: any) {
   if (type === 'audio' && (command.parent != null || (command.blend != null && command.blend !== 'normal') || command.motionBlur === true)) {
     throw new Error('Audio layers do not support parenting, blend modes, or motion blur');
   }
-  if(requestedContent.modeling){if(type!=='group')throw new Error('Model recipes belong to groups');requestedContent.modeling=generatedModelSchema.parse(requestedContent.modeling);}
   const opts: any = {
     name: command.name || extensionDefinition?.label,
     from: command.from,
@@ -603,7 +671,7 @@ function addLayer(command: any) {
     if (PM.L(command.id)) throw new Error(`Layer id already exists: ${command.id}`);
     layer.id = String(command.id);
   }
-  layer.from = command.from == null ? PM.snapF(PM.time, PM.proj.fps) : Math.max(0, finite(command.from, 'layer start'));
+  layer.from = command.from == null ? PM.snapF(PM.time, PM.proj.fps) : finite(command.from, 'layer start');
   layer.dur = command.duration == null
     ? Math.max(.1, PM.proj.dur - layer.from)
     : Math.max(1 / PM.proj.fps, finite(command.duration, 'layer duration'));
@@ -812,6 +880,15 @@ function addMarker(command: any) {
   return marker;
 }
 
+function removeMarker(command: any) {
+  if (!Number.isSafeInteger(command.index) || command.index < 0 || command.index >= PM.proj.markers.length) {
+    throw new Error('Marker not found');
+  }
+  const [marker] = PM.proj.markers.splice(command.index, 1);
+  PM.touch();
+  return marker;
+}
+
 function createSection(command: any) {
   if (!command.section || typeof command.section !== 'object') throw new Error('Section manifest is required');
   PM.proj.library = PM.proj.library && typeof PM.proj.library === 'object' ? PM.proj.library : { sections: [], looks: [] };
@@ -837,6 +914,21 @@ function updateSection(command: any) {
   if (section.versions.length > 12) section.versions.splice(0, section.versions.length - 12);
   PM.bus.emit('library');
   return { id: section.id, versions: section.versions.length };
+}
+
+function simplificationRefs(source: any) {
+  const command = parseEditCommand(source);
+  if (command instanceof ValidationError) throw new Error(command.message);
+  if (command.type !== 'simplify_keyframes') throw new Error('Expected simplify_keyframes');
+  const refs = command.scope === 'properties' ? command.properties! : allPropertyRefs(PM).filter(ref =>
+    command.scope !== 'layers' || (command.targets || PM.sel.layers).includes(ref.layerId));
+  const unique = new Map(refs.map(ref => [JSON.stringify([ref.layerId, ref.path]), ref]));
+  for (const ref of unique.values()) {
+    const layer = simplificationLayer(PM, ref.layerId);
+    if (!layer || !PM.findProp(layer, ref.path)) throw new Error('Simplification property not found');
+  }
+  if (command.scope === 'layers' && command.targets?.some(id => !simplificationLayer(PM, id))) throw new Error('Simplification layer not found');
+  return [...unique.values()];
 }
 
 function keyframeLayers(command: any) {
@@ -881,7 +973,7 @@ function policyCommand(sourceCommand: any, meta: any = {}) {
     const locked: any = layers.filter((layer: any) => layer.lock || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock));
     if (locked.length && base.some(layer => layer.type === 'group')) throw new Error('Unlock the group and its contents before deleting');
     if (!locked.length) return { command };
-    const editable: any = layers.filter((layer: any) => !layer.lock);
+    const editable: any = layers.filter((layer: any) => !locked.includes(layer));
     const names: any = locked.map((layer: any) => `“${layer.name}”`).join(', ');
     if (!editable.length) throw new Error(`All targeted layers are locked: ${names}`);
     command.targets = editable.map((layer: any) => layer.id);
@@ -896,7 +988,7 @@ function policyCommand(sourceCommand: any, meta: any = {}) {
 
   if (command.type === 'set_easing') {
     if (command.overrideLock !== true) {
-      const locked: any = keyframeLayers(command).find((layer: any) => layer.lock);
+      const locked: any = keyframeLayers(command).find((layer: any) => layer.lock || (PM.groupAncestors?.(layer, projectLayers()) || []).some((group: any) => group.lock));
       if (locked) throw new Error(lockedMessage(locked));
     }
     return { command };
@@ -916,7 +1008,7 @@ function policyCommand(sourceCommand: any, meta: any = {}) {
   return { command };
 }
 
-function runOne(sourceCommand: any, meta: any = {}) {
+function runOne(sourceCommand: any, meta: any = {}, presets?: KeyPresets) {
   const policy: any = policyCommand(sourceCommand, meta);
   const command: any = policy.command;
   const fontLayer = findLayer(command.target || command.layer || command.targetId);
@@ -935,10 +1027,10 @@ function runOne(sourceCommand: any, meta: any = {}) {
   } : null;
   let data: any;
   switch (command.type) {
-    case 'offset_property': data = offsetProperty(command,meta); break;
-    case 'set_property': data = setProperty(command,meta); break;
-    case 'replace_keyframes': data = replaceKeyframes(command,meta); break;
-    case 'set_easing': data = setEasing(command,meta); break;
+    case 'set_property': data = setProperty(command, presets); break;
+    case 'replace_keyframes': data = replaceKeyframes(command); break;
+    case 'simplify_keyframes': data = simplifyProperties(PM, simplificationRefs(command)); break;
+    case 'set_easing': data = setEasing(command); break;
     case 'set_expression': data = setExpression(command,meta); break;
     case 'set_content': data = setContent(command, meta); break;
     case 'set_layer': data = setLayer(command); break;
@@ -955,6 +1047,7 @@ function runOne(sourceCommand: any, meta: any = {}) {
     case 'set_transition': data = setTransition(command); break;
     case 'set_scene_parameter': data = setSceneParameter(command); break;
     case 'add_marker': data = addMarker(command); break;
+    case 'remove_marker': data = removeMarker(command); break;
     case 'create_section': data = createSection(command); break;
     case 'update_section': data = updateSection(command); break;
     case 'add_captions': data = addCaptions({ PM, findLayer }, command); break;
@@ -1001,6 +1094,25 @@ function runOne(sourceCommand: any, meta: any = {}) {
   }
   if (policy.message) data = { ...data, message: policy.message, skippedLocked: policy.skippedLocked };
   return { command, data, message: policy.message };
+}
+
+function runCommands(list: any[], meta: any) {
+  const presets: KeyPresets = new Map();
+  const finishPresets = () => {
+    for (const [prop, keys] of presets) {
+      PM.setKeysOn(prop, [...keys].map(([key, ease]) => ({ t: key.t, v: key.v, ease })), PM.proj.fps);
+    }
+    presets.clear();
+  };
+  const executed = [];
+  for (const command of list) {
+    // Complete property runs before another operation reads the animation or
+    // overrides its easing; command order must remain authoritative.
+    if (command.type !== 'set_property') finishPresets();
+    executed.push(runOne(command, meta, presets));
+  }
+  finishPresets();
+  return executed;
 }
 
 function recordedCommand(command: any, submitted: any) {
@@ -1085,7 +1197,7 @@ function sourceCatalog() {
       const control: any = primitiveControl(value); if (!control) return null;
       const fxId: any = item.key.split('.')[0];
       const fx: any = (layer.fx || []).find((effect: any) => effect.id === fxId);
-      const fxParam: any = fx && PM.FX?.[fx.type]?.params?.find((param: any) => param.k === item.key.slice(fxId.length + 1));
+      const fxParam: any = fx && (PM.effectDef?.(fx) ?? (!PM.effectDef ? PM.FX?.[fx.type] : undefined))?.params?.find((param: any) => param.k === item.key.slice(fxId.length + 1));
       const shaderDef: any = layer.type === 'shader' && item.key.startsWith('u.')
         ? (layer._udefs || PM.parseUniforms?.(layer.d.code) || []).find((def: any) => `u.${def.name}` === item.key) : null;
       const extensionDef: any = layer.type === 'extension' && item.key.startsWith('x.')
@@ -1139,7 +1251,7 @@ const Edit: any = {
   operations: Object.freeze({
     set_property: { target: 'layer', fields: ['path', 'value', 'time', 'mode', 'ease'] },
     replace_keyframes: { target: 'layer', fields: ['path', 'keyframes', 'replace', 'expression'] },
-    offset_property: {target:'layer',fields:['path','delta']},
+    simplify_keyframes: { target: 'project', fields: ['scope', 'targets', 'properties'] },
     set_easing: { target: 'keyframes', fields: ['keyframes', 'curve'] },
     set_expression: { target: 'layer', fields: ['path', 'expression'] },
     set_content: { target: 'layer', fields: ['patch'] },
@@ -1157,6 +1269,7 @@ const Edit: any = {
     set_transition: { target: 'layer', fields: ['layer', 'edge', 'transition'] },
     set_scene_parameter: { target: 'project', fields: ['name', 'value'] },
     add_marker: { target: 'project', fields: ['time', 'name'] },
+    remove_marker: { target: 'project', fields: ['index'] },
     create_section: { target: 'project', fields: ['section'] },
     update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version', 'at'] },
     transform_layers: { target: 'layer-collection', fields: ['transform', 'state'] },
@@ -1172,28 +1285,40 @@ const Edit: any = {
     if (meta.baseRevision != null && Number(meta.baseRevision) !== Number(PM.proj.revision || 0)) {
       return fail(`Project changed: expected revision ${meta.baseRevision}, found ${PM.proj.revision || 0}`);
     }
+    const guarded = ['agent', 'import', 'generated-ui', 'generated-tool', 'generated-script'].includes(meta.origin)
+      && !list.every((command: any) => command.type === 'simplify_keyframes');
+    const keysBefore = guarded ? snapshotKeyframes(PM) : null;
     if (live) {
+      const transaction = live, pendingCommands = [...live.commands], selection = clone(PM.sel);
+      let checkpoint: Patch[] | null = null;
       try {
+        checkpoint = liveCheckpoint(list);
         trackCommands(list);
-        const executed: any = list.map((command: any) => runOne(command, meta));
+        const executed: any = runCommands(list, meta);
         const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
         executed.forEach(({ command }: any) => rememberLive(command));
         changed(false);
-        const notices: any = executed.map((item: any) => item.message).filter(Boolean);
+        const denseNote = keysBefore ? noticeDenseKeyframes(PM, keysBefore, keyframeWrites(executed)) : null;
+        const notices: any = [...executed.map((item: any) => item.message), denseNote].filter(Boolean);
         return pass(['Source updated', ...notices].join('. '), { results, revision: PM.proj.revision || 0 });
-      } catch (error: any) { return fail(String(error.message || error)); }
+      } catch (error: any) {
+        transaction.commands = pendingCommands;
+        if (checkpoint) PM.replaceProject(applyPatch(PM.proj, checkpoint), { selection });
+        return fail(String(error.message || error));
+      }
     }
     const selection: any = clone(PM.sel);
     PM.hist.beginScoped(meta.label || 'Edit source', meta.historyGroup || null, meta.origin || 'interface');
     try {
       trackCommands(list);
-      const executed: any = list.map((command: any) => runOne(command, meta));
+      const executed: any = runCommands(list, meta);
       const applied: any = executed.map((item: any, index: any) => recordedCommand(item.command, list[index]));
       const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
       record(meta.label, meta.origin, applied);
       changed();
       PM.hist.commit(meta.label || 'Edit source');
-      const notices: any = executed.map((item: any) => item.message).filter(Boolean);
+      const denseNote = keysBefore ? noticeDenseKeyframes(PM, keysBefore, keyframeWrites(executed)) : null;
+      const notices: any = [...executed.map((item: any) => item.message), denseNote].filter(Boolean);
       return pass([meta.label || 'Source updated', ...notices].join('. '), { results, revision: PM.proj.revision });
     } catch (error: any) {
       PM.hist.rollback(selection);
@@ -1211,6 +1336,8 @@ const Edit: any = {
     if (live) return fail('Finish the active source edit before changing structure');
     if (typeof action !== 'function') return fail('A structural edit action is required');
     const selection: any = clone(PM.sel);
+    const guarded = ['agent', 'import'].includes(meta.origin);
+    const keysBefore = guarded ? snapshotKeyframes(PM) : null;
     const before: any = PM.hist.begin(label || 'Edit source', meta.historyGroup || null, meta.origin || 'interface');
     try {
       const result: any = action();
@@ -1241,7 +1368,8 @@ const Edit: any = {
       });
       changed();
       PM.hist.commit(label || 'Edit source');
-      return pass(label || 'Source updated', { result, revision: PM.proj.revision });
+      const denseNote = keysBefore ? noticeDenseKeyframes(PM, keysBefore) : null;
+      return pass([label || 'Source updated', denseNote].filter(Boolean).join('. '), { result, revision: PM.proj.revision });
     } catch (error: any) {
       PM.hist.rollback(selection);
       return fail(String(error.message || error));
@@ -1319,6 +1447,7 @@ const Edit: any = {
     };
   },
 
+  isLive: () => !!live,
   sourceCatalog,
 };
 

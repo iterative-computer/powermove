@@ -1,8 +1,10 @@
+import { publishVisualReply } from '../../panels/agent/publish-visual-reply';
 import { workspaceImportHandoff } from '../../onboarding/workspace-import';
 import { createForkUpdater } from '../../shell/update-fork';
 import { WORKSPACE_IMPORT_PROMPT, expandAgentRequest } from '../../../../shared/creative-workspace';
 import { recordAfterEffectsExtensions } from '../../library/after-effects-imports';
 import { createAgentCheckpoint } from './checkpoint';
+import { agentProjectSnapshot } from '../../../../shared/agent-project-snapshot';
 import { bridge } from '../../kernel/bridge';
 import { noticeKind, stated } from '../../errors/presentation';
 import { notifyAgentFinished, notifyAgentQuestion } from '../../panels/agent/notification-preferences';
@@ -237,7 +239,7 @@ PM.AgentArtifacts = {
     const id: any = PM.uid('agent-artifact-');
     return new Promise((resolve: any, reject: any) => {
       const timer: any = window.setTimeout(() => { artifactPending.delete(id); reject(new Error('The artifact took too long to load')); }, 120_000);
-      artifactPending.set(id, { resolve, reject, timer });
+      artifactPending.set(id, { resolve, reject, timer, artifact: { projectId: artifact.projectId, path: artifact.path } });
       bridge.postMessage({ id, projectId: artifact.projectId, path: artifact.path });
     });
   },
@@ -248,7 +250,9 @@ PM.AgentArtifacts = {
     try {
       const bytes: any = result.data instanceof Uint8Array ? result.data
         : Uint8Array.from(window.atob(result.dataBase64 || ''), (character: any) => character.charCodeAt(0));
-      job.resolve(new window.File([bytes], result.name || 'agent-artifact', { type: result.mime || 'application/octet-stream' }));
+      const file = new window.File([bytes], result.name || 'agent-artifact', { type: result.mime || 'application/octet-stream' });
+      Object.defineProperty(file, '__powermoveArtifact', { value: job.artifact });
+      job.resolve(file);
     } catch { job.reject(new Error('The artifact could not be decoded')); }
   },
   reveal(artifact: any) {
@@ -319,8 +323,15 @@ const AGENT_PROVIDERS: any = [
   { id: 'compatible', label: 'API / local model' },
 ];
 function ensureClaudeModelChoice(model: string): void {
-  if (/^claude-[a-z0-9-]{1,100}$/.test(model) && !AGENT_MODELS.claude.some(item => item.id === model)) {
+  // Keep any saved id the CLI accepts (claude-*, aliases like opusplan or sonnet[1m]) so the picker never shows a blank model.
+  if (/^[a-z][a-z0-9.\-]{0,100}(?:\[[a-z0-9]{1,10}\])?$/.test(model) && !AGENT_MODELS.claude.some(item => item.id === model)) {
     AGENT_MODELS.claude.push({ id: model, label: model });
+  }
+}
+function ensureCodexModelChoice(model: string): void {
+  // Match the app-server catalog's model-id validation while its live list loads.
+  if (/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(model) && !AGENT_MODELS.chatgpt.some(item => item.id === model)) {
+    AGENT_MODELS.chatgpt.push({ id: model, label: model });
   }
 }
 if (S.provider === 'claude') ensureClaudeModelChoice(S.model);
@@ -342,7 +353,6 @@ async function refreshCodexModels(): Promise<void> {
     // Keep the bundled catalog when the runtime is offline or too old.
   }
 }
-void refreshCodexModels();
 async function refreshClaudeModels(): Promise<void> {
   try {
     const models = await bridge()?.claude?.models?.();
@@ -357,12 +367,16 @@ async function refreshClaudeModels(): Promise<void> {
     // Keep the bundled catalog when Claude is unavailable.
   }
 }
-void refreshClaudeModels();
+function refreshProviderModels(provider: string): void {
+  if (provider === 'chatgpt') void refreshCodexModels();
+  if (provider === 'claude') void refreshClaudeModels();
+}
+let initialThreadRestored = false;
 bridge()?.chatgpt?.onChanged?.((status) => {
-  if (status.state === 'connected') void refreshCodexModels();
+  if (initialThreadRestored && status.state === 'connected' && S.provider === 'chatgpt') void refreshCodexModels();
 });
 bridge()?.claude?.onChanged?.((status) => {
-  if (status.state === 'connected') void refreshClaudeModels();
+  if (initialThreadRestored && status.state === 'connected' && S.provider === 'claude') void refreshClaudeModels();
 });
 function selectedModelName(provider: string, model: string): string {
   return provider === 'compatible' && model === 'configured' ? AGENT_MODELS.compatible[0]!.label : model;
@@ -727,11 +741,14 @@ function restoreThreadModel(thread: any): void {
   const model = provider === 'compatible' && thread.model === AGENT_MODELS.compatible[0]?.label ? 'configured' : thread.model;
   if (!AGENT_PROVIDERS.some((item: any) => item.id === provider) || typeof model !== 'string') return;
   if (provider === 'claude') ensureClaudeModelChoice(model);
+  if (provider === 'chatgpt') ensureCodexModelChoice(model);
   if (!AGENT_MODELS[provider as keyof typeof AGENT_MODELS]?.some(item => item.id === model)) return;
+  const changedProvider = S.provider !== provider;
   S.provider = provider;
   S.model = model;
   const effort = REASONING_EFFORTS.includes(thread.reasoningEffort) ? thread.reasoningEffort : S.reasoningEffort;
   S.reasoningEffort = modelEffort(provider, selectedModelName(provider, model), effort) || effort;
+  if (changedProvider && initialThreadRestored) refreshProviderModels(provider);
 }
 
 function restoreThread() {
@@ -849,6 +866,8 @@ function switchThread(id?: string) {
 }
 
 restoreThread();
+initialThreadRestored = true;
+refreshProviderModels(S.provider);
 PM.bus?.on?.('project', () => { ensureThreadProject(); PM.AgentUI?.update({ flush: true }); });
 PM.bus?.on?.('projects:open', releaseClosedProjectRuns);
 PM.bus?.on?.('storage:error', (event: any) => {
@@ -868,6 +887,15 @@ const Spatial: any = {
   /* Small pure seams are exposed for deterministic regression tests. */
   math: { selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult, boundedEditableSource, boundedAgentPrompt },
   lifecycle: { applyExtensionChanges, reduceTrace, sealTrace },
+  canSwitchRunProject(runId: string) {
+    const session = [...sessions.values()].find(item => item.codexRequestId === runId);
+    return !session || session.projectId === APP_AGENT_PROJECT_ID;
+  },
+  publishVisualReply(runId: string, value: unknown) {
+    return publishVisualReply({ runId, value, sessions: sessions.values(), busy: sessionBusy,
+      archive: projectId => threadArchives.get(projectId), uid: prefix => PM.uid(prefix),
+      changed: session => touch(session, { flush: true }) });
+  },
   assertRunProject(runId: string) {
     const session = [...sessions.values()].find(item => item.codexRequestId === runId);
     if (session && session.projectId !== APP_AGENT_PROJECT_ID && session.projectId !== PM.proj?.id) {
@@ -987,8 +1015,7 @@ registerAgentPanel(PM, {
     S.reasoningEffort = modelEffort(provider, selectedModelName(provider, S.model), S.reasoningEffort) || S.reasoningEffort;
     PM.store.set('agentProvider', provider);
     PM.AgentUI?.update({ focusComposer: true });
-    if (provider === 'chatgpt') void refreshCodexModels();
-    if (provider === 'claude') void refreshClaudeModels();
+    refreshProviderModels(provider);
   },
   retry: (messageIndex?: number) => {
     if (S.activeRequest) return;
@@ -1665,11 +1692,9 @@ function conversationReply(plan: any) {
   return plan.message || `I prepared the ${plan.section.title} section.`;
 }
 
-/* A sent request runs in the titlebar launcher; the conversation stays one
-   click away instead of covering the editor. */
+/* Dismiss the spatial composer while keeping the agent conversation open. */
 function promoteToConversation() {
   dismissOverlay(true);
-  PM.AgentShell?.collapse?.();
 }
 
 /* `project` (from older callers) keeps the current approval mode. Full access
@@ -2164,9 +2189,9 @@ async function runAutonomousRequest({ session, request, token, controller, acces
   const baseRevision: any = Number(PM.proj.revision) || 0;
   const checkpointLabel: any = `Before autonomous agent · ${request.slice(0, 42)}`;
   const checkpoint = createAgentCheckpoint(PM, checkpointLabel);
-  const projectJSON = JSON.stringify(PM.proj);
+  const projectJSON = agentProjectSnapshot(PM.proj);
   const placementInstructions = uiPlacementInstructions(PM.WS?.current);
-  const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observeVisual() : Promise.resolve({ state: {}, times: [], images: [] });
+  const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observeVisual(undefined, { signal: controller.signal }) : Promise.resolve({ state: {}, times: [], images: [] });
   let [observation]: any = await Promise.all([
     observationPromise,
     new Promise((resolve: any) => window.setTimeout(resolve, SEND_TRANSITION_MS)),
@@ -2281,7 +2306,7 @@ async function runAutonomousRequest({ session, request, token, controller, acces
       proposalRevision = Number(PM.proj.revision) || 0;
       proposalChangeSerial = projectChangeSerial;
       session.activity = 'Project changed — reconciling with the latest version…'; touch(session);
-      observation = PM.AgentHarness ? await PM.AgentHarness.observeVisual() : { state: {}, times: [], images: [] };
+      observation = PM.AgentHarness ? await PM.AgentHarness.observeVisual(undefined, { signal: controller.signal }) : { state: {}, times: [], images: [] };
       await waitForSessionProject(session, controller.signal);
       if (token !== session.requestToken) return;
       const reconcileRequest: any = `Reconcile the autonomous agent's proposed Powermove source edits with the project as it exists now.
@@ -2396,7 +2421,7 @@ The user edited the project during the autonomous run. Return kind=scene and a c
     checkpoint.historyId = liveEditsApplied
       ? (typeof raw === 'object' ? raw?.liveEditHistoryId || null : null)
       : (changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null);
-    const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observeVisual() : observation;
+    const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observeVisual(undefined, { signal: controller.signal }) : observation;
     if (finalFrames.visualError) reviewError += `${reviewError ? ' ' : ''}${finalFrames.visualError}`;
     await waitForSessionProject(session, controller.signal);
     if (token !== session.requestToken || controller.signal.aborted) return;
@@ -2445,7 +2470,7 @@ The user edited the project during the autonomous run. Return kind=scene and a c
         : attemptedImports ? 'Media import verification did not finish within the repair limit.' : result.extensions.length ? 'The last extension update loaded, but its live verification did not finish within the repair limit.' : 'The last composition repair has not been reviewed within the repair limit.';
     }
     if (token !== session.requestToken) return;
-    run.reviewError = runs.map(entry => entry.reviewError).filter(Boolean).join(' ');
+    run.reviewError = [...new Set(runs.map(entry => entry.reviewError).filter(Boolean))].join(' ');
     finishSteps(session);
     archiveAutonomousReply(session, result.summary, result.notes);
     // Refresh earlier contributions' health after the last verification, without
@@ -2457,7 +2482,10 @@ The user edited the project during the autonomous run. Return kind=scene and a c
       session.conversation.push({ role: 'assistant', text: `${change.action === 'removed' ? 'Removed' : change.action === 'created' ? 'Added' : 'Updated'} mod ${name}`,
         modResult: { id: change.id, name, action: change.action, status: change.action === 'removed' ? 'removed' : error || run.reviewError ? 'error' : 'ready' } });
     }
-    if (run.reviewError) session.conversation.push({ role: 'assistant', text: run.reviewError });
+    if (run.reviewError) {
+      session.conversation.push({ role: 'assistant', text: run.reviewError });
+      run.reviewErrorInConversation = true;
+    }
     session.run = {
       ...run, undoRuns: runs,
       changed: runs.some(entry => entry.changed),
@@ -2585,7 +2613,7 @@ async function runEditorRequest({ session, request, token, controller, focus, co
     /* Let the send handoff finish before the next progress render replaces the
        message DOM. Observation still runs immediately, so the beat adds only
        the portion of the 240 ms transition that useful work did not consume. */
-    const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observeVisual() : Promise.resolve({ state: {}, times: [], images: [] });
+    const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observeVisual(undefined, { signal: controller.signal }) : Promise.resolve({ state: {}, times: [], images: [] });
     const [observation]: any = await Promise.all([
       observationPromise,
       new Promise((resolve: any) => window.setTimeout(resolve, SEND_TRANSITION_MS)),
@@ -2833,7 +2861,7 @@ function responseSchema() {
               type: { type: 'string', enum: ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout', 'curve'] }, label: { type: 'string' },
               parameter: { type: 'string' }, defaultValue: { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }] }, min: { type: 'number' }, max: { type: 'number' }, step: { type: 'number' },
               options: { type: 'array', items: { type: 'string' } }, target: { type: 'string' }, path: { type: 'string' }, command: { type: 'string' },
-              stateKey: { type: 'string' }, source: { type: 'string' }, action: { type: 'string' }, primary: { type: 'boolean' }, advanced: { type: 'boolean' },
+              stateKey: { type: 'string' }, source: { type: 'string' }, action: { type: 'string' }, primary: { type: 'boolean' }, advanced: { type: ['boolean', 'null'] },
             },
           } },
         },
@@ -2896,7 +2924,7 @@ RULES
 - kind=interface for a structured Timeline redesign. interfaceEdit must be one JSON-encoded manifest shaped like {"target":"timeline","patch":{"rowHeight":22..48,"gutterWidth":160..360,"rulerHeight":20..42,"clipRadius":0..12,"keyframeSize":4..12,"showLayerNumbers":boolean,"showTypeBadges":boolean,"toolbarDensity":"compact|normal","surfaceOrder":"normal|reversed"}}. Include only fields requested or clearly useful. This edits the Timeline view over the existing source; never rewrite layers or keyframes for an interface request.
 - kind=section for editable panels/controls. For a known reusable generated tool, set section.tool to an id from GENERATED TOOL CAPABILITIES and leave controls empty. The tool recipe supplies validated selection state, settings, Preview, Apply, and Undo controls. Return a neutral chromeEdit of {"target":"preview.cornerRadius","value":"square"}.
 - operation=create when adding a section; operation=modify when replacing or changing an existing source surface.
-- Use visual editors first, about five primary controls, and advanced:true for secondary controls under More. Sliders are visual tracks with precise number entry; fill opens the shared visual gradient editor. Avoid exposing every shader parameter as a primary row.
+- Use visual editors first, about five primary controls, and advanced:true for secondary controls under More. Use advanced:null for automatic grouping, or advanced:false only to explicitly keep a control visible. Sliders are filled fields with precise number entry and labels outside; fill opens the shared visual gradient editor. Avoid exposing every shader parameter as a primary row.
 - A section is a compact native Powermove panel made from slider, text, color, fill, toggle, select, button, readout, and visual curve controls.
 - Every non-button control that edits project data must bind to real editable source. Use target="$selection" for the selected layer, an exact layer id from EDITABLE SOURCE CATALOG, or target="$composition" for composition paths. A visual tool control may instead use stateKey only when a validated source-action button consumes that state.
 - The EDITABLE SOURCE CATALOG below is authoritative for every included layer. Large projects also include a compact layerIndex; selected layers and layers named in the request are prioritized. If a requested field is listed, create the working control; never claim it is unavailable. Choose each control type and range from its catalog entry.
@@ -3587,6 +3615,9 @@ async function undoSceneRun() {
 
 function onKey(event: any) {
   if (!S.active) return;
+  // A deliberately expanded attachment owns Escape; it must not cancel a run
+  // or undo the result behind its modal dialog.
+  if (document.querySelector('.visual-reply dialog[open]')) return;
   if (event.key === 'Escape') {
     event.preventDefault(); event.stopPropagation();
     if (S.phase === 'applying') return;

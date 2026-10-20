@@ -163,6 +163,7 @@ export interface TextContent {
   weight: number;
   size: number;
   tracking: number;
+  /** Line height as a multiple of size: 1.2 means 120%, not 120. */
   leading: number;
   color: string;
   align: 'left' | 'center' | 'right';
@@ -453,6 +454,8 @@ export interface Comp {
 }
 
 export interface Project extends Comp {
+  /** Project-wide working precision; absent in older projects means 16-bit float. */
+  colorDepth?: import('../color-depth').ColorDepth;
   /** Id of the composition open in the Timeline; the other compositions live in `comps`. */
   compId?: string;
   /** Name of the open composition (`name` is the project's). */

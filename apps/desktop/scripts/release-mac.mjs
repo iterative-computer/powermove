@@ -123,6 +123,7 @@ async function main() {
   const { version } = JSON.parse(await readFile(path.join(repository, 'package.json'), 'utf8'));
   const channel = /^\d+\.\d+\.\d+-([a-z]+)\./i.exec(version)?.[1]?.toLowerCase() ?? 'latest';
 
+  await run('node', [path.join(repository, 'scripts/clean-renderer.mjs')]);
   await run('bun', ['run', 'build']);
   await run(path.join(repository, 'node_modules/.bin/electron-builder'), [
     '--mac', '--arm64', '--publish', 'never',

@@ -11,18 +11,27 @@ test('background picker keeps every channel above the hex field', async ({ sessi
   await expect(picker).toBeVisible();
   await picker.screenshot({ path: info.outputPath('background-picker.png') });
   const geometry = await picker.evaluate(el => {
-    const hex = el.querySelector('.color-dialog-value')!.getBoundingClientRect();
-    const bottom = Math.max(...[...el.querySelectorAll('.color-channel, .color-sv, .color-hue')].map(node => node.getBoundingClientRect().bottom));
-    return { hexTop: hex.top, bottom };
+    const hex = el.querySelector('.cp-value')!.getBoundingClientRect();
+    const channels = [...el.querySelectorAll('.cp-channel input, .cp-channel span')];
+    const bottom = Math.max(...channels.map(node => node.getBoundingClientRect().bottom));
+    const surfaceOverlap = [...el.querySelectorAll('.cp-plane, .cp-track')].some(node => {
+      const rect = node.getBoundingClientRect();
+      return rect.left < hex.right && rect.right > hex.left && rect.top < hex.bottom && rect.bottom > hex.top;
+    });
+    return { hexTop: hex.top, bottom, channels: channels.length, surfaceOverlap };
   });
+  expect(geometry.channels).toBeGreaterThan(0);
   expect(geometry.bottom).toBeLessThanOrEqual(geometry.hexTop - 4);
+  expect(geometry.surfaceOverlap).toBe(false);
   const before = await page.getByRole('button', { name: /^Background · / }).getAttribute('aria-label');
   const surface = await picker.getByRole('slider', { name: 'Saturation and brightness' }).boundingBox();
   if (!surface) throw new Error('Missing color surface');
   await page.mouse.click(surface.x + surface.width * .7, surface.y + surface.height * .3);
-  const chosen = await picker.getByLabel('Background hex value').inputValue();
+  const chosen = (await picker.getByLabel('Background hex value').inputValue()).split(' / ')[0]!;
+  expect(chosen).not.toBe(before!.replace(/^Background · /, ''));
   await expect(page.getByRole('button', { name: `Background · ${chosen}` })).toBeVisible();
-  await picker.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(picker).toHaveCount(0);
   await expect(page.getByRole('button', { name: before!, exact: true })).toBeVisible();
 });
 

@@ -14,6 +14,8 @@ import type { ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionsBri
 import type { VarsBridge } from '../../../shared/vars-ipc';
 import { MANIFEST_LIMITS, needsTrust } from '../../../shared/extensions';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps } from './host';
+import { reconcileWorkspaceAppearance } from './workspace-appearance';
+import { reconcileThemeState } from './theme-state';
 import { createSandboxRuntime, type SandboxRuntime } from './sandbox-host';
 import { extensionLoad, noticeSlowExtensions } from '../runtime/extension-load';
 
@@ -341,7 +343,9 @@ export function createLoader(options: LoaderOptions): Loader {
     if (entry) {
       try {
         if (entry.sandbox) entry.sandbox.dispose();
-        else await entry.module?.deactivate?.();
+        // Cleanup must not hold the reload queue or its owner registrations
+        // forever when an extension returns a promise that never settles.
+        else await withTimeout(Promise.resolve(entry.module?.deactivate?.()), timeoutMs, `deactivate() of "${id}" timed out`);
       } catch (error) {
         console.error(`[kernel] extension "${id}" deactivate() threw`, error);
       }
@@ -366,6 +370,8 @@ export function createLoader(options: LoaderOptions): Loader {
     // excluding it also lets a replaced built-in become available again.
     const plan = planLoad(list.filter(record => !activationFailures.has(record.id)), Object.keys(builtins));
     const desired = new Set(plan.order);
+    reconcileThemeState(kernel, desired, deps.themeAppearance);
+    if (deps.workspace) reconcileWorkspaceAppearance(deps.workspace, desired, deps.workspaceAppearance);
     const changed = new Set(changedIds);
     const panelChanges = kernel.panels.batchChanges();
     try {
@@ -460,6 +466,8 @@ export function createLoader(options: LoaderOptions): Loader {
     const list = await refreshRecords();
     for (const [id, health] of builtinHealth) if (health) setHealth(id, health);
     const plan = planLoad(list, builtinOrder);
+    reconcileThemeState(kernel, new Set(plan.order), deps.themeAppearance);
+    if (deps.workspace) reconcileWorkspaceAppearance(deps.workspace, new Set(plan.order), deps.workspaceAppearance);
     for (const { id, health } of plan.skipped) {
       if (active.has(id)) await deactivate(id);
       setHealth(id, health);

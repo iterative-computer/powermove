@@ -14,6 +14,13 @@ const definition = (patch: Partial<ExtensionLayerDefinition> = {}): ExtensionLay
 });
 
 describe('structured extension layers', () => {
+  it('accepts more than the former parameter limit and includes every uniform', () => {
+    const params = Array.from({ length: 100 }, (_, i) => ({ k: `p${i}`, label: `Parameter ${i}`, def: 0, min: 0, max: 1 }));
+    const value = definition({ params });
+    expect(() => validateExtensionLayerDefinition(value)).not.toThrow();
+    expect(extensionLayerFragment(value, '#version 300 es')).toContain('uniform float u_p99;');
+  });
+
   it('validates a bounded definition and assembles typed uniforms', () => {
     const value = definition();
     expect(() => validateExtensionLayerDefinition(value)).not.toThrow();

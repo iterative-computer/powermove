@@ -15,7 +15,7 @@ import {
 import { EXTENSION_ID } from '../../shared/extensions';
 import { isArrayOf, isBytes, isOneOf, isRecord, isString } from '../../shared/guards';
 import { buildAutonomousArgv, buildEditorArgv } from './adapter';
-import { publishExtensionChanges, withStageSnapshot } from './change-history';
+import { ExtensionPublicationConflictError, publishExtensionChanges, withStageSnapshot } from './change-history';
 import { AgentResultValidationError, repairAgentResult } from './result-repair';
 import { validateStagedExtensions } from './validate-staged-extensions';
 import { collectArtifacts } from './artifacts';
@@ -538,10 +538,11 @@ export class CodexRunner {
         await this.cleanupCancelled(state, options.userData);
         return cancelledResult(state);
       }
-      if ((error instanceof AgentResultValidationError || repairingResult) && state.layout) {
+      if ((error instanceof AgentResultValidationError || error instanceof ExtensionPublicationConflictError || repairingResult) && state.layout) {
         await preserveCancelledRun(state.layout).catch(checkpointError => options.onWarning?.(`Could not save the agent checkpoint: ${String(checkpointError)}`));
       }
-      return failure(error instanceof Error ? error.message : String(error));
+      return { ...failure(error instanceof Error ? error.message : String(error)),
+        ...(error instanceof ExtensionPublicationConflictError ? { preserveLiveEdits: true } : {}) };
     } finally {
       if (timeout) clearTimeout(timeout);
       if (state.killTimer) clearTimeout(state.killTimer);

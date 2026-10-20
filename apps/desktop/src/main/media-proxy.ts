@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { mkdtemp, open, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -18,6 +19,7 @@ import { orderedSequence, validSequenceFps } from '../shared/image-sequence';
 import { MAX_SEQUENCE_FRAMES } from '../shared/animated-image';
 import { CONVERTED_VIDEO_EXTENSIONS, NATIVE_VIDEO_EXTENSIONS, mediaExtension, needsImageConversion } from '../shared/media-formats';
 import { spawnWithRetry } from './spawn-retry';
+import { isRendererUnavailable } from './renderer-recovery';
 
 const execFileAsync = promisify(execFile);
 const STILL_TIMEOUT_MS = 2 * 60 * 1000;
@@ -31,7 +33,10 @@ export const MAX_PROXY_CHUNK_BYTES = 4 * 1024 * 1024;
 
 type ProxyEntry = {
   directory: string; file: string; size: number;
-  upload?: { total: number; received: number; queue: Promise<void>; finishing: boolean };
+  reader?: Promise<FileHandle>;
+  reads?: Set<Promise<Uint8Array>>;
+  finish?: Promise<{ token: string; size: number }>;
+  upload?: { total: number; received: number; queue: Promise<void>; finishing: boolean; handle?: FileHandle; close?: Promise<void> };
   animation?: { fps: number; repeats: number[]; written: number[]; queue: Promise<void>; finishing: boolean };
 };
 type Convert = (source: string, output: string) => Promise<void>;
@@ -137,6 +142,9 @@ export function stillImageConverter(binary: string): ConvertStill {
 
 export class MediaProxyService {
   readonly #entries = new Map<string, ProxyEntry>();
+  readonly #releases = new Map<string, Promise<void>>();
+  readonly #releaseListeners = new Set<(token: string) => void>();
+  #disposed = false;
 
   constructor(
     private readonly tempRoot: string,
@@ -146,13 +154,46 @@ export class MediaProxyService {
     private readonly convertStill?: ConvertStill
   ) {}
 
+  #add(entry: ProxyEntry): string {
+    if (this.#disposed) throw new Error('The playback proxy service has closed');
+    const token = randomUUID().replaceAll('-', '');
+    this.#entries.set(token, entry);
+    return token;
+  }
+
+  #active(token: string, entry: ProxyEntry): void {
+    if (this.#entries.get(token) !== entry) throw new Error('The playback proxy has expired');
+  }
+
+  #reader(entry: ProxyEntry): Promise<FileHandle> {
+    if (!entry.reader) {
+      const pending = open(entry.file, 'r').catch(error => {
+        // A failed open must not permanently poison an otherwise valid token.
+        if (entry.reader === pending) delete entry.reader;
+        throw error;
+      });
+      entry.reader = pending;
+    }
+    return entry.reader;
+  }
+
+  #closeUpload(upload: NonNullable<ProxyEntry['upload']>): Promise<void> {
+    return upload.close ??= upload.handle?.close() ?? Promise.resolve();
+  }
+
+  onRelease(listener: (token: string) => void): void {
+    this.#releaseListeners.add(listener);
+  }
+
+  has(token: string): boolean { return this.#entries.has(token); }
+
   async beginPreview(total: number): Promise<string> {
     if (!this.convertPreview || !Number.isSafeInteger(total) || total < 1) throw new Error('Invalid preview source size');
     const directory = await mkdtemp(path.join(this.tempRoot, 'powermove-preview-'));
-    const token = randomUUID().replaceAll('-', '');
-    this.#entries.set(token, { directory, file: path.join(directory, 'source'), size: 0,
-      upload: { total, received: 0, queue: Promise.resolve(), finishing: false } });
-    return token;
+    try {
+      return this.#add({ directory, file: path.join(directory, 'source'), size: 0,
+        upload: { total, received: 0, queue: Promise.resolve(), finishing: false } });
+    } catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
   }
 
   async writePreview(token: string, offset: number, data: Uint8Array): Promise<void> {
@@ -160,16 +201,22 @@ export class MediaProxyService {
     if (!upload || upload.finishing || offset !== upload.received || !(data instanceof Uint8Array)
       || data.length < 1 || data.length > MAX_PROXY_CHUNK_BYTES || offset + data.length > upload.total) throw new Error('Invalid preview source chunk');
     upload.received += data.length;
-    upload.queue = upload.queue.then(() => writeFile(entry!.file, data, { flag: 'a', mode: 0o600 }));
-    await upload.queue;
+    upload.queue = upload.queue.then(async () => {
+      const handle = upload.handle ??= await open(entry!.file, 'a', 0o600);
+      await handle.writeFile(data);
+    });
+    try { await upload.queue; }
+    catch (error) { await this.release(token); throw error; }
   }
 
   async finishPreview(token: string): Promise<{ token: string; size: number }> {
     const entry = this.#entries.get(token), upload = entry?.upload;
     if (!entry || !upload || upload.finishing || upload.received !== upload.total) throw new Error('Incomplete preview source');
     upload.finishing = true;
-    try {
+    const finish = (async () => {
       await upload.queue;
+      await this.#closeUpload(upload);
+      this.#active(token, entry);
       // Detect the WebM container signature without trusting a user filename.
       const handle = await open(entry.file, 'r'), prefix = Buffer.alloc(4);
       try { await handle.read(prefix, 0, 4, 0); } finally { await handle.close(); }
@@ -178,12 +225,19 @@ export class MediaProxyService {
         await symlink(entry.file, named); entry.file = named;
       }
       const output = path.join(entry.directory, 'preview.webm');
+      this.#active(token, entry);
       await this.convertPreview!(entry.file, output);
+      this.#active(token, entry);
       const info = await stat(output);
       if (!info.isFile() || info.size < 1) throw new Error('The preview was empty');
+      this.#active(token, entry);
       entry.file = output; entry.size = info.size; delete entry.upload;
       return { token, size: info.size };
-    } catch (error) { await this.release(token); throw error; }
+    })();
+    entry.finish = finish;
+    try { return await finish; }
+    catch (error) { await this.release(token); throw error; }
+    finally { delete entry.finish; }
   }
 
   async create(sourcePath: string): Promise<{ token: string; size: number }> {
@@ -202,8 +256,7 @@ export class MediaProxyService {
       await this.convert(resolved, output);
       const converted = await stat(output);
       if (!converted.isFile() || converted.size <= 0) throw new Error('The playback proxy was empty');
-      const token = randomUUID().replaceAll('-', '');
-      this.#entries.set(token, { directory, file: output, size: converted.size });
+      const token = this.#add({ directory, file: output, size: converted.size });
       return { token, size: converted.size };
     } catch (error) {
       await rm(directory, { recursive: true, force: true });
@@ -234,8 +287,7 @@ export class MediaProxyService {
       await this.convertSequence(path.join(directory, `frame-%08d${extension}`), fps, frames.length, output, onProgress);
       const converted = await stat(output);
       if (!converted.isFile() || converted.size <= 0) throw new Error('The image sequence was empty');
-      const token = randomUUID().replaceAll('-', '');
-      this.#entries.set(token, { directory, file: output, size: converted.size });
+      const token = this.#add({ directory, file: output, size: converted.size });
       return { token, size: converted.size };
     } catch (error) {
       await rm(directory, { recursive: true, force: true });
@@ -257,10 +309,10 @@ export class MediaProxyService {
     const frames = repeats.reduce((total, count) => total + count, 0);
     if (frames > MAX_SEQUENCE_FRAMES) throw new Error('This animation has too many frames to import');
     const directory = await mkdtemp(path.join(this.tempRoot, 'powermove-animation-'));
-    const token = randomUUID().replaceAll('-', '');
-    this.#entries.set(token, { directory, file: '', size: 0,
-      animation: { fps, repeats, written: repeats.map(() => 0), queue: Promise.resolve(), finishing: false } });
-    return token;
+    try {
+      return this.#add({ directory, file: '', size: 0,
+        animation: { fps, repeats, written: repeats.map(() => 0), queue: Promise.resolve(), finishing: false } });
+    } catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
   }
 
   async writeAnimationFrame(token: string, index: number, offset: number, data: Uint8Array): Promise<void> {
@@ -282,8 +334,9 @@ export class MediaProxyService {
     if (!entry || !animation || animation.finishing) throw new Error('Unknown animation import');
     if (animation.written.some(bytes => bytes < 1)) throw new Error('The animation is missing frames');
     animation.finishing = true;
-    try {
+    const finish = (async () => {
       await animation.queue;
+      this.#active(token, entry);
       // Repeating a frame holds it on screen for its own delay at a fixed rate.
       let slot = 0;
       for (let index = 0; index < animation.repeats.length; index++) {
@@ -293,12 +346,19 @@ export class MediaProxyService {
         }
       }
       const output = path.join(entry.directory, 'animation.webm');
+      this.#active(token, entry);
       await this.convertSequence!(path.join(entry.directory, 'frame-%08d.png'), animation.fps, slot, output, onProgress);
+      this.#active(token, entry);
       const converted = await stat(output);
       if (!converted.isFile() || converted.size < 1) throw new Error('The converted animation was empty');
+      this.#active(token, entry);
       entry.file = output; entry.size = converted.size; delete entry.animation;
       return { token, size: converted.size };
-    } catch (error) { await this.release(token); throw error; }
+    })();
+    entry.finish = finish;
+    try { return await finish; }
+    catch (error) { await this.release(token); throw error; }
+    finally { delete entry.finish; }
   }
 
   /** TIFF and HEIF stills become a PNG the renderer can decode like any other. */
@@ -319,8 +379,7 @@ export class MediaProxyService {
       await this.convertStill(resolved, extension, output);
       const converted = await stat(output);
       if (!converted.isFile() || converted.size <= 0) throw new Error('The converted image was empty');
-      const token = randomUUID().replaceAll('-', '');
-      this.#entries.set(token, { directory, file: output, size: converted.size });
+      const token = this.#add({ directory, file: output, size: converted.size });
       return { token, size: converted.size };
     } catch (error) {
       await rm(directory, { recursive: true, force: true });
@@ -338,29 +397,57 @@ export class MediaProxyService {
     }
     const bytesToRead = Math.min(length, entry.size - offset);
     if (bytesToRead <= 0) return new Uint8Array();
-    const buffer = Buffer.allocUnsafe(bytesToRead);
-    const handle = await open(entry.file, 'r');
-    try {
+    const reading = (async () => {
+      const handle = await this.#reader(entry);
+      const buffer = new Uint8Array(bytesToRead);
       const { bytesRead } = await handle.read(buffer, 0, bytesToRead, offset);
-      return new Uint8Array(buffer.buffer, buffer.byteOffset, bytesRead);
-    } finally {
-      await handle.close();
-    }
+      return bytesRead === bytesToRead ? buffer : buffer.slice(0, bytesRead);
+    })();
+    (entry.reads ??= new Set()).add(reading);
+    try {
+      return await reading;
+    } finally { entry.reads.delete(reading); }
   }
 
   async release(token: string): Promise<void> {
     if (!TOKEN.test(token)) return;
+    const pending = this.#releases.get(token);
+    if (pending) return pending;
     const entry = this.#entries.get(token);
     if (!entry) return;
     this.#entries.delete(token);
-    await entry.upload?.queue.catch(() => undefined);
-    await entry.animation?.queue.catch(() => undefined);
-    await rm(entry.directory, { recursive: true, force: true });
+    const releasing = (async () => {
+      // Previously accepted requests finish before descriptors close or files
+      // disappear. Deleting the token above blocks every new request immediately.
+      await Promise.allSettled([
+        entry.upload?.queue, entry.animation?.queue, entry.finish,
+        ...(entry.reads ?? []),
+      ]);
+      try {
+        await Promise.all([
+          entry.reader?.then(handle => handle.close(), () => undefined),
+          entry.upload && this.#closeUpload(entry.upload),
+        ]);
+      } finally { await rm(entry.directory, { recursive: true, force: true }); }
+    })();
+    this.#releases.set(token, releasing);
+    let notificationFailed = false, notificationError: unknown;
+    try {
+      for (const listener of this.#releaseListeners) {
+        try { listener(token); }
+        catch (error) { notificationFailed = true; notificationError ??= error; }
+      }
+      await releasing;
+      if (notificationFailed) throw notificationError;
+    }
+    finally { this.#releases.delete(token); }
   }
 
   async dispose(): Promise<void> {
+    this.#disposed = true;
     const tokens = [...this.#entries.keys()];
-    await Promise.all(tokens.map(token => this.release(token)));
+    await Promise.all([...this.#releases.values(), ...tokens.map(token => this.release(token))]);
+    this.#releaseListeners.clear();
   }
 }
 
@@ -384,9 +471,59 @@ export function registerMediaProxyIpc(
   service: MediaProxyService,
   { isTrustedSender }: { isTrustedSender(event: IpcMainInvokeEvent): boolean }
 ): void {
+  type Owner = { sender: IpcMainInvokeEvent['sender']; tokens: Set<string>; destroyed: () => void };
+  const owners = new WeakMap<IpcMainInvokeEvent['sender'], Owner>();
+  const tokens = new Map<string, Owner>();
+  const forget = (token: string) => {
+    const owner = tokens.get(token);
+    if (!owner) return;
+    tokens.delete(token); owner.tokens.delete(token);
+    if (owner.tokens.size === 0) {
+      owner.sender.removeListener('destroyed', owner.destroyed);
+      owner.sender.removeListener('render-process-gone', owner.destroyed);
+      owners.delete(owner.sender);
+    }
+  };
+  service.onRelease(forget);
+  const own = async (event: IpcMainInvokeEvent, token: string): Promise<string> => {
+    if (!service.has(token)) throw new Error('The playback proxy has expired');
+    if (isRendererUnavailable(event.sender)) {
+      await service.release(token);
+      throw new Error('The media renderer has closed or crashed');
+    }
+    let owner = owners.get(event.sender);
+    if (!owner) {
+      owner = { sender: event.sender, tokens: new Set(), destroyed: () => {
+        for (const token of [...owner!.tokens]) void service.release(token).catch(() => undefined);
+      } };
+      owners.set(event.sender, owner);
+      event.sender.once('destroyed', owner.destroyed);
+      event.sender.once('render-process-gone', owner.destroyed);
+    }
+    owner.tokens.add(token); tokens.set(token, owner);
+    return token;
+  };
+  const createOwned = async <T extends { token: string }>(event: IpcMainInvokeEvent,
+    create: (isCurrent: () => boolean) => Promise<T>): Promise<T> => {
+    // A recovered WebContents is the same object, but its old request cannot
+    // deliver tokens or progress to the replacement renderer.
+    let rendererGone = false;
+    const gone = () => { rendererGone = true; };
+    const isCurrent = () => !rendererGone && !isRendererUnavailable(event.sender);
+    event.sender.once('render-process-gone', gone);
+    try {
+      const result = await create(isCurrent);
+      if (!isCurrent()) {
+        await service.release(result.token);
+        throw new Error('The media renderer has closed or crashed');
+      }
+      await own(event, result.token);
+      return result;
+    } finally { event.sender.removeListener('render-process-gone', gone); }
+  };
   ipcMain.handle(IPC.mediaPreviewBegin, async (event, size: number) => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
-    return service.beginPreview(size);
+    return (await createOwned(event, async () => ({ token: await service.beginPreview(size) }))).token;
   });
   ipcMain.handle(IPC.mediaPreviewChunk, async (event, value: unknown) => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -402,7 +539,7 @@ export function registerMediaProxyIpc(
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const request = proxyRequest(value);
     try {
-      const proxy = await service.create(request.sourcePath);
+      const proxy = await createOwned(event, () => service.create(request.sourcePath));
       return {
         ok: true,
         token: proxy.token,
@@ -427,9 +564,9 @@ export function registerMediaProxyIpc(
       throw new IpcValidationError(IPC.mediaSequenceCreate, 'invalid request id');
     }
     try {
-      const proxy = await service.createSequence(sourcePaths, fps, completed => {
-        if (requestId && !event.sender.isDestroyed()) event.sender.send(IPC.mediaSequenceProgress, { requestId, completed });
-      });
+      const proxy = await createOwned(event, isCurrent => service.createSequence(sourcePaths, fps, completed => {
+        if (requestId && isCurrent()) event.sender.send(IPC.mediaSequenceProgress, { requestId, completed });
+      }));
       return { ok: true, ...proxy, type: 'video/webm' };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'Could not import image sequence' };
@@ -440,7 +577,7 @@ export function registerMediaProxyIpc(
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!value || typeof value !== 'object') throw new IpcValidationError(IPC.mediaAnimationBegin, 'expected an object');
     const { fps, repeats } = value as { fps: number; repeats: number[] };
-    return service.beginAnimation(fps, repeats);
+    return (await createOwned(event, async () => ({ token: await service.beginAnimation(fps, repeats) }))).token;
   });
 
   ipcMain.handle(IPC.mediaAnimationFrame, async (event, value: unknown) => {
@@ -465,7 +602,7 @@ export function registerMediaProxyIpc(
     }
     try {
       const proxy = await service.finishAnimation(token, completed => {
-        if (requestId && !event.sender.isDestroyed()) event.sender.send(IPC.mediaAnimationProgress, { requestId, completed });
+        if (requestId && service.has(token) && !isRendererUnavailable(event.sender)) event.sender.send(IPC.mediaAnimationProgress, { requestId, completed });
       });
       return { ok: true, ...proxy, type: 'video/webm' };
     } catch (error) {
@@ -479,7 +616,7 @@ export function registerMediaProxyIpc(
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const request = proxyRequest(value, IPC.mediaImageCreate);
     try {
-      const proxy = await service.createStillImage(request.sourcePath);
+      const proxy = await createOwned(event, () => service.createStillImage(request.sourcePath));
       return { ok: true, ...proxy, type: 'image/png' };
     } catch (error) {
       return { ok: false, error: error instanceof Error && error.message

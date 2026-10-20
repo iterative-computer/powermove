@@ -1,8 +1,9 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { atomicWrite, ProjectFiles } from './project-files';
+import * as projectHash from './project-file-hash';
 
 let directory: string;
 let registry: string;
@@ -61,6 +62,22 @@ describe('real project files', () => {
     expect(backups).toHaveLength(1);
     expect(await readFile(backups[0]!)).toEqual(bytes('first'));
     expect((await readdir(directory)).some(name => name.endsWith('.tmp'))).toBe(false);
+  });
+  it('retries a transient macOS read deadlock while checking the existing project', async () => {
+    const destination = path.join(directory, 'Demo.pmv');
+    await files.save('one', bytes('first'), destination);
+    const handle = await open(destination, 'r');
+    const prototype = Object.getPrototypeOf(handle) as { read: typeof handle.read };
+    await handle.close();
+    const originalRead = prototype.read;
+    const deadlock = Object.assign(new Error('Unknown system error -11, read'), { errno: -11, code: 'Unknown system error -11' });
+    const read = vi.spyOn(prototype, 'read').mockRejectedValueOnce(deadlock).mockImplementation(originalRead);
+    try {
+      await files.save('one', bytes('second'));
+      expect(await readFile(destination)).toEqual(bytes('second'));
+      expect(await readFile((await files.backups('one'))[0]!)).toEqual(bytes('first'));
+      expect(read).toHaveBeenCalled();
+    } finally { read.mockRestore(); }
   });
   it('Save As changes only that project’s destination', async () => {
     const a = path.join(directory, 'a.pmv'), b = path.join(directory, 'b.pmv');
@@ -122,6 +139,20 @@ describe('real project files', () => {
     await writeFile(destination, bytes('after and larger'));
     await expect(files.close(opened.token)).rejects.toThrow('changed while opening');
     await expect(files.read(opened.token, 0, 1)).rejects.toThrow('range');
+  });
+  it('rejects a file changed during opening before granting a project association', async () => {
+    const destination = path.join(directory, 'changing-open.pmv');
+    await writeFile(destination, bytes('before'));
+    const originalHash = projectHash.hashProjectFile;
+    const hashing = vi.spyOn(projectHash, 'hashProjectFile').mockImplementation(async (...args) => {
+      const hash = await originalHash(...args);
+      await writeFile(destination, bytes('changed by another writer'));
+      return hash;
+    });
+    try {
+      await expect(files.open(destination)).rejects.toThrow('changed while opening');
+      await expect(readFile(registry)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally { hashing.mockRestore(); }
   });
   it('keeps the original intact if the backup cannot be written', async () => {
     const destination = path.join(directory, 'a.pmv');

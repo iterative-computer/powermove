@@ -13,6 +13,6 @@ describe('inspector actions', () => {
 
     const items = menu.mock.calls[0]?.[1] ?? [];
     expect(items.filter((item: any) => typeof item?.label === 'string').map((item: any) => item.label))
-      .toEqual(['Text', 'Shape', 'Solid', 'Null', 'Import media…']);
+      .toEqual(['Text', 'Shape', 'Solid', 'Adjustment layer', 'Null', 'Import media…']);
   });
 });

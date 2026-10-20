@@ -1,16 +1,16 @@
+import { captureAborted } from '../core/video-frame-decode';
+import { editLayerStrips, timelineState } from './layer-strips';
+import { manageProject } from './project-tools';
 import { setPanelLayout } from './workspace-layout';
 import { mcpProjectTool } from './mcp-project-tools';
 import { createAgentCheckpoint } from './checkpoint';
-import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } from './panel-tools';
+import { openPanel, readPanel, interactPanel, panelBounds, panelTarget, assertPanelTarget, preparePanelInput } from './panel-tools';
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
 import { editVideo, videoAssets } from './video-editing';
 import { agentMediaSource } from './media-source';
 import { listMedia, importMedia, manageMedia } from './media-management';
 import { checkProject } from './project-check';
 import { CHECK_PROJECT_TOOL, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentCompositionInfo } from '../../../../shared/media-tools';
-import { editModel,MODEL_RECIPES } from '../../core/scene3d/modeling';
-import {renderSettings,setRenderSettings} from '../../core/scene3d/rendering';
-import {MATERIAL_PRESETS,listMaterials} from '../../core/scene3d/materials';
 import { editScene } from '../../core/scene3d/operations';
 import { compositionScene,layer3DRole } from '../../core/scene3d/layers';
 import { SCENE3D_DEFINITION, sceneProperties,parseScene } from '../../core/scene3d/schema';
@@ -31,16 +31,16 @@ import { bridge as hostBridge } from '../../kernel/bridge';
 export function install(PM: PMRegistry): void {
 const MAX_REPAIRS = 2;
 const SCENE_OPERATIONS = new Set([
-  'set_property', 'replace_keyframes', 'offset_property', 'set_easing', 'set_expression', 'set_content',
+  'set_property', 'replace_keyframes', 'simplify_keyframes', 'set_easing', 'set_expression', 'set_content',
   'set_layer', 'set_composition', 'add_layer', 'delete_layers',
   'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'remove_effect', 'set_effect', 'set_transition',
-  'set_scene_parameter', 'add_marker', 'create_section', 'update_section',
+  'set_scene_parameter', 'add_marker', 'remove_marker', 'create_section', 'update_section',
   'transform_layers', 'add_captions', 'edit_captions',
 ]);
 const FIELDS: any = {
   set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold', 'preserveHandEdits'],
   replace_keyframes: ['type', 'target', 'path', 'keyframes', 'replace', 'expression', 'preserveHandEdits'],
-  offset_property: ['type', 'target', 'path', 'delta', 'preserveHandEdits'],
+  simplify_keyframes: ['type', 'scope', 'targets', 'properties'],
   set_easing: ['type', 'keyframes', 'curve'],
   set_expression: ['type', 'target', 'path', 'expression'],
   set_content: ['type', 'target', 'patch'],
@@ -52,12 +52,13 @@ const FIELDS: any = {
   ungroup_layers: ['type', 'targets'],
   move_to_group: ['type', 'targets', 'group'],
   reorder_layer: ['type', 'target', 'index'],
-  add_effect: ['type', 'target', 'effect', 'parameters', 'open'],
+  add_effect: ['type', 'target', 'effect', 'version', 'parameters', 'inputs', 'open'],
   remove_effect: ['type', 'target', 'effect'],
   set_effect: ['type', 'target', 'effect', 'patch'],
   set_transition: ['type', 'layer', 'edge', 'transition'],
   set_scene_parameter: ['type', 'name', 'label', 'control', 'value', 'min', 'max', 'options'],
   add_marker: ['type', 'id', 'time', 'name'],
+  remove_marker: ['type', 'index'],
   create_section: ['type', 'section'],
   update_section: ['type', 'sectionId', 'layers', 'thumb', 'at', 'version'],
   transform_layers: ['type', 'transform', 'state'],
@@ -174,12 +175,19 @@ function projectState(options: any = {}) {
   };
 }
 
-async function capture(times = defaultTimes(), width = 480) {
+async function capture(times = defaultTimes(), width = 480, options: { signal?: AbortSignal } = {}) {
+  const project = PM.proj, compId = project.compId, revision = project.revision;
+  const check = () => {
+    captureAborted(options.signal);
+    if (PM.proj !== project || project.compId !== compId || project.revision !== revision)
+      throw new DOMException('The composition changed during preview', 'AbortError');
+  };
   const chosen = safeTimes(times, defaultTimes());
   const images = [];
   for (const time of chosen) {
-    await new Promise((resolve: any) => window.requestAnimationFrame(resolve));
-    images.push(await (PM.Export.snapshotAsync?.(time, width) ?? PM.Export.snapshot(time, width)));
+    check();
+    images.push(await (PM.Export.snapshotAsync?.(time, width, options) ?? PM.Export.snapshot(time, width)));
+    check();
   }
   return { times: chosen, images };
 }
@@ -193,11 +201,13 @@ async function observe(times?: any) {
 }
 
 /** Capture only on a deliberate agent send/review, never during idle reads. */
-async function observeVisual(times?: any) {
+async function observeVisual(times?: any, options: { signal?: AbortSignal } = {}) {
+  const state = projectState();
   const chosen = safeTimes(times, defaultTimes());
-  try { return { state: projectState(), ...await capture(chosen), visualError: '' }; }
+  try { return { state, ...await capture(chosen, 480, options), visualError: '' }; }
   catch (error: any) {
-    return { state: projectState(), times: [], images: [], visualError: `Composition preview unavailable: ${String(error?.message || error)}` };
+    if (options.signal?.aborted || error?.name === 'AbortError') return { state, times: [], images: [], cancelled: true, visualError: '' };
+    return { state, times: [], images: [], visualError: `Composition preview unavailable: ${String(error?.message || error)}` };
   }
 }
 
@@ -231,7 +241,7 @@ function cleanCommand(raw: any) {
     if (!out.sectionId || !Array.isArray(out.layers) || !out.layers.length) return null;
   }
   /* Model-authored edits preserve hand intent by default; explicit overrides survive. */
-  if (out.type === 'set_property' || out.type === 'replace_keyframes' || out.type === 'offset_property') out.preserveHandEdits = out.preserveHandEdits !== false;
+  if (out.type === 'set_property' || out.type === 'replace_keyframes') out.preserveHandEdits = out.preserveHandEdits !== false;
   return out;
 }
 
@@ -251,11 +261,11 @@ function describeCommand(command: any) {
   const target = command.target || (Array.isArray(command.targets) ? `${command.targets.length} layers` : '') || command.name || '';
   const detail = command.path || command.layerType || command.effect || Object.keys(command.patch || {}).join(', ');
   const labels: any = {
-    set_property: 'Set property', replace_keyframes: 'Animate', set_easing: 'Set easing', set_expression: 'Set expression',
+    set_property: 'Set property', replace_keyframes: 'Animate', simplify_keyframes: 'Simplify Keyframes', set_easing: 'Set easing', set_expression: 'Set expression',
     set_content: 'Edit content', set_layer: 'Edit layer', set_composition: 'Edit composition',
     add_layer: 'Add layer', delete_layers: 'Delete', reorder_layer: 'Reorder layer',
     add_effect: 'Add effect', remove_effect: 'Remove effect', set_effect: 'Edit effect',
-    set_scene_parameter: 'Set scene control', add_marker: 'Add marker',
+    set_scene_parameter: 'Set scene control', add_marker: 'Add marker', remove_marker: 'Remove marker',
     create_section: 'Create section', update_section: 'Update section',
     transform_layers: 'Transform layers', add_captions: 'Add captions', edit_captions: 'Edit captions',
   };
@@ -340,7 +350,7 @@ async function execute(request: any, proposal: any, progress: any = () => {}, re
   try {
     for (let pass = 0; pass <= MAX_REPAIRS; pass++) {
       progress(pass ? `Reviewing repair ${pass} of ${MAX_REPAIRS}…` : 'Reviewing the source edit…');
-      frames = await observeVisual(proposal.reviewTimes);
+      frames = await observeVisual(proposal.reviewTimes, { signal: reviewOptions.signal });
       if (frames.visualError) reviewError = frames.visualError;
       const raw = await PM.CodexBridge.request(
         reviewPrompt(request, applied, pass, frames), reviewSchema(), frames.images,
@@ -361,7 +371,7 @@ async function execute(request: any, proposal: any, progress: any = () => {}, re
     reviewError = String(error.message || error);
   }
   /* Refresh final pixels after repairs, using representative times by default. */
-  try { frames = await observeVisual(proposal.reviewTimes); if (frames.visualError) reviewError = frames.visualError; }
+  try { frames = await observeVisual(proposal.reviewTimes, { signal: reviewOptions.signal }); if (frames.visualError) reviewError = frames.visualError; }
   catch (error: any) {
     reviewError = reviewError || String(error.message || error);
     frames = frames || { state: projectState(), times: proposal.reviewTimes, images: [] };
@@ -376,6 +386,8 @@ async function execute(request: any, proposal: any, progress: any = () => {}, re
 }
 
 function rollback(checkpoint: any) {
+  if (checkpoint?.projectId && checkpoint.projectId !== PM.proj.id) return false;
+  if (checkpoint?.boundary !== undefined && checkpoint.boundary !== (PM.agentProjectBoundary || 0)) return false;
   if (checkpoint.historyId && PM.hist.undoIfTop?.(checkpoint.historyId)) return true;
   const take = checkpoint?.takeId && PM.takes?.all?.().find((item: any) => item.id === checkpoint.takeId);
   const json = checkpoint?.json || take?.json;
@@ -396,6 +408,8 @@ interface LiveToolTransaction {
 }
 
 const liveToolTransactions = new Map<string, LiveToolTransaction>();
+const panelCalls = new Map<string, Set<AbortController>>();
+const committedToolChanges = new Set<string>();
 const liveToolObservations = new Map<string, { projectId: string; revision: number }>();
 
 /* Caption generation can outlast one tool call (the bridge fails a call after
@@ -572,17 +586,51 @@ async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promis
 }
 
 async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit<AgentToolResponseEvent, 'runId' | 'callId'>> {
+  if (request.tool === 'publish_visual_reply') {
+    if (!hostBridge()?.versions.electron) throw new Error('Visual replies require the Powermove desktop app.');
+    if (!PM.SpatialAssistant?.publishVisualReply) throw new Error('Visual replies are unavailable in this connection.');
+    const artifact = PM.SpatialAssistant.publishVisualReply(request.runId, request.arguments);
+    return { ok: true, content: [toolText(artifact)] };
+  }
   PM.SpatialAssistant?.assertRunProject?.(request.runId);
   const pinned = liveToolObservations.get(request.runId) || liveToolTransactions.get(request.runId);
   if (pinned && request.tool !== '__finish_run') assertTransactionProject(pinned);
   if (request.tool.startsWith('__mcp_')) {
     const value = await mcpProjectTool(PM, request.tool, request.arguments);
-    if (request.tool === '__mcp_context') refreshLiveTransaction(request);
+    if (request.tool === '__mcp_context') {
+      refreshLiveTransaction(request);
+      // The host writes this snapshot to the workspace; it never reaches the
+      // agent, so large projects must not hit the response budget.
+      return { ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: currentRevision() };
+    }
     return { ok: true, content: [toolText(value)], revision: currentRevision() };
   }
   if (request.tool === '__agent_thread_control') {
     if (!PM.SpatialAssistant?.controlThread) throw new Error('Thread controls are unavailable.');
     return { ok: true, content: [toolText(await PM.SpatialAssistant.controlThread(request.arguments))] };
+  }
+  if (request.tool === 'manage_project') {
+    const operation = String(request.arguments.operation);
+    if (!['list', 'create', 'open', 'rename', 'duplicate', 'save', 'trash', 'restore'].includes(operation)) throw new Error('Unknown project operation.');
+    if (['create', 'open'].includes(operation) && PM.SpatialAssistant?.canSwitchRunProject?.(request.runId) === false) {
+      throw new Error('Create or open projects from an app thread. This thread stays attached to its project.');
+    }
+    if (operation !== 'list') {
+      if (PM.Export?.busy || PM.agentFrameCapture) throw new Error('Wait for the current export or frame capture to finish.');
+      if (hostBridge()?.remote) throw new Error('Project library management requires a desktop window.');
+      const finished = await handleLiveAgentTool({ ...request, tool: '__finish_run', arguments: { commit: true } });
+      if (!finished.ok) throw new Error(finished.error);
+      if (finished.changed) committedToolChanges.add(request.runId);
+    }
+    if (operation !== 'list') PM.agentProjectBoundary = (PM.agentProjectBoundary || 0) + 1;
+    const result = await manageProject(PM, request.arguments);
+    if (operation !== 'list') { committedToolChanges.add(request.runId); refreshLiveTransaction(request); }
+    return { ok: true, content: [toolText(result)], changed: operation !== 'list', revision: currentRevision() };
+  }
+  if (request.tool === 'get_timeline') {
+    const content = toolText(timelineState(PM, request.arguments));
+    refreshLiveTransaction(request);
+    return { ok: true, content: [content], revision: currentRevision() };
   }
   if (request.tool === 'select_layers') {
     const ids = request.arguments.layerIds;
@@ -602,10 +650,10 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     })], revision: currentRevision() };
   }
   if (request.tool === 'get_3d_scene') {
-    const comp=PM.curComp?.()||PM.proj;const layers=comp.layers.filter((l:any)=>layer3DRole(l));
-    const state={modelRecipes:MODEL_RECIPES,materialPresets:MATERIAL_PRESETS,materials:listMaterials(PM),rendering:renderSettings(comp),modelGroups:comp.layers.filter((l:any)=>l.d?.modeling).map((l:any)=>({id:l.id,name:l.name,parent:l.parent,model:l.d.modeling})),layerId:request.arguments.target || null,scene:compositionScene(PM,PM.time),
+    const layers=PM.proj.layers.filter((l:any)=>layer3DRole(l));
+    const state={layerId:request.arguments.target || null,scene:compositionScene(PM,PM.time),
       layers:layers.map((l:any)=>({id:l.id,name:l.name,role:layer3DRole(l),parent:l.parent,visible:l.on,locked:l.lock,from:l.from,duration:l.dur,content:l.d.data})),
-      channels:[...layers,...comp.layers.filter((layer:any)=>layer.d?.modeling)].flatMap((layer:any)=>PM.allProps(layer).map((p:any)=>({layerId:layer.id,path:p.key,value:PM.evP(layer,p.prop,PM.time,p.key),keyframeCount:p.prop.kf.length}))),
+      channels:layers.flatMap((layer:any)=>PM.allProps(layer).map((p:any)=>({layerId:layer.id,path:p.key,value:PM.evP(layer,p.prop,PM.time,p.key),keyframeCount:p.prop.kf.length}))),
       assets:Object.values<any>(PM.proj.assets || {}).filter(a=>['model','image'].includes(a.kind)).map(a=>({id:a.id,name:a.name,kind:a.kind,format:a.format})),
       revision:currentRevision()};
     refreshLiveTransaction(request);
@@ -680,7 +728,11 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     };
     return { ok: true, content: [toolText(state)], revision: currentRevision() };
   }
-  if (request.tool === '__panel_bounds') return { ok: true, content: [toolText(panelBounds(PM, request.arguments.panelId))], revision: currentRevision() };
+  if (request.tool === '__panel_bounds') return { ok: true, content: [toolText({ ...panelBounds(PM, request.arguments.panelId), target: panelTarget(PM, request.arguments.panelId) })], revision: currentRevision() };
+  if (request.tool === '__validate_panel_target') {
+    assertPanelTarget(PM, request.arguments.panelId, request.arguments.target);
+    return { ok: true, content: [], revision: currentRevision() };
+  }
   if (request.tool === '__prepare_panel_input') {
     const target = preparePanelInput(PM, request.arguments);
     const transaction = beginLiveTransaction(request, 'Use panel');
@@ -696,16 +748,25 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     return { ok: true, content: [toolText(panelLayoutDigest())], revision: currentRevision() };
   }
   if (request.tool === 'get_panel_state' || request.tool === 'open_panel' || request.tool === 'interact_panel') {
-    if (request.tool === 'open_panel') await openPanel(PM, request.arguments.panelId);
-    if (request.tool !== 'interact_panel') return { ok: true, content: [toolText(readPanel(PM, request.arguments.panelId))], revision: currentRevision() };
-    const transaction = beginLiveTransaction(request, 'Use panel');
-    if (currentRevision() !== transaction.revision) throw new Error('The project changed. Read get_project_state before using another panel control.');
-    // Arbitrary panel handlers may import asynchronously or use their own history.
-    // Keep their native Undo entries; never snapshot-rollback an external panel action.
-    const state = await interactPanel(PM, request.arguments, () => { transaction.panelActions = true; });
-    transaction.revision = currentRevision();
-    transaction.changed ||= transaction.revision !== transaction.baseRevision;
-    return { ok: true, content: [toolText(state)], changed: transaction.changed, revision: transaction.revision };
+    const controller = new AbortController();
+    let calls = panelCalls.get(request.runId);
+    if (!calls) panelCalls.set(request.runId, calls = new Set());
+    calls.add(controller);
+    try {
+      if (request.tool === 'open_panel') await openPanel(PM, request.arguments.panelId, controller.signal);
+      if (request.tool !== 'interact_panel') return { ok: true, content: [toolText(readPanel(PM, request.arguments.panelId))], revision: currentRevision() };
+      const transaction = beginLiveTransaction(request, 'Use panel');
+      if (currentRevision() !== transaction.revision) throw new Error('The project changed. Read get_project_state before using another panel control.');
+      // Arbitrary panel handlers may import asynchronously or use their own history.
+      // Keep their native Undo entries; never snapshot-rollback an external panel action.
+      const state = await interactPanel(PM, request.arguments, () => { transaction.panelActions = true; }, controller.signal);
+      transaction.revision = currentRevision();
+      transaction.changed ||= transaction.revision !== transaction.baseRevision;
+      return { ok: true, content: [toolText(state)], changed: transaction.changed, revision: transaction.revision };
+    } finally {
+      calls.delete(controller);
+      if (!calls.size && panelCalls.get(request.runId) === calls) panelCalls.delete(request.runId);
+    }
   }
   if (request.tool === 'render_frames') {
     const rawTimes = Array.isArray(request.arguments.times) ? request.arguments.times : undefined;
@@ -719,7 +780,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       revision: currentRevision()
     };
   }
-  if (request.tool === 'apply_commands' || request.tool === 'edit_video' || request.tool === 'edit_3d') {
+  if (request.tool === 'apply_commands' || request.tool === 'edit_video' || request.tool === 'edit_3d' || request.tool === 'edit_layer_strips') {
     const rawCommands = Array.isArray(request.arguments.commands) ? request.arguments.commands : [];
     const commands = rawCommands.map(cleanCommand);
     const invalidIndex = commands.indexOf(null);
@@ -739,7 +800,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       baseRevision: transaction.revision,
       historyGroup: transaction.historyGroup
     };
-    const applied = request.tool === 'edit_3d' ? ['create_model','regenerate_model','import_blend'].includes(String(request.arguments.operation)) ? await editModel(PM,request.arguments as any,editMeta) : request.arguments.operation==='set_rendering'?setRenderSettings(PM,request.arguments.settings as any,editMeta):editScene(PM,request.arguments as any,editMeta) : request.tool === 'edit_video'
+    const applied = request.tool === 'edit_layer_strips' ? editLayerStrips(PM, request.arguments, editMeta) : request.tool === 'edit_3d' ? editScene(PM,request.arguments as any,editMeta) : request.tool === 'edit_video'
       ? editVideo(PM, request.arguments, editMeta)
       : PM.Edit.apply(commands, editMeta);
     if (!applied.ok) throw new Error(applied.message);
@@ -750,7 +811,9 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       ok: true,
       content: [toolText({
         applied: commands.map(describeCommand),
+        ...(request.tool === 'edit_layer_strips' ? { strips: applied.data?.result ?? applied.data } : {}),
         ...(request.tool === 'edit_3d' ? {layer:applied.data?.result ?? null,scene:applied.data?.result ?? null} : {clip:applied.data?.result ?? null}),
+        results: applied.data?.results || [],
         message: applied.message || 'Applied editable Powermove commands.',
         revision: transaction.revision
       })],
@@ -833,11 +896,14 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     };
   }
   if (request.tool === '__finish_run') {
+    for (const controller of panelCalls.get(request.runId) ?? []) controller.abort();
+    panelCalls.delete(request.runId);
     cancelCaptionJobs(request.runId);
+    const committed = committedToolChanges.delete(request.runId);
     liveToolObservations.delete(request.runId);
     const transaction = liveToolTransactions.get(request.runId);
     if (!transaction) {
-      return { ok: true, content: [toolText({ changed: false })], changed: false, revision: currentRevision() };
+      return { ok: true, content: [toolText({ changed: committed })], changed: committed, revision: currentRevision() };
     }
     const commit = request.arguments.commit === true;
     try {
@@ -857,8 +923,8 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       }
       return {
         ok: true,
-        content: [toolText({ changed: (commit || transaction.panelActions) && transaction.changed, historyId: historyId || null })],
-        changed: (commit || transaction.panelActions === true) && transaction.changed,
+        content: [toolText({ changed: committed || (commit || transaction.panelActions) && transaction.changed, historyId: historyId || null })],
+        changed: committed || (commit || transaction.panelActions === true) && transaction.changed,
         revision: currentRevision(),
         ...(historyId ? { historyId } : {})
       };

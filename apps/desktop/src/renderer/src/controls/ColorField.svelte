@@ -94,6 +94,7 @@
   let invalid = $state(false);
   let previewing = $state(false);
   let sampling = $state(false);
+  let pickerGeneration = 0;
   let menu = $state<{ kind: 'settings' | 'notation' | 'space'; handle: PopoverMenuHandle } | null>(null);
   let closeTimer: number | undefined;
   let stopDrag: (() => void) | undefined;
@@ -354,14 +355,18 @@
       return;
     }
     if (sampling) return;
+    const generation = pickerGeneration;
     sampling = true;
     try {
       const result = await new EyeDropper().open();
-      useDraft(result.sRGBHex);
+      if (generation === pickerGeneration && open && phase === 'open') useDraft(result.sRGBHex);
     } catch (error) {
       if (!(error instanceof DOMException && error.name === 'AbortError')) api.ui.toast('Could not sample that color');
     } finally {
-      sampling = false;
+      if (generation === pickerGeneration) {
+        sampling = false;
+        if (open && phase === 'open' && popover?.isConnected) valueInput?.focus({ preventScroll: true });
+      }
     }
   }
 
@@ -395,6 +400,8 @@
   }
 
   function show(): void {
+    pickerGeneration++;
+    sampling = false;
     window.clearTimeout(closeTimer);
     previewing = false;
     phase = 'open';
@@ -485,7 +492,7 @@
     });
   });
   onMount(() => { if (embedded) show(); });
-  onDestroy(() => { stopDrag?.(); window.clearTimeout(closeTimer); menu?.handle.close(); });
+  onDestroy(() => { pickerGeneration++; stopDrag?.(); window.clearTimeout(closeTimer); menu?.handle.close(); });
   function overlay(node: HTMLElement) { return embedded ? undefined : mountOverlayOnBody(node); }
 </script>
 

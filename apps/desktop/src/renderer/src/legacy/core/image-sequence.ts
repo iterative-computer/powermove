@@ -2,7 +2,7 @@ import { IMAGE_SEQUENCE_ACCEPT, orderedSequence, sequenceFrame, sequenceGaps, va
 import type { PMRegistry } from '../registry';
 import type { ImportProgress } from './import-progress';
 import { bridge as hostBridge } from '../../kernel/bridge';
-import { cloudSourcePaths } from './cloud-media';
+import { cloudSourcePaths, prepareCloudImport } from './cloud-media';
 
 export const importedSequences = new WeakMap<File, { fps: number; frames: number }>();
 
@@ -92,7 +92,9 @@ export async function convertImageSequence(files: File[], fps: number, assertCur
   let width = 0, height = 0;
   let checked = 0;
   onProgress?.({ label: `Checking frames · 0 of ${frames.length}`, completed: 0, total: frames.length });
-  for (const file of frames) {
+  for (const [index, original] of frames.entries()) {
+    const file = frames[index] = await prepareCloudImport(original, assertCurrent, (label, progress) =>
+      onProgress?.({ label: `${label} · ${original.name}`, ...progress }));
     assertCurrent();
     const bitmap = await createImageBitmap(file);
     try {

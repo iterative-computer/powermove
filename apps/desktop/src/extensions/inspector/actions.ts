@@ -6,6 +6,7 @@ export function showNewLayerMenu(api: PowermoveAPI, anchor: HTMLElement): void {
     { label: 'Text', kb: '⌘T', run: () => api.commands.run('newText') },
     { label: 'Shape', kb: '⌘⇧Y', run: () => api.commands.run('newShape') },
     { label: 'Solid', kb: '⌘Y', run: () => api.commands.run('newSolid') },
+    { label: 'Adjustment layer', kb: '⌘⌥Y', run: () => api.commands.run('newAdjustment') },
     { label: 'Null', run: () => api.commands.run('newNull') },
     '-',
     { label: 'Import media…', kb: '⌘I', run: () => api.commands.run('import') }

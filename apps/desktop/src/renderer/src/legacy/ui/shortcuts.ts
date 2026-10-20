@@ -35,6 +35,7 @@ const kernel = ensureKernel(PM);
    or `PM.commands.palette.run = …` from overlays/install.ts) replaces rather
    than stacking, so the legacy layer never buries its own entries. */
 const owned = new Map<string, { dispose(): void }>();
+const loadingNavigation = new Set(['settings', 'projects', 'newProject', 'open', 'closeTab', 'nextTab', 'previousTab']);
 const put = (definition: CommandDefinition): void => {
   owned.get(definition.id)?.dispose();
   owned.set(definition.id, kernel.commands.register(LEGACY_OWNER, definition));
@@ -47,6 +48,7 @@ const def: any = (id?: any, label?: any, kb?: any, run?: any, cat: any = 'Genera
        skips preventDefault. Legacy always prevented the default, so a command
        that happens to return false must not change that. */
     run: (...a: any[]) => {
+      if (PM.projectLoading && !loadingNavigation.has(id)) return undefined;
       const result = run(...a);
       return opts.preserveFalse ? result : result === false ? undefined : result;
     },
@@ -121,6 +123,7 @@ def('newText', 'New text layer', '⌘T', () => addLayer('text', { name: 'Headlin
 def('newSolid', 'New solid', '⌘Y', () => addLayer('solid', { name: 'Solid' }), 'Create');
 def('newShape', 'New shape', '⌘⇧Y', () => addLayer('shape', { name: 'Shape', p: center() }), 'Create');
 def('newNull', 'New null object', '⌘⌥⇧Y', () => addLayer('null', { name: 'Null', p: center() }), 'Create');
+def('newAdjustment', 'New adjustment layer', '⌘⌥Y', () => addLayer('adjustment', { name: 'Adjustment Layer' }), 'Create');
 def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
 def('importSequence', 'Import image sequence…', null, () => PM.pickFiles(true), 'Create');
 def('importFolder', 'Import folder…', null, () => PM.pickFolder(), 'Create');
@@ -172,7 +175,6 @@ const nativeCommandForAsset = (id?: any, at: any = PM.time) => {
   const meta: any = PM.proj.assets[id]; if (!meta) return;
   const a: any = PM.assets?.get?.(id) || meta;
   if (a.kind === 'model') {
-    if (a.format === 'blend') return;
     const definition = a.layerDefinition || LAYER3D_DEFINITIONS.object;
     if (!PM.layerDefinition?.(definition)) return;
     return {
@@ -200,6 +202,7 @@ const nativeCommandForAsset = (id?: any, at: any = PM.time) => {
       select: true,
     };
   }
+  if(a.kind==='lut')return null;
   const type: any = a.kind === 'audio' ? 'audio' : a.kind === 'video' ? 'video' : 'image';
   const content: any = type === 'audio'
     ? { asset: id, trim: 0, gain: 1, fadeIn: 0, fadeOut: 0 }
@@ -237,13 +240,6 @@ PM.commandForAsset = (id?: any, at: any = PM.time) => {
   } };
 };
 def('addFromAsset', 'Add layer from asset', null, (id?: any) => {
-  const asset = PM.proj.assets[id];
-  if (asset?.format === 'blend') {
-    return PM.Kernel.api('media-import').scene3d.model({operation:'import_blend',sourceAssetId:id,name:asset.name.replace(/\.blend$/i,'')}).then((result:any)=>{
-      if (!result.ok) PM.toast(result.message,{error:true});
-      return result.ok ? PM.L(result.data?.result?.id) : null;
-    });
-  }
   const command: any = PM.commandForAsset(id);
   if (!command) return;
   const result: any = PM.Edit.apply(command, { label: 'New ' + command.layerType, origin: 'command' });
@@ -263,7 +259,11 @@ def('separateAudio', 'Separate audio', null, (id?: any) => separateVideoAudio(PM
 def('selectAll', 'Select all layers', '⌘A', () => PM.selectLayers(PM.proj.layers.map((l: any) => l.id)), 'Edit');
 def('deselect', 'Deselect', '⎋', () => { PM.selectLayers([]); PM.sel.keys = []; }, 'Edit');
 def('groupLayers', 'Group layers', '⌘G', () => PM.Edit.apply({ type: 'group_layers', targets: PM.sel.layers }, { label: 'Group layers', origin: 'timeline' }), 'Edit');
-def('ungroupLayers', 'Ungroup layers', '⌘⇧G', () => PM.Edit.apply({ type: 'ungroup_layers', targets: PM.sel.layers }, { label: 'Ungroup layers', origin: 'timeline' }), 'Edit');
+def('ungroupLayers', 'Ungroup layers', '⌘⇧G', () => {
+  const result = PM.Edit.apply({ type: 'ungroup_layers', targets: PM.sel.layers }, { label: 'Ungroup layers', origin: 'timeline' });
+  if (!result.ok) PM.toast(result.message);
+  return result;
+}, 'Edit');
 
 /* ── layer clipboard ───────────────────────────────────── */
 let layerClip: any = null;
@@ -812,12 +812,6 @@ export function pasteLayers(PM: PMRegistry, getClipboard: () => any[] | null = (
       else clone.parent = source.parent && currentIds.has(source.parent) ? source.parent : null;
       clone.group = idMap.get(source.group) || (currentIds.has(source.group) ? source.group : null);
       if (source.matteSource && idMap.has(source.matteSource)) clone.matteSource = idMap.get(source.matteSource);
-      if(clone.d?.modeling)for(const part of Object.values<any>(clone.d.modeling.parts))if(idMap.has(part.layerId))part.layerId=idMap.get(part.layerId);
-      const generation=clone.d?.data?.object?.generation;
-      if(generation&&idMap.has(generation.groupId))generation.groupId=idMap.get(generation.groupId);
-      else if(generation&&!currentIds.has(generation.groupId))delete clone.d.data.object.generation;
-      // Shared material animation belongs to composition time when pasting later.
-      if(offset)for(const item of PM.allProps(clone))if(/^(shader|slots\.[^.]+\.shader)\./.test(item.key))for(const key of item.prop.kf)key.t-=offset;
       return clone;
     });
     layers.splice(insertAt, 0, ...pasted);

@@ -1,5 +1,5 @@
 import type { PMRegistry } from '../legacy/registry';
-import { applyPanelSize, findPanel, panelMinHeight, setPanelCollapsed, type DockSpec, type PanelSpec, type Workspace } from './model';
+import { applyPanelSize, findPanel, setPanelCollapsed, type DockSpec, type PanelSpec, type Workspace } from './model';
 
 export type SelectionSnapshot = {
   active: HTMLElement | null;
@@ -109,8 +109,7 @@ export function panelSlot(node: HTMLElement, initial: PanelSlotParams) {
     if (!inst?.el) return;
     inst.spec = params.spec;
     inst.dock = params.dock;
-    applyPanelSize(inst.el, params.spec, inst.def);
-    inst.el.style.minHeight = `${panelMinHeight(params.spec, inst.def)}px`;
+    applyPanelSize(inst.el, params.spec, inst.def, params.dock.id);
     inst.el.querySelector('.ptitle')?.replaceChildren(params.spec.title || inst.def.title);
     setPanelCollapsed(params.PM, params.id, !!findPanel(params.PM.Layout.ws as Workspace, params.id)?.spec.collapsed, false);
     movePreservingFocus(inst.el, node);

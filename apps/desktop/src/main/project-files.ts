@@ -1,12 +1,15 @@
+import { readWithRetry } from './read-retry';
+import { assertProjectDocument, ProjectDocumentWorkerError, validateProjectDocumentInWorker, WORKER_DOCUMENT_BYTES } from './project-document-validator';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, unlink, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { PROJECT_ID } from '../shared/ipc';
 import { isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../shared/project-container';
 import { FILE_CHUNK_BYTES } from './file-upload';
-import { checkVersion, changedFile, copySnapshot, fileVersion, hashHandle, publishFile, syncDirectory, syncFile, temporarySibling, type FileVersion } from './durable-file';
-import { isIncrementalProject, readIncrementalIndex, type SaveMedia } from '../shared/project-incremental';
+import { checkVersion, changedFile, copySnapshot, fileVersion, publishFile, syncDirectory, syncFile, temporarySibling, type FileVersion } from './durable-file';
+import { isIncrementalProject, readIncrementalIndex, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
 import { nativeHash, ProjectSave, validateSaveMedia } from './project-save';
+import { hashProjectFile } from './project-file-hash';
 
 /** Replace only after every byte has reached disk; a failed write preserves the original. */
 export async function atomicWrite(filePath: string, data: Uint8Array | Iterable<Uint8Array> | AsyncIterable<Uint8Array>): Promise<void> {
@@ -23,6 +26,10 @@ export async function atomicWrite(filePath: string, data: Uint8Array | Iterable<
 }
 
 type Association = { path: string; hash: string; generation?: number };
+type OpenedProject = { path: string; projectId: string; token: string; size: number; media: ProjectMediaRange[] };
+type FullProject = OpenedProject & { document: any; documentRange?: ProjectRecord };
+type RangeProject = OpenedProject & { document?: never; documentRange: ProjectRecord };
+type HashResult = { ok: true; hash: string } | { ok: false; error: unknown };
 
 /** Main-process-only grants: renderer data can never invent an overwrite path. */
 export class ProjectFiles {
@@ -72,7 +79,10 @@ export class ProjectFiles {
   }
   private serial<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.queue.then(async () => { await this.ready; return operation(); });
-    this.queue = next.catch(() => undefined);
+    // The queue needs completion, not the operation's value. Passing a
+    // successful open result through catch keeps its entire project/history
+    // alive until the next file operation, even after the reader is closed.
+    this.queue = next.then(() => undefined, () => undefined);
     return next;
   }
   async backups(id: string): Promise<string[]> {
@@ -193,31 +203,56 @@ export class ProjectFiles {
       } finally { await unlink(temporary).catch(() => undefined); }
     });
   }
-  open(filePath: string): Promise<{ path: string; projectId: string; token: string; size: number; document: any; media: ProjectMediaRange[] }> {
+  open(filePath: string): Promise<FullProject>;
+  open(filePath: string, options: { allowDocumentRange?: boolean }): Promise<FullProject | RangeProject>;
+  open(filePath: string, options: { allowDocumentRange?: boolean } = {}): Promise<FullProject | RangeProject> {
     return this.serial(async () => {
       const handle = await open(filePath, 'r');
+      let hashing: Promise<HashResult> | undefined;
+      let hashingAbort: AbortController | undefined;
       try {
         const info = await handle.stat();
         if (!info.isFile() || !Number.isSafeInteger(info.size)) throw new Error('This is not a readable project file.');
-        const readExactly = async (position: number, length: number) => {
-          const buffer = Buffer.allocUnsafe(length);
+        const readExactly = async (position: number, length: number, owned = false) => {
+          const buffer = owned ? Buffer.allocUnsafeSlow(length) : Buffer.allocUnsafe(length);
           for (let offset = 0; offset < length;) {
-            const { bytesRead } = await handle.read(buffer, offset, length - offset, position + offset);
+            const { bytesRead } = await readWithRetry(() => handle.read(buffer, offset, length - offset, position + offset));
             if (!bytesRead) throw new Error('The project container is truncated.');
             offset += bytesRead;
           }
           return buffer;
         };
         const prefix = await readExactly(0, Math.min(9, info.size));
-        let document: any, media: ProjectMediaRange[] = [];
+        let document: any, rangeValidated = false, media: ProjectMediaRange[] = [], documentRange: ProjectRecord | undefined, mediaToVerify: ProjectRecord[] = [];
         if (isIncrementalProject(prefix)) {
           const index = await readIncrementalIndex(info.size, readExactly, nativeHash);
-          const bytes = await readExactly(index.document.offset, index.document.length);
-          if (await nativeHash(bytes) !== index.document.sha256) throw new Error('The project document checksum does not match.');
-          document = JSON.parse(bytes.toString('utf8')); media = index.media;
-          for (const item of index.media) {
-            if ((await hashHandle(handle, item.offset, item.length)).digest('hex') !== item.sha256) throw new Error('The project media checksum does not match.');
+          const workerRange = options.allowDocumentRange && index.document.length >= WORKER_DOCUMENT_BYTES;
+          let bytes = await readExactly(index.document.offset, index.document.length, workerRange);
+          if (workerRange) {
+            const validation = validateProjectDocumentInWorker(bytes, index.document.sha256);
+            // Capture both outcomes immediately: document validation must win
+            // over a concurrent media/read error, and no rejected hash escapes.
+            hashingAbort = new AbortController();
+            hashing = Promise.resolve().then(() => hashProjectFile(handle, info.size, index.media, hashingAbort!.signal))
+              .then(hash => ({ ok: true as const, hash }), error => ({ ok: false as const, error }));
+            try {
+              await validation;
+              rangeValidated = true;
+            } catch (error) {
+              if (!(error instanceof ProjectDocumentWorkerError)) throw error;
+              // Transfer detaches the owned bytes even if the worker later
+              // fails. Retry the original checksum/parser on the same handle.
+              if (bytes.byteLength !== index.document.length) bytes = await readExactly(index.document.offset, index.document.length);
+              if (await nativeHash(bytes) !== index.document.sha256) throw new Error('The project document checksum does not match.');
+              document = JSON.parse(bytes.toString('utf8'));
+            }
+          } else {
+            if (await nativeHash(bytes) !== index.document.sha256) throw new Error('The project document checksum does not match.');
+            document = JSON.parse(bytes.toString('utf8'));
           }
+          media = index.media;
+          mediaToVerify = index.media;
+          documentRange = { offset: index.document.offset, length: index.document.length, sha256: index.document.sha256 };
         } else if (isProjectContainer(prefix)) {
           if (prefix.length < 9) throw new Error('The project container is truncated.');
           const headerLength = prefix.readUInt32LE(5);
@@ -229,18 +264,20 @@ export class ProjectFiles {
           // format readable alongside PMV3 and incremental PMV4.
           document = JSON.parse((await readExactly(0, info.size)).toString('utf8'));
         }
-        const project = document?.proj || document;
-        if (!project || !Array.isArray(project.layers) || !Number.isFinite(project.w) || !Number.isFinite(project.h)) throw new Error('This is not a Powermove project.');
-        const digest = createHash('sha256');
-        for await (const chunk of handle.createReadStream({ start: 0, autoClose: false, highWaterMark: FILE_CHUNK_BYTES })) digest.update(chunk);
+        if (!rangeValidated) assertProjectDocument(document);
+        const hashed: HashResult = hashing ? await hashing : { ok: true, hash: await hashProjectFile(handle, info.size, mediaToVerify) };
+        if (!hashed.ok) throw hashed.error;
+        const hash = hashed.hash;
         const after = await handle.stat();
         if (after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs) throw new Error('The project changed while opening. Try opening it again.');
         const projectId = randomUUID(), token = randomUUID();
-        this.associations.set(projectId, { path: filePath, hash: digest.digest('hex') });
+        this.associations.set(projectId, { path: filePath, hash });
         await this.persist();
         this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, busy: false });
-        return { path: filePath, projectId, token, size: info.size, document, media };
-      } catch (error) { await handle.close(); throw error; }
+        const opened = { path: filePath, projectId, token, size: info.size };
+        return rangeValidated ? { ...opened, media, documentRange: documentRange! }
+          : { ...opened, document, media, ...(documentRange ? { documentRange } : {}) };
+      } catch (error) { hashingAbort?.abort(); await hashing; await handle.close(); throw error; }
     });
   }
 
@@ -251,7 +288,7 @@ export class ProjectFiles {
     reader.busy = true;
     try {
       const data = Buffer.allocUnsafe(length);
-      const { bytesRead } = await reader.handle.read(data, 0, length, offset);
+      const { bytesRead } = await readWithRetry(() => reader.handle.read(data, 0, length, offset));
       if (!bytesRead) throw new Error('The project container is truncated.');
       return data.subarray(0, bytesRead);
     } finally { reader.busy = false; }
