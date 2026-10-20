@@ -6,7 +6,7 @@ import path from 'node:path';
 import { PROJECT_ID } from '../shared/ipc';
 import { isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../shared/project-container';
 import { FILE_CHUNK_BYTES } from './file-upload';
-import { checkVersion, changedFile, copySnapshot, fileVersion, publishFile, syncDirectory, syncFile, temporarySibling, type FileVersion } from './durable-file';
+import { checkVersion, changedFile, copySnapshot, fileVersion, publishFile, RecoveryFileError, syncDirectory, syncFile, temporarySibling, type FileVersion } from './durable-file';
 import { isIncrementalProject, readIncrementalIndex, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
 import { nativeHash, ProjectSave, validateSaveMedia } from './project-save';
 import { hashProjectFile } from './project-file-hash';
@@ -142,8 +142,11 @@ export class ProjectFiles {
       await checkVersion(destination, previous);
       await mkdir(path.dirname(this.registryPath), { recursive: true });
       await atomicWrite(journal, Buffer.from(JSON.stringify({ id, path: destination, hash, generation })));
-      await publishFile(temporary, destination, previous, hash);
-      this.associations.set(id, { path: destination, hash, generation });
+      await publishFile(temporary, destination, previous, hash, () => {
+        // Finalization can fail after publication. Retry against the bytes that
+        // reached the destination while the renderer keeps its edits dirty.
+        this.associations.set(id, { path: destination, hash, generation });
+      });
       // The user's file is durably committed. A failed private registry write
       // must not report that their file failed; retain the journal for restart.
       try { await this.persist(); await unlink(journal); }
@@ -196,11 +199,15 @@ export class ProjectFiles {
         }
       }
       const temporary = temporarySibling(destination);
+      let retainTemporary = false;
       try {
         const handle = await open(temporary, 'wx', 0o600);
         try { await handle.writeFile(writing()); await syncFile(handle); } finally { await handle.close(); }
         return await this.commit(id, destination, temporary, digest.digest('hex'), previous);
-      } finally { await unlink(temporary).catch(() => undefined); }
+      } catch (error) {
+        retainTemporary = error instanceof RecoveryFileError && error.recoveryPath === temporary;
+        throw error;
+      } finally { if (!retainTemporary) await unlink(temporary).catch(() => undefined); }
     });
   }
   open(filePath: string): Promise<FullProject>;
