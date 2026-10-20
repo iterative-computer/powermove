@@ -2,7 +2,7 @@
    Colors, radii and type mirror @powermove/tokens so they read as part of the website.
    Everything is inline: callers' CSPs allow no fonts, images or external styles. */
 
-const mark = '<svg class="mark" viewBox="0 0 141 116" aria-hidden="true"><path fill="currentColor" d="M33.3885 106.544L5.19736 115.218C1.26974 116.426 -1.70853 111.636 1.11257 108.648L28.2054 79.9531C42.9061 64.3828 53.2117 45.1902 58.0699 24.3349L63.0183 3.09249C63.9876 -1.06813 69.929 -1.01597 70.8251 3.16102L74.1448 18.6367C79.385 43.0646 92.058 65.2717 110.424 82.2092L138.829 108.405C141.918 111.254 139.086 116.33 135.039 115.198L101.016 105.677C78.8565 99.4757 55.3816 99.7767 33.3885 106.544Z"/></svg>';
+const mark = '<svg class="mark" viewBox="0 0 59.41 164.75" aria-hidden="true"><defs><linearGradient id="pm-trail" x1="1" y1="0" x2="0" y2="0"><stop offset="0" stop-color="#F0580A" stop-opacity="0.71"/><stop offset="1" stop-color="#F0580A" stop-opacity="0"/></linearGradient><linearGradient id="pm-fade" x1="0" y1="0" x2="0" y2="1"><stop offset="0.55" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><mask id="pm-mask" maskContentUnits="objectBoundingBox"><rect width="1" height="1" fill="url(#pm-fade)"/></mask></defs><rect x="5.26" y="56.41" width="26.39" height="108.34" fill="url(#pm-trail)" mask="url(#pm-mask)"/><rect x="31.65" y="56.41" width="5.0" height="108.34" fill="#F0580A"/><path d="M9.42 0.06L50.58 0.00C54.01-0.00 57.14 1.99 58.60 5.11C60.04 8.23 59.54 11.91 57.31 14.53L47.91 25.61C46.55 27.14 45.83 28.88 45.65 30.87L43.33 44.83C42.76 48.31 40.16 51.13 36.73 51.96C33.30 52.81 29.69 51.52 27.57 48.69L1.99 14.62C-2.76 7.80 1.49 0.78 9.42 0.06Z" fill="#F0580A"/></svg>';
 
 export const icons = {
   spinner: '<svg class="icon spin" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" opacity=".2"/><path d="M21 12a9 9 0 0 0-9-9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
@@ -17,7 +17,7 @@ const style = `
 html,body{height:100%}
 body{margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;padding:48px 16px;background:var(--bg);color:var(--tx);font:14px/1.5 Geist,-apple-system,BlinkMacSystemFont,system-ui,sans-serif;-webkit-font-smoothing:antialiased;text-align:center}
 .brand{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:500;letter-spacing:-.02em}
-.mark{width:22px;height:18px}
+.mark{width:9px;height:25px}
 .card{width:100%;max-width:400px;padding:36px 32px 32px;border-radius:12px;background:var(--panel);box-shadow:0 0 0 1px var(--line),0 24px 48px -24px rgb(0 0 0 / .45);display:flex;flex-direction:column;align-items:center}
 .badge{display:grid;place-items:center;width:44px;height:44px;margin-bottom:20px;border-radius:50%;background:var(--accent-dim);color:var(--accent)}
 .badge[data-tone=success]{background:var(--success-dim);color:var(--success)}

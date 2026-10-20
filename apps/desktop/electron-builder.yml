@@ -128,7 +128,7 @@ mac:
   entitlementsInherit: resources/entitlements.mac.plist
   # Apple Icon Composer catalog. electron-builder invokes actool so macOS can
   # select light, dark, tinted, and clear renditions from icon.json.
-  icon: resources/icon/Powermove.icon
+  icon: resources/icon/app-icon/Powermove-playhead.icon
   extendInfo:
     UTExportedTypeDeclarations:
       - UTTypeIdentifier: com.zellzoi.powermove.project

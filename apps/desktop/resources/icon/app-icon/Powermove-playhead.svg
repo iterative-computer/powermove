@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><defs>
+  <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#2B2B2B"/>
+    <stop offset="1" stop-color="#111111"/>
+  </linearGradient>
+</defs>
+<clipPath id="tileClip"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/><g clip-path="url(#tileClip)"><g transform="translate(10.83 43.94) scale(7.7551)">
+<defs>
+  <linearGradient id="stem" x1="1" y1="0" x2="0" y2="0">
+    <stop offset="0" stop-color="#F0580A" stop-opacity="0.71"/>
+    <stop offset="1" stop-color="#F0580A" stop-opacity="0"/>
+  </linearGradient>
+  <linearGradient id="stemFadeY" gradientUnits="userSpaceOnUse" x1="0" y1="58.1" x2="0" y2="123.1">
+    <stop offset="0" stop-color="#fff"/>
+    <stop offset="0.6" stop-color="#fff"/>
+    <stop offset="1" stop-color="#000"/>
+  </linearGradient>
+  <mask id="stemFade" maskUnits="userSpaceOnUse" x="0" y="40" width="134" height="100">
+    <rect x="0" y="40" width="134" height="100" fill="url(#stemFadeY)"/>
+  </mask>
+</defs>
+<g mask="url(#stemFade)">
+<rect x="52.8" y="58.1" width="16" height="65" fill="url(#stem)"/>
+<svg x="0" y="0" width="134.333" height="403" viewBox="17.611 52.833 22.389 67.167" overflow="visible">
+  <line x1="28.833" y1="62.517" x2="28.833" y2="73.351" stroke="#F0580A" stroke-width="0.5"/>
+</svg>
+</g>
+<svg x="0" y="0" width="134.333" height="403" viewBox="17.611 52.833 22.389 67.167" overflow="visible">
+  <path transform="translate(-4.84 2.52) rotate(-4.9)" d="M26.443 56.828L30.544 57.174C30.886 57.203 31.181 57.428 31.299 57.752C31.416 58.075 31.335 58.437 31.091 58.679L30.059 59.703C29.911 59.844 29.824 60.011 29.789 60.208L29.439 61.579C29.352 61.921 29.069 62.179 28.72 62.233C28.371 62.288 28.023 62.129 27.836 61.829L25.578 58.216C25.163 57.496 25.646 56.832 26.443 56.828Z" fill="#F0580A"/>
+</svg>
+</g></g></svg>
