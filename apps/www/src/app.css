@@ -50,8 +50,8 @@ main{overflow:clip}
 /* ---- header ---- */
 .site-header{position:absolute;inset:0 0 auto;z-index:50;color:var(--tx)}
 .bar{display:flex;align-items:center;justify-content:space-between;max-width:var(--col);height:96px;margin-inline:auto;padding-inline:24px}
-.mark{display:grid;place-items:center;width:32px;height:32px;margin-left:-5px;border-radius:var(--r-sm)}
-.mark span{width:12px;height:28px;background:url(/powermove-logo.svg) center/contain no-repeat}
+.mark{display:flex;align-items:center;height:32px;border-radius:var(--r-sm)}
+.mark svg{display:block;height:30px;width:auto}
 .links{display:flex;align-items:center;gap:20px;font-size:15px;letter-spacing:-.01em}
 .links a{transition:color var(--dur-3),opacity var(--dur-3)}
 .links a.quiet{color:var(--tx-3)}
@@ -167,8 +167,8 @@ main{overflow:clip}
 .foot-inner{display:grid;gap:56px;max-width:var(--col);margin-inline:auto;padding:0 24px 32px}
 @media(min-width:900px){.foot-inner{grid-template-columns:minmax(0,5fr) minmax(0,6fr);gap:64px}}
 @media(max-width:640px){.foot-inner{padding-inline:16px}}
-.foot-mark{display:inline-grid;place-items:center;width:32px;height:32px;margin:-5px 0 0 -5px;border-radius:var(--r-sm);color:#fff}
-.foot-mark span{width:12px;height:28px;background:url(/powermove-logo.svg) center/contain no-repeat}
+.foot-mark{display:inline-flex;border-radius:var(--r-sm);color:#fff}
+.foot-mark svg{display:block;height:36px;width:auto}
 .foot-line{margin-top:18px;max-width:30ch;font-size:15px;line-height:1.5;letter-spacing:-.01em;color:rgb(255 255 255 / .62);text-wrap:pretty}
 .foot-cta{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}
 .foot-nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:36px 24px}

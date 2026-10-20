@@ -2,6 +2,7 @@
   import { X } from '@lucide/svelte';
   import { GITHUB } from '$lib/links';
   import { download, resolveDownload } from '$lib/download.svelte';
+  import Wordmark from '$lib/Wordmark.svelte';
 
   // `onDark` is for the home page, where the bar sits on the hero's gradient.
   let { onDark = false }: { onDark?: boolean } = $props();
@@ -30,7 +31,7 @@
 
 <header class="site-header" data-on-dark={onDark ? '' : undefined} data-state={open ? 'active' : undefined}>
   <nav class="bar" aria-label="Main navigation">
-    <a class="mark" href="/#top" aria-label="Powermove home"><span aria-hidden="true"></span></a>
+    <a class="mark" href="/#top" aria-label="Powermove home"><Wordmark /></a>
     <ul class="links">
       {#each items as item (item.href)}
         <li><a class="quiet" href={item.href} onclick={() => (open = false)}>{item.label}</a></li>

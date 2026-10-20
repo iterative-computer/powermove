@@ -1,6 +1,7 @@
 <script lang="ts">
   import { DISCORD, GITHUB, RELEASES } from '$lib/links';
   import { download, resolveDownload, stars } from '$lib/download.svelte';
+  import Wordmark from '$lib/Wordmark.svelte';
 
   type Link = { label: string; href: string; external?: boolean };
 
@@ -44,7 +45,7 @@
   <div class="foot-dusk" aria-hidden="true"></div>
   <div class="foot-inner">
     <div class="foot-lead">
-      <a class="foot-mark" href="/#top" aria-label="Powermove home"><span aria-hidden="true"></span></a>
+      <a class="foot-mark" href="/#top" aria-label="Powermove home"><Wordmark /></a>
       <p class="foot-line">Powermove is free and open source, for Macs with Apple silicon.</p>
       <div class="foot-cta">
         <a class="pill light" href={download.href}>Download for Mac</a>
