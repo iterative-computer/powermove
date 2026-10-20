@@ -71,8 +71,8 @@ describe('native SVG onboarding renderer', () => {
       expect(output.getAttribute('display')).toBe('inline');
       const renderedPath = svg.querySelector(`#onboarding-bloom-${reference.proj.layers.filter((layer: any) => layer.type === 'shape').indexOf(activeLayer)} path`)!;
       const data = renderedPath.getAttribute('d')!;
-      expect(data).toBe(pathData(reference, activeLayer, vectorPath, time));
-      expect(data.match(/ C /g)).toHaveLength(vectorPath.vertices.length);
+      expect(data).toBe(activeLayer.d.paths.map((each: any) => pathData(reference, activeLayer, each, time)).join(' '));
+      expect(data.match(/ C /g)).toHaveLength(activeLayer.d.paths.reduce((count: number, each: any) => count + each.vertices.length, 0));
       expect(data.endsWith(' Z')).toBe(true);
       const actualMatrix = renderedPath.getAttribute('transform')!.match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi)!.map(Number);
       const expectedMatrix = expectedCombinedMatrix(reference, activeLayer, vectorPath, time);

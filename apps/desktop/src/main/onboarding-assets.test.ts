@@ -72,7 +72,7 @@ describe('onboarding export assets', () => {
     expect(welcome).toContain('document.fonts.ready.then(scheduleLogoTarget)');
     expect(welcome).toContain('window.onboarding.reportLogoTarget');
     expect(styles).toContain("font-family: 'Geist', sans-serif");
-    expect(styles).toContain('fill: var(--tx)');
+    expect(styles).toContain('.welcome-mark {');
     expect(styles).toContain('.welcome-card > * { animation: none; }');
   });
 });
