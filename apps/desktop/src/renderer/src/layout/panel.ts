@@ -201,7 +201,13 @@ export function panelPoolHost(node: HTMLElement, initial: PoolHostParams) {
   return {
     update(next: PoolHostParams) {
       const element = params.PM.panelInst[params.spec.id]?.el as HTMLElement | undefined;
-      if (element && params.dock.id !== next.dock.id) stagePanelMove(params.spec.id, element);
+      // A new slot may already own the live panel by the time the pool updates.
+      // Only stage it while it still belongs to the old dock; parking it after
+      // the destination attached leaves that slot blank until another layout.
+      if (element && params.dock.id !== next.dock.id
+        && element.closest('.dock')?.id === `dock-${params.dock.id}`) {
+        stagePanelMove(params.spec.id, element);
+      }
       params = next;
       syncPanelManifest(params.PM, params.spec.id, params.spec, params.dock);
       mount();
