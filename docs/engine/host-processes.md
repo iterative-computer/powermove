@@ -528,3 +528,75 @@ authoritative JavaScript document even when a diagnostic or utility recovery
 fails. Native export still waits for a checked, repaired mirror. Preparation and
 recovery share one serialized queue; a revive request goes through connection
 recovery instead of racing a second ingestion.
+
+### Opening the private projects, paired medians (2026-10-22)
+
+These runs used a release LTO build with the setting off ("today") and on
+("engine"), on the same build. They were interleaved one pair at a time, three
+runs per mode and project, with fresh profiles plus the corpus's 39 extensions.
+Other lanes were running on the machine throughout. Memory was sampled 5 s
+after the open resolved, after a forced GC. Physical footprint (`footprint`)
+is what macOS charges a process. RSS also counts resident clean and
+reusable pages, and it does not count GPU-owned memory. Totals cover the app's
+process tree and exclude FFmpeg proxy conversions. Those are started by an
+extension's 4K import, overlap the sample at random, and run in both modes.
+
+| Median | PMV4 today | PMV4 engine | PMV3 today | PMV3 engine |
+|---|---|---|---|---|
+| Open (s) | 372.0 | 419.3 | 120.1 | 135.3 |
+| Renderer RSS (MiB) | 2,342 | 3,062 | 1,560 | 1,716 |
+| Total RSS (MiB) | 4,758 | 6,325 | 2,608 | 3,428 |
+| Renderer footprint (MiB) | 1,549 | 1,815 | 965 | 1,129 |
+| Total footprint (MiB) | 3,474 | 4,716 | 2,582 | 4,289 |
+| Engine processes' footprint (MiB) | n/a | 1,014 | n/a | 999 |
+| Longest main-thread task in the open (s) | 81.4 | 78.6 | 110.5 | 116.8 |
+| Tasks of 100 ms to 20 s in the open | 31 | 6 | 6 | 8 |
+| Longest of those (ms) | 1,197 | 1,623 | 3,314 | 3,273 |
+| Blank opens | 0 of 3 | 0 of 3 | 0 of 3 | 0 of 3 |
+
+Every open is dominated by work today already does. On PMV4 that is one
+open-reply deserialization (62 to 75 s) and four synchronous whole-project
+storage writes (56 to 79 s each). Those are `switchProject`'s put, the
+autosave it schedules (a recovery copy with a thumbnail), the poster
+backfill's `checkpointAssetMetadata`, and `captureProjectSession`. On PMV3 it
+is one 90 to 119 s reply carrying its 114 MB of undo history.
+
+The engine adds native preparation before publication: 23.5 to 34.7 s on
+PMV4, cooperative and without long tasks, and 2.4 s on PMV3. Its PMV4
+storage writes also ran 0 to 18 s slower each once the viewer was active.
+
+An earlier engine pass (363 s against today's 397 s) came from a build whose
+autosave dropped its write when an edit arrived during the async check (four
+long tasks instead of today's five). Engine opens now perform exactly
+today's writes.
+
+Shrinking `JsString` to two words made a document node 24 bytes instead of 32.
+The PMV4 tree fell from 438 to 355 MiB live (−19%), and from 462 to 362 MiB
+after allocator rounding. The utility's dirty allocator memory fell from 642
+to 552 MB, and its footprint from 1,099 to about 1,010 MiB. The two no-op
+structural diffs are gone: `structuralDiffs` went from 2 to 0, and the flush
+total from 958 ms to 0.2 ms.
+
+What remains above today:
+
+- **Utility.** About 370 MB is the native tree and 180 MB the rest of the
+  allocator. GPU-owned memory is 490 MB on PMV4 and 0.7 to 1.3 GB on PMV3:
+  frame pools and pipelines, which belong to the frame-pipeline and
+  engine-memory lanes.
+- **Renderer, PMV4.** The barrier shadow plus allocator account for +266 MiB
+  of footprint. RSS is a further 450 MB higher, from V8 and allocator pages
+  that are freed but still resident after the preparation's transient peak.
+  The V8 heap reached 1.9 GB before GC against today's 1.4 GB, then fell
+  below today's after GC (1,164 vs 1,124 MiB used, within noise).
+
+Leads, by expected size:
+
+1. A 16-byte node (a 32-bit revision beside a compact scalar payload) would
+   save about 170 MB on PMV4.
+2. Seeding the renderer's integrity cache from the native receipt, instead of
+   a separate canonical pass, would remove one of preparation's three
+   whole-document passes.
+3. Folding each object's `Arc` header into its values allocation would save
+   about 37 MB.
+4. The storage writes during the open are a shared cost of about 4 minutes;
+   each is a full main-thread freeze for both settings.
