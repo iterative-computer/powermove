@@ -925,9 +925,9 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
 let assetEpoch = 0;
 function checkpointAssetMetadata(project: any) {
   if (!project || PM.proj !== project) return;
-  /* Asset metadata is mutated outside typed history, so an existing recovery
-     journal cannot replay it. Force the smallest full project checkpoint. */
-  try { PM.Projects?.put?.(project); } catch (error) { }
+  /* Asset metadata is mutated outside typed history: record it in the
+     recovery journal as one entry replacing `assets` (projects.ts). */
+  try { (PM.Projects?.checkpointAssets ?? PM.Projects?.put)?.(project); } catch (error) { }
 }
 /** Import and replacement share all reading, decoding, conversion, and storage. */
 async function prepareImportedAsset(file: any, { id, assertCurrentProject, resolved: settled, onStage, storage }: any) {

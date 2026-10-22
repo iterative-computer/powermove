@@ -1,6 +1,7 @@
 /* Ported from host/electron-shim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { stringifyAsync } from '../core/serialize-async';
+import { digestText } from '../core/json-slices';
 import { HistoryRecords, packStoredHistory, unpackStoredHistory } from '../../../../shared/history-memory';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { runCommandWhenReady } from '../../engine-doc/readiness';
@@ -341,6 +342,53 @@ export function install(PM: PMRegistry): void {
      about 257 MB). Reading it again refills from main. */
   const engineOn = (() => { try { return bridge.nativeEngine?.enabledSync?.() === true; } catch { return false; } })();
   const lazyAfterWrite = (service: string) => engineOn && /^project\./.test(service);
+  /* A whole project goes to main as one JSON string (OPENWRITE-1). Handed
+     over as an object, the context bridge copied it member by member on this
+     thread before IPC began: 60 to 75 s per write of a 180 MB project, with
+     either engine setting, four times per open. JSON.stringify takes about a
+     second and is the same atomic snapshot of the call that the clone was;
+     main's engine stores exactly these bytes (it used to JSON.stringify the
+     clone). Until main has the value, reads answer from the posted text. */
+  const serializedSlot = (service: string) => /^project\./.test(service) && typeof bridge.store.setSerialized === 'function';
+  const posted = new Map<string, string>();
+  let tracks = 0;
+  const digests = new Map<string, { digest: Promise<string | null>; chars: number }>();
+  const reportStoreError = (event: { key: string; error: string }) => {
+    saveErrors.set(event.key, String(event.error));
+    PM.bus?.emit('storage:error', event);
+    if (String(event.error).includes('unknown store key')) {
+      cached.delete(legacyKey(event.key));
+    }
+    PM.toast(`Could not save ${event.key}: ${event.error}`);
+  };
+  const setSerializedSlot = (service: string, value: any): boolean => {
+    let serialized: string | undefined;
+    try { serialized = JSON.stringify(value); } catch (error) {
+      window.console.warn('store', error);
+      saveErrors.set(service, errorText(error, 'Save failed'));
+      return false;
+    }
+    if (serialized === undefined) { saveErrors.set(service, 'value is not JSON-serialisable'); return false; }
+    const version = writeVersions.get(service);
+    saveErrors.delete(service);
+    cached.delete(legacyKey(service));
+    posted.set(service, serialized);
+    const text = serialized;
+    digests.set(service, { digest: digestText(text).catch(() => null), chars: text.length });
+    // Posted now, in call order with this window's other store messages (a
+    // journal deletion after a checkpoint must reach main after it).
+    let sent: Promise<void>;
+    try { sent = Promise.resolve(bridge.store.setSerialized(service, text)); } catch (error) { sent = Promise.reject(error); }
+    const write: Promise<void> = sent
+      .then(() => { if (writeVersions.get(service) === version) saveErrors.delete(service); },
+        (error: unknown) => { if (writeVersions.get(service) === version) reportStoreError({ key: service, error: errorText(error, 'Save failed') }); })
+      .finally(() => {
+        if (writeVersions.get(service) === version) { posted.delete(service); lazy.add(service); }
+        if (asyncWrites.get(service) === write) asyncWrites.delete(service);
+      });
+    asyncWrites.set(service, write);
+    return true;
+  };
   const refill = (service: string) => {
     const get = bridge.store.getEncodedSync || bridge.store.getSync;
     if (!get) return;
@@ -361,11 +409,16 @@ export function install(PM: PMRegistry): void {
     /** Whether the key holds a value, without reading or cloning it. */
     has(key: any) {
       const service = serviceKey(key);
+      if (posted.has(service)) return true;
       if (stale.has(service)) refill(service);
       return lazy.has(service) || cached.has(legacyKey(service));
     },
     get(key: any, fallback: any, options: { omitHistory?: boolean } = {}) {
       const stored = legacyKey(key);
+      const pending = posted.get(serviceKey(key));
+      if (pending !== undefined) {
+        try { return unpackStoredHistory(serviceKey(key), JSON.parse(pending)); } catch { return fallback; }
+      }
       if (stale.has(serviceKey(key)) || lazy.has(serviceKey(key))) refill(serviceKey(key));
       if (!cached.has(stored)) return fallback;
       try {
@@ -402,6 +455,8 @@ export function install(PM: PMRegistry): void {
       const service = serviceKey(key);
       stale.delete(service); lazy.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
+      posted.delete(service); digests.delete(service);
+      if (serializedSlot(service)) return setSerializedSlot(service, value);
       try {
         const copy = packStoredHistory(service, cloneValue(value), historyRecords);
         saveErrors.delete(service);
@@ -415,9 +470,26 @@ export function install(PM: PMRegistry): void {
         return false;
       }
     },
+    /** The digest (json-slices) of the JSON text this window last wrote for a
+     *  project slot; null when unknown (another writer, or a deletion since). */
+    writtenDigest(key: string): Promise<string | null> | null {
+      return digests.get(serviceKey(key))?.digest ?? null;
+    },
+    /** The length in UTF-16 units of that text (0 when unknown). */
+    writtenChars(key: string): number {
+      return digests.get(serviceKey(key))?.chars ?? 0;
+    },
+    /** Lets flush() wait for, and report, an operation on `key` that is not a write yet. */
+    track(key: string, operation: Promise<void>) {
+      const service = serviceKey(key), slot = `track:${++tracks}:${service}`;
+      const tracked: Promise<void> = operation.catch(error => { saveErrors.set(service, errorText(error, 'Save failed')); })
+        .finally(() => asyncWrites.delete(slot));
+      asyncWrites.set(slot, tracked);
+    },
     del(key: any) {
       const service = serviceKey(key);
       stale.delete(service); lazy.delete(service);
+      posted.delete(service); digests.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       cached.delete(legacyKey(service));
       bridge.store.delete(service);
@@ -501,14 +573,7 @@ export function install(PM: PMRegistry): void {
     PM.bus?.emit('store:external', changed);
   });
 
-  bridge.store.onError((event: any) => {
-    saveErrors.set(event.key, String(event.error));
-    PM.bus?.emit('storage:error', event);
-    if (String(event.error).includes('unknown store key')) {
-      cached.delete(legacyKey(event.key));
-    }
-    PM.toast(`Could not save ${event.key}: ${event.error}`);
-  });
+  bridge.store.onError((event: any) => reportStoreError(event));
 
   let fontRefresh: Promise<boolean> | undefined;
   let fontSignature: string | undefined;
