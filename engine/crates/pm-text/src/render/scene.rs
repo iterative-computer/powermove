@@ -623,7 +623,7 @@ impl Painter<'_> {
                 }
                 if bitmap_face && let Some(bmp) = self.bitmaps.get(run.face, g.id, dsize, bsize) {
                     let (x, y) = if place.axis_aligned {
-                        self.profile.position(p.x, p.y, device_size, true)
+                        self.profile.bitmap_position(p.x, p.y, device_size)
                     } else {
                         (p.x, p.y)
                     };
@@ -858,7 +858,11 @@ impl Painter<'_> {
                 } else if place.axis_aligned {
                     (p.x, p.y + dy)
                 } else {
-                    let d = place.residual * kurbo::Point::new(0.0, dy);
+                    let d = if self.profile.device_space_offset {
+                        kurbo::Point::new(0.0, dy)
+                    } else {
+                        place.residual * kurbo::Point::new(0.0, dy)
+                    };
                     (p.x + d.x, p.y + d.y)
                 };
                 let t = Affine::translate((x, y)) * place.residual;

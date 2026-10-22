@@ -213,6 +213,7 @@ impl Exec<'_> {
                             &with_layer,
                             rect,
                             full,
+                            plan.view,
                         ) {
                             Ok(Some(t)) => t,
                             Ok(None) => with_layer,
@@ -364,6 +365,7 @@ impl Exec<'_> {
         backdrop: Option<&Target>,
         rect: Region,
         full: (u32, u32),
+        view: Option<crate::plan::OutputView>,
     ) -> Result<Option<Target>, String> {
         let mut taken = Vec::new();
         let result = {
@@ -375,6 +377,7 @@ impl Exec<'_> {
                 precision: self.precision,
                 working: self.working,
                 full,
+                view,
                 taken: &mut taken,
                 native: Some(crate::effects::exec::Native {
                     effects: self.effects,
@@ -400,6 +403,7 @@ impl Exec<'_> {
     }
 
     /// `runTransition` over the pass rectangle (the whole frame).
+    #[allow(clippy::too_many_arguments)]
     fn run_transition(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -408,6 +412,7 @@ impl Exec<'_> {
         with_layer: &Target,
         rect: Region,
         full: (u32, u32),
+        view: Option<crate::plan::OutputView>,
     ) -> Result<Option<Target>, String> {
         let mut taken = Vec::new();
         let result = {
@@ -419,6 +424,7 @@ impl Exec<'_> {
                 precision: self.precision,
                 working: self.working,
                 full,
+                view,
                 taken: &mut taken,
                 native: Some(crate::effects::exec::Native {
                     effects: self.effects,
@@ -471,6 +477,7 @@ impl Exec<'_> {
             height: plan.height,
             background: crate::plan::Background::Transparent,
             draws: Vec::new(),
+            view: plan.view,
         };
         self.draw_pass(encoder, &layer_plan, &resolved, pass_region, &content, true);
         let matte = n.matte.as_ref().map(|m| {
@@ -508,7 +515,7 @@ impl Exec<'_> {
                         }
                     }
                 }
-                match self.run_effects(encoder, effects, &res, Some(acc), rect, full) {
+                match self.run_effects(encoder, effects, &res, Some(acc), rect, full, plan.view) {
                     Ok(Some(t)) => res = t,
                     Ok(None) => {}
                     Err(message) => {
@@ -537,16 +544,17 @@ impl Exec<'_> {
         acc: &Target,
     ) -> Option<Target> {
         let full = (plan.width, plan.height);
-        let adjusted = match self.run_effects(encoder, &n.effects, acc, Some(acc), rect, full) {
-            Ok(Some(t)) => t,
-            // A missing or failed effect program leaves the composition
-            // unchanged.
-            Ok(None) => return None,
-            Err(message) => {
-                self.fail_layer(plan, &n.layer, message);
-                return None;
-            }
-        };
+        let adjusted =
+            match self.run_effects(encoder, &n.effects, acc, Some(acc), rect, full, plan.view) {
+                Ok(Some(t)) => t,
+                // A missing or failed effect program leaves the composition
+                // unchanged.
+                Ok(None) => return None,
+                Err(message) => {
+                    self.fail_layer(plan, &n.layer, message);
+                    return None;
+                }
+            };
         let contribution = match &n.masks {
             Some(m) => match self.mask_and_matte(encoder, &adjusted, Some(m), None, rect, full) {
                 Ok(t) => t,

@@ -88,6 +88,9 @@ pub(crate) struct BuildKey {
     pub blur: Option<crate::motion::Blur>,
     pub video_padding: u64,
     pub view_override: bool,
+    /// The output origin (bits): every draw of the top level and its
+    /// groups moves with it.
+    pub origin: Option<(u64, u64)>,
 }
 
 /// Which document the entries belong to.

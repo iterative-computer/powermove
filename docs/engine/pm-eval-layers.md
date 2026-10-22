@@ -21,6 +21,7 @@ and a time, and runs unchanged on wasm32.
 | `retime` | `legacy/core/retiming.ts` | `sourceTime`: time remap, constant speed, variable speed (section 5 rule 5) |
 | `text_anim` | `legacy/core/text-animation.ts` | animator state (stagger, range, wave; characters, words, lines), range styles, posed glyphs, `countTextUnits`, unit ranks and weights |
 | `text_geom`, `text_measure` | `legacy/gl/raster.ts` text geometry | raster box, anchor, selection bounds, Blink ink boxes; `TextMeasure` over `pm-text` level 1 |
+| `text_level2` | native-only text semantics | range-aware Parley layout, metric baselines/carets, shaped glyph poses, resting typography anchoring, animated bounds and picks; shared with rendering |
 | `captions` | `captions/model.ts`, `layout.ts`, `render.ts` frame | style normalization, tokens, word timings, layout, placement, word states, `PM.captionBounds` |
 | `bounds` | `GL.bounds`, `nativeBounds`, `GL.pick`, `groupBounds`, `pathValues`, `groupMatrix` | 2D bounds of every layer type and picking; 3D object picks and bounds go to a `LayerHost` |
 | `scene3d` | `core/scene3d/layers.ts` `compositionScene`, `service.ts` placement | the evaluated 3D scene: objects, lights, the topmost active camera and environment, studio defaults, aims in parent space, shared-material timing |

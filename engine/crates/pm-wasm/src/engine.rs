@@ -186,6 +186,24 @@ pub(crate) struct InkProbe<'m> {
 }
 
 impl pm_eval::text_geom::TextMeasure for InkProbe<'_> {
+    fn require_ink(&mut self) {
+        self.ink = true;
+    }
+    fn level2(
+        &mut self,
+        d: &pm_text::compat::TextContent,
+        spans: &[pm_text::level2::StyleSpan],
+    ) -> Result<pm_eval::text_level2::Shaped, String> {
+        self.inner.level2(d, spans)
+    }
+    fn level2_ink(
+        &mut self,
+        data: &pm_text::font::FontBytes,
+        run: &pm_text::level2::Run,
+        glyph: u32,
+    ) -> Option<[f64; 4]> {
+        self.inner.level2_ink(data, run, glyph)
+    }
     fn measure_lines(
         &mut self,
         d: &pm_text::compat::TextContent,
@@ -432,6 +450,7 @@ impl Engine {
         self.doc
             .apply_ops_at(&ops, revision)
             .map_err(|e| ApplyError::Mismatch(e.to_string()))?;
+        self.ev.document_patched(&self.doc, base, &ops);
         self.stats.batches += 1;
         self.stats.ops += ops.len() as u64;
         Ok(ops.len())
@@ -524,19 +543,25 @@ impl Engine {
         let ids: Vec<PropId> = ids.iter().map(|&i| PropId::from_index(i)).collect();
         let mut k = vec![ValueKind::Number; ids.len()];
         self.ev.ev_batch(&self.doc, &ids, t, out, &mut k);
-        for (dst, src) in kinds.iter_mut().zip(k) {
-            *dst = src as u8;
+        for ((dst, src), &id) in kinds.iter_mut().zip(k).zip(&ids) {
+            *dst = src as u8
+                | if self.expression_error(id).is_some() {
+                    0x80
+                } else {
+                    0
+                };
         }
+    }
+
+    /// Diagnostics for incremental plan reuse (not on the evaluation path).
+    pub fn evaluation_cache_stats(&self) -> pm_eval::CacheStats {
+        self.ev.cache_stats()
     }
 
     /// The expression error recorded for an id's channel, if any.
     pub fn expression_error(&self, id: PropId) -> Option<&str> {
         let a = self.ev.address(id)?;
-        self.ev.expression_error(
-            &a.comp.to_string_lossy(),
-            &a.layer.to_string_lossy(),
-            &a.key.to_string_lossy(),
-        )
+        self.ev.expression_error_at(a)
     }
 
     // ── fonts ─────────────────────────────────────────────────────────────
@@ -1259,7 +1284,7 @@ impl Engine {
                 match op {
                     "bounds" => {
                         let l = layer!();
-                        let b = try_js!(scope.bounds(l, t, &mut probe, &mut host));
+                        let b = scope.bounds(l, t, &mut probe, &mut host);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1267,7 +1292,7 @@ impl Engine {
                         if ink && !outlines {
                             return Err(Unanswered::Ink);
                         }
-                        match b {
+                        match try_js!(b) {
                             Some(b) => {
                                 out.raw("{");
                                 bounds_reply(out, &b);
@@ -1278,7 +1303,7 @@ impl Engine {
                     }
                     "groupBounds" => {
                         let l = layer!();
-                        let b = try_js!(scope.group_bounds(l, t, &mut probe, &mut host));
+                        let b = scope.group_bounds(l, t, &mut probe, &mut host);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1286,7 +1311,7 @@ impl Engine {
                         if ink && !outlines {
                             return Err(Unanswered::Ink);
                         }
-                        match b {
+                        match try_js!(b) {
                             Some(b) => {
                                 out.raw("{");
                                 bounds_reply(out, &b);
@@ -1305,7 +1330,7 @@ impl Engine {
                         };
                         let x = number(get(request, "x")).unwrap_or(f64::NAN);
                         let y = number(get(request, "y")).unwrap_or(f64::NAN);
-                        let hit = try_js!(scope.pick(x, y, t, &options, &mut probe, &mut host));
+                        let hit = scope.pick(x, y, t, &options, &mut probe, &mut host);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1313,7 +1338,7 @@ impl Engine {
                         if ink && !outlines {
                             return Err(Unanswered::Ink);
                         }
-                        match hit {
+                        match try_js!(hit) {
                             Some(l) => indexes(out, layers, &[l]),
                             None => out.raw("null"),
                         }
@@ -1321,10 +1346,18 @@ impl Engine {
                     "textLayout" => {
                         let l = layer!();
                         let d = try_js!(scope.resolved_text_content(l, t));
-                        let caret = probe.inner.compat().caret_layout(&text_content(&d));
+                        let content = text_content(&d);
+                        let caret = if pm_eval::text_level2::is_level2(l) {
+                            scope
+                                .level2_text(l, t, &mut probe, false, false)
+                                .map(|frame| frame.caret_layout(&content))
+                        } else {
+                            Ok(probe.inner.compat().caret_layout(&content))
+                        };
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
                         }
+                        let caret = try_js!(caret);
                         match serde_json::to_string(&caret) {
                             Ok(json) => out.raw(&json),
                             Err(e) => return Ok(Err(JsThrow::type_error(e.to_string()))),
@@ -1332,7 +1365,7 @@ impl Engine {
                     }
                     _ => {
                         let l = layer!();
-                        let r = try_js!(scope.text_raster(l, t, &mut probe));
+                        let r = scope.text_raster(l, t, &mut probe);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1340,6 +1373,7 @@ impl Engine {
                         if ink && !outlines {
                             return Err(Unanswered::Ink);
                         }
+                        let r = try_js!(r);
                         let mut first = true;
                         out.raw("{");
                         for (k, v) in [

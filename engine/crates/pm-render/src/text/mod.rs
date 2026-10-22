@@ -77,8 +77,8 @@ pub trait TextFonts: Send {
     fn set_seed_scope(&mut self, scope: served::SeedScope) {
         let _ = scope;
     }
-    /// Level 2 layout for `compat` ≥ 2 text layers, when the host provides
-    /// it (`None`: such layers are refused).
+    /// Optional eager collection for standalone layout/reference consumers.
+    /// Production text uses `TextMeasure::level2` over the served registry.
     fn level2(&mut self) -> Option<&mut Level2Fonts> {
         None
     }
@@ -586,6 +586,23 @@ impl TextContext {
         scale: f64,
     ) -> JsResult<Option<TextQuad>> {
         self.sync_fonts();
+        if pm_eval::text_level2::is_level2(layer) {
+            let raster = {
+                let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+                scope.text_raster(layer, time, fonts.measure())?
+            };
+            // The compatibility raster API still works for new text. Its
+            // pixels come from the same output-resolution painter, with
+            // transparent room for the smoothing profile around the ink.
+            let (w, h) = (raster.w + 8.0, raster.h + 8.0);
+            let (ax, ay) = (raster.anchor_x + 4.0, raster.anchor_y + 4.0);
+            let density = js_min(js_min(scale, 8192.0 / w), 8192.0 / h);
+            let target = (canvas_px(w, density), canvas_px(h, density));
+            let m = Affine::scale(density) * Affine::translate((ax, ay));
+            return self
+                .text_layer_level2(scope, layer, time, m, target)
+                .map(|p| p.map(|p| Self::quad(p, w, h, ax, ay)));
+        }
         let d = scope.resolved_text_content(layer, time)?;
         let stored = pm_eval::node::member(Some(layer), "d");
         let has = |key: &str| {
@@ -717,52 +734,16 @@ impl TextContext {
         target: (u32, u32),
     ) -> JsResult<Option<TextPlan>> {
         self.sync_fonts();
-        let stored = pm_eval::node::member(Some(layer), "d");
-        let has = |key: &str| {
-            pm_eval::node::member(stored, key)
-                .map(|n| pm_eval::node::get(n, b"length").truthy())
-                .unwrap_or(false)
+        let frame = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            scope.level2_text(layer, time, fonts.measure(), true, true)?
         };
-        if has("animators") || has("styles") {
-            self.unsupported
-                .push("animated or range-styled text at compat level 2".into());
-            return Ok(None);
-        }
-        if pm_eval::node::member(stored, "fontAnchorBounds")
-            .is_some_and(|b| pm_eval::node::truthy(Some(b)))
-        {
-            self.unsupported
-                .push("typography anchoring at compat level 2".into());
-            return Ok(None);
-        }
-        let d = scope.resolved_text_content(layer, time)?;
-        let tc = text_content(&d);
-        let fill = {
-            let c = get(&d, "color");
-            let fallback = JsValue::from("#fff");
-            fill_style(
-                if c.truthy() { c } else { &fallback },
-                color::BLACK,
-                &mut self.unsupported,
-            )
-        };
-        let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
-        let Some(l2) = fonts.level2() else {
-            self.unsupported
-                .push("compat level 2 text without level 2 fonts".into());
-            return Ok(None);
-        };
-        let layout = l2.engine.layout(&tc);
-        if layout.missing_glyphs > 0 {
-            self.unsupported
-                .push("compat level 2 text whose fonts are not loaded".into());
-            return Ok(None);
-        }
-        let faces: Vec<Option<pm_text::font::FontBytes>> = layout
-            .runs
-            .iter()
-            .map(|r| l2.face(&r.font).cloned())
-            .collect();
+        let m = m * Affine::translate((frame.offset.x, frame.offset.y));
+        let [a, b, c, d, _, _] = m.as_coeffs();
+        let aa = a * a + b * b;
+        let cc = c * c + d * d;
+        let bb = a * c + b * d;
+        let scale = ((aa + cc + ((aa - cc) * (aa - cc) + 4.0 * bb * bb).sqrt()) / 2.0).sqrt();
         let mut scene = TextScene {
             width: target.0,
             height: target.1,
@@ -777,16 +758,15 @@ impl TextContext {
             profile: Profile::CORETEXT,
             unsupported: Vec::new(),
         };
-        for (run, data) in layout.runs.iter().zip(&faces) {
-            let Some(data) = data else {
-                self.unsupported
-                    .push(format!("compat level 2 font {} not loaded", run.font));
-                return Ok(None);
-            };
+        for draw in &frame.draws {
+            if !draw.opacity.is_finite() || draw.opacity <= 0.0 {
+                continue;
+            }
+            let run = &draw.run;
             let face = pm_text::render::outline::FaceRef {
-                data: data.as_slice(),
+                data: draw.data.as_slice(),
                 index: 0,
-                id: data.id(),
+                id: draw.data.id(),
             };
             let refs = [pm_text::render::scene::Run {
                 face,
@@ -798,7 +778,16 @@ impl TextContext {
                 glyphs: &run.glyphs,
                 bitmap_size: None,
             }];
-            painter.fill_text(&mut scene.items, &refs, (0.0, 0.0), m, fill, 1.0, 0.0);
+            let fill = fill_style(&draw.color, color::BLACK, &mut painter.unsupported);
+            painter.fill_text(
+                &mut scene.items,
+                &refs,
+                (0.0, 0.0),
+                m * Affine::new(draw.matrix),
+                fill,
+                draw.opacity,
+                draw.blur * scale,
+            );
         }
         self.unsupported.append(&mut painter.unsupported);
         Ok(self.finish(scene, false))

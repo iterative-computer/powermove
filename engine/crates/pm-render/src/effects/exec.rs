@@ -39,14 +39,21 @@ fn full_quad(w: u32, h: u32) -> [f32; 9] {
 }
 
 /// `effectViewportCoordinates(W, H)`: `u_uv`, `u_pxOrigin`, `u_coordRes`
-/// for a buffer covering `region` of a level of `full` pixels.
+/// for a buffer covering `region` of a level of `full` pixels. With a
+/// `view` (an output origin, today's preview viewport) the coordinates are
+/// the composition's at today's scale: the resolution is the whole
+/// composition's, and the origin is the view's plus the region's.
 pub(crate) fn effect_coordinates(
     region: Option<Region>,
     full: (u32, u32),
     buffer: (u32, u32),
+    view: Option<crate::plan::OutputView>,
 ) -> ([f64; 4], [f64; 2], [f64; 2]) {
-    let resolution = [f64::from(full.0.max(1)), f64::from(full.1.max(1))];
-    let origin = region.map_or([0.0, 0.0], |r| [f64::from(r.x), f64::from(r.y)]);
+    let at = region.map_or([0.0, 0.0], |r| [f64::from(r.x), f64::from(r.y)]);
+    let (resolution, origin) = match view {
+        Some(v) => (v.resolution, [v.origin[0] + at[0], v.origin[1] + at[1]]),
+        None => ([f64::from(full.0.max(1)), f64::from(full.1.max(1))], at),
+    };
     let uv = [
         origin[0] / resolution[0],
         origin[1] / resolution[1],
@@ -1087,7 +1094,7 @@ impl EffectPasses for Chain {
         let working = cx.working;
         let rect = input.rect;
         let region = (rect != Region::full(full.0, full.1)).then_some(rect);
-        let coordinates = effect_coordinates(region, full, (rect.width, rect.height));
+        let coordinates = effect_coordinates(region, full, (rect.width, rect.height), cx.view);
         let mut gpu = Gpu::of(cx).ok_or("the effect chain needs the renderer that prepared it")?;
         let out = gpu.chain(
             &self.layer,
@@ -1184,7 +1191,7 @@ mod tests {
 
     #[test]
     fn effect_coordinates_follow_the_viewport_rule() {
-        let (uv, origin, res) = effect_coordinates(None, (1920, 1080), (1920, 1080));
+        let (uv, origin, res) = effect_coordinates(None, (1920, 1080), (1920, 1080), None);
         assert_eq!(
             (uv, origin, res),
             ([0.0, 0.0, 1.0, 1.0], [0.0, 0.0], [1920.0, 1080.0])
@@ -1195,9 +1202,29 @@ mod tests {
             width: 960,
             height: 540,
         };
-        let (uv, origin, res) = effect_coordinates(Some(r), (1920, 1080), (960, 540));
+        let (uv, origin, res) = effect_coordinates(Some(r), (1920, 1080), (960, 540), None);
         assert_eq!(uv, [0.25, 0.25, 0.5, 0.5]);
         assert_eq!(origin, [480.0, 270.0]);
         assert_eq!(res, [1920.0, 1080.0]);
+        // Today's preview viewport: the level is a 1000 × 600 canvas of a
+        // 1920 × 1080 composition at scale 4, starting at (3000.5, 1200);
+        // a buffer at (100, 50) of it.
+        let view = crate::plan::OutputView {
+            origin: [3000.5, 1200.0],
+            resolution: [7680.0, 4320.0],
+        };
+        let r = Region {
+            x: 100,
+            y: 50,
+            width: 768,
+            height: 432,
+        };
+        let (uv, origin, res) = effect_coordinates(Some(r), (1000, 600), (768, 432), Some(view));
+        assert_eq!(origin, [3100.5, 1250.0]);
+        assert_eq!(res, [7680.0, 4320.0]);
+        assert_eq!(uv, [3100.5 / 7680.0, 1250.0 / 4320.0, 0.1, 0.1]);
+        // The whole level (no region): the view's origin.
+        let (_, origin, _) = effect_coordinates(None, (1000, 600), (1000, 600), Some(view));
+        assert_eq!(origin, [3000.5, 1200.0]);
     }
 }

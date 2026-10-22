@@ -103,6 +103,13 @@ export interface EngineDoc {
   tracker: Tracker | null;
   /** Resolves when the module is loaded and the mirror synced (or failed). */
   whenReady: Promise<boolean>;
+  /** Named failures replace legacy answers (the "Use New Engine" setting). */
+  strict: boolean;
+  /**
+   * Readiness once the load in flight settles: the boot load, a `retry()`, or
+   * a revival after a trap. Resolves at once with `ready` when none is.
+   */
+  settled(): Promise<boolean>;
   check(reason: string): ConsistencyResult | null;
   beforeSave(reason?: string): void;
   beforeExport(reason?: string): void;
@@ -132,8 +139,16 @@ export interface EngineDoc {
   /** Loads the module again after a `pm-wasm-unavailable` failure; resolves with readiness. */
   retry(): Promise<boolean>;
   /**
-   * `fn` runs once the module becomes ready after `whenReady` resolved false
-   * (a successful `retry()`): the extension loader activates what waited.
+   * Shows the newest named failure's notice again (with Retry where it can
+   * help): a request that could not run because the document module is not
+   * ready says so instead of disappearing. Strict mode only.
+   */
+  showFailure(): void;
+  /**
+   * `fn` runs each time the module becomes ready again after it was not: a
+   * successful `retry()` after `whenReady` resolved false, or an asynchronous
+   * revival after a trap. The extension loader activates what waited; the
+   * editor finishes its first-frame setup.
    */
   onReady(fn: () => void): () => void;
   /** Loads the faces the open composition's text needs before anything asks (asynchronous font providers). */
@@ -154,9 +169,9 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     PM.doc = noopDoc;
     const off: EngineDoc = {
       mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
-      whenReady: Promise.resolve(false),
+      whenReady: Promise.resolve(false), strict: false, settled: () => Promise.resolve(false),
       check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
-      failures: () => [], retry: () => Promise.resolve(false), onReady: () => () => {}, warmFonts: () => Promise.resolve(),
+      failures: () => [], showFailure: () => {}, retry: () => Promise.resolve(false), onReady: () => () => {}, warmFonts: () => Promise.resolve(),
     };
     PM.EngineDoc = off;
     return off;
@@ -425,10 +440,17 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     failures.push(failure);
     reporter.emit({ type: 'failure', code, message, retry });
     PM.bus?.emit?.('engine:failure', failure);
-    // Visible, never silent (amendment 21): the editor's own toast, with
-    // Retry where reloading the module can help.
+    notice(failure);
+  }
+  /** Visible, never silent (amendment 21): the editor's own toast, with
+   *  Retry where reloading the module can help. One toast per code. */
+  function notice({ code, message, retry }: EngineFailure): void {
     PM.toast?.(message, 8000, { error: true, key: `engine-failure-${code}`,
       ...(retry ? { action: { label: 'Retry', run: () => { void state.retry(); } } } : {}) });
+  }
+  /** Readiness came back: everything that waited for it runs. */
+  function notifyReady(): void {
+    for (const fn of [...readyListeners]) { try { fn(); } catch (error) { console.error(error); } }
   }
 
   const subscribers = new Set<(batch: PatchBatch) => void>();
@@ -441,6 +463,8 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const startup = { startedAt: performance.now(), moduleMs: 0, instantiateMs: 0, mirrorMs: 0, readyMs: 0 };
   const state: EngineDoc = {
     mode, enabled: true, ready: false, api, edits, barrier: null, wasm: null, auditor, dual, tracker, whenReady,
+    strict: !!options.strict,
+    settled: () => loading ?? Promise.resolve(state.ready),
     check(reason) {
       if (!state.ready || !barrier) return null;
       try { return barrier.check(reason); } catch (error) { console.warn('[engine-doc] consistency check failed to run', error); return null; }
@@ -467,6 +491,12 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     },
     summary() { reporter.emit({ type: 'summary', session, ...state.stats() }); },
     failures: () => failures.slice(),
+    showFailure() {
+      if (!options.strict) return;
+      const latest = [...failures].reverse().find(f => f.code === 'pm-wasm-unavailable') ?? failures[failures.length - 1];
+      if (latest) notice(latest);
+      else fail('pm-wasm-unavailable', "The new engine's document module is not ready.", true);
+    },
     retry: () => {
       if (!api.fonts && options.fonts === undefined) { const provider = editorFonts(); if (provider) api.fonts = new FontLoader(provider); }
       api.fonts?.retry();
@@ -475,7 +505,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       return start().then((ok) => {
         if (ok) {
           afterReady();
-          for (const fn of [...readyListeners]) { try { fn(); } catch (error) { console.error(error); } }
+          notifyReady();
         }
         return ok;
       });
@@ -511,7 +541,14 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     state.ready = true;
     reporter.emit({ type: 'ready', mode: mode.name, bytes: wasm.x.memory.buffer.byteLength });
   };
-  const start = async (): Promise<boolean> => {
+  /** The load in flight (see `settled`). */
+  let loading: Promise<boolean> | null = null;
+  const start = (): Promise<boolean> => {
+    const attempt = load().finally(() => { if (loading === attempt) loading = null; });
+    loading = attempt;
+    return attempt;
+  };
+  const load = async (): Promise<boolean> => {
     try {
       const started = performance.now();
       compiledModule = await loadModule();
@@ -577,9 +614,9 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     if (!wasm?.dead || reviving) return;
     reviving = true;
     state.ready = false;
-    if (reviveNow()) { reviving = false; return; }
+    if (reviveNow()) { reviving = false; notifyReady(); return; }
     reporter.emit({ type: 'dead' });
-    void start().finally(() => { reviving = false; });
+    void start().then(ok => { if (ok) notifyReady(); }).finally(() => { reviving = false; });
   };
   let reviving = false;
   const reviveTimer = setInterval(revive, 1000);

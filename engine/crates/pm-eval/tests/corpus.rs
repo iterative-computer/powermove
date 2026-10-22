@@ -10,6 +10,12 @@
 //! fresh renderer would instead of modelling the capture's font cache
 //! (`capture_font_cache_seeds`).
 //!
+//! Level 2 text documents (`compat` ≥ 2) have no legacy answer: today's
+//! engine evaluates them at level 1, and the capture leaves them out
+//! (`engine/corpus/src/legacy-capture.ts`). One an older capture still holds
+//! is routed to the native semantic gate, counted and listed; it fails the
+//! test when that gate does not judge it.
+//!
 //! Tolerances (plan section 25): numbers within `1e-9 + 1e-9·|b|`, strings and
 //! booleans exact; bounds within 1e-6.
 
@@ -990,6 +996,7 @@ fn node_has(layer: &Node, member: &str, key: &JsString) -> bool {
 
 fn main() {
     pins_fail_only_when_a_font_grows();
+    level2_documents_are_routed_to_the_semantic_gate();
     corpus_evaluation_matches_legacy();
 }
 
@@ -1066,6 +1073,41 @@ fn capture_font_cache_seeds(manifest: Option<&Value>) -> Vec<FontCacheSeed> {
         .collect()
 }
 
+/// The corpus ids the native level 2 semantic gate judges
+/// (`pm-render/tests/text_level2_semantics.rs`, over the shared fixture).
+fn semantic_gate_ids() -> std::collections::BTreeSet<String> {
+    let cases = parse(include_str!("../../../corpus/fixtures/text-level2.json")).unwrap();
+    let Value::Array(cases) = cases else {
+        panic!("the level 2 corpus fixture is an array");
+    };
+    cases
+        .iter()
+        .map(|c| {
+            member(c, "id")
+                .and_then(|id| id.as_js_string())
+                .map(|id| id.to_string_lossy())
+                .expect("a case id")
+        })
+        .collect()
+}
+
+fn level2_documents_are_routed_to_the_semantic_gate() {
+    let gate = semantic_gate_ids();
+    assert_eq!(gate.len(), 14);
+    assert!(gate.contains("text-level2/word-transform"));
+    let doc = |compat: &str| {
+        let json = format!(
+            r#"{{"layers":[{{"id":"L1","type":"text"{compat},"d":{{"text":"a"}},"p":{{}}}}]}}"#
+        );
+        Document::new(Some(parse(&json).unwrap()), 1)
+    };
+    assert_eq!(
+        pm_eval::text_level2::level2_text_layers(&doc(r#","compat":2"#)),
+        ["L1"]
+    );
+    assert!(pm_eval::text_level2::level2_text_layers(&doc("")).is_empty());
+}
+
 fn corpus_evaluation_matches_legacy() {
     let Some(dir) = corpus_dir() else {
         eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
@@ -1105,6 +1147,8 @@ fn corpus_evaluation_matches_legacy() {
         }
     );
     measure.compat().set_font_cache_seeds(seeds);
+    let semantic_gate = semantic_gate_ids();
+    let mut level2: BTreeMap<String, (Vec<String>, bool)> = BTreeMap::new();
     for (name, path) in projects(&dir) {
         if only.as_deref().is_some_and(|p| !name.starts_with(p)) {
             continue;
@@ -1114,6 +1158,13 @@ fn corpus_evaluation_matches_legacy() {
         }
         let loaded = std::fs::read_to_string(path.join("loaded.json")).unwrap();
         let doc = Document::new(Some(parse(&loaded).unwrap()), 1);
+        // Level 2 text has no legacy answer: today's engine evaluates it at
+        // level 1. It goes to the semantic gate, never to this comparison.
+        let layers = pm_eval::text_level2::level2_text_layers(&doc);
+        if !layers.is_empty() {
+            level2.insert(name.clone(), (layers, semantic_gate.contains(&name)));
+            continue;
+        }
         let mut evals: Vec<PathBuf> = std::fs::read_dir(path.join("eval"))
             .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
             .unwrap_or_default();
@@ -1194,7 +1245,27 @@ fn corpus_evaluation_matches_legacy() {
             );
         }
     }
+    eprintln!(
+        "  level 2 text routed to the semantic gate (no legacy answer): {} projects",
+        level2.len()
+    );
+    for (name, (layers, judged)) in &level2 {
+        eprintln!(
+            "    {name:<44} layers {}{}",
+            layers.join(", "),
+            if *judged { "" } else { "  NOT JUDGED" }
+        );
+    }
+    let unjudged: Vec<&String> = level2
+        .iter()
+        .filter(|(_, (_, judged))| !judged)
+        .map(|(name, _)| name)
+        .collect();
     assert!(!failed, "corpus mismatches (see above)");
+    assert!(
+        unjudged.is_empty(),
+        "level 2 text the semantic gate (pm-render tests/text_level2_semantics.rs) does not judge: {unjudged:?}"
+    );
     assert!(
         grown.is_empty(),
         "text layouts left out of the comparison grew past their pins (see above)"
