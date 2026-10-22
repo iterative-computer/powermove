@@ -174,6 +174,37 @@ describe('EngineRenderTransport', () => {
     }
   });
 
+  it('an async snapshot prepares its compatibility needs asynchronously and posts the prepared answers', async () => {
+    const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
+    const { transport, session: s } = setup([{ status: 'needsRenderer', revision: 12, fallback: [], compat: [need] }, rendered(2, 2)]);
+    const options: unknown[] = [];
+    let prepared = false;
+    const prepare = vi.fn(async (_need: unknown, revision: number) => { expect(revision).toBe(12); await Promise.resolve(); prepared = true; });
+    transport.answerCompat('rasterOverride', (_need, _revision, o) => { options.push(o); return o?.prepared && prepared ? { kind: 'native' } : null; }, prepare);
+    expect((await transport.snapshot({ time: 0, width: 2, height: 2 })).width).toBe(2);
+    expect(prepare).toHaveBeenCalledOnce();
+    // Only the prepared answer: no synchronous answer ran on the caller's turn.
+    expect(options).toEqual([{ prepared: true }]);
+    expect(s.posted).toContainEqual(expect.objectContaining({ compat: 'native', layer: 'title' }));
+  });
+
+  it('an async snapshot answers synchronously only a need whose prepared answer did not survive', async () => {
+    const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
+    const { transport, session: s } = setup([{ status: 'needsRenderer', revision: 12, fallback: [], compat: [need] }, rendered(2, 2)]);
+    const options: unknown[] = [];
+    // A reset dropped the prepared answer (or the preparation failed).
+    transport.answerCompat('rasterOverride', (_need, _revision, o) => { options.push(o); return o?.prepared ? null : { kind: 'native' }; }, async () => { throw new Error('reset'); });
+    expect((await transport.snapshot({ time: 0, width: 2, height: 2 })).width).toBe(2);
+    expect(options).toEqual([{ prepared: true }, undefined]);
+    expect(s.posted.filter((p) => p['compat'] === 'native')).toHaveLength(1);
+    // A synchronous snapshot keeps answering on the calling thread.
+    const sync = setup([{ status: 'needsRenderer', revision: 12, fallback: [], compat: [need] }, rendered(2, 2)]);
+    const prepare = vi.fn(async () => {});
+    sync.transport.answerCompat('rasterOverride', () => ({ kind: 'native' }), prepare);
+    expect(sync.transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
   it('still stops a repeated unresolved raster dependency after three replies', async () => {
     const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
     const needs: EngineSnapshotReply = { status: 'needsRenderer', revision: 12, fallback: [], compat: [need] };

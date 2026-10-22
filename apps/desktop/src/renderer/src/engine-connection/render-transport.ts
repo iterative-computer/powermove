@@ -721,6 +721,26 @@ export class EngineRenderTransport {
     }
   }
 
+  /**
+   * An asynchronous snapshot's round (a thumbnail, a capture, an async
+   * `render.snapshot`): a producer that prepares asynchronously gets each
+   * need's base dependencies over async IPC first, as playback does, and
+   * the prepared answer is posted. Its caller never waits on a synchronous
+   * base raster, which during playback would hold presentation and input.
+   * A need whose prepared answer did not survive (a reset, a changed layer)
+   * or whose preparation failed is answered as the synchronous round does,
+   * so its pixels and its producer's error are today's.
+   */
+  private async answerRoundAsync(compat: CompatNeed[]): Promise<void> {
+    if (!compat.length) return;
+    const revision = this.options.revision() ?? 0;
+    await Promise.allSettled(compat.map((need) => this.preparers.get(need.source)?.(need, revision)));
+    const session = this.options.session();
+    if (!session) throw new EngineSnapshotError('unavailable', 'The window has no engine session to post compatibility pixels on.');
+    const unprepared = compat.filter((need) => !(this.preparers.has(need.source) && this.answerNeed(need, session, true)));
+    this.answerRound(unprepared);
+  }
+
   /** Resolves once a session is open, or after `ms`. */
   private async waitForSession(ms: number): Promise<void> {
     const until = performance.now() + ms;
@@ -1002,7 +1022,7 @@ export class EngineRenderTransport {
         if (reply.status === 'failed') throw failure(reply);
         dependencies.observe(reply);
         this.stats.rounds++;
-        this.answerRound(reply.compat);
+        await this.answerRoundAsync(reply.compat);
         await this.postSvg(reply.svg, uploaded, (rasters, request) => rasters.draw(request));
         if (!reply.fallback.length) continue;
         const runner = this.options.fallbackRunner();
