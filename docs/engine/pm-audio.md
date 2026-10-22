@@ -288,7 +288,8 @@ Plan section 16: "pitch preserved by default (Signalsmith Stretch, our own bindi
 following speed per clip (`pitch`); deterministic pre-roll."
 
 **The binding.** `pm-stretch` vendors Signalsmith Stretch 1.4.0 and Signalsmith Linear
-0.6.4 (both MIT, on the section 24 `cargo-deny` list; headers unmodified, hashes in
+0.6.4 (both MIT, on the section 24 `cargo-deny` list; local cooperative setup
+changes and upstream hashes are documented in
 `engine/crates/pm-stretch/vendor/README.md`) behind a C shim that catches every C++
 exception. It uses the library's portable FFT with fast math off, and seeds (and reseeds
 on reset) the random engine the library uses below 0.5×, so the same calls give the same
@@ -3243,10 +3244,212 @@ Unlabeled work reports unknown. Small gain/mixing tails may remain within
 the preceding voice phase until the next checkpoint; phase names are not
 exclusive function-level CPU attribution.
 
-All final device and repetition gates remain pending for this revision.
-Independent source reviews found no blockers in the continuation and phase
-changes. Build and strict Clippy checks passed. Seven targeted queue and
-atomic-record unit regressions also passed; they exercise no audio device
-or actual scheduling policy. The full audio runtime gates remain pending.
-The historical AirPods 256-frame allowance above remains limited to that
+V24 then completed four stressed paired preflights, with four busy threads
+and 30 starts per engine on the built-in 48 kHz, 64-frame output. Shared
+voices passed; distinct voices still missed the stated latency target.
+
+| Scenario | Today p50/p95/max ms | V24 p50/p95/max ms |
+| --- | --- | --- |
+| Shared unprepared seek | 29.829 / 32.413 / 32.630 | 29.006 / 30.284 / 30.928 |
+| Shared speed edit | 30.830 / 32.436 / 32.729 | 26.947 / 27.965 / 28.052 |
+| Distinct unprepared seek | 30.432 / 31.923 / 32.528 | 30.590 / 32.116 / 32.296 |
+| Distinct speed edit | 30.428 / 32.431 / 32.635 | 30.844 / 31.308 / 31.343 |
+
+The distinct seek p50/p95 misses, and distinct speed p50 miss, remain
+blockers. No miss is classified as noise. Across those 120 native starts,
+12 shared-head profile starts and 24 distinct profile starts, the observed
+program-underrun, omitted-prefix, start-spread, A3, producer history-claim,
+and computation/constraint-overrun counters were zero. Application-lifetime
+underrun counters were nonzero and remain in the raw reports; zero program
+counters do not establish a zero application-lifetime count. These captures
+do not replace the full repetition or 60-second loop campaign.
+
+The shared profile showed that retaining a worker helps only a sole ready
+head. One of 12 heads had 20 local continuations and 0.019 ms of queue time;
+the other 11 competed with ready priority-zero peers and requeued 17–19
+times. The median queue time remained 4.034 ms. The queue delay is largely
+waiting for other urgent jobs, rather than a measured four milliseconds
+inside the queue mutex.
+
+Distinct profiling matched all 12 seek cohorts and 11 of 12 speed cohorts;
+one speed start was already ready and had no contemporaneous cohort.
+Seek applied-to-ready was 10.711/11.417 ms (p50/p95), with 56.485 ms summed
+CPU across the 16 jobs. The last completing job's medians were 3.974 ms CPU,
+3.495 ms queue, 3.027 ms budget sleep and 0.171 ms policy entry. Speed
+applied-to-ready was 12.957/15.516 ms, with 78.968 ms summed CPU; the last
+job's medians were 4.905 ms CPU, 4.962 ms queue, 3.851 ms budget sleep and
+0.211 ms entry. Sleep overlaps entry/work wall time. Last job logs preceded
+ready by 2–7 microseconds; they are correlated completion observations, not
+the publication event itself. These profiled native rows were unpaired
+and do not establish a paired latency pass.
+
+A 512-frame output lead was investigated and rejected as the next fix.
+The native interval is 1,440 frames at 48 kHz: the measured 2/3/4-second
+anchors need the same native process calls for a 512- and 1,024-frame lead.
+Other phases could lose useful reserve before a serial producer fill.
+HEAD 4096, LEAD 1024 and canonical pre-roll/grid remain unchanged.
+
+The instrumentation patch is measurement only: fixed atomic maxima and an observation
+count record thread-CPU spans after admitted DSP checkpoints, including
+the fraction of each span's actual computation budget. Such spans can
+include intervening work; they are upper bounds rather than isolated vendor
+call timers. No reservation, callback limit, CPU debt, or PCM change has been
+made. Build, strict Clippy, addons and nine targeted pure regressions passed;
+independent source review found no P1/P2 blockers. The values are
+schedule-lifetime snapshots across producer
+and worker roles; their separate maxima may come from different events.
+Finite observed spans cannot establish a hard bound for a smaller reserve.
+
+Its device capture then completed 55 of 84 planned native starts. The speed
+row aborted on two worker computation-budget overruns. The first record
+identified `stretch-init`: 1.276500 ms of unit CPU plus 0.004250 ms already
+spent, against a 1.266666 ms computation allowance and 1.333333 ms constraint.
+That record was already present before the first measured Play. Constraint
+and program-underrun counters were zero; the strict computation gate still
+failed. A larger reserve cannot make this indivisible unit fit its allowance.
+Initialization needs finer checkpoints rather than a relaxed CPU limit.
+Observed mixed-role DSP-span maxima were 0.132–0.227 ms across these rows;
+they do not establish an initialization bound. All 55 observed starts kept
+16 complete voices together, without an omitted prefix or A3 fallback.
+
+The unprofiled seek row retained a 1,401.582 ms first-start outlier. Of that,
+1,362.958 ms was between the UI request timestamp and the engine request;
+apply-to-ready took 19.364 ms. The cause of the delivery delay was not
+isolated. These native-only captures have no paired latency verdict, and
+neither the outlier nor the overruns are classified as noise. Nonzero
+application-lifetime underrun counters remain recorded separately.
+
+The earlier V24 immutable headless preflight also completed: 119 library
+tests passed, one was ignored, ten start regressions passed, and 32 cold
+atomic first-512-frame observations had a 9.286 ms maximum, below the
+10.666667 ms bound. Those results do not qualify the newer instrumentation
+or the final revision.
+
+The next candidate adds opt-in initialization checkpoints through FFT
+twiddle construction, Kaiser and reconstruction loops, STFT reset, and
+between allocation stages. The ordinary constructor/reset remains the
+offline reference. The callback-enabled path also skips an initial ACG
+window and reset that the immediately following Kaiser setup and final
+reset overwrite before use. Final dimensions, buffers, seed and arithmetic
+order remain unchanged; direct seeded PCM comparisons cover repeated
+resets, 44.1/48 kHz and the random-phase slow-stretch path. Native reset
+constructs its replacement before swapping, preserving live state on an
+allocation failure. Allocations themselves remain indivisible and require
+the strict actual-device CPU gate.
+
+Preparation turns allow two resumable fresh/produce operations, with the
+quota carried across stage and join-range transitions. A class-changing
+operation can process an outgoing run and seek the incoming one; this is
+not a two-FFI-call bound. Independent test counters check actual DSP calls
+alongside existing exact PCM and history-handoff comparisons. The FIFO
+handoff, continuous CPU checkpoints and physical debt remain intact, as do
+the 500-microsecond ordinary reserve, initialization reserve and actual
+callback limits.
+
+V26 passed its build and strict Clippy checks, 119 audio library tests (one
+ignored), two stretch library tests and five binding tests. Its runtime
+preflight failed: 29 of 32 cold first-512 observations exceeded the enforced
+10.666667 ms bound; p50/p95/max were 13.120/17.236/20.460 ms. On the built-in
+48 kHz, 64-frame output, paired stressed distinct seek measured
+42.129/44.837/44.967 ms against Today 29.194/32.203/32.495 ms; distinct speed
+measured 39.905/42.853/44.058 ms against 29.973/32.012/32.307 ms. All 60
+native starts in those two rows retained complete, simultaneous voices and
+zero program-underrun and computation/constraint-overrun counters. The
+latency and headless-bound failures still block qualification.
+
+Independent review found setup checks in two shared per-block helpers had
+prevented vectorization and bulk stores, affecting processing as well as
+initialization. The remaining diagnostic runs were canceled and all
+completed failures retained. V27 removes those checks and dispatches STFT
+reset once between cooperative setup and an unhooked template path, keeping
+ordinary processing clears and arithmetic available to the optimizer. A
+stereo seeded repeated-reset comparison supplements the mono coverage.
+V27 audio/stretch compilation, strict Clippy, addons and matching app/Wasm
+builds passed. Disassembly restores the same helper mnemonic sequences as
+the earlier vectorized object: 54 NEON instructions in window-product
+arithmetic and six bulk-clear calls in output movement. The ordinary reset
+specialization has bulk clears and no per-element indirect callbacks. This
+verifies generated code, rather than a runtime or worst-case CPU bound.
+V27 runtime qualification is pending. Its first paired attempt retained one
+partial 2,063.992 ms native observation, then failed because first-buffer
+timing was missing. The selected pre-edit audio report had no device or
+project and zero callbacks, so this does not establish device-output timing.
+The Today launch separately timed out waiting for its first window. Neither
+part supplies a paired latency verdict. One subsequent unloaded startup
+probe retained all 16 layers and opened the device within its 300 ms warmup,
+without a host-clock or silent run; it did not reproduce or explain the
+first failures. Capture setup needs explicit document, session and audio
+readiness before the measured edits.
+The sampled DSP-span telemetry now includes initialization and destructor
+tails; its maxima are not isolated vendor-call times or directly comparable
+to V25. Allocation and destruction can still be indivisible.
+
+Full final device and repetition qualification remains pending. The
+historical AirPods 256-frame allowance above remains limited to that
 accepted device result and does not excuse the built-in-output misses.
+
+V27's later reserved headless preflight passed 121 library tests (one
+ignored), two stretch library tests, six binding tests and ten focused
+start regressions. Four of its 32 cold atomic observations still exceeded
+10.666667 ms; visible first-buffer p50/p95/max were
+7.957/11.713/12.755 ms, with a 13.414 ms observer maximum. A separate seeded
+probe compared the earlier vectorized object, V27's ordinary path and its
+cooperative path: all 1,167,696 floats across eight mono/stereo, rate,
+slow-stretch and repeated-reset cases were byte-identical. This supports
+PCM preservation on this Mac; final mapped playback comparisons remain
+required.
+
+V28 increased the preparation pool from ten to twelve workers on the
+16-core Mac (twelve performance and four efficiency cores), still below
+total cores minus two. Its reserved preflight passed all 21 processes,
+including the same library, binding and focused regressions and all 32
+cold atomic observations. First-buffer p50/p95/max were
+6.837/8.323/8.466 ms; the observer maximum was also 8.466 ms.
+
+Four paired stressed rows then completed, with four busy threads and 30
+starts per engine on MacBook Pro Speakers, 48 kHz and 64 frames. Both
+halves of every pair held the exclusive app lease. Recorded one-minute
+load means did not change sharply under the preregistered validity rule;
+no pair was discarded or retried. Shared rows passed; distinct rows failed.
+
+| Scenario | Today p50/p95/max ms | V28 p50/p95/max ms |
+| --- | --- | --- |
+| Distinct unprepared seek | 30.128 / 32.207 / 32.317 | 31.189 / 32.886 / 34.154 |
+| Distinct speed edit | 30.133 / 32.135 / 32.536 | 32.388 / 34.926 / 35.194 |
+| Shared unprepared seek | 30.222 / 32.603 / 32.711 | 29.474 / 31.369 / 31.506 |
+| Shared speed edit | 30.034 / 32.528 / 32.635 | 28.749 / 29.790 / 29.834 |
+
+The two distinct rows miss all three required latency statistics. No miss
+is classified as noise. Those 120 native starts and 24 additional native
+profile starts kept all 16 voices complete and simultaneous, with zero
+program underruns, omitted prefix, start spread, A3 fallback, producer
+history claims, and computation/constraint overruns. Application-lifetime
+underruns are separate counters and are not claimed to be zero.
+
+Profile cohorts matched all twelve seek starts and eleven cold speed
+starts; the remaining speed start was already ready. Median apply-to-ready
+was 12.170 ms for seek and 10.157 ms for speed. The final initial voice
+claim arrived about 1.7 ms after enqueue. The last completing voice used
+4.979/4.378 ms CPU, 2.991/2.608 ms queue time and 4.004/3.364 ms budget
+sleep, respectively. These scopes overlap and must not be added as
+independent wall time. Across the unprofiled rows, median UI-to-engine
+request was 1.117 ms for seek and 2.178 ms for speed; request-to-apply was
+only 0.022/0.018 ms. Dirty-project graph construction precedes that engine
+request timestamp and needs its own control-thread measurement. Full
+final qualification remains pending.
+
+The resumed validation replaces test media paths with owned temporary-directory
+handles throughout pm-audio and pm-media, including the shared playback
+fixture, unit fixtures and examples. Fixture teardown joins decoder workers
+before deleting media; panic unwinding releases the directory as well. The
+corpus app harness removes profiles when setup or launch fails, and always
+removes them after close. The catalog's temporary rewritten module is also
+removed immediately after import.
+
+The campaign now gives its children an isolated `TMPDIR` and compares file,
+directory and byte counts against its empty starting state, even after a
+child failure. Any growth fails the campaign; the outer directory guard then
+removes its own tree. The guard's regression checks cover a successful child,
+an exception exit and a deliberately leaking child. A failed-extension launch
+also returns to an empty temporary tree. This prevents repeated playback
+runs from accumulating generated media in the host temporary directory.
