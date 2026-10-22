@@ -181,7 +181,7 @@ describe('composition thumbnails with the new engine on', () => {
     const lands: Array<(value: unknown) => void> = [];
     const engine = {
       thumbnails: { request: vi.fn(() => new Promise((resolve) => { lands.push(resolve); })) },
-      toCanvas: vi.fn(() => ({ toDataURL: () => 'data:image/jpeg;stale' })),
+      toCanvas: vi.fn(() => ({ toDataURL: (): string => 'data:image/jpeg;stale' })),
     };
     const PM: Record<string, any> = { proj: comp, Comps: { list: () => [comp] }, EngineRender: engine, playing: false };
     const thumbs = createCompThumbnails(PM);
