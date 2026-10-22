@@ -165,6 +165,35 @@ describe('the raster override producer', () => {
     expect(compat.ready(need('title', 2), 4)).toBe(true);
   });
 
+  it('keeps base rasters across frames by content, as today\'s raster cache, for the layer and the copies a wrapper draws', () => {
+    const { services, compat, engineRaster, need } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.type, layer.d, scale, crop ?? null]));
+    const original = services.get<any>('raster');
+    // Today's typewriter pattern: the whole text, then a copy holding the typed prefix.
+    services.register('raster', (layer: any, scale: number, time: number, uploaded: unknown, crop: unknown) => {
+      if (layer.type !== 'text') return original(layer, scale, time, uploaded, crop);
+      const full = original(layer, scale, time, undefined, crop);
+      const count = Math.min(5, Math.floor(time * 2));
+      const typed = original({ ...layer, id: `${layer.id}:typed:${count}`, d: { ...layer.d, text: String(layer.d.text).slice(0, count) } }, scale, time, undefined, crop);
+      return { ...full, w: typed.w, key: `typed:${layer.id}:${count}:${full.cv.width}` };
+    });
+    compat.answer(need('title', 0.5), 4);
+    expect(engineRaster).toHaveBeenCalledTimes(2);
+    // The same content at the next frames: no engine raster at all.
+    compat.answer(need('title', 0.6), 4);
+    compat.answer(need('title', 0.7), 4);
+    expect(engineRaster).toHaveBeenCalledTimes(2);
+    // One more character typed: only the new prefix is drawn.
+    compat.answer(need('title', 1.0), 4);
+    expect(engineRaster).toHaveBeenCalledTimes(3);
+    // Another density is another raster, as today.
+    compat.answer(need('title', 1.0, 3), 4);
+    expect(engineRaster).toHaveBeenCalledTimes(5);
+    // A font change drops them.
+    compat.reset();
+    compat.answer(need('title', 1.0), 4);
+    expect(engineRaster).toHaveBeenCalledTimes(7);
+  });
+
   it('answers native for a wrapper that passes a layer through, without drawing the base', () => {
     const { services, compat, engineRaster, need } = setup();
     const original = services.get<any>('raster');

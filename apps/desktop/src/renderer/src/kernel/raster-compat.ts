@@ -44,6 +44,9 @@ export const TICKS_PER_SECOND = 705_600_000;
 
 const LAZY = Symbol('powermove.lazyRaster');
 
+/** Today's raster cache entry bound (legacy/gl/raster.ts `MAX`). */
+const MAX_BASES = 4096;
+
 type LazyMark = {
   layer: unknown; scale: number; time: number; crop: unknown;
   /** The wrapper wrote a field, or read the canvas (it may have drawn on it). */
@@ -280,7 +283,6 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   const readsBase = new Set<string>();
   /** Base surfaces loaded so far (a load during an answer marks its layer). */
   let loads = 0;
-  let answeringLayer: unknown = null;
   let pending = 0, generation = 0, readyRevision: number | null = null;
   let active: { layer: unknown; key: string; scale: number; time: number; crop: string } | null = null;
   let serial = 0;
@@ -296,15 +298,18 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     generation++;
   };
   const clearReady = () => { ready.clear(); preparing.clear(); bases.clear(); baseBytes = 0; readyRevision = null; generation++; };
+  // Today's raster cache bounds (legacy/gl/raster.ts: `MAX` entries and
+  // the `raster` memory budget, 192 MiB by default).
+  const maxBaseBytes = Number(PM?.Memory?.budget?.('raster')) || 192 * 1024 * 1024;
   const rememberBase = (key: string | null, layer: unknown, surface: any) => {
     if (!key || !surface) return;
     const bytes = Number(surface.cv?.width) * Number(surface.cv?.height) * 4;
-    if (!(bytes > 0 && bytes <= 32 * 1024 * 1024)) return;
+    if (!(bytes > 0 && bytes <= maxBaseBytes)) return;
     const old = bases.get(key);
     if (old) baseBytes -= old.bytes;
     bases.delete(key);
     bases.set(key, { layer, surface, bytes }); baseBytes += bytes;
-    while (bases.size > 2 || baseBytes > 32 * 1024 * 1024) {
+    while (bases.size > MAX_BASES || baseBytes > maxBaseBytes) {
       const first = bases.keys().next().value!;
       baseBytes -= bases.get(first)!.bytes; bases.delete(first);
     }
@@ -325,10 +330,18 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const t = Number(time ?? PM?.time ?? 0);
       const prepared = active && active.layer === layer ? ready.get(active.key) : undefined;
       const matches = prepared?.layer === layer && active?.scale === s && active.time === t && active.crop === cropKey(crop ?? undefined);
-      const key = answeringLayer === layer ? options.rasterKey?.(layer, s, t, crop ?? undefined) ?? null : null;
       const load = () => {
         loads++;
         if (matches) return prepared!.surface;
+        // Today's raster cache: the same content at the same density and
+        // window is the same surface, in any frame (the key is the evaluated
+        // content, so a layer copy a wrapper draws hits it as well).
+        const key = options.rasterKey?.(layer, s, t, crop ?? undefined) ?? null;
+        const cached = key ? bases.get(key) : undefined;
+        if (cached) {
+          bases.delete(key!); bases.set(key!, cached);
+          return cached.surface;
+        }
         const surface = options.engineRaster(layer, s, t, crop ?? undefined);
         rememberBase(key, layer, surface);
         return surface;
@@ -367,7 +380,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const layer = findLayer(PM, String(need.composition), String(need.layer));
       if (!layer) return true;
       const baseKey = options.rasterKey?.(layer, Number(need.scale), Number(need.time) / TICKS_PER_SECOND, need.crop ?? undefined) ?? null;
-      return readyRevision === revision && !!baseKey && bases.get(baseKey)?.layer === layer;
+      return readyRevision === revision && !!baseKey && bases.has(baseKey);
     },
 
     async prepare(need: CompatNeed, revision: number): Promise<void> {
@@ -399,7 +412,6 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   function answerWith(need: CompatNeed, revision: number, answerOptions: CompatAnswerOptions | undefined, layer: any, chain: Raster, time: number, scale: number, crop: RasterWindowLike | undefined): CompatAnswerResult {
     let result: any;
     producing++;
-    answeringLayer = layer;
     active = answerOptions?.prepared === true && answerOptions.layer === undefined
       ? { layer, key: sampleKey(need, revision), scale, time, crop: cropKey(crop) } : null;
     try {
@@ -418,7 +430,6 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       producing--;
       if (active) ready.delete(active.key);
       active = null;
-      answeringLayer = null;
     }
     const mark: LazyMark | undefined = result?.[LAZY];
     // The base itself, for this layer, density and window, untouched: the
@@ -455,7 +466,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     if (ready.get(key)?.layer === layer) return;
     const baseKey = options.rasterKey?.(layer, Number(need.scale), Number(need.time) / TICKS_PER_SECOND, need.crop ?? undefined) ?? null;
     const cached = baseKey ? bases.get(baseKey) : undefined;
-    if (cached && cached.layer === layer) {
+    if (cached) {
       ready.set(key, { layer, surface: cached.surface });
       while (ready.size > 2) ready.delete(ready.keys().next().value!);
       return;

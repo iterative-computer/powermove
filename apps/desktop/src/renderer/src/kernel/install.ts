@@ -962,11 +962,17 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
       return engine ? engineRasterBase(PM, engine, [layer as Layer, scale, time, undefined, crop as RasterWindow | undefined]) : null;
     },
     rasterKey: (layer, scale, time, crop) => {
-      // The legacy shape cache also keys pixels by resolved content rather
-      // than composition time: rotation alone never repaints its base.
-      if (layer?.type !== 'shape' || layer.d?.paths?.length) return null;
+      // Today's raster cache (legacy/gl/raster.ts) keys pixels by resolved
+      // content and density rather than composition time: rotation alone
+      // never repaints a base, and a text layer whose text and style hold
+      // keeps its raster. Path shapes, animated or styled characters and
+      // typography anchoring depend on more than that: never cached.
+      const type = layer?.type;
+      if (type !== 'shape' && type !== 'text') return null;
+      if (type === 'shape' && layer.d?.paths?.length) return null;
+      if (type === 'text' && (layer.d?.animators?.length || layer.d?.styles?.length || layer.d?.fontAnchorBounds)) return null;
       const evaluator = native(PM);
-      return evaluator ? JSON.stringify([evaluator.resolveContent(layer, time), scale, crop ?? null]) : null;
+      return evaluator ? JSON.stringify([type, layer.compat ?? null, evaluator.resolveContent(layer, time), scale, crop ?? null]) : null;
     },
     engineRasterAsync: async (layer, scale, time, crop) => {
       const engine = engineRender(PM);
