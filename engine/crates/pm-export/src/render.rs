@@ -837,12 +837,9 @@ fn plan_export_checked(
             None
         } else {
             Some(AudioPlan {
-                // Opus is written at 48 kHz: the mix runs at 48 kHz for WebM.
-                sample_rate: if audio_codec == AudioCodec::Opus {
-                    crate::settings::OPUS_SAMPLE_RATE
-                } else {
-                    pm_audio::mixer::project_sample_rate(doc)
-                },
+                // Today's export OfflineAudioContext is always stereo 48 kHz,
+                // independently of the project's playback device/rate.
+                sample_rate: 48_000,
                 graph: Arc::new(graph),
                 cache,
             })
@@ -1113,7 +1110,12 @@ where
                     preview,
                 });
             }
-            Ok(pipeline.finish()?)
+            pipeline
+                .finish_with_cancel(cancel)
+                .map_err(|error| match error {
+                    crate::Error::Cancelled => JobError::Cancelled,
+                    error => JobError::Export(error),
+                })
         });
         let mut render_error = None;
         for n in 0..frames {
@@ -1201,7 +1203,7 @@ where
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
 /// FFmpeg (WebM), or the engine's PNG writer.
 pub fn sink_for(plan: &ExportPlan) -> Result<crate::OutputSink, JobError> {
-    let mut sink = crate::OutputSink::new(&plan.spec)?;
+    let mut sink = crate::OutputSink::for_job(&plan.spec)?;
     if let (crate::OutputSink::Png(png), Some(name)) = (&mut sink, &plan.sequence_name) {
         png.set_stem(name);
     }

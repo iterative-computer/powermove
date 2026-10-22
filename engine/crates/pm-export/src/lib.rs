@@ -38,6 +38,7 @@ pub mod webm;
 pub mod mac;
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 
 pub use convert::{EncoderInput, WorkingFrame};
 pub use pipeline::{Pipeline, Sink};
@@ -55,11 +56,32 @@ pub struct Delivered {
 pub enum OutputSink {
     #[cfg(target_os = "macos")]
     VideoToolbox(Box<mac::VideoToolboxSink>),
+    #[cfg(target_os = "macos")]
+    LegacyVideo(Box<mac::legacy_video::LegacyVideoSink>),
     Webm(Box<webm::WebmSink>),
     Png(Box<png::PngSink>),
 }
 
 impl OutputSink {
+    /// Job rendering supplies working RGBA frames. H.264's desktop conversion
+    /// and encoder settings run in the same bundled FFmpeg as flag-off exports.
+    /// `new` also supports callers supplying already converted encoder planes.
+    pub fn for_job(spec: &ExportSpec) -> Result<OutputSink, Error> {
+        #[cfg(target_os = "macos")]
+        if matches!(spec.codec, Codec::H264 { .. })
+            && spec.container == Container::Mp4
+            && spec.tags == ColorTags::Rec709QuickTime
+            && spec
+                .audio
+                .is_none_or(|a| a.ffmpeg_mux(spec.codec, spec.container))
+        {
+            return Ok(OutputSink::LegacyVideo(Box::new(
+                mac::legacy_video::LegacyVideoSink::new(spec)?,
+            )));
+        }
+        Self::new(spec)
+    }
+
     /// Opens the encoder, muxer, and temporary output `spec` asks for.
     pub fn new(spec: &ExportSpec) -> Result<OutputSink, Error> {
         match spec.container {
@@ -88,10 +110,20 @@ impl OutputSink {
 impl Sink for OutputSink {
     type Output = Delivered;
 
+    fn video_rgba(&mut self, index: u64, frame: &WorkingFrame) -> Result<bool, Error> {
+        match self {
+            #[cfg(target_os = "macos")]
+            OutputSink::LegacyVideo(s) => s.video_rgba(index, frame),
+            _ => Ok(false),
+        }
+    }
+
     fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
         match self {
             #[cfg(target_os = "macos")]
             OutputSink::VideoToolbox(s) => s.video(index, input),
+            #[cfg(target_os = "macos")]
+            OutputSink::LegacyVideo(s) => s.video(index, input),
             OutputSink::Webm(s) => s.video(index, input),
             OutputSink::Png(s) => s.video(index, input),
         }
@@ -101,6 +133,8 @@ impl Sink for OutputSink {
         match self {
             #[cfg(target_os = "macos")]
             OutputSink::VideoToolbox(s) => s.audio(interleaved),
+            #[cfg(target_os = "macos")]
+            OutputSink::LegacyVideo(s) => s.audio(interleaved),
             OutputSink::Webm(s) => s.audio(interleaved),
             OutputSink::Png(s) => s.audio(interleaved),
         }
@@ -110,6 +144,19 @@ impl Sink for OutputSink {
         match self {
             #[cfg(target_os = "macos")]
             OutputSink::VideoToolbox(s) => s.finish(),
+            #[cfg(target_os = "macos")]
+            OutputSink::LegacyVideo(s) => s.finish(),
+            OutputSink::Webm(s) => s.finish(),
+            OutputSink::Png(s) => s.finish(),
+        }
+    }
+
+    fn finish_with_cancel(self, cancel: &AtomicBool) -> Result<Delivered, Error> {
+        match self {
+            #[cfg(target_os = "macos")]
+            OutputSink::VideoToolbox(s) => s.finish_with_cancel(cancel),
+            #[cfg(target_os = "macos")]
+            OutputSink::LegacyVideo(s) => s.finish_with_cancel(cancel),
             OutputSink::Webm(s) => s.finish(),
             OutputSink::Png(s) => s.finish(),
         }
@@ -129,6 +176,8 @@ pub fn export(spec: ExportSpec) -> Result<Export, Error> {
 /// Export errors.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("cancelled")]
+    Cancelled,
     #[error("invalid export settings: {0}")]
     InvalidSpec(String),
     #[error("invalid frame: {0}")]
