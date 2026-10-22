@@ -24,7 +24,7 @@ import { NativeEngine } from '../../main/engine/native-engine';
 import { AgentJobs } from '../../main/engine/agent-jobs';
 import { packAgentProject } from '../../main/agent-tools/project-packer';
 import { WorkerPool } from '../../main/media-store/hasher';
-import { MediaStoreService, validLink } from '../../main/media-store/service';
+import { MediaStoreService, validLink, type MediaStoreServiceOptions } from '../../main/media-store/service';
 import { STORE_DIRECTORY } from '../../main/media-store/store';
 import { RemoteClient, type WebIpcMain } from '../clients';
 import type { ProjectSessions, SessionMember } from '../sessions';
@@ -48,6 +48,7 @@ export interface HiddenHostOptions {
   /** Test/embedded worker bundle; production uses dist/engine/engine.mjs. */
   documentScript?: string;
   documentEnv?: Record<string, string>;
+  mediaConversions?: Pick<MediaStoreServiceOptions, 'convertStill' | 'convertVideo'>;
   ownerForRun?(run: string): number | null;
   extensions: NonNullable<DocumentHostServices['extensions']>;
 }
@@ -101,7 +102,7 @@ export class NativeHiddenHost {
     const transport = new NodeEngineTransport();
     this.hashes = new WorkerPool(path.join(distDir, 'native-media-hash.cjs'), 1);
     this.profileDefinitions = new ProfileDefinitionsWriter(profileDefinitionsPath(userData), message => log(`[native] ${message}`));
-    this.media = new MediaStoreService({ root: path.join(userData, STORE_DIRECTORY), userData, executor: this.hashes, enabled: true });
+    this.media = new MediaStoreService({ root: path.join(userData, STORE_DIRECTORY), userData, executor: this.hashes, enabled: true, ...options.mediaConversions });
     this.snapshotBridge = new NativeSnapshotBridge(loaded, log);
     const spawn = (role: 'interactive' | 'job', env: Record<string, string> = {}) => transport.spawn(path.join(distDir, 'native-engine-child.cjs'), addon, log, {
       POWERMOVE_ENGINE_PARITY_ENV: process.env['POWERMOVE_ENGINE_PARITY_ENV'] ?? readShaderEnvironment(probeDirectory),

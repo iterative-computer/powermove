@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import { ENGINE_IPC } from '../shared/engine-ipc';
 import { ENGINE_FONTS_IPC } from '../shared/engine-fonts-ipc';
+import { registerMediaStoreIpc } from '../main/media-store/ipc';
 /*
  * `powermove serve`: the Powermove host without Electron. The same main-process
  * modules that back the desktop app run here in plain Node, and each browser
@@ -378,6 +379,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     if (!extensionRegistry) throw new Error('native-extensions-unavailable: The extension registry could not start.');
     nativeHost = new NativeHiddenHost({ ownerForRun: id => runs.controlOwner(id)?.id ?? null, userData, exportsDir: options.exportsDir, distDir: path.join(options.appPath, 'dist'),
       rendererDir: options.rendererDir, ipc, store, sessions, browser: options.nativeBrowser, log,
+      mediaConversions: { convertStill: file => mediaProxies.createStillImage(file), convertVideo: file => mediaProxies.create(file) },
       extensions: { list: async () => extensionRegistry!.list(), bundle: async url => {
         const asset = await serveExtensionAsset(new URL(url).pathname);
         if (!asset) throw new Error(`extension-bundle-unavailable: ${url}`);
@@ -385,6 +387,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       }, onChanged: listener => { extensionListeners.add(listener); return () => { extensionListeners.delete(listener); }; } } });
     installSyncFonts(ipcMain, ctx, () => loadNativeFontRegistry(process.env['POWERMOVE_PM_BRIDGE'] ?? path.join(options.appPath, 'dist/native', `${process.platform}-${process.arch}`, 'pm_bridge.node'), createRequire(path.join(options.appPath, 'dist/server.mjs'))));
     registerEngineFontsIpc(ipcMain, ctx, nativeHost.fonts);
+    registerMediaStoreIpc(ipcMain, nativeHost.media, ctx);
     try { await nativeHost.start(); } catch (error) { await nativeHost.close(); stopWatcher?.(); throw error; }
     ipc.handle(ENGINE_IPC.getStatus, event => {
       trustedClient(event);

@@ -3,8 +3,9 @@ import { ENGINE_FONTS_IPC } from '../../../shared/engine-fonts-ipc';
 import { ENGINE_IPC } from '../../../shared/engine-ipc';
 import { encodeFrame, decodeFrame } from '../../../shared/wire';
 import type { ReconnectingLink } from '../../../shared/reconnect';
+import { hiddenMediaStore } from './hidden-media-store';
 
-export function nativeHiddenBridge(link: ReconnectingLink): Pick<PowermoveBridge, 'nativeEngine' | 'engineFonts'> {
+export function nativeHiddenBridge(link: ReconnectingLink): Pick<PowermoveBridge, 'nativeEngine' | 'engineFonts' | 'mediaStore'> {
   const project = () => String((window as any).PM?.proj?.id ?? 'powermove-home');
   const payload = (channel: string, args: unknown[]) => encodeFrame({ project: project(), channel, args });
   const asyncCall = async <T>(channel: string, ...args: unknown[]): Promise<T> => {
@@ -27,7 +28,7 @@ export function nativeHiddenBridge(link: ReconnectingLink): Pick<PowermoveBridge
     generation: () => asyncCall(ENGINE_FONTS_IPC.generation), seeds: () => asyncCall(ENGINE_FONTS_IPC.seeds),
     reportUiFonts: json => asyncCall(ENGINE_FONTS_IPC.uiFonts, json)
   };
-  return { engineFonts: fonts, nativeEngine: {
+  return { engineFonts: fonts, mediaStore: hiddenMediaStore(link), nativeEngine: {
     enabledSync: () => true,
     status: () => link.invoke(ENGINE_IPC.getStatus), hostTime: () => link.invoke(ENGINE_IPC.hostTime),
     pushDefinitions: update => link.send(ENGINE_IPC.definitions, update)
