@@ -523,6 +523,46 @@ describe('file store', () => {
     expect(store.snapshot()).toHaveProperty('project.orphan');
     await expect(fs.stat(path.join(directory, 'project.orphan.json'))).resolves.toBeDefined();
   });
+
+  it('keeps a project journal on disk while the slot posted before it has not been written', async () => {
+    const directory = await temporaryDirectory();
+    const slotFile = path.join(directory, 'project.P.json'), journalFile = path.join(directory, 'projectJournal.P.json');
+    const slot = JSON.stringify({ v: '1', proj: { id: 'P', name: 'Old' } }), journal = JSON.stringify([{ revision: 2, patches: [] }]);
+    await fs.writeFile(slotFile, slot);
+    await fs.writeFile(journalFile, journal);
+    let failing = true;
+    const store = createStore(directory, {
+      writeDelayMs: 0,
+      fs: { ...fs, rename: async (from: any, to: any) => { if (failing && path.basename(String(to)) === 'project.P.json') throw new Error('EIO: i/o error'); return fs.rename(from, to); } }
+    });
+    const errors: Array<{ key: string; error: string }> = [];
+    store.onError(event => errors.push(event));
+    await store.load();
+
+    // A checkpoint whose persist fails, then the window's journal deletion and a newer journal.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'New' } }));
+    await store.delete('projectJournal.P');
+    await store.flushAll();
+    await store.setSerialized!('projectJournal.P', JSON.stringify([{ revision: 3, patches: [] }]));
+    await store.flushAll();
+    expect(errors.filter(event => event.error.includes('EIO')).map(event => event.key)).toEqual(['project.P']);
+    expect(await fs.readFile(slotFile, 'utf8')).toBe(slot);
+    expect(await fs.readFile(journalFile, 'utf8')).toBe(journal);
+
+    // A refused checkpoint holds it too.
+    await expect(store.setSerialized!('project.P', '{not json')).rejects.toThrow();
+    await store.delete('projectJournal.P');
+    await store.flushAll();
+    expect(await fs.readFile(journalFile, 'utf8')).toBe(journal);
+
+    // Once a checkpoint is written, the journal follows it again.
+    failing = false;
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'Newer' } }));
+    await store.delete('projectJournal.P');
+    await store.flushAll();
+    expect(JSON.parse(await fs.readFile(slotFile, 'utf8')).proj.name).toBe('Newer');
+    await expect(fs.stat(journalFile)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });
 
 describe('store IPC and quit integration', () => {

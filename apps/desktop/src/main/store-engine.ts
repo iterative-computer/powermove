@@ -87,6 +87,8 @@ export class StoreEngine {
   private loaded = false;
   /** projectState keys whose file existed at load but could not be read. */
   private readonly unread = new Set<string>();
+  /** project.<id> slots whose newest write did not reach disk (refused, or its persist failed). */
+  private readonly failedSlots = new Set<string>();
   private readonly backlog: StoreRequest[] = [];
   private busy = false;
   private directory = '';
@@ -148,6 +150,8 @@ export class StoreEngine {
     };
     const refuse = (error: unknown) => {
       const rejection = error instanceof Rejection ? error : new Rejection(IPC.storeSet, errorText(error));
+      // The window deletes the slot's journal right after posting it.
+      if (key.startsWith('project.')) this.failedSlots.add(key);
       this.reply({ type: 'rejected', id, key, channel: rejection.channel, detail: rejection.detail });
     };
     try {
@@ -299,10 +303,23 @@ export class StoreEngine {
       const checkpoint = this.queues.get(slot);
       if (checkpoint) { const own = previous; previous = Promise.all([own, checkpoint]).then(() => undefined); }
     }
+    const isSlot = key.startsWith('project.');
     const current = previous
-      .then(() => this.persist(key, operation))
-      .then(() => { if (operation.id) this.reply({ type: 'written', id: operation.id, key }); })
+      .then(async () => {
+        /* A journal is relative to the slot on disk. When the newest slot
+           write failed, the disk still holds the older slot, and its journal
+           is the only record of the edits since: deleting it, or replacing it
+           with entries meant for the slot that never landed, would lose them.
+           It stays as it is until a slot write succeeds (the window writes
+           the slot again at its next save, then the journal). */
+        if (slot && this.failedSlots.has(slot)) return false;
+        await this.persist(key, operation);
+        if (isSlot) this.failedSlots.delete(key);
+        return true;
+      })
+      .then(persisted => { if (persisted && operation.id) this.reply({ type: 'written', id: operation.id, key }); })
       .catch((error: unknown) => {
+        if (isSlot) this.failedSlots.add(key);
         this.emitError(key, errorText(error));
       });
     this.queues.set(key, current);
