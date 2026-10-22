@@ -208,6 +208,7 @@ impl LegacyVideoSink {
             .transpose()?;
         if let Some(mux) = mux.as_mut() {
             mux.set_reel(spec.timecode.as_ref().and_then(|tc| tc.reel.as_deref()));
+            mux.set_video(spec.frames, spec.rate);
         }
         let video = mux.as_ref().map_or(output.temp_path(), |m| m.video_path());
         let mut child = Command::new(bundled_ffmpeg()?)

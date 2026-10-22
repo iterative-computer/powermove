@@ -527,8 +527,9 @@ fn delivery_options_reach_the_file() {
         if codec == "lpcm" || codec == "in24" {
             assert_eq!((a.bits_per_channel, a.float), (bits, float), "{coding:?}");
         }
-        // round(30 × 1001/30000 × 48000) = 48048.
-        assert_eq!(a.samples, 48_048, "{coding:?}");
+        // Today's mix length: ceil(range × 48000) for the one-second range,
+        // though its 30 frames at 29.97 fps last 1.001 s.
+        assert_eq!(a.samples, 48_000, "{coding:?}");
         let tc = r.timecode.as_ref().unwrap();
         // 01:00:00;00 at 29.97 drop-frame is frame 107892.
         assert_eq!(

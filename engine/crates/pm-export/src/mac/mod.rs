@@ -60,6 +60,7 @@ impl VideoToolboxSink {
             .transpose()?;
         if let Some(mux) = legacy_audio.as_mut() {
             mux.set_reel(spec.timecode.as_ref().and_then(|tc| tc.reel.as_deref()));
+            mux.set_video(spec.frames, spec.rate);
         }
         let video_path = legacy_audio
             .as_ref()

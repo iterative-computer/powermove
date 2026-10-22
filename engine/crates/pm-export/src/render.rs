@@ -627,6 +627,19 @@ pub struct AudioPlan {
     pub graph: Arc<pm_audio::MixGraph>,
     pub cache: Arc<pm_audio::SourceCache>,
     pub sample_rate: u32,
+    /// The export's samples: today's `OfflineAudioContext` length
+    /// ([`legacy_audio_samples`]), not the frames' span.
+    pub samples: i64,
+}
+
+/// Today's export mix length (`audio.ts` `renderOffline`):
+/// `ceil((t1 − t0) × 48000)` with the range in seconds as JavaScript holds
+/// them. Range ends are ticks of seconds the sheet chose, so the division
+/// gives back the same double.
+pub fn legacy_audio_samples(start: Ticks, end: Ticks, sample_rate: u32) -> i64 {
+    let seconds = |t: Ticks| t.get() as f64 / TICKS_PER_SECOND as f64;
+    let span = (seconds(end) - seconds(start)).max(0.0);
+    (span * f64::from(sample_rate)).ceil() as i64
 }
 
 /// Source blocks kept decoded for one export's mix.
@@ -840,6 +853,7 @@ fn plan_export_checked(
                 // Today's export OfflineAudioContext is always stereo 48 kHz,
                 // independently of the project's playback device/rate.
                 sample_rate: 48_000,
+                samples: legacy_audio_samples(s.range.start, s.range.end, 48_000),
                 graph: Arc::new(graph),
                 cache,
             })
@@ -1042,6 +1056,7 @@ where
     let mut pipeline = Pipeline::new(spec, sink)?;
     pipeline.set_legacy_png(crate::png_compat::has_level1_content(&document));
     let mut mixer = audio.map(|a| {
+        let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
         (
             pm_audio::Mixer::new(
                 pm_audio::MixFormat::stereo(a.sample_rate),
@@ -1051,6 +1066,8 @@ where
                 a.cache,
             ),
             a.sample_rate,
+            // Today's mix ends here, before or after the last frame's end.
+            first + a.samples,
         )
     });
     let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
@@ -1089,8 +1106,14 @@ where
                     None
                 };
                 drop(rgba);
-                if let Some((mixer, rate)) = mixer.as_mut() {
+                if let Some((mixer, rate, last)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
+                    let first = first.min(*last);
+                    let end = if n + 1 == frames {
+                        *last
+                    } else {
+                        end.min(*last)
+                    };
                     let mut block = Vec::new();
                     let summary = pm_audio::offline::render(mixer, first, end, 8192, |_, inter| {
                         block.extend_from_slice(inter);

@@ -167,8 +167,11 @@ pub(super) struct LegacyMux {
     output: PathBuf,
     wav: Option<LegacyWav>,
     codec: AudioCodec,
+    spec_rate: u32,
     frames: u64,
     reel: Option<String>,
+    /// The video's frame count and rate, for `-shortest`.
+    track: Option<(u64, pm_time::Rate)>,
 }
 
 impl LegacyMux {
@@ -188,8 +191,10 @@ impl LegacyMux {
             output: output.to_path_buf(),
             wav: None,
             codec: spec.codec,
+            spec_rate: spec.sample_rate,
             frames: 0,
             reel: None,
+            track: None,
         };
         mux.wav = Some(LegacyWav::new(&mux.audio, spec)?);
         Ok(mux)
@@ -203,6 +208,27 @@ impl LegacyMux {
     /// muxer reads the source video stream's `reel_name` for the tmcd `name` box.
     pub fn set_reel(&mut self, reel: Option<&str>) {
         self.reel = reel.map(str::to_owned);
+    }
+
+    /// The video track the audio is muxed with (`frames` at `rate`).
+    pub fn set_video(&mut self, frames: u64, rate: pm_time::Rate) {
+        self.track = Some((frames, rate));
+    }
+
+    /// Today's mux passes `-shortest`, which ends the file with the shorter
+    /// track. When today's mix (`ceil(range × 48000)` samples) is shorter
+    /// than the frames (29.97 fps exports of whole seconds), that drops the
+    /// last frame: a missing frame in today's export (decision COMPCLOSE-1:
+    /// such bugs are fixed, not reproduced). Then the option is left out and
+    /// both tracks keep their length; otherwise it trims the audio as today.
+    fn shortest(&self) -> bool {
+        let Some((frames, rate)) = self.track else {
+            return true;
+        };
+        let sample_rate = i128::from(self.spec_rate);
+        // audio / sample_rate >= frames × den / num
+        i128::from(self.frames) * i128::from(rate.num())
+            >= i128::from(frames) * i128::from(rate.den()) * sample_rate
     }
 
     pub fn push(&mut self, interleaved: &[f32]) -> Result<(), Error> {
@@ -252,9 +278,12 @@ impl LegacyMux {
                 .arg("-metadata:s:v:0")
                 .arg(format!("reel_name={reel}"));
         }
+        if self.shortest() {
+            command.arg("-shortest");
+        }
         let mut child = ChildGuard(
             command
-                .args(["-shortest", "-y"])
+                .arg("-y")
                 .arg(&self.output)
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
@@ -505,6 +534,28 @@ mod tests {
             drop(mux);
             assert!(!video.exists() && !audio.exists());
         }
+    }
+
+    #[test]
+    fn shortest_trims_audio_but_never_drops_frames() {
+        let dir = TestDir::new();
+        let spec = AudioSpec {
+            sample_rate: 48_000,
+            channels: 2,
+            codec: AudioCodec::Pcm24,
+        };
+        let mut mux = LegacyMux::new(&dir.0.join("tc.mov"), spec).unwrap();
+        // Today's one-second mix under 30 frames at 29.97 fps (1.001 s):
+        // `-shortest` would end the file before the last frame.
+        mux.set_video(30, pm_time::Rate::FPS_29_97);
+        mux.frames = 48_000;
+        assert!(!mux.shortest());
+        mux.frames = 48_048;
+        assert!(mux.shortest(), "audio as long as the frames");
+        // 24 frames at 24 fps with a 1.01 s range: today trims the audio.
+        mux.set_video(24, pm_time::Rate::FPS_24);
+        mux.frames = 48_480;
+        assert!(mux.shortest());
     }
 
     #[test]
