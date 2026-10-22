@@ -239,16 +239,11 @@ pub(crate) fn wake_workers() {
     Executor::shared().unpark_all();
 }
 
-fn worker_count(available: usize, performance_cores: Option<usize>) -> usize {
-    let total_ceiling = available.saturating_sub(2).max(1);
-    performance_cores
-        .filter(|&cores| cores > 0 && cores <= available)
-        .map_or(total_ceiling, |cores| {
-            // Reserve two performance cores for the producer and device
-            // callback. Eight workers still prepare sixteen voices in two
-            // waves where the total-core cap permits.
-            cores.saturating_sub(2).max(8).min(total_ceiling)
-        })
+fn worker_count(available: usize) -> usize {
+    // Independent foreground voices can occupy the whole preparation pool.
+    // Leave two logical cores below the machine's available parallelism;
+    // Darwin's scheduler decides placement, including heterogeneous cores.
+    available.saturating_sub(2).max(1)
 }
 
 #[cfg(target_os = "macos")]
@@ -744,7 +739,7 @@ impl Executor {
             let performance = performance_cores();
             #[cfg(not(target_os = "macos"))]
             let performance = None;
-            let count = worker_count(available, performance);
+            let count = worker_count(available);
             if crate::profile::enabled() {
                 crate::profile::worker_event(format!(
                     "pm-audio-prepare-pool workers={count} available={available} performance_cores={performance:?}"
@@ -1890,15 +1885,13 @@ mod queue_tests {
     }
 
     #[test]
-    fn pool_count_keeps_two_total_cores_and_two_waves_when_possible() {
-        assert_eq!(worker_count(16, Some(12)), 10);
-        assert_eq!(worker_count(16, None), 14);
-        assert_eq!(worker_count(16, Some(24)), 14);
-        assert_eq!(worker_count(12, Some(8)), 8);
-        assert_eq!(worker_count(10, Some(8)), 8);
-        assert_eq!(worker_count(10, Some(6)), 8);
-        assert_eq!(worker_count(8, Some(4)), 6);
-        assert_eq!(worker_count(2, Some(1)), 1);
+    fn pool_count_leaves_two_available_cores() {
+        assert_eq!(worker_count(16), 14);
+        assert_eq!(worker_count(12), 10);
+        assert_eq!(worker_count(10), 8);
+        assert_eq!(worker_count(8), 6);
+        assert_eq!(worker_count(2), 1);
+        assert_eq!(worker_count(1), 1);
     }
 
     #[test]

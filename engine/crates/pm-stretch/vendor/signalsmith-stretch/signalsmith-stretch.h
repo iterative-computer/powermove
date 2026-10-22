@@ -3,6 +3,11 @@
 
 #include "signalsmith-linear/stft.h" // https://github.com/Signalsmith-Audio/linear
 
+#ifndef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
+#	define SIGNALSMITH_STRETCH_SETUP_CHECKPOINT() ((void)0)
+#	define SIGNALSMITH_STRETCH_LOCAL_SETUP_CHECKPOINT
+#endif
+
 #include <vector>
 #include <array>
 #include <algorithm>
@@ -68,29 +73,43 @@ struct SignalsmithStretch {
 	}
 
 	// Manual setup
-	void configure(int nChannels, int blockSamples, int intervalSamples, bool splitComputation=false) {
+	void configure(int nChannels, int blockSamples, int intervalSamples, bool splitComputation=false, bool deferInitialWindowSetup=false) {
 		_splitComputation = splitComputation;
 		channels = nChannels;
-		stft.configure(channels, channels, blockSamples, intervalSamples + 1);
+		stft.configure(channels, channels, blockSamples, intervalSamples + 1, 0, 0, 0, deferInitialWindowSetup);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		stft.setInterval(intervalSamples, stft.kaiser);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		stft.reset(Sample(0.1));
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		stashedInput = stft.input;
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		stashedOutput = stft.output;
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 
 		bands = int(stft.bands());
 		_channelBands.assign(bands*channels, Band());
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		
 		peaks.reserve(bands/2);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		energy.resize(bands);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		smoothedEnergy.resize(bands);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		outputMap.resize(bands);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		channelPredictions.resize(channels*bands);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 
 		blockProcess = {};
 		formantMetric.resize(bands + 2);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 
 		tmpProcessBuffer.resize(blockSamples + intervalSamples);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		tmpPreRollBuffer.resize(outputLatency()*channels);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 	}
 	// For querying the existing config
 	int blockSamples() const {
@@ -1057,4 +1076,8 @@ private:
 };
 
 }} // namespace
+#ifdef SIGNALSMITH_STRETCH_LOCAL_SETUP_CHECKPOINT
+#	undef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
+#	undef SIGNALSMITH_STRETCH_LOCAL_SETUP_CHECKPOINT
+#endif
 #endif // include guard

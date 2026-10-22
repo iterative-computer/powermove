@@ -82,8 +82,14 @@ extern "C" fn shuttle_checkpoint() {
 
 impl Shuttle {
     pub fn new(channels: usize, rate: u32) -> Result<Shuttle> {
+        let stretcher = if crate::realtime::has_active_guard() {
+            Stretcher::new_with_checkpoint(channels, rate, shuttle_checkpoint)
+        } else {
+            Stretcher::new(channels, rate)
+        }
+        .map_err(err)?;
         Ok(Shuttle {
-            stretcher: Stretcher::new(channels, rate).map_err(err)?,
+            stretcher,
             channels,
             epoch: None,
             started: false,
@@ -219,7 +225,13 @@ impl Shuttle {
             let n = self.take(need as usize);
             let views: Vec<&[f32]> = self.scratch.iter().map(|c| &c[..n]).collect();
             crate::realtime::checkpoint_phase_reserve("shuttle-reset", 1_000_000);
-            self.stretcher.reset().map_err(err)?;
+            if crate::realtime::has_active_guard() {
+                self.stretcher
+                    .reset_with_checkpoint(shuttle_checkpoint)
+                    .map_err(err)?;
+            } else {
+                self.stretcher.reset().map_err(err)?;
+            }
             crate::realtime::checkpoint_phase("shuttle-output-seek");
             if crate::realtime::has_active_guard() {
                 self.stretcher

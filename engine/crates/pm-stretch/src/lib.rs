@@ -21,6 +21,13 @@ use std::ptr::NonNull;
 
 unsafe extern "C" {
     fn pm_stretch_new(channels: c_int, block: c_int, interval: c_int, seed: c_long) -> *mut c_void;
+    fn pm_stretch_new_with_checkpoint(
+        channels: c_int,
+        block: c_int,
+        interval: c_int,
+        seed: c_long,
+        checkpoint: Option<extern "C" fn()>,
+    ) -> *mut c_void;
     fn pm_stretch_free(handle: *mut c_void);
     fn pm_stretch_input_latency(handle: *const c_void) -> c_int;
     fn pm_stretch_output_latency(handle: *const c_void) -> c_int;
@@ -29,6 +36,10 @@ unsafe extern "C" {
     fn pm_stretch_seek_length(handle: *const c_void) -> c_int;
     fn pm_stretch_output_seek_length(handle: *const c_void, rate: f32) -> c_int;
     fn pm_stretch_reset(handle: *mut c_void) -> c_int;
+    fn pm_stretch_reset_with_checkpoint(
+        handle: *mut c_void,
+        checkpoint: Option<extern "C" fn()>,
+    ) -> c_int;
     fn pm_stretch_set_transpose(handle: *mut c_void, factor: f32) -> c_int;
     fn pm_stretch_seek(
         handle: *mut c_void,
@@ -127,12 +138,34 @@ impl Stretcher {
         Stretcher::with_config(channels, block, interval, SEED)
     }
 
+    /// Default preset with cooperative checkpoints during native setup.
+    /// The callback must not unwind across the C boundary.
+    pub fn new_with_checkpoint(
+        channels: usize,
+        sample_rate: u32,
+        checkpoint: extern "C" fn(),
+    ) -> Result<Stretcher> {
+        let block = (sample_rate as f64 * DEFAULT_BLOCK_SECONDS) as usize;
+        let interval = (sample_rate as f64 * DEFAULT_INTERVAL_SECONDS) as usize;
+        Self::with_config_inner(channels, block, interval, SEED, Some(checkpoint))
+    }
+
     /// Analysis blocks of `block` samples every `interval` samples.
     pub fn with_config(
         channels: usize,
         block: usize,
         interval: usize,
         seed: i64,
+    ) -> Result<Stretcher> {
+        Self::with_config_inner(channels, block, interval, seed, None)
+    }
+
+    fn with_config_inner(
+        channels: usize,
+        block: usize,
+        interval: usize,
+        seed: i64,
+        checkpoint: Option<extern "C" fn()>,
     ) -> Result<Stretcher> {
         if !(1..=MAX_CHANNELS).contains(&channels) {
             return Err(StretchError::Shape(format!(
@@ -146,12 +179,21 @@ impl Stretcher {
         }
         // SAFETY: plain values; a null return is an allocation failure.
         let raw = unsafe {
-            pm_stretch_new(
-                channels as c_int,
-                block as c_int,
-                interval as c_int,
-                seed as c_long,
-            )
+            match checkpoint {
+                Some(callback) => pm_stretch_new_with_checkpoint(
+                    channels as c_int,
+                    block as c_int,
+                    interval as c_int,
+                    seed as c_long,
+                    Some(callback),
+                ),
+                None => pm_stretch_new(
+                    channels as c_int,
+                    block as c_int,
+                    interval as c_int,
+                    seed as c_long,
+                ),
+            }
         };
         let handle = NonNull::new(raw).ok_or(StretchError::Alloc)?;
         Ok(Stretcher {
@@ -205,6 +247,13 @@ impl Stretcher {
     pub fn reset(&mut self) -> Result<()> {
         // SAFETY: a live handle.
         status(unsafe { pm_stretch_reset(self.handle.as_ptr()) })
+    }
+
+    /// Resets the seeded state with cooperative native setup checkpoints.
+    /// A failed reset leaves the previous native state intact.
+    pub fn reset_with_checkpoint(&mut self, checkpoint: extern "C" fn()) -> Result<()> {
+        // SAFETY: a live handle; the callback must not unwind across FFI.
+        status(unsafe { pm_stretch_reset_with_checkpoint(self.handle.as_ptr(), Some(checkpoint)) })
     }
 
     /// Shifts every frequency by `factor` (1: none).

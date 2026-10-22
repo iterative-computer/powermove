@@ -161,6 +161,8 @@ pub struct StretchRun {
     pub evaluated: u64,
     /// Fresh starts (diagnostics).
     pub fresh_starts: u64,
+    #[cfg(test)]
+    native_calls: u64,
 }
 
 /// Evaluates the map at a control index.
@@ -198,7 +200,14 @@ impl StretchRun {
             scratch_out: vec![Vec::new(); channels],
             evaluated: 0,
             fresh_starts: 0,
+            #[cfg(test)]
+            native_calls: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn native_calls(&self) -> u64 {
+        self.native_calls
     }
 
     pub fn key(&self) -> u64 {
@@ -245,7 +254,15 @@ impl StretchRun {
     ) -> Result<PrepareOutcome> {
         if self.pos < start + crate::ring::CHUNK as i64 {
             match self.render_budgeted(start, crate::ring::CHUNK, map, read, out, should_yield)? {
-                PrepareOutcome::Complete => {}
+                PrepareOutcome::Complete => {
+                    // This completed render's last produce was not offered
+                    // to `should_yield` because it finalized its output.
+                    // Charge it before the join renders a second range, so
+                    // one worker slice cannot hide a third native call.
+                    if at > start && should_yield() {
+                        return Ok(PrepareOutcome::Yielded);
+                    }
+                }
                 other => return Ok(other),
             }
         }
@@ -521,10 +538,22 @@ impl StretchRun {
             let _scope = crate::profile::timer(crate::profile::Kind::DspInit);
             match self.spare.take() {
                 Some(mut st) => {
-                    st.reset().map_err(stretch_error)?;
+                    if crate::realtime::has_active_guard() {
+                        st.reset_with_checkpoint(stretch_checkpoint)
+                            .map_err(stretch_error)?;
+                    } else {
+                        st.reset().map_err(stretch_error)?;
+                    }
                     st
                 }
-                None => Stretcher::new(self.channels, self.rate).map_err(stretch_error)?,
+                None => {
+                    if crate::realtime::has_active_guard() {
+                        Stretcher::new_with_checkpoint(self.channels, self.rate, stretch_checkpoint)
+                            .map_err(stretch_error)?
+                    } else {
+                        Stretcher::new(self.channels, self.rate).map_err(stretch_error)?
+                    }
+                }
             }
         };
         crate::realtime::checkpoint_phase("stretch-map");
@@ -539,6 +568,10 @@ impl StretchRun {
             crate::realtime::checkpoint_phase("stretch-output-seek");
             let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
             let _scope = crate::profile::timer(crate::profile::Kind::DspSeek);
+            #[cfg(test)]
+            {
+                self.native_calls += 1;
+            }
             if crate::realtime::has_active_guard() {
                 stretcher
                     .output_seek_with_checkpoint(&views, stretch_checkpoint)
@@ -672,6 +705,10 @@ impl StretchRun {
             crate::realtime::checkpoint_phase("stretch-process");
             let _timing = crate::profile::timer(crate::profile::Kind::Dsp);
             let _scope = crate::profile::timer(crate::profile::Kind::DspProcess);
+            #[cfg(test)]
+            {
+                self.native_calls += 1;
+            }
             let input: &[&[f32]] = if len == 0 { &[] } else { &input };
             if crate::realtime::has_active_guard() {
                 live.stretcher
@@ -811,6 +848,7 @@ mod tests {
                 .unwrap()
         );
         let mut yields = 0;
+        let mut yielded_between_join_ranges = false;
         loop {
             match sliced
                 .prepare_join_budgeted(
@@ -826,12 +864,18 @@ mod tests {
                 PrepareOutcome::Complete => break,
                 PrepareOutcome::Yielded => {
                     yields += 1;
+                    yielded_between_join_ranges |=
+                        sliced.pos >= start + crate::ring::CHUNK as i64 && sliced.pending.is_none();
                     assert!(yields < 32, "join did not progress");
                 }
                 PrepareOutcome::MissingInput => panic!("decoded join input reported missing"),
             }
         }
         assert!(yields > 0);
+        assert!(
+            yielded_between_join_ranges,
+            "completed first range offered a fair boundary"
+        );
         assert_eq!(actual, expected);
         assert_eq!(sliced.fresh_starts, reference.fresh_starts);
 

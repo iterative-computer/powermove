@@ -5,6 +5,18 @@
 use pm_stretch::Stretcher;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+thread_local! {
+    static SETUP_CHECKPOINTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+extern "C" fn setup_checkpoint() {
+    SETUP_CHECKPOINTS.with(|count| count.set(count.get() + 1));
+}
+
+fn setup_checkpoints() -> usize {
+    SETUP_CHECKPOINTS.with(std::cell::Cell::get)
+}
+
 const SR: u32 = 48_000;
 
 fn sine(freq: f64, len: usize, amp: f64) -> Vec<f32> {
@@ -148,6 +160,112 @@ fn cooperative_checkpoints_keep_interval_calls_bit_exact() {
                 actual.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
                 "rate {rate}, plain zero call {call}"
             );
+        }
+    }
+}
+
+#[test]
+fn checkpointed_setup_and_reset_match_plain_seeded_pcm() {
+    for sample_rate in [44_100, 48_000] {
+        // A reversed source exercises the same call sequence as reverse
+        // playback, and 0.35x exercises the seeded random-phase path.
+        let mut reverse = sine(731.0, sample_rate as usize * 3, 0.4);
+        reverse.reverse();
+        for (rate, input) in [(0.35, reverse.as_slice()), (1.5, reverse.as_slice())] {
+            let before = setup_checkpoints();
+            let mut ordinary = Stretcher::new(1, sample_rate).unwrap();
+            assert_eq!(
+                setup_checkpoints(),
+                before,
+                "plain constructor leaked callback"
+            );
+            let mut checked =
+                Stretcher::new_with_checkpoint(1, sample_rate, setup_checkpoint).unwrap();
+            assert!(setup_checkpoints() > before, "setup did not checkpoint");
+
+            for epoch in 0..3 {
+                let before = setup_checkpoints();
+                let expected = stretch(&mut ordinary, input, rate, 4096);
+                let actual = stretch(&mut checked, input, rate, 4096);
+                assert_eq!(
+                    setup_checkpoints(),
+                    before,
+                    "plain PCM calls invoked setup callback"
+                );
+                assert_eq!(
+                    expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "rate {rate}, sample rate {sample_rate}, epoch {epoch}"
+                );
+                let before = setup_checkpoints();
+                ordinary.reset().unwrap();
+                assert_eq!(setup_checkpoints(), before, "plain reset leaked callback");
+                checked.reset_with_checkpoint(setup_checkpoint).unwrap();
+                assert!(setup_checkpoints() > before, "reset did not checkpoint");
+            }
+        }
+    }
+}
+
+#[test]
+fn checkpointed_stereo_setup_matches_plain_seeded_pcm() {
+    let sample_rate = 44_100;
+    let mut left = sine(311.0, sample_rate as usize * 3, 0.3);
+    let mut right = sine(907.0, sample_rate as usize * 3, 0.2);
+    left.reverse();
+    right.reverse();
+
+    for rate in [0.35, 1.5] {
+        let mut plain = Stretcher::new(2, sample_rate).unwrap();
+        let before_new = setup_checkpoints();
+        let mut checked = Stretcher::new_with_checkpoint(2, sample_rate, setup_checkpoint).unwrap();
+        assert!(setup_checkpoints() > before_new);
+
+        for epoch in 0..2 {
+            let lead = plain.output_seek_length(rate);
+            let before_pcm = setup_checkpoints();
+            plain.output_seek(&[&left[..lead], &right[..lead]]).unwrap();
+            checked
+                .output_seek(&[&left[..lead], &right[..lead]])
+                .unwrap();
+            let mut fed = lead;
+            let interval = plain.interval_samples();
+            for call in 1..=4 {
+                let want = (lead as f64 + (call * interval) as f64 * rate).round() as usize;
+                let mut expected_l = vec![0.0; interval];
+                let mut expected_r = vec![0.0; interval];
+                let mut actual_l = vec![0.0; interval];
+                let mut actual_r = vec![0.0; interval];
+                plain
+                    .process(
+                        &[&left[fed..want], &right[fed..want]],
+                        &mut [&mut expected_l, &mut expected_r],
+                    )
+                    .unwrap();
+                checked
+                    .process(
+                        &[&left[fed..want], &right[fed..want]],
+                        &mut [&mut actual_l, &mut actual_r],
+                    )
+                    .unwrap();
+                for (expected, actual) in [(expected_l, actual_l), (expected_r, actual_r)] {
+                    assert_eq!(
+                        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "stereo rate {rate}, epoch {epoch}, call {call}"
+                    );
+                }
+                fed = want;
+            }
+            assert_eq!(
+                setup_checkpoints(),
+                before_pcm,
+                "plain PCM calls invoked setup callback"
+            );
+            plain.reset().unwrap();
+            let before_reset = setup_checkpoints();
+            checked.reset_with_checkpoint(setup_checkpoint).unwrap();
+            assert!(setup_checkpoints() > before_reset);
         }
     }
 }

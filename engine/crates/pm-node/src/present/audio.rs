@@ -24,7 +24,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,26 @@ pub const WARM_IDLE: Duration = Duration::from_millis(100);
 /// Decoded audio kept per viewer.
 const SOURCE_BUDGET: usize = 256 * 1024 * 1024;
 const DECODE_WORKERS: usize = 2;
+
+// The audio control thread is ordinary-priority. Keep these clock reads and
+// the diagnostic write out of pm-audio's real-time producer and callback.
+fn control_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PM_AUDIO_PROFILE").is_some())
+}
+
+fn play_receive_stamp(ctl: &AudioCtl) -> Option<u64> {
+    (control_profile_enabled() && matches!(ctl, AudioCtl::Play { .. }))
+        .then(pm_audio::clock::host_now_us)
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProjectTiming {
+    start_us: u64,
+    clone_done_us: u64,
+    build_send_done_us: u64,
+    status_done_us: u64,
+}
 
 pub enum AudioCtl {
     Document(DocumentUpdate),
@@ -261,17 +281,24 @@ impl Control {
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break,
             };
-            let mut controls: Vec<AudioCtl> = first.into_iter().collect();
+            let mut controls: Vec<(AudioCtl, Option<u64>)> = first
+                .into_iter()
+                .map(|ctl| {
+                    let received_us = play_receive_stamp(&ctl);
+                    (ctl, received_us)
+                })
+                .collect();
             while let Ok(ctl) = self.rx.try_recv() {
-                controls.push(ctl);
+                let received_us = play_receive_stamp(&ctl);
+                controls.push((ctl, received_us));
             }
             let rested = controls.is_empty();
             let starting = controls
                 .iter()
-                .any(|c| matches!(c, AudioCtl::Play { .. } | AudioCtl::PlayAround { .. }));
+                .any(|(c, _)| matches!(c, AudioCtl::Play { .. } | AudioCtl::PlayAround { .. }));
             let _priority = starting.then(pm_audio::playback::StartPriority::new);
-            for ctl in controls {
-                if !self.apply(ctl) {
+            for (ctl, received_us) in controls {
+                if !self.apply(ctl, received_us) {
                     self.shutdown();
                     return;
                 }
@@ -289,7 +316,7 @@ impl Control {
                 .last_project
                 .is_none_or(|last| last.elapsed() >= PROJECT_INTERVAL);
             if self.playback.is_some() && self.dirty && due {
-                self.set_project();
+                let _ = self.set_project();
             }
             self.send_levels();
             self.report();
@@ -338,7 +365,7 @@ impl Control {
     }
 
     /// Returns false on shutdown.
-    fn apply(&mut self, ctl: AudioCtl) -> bool {
+    fn apply(&mut self, ctl: AudioCtl, received_us: Option<u64>) -> bool {
         match ctl {
             AudioCtl::Shutdown => return false,
             AudioCtl::Document(update) => {
@@ -386,7 +413,7 @@ impl Control {
                     return true;
                 }
                 if self.dirty {
-                    self.set_project();
+                    let _ = self.set_project();
                 }
                 self.command(TransportCommand::Seek {
                     time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
@@ -398,7 +425,7 @@ impl Control {
                     return true;
                 }
                 if self.dirty {
-                    self.set_project();
+                    let _ = self.set_project();
                 }
                 self.command(TransportCommand::Seek {
                     time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
@@ -420,13 +447,17 @@ impl Control {
                 }
             }
             AudioCtl::Play { from, rate } => {
+                let profiled = received_us.is_some();
+                let begin_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
+                let opening = self.playback.is_none();
                 if self.playback.is_none() && !self.open() {
                     return true;
                 }
+                let open_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
                 self.paused_at = from.max(0);
-                if self.dirty {
-                    self.set_project();
-                }
+                let dirty = self.dirty;
+                let project = dirty.then(|| self.set_project()).flatten();
+                let dispatch_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
                 self.commands(&[
                     TransportCommand::SetLoop {
                         range: self.loop_range,
@@ -437,6 +468,17 @@ impl Control {
                     },
                     TransportCommand::Play { rate },
                 ]);
+                if let Some(received_us) = received_us {
+                    let ack_us = pm_audio::clock::host_now_us();
+                    let project = project.unwrap_or_default();
+                    eprintln!(
+                        "pm-audio-node-play received_us={received_us} begin_us={begin_us} open_done_us={open_done_us} project_start_us={} clone_done_us={} build_send_done_us={} status_done_us={} dispatch_us={dispatch_us} ack_us={ack_us} dirty={dirty} opened={opening}",
+                        project.start_us,
+                        project.clone_done_us,
+                        project.build_send_done_us,
+                        project.status_done_us,
+                    );
+                }
             }
         }
         true
@@ -453,7 +495,7 @@ impl Control {
         if pm_audio::graph::audible(&self.doc, &self.composition, &mut ev).unwrap_or(false)
             && self.open()
         {
-            self.set_project();
+            let _ = self.set_project();
             self.command(TransportCommand::SetLoop {
                 range: self.loop_range,
             });
@@ -528,17 +570,25 @@ impl Control {
         }
     }
 
-    fn set_project(&mut self) {
+    fn set_project(&mut self) -> Option<ProjectTiming> {
         let Some(playback) = &self.playback else {
-            return;
+            return None;
+        };
+        let profiled = control_profile_enabled();
+        let mut timing = ProjectTiming {
+            start_us: profiled.then(pm_audio::clock::host_now_us).unwrap_or(0),
+            ..ProjectTiming::default()
         };
         self.last_project = Some(Instant::now());
         if self.broken || self.doc.root().is_none() {
-            return;
+            return profiled.then_some(timing);
         }
         self.dirty = false;
         let doc = Arc::new(self.doc.clone());
-        match playback.set_project(doc, &self.composition, &self.media) {
+        timing.clone_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
+        let result = playback.set_project(doc, &self.composition, &self.media);
+        timing.build_send_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
+        match result {
             Ok(problems) => {
                 let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
                 status.projects += 1;
@@ -558,6 +608,8 @@ impl Control {
                 status.problems.drain(..excess);
             }
         }
+        timing.status_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
+        profiled.then_some(timing)
     }
 
     fn report(&self) {

@@ -50,6 +50,15 @@ const idlePoolFailed = (timing: any) => !timing?.idleStartupArm?.startsWith('Arm
   || timing?.idlePoolSincePlay?.conflicts !== 0
   || ['armFailures', 'armTimeouts', 'computationOverruns', 'constraintOverruns', 'restoreFailures', 'hintFailures', 'constraintReadbackFailures']
     .some(key => timing?.idlePool?.[key] !== 0);
+function activeAudio(report: any, sessionId: number) {
+  if (!Number.isSafeInteger(sessionId) || sessionId <= 0) throw new Error(`invalid active native session ID: ${sessionId}`);
+  const matches = Object.entries(report.presenter.audio as Record<string, any>)
+    .filter(([key]) => key.endsWith(`:${sessionId}`));
+  if (matches.length !== 1) throw new Error(`expected exactly one active audio entry for session ${sessionId}; found ${matches.length}`);
+  const [key, audio] = matches[0];
+  if (report.presenter.routes[key] !== 'engine') throw new Error(`active audio route ${key} is ${report.presenter.routes[key] ?? 'missing'}, expected engine`);
+  return { key, audio, sessionId, hostClockRuns: report.presenter.hostClockRuns, silentRuns: report.presenter.silentRuns };
+}
 for (const native of modes) {
   process.env.POWERMOVE_NEW_ENGINE = native ? '1' : '0';
   const session = await launchLegacyApp();
@@ -60,6 +69,10 @@ for (const native of modes) {
       waitForFunction: session.waitFor,
       waitForTimeout: (ms: number) => Bun.sleep(ms),
     };
+    await page.waitForFunction(() => {
+      const doc = (window as any).PM?.EngineDoc;
+      return Boolean(doc && (!doc.enabled || doc.ready));
+    });
     await page.evaluate(() => {
       const PM = (window as any).PM;
       PM.replaceProject(PM.mkProject({ name: 'A7-A8 measurement', w: 160, h: 90, fps: 30, dur: 10 }));
@@ -81,7 +94,7 @@ for (const native of modes) {
       document.body.appendChild(input);
     });
     await session.setInputFiles('#a6-media', [file]);
-    await page.evaluate(async ({ voices, trimStep }) => {
+    const installed = await page.evaluate(async ({ voices, trimStep }) => {
       const PM = (window as any).PM;
       const input = document.getElementById('a6-media') as HTMLInputElement;
       const asset = await PM.assets.add(input.files![0], { newAsset: true, silent: true });
@@ -93,25 +106,84 @@ for (const native of modes) {
       PM.touch();
       PM.bus.emit('layers'); PM.bus.emit('project');
       PM.invalidate();
+      return { projectId: PM.proj.id, layerCount: PM.proj.layers.length };
     }, { voices, trimStep });
     if (native) {
+      await page.waitForFunction(() => {
+        const PM = (window as any).PM;
+        const active = PM.EngineConnection?.session();
+        const snapshot = PM.EngineDoc?.snapshot();
+        return Number.isSafeInteger(active?.id) && active.id > 0
+          && snapshot && Number.isSafeInteger(snapshot.revision)
+          && active.applied >= snapshot.revision;
+      });
       await page.waitForFunction(() => (window as any).PM.EngineConnection.status().driving);
       await page.waitForFunction(() => Boolean((window as any).PM.EngineConnection.status().hostOffsetUs));
     } else {
       await page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((a: any) => a.audioBuffer));
     }
+    const fixture = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      return { projectId: PM.proj?.id, layerCount: PM.proj?.layers?.length,
+        sessionId: PM.EngineConnection?.session()?.id ?? null,
+        revision: PM.EngineDoc?.snapshot()?.revision ?? null };
+    });
+    if (typeof installed.projectId !== 'string' || !installed.projectId || installed.layerCount !== voices
+      || fixture.projectId !== installed.projectId || fixture.layerCount !== installed.layerCount
+      || (native && (!Number.isSafeInteger(fixture.sessionId) || fixture.sessionId <= 0
+        || !Number.isSafeInteger(fixture.revision)))) {
+      throw new Error(`fixture was not installed on the active document: ${JSON.stringify(fixture)}`);
+    }
+    const activeNativeSessionId: number | null = native ? fixture.sessionId : null;
+    const assertFixture = async () => {
+      const actual = await page.evaluate(() => {
+        const PM = (window as any).PM;
+        return { projectId: PM.proj?.id, layerCount: PM.proj?.layers?.length,
+          sessionId: PM.EngineConnection?.session()?.id ?? null };
+      });
+      if (actual.projectId !== fixture.projectId || actual.layerCount !== voices
+        || (native && actual.sessionId !== activeNativeSessionId)) {
+        throw new Error(`measurement fixture changed: ${JSON.stringify({ expected: fixture, actual })}`);
+      }
+    };
+    result[native ? 'nativeFixture' : 'todayFixture'] = fixture;
+    // Keep unrelated renderer/GPU telemetry out of the per-start IPC path.
+    // The final validation still checks every reported audio entry.
+    const nativeReport = async (allAudio = false) => session.evaluateMain(async (_electron, { sessionId, allAudio }) => {
+      const { presenter } = await (globalThis as any).__powermoveNativeEngine.engine.report('interactive');
+      const audio = allAudio ? presenter.audio : Object.fromEntries(
+        Object.entries(presenter.audio).filter(([key]) => key.endsWith(`:${sessionId}`)));
+      return { presenter: { audio, routes: presenter.routes, hostClockRuns: presenter.hostClockRuns, silentRuns: presenter.silentRuns } };
+    }, { sessionId: activeNativeSessionId, allAudio });
     // First play opens/resumes the device; subsequent measured runs are warm.
     await page.evaluate(() => (window as any).PM.play());
     await page.waitForTimeout(300);
+    if (native) {
+      const warmDeadline = performance.now() + 60_000;
+      for (;;) {
+        const report = await nativeReport();
+        const matches = Object.keys(report.presenter.audio).filter(key => key.endsWith(`:${activeNativeSessionId}`));
+        if (matches.length) {
+          const bound = activeAudio(report, activeNativeSessionId!);
+          if (typeof bound.audio.device === 'string' && bound.audio.device.length > 0 && bound.audio.deviceRate > 0
+            && bound.audio.projects > 0 && bound.audio.deviceCallbacks > 0 && bound.audio.startTiming != null) {
+            result.nativeBinding = { sessionId: bound.sessionId, audioKey: bound.key,
+              hostClockRuns: bound.hostClockRuns, silentRuns: bound.silentRuns,
+              projectId: fixture.projectId, layerCount: fixture.layerCount };
+            break;
+          }
+        }
+        if (performance.now() >= warmDeadline) throw new Error(`active native audio was not ready after warm Play: ${JSON.stringify({ fixture, matches })}`);
+        await Bun.sleep(25);
+      }
+    }
+    await assertFixture();
     await page.evaluate(() => (window as any).PM.pause());
     const stress: Bun.Subprocess[] = [];
     let loop: any;
     try {
       for (let i = 0; i < stressThreads; i++) stress.push(Bun.spawn(['/bin/sh', '-c', 'while :; do :; done']));
-      const status = async () => native ? await session.evaluateMain(async () => {
-        const r = await (globalThis as any).__powermoveNativeEngine.engine.report('interactive');
-        return Object.values(r.presenter.audio)[0];
-      }) : await page.evaluate(() => {
+      const status = async () => native ? activeAudio(await nativeReport(), activeNativeSessionId!).audio : await page.evaluate(() => {
         const starts = (window as any).__a6starts;
         const ctx = starts.at(-1)?.ctx;
         return ctx ? { baseLatency: ctx.baseLatency, stats: JSON.parse(JSON.stringify(ctx.playbackStats)) } : null;
@@ -141,17 +213,19 @@ for (const native of modes) {
       // Keep completed and failing raw starts in the catch report too.
       result[native ? 'native' : 'today'] = { samples, n: 0, partial: true };
       for (let run = 0; run < Number(count); run++) {
+        await assertFixture();
         const target = waitMs === 0 ? (run % 2 === 0 ? 2 : 3) : 4;
         if (waitMs > 0) {
           await page.evaluate(t => { const PM = (window as any).PM; PM.pause(); PM.setTime(t); }, target);
           await page.waitForTimeout(waitMs);
         }
-        const preEditAudio: any = native ? await session.evaluateMain(async () => {
-          const r = await (globalThis as any).__powermoveNativeEngine.engine.report('interactive');
-          return Object.values(r.presenter.audio)[0];
-        }) : null;
-        const sample = await page.evaluate(async ({ native, target, inline, edit, run, readyWaitMs }) => {
+        const preEditAudio: any = native ? activeAudio(await nativeReport(), activeNativeSessionId!).audio : null;
+        const sample = await page.evaluate(async ({ native, target, inline, edit, run, readyWaitMs, projectId, voices, sessionId }) => {
           const PM = (window as any).PM;
+          if (PM.proj?.id !== projectId || PM.proj?.layers?.length !== voices
+            || (native && PM.EngineConnection?.session()?.id !== sessionId)) {
+            throw new Error('measurement fixture or active native session changed before timed Play');
+          }
           const starts = (window as any).__a6starts as any[];
           starts.length = 0;
           const oldEpoch = PM.EngineConnection?.status().clock?.epoch;
@@ -188,7 +262,8 @@ for (const native of modes) {
             }
             await new Promise(r => setTimeout(r, 1));
           }
-        }, { native, target, inline: waitMs === 0, edit, run, readyWaitMs });
+        }, { native, target, inline: waitMs === 0, edit, run, readyWaitMs,
+          projectId: fixture.projectId, voices, sessionId: activeNativeSessionId });
         const captured: any = { ...sample, preEditAudio };
         samples.push(captured);
         result[native ? 'native' : 'today'].n = samples.length;
@@ -229,10 +304,14 @@ for (const native of modes) {
           }
         }
       }
-      const audio = native ? await session.evaluateMain(async () => {
-        const report = await (globalThis as any).__powermoveNativeEngine.engine.report('interactive');
-        return { hostClockRuns: report.presenter.hostClockRuns, audio: Object.values(report.presenter.audio) };
-      }) : null;
+      const audio = native ? await (async () => {
+        const report = await nativeReport(true);
+        const bound = activeAudio(report, activeNativeSessionId!);
+        if (bound.key !== (result.nativeBinding as any).audioKey) throw new Error(`active audio key changed: ${bound.key}`);
+        return { hostClockRuns: report.presenter.hostClockRuns, silentRuns: report.presenter.silentRuns,
+          activeAudioKey: bound.key, activeSessionId: bound.sessionId,
+          audio: Object.values(report.presenter.audio) };
+      })() : null;
       if (audio && (audio.hostClockRuns !== 0 || !audio.audio.length || audio.audio.some((a: any) => a.error || a.problems.length))) {
         throw new Error(`native device-clock validation failed: ${JSON.stringify(audio)}`);
       }

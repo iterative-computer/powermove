@@ -25,6 +25,7 @@
 //! rendering starts. Clips that follow speed, and constant rates within
 //! [`crate::stretch::unity_band`] of 1, resample (pitch follows the speed).
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -342,6 +343,8 @@ impl PrepareVoice {
             out: Vec::new(),
             terminal: false,
             #[cfg(test)]
+            last_slice_boundaries: 0,
+            #[cfg(test)]
             before_history_lock: None,
         }
     }
@@ -357,7 +360,7 @@ impl PrepareVoice {
         // yields; preserve their evaluator and all evaluation memoization.
         let owned = std::mem::replace(ev, Evaluator::new());
         let mut task = self.into_task(owned, static_content);
-        let result = match task.step_with(&cancelled, &mut || false) {
+        let result = match task.step_with(&cancelled, &mut || false, None) {
             Ok(PrepareStep::Yielded) => unreachable!("unsliced task cannot yield"),
             Ok(PrepareStep::Complete(ready)) => Ok(ready),
             Ok(PrepareStep::Retired) => Ok(true),
@@ -385,6 +388,8 @@ pub(crate) struct PrepareTask {
     out: Vec<Vec<f32>>,
     terminal: bool,
     #[cfg(test)]
+    last_slice_boundaries: u8,
+    #[cfg(test)]
     before_history_lock: Option<Box<dyn FnOnce() + Send>>,
 }
 #[derive(Clone, Copy)]
@@ -402,7 +407,21 @@ pub(crate) enum PrepareStep {
 }
 impl PrepareTask {
     pub(crate) fn step(&mut self, cancelled: impl Fn() -> bool) -> Result<PrepareStep> {
-        self.step_with(&cancelled, &mut || true)
+        let boundaries = Cell::new(0u8);
+        let result = self.step_with(
+            &cancelled,
+            &mut || {
+                let n = boundaries.get().saturating_add(1);
+                boundaries.set(n);
+                n >= 2
+            },
+            Some(&boundaries),
+        );
+        #[cfg(test)]
+        {
+            self.last_slice_boundaries = boundaries.get();
+        }
+        result
     }
 
     fn finish(&mut self, ready: bool) {
@@ -424,9 +443,10 @@ impl PrepareTask {
         &mut self,
         cancelled: &dyn Fn() -> bool,
         should_yield: &mut dyn FnMut() -> bool,
+        boundaries: Option<&Cell<u8>>,
     ) -> Result<PrepareStep> {
         debug_assert!(!self.terminal, "terminal preparation was rescheduled");
-        let result = self.step_inner(cancelled, should_yield);
+        let result = self.step_inner(cancelled, should_yield, boundaries);
         match &result {
             Ok(PrepareStep::Yielded) => {}
             Ok(PrepareStep::Complete(ready)) => self.finish(*ready),
@@ -540,6 +560,7 @@ impl PrepareTask {
         &mut self,
         cancelled: &dyn Fn() -> bool,
         should_yield: &mut dyn FnMut() -> bool,
+        boundaries: Option<&Cell<u8>>,
     ) -> Result<PrepareStep> {
         if cancelled() {
             return Err(crate::error::AudioError::Device(
@@ -666,6 +687,17 @@ impl PrepareTask {
                 }
                 stretch::PrepareOutcome::Complete => {}
             }
+            // `render_budgeted` calls the predicate after every nonterminal
+            // fresh/produce boundary. Its final native call completes the
+            // render before it can yield, so charge that boundary here. The
+            // quota spans Join → Lead/Head instead of granting a hidden new
+            // two-boundary allowance at each stage. A class-changing
+            // boundary can contain more than one native FFI call.
+            let quota_exhausted = boundaries.is_some_and(|count| {
+                let n = count.get().saturating_add(1);
+                count.set(n);
+                n >= 2
+            });
             match self.stage {
                 PrepareStage::Join if work.target != work.start => {
                     return Ok(PrepareStep::Complete(true));
@@ -686,6 +718,12 @@ impl PrepareTask {
                     }
                     return Ok(PrepareStep::Complete(true));
                 }
+            }
+            if quota_exhausted {
+                // The completed stage is finalized but neither Done nor a
+                // partial head is visible. The same task resumes at its new
+                // stage after a fair FIFO turn.
+                return Ok(PrepareStep::Yielded);
             }
         }
     }
@@ -3573,11 +3611,21 @@ mod prepared_tests {
             let mut sliced = make();
             for job in sliced.preparation_work(start, start) {
                 let vi = job.vi;
+                let history = job.history();
                 assert!(job.claim());
                 let mut task = job.into_task(Evaluator::new(), false);
                 let mut yields = 0;
                 loop {
-                    match task.step(|| false).unwrap() {
+                    let calls_before = history.lock().unwrap().native_calls();
+                    let outcome = task.step(|| false).unwrap();
+                    let calls_after = history.lock().unwrap().native_calls();
+                    // A class-changing produce may process the outgoing
+                    // run and output-seek the next one before its boundary.
+                    assert!(
+                        calls_after - calls_before <= 4,
+                        "dynamic v{vi} made too many native calls in one slice"
+                    );
+                    match outcome {
                         PrepareStep::Yielded => yields += 1,
                         PrepareStep::Complete(ready) => {
                             assert!(ready);
@@ -3631,6 +3679,7 @@ mod prepared_tests {
         let unsliced_jobs = unsliced.preparation_work(start, start);
         assert_eq!(sliced_jobs.len(), 4);
         assert_eq!(unsliced_jobs.len(), 4);
+        let mut saw_two_boundary_slice = false;
 
         for (job, whole) in sliced_jobs.into_iter().zip(unsliced_jobs) {
             assert_eq!(job.vi, whole.vi);
@@ -3643,7 +3692,19 @@ mod prepared_tests {
             let mut task = job.into_task(Evaluator::new(), true);
             let mut yields = 0;
             loop {
-                match task.step(|| false).unwrap() {
+                let calls_before = history.lock().unwrap().native_calls();
+                let outcome = task.step(|| false).unwrap();
+                let calls_after = history.lock().unwrap().native_calls();
+                assert!(
+                    calls_after - calls_before <= 2,
+                    "constant-map v{vi} made more than two native calls in one slice"
+                );
+                assert!(
+                    task.last_slice_boundaries <= 2,
+                    "v{vi} exceeded the two-boundary slice across a stage transition"
+                );
+                saw_two_boundary_slice |= task.last_slice_boundaries == 2;
+                match outcome {
                     PrepareStep::Yielded => {
                         yields += 1;
                         assert!(!finished.load(Ordering::Acquire));
@@ -3667,6 +3728,10 @@ mod prepared_tests {
             sliced.prepared_voice(start, vi, true);
             unsliced.prepared_voice(start, vi, true);
         }
+        assert!(
+            saw_two_boundary_slice,
+            "the production two-boundary quota ran"
+        );
 
         let head = sliced.prepared[&start].heads[0].as_ref().unwrap();
         let head_guard = head.lock().unwrap();
