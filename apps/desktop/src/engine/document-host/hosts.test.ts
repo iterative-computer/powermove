@@ -120,7 +120,8 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('a document host worke
       { type: 'set_property', target: 'Lnull', path: 'position.x', value: 480, time: 2, ease: 'easeInOut' },
       { type: 'set_property', target: 'Lsolid', path: 'rotation', value: 30, time: 1 },
       { type: 'set_expression', target: 'Lsolid', path: 'opacity', expression: '50 + Math.sin(time) * 50' },
-      { type: 'offset_property', target: 'Lsolid', path: 'position.y', delta: 40 },
+      // main removed offset_property (2b1fa379a); the same write as a set.
+      { type: 'set_property', target: 'Lsolid', path: 'position.y', value: 40 },
       { type: 'set_layer', target: 'Lshape', patch: { from: 1, duration: 3 } },
       { type: 'reorder_layer', target: 'Lshape', index: 0 },
     ]);
