@@ -249,8 +249,20 @@ fn corpus_render_parity() {
             }
             let rgba = renderer.read_rgba(&frame).unwrap();
             let ours = opaque8(&rgba);
-            let (w, h, reference) = read_png(&s.png);
+            let (w, h, reference) =
+                support::reference_substitutions::opaque_reference(&capture, &p.name, s)
+                    .unwrap_or_else(|error| panic!("{} t={}: {error}", p.name, s.time));
             assert_eq!((w, h), (s.width, s.height));
+            // Keep reviewable native/reference evidence even when an explicit
+            // owner-approved substitution passes its ordinary comparison.
+            if s.reference_substitution.is_some()
+                && let Some(dir) = &diffs
+            {
+                std::fs::create_dir_all(dir).unwrap();
+                let stem = format!("{}-{}-COMPCLOSE-1", p.name.replace('/', "_"), s.time);
+                write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
+                write_png(&dir.join(format!("{stem}-reference.png")), w, h, &reference);
+            }
             if video {
                 let mask = interior(&reference, w, h);
                 let (max, n) = masked_max(&ours, &reference, &mask);

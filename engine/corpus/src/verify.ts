@@ -11,6 +11,7 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { readFloat, sha256, type FileRecord } from './output';
 import { decodePng } from './png';
 
@@ -55,13 +56,38 @@ export function verifyCapture(dir: string): VerifyResult {
     check(project.document, `${where} document`);
     check(project.loaded, `${where} loaded`);
     listed.add(`${project.dir}/project.json`);
-    if (!existsSync(path.join(dir, project.dir, 'project.json'))) problems.push(`${where}: ${project.dir}/project.json is missing`);
+    const projectPath = path.join(dir, project.dir, 'project.json');
+    if (!existsSync(projectPath)) problems.push(`${where}: ${project.dir}/project.json is missing`);
+    const localSamples = existsSync(projectPath) ? JSON.parse(readFileSync(projectPath, 'utf8')).samples ?? [] : [];
     for (const asset of project.blender?.assets ?? []) { bytes += asset.bytes; check(asset, `${where} Blender asset`); }
     for (const sample of project.samples ?? []) {
       const at = `${where} @ ${sample.time}`;
       if (sample.error) failedSamples++;
       if (sample.png) { frames++; bytes += sample.png.bytes; }
       checkPng(sample.png, `${at} png`, sample.width, sample.height);
+      // Owner annotations add references alongside the immutable original
+      // outputs; they do not rewrite the original capture's byte totals.
+      const substitution = sample.referenceSubstitution;
+      if (!isDeepStrictEqual(substitution, localSamples.find((s: any) => s.time === sample.time)?.referenceSubstitution)) problems.push(`${at}: reference substitution metadata differs between project and manifest`);
+      if (substitution !== undefined) {
+        if (substitution?.id !== 'COMPCLOSE-1' || substitution.ownerDecision !== '2026-10-19'
+            || project.id !== 'motion/blur-video' || ![.5, 1.2].includes(sample.time)
+            || sample.width !== 480 || sample.height !== 270 || typeof substitution.reason !== 'string' || !substitution.reason.trim()
+            || !Array.isArray(substitution.evidence) || !substitution.evidence.length) {
+          problems.push(`${at}: invalid COMPCLOSE-1 reference substitution scope`);
+        } else {
+          if (['file', 'bytes', 'sha256'].some(key => substitution.original?.[key] !== sample.png?.[key])) problems.push(`${at}: substitution original differs from original PNG record`);
+          if (!substitution.corrected) problems.push(`${at}: corrected PNG is missing`);
+          else checkPng(substitution.corrected, `${at} COMPCLOSE-1 corrected png`, sample.width, sample.height);
+          for (const evidence of substitution.evidence) {
+            if (typeof evidence !== 'string' || !path.isAbsolute(evidence) || !existsSync(evidence) || !statSync(evidence).isFile()) problems.push(`${at}: missing absolute COMPCLOSE-1 evidence file`);
+            else {
+              const relative = path.relative(dir, evidence);
+              if (!relative.startsWith('..') && !path.isAbsolute(relative)) listed.add(relative);
+            }
+          }
+        }
+      }
       if (sample.alphaPng) bytes += sample.alphaPng.bytes;
       checkPng(sample.alphaPng, `${at} alpha png`, sample.width, sample.height);
       const floats = [

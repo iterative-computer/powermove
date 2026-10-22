@@ -117,15 +117,26 @@ through VideoToolbox; MP4 export with motion blur on; 2026-10-18 for all three):
 - the paused viewer shows the right frame with blur on (frames 3, 8, 15: levels
   50, 100, 170, the same as without blur).
 
-Today's preview and export disagree, and the engine currently follows the
-preview. Under owner amendment 22, the export difference remains a blocker
-for existing projects; the earlier appendix A exemption does not apply.
-Matching it requires the legacy upload history, not a fixed choice of frame 0:
-outside this capture the shared element can hold another previously uploaded
-frame. The side-by-sides of the corpus capture against the engine and the
-export levels stay outside the repository. The general corpus checks in
-`tests/corpus.rs` keep failing on both samples; neither stored reference was
-replaced with native output.
+**COMPCLOSE-1, owner decision 2026-10-19:** this stale upload is a legacy bug;
+the engine keeps drawing the correct center frame. The original captures
+remain unchanged as evidence of the bug, including the frame-0 timecodes and
+the 255-CV difference from the center frame. Outside the isolated capture the
+stale upload can depend on history; the engine does not emulate that history.
+
+For only `motion/blur-video` at t=0.5 and t=1.2, the general corpus accepts an
+explicit `referenceSubstitution` annotation naming COMPCLOSE-1. Its corrected
+reference comes from today's legacy compositor after `prepareFrame(t)`,
+`GL.dropTextures()`, and a sharp center-time priming pass through its own
+`texFor` upload path. Invalidation alone can leave an empty source while the
+first shutter-sample seek is pending. The subsequent blur reads the primed
+center-time video pixels. The project, transform sampling, shutter, shaders,
+and 16-sample blur stay unchanged. The capture records the actual video-frame
+timestamps at each upload and requires a second identical capture. Both the
+original and corrected PNGs, hashes, reason, owner decision, and evidence paths
+remain in the corpus metadata outside Git. No native pixels enter the recorder.
+Every substitution is logged, and any other project, time, or decision fails.
+The normal video bound remains 2 CV on patch interiors. The motion lane's
+historical stale-frame diagnostic continues reading the original PNG.
 
 ## 2.5D
 
@@ -420,11 +431,21 @@ padding. The harness now explicitly requests `VideoEnd::Final`; production
 viewer and final-output policies are unchanged. See `pm-render.md` for the
 source conversion and regression coverage.
 
-The corrected normal thin-LTO release run compares the same 354 frames:
+Before the COMPCLOSE-1 reference correction, the normal thin-LTO release run
+compared the same 354 frames:
 352 meet their existing class, with only the two blurred-video samples still
 at 255 CV. All eight retiming/precomp samples have zero interior difference.
 The four source-storage GPU regressions and seven color tests pass. No
 reference, bound, or project selection was changed.
+
+With the two explicit COMPCLOSE-1 annotations, the normal thin-LTO release
+corpus passes all 354 frames. Corrected legacy blur versus native rendering
+has zero interior difference over 107,904 pixels at t=0.5 and 107,858 at t=1.2;
+the full-frame maxima are 1 CV and 0 CV respectively. Both corrected app
+captures repeat exactly and their source uploads have the expected center
+timestamps (500000/500000 µs and 1200000/1166667 µs). The other 352 references
+and every comparison bound stay unchanged. The original stale PNGs still
+verify against their original hashes.
 
 ## Gaps
 
@@ -446,4 +467,3 @@ reference, bound, or project selection was changed.
   for the color lane (the corpus videos are untagged).
 - WebM exports have no `MotionBlurKind`; the export lane passes `AlphaExport` (20)
   for them.
-- Blurred video: existing-project compatibility blocker (above).
