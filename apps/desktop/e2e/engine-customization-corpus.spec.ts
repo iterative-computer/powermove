@@ -411,7 +411,7 @@ test.describe('Use New Engine: the customization corpus', () => {
   test('bisect the historical viewer boundary on today’s app', async ({ session }) => {
     test.setTimeout(540_000);
     await session.close();
-    const commits = ['155481d0', ...execFileSync('git', ['-C', REPO, 'log', '--first-parent', '--reverse', '--format=%h', '155481d0..470eeaf3', '--', 'apps/desktop/src/extensions/viewer']).toString().trim().split('\n')];
+    const commits = ['155481d0', ...execFileSync('git', ['-C', REPO, 'log', '--first-parent', '--reverse', '--format=%H', '155481d0..470eeaf3', '--', 'apps/desktop/src/extensions/viewer']).toString().trim().split('\n')];
     const observed = new Map<number, boolean>();
     const probe = async (index: number) => {
       if (observed.has(index)) return observed.get(index)!;
@@ -438,7 +438,8 @@ test.describe('Use New Engine: the customization corpus', () => {
     }
     // Certify earlier trees too rather than assuming monotonic behavior.
     for (let i = 0; i < high; i++) expect(await probe(i), `earlier viewer ${commits[i]}`).toBe(false);
-    expect(commits[high]).toBe(OLDEST_FORK_COMMIT);
+    // Full hashes: an abbreviated one grows with the repository's object count.
+    expect(commits[high]!.startsWith(OLDEST_FORK_COMMIT), `oldest working viewer ${commits[high]}`).toBe(true);
   });
 
   test('the oldest working viewer fork and replaces-only shape render unchanged on the engine', async ({ session }) => {
