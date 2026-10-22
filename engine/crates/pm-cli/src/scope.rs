@@ -500,6 +500,8 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
             ),
         };
         let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+        // Never write into the desktop's probe namespace (crate::angle).
+        renderer.read_only_shader_reference();
         crate::fonts::install(
             &mut renderer,
             options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),

@@ -87,18 +87,40 @@ fn cli(args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
-// This positive override gate uses the production Node/Chromium helper. Set
+// These gates use the production Node/Chromium helper. Set
 // POWERMOVE_ANGLE_HELPER to a prebuilt CLI dist/native-angle-child.cjs; run
 // this integration binary under pm-electron-lock, never build under the lock.
-fn cli_with_angle(args: &[&str]) -> std::process::Output {
-    let helper = std::env::var("POWERMOVE_ANGLE_HELPER")
-        .expect("build the CLI host and set POWERMOVE_ANGLE_HELPER for the override pixel gate");
-    Command::new(env!("CARGO_BIN_EXE_pm-cli"))
+// Without the helper a default workspace run skips them with a printed
+// reason; POWERMOVE_REQUIRE_ANGLE_HELPER=1 (the gate runs) makes that a failure.
+fn angle_helper() -> Option<String> {
+    match std::env::var("POWERMOVE_ANGLE_HELPER") {
+        Ok(helper) if !helper.is_empty() => Some(helper),
+        _ if std::env::var_os("POWERMOVE_REQUIRE_ANGLE_HELPER").is_some() => panic!(
+            "POWERMOVE_REQUIRE_ANGLE_HELPER is set: build the CLI host and set POWERMOVE_ANGLE_HELPER"
+        ),
+        _ => {
+            eprintln!(
+                "skipped: this gate needs the production ANGLE helper (set POWERMOVE_ANGLE_HELPER to a built CLI dist/native-angle-child.cjs)"
+            );
+            None
+        }
+    }
+}
+
+fn cli_with_angle(args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Option<std::process::Output> {
+    let helper = angle_helper()?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pm-cli"));
+    command
         .arg("render")
         .args(args)
         .env("POWERMOVE_ANGLE_HELPER", helper)
-        .output()
-        .unwrap()
+        .env_remove("POWERMOVE_ENGINE_PARITY_ENV")
+        .env_remove("POWERMOVE_ENGINE_PARITY_STORE")
+        .env_remove("POWERMOVE_ENGINE_SHADER_CACHE");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    Some(command.output().unwrap())
 }
 
 fn ok(out: &std::process::Output) -> Value {
@@ -235,15 +257,21 @@ fn a_definitions_snapshot_overrides_built_ins_by_id() {
         )
     });
     let out = dir.join("still.png");
-    let s = ok(&cli_with_angle(&[
-        file.to_str().unwrap(),
-        "-o",
-        out.to_str().unwrap(),
-        "--format",
-        "still",
-        "--definitions",
-        defs.to_str().unwrap(),
-    ]));
+    let Some(run) = cli_with_angle(
+        &[
+            file.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+            "--format",
+            "still",
+            "--definitions",
+            defs.to_str().unwrap(),
+        ],
+        &[],
+    ) else {
+        return;
+    };
+    let s = ok(&run);
     assert_eq!(s["definitions"], json!(defs.to_str().unwrap()));
     assert!(
         near(corner(&out), [0, 0, 255]),
@@ -389,5 +417,95 @@ fn an_unverified_shader_layer_is_not_delivered_without_its_browser_reference() {
     );
     assert!(String::from_utf8_lossy(&result.stderr).contains("fallback runner"));
     assert!(!out.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The desktop's probe namespace compares native output with Electron's
+/// WebGL runner. A CLI first probe (Playwright's Chromium) honours it but must
+/// never leave a `.native` (or `.runner`) marker the desktop would trust, on
+/// both entry points: direct pm-cli reading the profile's descriptor, and
+/// `powermove render`, which passes the descriptor in the environment.
+#[test]
+fn a_cli_first_probe_leaves_no_decision_in_the_desktop_namespace() {
+    let dir = scratch("first-probe");
+    let file = dir.join("p.json");
+    std::fs::write(&file, project(invert()).to_string()).unwrap();
+    // An exactly representable fork: native and ANGLE agree, so a writable
+    // namespace would record a native verification.
+    let defs = definitions_file(&dir, |set| {
+        rewrite_body(
+            set,
+            "invert",
+            "fork",
+            "\n      vec4 c = texture(u_tex, v_st); o = vec4(0.0, 0.0, c.a, c.a);",
+        )
+    });
+    let cache = dir.join("Shader Cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(
+        cache.join("desktop-environment.json"),
+        json!({ "v": 1, "environment": "{\"electron\":\"desktop\",\"chrome\":\"electron chromium\"}" }).to_string(),
+    )
+    .unwrap();
+    let markers = || -> Vec<String> {
+        std::fs::read_dir(cache.join("angle-parity"))
+            .map(|d| {
+                d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let descriptor = std::fs::read_to_string(cache.join("desktop-environment.json")).unwrap();
+    let descriptor: Value = serde_json::from_str(&descriptor).unwrap();
+    let descriptor = descriptor["environment"].as_str().unwrap().to_owned();
+    for (entry, env) in [
+        (
+            "direct",
+            vec![("POWERMOVE_ENGINE_SHADER_CACHE", cache.as_os_str())],
+        ),
+        (
+            "powermove render",
+            vec![
+                ("POWERMOVE_ENGINE_SHADER_CACHE", cache.as_os_str()),
+                (
+                    "POWERMOVE_ENGINE_PARITY_ENV",
+                    std::ffi::OsStr::new(&descriptor),
+                ),
+                (
+                    "POWERMOVE_ENGINE_PARITY_STORE",
+                    std::ffi::OsStr::new("read-only"),
+                ),
+            ],
+        ),
+    ] {
+        let out = dir.join(format!("{}.png", entry.replace(' ', "-")));
+        let Some(run) = cli_with_angle(
+            &[
+                file.to_str().unwrap(),
+                "-o",
+                out.to_str().unwrap(),
+                "--format",
+                "still",
+                "--definitions",
+                defs.to_str().unwrap(),
+            ],
+            &env,
+        ) else {
+            return;
+        };
+        ok(&run);
+        assert!(
+            near(corner(&out), [0, 0, 255]),
+            "{entry}: {:?}",
+            corner(&out)
+        );
+        assert_eq!(
+            markers(),
+            Vec::<String>::new(),
+            "{entry} wrote a probe decision"
+        );
+    }
+    // The desktop's own verification is still honoured: a native marker for
+    // this exact program would be read (the pin-store harness checks pixels).
     std::fs::remove_dir_all(dir).unwrap();
 }

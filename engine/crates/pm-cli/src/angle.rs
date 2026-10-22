@@ -287,7 +287,14 @@ mod tests {
 }
 
 /// Read the same profile descriptor even when pm-cli is invoked directly.
+///
+/// The desktop's namespace is honoured read only. Its decisions compare
+/// native output with Electron's WebGL runner; this CLI's runner is
+/// Playwright's Chromium (possibly SwiftShader over ssh or launchd), so a
+/// first probe here is decided in memory and never leaves a `.native` or
+/// `.runner` marker the desktop would trust (amendment 22).
 pub fn configure_probes(renderer: &mut pm_render::Renderer) -> Result<(), String> {
+    renderer.read_only_shader_reference();
     if std::env::var_os("POWERMOVE_ENGINE_PARITY_ENV").is_some() {
         return Ok(());
     }
