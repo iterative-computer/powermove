@@ -1519,13 +1519,14 @@ fn run_job(
             .root()
             .map(pm_render::js::layer_id)
             .unwrap_or_default();
-        Arc::new(compat::JobCompat::new(
+        compat::JobCompat::new(
             shared.clone() as Arc<dyn compat::CompatHost>,
             document.session,
             id,
             document.revision,
             settings.delivery.compat.clone(),
-        ))
+        )
+        .pipelined()
     });
     renderer.set_compat_rasters(
         job_compat

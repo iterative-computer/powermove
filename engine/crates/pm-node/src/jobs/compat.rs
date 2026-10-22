@@ -42,10 +42,30 @@ const MAX_BATCH: usize = 512;
 /// window's compatibility frames at a time (`compat-frames.ts` `MAX_ASKS`)
 /// and refuses more; a batch goes in turns of this many.
 const HOST_ASKS: usize = 24;
+/// Most requests the background fetch has at the host at once: with a
+/// frame's own turn ([`HOST_ASKS`]) never above main's bound of 32.
+const AHEAD_ASKS: usize = 8;
+/// Frames past the one drawn whose answers a pipelined export keeps asked
+/// for, and how close the drawn frame may come to the last one asked for
+/// before more are asked.
+const AHEAD_FRAMES: i64 = 12;
+const AHEAD_LOW: i64 = 6;
+/// Most bytes of answers fetched ahead and kept: past it the background
+/// fetch waits for the export to use them.
+const AHEAD_BYTES: usize = 384 << 20;
 
 type AnswerKey = (String, String, i64, CompatSource, u64);
 
 /// One export job's producers and the answers it got.
+///
+/// A pipelined job ([`JobCompat::pipelined`]) keeps the next frames'
+/// answers asked for in the background: a helper thread asks the host for
+/// the layers of the last frame that lacked answers at the next
+/// [`AHEAD_FRAMES`] frames, in turns of [`AHEAD_ASKS`], while the export
+/// renders. A frame then finds its answers (the window drew them while the
+/// engine drew the frames before), or waits only for those still on their
+/// way; what was never asked (a layer that just appeared) is asked for in
+/// the frame, as before.
 pub(crate) struct JobCompat {
     host: Arc<dyn CompatHost>,
     session: SessionId,
@@ -58,6 +78,36 @@ pub(crate) struct JobCompat {
     /// The earliest time of the last batch (ticks): the frame step is the
     /// distance to the next one.
     last_batch: Mutex<Option<i64>>,
+    /// The job itself, for the background fetch (unset: no pipelining).
+    me: std::sync::Weak<JobCompat>,
+    ahead: Mutex<Ahead>,
+    /// Answers being fetched, and a signal when some arrive.
+    inflight: Mutex<std::collections::HashSet<AnswerKey>>,
+    arrived: std::sync::Condvar,
+    /// Bytes of raster answers held.
+    bytes: std::sync::atomic::AtomicUsize,
+}
+
+/// What the background fetch asks for next.
+#[derive(Default)]
+struct Ahead {
+    /// The layers of the last frame that lacked answers (composition,
+    /// layer, source, scale bits).
+    layers: Vec<(String, String, CompatSource, u64)>,
+    /// The frame step (ticks) and the last frame time asked for.
+    step: i64,
+    scheduled: i64,
+    /// Answers before each composition's floor are done (an export moves
+    /// forward).
+    floors: HashMap<String, i64>,
+    worker: Option<std::sync::mpsc::Sender<Vec<AnswerKey>>>,
+}
+
+fn raster_bytes(answer: &CompatAnswer) -> usize {
+    match answer {
+        CompatAnswer::Raster(r) => r.data.len(),
+        _ => 0,
+    }
 }
 
 impl JobCompat {
@@ -77,9 +127,203 @@ impl JobCompat {
             answers: Mutex::new(HashMap::new()),
             failure: Mutex::new(None),
             last_batch: Mutex::new(None),
+            me: std::sync::Weak::new(),
+            ahead: Mutex::new(Ahead::default()),
+            inflight: Mutex::new(std::collections::HashSet::new()),
+            arrived: std::sync::Condvar::new(),
+            bytes: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
+    /// The job shared, with its answers fetched ahead in the background.
+    pub(crate) fn pipelined(self) -> Arc<JobCompat> {
+        Arc::new_cyclic(|me| JobCompat {
+            me: me.clone(),
+            ..self
+        })
+    }
+
+    fn insert_answer(&self, answers: &mut HashMap<AnswerKey, CompatAnswer>, key: AnswerKey, answer: CompatAnswer) {
+        let added = raster_bytes(&answer);
+        if let Some(old) = answers.insert(key, answer) {
+            self.bytes
+                .fetch_sub(raster_bytes(&old), std::sync::atomic::Ordering::Relaxed);
+        }
+        self.bytes
+            .fetch_add(added, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Drops answers of composition `comp` before `floor` (ticks).
+    fn prune(&self, comp: &str, floor: i64) {
+        let mut answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut freed = 0;
+        answers.retain(|k, v| {
+            let keep = k.0 != comp || k.2 >= floor;
+            if !keep {
+                freed += raster_bytes(v);
+            }
+            keep
+        });
+        self.bytes
+            .fetch_sub(freed, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Frame `time` (ticks) of `comp` is being drawn: older answers of the
+    /// composition go, and the next frames are asked for when the
+    /// background fetch is close to running out.
+    fn advance(&self, comp: &str, time: i64) {
+        let Some(me) = self.me.upgrade() else {
+            return;
+        };
+        let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
+        let step = ahead.step;
+        if step <= 0 || ahead.layers.is_empty() {
+            return;
+        }
+        let floor = time - step;
+        let prune = ahead.floors.get(comp).is_none_or(|f| floor > *f);
+        if prune {
+            ahead.floors.insert(comp.to_owned(), floor);
+        }
+        let schedule = ahead.scheduled < time + AHEAD_LOW * step;
+        let mut keys = Vec::new();
+        if schedule {
+            let from = (ahead.scheduled + step).max(time + step);
+            let to = time + AHEAD_FRAMES * step;
+            let mut t = from;
+            while t <= to {
+                for (c, l, source, scale) in &ahead.layers {
+                    keys.push((c.clone(), l.clone(), t, *source, *scale));
+                }
+                t += step;
+            }
+            ahead.scheduled = to;
+        }
+        if !keys.is_empty() {
+            if ahead.worker.is_none() {
+                ahead.worker = spawn_ahead(&me);
+            }
+            if let Some(worker) = &ahead.worker
+                && worker.send(keys).is_err()
+            {
+                ahead.worker = None;
+            }
+        }
+        drop(ahead);
+        if prune {
+            self.prune(comp, floor);
+        }
+    }
+
+    /// Asks the host for `keys` in turns of `turn`, marking them in flight
+    /// (keys answered or in flight already are skipped); `needed` keys
+    /// that cannot be had fail the export. False when one failed.
+    fn ask(&self, keys: Vec<(AnswerKey, bool)>, turn: usize) -> bool {
+        let keys: Vec<(AnswerKey, bool)> = {
+            let answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
+            let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+            keys.into_iter()
+                .filter(|(k, _)| !answers.contains_key(k) && inflight.insert(k.clone()))
+                .collect()
+        };
+        let mut ok = true;
+        for chunk in keys.chunks(turn) {
+            let requests: Vec<Request> = chunk
+                .iter()
+                .map(|((composition, layer, time, source, scale), _)| {
+                    Request::CompatFrame(CompatFrameRequest {
+                        document: self.document.as_str().into(),
+                        composition: composition.as_str().into(),
+                        layer: layer.as_str().into(),
+                        time: pm_protocol::common::Ticks::new(*time)
+                            .unwrap_or(pm_protocol::common::Ticks::ZERO),
+                        source: *source,
+                        scale: f64::from_bits(*scale),
+                        revision: self.revision,
+                        // Layer producers only: SVG rasters have their own
+                        // source (`pm_render::vector::svg_rasters`).
+                        svg: None,
+                        frame: None,
+                    })
+                })
+                .collect();
+            let results = if ok && self.failure().is_none() {
+                self.host.call_many(requests, self.session)
+            } else {
+                Vec::new()
+            };
+            {
+                let mut answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
+                for ((key, needed), result) in chunk.iter().zip(results) {
+                    match answer_of(result) {
+                        Ok(answer) => self.insert_answer(&mut answers, key.clone(), answer),
+                        // A frame ahead that cannot be had is asked for
+                        // again when its frame comes (and fails then, with
+                        // its own reason).
+                        Err(message) if *needed => {
+                            self.fail_message(message);
+                            ok = false;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+            for (key, _) in chunk {
+                inflight.remove(key);
+            }
+            drop(inflight);
+            self.arrived.notify_all();
+        }
+        ok
+    }
+
+    /// Waits until none of `keys` is being fetched.
+    fn wait_for(&self, keys: &[AnswerKey]) {
+        let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        while keys.iter().any(|k| inflight.contains(k)) && self.failure().is_none() {
+            inflight = self
+                .arrived
+                .wait_timeout(inflight, std::time::Duration::from_millis(50))
+                .map(|(g, _)| g)
+                .unwrap_or_else(|e| e.into_inner().0);
+        }
+    }
+}
+
+/// The background fetch of a pipelined job: asks for what it is sent,
+/// within [`AHEAD_BYTES`], until the job is gone.
+fn spawn_ahead(job: &Arc<JobCompat>) -> Option<std::sync::mpsc::Sender<Vec<AnswerKey>>> {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<AnswerKey>>();
+    let weak = Arc::downgrade(job);
+    std::thread::Builder::new()
+        .name("pm-export-compat-ahead".into())
+        .spawn(move || {
+            while let Ok(keys) = rx.recv() {
+                for chunk in keys.chunks(AHEAD_ASKS) {
+                    // Within the byte bound: the export uses (and drops)
+                    // answers as it moves on.
+                    loop {
+                        let Some(job) = weak.upgrade() else { return };
+                        if job.failure().is_some() {
+                            return;
+                        }
+                        if job.bytes.load(std::sync::atomic::Ordering::Relaxed) < AHEAD_BYTES {
+                            break;
+                        }
+                        drop(job);
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    let Some(job) = weak.upgrade() else { return };
+                    job.ask(chunk.iter().map(|k| (k.clone(), false)).collect(), AHEAD_ASKS);
+                }
+            }
+        })
+        .ok()?;
+    Some(tx)
+}
+
+impl JobCompat {
     /// The first reason an answer could not be had.
     pub(crate) fn failure(&self) -> Option<String> {
         self.failure
@@ -280,6 +524,7 @@ impl CompatRasters for JobCompat {
             source,
             scale.to_bits(),
         );
+        self.advance(composition, ticks.get());
         if let Some(answer) = self
             .answers
             .lock()
@@ -314,17 +559,34 @@ impl CompatRasters for JobCompat {
             *last = Some(earliest);
             step
         };
-        // The frame's needs first, then the same layers at the next frames,
-        // in time order (the order today's export ran the chain in).
+        let stepped = step > 0 && step <= pm_protocol::common::TICKS_PER_SECOND;
+        let pipelined = self.me.upgrade().is_some();
+        if pipelined && stepped {
+            // The background fetch asks for these layers at the next frames.
+            let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
+            ahead.step = step;
+            for n in needs {
+                let layer = (
+                    n.composition.as_str().to_owned(),
+                    n.layer.as_str().to_owned(),
+                    n.source,
+                    n.scale.to_bits(),
+                );
+                if !ahead.layers.contains(&layer) {
+                    ahead.layers.push(layer);
+                }
+            }
+            // A layer that appeared starts its frames ahead from here.
+            ahead.scheduled = ahead.scheduled.min(earliest);
+        }
+        // The frame's needs first, then (unpipelined) the same layers at
+        // the next frames, in time order (the order today's export ran the
+        // chain in).
         let mut asks: Vec<(AnswerKey, bool)> = Vec::new();
         {
             let answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
             let mut seen = std::collections::HashSet::new();
-            let ahead = if step > 0 && step <= pm_protocol::common::TICKS_PER_SECOND {
-                FETCH_AHEAD
-            } else {
-                0
-            };
+            let ahead = if stepped && !pipelined { FETCH_AHEAD } else { 0 };
             for k in 0..=ahead {
                 for n in needs {
                     let key = key_of(n, n.time.get() + k * step);
@@ -337,55 +599,49 @@ impl CompatRasters for JobCompat {
                     asks.push((key, k == 0));
                 }
             }
+        }
+        if !pipelined {
             // An export moves forward: answers before this frame are done.
-            drop(answers);
             let floor = earliest - step.max(0);
-            self.answers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .retain(|k, _| k.2 >= floor);
-        }
-        let requests: Vec<Request> = asks
-            .iter()
-            .map(|((composition, layer, time, source, scale), _)| {
-                Request::CompatFrame(CompatFrameRequest {
-                    document: self.document.as_str().into(),
-                    composition: composition.as_str().into(),
-                    layer: layer.as_str().into(),
-                    time: pm_protocol::common::Ticks::new(*time).unwrap_or(pm_protocol::common::Ticks::ZERO),
-                    source: *source,
-                    scale: f64::from_bits(*scale),
-                    revision: self.revision,
-                    // Layer producers only: SVG rasters have their own source
-                    // (`pm_render::vector::svg_rasters::SvgRasterSource`).
-                    svg: None,
-                    frame: None,
-                })
-            })
-            .collect();
-        let mut results = Vec::with_capacity(asks.len());
-        let mut requests = requests.into_iter().peekable();
-        while requests.peek().is_some() {
-            let turn: Vec<Request> = requests.by_ref().take(HOST_ASKS).collect();
-            results.extend(self.host.call_many(turn, self.session));
-        }
-        let mut answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
-        for ((key, needed), result) in asks.into_iter().zip(results) {
-            match answer_of(result) {
-                Ok(answer) => {
-                    answers.insert(key, answer);
-                }
-                // A frame ahead that cannot be had is asked for again when
-                // its frame comes (and fails then, with its own reason).
-                Err(message) if needed => {
-                    drop(answers);
-                    self.fail_message(message);
-                    return false;
-                }
-                Err(_) => {}
+            let comps: std::collections::BTreeSet<String> =
+                needs.iter().map(|n| n.composition.as_str().to_owned()).collect();
+            for comp in comps {
+                self.prune(&comp, floor);
             }
         }
-        true
+        // Those the background fetch is asking for: waited for, then asked
+        // here if it could not get them.
+        let needed: Vec<AnswerKey> = asks.iter().filter(|a| a.1).map(|a| a.0.clone()).collect();
+        if !self.ask(asks, HOST_ASKS) {
+            return false;
+        }
+        // Those the background fetch was asking for are waited for; any it
+        // could not get are asked for here (and fail the export if the
+        // host cannot answer them).
+        loop {
+            self.wait_for(&needed);
+            if self.failure().is_some() {
+                return false;
+            }
+            let missing: Vec<(AnswerKey, bool)> = {
+                let answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
+                needed
+                    .iter()
+                    .filter(|k| !answers.contains_key(*k))
+                    .map(|k| (k.clone(), true))
+                    .collect()
+            };
+            if missing.is_empty() {
+                break;
+            }
+            if !self.ask(missing, HOST_ASKS) {
+                return false;
+            }
+        }
+        for n in needs {
+            self.advance(n.composition.as_str(), n.time.get());
+        }
+        self.failure().is_none()
     }
 }
 
@@ -624,6 +880,69 @@ mod tests {
         assert!(compat.fetch(&needs));
         assert_eq!(host.sizes.lock().unwrap().iter().sum::<usize>(), 60);
         assert!(needs.iter().all(|n| !matches!(compat.answer("root", n.layer.as_str(), 0.0, 1.0, CompatSource::RasterOverride, None), CompatAnswer::Missing)));
+    }
+
+    #[test]
+    fn a_pipelined_export_finds_its_next_frames_answered_in_the_background() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Slow {
+            asked: Mutex<Vec<i64>>,
+            outstanding: AtomicUsize,
+            most: AtomicUsize,
+        }
+        impl CompatHost for Slow {
+            fn call(&self, _request: Request, _session: SessionId) -> Result<Response, String> {
+                unreachable!("batched")
+            }
+            fn call_many(&self, requests: Vec<Request>, _session: SessionId) -> Vec<Result<Response, String>> {
+                let now = self.outstanding.fetch_add(requests.len(), Ordering::SeqCst) + requests.len();
+                self.most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                for r in &requests {
+                    let Request::CompatFrame(r) = r else { panic!() };
+                    self.asked.lock().unwrap().push(r.time.get());
+                }
+                self.outstanding.fetch_sub(requests.len(), Ordering::SeqCst);
+                requests.iter().map(|_| Ok(frame(false))).collect()
+            }
+        }
+        let host = Arc::new(Slow { asked: Mutex::new(Vec::new()), outstanding: AtomicUsize::new(0), most: AtomicUsize::new(0) });
+        let compat = JobCompat::new(host.clone(), SessionId::new(4).unwrap(), "P".into(), Revision::new(9).unwrap(), vec![CompatSource::RasterOverride]).pipelined();
+        let step = 1.0 / 30.0;
+        let layers: Vec<String> = (0..20).map(|i| format!("L{i}")).collect();
+        let needs = |t: f64| layers.iter().map(|l| need(l, t, 1.0)).collect::<Vec<_>>();
+        // The first two frames give the layers and the step.
+        assert!(compat.fetch(&needs(0.0)));
+        assert!(compat.fetch(&needs(step)));
+        let mut fetched = 0;
+        for k in 2..60 {
+            let t = step * k as f64;
+            // A frame asks only for what is not answered (or on its way).
+            let missing: Vec<_> = layers
+                .iter()
+                .filter(|l| matches!(compat.answer("root", l, t, 1.0, CompatSource::RasterOverride, None), CompatAnswer::Missing))
+                .map(|l| need(l, t, 1.0))
+                .collect();
+            if !missing.is_empty() {
+                fetched += 1;
+                assert!(compat.fetch(&missing));
+            }
+            for l in &layers {
+                assert!(matches!(compat.answer("root", l, t, 1.0, CompatSource::RasterOverride, None), CompatAnswer::Raster(_)), "frame {k}");
+            }
+            // The engine draws the frame meanwhile (longer than the host
+            // takes for a frame's answers, as in an export).
+            std::thread::sleep(std::time::Duration::from_millis(12));
+        }
+        // Most frames found their answers fetched ahead.
+        assert!(fetched < 20, "{fetched} frames waited for a fetch of their own");
+        // Never more at the host than main accepts, and never asked far ahead.
+        assert!(host.most.load(Ordering::SeqCst) <= 32);
+        let newest = ticks_of(step * 59.0).get();
+        let furthest = *host.asked.lock().unwrap().iter().max().unwrap();
+        assert!(furthest <= newest + (AHEAD_FRAMES + 1) * ticks_of(step).get());
+        // Answers of frames already drawn are dropped.
+        assert!(matches!(compat.answer("root", "L0", 0.0, 1.0, CompatSource::RasterOverride, None), CompatAnswer::Missing));
     }
 
     #[test]
