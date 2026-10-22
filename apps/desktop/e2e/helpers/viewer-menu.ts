@@ -11,4 +11,8 @@ export async function choosePreviewResolution(page: Page, value: string): Promis
   await page.getByRole('button', { name: 'Preview quality', exact: true }).click();
   await page.getByRole('group', { name: 'Resolution', exact: true })
     .getByRole('menuitemradio', { name: label, exact: true }).click();
+  // The menu applies its choice as it closes. Like the old select's change
+  // event, return only once the choice (and its 'quality' change) is in.
+  await page.waitForFunction((choice) => (window as any).PM.previewResolution === choice, value);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
