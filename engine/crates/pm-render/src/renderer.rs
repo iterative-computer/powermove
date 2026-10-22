@@ -283,6 +283,13 @@ impl Renderer {
         self.effects.parity.configure(Some(environment), directory);
     }
 
+    /// Honour the configured probe directory without ever writing to it:
+    /// this renderer's runner is not the browser that directory's
+    /// decisions were made against (`effects::parity` module notes).
+    pub fn read_only_shader_reference(&mut self) {
+        self.effects.parity.set_read_only();
+    }
+
     /// CLI hosts without an ANGLE environment must fail closed for user
     /// programs instead of treating the absence of a parity service as proof.
     /// A host that supplied the desktop environment retains its persisted
@@ -304,15 +311,19 @@ impl Renderer {
         let media = MediaCache::new(&device);
         let text_gpu = crate::text::gpu::TextGpu::new(&device);
         let mut effects = Effects::new(format!("{}; wgpu 30", std::env::consts::OS));
-        if let Ok(browser) = std::env::var("POWERMOVE_ENGINE_PARITY_ENV") {
+        if let Some(store) =
+            crate::effects::parity::ProbeStore::from_environment(|name| std::env::var_os(name))
+        {
             let environment = format!(
-                "{browser}; {:?}; pipeline {}",
+                "{}; {:?}; pipeline {}",
+                store.browser,
                 device.adapter_info(),
                 pm_glsl::pipeline::PIPELINE_REVISION
             );
-            let directory = std::env::var_os("POWERMOVE_ENGINE_SHADER_CACHE")
-                .map(|d| std::path::PathBuf::from(d).join("angle-parity"));
-            effects.parity.configure(Some(environment), directory);
+            if store.read_only {
+                effects.parity.set_read_only();
+            }
+            effects.parity.configure(Some(environment), store.directory);
         }
         Renderer {
             text: crate::text::TextContext::default(),
