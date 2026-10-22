@@ -74,13 +74,13 @@ function isRootWrapper(cur: any, proj: any, fields: number, unwrap: <T>(v: T) =>
     || !same(cur.w, proj.w) || !same(cur.h, proj.h) || !same(cur.fps, proj.fps) || !same(cur.fpsRational, proj.fpsRational)
     || !same(cur.dur, proj.dur) || !same(cur.bg, proj.bg) || !same(cur.backgroundFill, proj.backgroundFill)
     || !same(cur.markers, proj.markers) || !same(cur.work, proj.work) || !same(cur.shutter, proj.shutter)
-    || !same(cur.audioGain, proj.audioGain) || !same(cur.render3d, proj.render3d)) return false;
+    || !same(cur.audioGain, proj.audioGain)) return false;
   let members = 0;
   for (const key in cur) {
     switch (key) {
       // COMP_FIELDS (a test checks this list against it), id and name.
       case 'id': case 'name': case 'w': case 'h': case 'fps': case 'fpsRational': case 'dur': case 'bg':
-      case 'backgroundFill': case 'layers': case 'markers': case 'work': case 'shutter': case 'audioGain': case 'render3d':
+      case 'backgroundFill': case 'layers': case 'markers': case 'work': case 'shutter': case 'audioGain':
         members += 1;
         break;
       default:
@@ -90,7 +90,7 @@ function isRootWrapper(cur: any, proj: any, fields: number, unwrap: <T>(v: T) =>
   return members === fields + 2;
 }
 /** The members isRootWrapper compares, besides `id` and `name` (must equal COMP_FIELDS). */
-export const ROOT_WRAPPER_FIELDS = ['w', 'h', 'fps', 'fpsRational', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'render3d'] as const;
+export const ROOT_WRAPPER_FIELDS = ['w', 'h', 'fps', 'fpsRational', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain'] as const;
 
 /** Finds `target` inside `root` by identity; its path, or null. */
 export function findPath(root: any, target: any, limit = 12): PathPart[] | null {
