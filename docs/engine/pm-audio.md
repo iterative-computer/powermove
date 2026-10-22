@@ -3479,3 +3479,46 @@ An uncatchable process
 kill still relies on the reservation's fixed expiry. The exclusive paired
 measurement phase releases its reservation before the sixty playback-suite
 runs, which each acquire an ordinary lease for their own duration.
+
+The next diagnostic completed seven rows on AirPods Pro, 48 kHz with
+256-frame native callbacks, under four stress threads. This candidate is
+unqualified. The paired latency results were:
+
+| Case | Today p50/p95/max (ms) | Native p50/p95/max (ms) |
+| --- | --- | --- |
+| Shared prepared level edit, 60 s loop | 173.286 / 175.887 / 176.096 | 169.881 / 171.948 / 172.448 |
+| Distinct unprepared seek | 173.654 / 175.571 / 175.857 | 182.588 / 187.121 / 188.054 |
+| Shared unprepared seek | 172.962 / 175.584 / 175.675 | 178.495 / 182.761 / 183.661 |
+| Shared speed edit | 172.783 / 175.676 / 175.775 | 178.568 / 180.801 / 186.334 |
+
+The distinct speed row failed final validation after its cold warm Play
+waited 120.243 ms and invoked A3, omitting 1,280 frames per voice. Its thirty
+later timed starts had zero start-program, real-time, omission, spread and
+A3 counters, but that does not excuse the initial dropout. Its retained
+partial native samples were 180.755 / 184.555 / 185.211 ms against Today's
+173.384 / 175.879 / 175.982 ms; these are raw figures, not a validated row.
+One shared-seek
+pair was discarded under the fixed sharply unequal load criterion; its raw
+results remain retained, along with the replacement pair's latency misses.
+These new misses exceed the historical AirPods allowance and are blockers.
+Both engines passed the per-app temporary-tree checks, and the failed
+campaign's outer guard removed its empty owned tree.
+
+Control profiles matched twelve seek and twelve speed Play receipts.
+Median UI-to-control-receipt was 9.605 / 9.014 ms, respectively. Median graph
+build-and-send was only 0.160 ms for the ten dirty seek starts; the speed
+starts already had their edited projects installed. Separate synchronous
+Pause and Exact Seek acknowledgements precede Play, each potentially
+crossing a device period. Removing those waits must preserve producer FIFO
+order and individual errors. Its effect on output latency needs measurement:
+paused preparation can overlap the existing acknowledgement waits.
+
+The unchanged runtime binary also passed one plain and one stressed
+40-test headless smoke, with six exact mapped PCM comparisons in each and
+zero temporary growth. Cold first-buffer publication maxima were 7.820 /
+8.143 ms, below the enforced 10.666667 ms bound. Three observer polls were
+later: 10.940 / 11.411 ms plain and 10.700 ms stressed. These remain recorded
+separately. The deadline uses the earlier of the producer's post-release
+timestamp and the observer's post-acquire timestamp, both valid upper
+bounds on actual publication. The final thirty-plus-thirty campaign remains
+required.
