@@ -8,7 +8,7 @@ mod support;
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::{PixelRect, Size};
-use pm_render::{Feature, MapResolver, RenderRequest, Renderer, unsupported};
+use pm_render::{Feature, MapResolver, RenderRequest, Renderer, SnapshotRows, unsupported};
 use serde_json::{Value, json};
 use support::doc::*;
 use support::{repo_root, ticks};
@@ -777,6 +777,87 @@ fn render_into_a_callers_target_equals_render() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn snapshot_row_order_matches_generic_render_for_standard_and_linear() {
+    let width = 16;
+    let height = 8;
+    let request = RenderRequest::at_scale(Size::new(width, height), 1.0, Precision::Float16);
+    let resolver = MapResolver::default();
+    let mut renderer = Renderer::headless().unwrap();
+    for linear in [false, true] {
+        let mut source = project(
+            width,
+            height,
+            1.0,
+            no_fill(),
+            vec![layer(
+                "tile",
+                "solid",
+                json!({ "color": "#DF7030", "w": 8, "h": 4 }),
+                8.0,
+                0.0,
+                1.0,
+            )],
+        );
+        source["color"] = json!({ "mode": "standard", "linearBlending": linear });
+        let doc = load(&source);
+        let target = || {
+            pm_gpu::Target::new(
+                renderer.device(),
+                "snapshot rows",
+                width,
+                height,
+                wgpu::TextureFormat::Rgba16Float,
+                pm_gpu::target::working_usage(),
+            )
+        };
+        let generic = target();
+        let snapshot = target();
+        renderer
+            .render_into(
+                &doc,
+                "Ptest-root",
+                ticks(0.0),
+                &request,
+                &resolver,
+                &generic,
+                None,
+            )
+            .unwrap();
+        let (_, rows) = renderer
+            .render_snapshot_into(
+                &doc,
+                "Ptest-root",
+                ticks(0.0),
+                &request,
+                &resolver,
+                &snapshot,
+            )
+            .unwrap();
+        let expected =
+            pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &generic.texture)
+                .unwrap();
+        let raw =
+            pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &snapshot.texture)
+                .unwrap();
+        let row = width as usize * 8;
+        assert_ne!(&expected[..row], &expected[expected.len() - row..]);
+        let normalized: Vec<_> = match rows {
+            SnapshotRows::TopDown => raw,
+            SnapshotRows::Gl => raw.chunks_exact(row).rev().flatten().copied().collect(),
+        };
+        assert_eq!(
+            rows,
+            if linear {
+                SnapshotRows::TopDown
+            } else {
+                SnapshotRows::Gl
+            }
+        );
+        assert_eq!(normalized, expected);
+    }
 }
 
 #[test]

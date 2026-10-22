@@ -88,6 +88,8 @@ fn send_delay(_value: Option<String>) -> Option<std::time::Duration> {
 /// `1`: keep the stand-in log in the presenter's status (scrub
 /// measurements, docs/engine/scrub.md).
 pub const STAND_IN_LOG_ENV: &str = "POWERMOVE_ENGINE_STAND_IN_LOG";
+/// `1`: sample the render thread's resource inventory for allocation probes.
+pub const ALLOCATION_INVENTORY_ENV: &str = "POWERMOVE_ENGINE_ALLOCATION_INVENTORY";
 /// Where timed frames start on the viewer's refresh grid, in thousandths of
 /// a refresh after it (`off` renders at the due time, as before the hint).
 pub const PHASE_ENV: &str = "POWERMOVE_BRIDGE_PHASE";
@@ -162,6 +164,7 @@ impl PresenterConfig {
                 extra_passes: number(LOAD_ENV, 0, 8),
                 trace: env(TRACE_ENV).as_deref() == Some("1"),
                 stand_in_log: env(STAND_IN_LOG_ENV).as_deref() == Some("1"),
+                allocation_inventory: env(ALLOCATION_INVENTORY_ENV).as_deref() == Some("1"),
                 phase: match env(PHASE_ENV).as_deref() {
                     Some("off") => None,
                     Some(v) => v
@@ -444,7 +447,8 @@ impl BridgePresenter {
 
     /// The depth and object-id pool for `state` (plan section 8; the Phase
     /// 3c render transport): `rgbaf16` surfaces at the viewer's size, as
-    /// many as the color pool, made only while the viewer asks for them.
+    /// a depth/ID and selection-coverage pair per color slot, made only
+    /// while the viewer asks for them.
     /// Returns `Some(Some(spec))` for a new pool, `Some(None)` to retire the
     /// current one, `None` when nothing changes.
     fn plan_depth(
@@ -831,6 +835,19 @@ mod tests {
         assert_eq!(send_delay(Some("0".into())), None);
         assert_eq!(send_delay(Some("soon".into())), None);
         assert_eq!(send_delay(None), None);
+    }
+
+    #[test]
+    fn allocation_inventory_is_opt_in() {
+        for enabled in [false, true] {
+            let config = PresenterConfig::from_env(EngineProcess::Interactive, |key| match key {
+                BRIDGE_ENV => Some("test".into()),
+                ALLOCATION_INVENTORY_ENV if enabled => Some("1".into()),
+                _ => None,
+            })
+            .unwrap();
+            assert_eq!(config.thread.allocation_inventory, enabled);
+        }
     }
 
     fn presenter() -> (BridgePresenter, Receiver<Command>) {

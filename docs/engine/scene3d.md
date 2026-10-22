@@ -1062,3 +1062,212 @@ and concurrent lanes prevent a quiet-window performance qualification.
   and viewerless preview API checks pass. Renderer/node type checks retain
   the existing 9/75 diagnostics outside the changed lane. Whole-workspace
   formatting has existing differences; changed Rust files pass independently.
+
+
+## Phase 3c round 9: geometry ownership and capture resources
+
+Imported glTF attributes and indices now have shared CPU ownership. GLB
+readers borrow the BIN chunk while decoding, float accessors retain their
+f32 storage, and compatibility tuple decoding writes directly into f32
+arrays instead of keeping a full f64 intermediate. Integer accessors keep
+exact u32 components until normalized conversion; sparse writes, column
+padding, signed zero and the former f32/f64 NaN conversion remain covered.
+Renderer geometry references those source arrays. Generated draw indices
+and morph metadata live with one file version and are reused between
+frames and placements. GPU mesh keys also identify the file content and
+primitive, so three placements upload one mesh. Replacing or removing a
+file releases its cached previous version.
+
+The deprecated Object3D reader receives a packed binary import result:
+a small JSON header describes typed views over one owned ArrayBuffer.
+It wraps those views in BufferAttributes. The WASM input and output are
+released after transfer, and subsequent imports or memory growth cannot
+invalidate the reader's arrays. Model registration writes its header and
+payload directly into WASM input memory, avoiding another concatenation
+buffer. Model geometry is not serialized into the document. Renderer-side
+source bytes and WASM geometry support exact picking and bounds; the
+compatibility arrays support frozen readers; native geometry supports
+Blender snapshots, animation and device recovery. These are distinct
+consumers, not per-placement copies. Full model data is never simplified.
+
+Uploads write directly into mapped GPU buffers. Missing attributes use
+constant zero-stride inputs, including WebGL's fourth component of one
+for missing vec4 inputs. This removes vertex-sized default arrays for
+normals, UV channels, colors, tangents and skinning attributes. Pipeline
+keys include the constant-input layout. An indexed 600,001-vertex resource
+test verifies shared source arrays, one GPU mesh for three placements,
+and GPU storage below POSITION bytes plus 4 KiB for its tiny index list.
+
+Repeated captures retain one bounded output attachment and one device-scoped
+readback staging buffer. Every capture renders color again, copies the
+texture, maps and waits for that copy, converts its padded rows directly
+into the final RGBA8 result, and unmaps. Half and full float project
+precision both use their appropriate decoder. Revision, transparency and
+resize regressions check that attachment reuse does not retain old pixels.
+Standard-color snapshots render directly into that target in GL row order;
+their RGBA8 conversion visits mapped rows in reverse, avoiding a separate
+GPU flip pass and another intermediate target. Linear working color keeps
+its GPU encoding/flip pass. Generic renderer targets remain top-down.
+The shared depth prepass can survive independently rebuilt equivalent
+texture-free scenes, matching today's unchanged-scene reuse. Its comparison
+uses geometry content keys and evaluated camera, pose, light and material
+state, including signed-zero distinctions. Texture-bearing and instanced
+scenes keep conservative invalidation; color is always rendered afresh.
+
+Resource attribution is available through
+`engine.report('interactive').presenter.allocations` when
+`POWERMOVE_ENGINE_ALLOCATION_INVENTORY=1`; the periodic inventory is disabled
+in normal use. IOSurface values use actual allocation sizes. Other texture
+and mesh values are nominal storage sizes, and lease/cache budgets are not
+resident allocations. `engine.report(process).fontMemory` reports retained
+font payload lengths without paths or contents and deduplicates shared
+full-font backing stores. Font mappings and opaque driver/CoreText caches
+must not be equated with those payload lengths.
+
+DHAT allocation profiling of the same 600k-vertex fixture attributes the
+native parser peak to its 7.2 MB retained POSITION array: peak live bytes
+fell from 21,617,916 to 7,229,492. Packed compatibility transfer peak fell
+from 160,852,693 bytes on the previous JSON path to 15,643,899 bytes, with
+8,388,608 bytes retained by its output vector. The input fixture's 7.2 MB
+allocation precedes the profiler and is excluded from both figures. These
+are allocator measurements, separate from Electron working-set samples.
+
+The native file cache retains up to 64 current file versions, including
+geometry needed to reconstruct later frames. It does not retain previous
+versions of a replaced file, but an unused still-present file can remain
+cached until eviction. Shared ownership removes duplicate payloads; it is
+not a claim that all source geometry is released after GPU upload.
+
+Rest-pose picking builds its BVH directly from retained f32 positions,
+converting individual tuples to f64 without a second full vertex array.
+Its binned SAH, triangle order, f64 bounds and posed refit remain unchanged.
+Static point and line picks also read the retained array directly. On the
+600k fixture, DHAT measures the picker constructor's peak falling from
+46,545,705 to 32,145,705 bytes; retained memory is unchanged at 17,745,593
+bytes. Tests compare BVH fields by float bits, including signed zero and
+nonfinite inputs, and retain point/line index and tie order.
+
+### Attribution and remaining performance gate
+
+These changes do not qualify the engine for performance parity. Paired
+whole-app measurements still exceed today's import/peak working set and
+median synchronous capture time. Geometry fidelity and the accepted pixel
+comparison remain unchanged; performance failures must not be hidden by a
+smaller model, a new refusal, a lower precision format or stale capture
+pixels. Idle-orbit qualification remains deferred to the quiet window.
+
+The paired baseline measurement locates the extra working set in the two
+engine utility processes: interactive 181.7 MiB and job 73.2 MiB medians,
+against a 247.0 MiB median paired whole-app difference. Other process roles offset
+part of that difference; independent medians do not sum algebraically.
+This is engine startup architecture rather than per-placement geometry.
+At an initial empty-app inventory both utilities report zero retained font
+payloads; the interactive GPU, composer and presenter pools have not yet
+been created, and the job GPU remains uncreated. The media, text-raster and
+vector caches also measure zero. Their configured budgets are not live
+allocations. The additional utility runtime, V8/library mappings, threads,
+allocator and opaque AppKit/CoreText/driver state are not individually
+attributed by these counters. They must not be relabeled as font caches
+or a wgpu allocation without further evidence.
+
+A separate stable empty-view inventory records an 83.0 MiB allocated
+color IOSurface pool (eight RGBA16F surfaces at 1496×904), a 10.3 MiB
+working target and 9.6 MiB nominal renderer targets. After the model is
+shown at 1496×792, actual exported storage is 72.7 MiB for eight color
+surfaces, 72.7 MiB for eight depth/ID surfaces, and 72.7 MiB for eight
+selection-coverage surfaces. Working target storage is 9.0 MiB, nominal
+renderer targets 31.0 MiB, and the one shared model GPU mesh 9,600,784
+bytes. Mesh attributes and generated indices account for 9,606,645 retained
+CPU bytes across all three placements in a renderer-only DHAT run. Font
+payloads, media, text/vector rasters and material maps remain zero in this
+fixture. Exported storage can be mapped by several processes; allocated
+bytes and nominal GPU sizes are not additive with process working sets.
+
+A standalone DHAT measurement of device construction retains 88,621 Rust
+heap bytes; adding the display transform retains 171,224 bytes. That
+excludes opaque Metal and system framework allocations, and cannot explain
+or partition the app's utility-process working sets. Allocations-template
+attachment failed on this environment; DHAT provides the allocator evidence,
+while driver/pipeline/CoreText internal byte attribution remains open.
+
+A separate DHAT run draws the exact 256×144 sparse fixture with all three
+placements, ending the profile while the renderer, scene and device remain
+held. Rust heap peaks at 11,879,258 bytes and retains 11,618,869 bytes:
+9,600,000 bytes are the shared POSITION/index arrays, about 1.85 MB is
+regex-automata storage, about 68 KB is attributed to Naga and about 2 KB
+to wgpu Rust API stacks. Normal teardown leaves 1,880,235 bytes of mostly
+global caches in a separate run. This excludes C++/Metal/system allocations
+and does not explain the app's roughly 205 MiB import delta.
+
+Before removing the snapshot-only flip, a CPU sample during 2,000 fresh
+256×144 native captures places about half
+of snapshot-active stack samples in the Metal completion wait and about
+30% under command-encoder finish. Pixel conversion accounts for one sample
+out of 1,690 active samples. These are sampled CPU stack residences, not
+GPU timestamps. A separate three-run paired transport probe before that
+last change measures an
+empty capture at 2.3 ms native versus 1.5 ms today (p50), and the model at
+3.7 versus 2.0 ms. Both fixed transport overhead and native render work
+remain relevant; the readback gap cannot be assigned entirely to IPC.
+Presenter surface lifetimes and engine startup belong to the shared engine
+owners; render-pass encoding and fresh-copy/map completion need further
+renderer/presenter profiling before another change.
+
+### Final paired results
+
+Three independent fresh-app pairs per geometry use the same 600,000-vertex,
+200,000-triangle model at three placements. Legacy runs first in each pair.
+Figures are medians of per-run quantities. Peak working set is the whole-app
+sum sampled every 50 ms; after-probes delta is measured from the baseline
+and includes the refusal and viewport probes. Capture p50/p95/p99 use 12
+fresh 256×144 frames after three warmups. These are shared-machine capture
+measurements, not display-present or idle-orbit timing.
+
+| Probe | Metric | Legacy before | Native before | Legacy after | Native after | Final gate |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| sparse | Baseline MiB | 737.4 | 984.6 | 748.9 | 989.7 | — |
+| sparse | Import delta MiB | 79.6 | 377.1 | 73.6 | 204.5 | **fail** |
+| sparse | Peak MiB | 954.8 | 1432.0 | 951.8 | 1273.6 | **fail** |
+| sparse | After-probes delta MiB | 212.8 | 445.7 | 208.0 | 268.1 | — |
+| sparse | Capture p50 ms | 1.6 | 5.0 | 1.3 | 3.3 | **fail** |
+| sparse | Capture p95 ms | 5.6 | 5.9 | 5.4 | 3.8 | pass |
+| sparse | Capture p99 ms | 5.6 | 5.9 | 5.4 | 3.8 | — |
+| dense | Baseline MiB | 736.7 | 984.9 | 744.3 | 988.8 | — |
+| dense | Import delta MiB | 82.2 | 397.4 | 79.4 | 209.6 | **fail** |
+| dense | Peak MiB | 970.5 | 1456.6 | 948.0 | 1269.6 | **fail** |
+| dense | After-probes delta MiB | 244.0 | 479.8 | 209.3 | 273.7 | — |
+| dense | Capture p50 ms | 1.7 | 4.1 | 1.4 | 2.2 | **fail** |
+| dense | Capture p95 ms | 7.0 | 4.6 | 7.1 | 3.1 | pass |
+| dense | Capture p99 ms | 7.0 | 4.6 | 7.1 | 3.1 | — |
+
+The 10% memory allowance applies to import delta and peak. Capture p50
+still exceeds today in both geometries; p95 passes. Every final accepted
+model pair has max 0 CV, with all vertices retained. No performance pass
+or permission to merge follows from the reduction in allocator bytes.
+
+The final WASM profile retains 17,928,148 logical bytes in 55,771,136 bytes
+of linear memory, down from 70,189,056 linear bytes before the picking
+temporary was removed. Its measured logical allocation peak falls by
+14,400,000 bytes. The final renderer target pool is 31,057,256 nominal
+bytes, while the exported color/depth/coverage storage remains unchanged.
+
+Qualification: 457 focused TypeScript tests and all 13 real-WASM geometry
+tests pass. The latter compare 6,208 answers and measure skinned-pick p95
+at 3.34 ms against the unchanged 33 ms limit. Rust core, presenter and
+render checks pass; the 182 Blender snapshots and 224 map-mip comparisons
+retain their existing bar. The final snapshot path is rechecked with 128
+presenter units, 12 snapshot integration tests and 12 headless tests.
+
+The engine-on batch passes 29 of 30 checks on its first final attempt;
+the isolated chrome recheck passes with unchanged expectations, completing
+the 30 distinct checks. The failed chrome pair changed PNG ICC metadata
+between captures (536 bytes versus absent), changing the captured outline
+RGB. An earlier stable-profile batch passed all 30 together. Flag-off
+coverage passes 18 checks. No color or edge tolerance was relaxed.
+
+One native renderer crashed during the initial final sparse batch; the
+macOS report records EXC_BAD_ACCESS on a DedicatedWorker thread in Chromium/
+V8 frames. The cause remains unresolved. The failed worker also timed out
+during teardown; its isolated profile was removed. Three fresh sparse
+pairs then pass, as do all three dense pairs. The clean rerun is evidence
+of successful draws, not a resolution of that observed stability failure.

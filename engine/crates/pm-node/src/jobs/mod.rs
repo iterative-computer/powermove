@@ -527,10 +527,17 @@ pub struct StatsHandle(Arc<Shared>);
 
 impl StatsHandle {
     pub fn json(&self) -> serde_json::Value {
+        let gpu_created = self
+            .0
+            .gpu
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
         let st = self.0.lock();
         serde_json::json!({
             "service": st.stats,
             "gate": self.0.gate.stats(),
+            "gpuCreated": gpu_created,
             "queued": {
                 "snapshots": st.snapshots.len(),
                 "agentExports": st.agent_exports.len(),

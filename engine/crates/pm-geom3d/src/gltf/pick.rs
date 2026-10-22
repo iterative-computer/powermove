@@ -163,8 +163,12 @@ pub(crate) struct Bvh {
 const LEAF: usize = 4;
 const BINS: usize = 12;
 
-fn tri_box(p: &[Vec3], t: &[u32; 3]) -> (Vec3, Vec3) {
-    let (a, b, c) = (p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]);
+fn tri_box_from_positions(position: &impl Fn(usize) -> Vec3, t: &[u32; 3]) -> (Vec3, Vec3) {
+    let (a, b, c) = (
+        position(t[0] as usize),
+        position(t[1] as usize),
+        position(t[2] as usize),
+    );
     (
         [
             a[0].min(b[0]).min(c[0]),
@@ -179,6 +183,10 @@ fn tri_box(p: &[Vec3], t: &[u32; 3]) -> (Vec3, Vec3) {
     )
 }
 
+fn tri_box(p: &[Vec3], t: &[u32; 3]) -> (Vec3, Vec3) {
+    tri_box_from_positions(&|i| p[i], t)
+}
+
 fn area(lo: Vec3, hi: Vec3) -> f64 {
     let e = sub(hi, lo);
     if e[0] < 0.0 {
@@ -189,6 +197,12 @@ fn area(lo: Vec3, hi: Vec3) -> f64 {
 
 impl Bvh {
     pub(crate) fn build(p: &[Vec3], tris: &[[u32; 3]]) -> Bvh {
+        Self::build_from_positions(tris, |i| p[i])
+    }
+
+    /// Build from rest-pose positions without materializing a second f64
+    /// array. The getter yields exactly the f64 values `build` would read.
+    fn build_from_positions(tris: &[[u32; 3]], position: impl Fn(usize) -> Vec3) -> Bvh {
         let n = tris.len();
         let mut order: Vec<u32> = (0..n as u32).collect();
         let empty = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], 0, 0);
@@ -198,7 +212,10 @@ impl Bvh {
                 order,
             };
         }
-        let boxes: Vec<(Vec3, Vec3)> = tris.iter().map(|t| tri_box(p, t)).collect();
+        let boxes: Vec<(Vec3, Vec3)> = tris
+            .iter()
+            .map(|t| tri_box_from_positions(&position, t))
+            .collect();
         let centers: Vec<Vec3> = boxes.iter().map(|(a, b)| scale(add(*a, *b), 0.5)).collect();
         let mut nodes = vec![([0.0; 3], [0.0; 3], 0u32, n as u32)];
         let mut stack = vec![0usize];
@@ -468,13 +485,15 @@ impl Picker {
                         .collect(),
                     None => (0..n / 3).map(|i| [3 * i, 3 * i + 1, 3 * i + 2]).collect(),
                 };
-                let p: Vec<Vec3> = g
-                    .position
-                    .data
-                    .chunks_exact(3)
-                    .map(|v| [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])])
-                    .collect();
-                let bvh = Bvh::build(&p, &t);
+                let position = &g.position.data;
+                let bvh = Bvh::build_from_positions(&t, |i| {
+                    let at = i * 3;
+                    [
+                        f64::from(position[at]),
+                        f64::from(position[at + 1]),
+                        f64::from(position[at + 2]),
+                    ]
+                });
                 Some((t, bvh))
             })
             .collect();
@@ -715,15 +734,10 @@ impl Picker {
                         continue;
                     }
                     let local = ray.apply(&math::invert(world));
-                    let positions: Vec<Vec3> = g
-                        .position
-                        .data
-                        .chunks_exact(3)
-                        .map(|v| [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])])
-                        .collect();
+                    let positions = StaticPositions(&g.position.data);
                     let found = if mode == super::Mode::Points {
                         points_hit(
-                            &positions,
+                            positions,
                             g.index.as_ref().map(|index| index.as_slice()),
                             &local,
                             threshold * threshold,
@@ -732,7 +746,7 @@ impl Picker {
                         )
                     } else {
                         line_hit(
-                            &positions,
+                            positions,
                             g.index.as_ref().map(|index| index.as_slice()),
                             mode,
                             &local,
@@ -758,9 +772,30 @@ impl Picker {
     }
 }
 
+/// Rest-pose f32 POSITION, read as the f64 tuples three.js raycasts. The
+/// former temporary used `chunks_exact(3)` even if a hand-edited accessor
+/// declared another item size.
+#[derive(Clone, Copy)]
+struct StaticPositions<'a>(&'a [f32]);
+
+impl StaticPositions<'_> {
+    fn len(&self) -> usize {
+        self.0.len() / 3
+    }
+
+    fn get(&self, i: usize) -> Option<Vec3> {
+        if i >= self.len() {
+            return None;
+        }
+        let at = i * 3;
+        let p = &self.0[at..at + 3];
+        Some([f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
+    }
+}
+
 /// `Points.raycast`'s per-point test: the closest point on the ray.
 fn points_hit(
-    pos: &[Vec3],
+    positions: StaticPositions<'_>,
     indices: Option<&[u32]>,
     r: &Ray,
     threshold_sq: f64,
@@ -768,11 +803,11 @@ fn points_hit(
     world_ray: &Ray,
 ) -> Option<(Vec3, u32)> {
     let mut best: Option<(f64, Vec3, u32)> = None;
-    let count = indices.map_or(pos.len(), <[u32]>::len);
+    let count = indices.map_or(positions.len(), <[u32]>::len);
     for i in 0..count {
         let vi = indices.map_or(i, |ix| ix[i] as usize);
         // An index past the last vertex reads NaN: never within range.
-        let Some(&p) = pos.get(vi) else {
+        let Some(p) = positions.get(vi) else {
             continue;
         };
         let along = dot(sub(p, r.origin), r.direction);
@@ -789,7 +824,7 @@ fn points_hit(
 
 /// `Line.raycast` for segments, strips, and loops.
 fn line_hit(
-    pos: &[Vec3],
+    positions: StaticPositions<'_>,
     indices: Option<&[u32]>,
     mode: super::Mode,
     r: &Ray,
@@ -799,11 +834,11 @@ fn line_hit(
 ) -> Option<(Vec3, u32)> {
     // An index past the last vertex reads `undefined`: NaN coordinates.
     let v = |i: usize| {
-        pos.get(indices.map_or(i, |ix| ix[i] as usize))
-            .copied()
+        positions
+            .get(indices.map_or(i, |ix| ix[i] as usize))
             .unwrap_or([f64::NAN; 3])
     };
-    let count = indices.map_or(pos.len(), <[u32]>::len);
+    let count = indices.map_or(positions.len(), <[u32]>::len);
     if count < 2 {
         return None;
     }
@@ -812,11 +847,10 @@ fn line_hit(
     } else {
         1
     };
-    let mut segments: Vec<(usize, usize)> =
-        (0..count - 1).step_by(step).map(|i| (i, i + 1)).collect();
-    if mode == super::Mode::LineLoop {
-        segments.push((count - 1, 0));
-    }
+    let segments = (0..count - 1)
+        .step_by(step)
+        .map(|i| (i, i + 1))
+        .chain((mode == super::Mode::LineLoop).then_some((count - 1, 0)));
     let mut best: Option<(f64, Vec3, u32)> = None;
     for (a, b) in segments {
         let (d2, on_ray) = distance_sq_to_segment(r, v(a), v(b));
@@ -913,6 +947,97 @@ mod tests {
         };
         assert_eq!(intersect_triangle(&back, a, b, c, true), None);
         assert_eq!(intersect_triangle(&back, a, b, c, false), Some(1.0));
+    }
+
+    #[test]
+    fn f32_position_reader_builds_bit_identical_bvh() {
+        let positions: Vec<f32> = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [2.0, 2.0, 2.0],
+            [2.0, 2.0, 2.0],
+            [2.0, 2.0, 2.0],
+            [-0.0, f32::from_bits(0x7fc0_0001), f32::INFINITY],
+            [f32::NEG_INFINITY, 3.0, 0.5],
+            [4.0, 3.0, 0.5],
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let f64_positions: Vec<Vec3> = positions
+            .chunks_exact(3)
+            .map(|p| [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
+            .collect();
+        let triangles = [
+            [0, 1, 2],
+            [3, 4, 5],
+            [6, 7, 8],
+            [0, 3, 6],
+            [1, 4, 7],
+            [2, 5, 8],
+            [0, 4, 8],
+        ];
+        let from_slice = Bvh::build(&f64_positions, &triangles);
+        let from_f32 = Bvh::build_from_positions(&triangles, |i| {
+            let at = i * 3;
+            [
+                f64::from(positions[at]),
+                f64::from(positions[at + 1]),
+                f64::from(positions[at + 2]),
+            ]
+        });
+        assert_eq!(from_slice.order, from_f32.order);
+        assert_eq!(from_slice.nodes.len(), from_f32.nodes.len());
+        for (a, b) in from_slice.nodes.iter().zip(&from_f32.nodes) {
+            assert_eq!(
+                (a.0.map(f64::to_bits), a.1.map(f64::to_bits), a.2, a.3),
+                (b.0.map(f64::to_bits), b.1.map(f64::to_bits), b.2, b.3)
+            );
+        }
+    }
+
+    #[test]
+    fn static_point_and_loop_readers_preserve_index_order() {
+        let points = [-1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 99.0];
+        // The trailing scalar is discarded by the former `chunks_exact(3)`.
+        let ray = Ray {
+            origin: [0.0, 0.0, 1.0],
+            direction: [0.0, 0.0, -1.0],
+        };
+        assert_eq!(
+            points_hit(
+                StaticPositions(&points),
+                Some(&[u32::MAX, 1, 0]),
+                &ray,
+                2.0,
+                &math::IDENTITY,
+                &ray,
+            )
+            .map(|(_, index)| index),
+            Some(1),
+        );
+
+        let square = [
+            -1.0f32, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0,
+        ];
+        let ray = Ray {
+            origin: [-1.0, 0.0, 1.0],
+            direction: [0.0, 0.0, -1.0],
+        };
+        assert_eq!(
+            line_hit(
+                StaticPositions(&square),
+                None,
+                super::super::Mode::LineLoop,
+                &ray,
+                0.01,
+                &math::IDENTITY,
+                &ray,
+            )
+            .map(|(_, index)| index),
+            Some(3),
+        );
     }
 
     #[test]
