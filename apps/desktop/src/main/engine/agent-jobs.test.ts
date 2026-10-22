@@ -244,6 +244,26 @@ describe('agent exports through the job engine', () => {
     expect(jobs.available).toBe(false);
     await expect(jobs.exportVideo(1, 'r', project(), { format: 'mp4', range: 'all', audio: false, motionBlur: false, alpha: false })).rejects.toThrow('not running');
   });
+
+  it('wait, bounded, for a job engine in its crash backoff instead of failing at once', async () => {
+    const engine = new FakeEngine();
+    const state = (job: string) => { for (const l of (engine as any).listeners) l.status?.({ interactive: { generation: 1, state: 'ready' }, job: { generation: 1, state: job } }); };
+    const jobs = new AgentJobs({ engine, readyWaitMs: 200 });
+    const input = { format: 'mp4', range: 'all' as const, audio: false, motionBlur: false, alpha: false, mode: 'async' as const };
+    engine.ready = false; state('restarting');
+    const pending = jobs.exportVideo(1, 'r', project(), input);
+    await tick();
+    expect(engine.of('openSession')).toHaveLength(0);
+    engine.ready = true; state('ready');
+    await expect(pending).resolves.toMatchObject({ status: 'queued' });
+    // Still down at the bound, or stopped while waiting: the named error.
+    engine.ready = false; state('restarting');
+    await expect(jobs.renderFrames(1, 'r', { project: project(), times: [0], width: 720, revision: 1 })).rejects.toThrow('The job engine is not running.');
+    const stopped = jobs.renderFrames(2, 'r', { project: project(), times: [0], width: 720, revision: 1 });
+    state('stopped');
+    await expect(stopped).rejects.toThrow('The job engine is not running.');
+    jobs.dispose();
+  });
 });
 
 describe('agent frames through the job engine', () => {
@@ -272,6 +292,16 @@ describe('agent frames through the job engine', () => {
     expect(engine.of('agentFrames').at(-1)!.body).toMatchObject({ maxDimension: 640 });
     await jobs.forgetOwner(4);
     expect(engine.of('closeSession').map((s) => s.session)).toEqual([10]);
+  });
+
+  it('label PNG frames as PNG', async () => {
+    const engine = new FakeEngine();
+    const jobs = new AgentJobs({ engine });
+    const result = await jobs.renderFrames(4, 'run', { project: project(), times: [0], width: 720, revision: 1, imageFormat: 'png' });
+    expect(engine.of('agentFrames')[0]!.body).toMatchObject({ format: { kind: 'png' } });
+    if (result.status !== 'rendered') throw new Error('expected frames');
+    expect(result.images.map(i => i.mimeType)).toEqual(['image/png']);
+    jobs.dispose();
   });
 
   it('restores frame order and refuses partial or duplicate outcomes', async () => {

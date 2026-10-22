@@ -94,6 +94,11 @@ export const INLINE_DOCUMENT_BYTES = 4 * 1024 * 1024;
 /** Finished jobs kept for `get_render_status`. */
 const FINISHED_KEPT = 64;
 
+/** How long agent work waits for a starting or restarting job engine: the
+ *  longest crash backoff (30 s, crash.ts) plus a launch. A stopped engine
+ *  (setting off, or one that cannot run here) fails at once. */
+export const ENGINE_READY_WAIT_MS = 45_000;
+
 /** The owner of render queue jobs (no window). */
 export const QUEUE_OWNER = -1;
 
@@ -360,6 +365,8 @@ export type AgentJobsOptions = {
   sessionOwner?(session: number, owner: number | null): Promise<unknown>;
   packProject?(project: Project, session: number, document: unknown): Promise<string>;
   queueBoundMs?: number;
+  /** Bounded wait for a starting/restarting job engine (`ENGINE_READY_WAIT_MS`). */
+  readyWaitMs?: number;
   now?: () => number;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
   /** A window's current definition set (main's relay); null when it pushed none. */
@@ -573,7 +580,8 @@ export class AgentJobs {
   /** The job engine restarted: its sessions and unfinished jobs are gone
    *  (agent jobs never resume, section 17). */
   private onEngineStatus(status: unknown): void {
-    const job = (status as { job?: { generation?: number } } | null)?.job;
+    const job = (status as { job?: { generation?: number; state?: string } } | null)?.job;
+    if (typeof job?.state === 'string') this.jobState = job.state;
     if (!job || typeof job.generation !== 'number' || job.generation === this.generation) return;
     const restarted = this.generation !== 0;
     this.generation = job.generation;
@@ -714,13 +722,13 @@ export class AgentJobs {
       if (left && !left.size) this.frameRuns.delete(run);
     }
     if (response.type !== 'agentFrames') throw new AgentJobError('The job engine answered agent frames with something else.');
-    return this.frameImages(plan.times, response.outcomes, response.queuedMs, frameSession.revision, aborted);
+    return this.frameImages(plan.times, response.outcomes, response.queuedMs, frameSession.revision, aborted, plan.imageFormat === 'png' ? 'image/png' : 'image/jpeg');
   }
 
   /** The batch's images in request order. A batch cancelled through its
    *  signal answers with the frames before the first cancelled one; any other
    *  failure (and a cancel the caller did not ask for) is named. */
-  private frameImages(times: number[], outcomes: AgentFrameOutcome[], queuedMs: number, revision: number, aborted = false): AgentFramesResult {
+  private frameImages(times: number[], outcomes: AgentFrameOutcome[], queuedMs: number, revision: number, aborted = false, mimeType: AgentFrameImage['mimeType'] = 'image/jpeg'): AgentFramesResult {
     const images: AgentFrameImage[] = new Array(times.length);
     const cancelled = new Set<number>();
     if (outcomes.length !== times.length) throw new AgentJobError('The job engine did not render every requested frame.');
@@ -733,7 +741,7 @@ export class AgentJobs {
         throw new AgentJobError(outcome.error.message, outcome.error.code);
       }
       if (outcome.image.kind !== 'inline') throw new AgentJobError('The job engine answered with an image file; agent frames expect inline images.');
-      images[outcome.index] = { time: times[outcome.index]!, data: outcome.image.bytes, mimeType: 'image/jpeg', width: outcome.width, height: outcome.height };
+      images[outcome.index] = { time: times[outcome.index]!, data: outcome.image.bytes, mimeType, width: outcome.width, height: outcome.height };
     }
     if (!cancelled.size) return { status: 'rendered', images, revision, queuedMs };
     const first = Math.min(...cancelled);
@@ -837,8 +845,28 @@ export class AgentJobs {
 
   /* ── sessions ──────────────────────────────────────────────────────── */
 
+  /** The job engine's last reported supervisor state (null: none reported yet). */
+  private jobState: string | null = null;
+
+  /** Resolves once the job engine is ready. A starting or restarting engine
+   *  (crash backoff) is waited for within `readyWaitMs`; a stopped one, or
+   *  one still down at the bound, is the named error. */
+  private whenAvailable(): Promise<void> {
+    if (this.available) return Promise.resolve();
+    const fail = () => new AgentJobError('The job engine is not running.', 'internal');
+    if (this.jobState !== 'starting' && this.jobState !== 'restarting') return Promise.reject(fail());
+    return new Promise<void>((resolve, reject) => {
+      const done = (error?: AgentJobError) => { clearTimeout(timer); off(); error ? reject(error) : resolve(); };
+      const timer = setTimeout(() => done(fail()), this.options.readyWaitMs ?? ENGINE_READY_WAIT_MS);
+      const off = this.options.engine.listen({ status: () => {
+        if (this.available) done();
+        else if (this.jobState === 'stopped') done(fail());
+      } });
+    });
+  }
+
   private async openSession(document: string, role: 'job' | 'jobSnapshot', owner: number | null): Promise<number> {
-    if (!this.available) throw new AgentJobError('The job engine is not running.', 'internal');
+    await this.whenAvailable();
     const opened = await this.options.engine.request('job', { type: 'openSession', document, role, process: 'job', color: STANDARD_COLOR });
     if (opened.type !== 'sessionOpened') throw new AgentJobError('The job engine did not open a session.');
     if (owner !== null) {
