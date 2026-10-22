@@ -92,7 +92,7 @@ export class EngineAudio {
         const { audio: _a, ...peaks } = message;
         // Requests are generation-tagged across replacement, relink and
         // full document resync, including work already running in the decoder.
-        this.sync();
+        this.observe();
         if (!this.asked.has(peaks.asset) || peaks.request !== this.asked.get(peaks.asset)) return;
         if (peaks.error) {
           // Offline media (not resolved yet) or no sound: ask again at the

@@ -191,3 +191,18 @@ it('invalidates a hashless restored asset when its persisted source is relinked'
   audio.receive(peak(2, .2), session);
   expect(Array.from(assets[0]!.peaks)).toEqual([Math.fround(.2)]);
 });
+
+it('does not let failing assets trigger each other into an automatic retry loop', () => {
+  const { audio, session, sent } = rig([{ id: 'a', kind: 'audio' }, { id: 'b', kind: 'video' }]);
+  audio.sync();
+  for (const [asset, request] of [['a', 1], ['b', 2]] as const) {
+    audio.receive({ audio: 'peaks', asset, request, peaksPerSecond: 100, duration: 0, peaks: [], error: 'the media is offline' }, session);
+  }
+  expect(sent.filter(message => message.audio === 'peaksWanted')).toHaveLength(2);
+  // A real asset/route sync still retries each source once.
+  audio.sync();
+  expect(sent.filter(message => message.audio === 'peaksWanted')).toHaveLength(4);
+  audio.receive({ audio: 'peaks', asset: 'a', request: 3, peaksPerSecond: 100, duration: 0, peaks: [], error: 'no audio stream' }, session);
+  audio.receive({ audio: 'peaks', asset: 'b', request: 4, peaksPerSecond: 100, duration: 0, peaks: [], error: 'no audio stream' }, session);
+  expect(sent.filter(message => message.audio === 'peaksWanted')).toHaveLength(4);
+});
