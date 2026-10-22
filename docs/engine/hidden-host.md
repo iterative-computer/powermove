@@ -28,20 +28,26 @@ existing supervisor.
 
 ## Media, jobs and persistence
 
-Agent imports stream into the host's immutable content store, use the desktop's
-sampled fingerprint plus the full content hash, and ask the job engine to probe
-the stored object. Read-only sources get a private writable staging copy for
-fsync; their immutable source objects keep their original permissions. Numeric
-audio facts retain channel counts for named and custom layouts. The production agent harness keeps validation, cancellation, locked
-references and transactions; the worker import adapter commits the shared asset
-identity and preserves replacement bytes for Undo. Workers resolve availability
-through host media paths. Existing CLI flat media copies are promoted into host
+Agent imports run today's editor importer in the project's on-demand tab. The
+tab uses the desktop's host media-store protocol: uploads finish only after the
+host verifies their bytes, with the same content hashes, originals, conversions,
+posters, SVG metadata and model records. The production agent harness retains
+validation, cancellation, locked references and transactions. Its worker adapter
+answers only after the tab's commit reaches the worker. Direct timeline imports
+share today's hidden-host adapter: omitting `at` imports assets only; placement
+uses registered import defaults and the editor's editable SVG and model branches.
+Workers retain complete imported metadata and confirm availability through host
+paths, including models. Existing CLI flat media copies are promoted into host
 objects when first needed, without removing their source files.
 
 Frames and all agent exports use `AgentJobs`, pinned to the worker's revision
-and winning definitions. Save uses the host-services PMV4 packer, including
-original media and Undo history. Project-specific run owners and media bindings
-keep an export independent of another project or tab.
+and winning definitions. Contact-sheet deadlines cancel that batch alone and
+return its completed cells with the remainder omitted. Save writes today's
+PMV3 agent container, including available originals and Undo history; missing
+media remains in the document and does not prevent saving. Planning waits for
+pending imports, and `Projects.put` runs after the file is written. The packer
+retains today's blob MIME types, frozen with each save's content bindings.
+Project-specific run owners and media bindings keep jobs independent.
 
 ## Chromium and shader pins
 
@@ -68,6 +74,9 @@ must pass through ANGLE before native verification. The browser module uses
 `ShaderFallbackRunner`, with the desktop's F16 texture, uniform and watchdog
 contract. `powermove render` starts an authenticated loopback service; direct
 bundled `pm-cli` starts the same Node helper and closes it on stdin EOF.
+The desktop and hidden host also atomically persist their winning definitions in
+`Engine Cache/definitions.json`. `powermove render` uses that set unless the
+caller provides `--definitions`; direct `pm-cli` accepts the same snapshot.
 
 Missing native addons are `native-runtime-unavailable`; missing Chromium is
 `chromium-unavailable` at the first browser-dependent call. Corrupt persisted
@@ -87,6 +96,10 @@ set to one:
 - `node apps/desktop/scripts/test-native-hidden-parity.mjs`
 - `node apps/desktop/scripts/test-native-hidden-services.mjs --launchd`
 - `node apps/desktop/scripts/test-native-hidden-services.mjs --ssh`
+- `node apps/desktop/scripts/test-native-import-contract.mjs` compares imported
+  asset/layer bytes with the desktop and metadata with both hidden hosts. It
+  covers SVG paths, animated GIF, BMP, OBJ, omitted placement and a registered
+  import-default override. `--timeline-regression` is the focused placement gate.
 - In `apps/desktop`, set `POWERMOVE_NATIVE_HOST_DIST` to the built CLI `dist`
   and run `bunx playwright test e2e/document-host-contract.spec.ts --config playwright.prebuilt.config.ts --workers=1`.
   Set `POWERMOVE_CONTRACT_ENGINE_SCRIPT` to an engine bundle built beforehand
@@ -112,15 +125,23 @@ id normalization. Service tests create temporary user-domain launchd jobs and a
 loopback-only SSH service with temporary keys outside the repository; they do
 not change login or authorized-key settings.
 
+The same parity fixture renders through both CLI entry points. A simultaneous
+native verification must lose to the persisted runner pin; removing only that
+pin must produce different native pixels. A missing browser must fail by name.
+The Rust definitions gate retains its original successful override and blue-pixel
+assertions, with the production ANGLE helper enabled. Child-supervision tests
+kill real pm-node children, check in-flight asset attribution and the two-crash
+ledger, increasing backoff, per-project definition replay and recovery of both
+engine roles. Build all test binaries before acquiring the app lease.
+
 ## Remaining integration gates
 
 The current integration branch does not yet include the extension-compatibility
 lane's raster override/context producers and corresponding snapshot events.
 The host's on-demand compatibility relay is wired, but those projects require
 that integration and parity validation; this lane does not claim their pixels
-are proved. Native importer format parity for animated images, SVG metadata and
-models also needs the corresponding media/extension integrations and corpus
-coverage. Desktop-encrypted extension variables and on-device captions are not
+are proved. The import contract uses synthetic fixtures; wider media corpus
+coverage remains with the media lanes. Desktop-encrypted extension variables and on-device captions are not
 yet provided by this embedder.
 
 ## macOS artifacts
@@ -133,3 +154,9 @@ without redistributing them, constructs/ticks/pumps `EngineHost` on clean Node 2
 and launches `pm-cli`. ARM64 and x64 require separate FFmpeg/native libraries; x64 loads under
 Rosetta on an ARM64 machine. The FFmpeg cross build uses the same pinned sources,
 component selection and LGPL policy as ARM64. These commands never publish.
+
+See [the ownership inventory](agents-ownership.md) for every agent-lane edit
+outside the original file ownership list and its justification, including
+changes subsequently reverted.
+
+The import contract freezes random WebM container IDs through a temporary FFmpeg wrapper shared by all three test hosts, analogous to the document contract’s clock and ID seam. The production encoder is unchanged. The comparison retains every asset and layer field, including `contentHash`; a separate test compares the wrapper’s decoded RGBA with today’s default encoder. All wrapper files and profiles are removed by the harness.

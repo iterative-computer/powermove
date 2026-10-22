@@ -635,18 +635,20 @@ extension definitions, and never pauses/resumes playback or enters the exclusive
 compatibility capture helper. MCP composition contact sheets submit all cells as
 one engine batch so the document and definitions freeze together. A partial,
 duplicate or out-of-order native response is validated and restored to request
-order; missing frames fail the batch. Frame sessions pin media like export
+order. At a contact-sheet deadline or cancellation, that batch alone is
+cancelled and completed cells return with the remaining cells omitted. Ordinary
+frame requests still require every requested frame. Frame sessions pin media like export
 sessions, including across project changes.
 
 Native `save_project` asks for a single serialized document envelope, workspace
-and Undo snapshot, then uses the host's `ProjectSave` PMV4 writer. The shared
-`project-assets.ts` helpers preserve today's linked-original conversion and
-Undo-reachable media collection. Each save gets its own exclusive owner-only
-name and media binding scope. It streams original bytes in bounded chunks,
-checks source identity before and after, validates the container, atomically
-publishes through `publishFile`, and returns the real path. Offline originals
-fail by name; an incomplete file is not delivered. Private document-plan responses
-have a separate bounded budget from paginated public agent state.
+and Undo snapshot, after pending imports finish. The host writes the same PMV3
+container as today's agent save, then records the project with `Projects.put`.
+The shared `project-assets.ts` helpers retain linked-original conversion and
+Undo-reachable media. Each save gets an exclusive owner-only name and media
+binding scope, including frozen blob MIME types. Missing sources are skipped;
+their metadata stays in the document. Source changes during copying fail by
+name and leave no output. Private document-plan responses have a separate bounded
+budget from paginated public agent state.
 
 `powermove render <project> <output> [options]` invokes the native CLI without a
 shell, preserves its exit code and signals, and accepts user-chosen destinations
@@ -658,9 +660,9 @@ in the native CLI; a missing WebGL runner remains a named headless failure.
 
 Targeted tests cover native failures before/after job acceptance and during
 recovery; pinning and playback isolation; incomplete frames; media binding
-lifetimes; PMV4 linked originals/Undo/exclusive naming; CLI argument boundaries;
+lifetimes; PMV3 byte equality, missing originals, MIME, Undo and exclusive naming; CLI argument boundaries;
 parameter validation and rendered expression changes. The desktop MCP smoke now
-checks native text, publication followed by frames, and host-packed PMV4 media and
+checks native text, publication followed by frames, and host-packed PMV3 media and
 Undo. `e2e/engine-agent-observation.spec.ts` measures twenty five-frame 720 px
 observations during a UHD project's playback. Only measured runs establish its
 performance result.
