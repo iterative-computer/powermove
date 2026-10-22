@@ -1691,6 +1691,37 @@ for level 1 canvas text under a non-axis-aligned matrix:
   the run draws in the path sub run: the canonical 64 px platform outline
   under the glyph's matrix. Axis-aligned text is unchanged; for it, the
   two sizes are equal.
+
+  Source, verified for Canvas2D in Chromium 152 (tag 152.0.7977.89, whose
+  `DEPS` pins Skia `b6d106297ff9ef2ff8094033695d045e87775581`; the files
+  below are byte-identical at the textexact pin `747cf654`):
+  - [`src/text/gpu/SubRunContainer.cpp`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/text/gpu/SubRunContainer.cpp#L1403-L1445),
+    `SubRunContainer::MakeInAlloc`: `maxMaskSize = subRunControl->maxSize()`;
+    per run, `approximateDeviceTextSize =
+    SkFontPriv::ApproximateTransformedTextSize(runFont, positionMatrix, ...)`;
+    the SDFT and direct-mask cases run only inside
+    `if (... && approximateDeviceTextSize < maxMaskSize)`. Otherwise the
+    whole run reaches the drawable and then the path case
+    (`SkStrikeSpec::MakePath`, `PathSubRun`), and outline glyphs end there.
+  - [`src/core/SkFont.cpp`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/core/SkFont.cpp#L372-L375):
+    without perspective, `ApproximateTransformedTextSize` returns
+    `font.getSize() * matrix.getMaxScale()`.
+  - [`src/text/gpu/SubRunControl.h`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/text/gpu/SubRunControl.h#L56)
+    `maxSize()` returns `fMaxDistanceFieldFontSize`, which
+    [`src/gpu/graphite/Caps.cpp`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/gpu/graphite/Caps.cpp#L365-L374)
+    `Caps::getSubRunControl` sets to `glyphsAsPathsFontSize()`, from
+    [`ContextOptions::fGlyphsAsPathsFontSize`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/include/gpu/graphite/ContextOptions.h#L84-L92):
+    256 under `SK_BUILD_FOR_MAC`.
+  - Chromium's
+    [`GetDefaultGraphiteContextOptions`](https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.89/gpu/command_buffer/service/skia_utils.cc)
+    does not override `fGlyphsAsPathsFontSize`.
+
+  The position matrix is the canvas transform including the raster
+  density, so an accelerated Canvas2D `fillText` under a skew animator is
+  routed by it. A 100 px title at 2x under a 30° skew (largest scale
+  1.33, size 266, every glyph mask under 256 px) draws as paths in
+  Chromium and in the engine; before this gate the engine drew it in the
+  large-text regime.
 - A direct mask over `kSkSideTooBigForAtlas` (256 px in either dimension,
   `SkGlyphDigest::fitsInAtlasDirect`) is rejected to the same path sub run.
   An example is a Zapfino glyph that fits upright but is rotated 45°. This
@@ -1706,12 +1737,51 @@ unaffected. If a distance field over a plot ever reached the native
 Graphite executor, it would keep the CPU primitive image. The scene emits
 fields only up to 256 px.
 
-Regression tests: `glyph_images_beyond_the_atlas_draw_as_paths` (pm-text,
-both gates plus a nearly upright control that keeps its mask);
-`glyphs_beyond_a_plot_are_never_placed` (pm-render atlas, 624×114 and
-64×4096 masks and a 513 px field); and `text_gpu`'s skew80/rotated
-renders through the full GPU path. Without the fix, the last one panics at
-the old `expect`.
+Regression tests:
+
+- `transformed_text_at_the_path_size_draws_as_paths` (pm-text) covers the
+  size gate alone. Arial `.`, `i` and `l` at 60 px under 2x and a 60° skew
+  (size 262.7) and at 48 px under 2 × scale(2.8, 1) (size 268.8) draw as
+  canonical paths, although each glyph's matrix mask is under 256 px and
+  the uniform device size (120 and 160.6 px) is below the large and
+  distance-field ranges. Controls at a 55° skew and scale(2.5, 1) (233.1
+  and 240) stay in the atlas. With the `max_scale` term removed, the test
+  fails on the first case (`skew 60 '.'`: a mask instead of a path).
+- `glyph_images_beyond_the_atlas_draw_as_paths` (pm-text) covers
+  `fitsInAtlasDirect`. Its 45° Zapfino rotation keeps the largest scale at
+  2 (100 px), so only the mask-size gate sends it to paths. The 80° skew
+  of 75 px `H` is also above the size gate (about 860 px), so it passes
+  with either gate alone; so does `text_gpu`'s skew80 render. A nearly
+  upright rotation keeps its mask.
+- `glyphs_beyond_a_plot_are_never_placed` (pm-render atlas, 624×114 and
+  64×4096 masks and a 513 px field) and `text_gpu`'s skew80/rotated
+  renders through the full GPU path. Without the fix, the last one panics
+  at the old `expect`.
+
+Chromium pixel reference (2026-10-22, Apple M4 Max, Electron 44 /
+Chromium 152, under `pm-electron-lock`). `capture/transformed-project.ts`
+writes four Arial "Hill." layers at layer scale 200% under a skew
+animator at time 0; `capture/source.ts --project ... --times 0 --out
+text-transformed-<stamp>` rasterizes them with today's app
+(`PM.raster`, density 2). Compared through `text_raster`
+(`PM_TEXT_RASTER=<capture>`):
+
+| Case | Size × max scale | Route | Pixels > 1 CV (max) | Without the gate |
+|---|---|---|---|---|
+| 60 px, skew 60° | 262.7 | paths | 6 (19 CV) | 2657 (217 CV), ink SSIM 0.906 |
+| 100 px, skew 30° | 265.9 | paths | 7 (24 CV) | 2644 (201 CV), ink SSIM 0.951 |
+| 60 px, skew 55° | 233.1 | distance fields | 3 (2 CV) | 8 (3 CV) |
+| 100 px, skew 20° | 239.7 | distance fields | 0 (1 CV) | 0 (1 CV) |
+
+The gate is confirmed: Chromium draws both path-size cases as paths, and
+without the gate the engine differs on about 2650 pixels. The cases are
+not within the strict 1 CV text raster bound, so the capture is not one
+of the gated sets. The remaining path-case pixels are single pixels on
+horizontal stem edges (the tops of `H`, `i` and `l`, and the baseline),
+where the 4× multisampled fill of a skewed canonical path crosses a
+sample row. The 55° control has 3 pixels at 2 CV in the distance-field
+path. Neither residual is retired here; the FONTS-R policy allows no new
+ratchet entries.
 
 The exactness wording for the thirteen retired cases: eight are
 byte-identical, and five are within their original strict bounds but not
@@ -1798,9 +1868,12 @@ textexact2 lane report. Every case retains its original strict bound.
   Those oversized and eviction paths lack independent captured parity.
 - Skewed, rotated or non-uniformly scaled canvas text now follows Skia's
   `ApproximateTransformedTextSize` and `fitsInAtlasDirect` gates (round 2).
-  No captured Chromium pixels exist for a glyph beyond the atlas or for
-  text whose largest-scale size crosses 256 px, so those paths are
-  source-ported and regression-tested, not pixel-qualified.
+  The size gate has a Chromium capture (skew animators at 2x, sizes 262.7
+  and 265.9): it confirms the path route, but 6 and 7 pixels on
+  horizontal stem edges remain over 1 CV (max 24), so it is not
+  pixel-qualified to the strict bound. No captured Chromium pixels exist
+  for a glyph beyond the atlas (`fitsInAtlasDirect`); that path is
+  source-ported and regression-tested.
 - The CPU SDF reference retains its earlier half-precision draw emulation;
   native GPU rendering uses the f32 Dawn shader. CPU-only SDF parity has
   not been newly qualified by this round.
