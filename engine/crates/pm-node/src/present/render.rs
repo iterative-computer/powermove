@@ -3236,6 +3236,13 @@ impl Thread {
         let lead = self.config.lead;
         self.retry_pool(key);
         let draws = !self.config.document || self.document_step(key);
+        // A Play in its preroll starts once the first frames are answered,
+        // before this pass's clock sample: the viewer must hear the run
+        // before its first timed frame (a timed frame of a line it believes
+        // stopped is dropped).
+        if draws {
+            self.finish_preroll(key);
+        }
         // A headless view's clock is heard once its route is decided (drawn
         // or not: the transport runs either way).
         let takes = draws
@@ -3382,8 +3389,6 @@ impl Thread {
         {
             view.dirty = false;
         }
-        // A Play in its preroll starts once the first frames are answered.
-        self.finish_preroll(key);
         // Playback: render ahead while frames are due and slots are free.
         loop {
             let Some(view) = self.views.get_mut(&key) else {
