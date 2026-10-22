@@ -642,12 +642,17 @@ function retryThumbnail(project: any) {
 function canFinishThumbnail(project: any) {
   if (PM.proj !== project || discardedProjects.has(project.id)) return false;
   if (!thumbnailBlocked()) return true;
+  if (!PM.EngineRender) lastThumbAt = 0;
   retryThumbnail(project);
   return false;
 }
 function projectThumb() {
+  if (!PM.proj) return undefined;
   const now = Date.now();
-  if (now - lastThumbAt < 5000) return undefined;
+  if (now - lastThumbAt < 5000) {
+    retryThumbnail(PM.proj);
+    return undefined;
+  }
   if (thumbnailBlocked()) {
     retryThumbnail(PM.proj);
     return undefined;
