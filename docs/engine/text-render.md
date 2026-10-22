@@ -1333,15 +1333,58 @@ are recorded in the lane report; no unobserved run is implied here.
 | Path masks, text colors, GPU paint, level 2 | Pass | Pass |
 
 The 113 pm-render, 78 pm-vector and 78 pm-text unit checks pass in both
-profiles, including the new source oracles. All fifteen generated stages
-reproduce byte-for-byte; all eight Metal stages compile with Metal 4.0.
+profiles, including the new source oracles. All fourteen generated shader
+files reproduce byte-for-byte; the fifteenth file is the hand-written
+primitive input. All eight Metal stages compile with Metal 4.0.
 Canvas2D retains its four pre-existing exceptions; none is added or changed.
 The composed corpus retains the pre-existing non-text typewriter-definition
 refusal, comparing that project's text in isolation. These text results do
 not qualify the missing custom effect. Test-only SVG fixtures now clean up
 their own directories; the changed tests leave no files in a scoped temp
-root in either profile. The app matrix is unmeasured in this round; no
-new app integration or typing-latency qualification is claimed.
+root in either profile.
+
+The hidden app now replays all thirteen retired cases with Use New Engine
+off and on: nine source rasters through the public kernel `render.raster`
+API and four composed/isolated frames through `render.renderFrameTo`.
+All twenty-six setting comparisons meet the unchanged bounds. Every native
+case has the same maximum CV error as the Rust gate: eight source rasters
+are byte-identical, the remaining path stroke differs by at most 1 CV,
+and the four frames have maxima 2, 2, 2 and 1 CV. Raw snapshot bytes and
+the returned Canvas2D surfaces agree. Native versus freshly captured legacy
+app pixels also meets each case's original bound. The legacy app's SDF
+draw history produces twenty-nine 1-CV differences from the standalone
+capture; the native SDF raster remains byte-identical to the Rust reference.
+These comparisons do not add an exception or change a budget. The twelve
+app parity checks pass on Electron 44 / Chromium 152.
+
+This app replay exposed a layer-raster snapshot bug outside the direct
+Rust raster gate: `TextPlan::crop` stores edges, while `LayerPixels::Float`
+and the snapshot transport require an origin and extent. Passing the edges
+as extents changed the source row stride when restoring the padded canvas.
+The layer-raster adapter now converts the rectangle at that boundary. The
+served-font snapshot regression independently copies the expected cropped
+rows into a full canvas, instead of sharing the placement helper with the
+implementation.
+
+App integration now passes all twenty non-latency text cases. Separate native
+typing responsiveness checks cover sixty keys each in a 96 px title, a 48 px
+paragraph and 24 px system-ui text: every key reaches a newer presented
+revision, the resulting text is exact, and render/layer failures remain zero.
+The title's final document and displayed revision agree, with no pending
+key, protocol request, patch batch or fallback raster.
+
+The apparent fifteen-minute typing stall was the harness's machine-load
+wait before Electron launched. Measurement preconditions now fail immediately;
+quiet-machine waiting belongs outside the Electron lock. The busy-machine
+guard regression returns before launching the app. A distinct
+`PM_TEXT_TYPING_DIAGNOSE=1` mode exercises responsiveness under contention
+without qualifying the unchanged 33 ms latency target. A missed frame now
+fails after five seconds and saves the pending key, recent frames/batches,
+renderer and engine state, console and hidden-window capture. Fixture
+startup, shutdown and disposable-profile cleanup have their own lifecycle
+timeout; interaction deadlines are unchanged. All six canvas-editing checks
+pass after separating that cleanup from the interaction budget. The 33 ms
+typing measurement remains unqualified under machine contention.
 
 ## Gaps
 
