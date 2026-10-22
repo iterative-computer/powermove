@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, COMPAT_PREFETCH, COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -543,7 +543,7 @@ describe('compatibility answers during playback', () => {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => i * frame));
-      expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(2);
+      expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(COMPAT_PREPARE_IN_FLIGHT);
       expect(vi.getTimerCount()).toBe(0);
       state.playing = true;
       t.playbackStarted();
@@ -573,12 +573,12 @@ describe('compatibility answers during playback', () => {
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
-      expect(pending).toHaveLength(2);
+      expect(pending).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
       await vi.advanceTimersByTimeAsync(51);
       pending.forEach(resolve => resolve());
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual([0]);
-      expect(pending).toHaveLength(2);
+      expect(pending).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
       expect(t.lookaheadStats.inFlight).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
     } finally { t.dispose(); vi.useRealTimers(); }
@@ -592,13 +592,13 @@ describe('compatibility answers during playback', () => {
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
-      expect(pending.map(p => p.time)).toEqual([0, frame]);
+      expect(pending.map(p => p.time)).toEqual(Array.from({ length: COMPAT_PREPARE_IN_FLIGHT }, (_, i) => i * frame));
       expect(asked).toEqual([]);
       // The second result lands while the first remains slow.
       pending[1]!.done();
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual([frame]);
-      expect(t.lookaheadStats.maxInFlight).toBe(2);
+      expect(t.lookaheadStats.maxInFlight).toBe(COMPAT_PREPARE_IN_FLIGHT);
       state.time = 30 * frame;
       pending[0]!.done();
       await vi.advanceTimersByTimeAsync(0);
@@ -606,6 +606,51 @@ describe('compatibility answers during playback', () => {
       expect(t.lookaheadStats.obsolete).toBe(1);
       expect(pending.at(-1)!.time).toBe(30 * frame);
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('prepares base pixels past the answer horizon only once that horizon is answered or in flight, two at a time', async () => {
+    vi.useFakeTimers();
+    const { t, session, state } = rig(true);
+    const prepared: number[] = [];
+    const answered: number[] = [];
+    const pending: Array<() => void> = [];
+    t.answerCompat('rasterOverride', n => { answered.push(n.time); return { kind: 'native' }; }, n => { prepared.push(n.time); return new Promise<void>(resolve => pending.push(resolve)); });
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      // The answer horizon first: its two preparations, nothing speculative.
+      expect(prepared).toEqual([0, frame]);
+      while (prepared.length < COMPAT_LOOKAHEAD + 1) { pending.shift()!(); await vi.advanceTimersByTimeAsync(0); }
+      // The last two answer frames are in flight: speculation may start, two at a time.
+      expect(prepared.slice(0, COMPAT_LOOKAHEAD + 1)).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => i * frame));
+      expect(prepared.slice(COMPAT_LOOKAHEAD + 1)).toEqual([COMPAT_LOOKAHEAD + 1, COMPAT_LOOKAHEAD + 2].map(n => n * frame));
+      expect(t.lookaheadStats.maxPrefetchInFlight).toBe(COMPAT_PREFETCH_IN_FLIGHT);
+      while (pending.length) { pending.shift()!(); await vi.advanceTimersByTimeAsync(0); }
+      // Never past the prefetch horizon, and each frame once.
+      expect(Math.max(...prepared)).toBe(COMPAT_PREFETCH * frame);
+      expect(new Set(prepared.filter(time => time > COMPAT_LOOKAHEAD * frame)).size).toBe(prepared.filter(time => time > COMPAT_LOOKAHEAD * frame).length);
+      // Speculative preparations never run the wrapper.
+      expect(Math.max(...answered)).toBe(COMPAT_LOOKAHEAD * frame);
+      // The clock moves on: the answer horizon catches up through the prepared frames.
+      state.time = 4 * frame;
+      t.presentedWhilePlaying();
+      await vi.advanceTimersByTimeAsync(0);
+      while (pending.length) { pending.shift()!(); await vi.advanceTimersByTimeAsync(0); }
+      expect(answered).toContain((4 + COMPAT_LOOKAHEAD) * frame);
+    } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('prepares nothing speculatively while paused', async () => {
+    vi.useFakeTimers();
+    const { t, session } = rig(false);
+    const prepared: number[] = [];
+    t.answerCompat('rasterOverride', () => ({ kind: 'native' }), async n => { prepared.push(n.time); });
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(Math.max(...prepared)).toBe(COMPAT_LOOKAHEAD * frame);
+      expect(t.lookaheadStats.prefetched).toBe(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
   });
 
   it('keeps a nested composition time offset while following the open clock', () => {

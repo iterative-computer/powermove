@@ -220,8 +220,19 @@ export const COMPAT_LOOKAHEAD = 6;
 const LOOKAHEAD_BUDGET_MS = 6;
 const LOOKAHEAD_MAX_ANSWERS = 16;
 const LOOKAHEAD_POLL_MS = 4;
+/** Base-raster preparations for the answer horizon in flight at once. */
+export const COMPAT_PREPARE_IN_FLIGHT = 2;
+/** Frames ahead of the clock whose base pixels are prepared speculatively,
+ *  without running the wrapper, once every layer's answer horizon is
+ *  answered or in flight. A base that changes every frame (an animated
+ *  size, a keyed text) costs one asynchronous engine raster per frame, and
+ *  under CPU load single rasters take up to five frames: the extra frames
+ *  of prepared pixels absorb those stalls instead of the presented frames. */
+export const COMPAT_PREFETCH = 15;
+/** Speculative base preparations in flight at once (beyond the answer horizon's). */
+export const COMPAT_PREFETCH_IN_FLIGHT = 2;
 
-type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; revision: number | null; clockCursor: number | null };
+type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null };
 
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
 
@@ -323,6 +334,7 @@ export class EngineRenderTransport {
   private readonly answerers = new Map<CompatSource, CompatAnswerer>();
   private readonly preparers = new Map<CompatSource, (need: CompatNeed, revision: number) => Promise<void>>();
   private aheadInFlight = 0;
+  private prefetchInFlight = 0;
   /** Needs answered with `reuse`, so a repeated ask gets pixels instead
    *  (the engine dropped that raster meanwhile). */
   private readonly reused = new Set<string>();
@@ -334,7 +346,7 @@ export class EngineRenderTransport {
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private aheadTurn = 0;
   private pumpingAhead = false;
-  readonly lookaheadStats = { answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, inFlight: 0, maxInFlight: 0, obsolete: 0, slowestAnswerMs: 0, answerMs: 0, recentAnswers: [] as { time: number; ms: number }[], recent: [] as number[] };
+  readonly lookaheadStats = { prefetched: 0, maxPrefetchInFlight: 0, answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, inFlight: 0, maxInFlight: 0, obsolete: 0, slowestAnswerMs: 0, answerMs: 0, recentAnswers: [] as { time: number; ms: number }[], recent: [] as number[] };
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
   /** UI snapshots (thumbnails, library cards, posters, the project thumbnail). */
@@ -453,7 +465,7 @@ export class EngineRenderTransport {
           ? clockCursor : entry.cursor + (entry.clockCursor === null ? 0 : clockCursor - entry.clockCursor);
         entry.clockCursor = clockCursor;
         if (revision !== entry.revision || Math.sign(step) !== Math.sign(entry.step)
-          || Math.sign(step) * (cursor - entry.cursor) < 0) entry.sent.clear();
+          || Math.sign(step) * (cursor - entry.cursor) < 0) { entry.sent.clear(); entry.prefetched.clear(); }
         if (Math.sign(step) * (cursor - entry.posted) > Math.abs(step)) this.lookaheadStats.recoveries++;
         entry.revision = revision;
         entry.step = step;
@@ -461,6 +473,10 @@ export class EngineRenderTransport {
         for (const time of entry.sent) {
           const distance = Math.sign(step) * (time - cursor);
           if (distance < -Math.abs(step) || distance > COMPAT_LOOKAHEAD * Math.abs(step)) entry.sent.delete(time);
+        }
+        for (const time of entry.prefetched) {
+          const distance = Math.sign(step) * (time - cursor);
+          if (distance < -Math.abs(step) || distance > COMPAT_PREFETCH * Math.abs(step)) entry.prefetched.delete(time);
         }
         return step !== 0;
       });
@@ -475,7 +491,7 @@ export class EngineRenderTransport {
           pending++;
           if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
           const prepare = this.preparers.get(entry.need.source);
-          if (prepare && this.aheadInFlight >= 2) continue;
+          if (prepare && this.aheadInFlight >= COMPAT_PREPARE_IN_FLIGHT) continue;
           done++;
           if (prepare) {
             this.prepareAhead(entry, time, revision ?? 0, prepare, warm, warmUntil);
@@ -490,6 +506,20 @@ export class EngineRenderTransport {
           }
         }
       }
+      // Speculative base pixels past the answer horizon, never ahead of it:
+      // only while no layer's nearer frame is still waiting to start.
+      if (pending === 0 && clock) {
+        for (let offset = COMPAT_LOOKAHEAD + 1; offset <= COMPAT_PREFETCH && this.prefetchInFlight < COMPAT_PREFETCH_IN_FLIGHT; offset++) {
+          for (const entry of entries) {
+            if (this.prefetchInFlight >= COMPAT_PREFETCH_IN_FLIGHT) break;
+            const prepare = this.preparers.get(entry.need.source);
+            const time = entry.cursor + offset * entry.step;
+            if (!prepare || time < 0 || entry.prefetched.has(time)) continue;
+            entry.prefetched.add(time);
+            this.prefetchAhead(entry.need, time, revision ?? 0, prepare);
+          }
+        }
+      }
       this.aheadTurn++;
       this.lookaheadStats.pending = pending;
       this.lookaheadStats.maxPending = Math.max(this.lookaheadStats.maxPending, pending);
@@ -499,6 +529,19 @@ export class EngineRenderTransport {
 
   playbackStarted(): void {
     this.presentedWhilePlaying();
+  }
+
+  /** Prepares one frame's base pixels ahead; the answer horizon reaching
+   *  that frame finds them ready (raster-compat `prepare`). A failure is
+   *  reported when that frame's own preparation repeats it. */
+  private prefetchAhead(need: CompatNeed, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>): void {
+    this.prefetchInFlight++;
+    this.lookaheadStats.prefetched++;
+    this.lookaheadStats.maxPrefetchInFlight = Math.max(this.lookaheadStats.maxPrefetchInFlight, this.prefetchInFlight);
+    void Promise.resolve().then(() => prepare({ ...need, time }, revision)).catch(() => {}).finally(() => {
+      this.prefetchInFlight--;
+      if (this.options.playing?.()) this.presentedWhilePlaying();
+    });
   }
 
   private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>, warm = false, warmUntil = Infinity): void {
@@ -564,7 +607,7 @@ export class EngineRenderTransport {
     const step = frame * (clock && clock.rate < 0 ? -1 : 1);
     const entry: AheadEntry = same ? previous : {
       need, session, step, cursor: need.time, posted: need.time,
-      sent: new Set<number>(), pending: new Set<number>(), revision: this.options.revision(), clockCursor: null
+      sent: new Set<number>(), pending: new Set<number>(), prefetched: new Set<number>(), revision: this.options.revision(), clockCursor: null
     };
     entry.need = need;
     // Never infer reverse playback from a late need. Only the transport's
