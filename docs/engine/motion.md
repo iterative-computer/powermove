@@ -117,11 +117,28 @@ through VideoToolbox; MP4 export with motion blur on; 2026-10-18 for all three):
 - the paused viewer shows the right frame with blur on (frames 3, 8, 15: levels
   50, 100, 170, the same as without blur).
 
-So today's preview and export disagree, and the engine follows the preview.
-This is an appendix A item for the plan owner, not a parity target the engine
-should reproduce. The side-by-sides of the corpus capture against the engine
-and the export levels are kept with the lane's evidence, outside the
-repository, for Jude's decision.
+**COMPCLOSE-1, owner decision 2026-10-19:** this stale upload is a legacy bug;
+the engine keeps drawing the correct center frame. The original captures
+remain unchanged as evidence of the bug, including the frame-0 timecodes and
+the 255-CV difference from the center frame. Outside the isolated capture the
+stale upload can depend on history; the engine does not emulate that history.
+
+For only `motion/blur-video` at t=0.5 and t=1.2, the general corpus accepts an
+explicit `referenceSubstitution` annotation naming COMPCLOSE-1. Its corrected
+reference comes from today's legacy compositor after `prepareFrame(t)`,
+`GL.dropTextures()`, and a sharp center-time priming pass through its own
+`texFor` upload path. Invalidation alone can leave an empty source while the
+first shutter-sample seek is pending. The subsequent blur reads the primed
+center-time video pixels. The project, transform sampling, shutter, shaders,
+and 16-sample blur stay unchanged. The capture records the actual video-frame
+timestamps at each upload and requires a second identical capture. Both the
+original and corrected PNGs, hashes, reason, owner decision, and evidence paths
+remain in the corpus metadata outside Git. Every evidence file lives inside the
+capture (`references/COMPCLOSE-1/` and its `evidence/` folder), so the gate
+survives a cleared `/tmp`; both verifiers reject evidence outside the capture. No native pixels enter the recorder.
+Every substitution is logged, and any other project, time, or decision fails.
+The normal video bound remains 2 CV on patch interiors. The motion lane's
+historical stale-frame diagnostic continues reading the original PNG.
 
 ## 2.5D
 
@@ -384,6 +401,57 @@ unchanged, continuous precomp rasterization, level 2 routing.
   cases), and `apps/desktop/e2e/legacy-blurred-video-export.spec.ts` (today's
   export and preview of blurred video, VP9, H.264, and ProRes sources).
 
+## Video corpus history (2026-10-21)
+
+A first-parent bisect identifies `e9a809393` (compclose) as the merge that
+exposed the five video failures in the general corpus test. It added the
+`motion-*` captures to the default selection. Its parent, `fa05a261b`, does
+not select these projects by default; selecting the same motion capture
+explicitly reproduces all five failures on that parent too. Both release
+comparisons report 255 CV at the two `motion/blur-video` samples, 3 CV at
+`retime/speed` t=2.9, and 7/9 CV at `space25d/precomps` t=1.5/2.6. The original
+motion notes already describe them. This is a coverage expansion, with no
+previously passing native render established for those samples.
+
+A fresh hidden capture from app 1.1.3 / Electron 44 on the same machine
+matches all ten stored opaque frames pixel for pixel, including both blurred
+video samples, so the original references faithfully record today's app.
+They were never replaced with native output. For the two blurred-video
+samples only, COMPCLOSE-1 (above) adds a second reference recaptured from
+today's legacy blur with the correct center frame uploaded; the originals
+stay as the record of the stale-upload bug.
+
+The clean integration baseline (`8d772dac8`, normal thin-LTO release profile)
+compares 354 frames and fails exactly those five. The historical release
+comparisons disable LTO because they predate the CrabbyAvif link fix
+(`release-build.md`); the pixel bounds stay unchanged.
+
+The precomp chroma residuals came from the source upload, not frame selection:
+ordinary opaque level 1 video needs Chromium's centered bilinear chroma
+reconstruction and RGBA8 source storage before layer filtering. Native float
+sources keep their existing reconstruction. The last retiming sample also
+used the wrong output kind in the corpus harness: the capture's `prepareFrame`
+uses final-output padding, while `RenderRequest::sized` defaults to viewer
+padding. The harness now explicitly requests `VideoEnd::Final`; production
+viewer and final-output policies are unchanged. See `pm-render.md` for the
+source conversion and regression coverage.
+
+Before the COMPCLOSE-1 reference correction, the normal thin-LTO release run
+compared the same 354 frames:
+352 meet their existing class, with only the two blurred-video samples still
+at 255 CV. All eight retiming/precomp samples have zero interior difference.
+The four source-storage GPU regressions and seven color tests pass. No
+reference, bound, or project selection was changed.
+
+With the two explicit COMPCLOSE-1 annotations, the normal thin-LTO release
+corpus passes all 354 frames. Corrected legacy blur versus native rendering
+has zero interior difference over 107,904 pixels at t=0.5 and 107,858 at t=1.2;
+the full-frame maxima are 1 CV and 0 CV respectively. Both corrected app
+captures repeat exactly and their source uploads have the expected center
+timestamps (500000/500000 µs and 1200000/1166667 µs). The other 352 references
+and every comparison bound stay unchanged. The original stale PNGs still
+verify against their original hashes.
+
 ## Gaps
 
 - The cached preview (section 8, "used by every path including … cached preview")
@@ -398,11 +466,9 @@ unchanged, continuous precomp rasterization, level 2 routing.
   at 1.75×) up to 2 pixels below the text box that `bounds` and `pick` measure
   with level 1 metrics, so those pixels do not select the layer (new content,
   no legacy reference): the text lane's.
-- Video decode differences at saturated chroma edges (up to 9 CV at a few pixels)
-  belong to the media lane's decode path; an H.264 file tagged only with a BT.709
+- An H.264 file tagged only with a BT.709
   matrix (no primaries or transfer) is read with BT.601 coefficients by Chromium and
   BT.709 by the engine (up to 23 CV on saturated red), an interpretation question
   for the color lane (the corpus videos are untagged).
 - WebM exports have no `MotionBlurKind`; the export lane passes `AlphaExport` (20)
   for them.
-- Blurred video: appendix A decision (above).
