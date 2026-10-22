@@ -3605,3 +3605,51 @@ run's newer stopped end sample. The hold now requires the pre-Play epoch;
 protocol regressions include stopped seek replies, unpolled forward and
 reverse ends, PlayAround and moving-clock rate changes. The original pure
 counterexample still passes. This correction does not attribute the V36 Pause.
+
+
+The corrected transport and presentation tests passed 26/26; renderer checking
+reported zero errors and one existing warning. A before/after pure-module
+check also reproduces the old unpolled forward/reverse end freeze and verifies
+6 s / 0 s end positions with the epoch guard. Disabled audible scrubbing now
+enqueues its exact seek through the same FIFO receipt path as ordinary seeks;
+the updated ordered-error/shutdown regression passed. The temporary-root
+guard checks the process table if Darwin denies a reaped group probe; it
+still rejects an unverified live group. All five cleanup regressions passed.
+
+V37 plain and stressed playback smokes each finished 39/40. All four distinct
+cold starts in each run exceeded the enforced 10.667 ms atomic first-512
+bound: plain 12.561/13.272/13.910/13.275 ms, stressed
+12.283/12.783/12.481/11.800 ms. The profiled inputs were preloaded, with no
+source publications during those starts. The older frozen V29 binary also
+missed four times on the current host (13.071/12.226/13.484/11.884 ms).
+These remain raw failures, with no noise dismissal. Fresh V39 checks later
+passed all four plain starts at 6.447–7.376 ms and stressed starts at
+6.699–7.349 ms, including exact 8192-frame PCM and zero start/RT counters.
+
+V39's seven-row device diagnostic remains unqualified. On MacBook Pro
+Speakers at 48 kHz with 64-frame callbacks, distinct unprepared seek measured
+35.421/39.629/41.414 ms against today's 29.999/32.400/32.600; distinct speed
+edits measured 33.251/35.015/36.256 against 30.413/31.613/32.792. Shared seek
+passed at 26.784/28.142/28.541 against 29.410/32.606/32.708. Shared speed's
+load-valid second pair passed at 29.963/31.616/31.660 against
+30.000/32.192/32.599; its first pair was repeated only for the predefined
+sharp load change, retaining its positive p95/max differences. All 204
+native timed starts, including discarded-load attempts, reported zero program
+underruns, omitted prefix, spread, A3 fires and RT errors. The 60 s loop pair
+failed device binding: today's default changed from speakers to AirPods and
+reported one underrun lasting 0.598062 s. The native speaker loop reported
+zero window underruns, starvation and overloads; its lifetime underrun counter
+was 1142. Every owned temporary tree was empty and removed, and final source
+and artifact hashes matched. This does not replace final qualification.
+
+The matched distinct-start profiles show roughly 70 ms aggregate worker CPU
+across 16 voices, while the last voice spends about 3.3–3.6 ms throttled.
+At the 64-frame period, the generic 500 microsecond admission reserve leaves
+only about 0.767 ms of the worker's 1.267 ms computation allowance usable.
+The next candidate reserves 250 microseconds only at stretch-process entry
+and its internal checkpointed steps. Profiled process spans peaked below
+166 microseconds in these captures; that observation is not a worst-case
+proof. Unknown work, setup, seek and shuttle retain their existing reserves,
+including the explicit 1 ms initialization reserve. Callback period,
+computation and constraint limits, overrun assertions, canonical preroll and
+head sizes are unchanged. Runtime and paired verification remain required.

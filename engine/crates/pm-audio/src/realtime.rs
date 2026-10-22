@@ -2098,18 +2098,27 @@ mod mac {
         })
     }
 
+    const STRETCH_PROCESS_RESERVE_NS: u64 = 250_000;
+
+    fn phase_reserve(phase: super::RealtimePhase) -> Option<u64> {
+        // The short, wall-gated stretch processing steps need less headroom
+        // than an unknown unit. Setup, seek, and shuttle retain their larger
+        // existing reservations.
+        (phase == super::RealtimePhase::StretchProcess).then_some(STRETCH_PROCESS_RESERVE_NS)
+    }
+
     pub(super) fn checkpoint_dsp_step() {
         // Wall elapsed is an upper bound on accrued thread CPU. Do not read
         // CLOCK_THREAD_CPUTIME_ID for each short vendor DSP step.
-        let id = BUDGET.with(|slot| {
+        let checkpoint = BUDGET.with(|slot| {
             let slot = slot.borrow();
             let budget = slot.as_ref().filter(|budget| budget.depth > 0)?;
             let interval_ns = (budget.period_ns / 16).clamp(1, 100_000);
             (budget.last_checkpoint_wall.elapsed().as_nanos() >= interval_ns as u128)
-                .then_some(budget.id)
+                .then_some((budget.id, phase_reserve(budget.phase)))
         });
-        if let Some(id) = id {
-            checkpoint_with_reserve(id, None, None, true);
+        if let Some((id, reserve)) = checkpoint {
+            checkpoint_with_reserve(id, reserve, None, true);
         }
     }
 
@@ -2463,7 +2472,7 @@ mod mac {
         BUDGET.with(|slot| {
             let id = slot.borrow().as_ref().map(|b| b.id);
             if let Some(id) = id {
-                checkpoint_with_reserve(id, None, Some(phase), false);
+                checkpoint_with_reserve(id, phase_reserve(phase), Some(phase), false);
             }
         });
     }
@@ -3386,6 +3395,52 @@ mod mac {
             assert!(reservation_requires_next_period(
                 carried_cpu_ns,
                 budget.computation_ns,
+                Some(1_000_000),
+            ));
+        }
+
+        #[test]
+        fn short_stretch_process_reserve_does_not_change_other_phases() {
+            use crate::realtime::RealtimePhase;
+
+            assert_eq!(
+                phase_reserve(RealtimePhase::StretchProcess),
+                Some(STRETCH_PROCESS_RESERVE_NS)
+            );
+            // The phase ID table includes setup, seek, shuttle, and unknown
+            // work; none of them may inherit the shorter process admission.
+            for id in 0..=u8::MAX {
+                let phase = RealtimePhase::from_id(id);
+                if phase != RealtimePhase::StretchProcess {
+                    assert_eq!(phase_reserve(phase), None, "{phase:?}");
+                }
+            }
+
+            const COMPUTATION_NS: u64 = 1_266_666; // 64 frames at 48 kHz, 95%.
+            assert!(!reservation_requires_next_period(
+                766_665,
+                COMPUTATION_NS,
+                phase_reserve(RealtimePhase::Unknown),
+            ));
+            assert!(reservation_requires_next_period(
+                766_666,
+                COMPUTATION_NS,
+                phase_reserve(RealtimePhase::Unknown),
+            ));
+            assert!(!reservation_requires_next_period(
+                1_016_665,
+                COMPUTATION_NS,
+                phase_reserve(RealtimePhase::StretchProcess),
+            ));
+            assert!(reservation_requires_next_period(
+                1_016_666,
+                COMPUTATION_NS,
+                phase_reserve(RealtimePhase::StretchProcess),
+            ));
+            // Constructor/reset admission still uses its explicit 1 ms.
+            assert!(reservation_requires_next_period(
+                266_666,
+                COMPUTATION_NS,
                 Some(1_000_000),
             ));
         }
