@@ -664,9 +664,26 @@ pub struct CompatNative {
     pub crop: Option<crate::common::PixelRect>,
 }
 
+/// A raster already uploaded under `id` answers a need at another frame,
+/// revision or density ([`CompatMessage::Reuse`], in an
+/// [`CompatMessage::Answers`] batch).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct CompatReuse {
+    pub id: CompatKey,
+    pub scale: f64,
+    pub revision: Revision,
+    /// The crop window of the need it answers ([`CompatNeed::crop`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub crop: Option<crate::common::PixelRect>,
+}
+
 /// Renderer ↔ interactive engine (session-bound, the viewer's port):
-/// `Pixels`, `Forget`, `Producers`, `Native`, `Reuse`, `SvgPixels`, and
-/// `SvgFailed` go to the engine, `Needs` and `SvgRequests` to the renderer.
+/// `Pixels`, `Forget`, `Producers`, `Native`, `Reuse`, `Answers`,
+/// `SvgPixels`, and `SvgFailed` go to the engine, `Needs` and
+/// `SvgRequests` to the renderer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
@@ -703,6 +720,16 @@ pub enum CompatMessage {
         #[cfg_attr(feature = "ts", ts(optional))]
         crop: Option<crate::common::PixelRect>,
     },
+    /// Renderer → engine: the pass-throughs and reuses one turn of the
+    /// renderer answered, in one message (each as [`CompatMessage::Native`]
+    /// and [`CompatMessage::Reuse`] would be, in order: natives first).
+    /// A large project's frame names hundreds of layers; one message per
+    /// answer cost the renderer's main thread and the engine's render
+    /// thread a turn each.
+    Answers {
+        natives: Vec<CompatNative>,
+        reuses: Vec<CompatReuse>,
+    },
     /// Engine → renderer: what a viewer frame at `revision` needs before it
     /// can be drawn. The renderer answers each need with `Pixels`,
     /// `Native`, or `Reuse`; the engine draws the frame once every answer
@@ -730,6 +757,8 @@ pub enum CompatMessage {
 
 /// Most needs in one [`CompatMessage::Needs`].
 pub const MAX_COMPAT_NEEDS: usize = 256;
+/// Most answers (natives and reuses) in one [`CompatMessage::Answers`].
+pub const MAX_COMPAT_ANSWERS: usize = 4096;
 /// Most producers a session names.
 pub const MAX_COMPAT_SOURCES: usize = 4;
 
@@ -799,6 +828,26 @@ impl Validate for CompatMessage {
                 id.validate()?;
                 valid_crop(*crop)?;
                 valid_scale(*scale)
+            }
+            CompatMessage::Answers { natives, reuses } => {
+                ensure(
+                    natives.len() + reuses.len() <= MAX_COMPAT_ANSWERS,
+                    C,
+                    || format!("{} compatibility answers", natives.len() + reuses.len()),
+                )?;
+                for n in natives {
+                    ensure(n.composition.is_valid() && n.layer.is_valid(), C, || {
+                        "invalid compatibility layer".into()
+                    })?;
+                    valid_crop(n.crop)?;
+                    valid_scale(n.scale)?;
+                }
+                for r in reuses {
+                    r.id.validate()?;
+                    valid_crop(r.crop)?;
+                    valid_scale(r.scale)?;
+                }
+                Ok(())
             }
             CompatMessage::Needs { needs, .. } => {
                 ensure(

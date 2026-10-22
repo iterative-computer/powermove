@@ -98,7 +98,19 @@ struct Answer {
     revision: Revision,
     /// The raster drawn; `None`: the layer passed through.
     raster: Option<CompatKey>,
+    /// When it was stored (the store's answer count): the oldest go first
+    /// once [`MAX_ANSWERS`] are held.
+    serial: u64,
 }
+
+/// Most answers (a layer at a frame, density and crop) one engine keeps.
+/// Every frame of a playing project adds one per layer its producer draws
+/// (hundreds a frame on a large project); the oldest half goes when the
+/// bound is reached, and a frame that needs one of them again asks again.
+pub const MAX_ANSWERS: usize = 1 << 16;
+/// Most outstanding asks kept; past it, asks older than [`ASK_AGAIN`]
+/// (asked again by any frame that still needs them) are forgotten.
+pub const MAX_ASKED: usize = 1 << 16;
 
 /// How long an ask waits before it is sent again (a renderer that missed
 /// it: a reload, a closed panel).
@@ -195,6 +207,8 @@ pub struct CompatStore {
     asked: HashMap<AnswerId, (Revision, Instant)>,
     /// The rasters as the renderer draws them, made once per raster.
     drawn: HashMap<(Key, CompatKey), Arc<pm_render::compat::CompatRaster>>,
+    /// Answers stored so far ([`Answer::serial`]).
+    serial: u64,
     /// The latest complete raster per producer key of a layer (any frame).
     by_key: HashMap<(Key, CompositionId, LayerId, CompatSource, String), CompatKey>,
 }
@@ -246,6 +260,7 @@ impl CompatStore {
             answers: HashMap::new(),
             asked: HashMap::new(),
             drawn: HashMap::new(),
+            serial: 0,
             by_key: HashMap::new(),
         }
     }
@@ -303,13 +318,7 @@ impl CompatStore {
                     n.crop,
                 );
                 self.asked.remove(&id);
-                self.answers.insert(
-                    id,
-                    Answer {
-                        revision: n.revision,
-                        raster: None,
-                    },
-                );
+                self.remember(id, n.revision, None);
                 Applied::Answered
             }
             CompatMessage::Reuse {
@@ -344,14 +353,28 @@ impl CompatStore {
                     return Applied::Evicted;
                 };
                 self.asked.remove(&answer);
-                self.answers.insert(
-                    answer,
-                    Answer {
-                        revision,
-                        raster: Some(id),
-                    },
-                );
+                self.remember(answer, revision, Some(id));
                 Applied::Answered
+            }
+            CompatMessage::Answers { natives, reuses } => {
+                // Each as its own message would be; an eviction among them
+                // makes the waiting frame ask again at once.
+                let mut applied = Applied::Ignored;
+                let natives = natives.into_iter().map(CompatMessage::Native);
+                let reuses = reuses.into_iter().map(|r| CompatMessage::Reuse {
+                    id: r.id,
+                    scale: r.scale,
+                    revision: r.revision,
+                    crop: r.crop,
+                });
+                for message in natives.chain(reuses) {
+                    match self.apply(key, message) {
+                        Applied::Evicted => applied = Applied::Evicted,
+                        Applied::Answered if applied != Applied::Evicted => applied = Applied::Answered,
+                        _ => {}
+                    }
+                }
+                applied
             }
             // Needs travel the other way.
             CompatMessage::Needs { .. } => Applied::Ignored,
@@ -440,13 +463,7 @@ impl CompatStore {
                     band.crop,
                 );
                 self.asked.remove(&answer);
-                self.answers.insert(
-                    answer,
-                    Answer {
-                        revision: raster.revision,
-                        raster: Some(band.id.clone()),
-                    },
-                );
+                self.remember(answer, raster.revision, Some(band.id.clone()));
                 self.drawn.remove(&id);
                 self.by_key.insert(
                     (
@@ -468,6 +485,18 @@ impl CompatStore {
                 }
                 Applied::Complete
             }
+        }
+    }
+
+    /// Stores an answer, keeping at most [`MAX_ANSWERS`] (the oldest half
+    /// goes when the bound is reached).
+    fn remember(&mut self, id: AnswerId, revision: Revision, raster: Option<CompatKey>) {
+        self.serial += 1;
+        let serial = self.serial;
+        self.answers.insert(id, Answer { revision, raster, serial });
+        if self.answers.len() > MAX_ANSWERS {
+            let keep_after = serial.saturating_sub((MAX_ANSWERS / 2) as u64);
+            self.answers.retain(|_, a| a.serial > keep_after);
         }
     }
 
@@ -656,7 +685,7 @@ impl CompatStore {
         needs: Vec<CompatNeed>,
         now: Instant,
     ) -> Vec<CompatNeed> {
-        needs
+        let fresh = needs
             .into_iter()
             .filter(|n| {
                 let id = answer_id(
@@ -676,7 +705,14 @@ impl CompatStore {
                     }
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if self.asked.len() > MAX_ASKED {
+            // Asks the renderer skipped (frames behind its clock): any frame
+            // that still needs one asks it again.
+            self.asked
+                .retain(|_, (_, at)| now.duration_since(*at) < ASK_AGAIN);
+        }
+        fresh
     }
 
     /// A need's name in a snapshot job's `waiting_for` (`compat:` and the
@@ -990,6 +1026,132 @@ mod tests {
             store.apply(session(2), reuse(later(23_520_000), 1.0)),
             Applied::Evicted
         );
+    }
+
+    #[test]
+    fn one_batch_of_answers_answers_as_its_messages_would() {
+        let mut store = CompatStore::default();
+        let r3 = Revision::new(3).unwrap();
+        let need = |layer: &str| CompatNeed {
+            composition: "c".into(),
+            layer: layer.into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            scale: 1.0,
+            crop: None,
+        };
+        let native = |layer: &str| pm_protocol::snapshot::CompatNative {
+            composition: "c".into(),
+            layer: layer.into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            scale: 1.0,
+            revision: r3,
+            crop: None,
+        };
+        store.apply(session(1), band(id("K", "k"), 1, 1, 0, 1, 1));
+        let needs = vec![need("A"), need("B"), need("K")];
+        let reuse = pm_protocol::snapshot::CompatReuse {
+            id: id("K", "k"),
+            scale: 1.0,
+            revision: r3,
+            crop: None,
+        };
+        assert_eq!(
+            store.apply(
+                session(1),
+                CompatMessage::Answers {
+                    natives: vec![native("A"), native("B")],
+                    reuses: vec![reuse.clone()],
+                }
+            ),
+            Applied::Answered
+        );
+        assert!(store.all_answered(session(1), r3, &needs));
+        // A reuse of a raster that is gone makes the batch ask again at once.
+        let gone = pm_protocol::snapshot::CompatReuse {
+            id: id("Z", "z"),
+            ..reuse
+        };
+        let applied = store.apply(
+            session(1),
+            CompatMessage::Answers {
+                natives: vec![native("C")],
+                reuses: vec![gone],
+            },
+        );
+        assert_eq!(applied, Applied::Evicted);
+        assert!(applied.unblocks());
+        assert_eq!(
+            store.apply(
+                session(1),
+                CompatMessage::Answers {
+                    natives: vec![],
+                    reuses: vec![],
+                }
+            ),
+            Applied::Ignored
+        );
+    }
+
+    #[test]
+    fn answers_and_asks_stay_bounded_while_a_project_plays() {
+        let mut store = CompatStore::default();
+        let r3 = Revision::new(3).unwrap();
+        let now = Instant::now();
+        let at = |frame: i64| Ticks::new(frame * 29_400_000).unwrap();
+        // Many frames of one layer, as a long playback answers them.
+        for frame in 0..(MAX_ANSWERS as i64 + 10) {
+            store.apply(
+                session(1),
+                CompatMessage::Native(pm_protocol::snapshot::CompatNative {
+                    composition: "c".into(),
+                    layer: "L".into(),
+                    time: at(frame),
+                    source: CompatSource::RasterOverride,
+                    scale: 1.0,
+                    revision: r3,
+                    crop: None,
+                }),
+            );
+        }
+        let (answers, _) = store.answer_counts();
+        assert!(answers <= MAX_ANSWERS, "{answers} answers kept");
+        // The newest frames' answers are the ones kept.
+        let newest = CompatNeed {
+            composition: "c".into(),
+            layer: "L".into(),
+            time: at(MAX_ANSWERS as i64 + 9),
+            source: CompatSource::RasterOverride,
+            scale: 1.0,
+            crop: None,
+        };
+        assert!(store.all_answered(session(1), r3, &[newest]));
+        // Asks the renderer never answered (frames it skipped) are bounded too.
+        let old = now;
+        for frame in 0..(MAX_ASKED as i64 + 1) {
+            let need = CompatNeed {
+                composition: "c".into(),
+                layer: "M".into(),
+                time: at(frame),
+                source: CompatSource::RasterOverride,
+                scale: 1.0,
+                crop: None,
+            };
+            store.to_ask(session(1), r3, vec![need], old);
+        }
+        let later = old + ASK_AGAIN + std::time::Duration::from_millis(1);
+        let need = CompatNeed {
+            composition: "c".into(),
+            layer: "M".into(),
+            time: at(MAX_ASKED as i64 + 2),
+            source: CompatSource::RasterOverride,
+            scale: 1.0,
+            crop: None,
+        };
+        assert_eq!(store.to_ask(session(1), r3, vec![need], later).len(), 1);
+        let (_, asked) = store.answer_counts();
+        assert!(asked < 16, "{asked} stale asks kept");
     }
 
     #[test]

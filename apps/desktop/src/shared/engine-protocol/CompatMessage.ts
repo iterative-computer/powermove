@@ -3,6 +3,7 @@ import type { CompatKey } from "./CompatKey";
 import type { CompatNative } from "./CompatNative";
 import type { CompatNeed } from "./CompatNeed";
 import type { CompatPixels } from "./CompatPixels";
+import type { CompatReuse } from "./CompatReuse";
 import type { CompatSource } from "./CompatSource";
 import type { CompositionId } from "./CompositionId";
 import type { LayerId } from "./LayerId";
@@ -14,11 +15,12 @@ import type { SvgRasterRequest } from "./SvgRasterRequest";
 
 /**
  * Renderer ↔ interactive engine (session-bound, the viewer's port):
- * `Pixels`, `Forget`, `Producers`, `Native`, `Reuse`, `SvgPixels`, and
- * `SvgFailed` go to the engine, `Needs` and `SvgRequests` to the renderer.
+ * `Pixels`, `Forget`, `Producers`, `Native`, `Reuse`, `Answers`,
+ * `SvgPixels`, and `SvgFailed` go to the engine, `Needs` and
+ * `SvgRequests` to the renderer.
  */
 export type CompatMessage = { "compat": "pixels" } & CompatPixels | { "compat": "forget", composition: CompositionId, layer: LayerId, } | { "compat": "producers", sources: Array<CompatSource>, } | { "compat": "native" } & CompatNative | { "compat": "reuse", id: CompatKey, scale: number, revision: Revision, 
 /**
  * The crop window of the need it answers ([`CompatNeed::crop`]).
  */
-crop?: PixelRect, } | { "compat": "needs", revision: Revision, needs: Array<CompatNeed>, } | { "compat": "svgRequests", requests: Array<SvgRasterRequest>, } | { "compat": "svgPixels" } & SvgRasterPixels | { "compat": "svgFailed", key: SvgRasterKey, reason: string, message: string, };
+crop?: PixelRect, } | { "compat": "answers", natives: Array<CompatNative>, reuses: Array<CompatReuse>, } | { "compat": "needs", revision: Revision, needs: Array<CompatNeed>, } | { "compat": "svgRequests", requests: Array<SvgRasterRequest>, } | { "compat": "svgPixels" } & SvgRasterPixels | { "compat": "svgFailed", key: SvgRasterKey, reason: string, message: string, };

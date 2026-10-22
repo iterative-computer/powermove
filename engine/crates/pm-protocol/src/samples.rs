@@ -1417,6 +1417,29 @@ pub fn events() -> Vec<Envelope> {
             revision: rev(43),
             crop: Some(crate::common::PixelRect { x: 256, y: 0, width: 512, height: 256 }),
         })),
+        event(Event::Compat(crate::snapshot::CompatMessage::Answers {
+            natives: vec![crate::snapshot::CompatNative {
+                composition: "comp-1".into(),
+                layer: "title".into(),
+                time: ticks(735_000_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                scale: 2.0,
+                revision: rev(43),
+                crop: None,
+            }],
+            reuses: vec![crate::snapshot::CompatReuse {
+                id: crate::snapshot::CompatKey {
+                    composition: "comp-1".into(),
+                    layer: "title".into(),
+                    time: ticks(705_600_000),
+                    source: crate::snapshot::CompatSource::RasterOverride,
+                    key: "[\"typewriter-3\",\"title\",7]".into(),
+                },
+                scale: 2.0,
+                revision: rev(43),
+                crop: Some(crate::common::PixelRect { x: 256, y: 0, width: 512, height: 256 }),
+            }],
+        })),
         event(Event::Compat(crate::snapshot::CompatMessage::Needs {
             revision: rev(43),
             needs: vec![crate::snapshot::CompatNeed {
