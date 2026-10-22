@@ -75,6 +75,9 @@ export type EngineConnectionStatus = {
   hostOffsetErrorUs: number | null;
   clock: unknown;
   renderStats: RenderStats | null;
+  /** Whether the frame last emitted as `preview:presented` came from the
+   *  engine's memory cache (Render Work Area or remembered frames). */
+  presentedCached: boolean;
 };
 
 export interface EngineConnectionHandle {
@@ -190,8 +193,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     const barrier = PM.EngineDoc?.barrier;
     if (barrier) versions.note(barrier.revision, PM.animVersion?.());
   };
+  let presentedCached = false;
   const presentedEvents = new PresentedEvents(
     (frame, quality) => {
+      presentedCached = Boolean((frame as { quality?: { cached?: boolean } }).quality?.cached);
       const doc = PM.EngineDoc;
       doc?.barrier?.flush();
       if (doc?.enabled && frame.revision === doc.barrier?.revision) {
@@ -573,7 +578,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       hostOffsetUs: hostClock.offsetUs(),
       hostOffsetErrorUs: hostClock.errorUs(),
       clock: current?.clock ?? null,
-      renderStats: stats.latest
+      renderStats: stats.latest,
+      presentedCached
     }),
     dispose: () => {
       preview.dispose();

@@ -67,6 +67,25 @@ describe('native Render Work Area', () => {
       expect(f.PM.toast).not.toHaveBeenCalled();
     } finally { f.dispose(); }
   });
+  it('remembers ordinary frames within the Preview memory limit and follows its changes', () => {
+    const f = fixture();
+    let budget = 1024 * 1024;
+    f.PM.Memory = { budget: () => budget, setBudget: (_name: string, bytes: number) => { budget = bytes; return true; } };
+    f.dispose();
+    const calls: Array<[number, boolean, boolean?]> = [];
+    const session: any = { previewCache: (...args: [number, boolean, boolean?]) => calls.push(args) };
+    const dispose = installNativePreviewCache(f.PM, () => session);
+    try {
+      expect(calls).toEqual([[1024 * 1024, false, false]]);
+      f.PM.Memory.setBudget('preview', 4 * 1024 * 1024);
+      expect(calls.at(-1)).toEqual([4 * 1024 * 1024, false, false]);
+      f.PM.Memory.setBudget('preview', 0);
+      expect(calls.at(-1)).toEqual([0, false, true]);
+      f.PM.Memory.setBudget('history', 8 * 1024 * 1024);
+      expect(calls).toHaveLength(3);
+    } finally { dispose(); }
+    expect(typeof f.PM.Memory.setBudget).toBe('function');
+  });
   it('releases native memory and restores time after decode failure', async () => {
     const f = fixture();
     f.session.cacheFrame.mockRejectedValueOnce(new Error('source went offline'));
@@ -76,7 +95,8 @@ describe('native Render Work Area', () => {
       expect(f.PM.time).toBe(.5);
       expect(f.PM.Preview.count).toBe(0);
       expect(f.PM.Preview.preparing).toBe(false);
-      expect(f.calls.at(-1)).toEqual([0, false, true]);
+      // Warmed frames are evicted; the automatic remembered-frame budget stays.
+      expect(f.calls.at(-1)).toEqual([1024 * 1024, false, true]);
       expect(f.PM.toast).toHaveBeenCalledWith('source went offline', 6000);
     } finally { f.dispose(); }
   });

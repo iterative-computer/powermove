@@ -626,11 +626,23 @@ export class DocumentSession {
     this.options.connection.event({ type: 'previewCache', bytes: Math.max(0, Math.floor(bytes)), preparing, clear } as never, this.id);
   }
 
+  /** The pixels one cached frame holds: the visible composition region of
+   *  the newest frame (its overlay viewport clipped to the stage) at the
+   *  preview resolution, as the engine renders it. Before a frame arrives,
+   *  the whole stage is a conservative upper bound. */
   previewSize(): { width: number; height: number } | null {
     if (!this.lastState || this.headless) return null;
     const scale = this.lastState.resolution === 'quarter' ? .25 : this.lastState.resolution === 'half' ? .5 : 1;
-    return { width: Math.max(1, Math.ceil(this.lastState.size.width * scale)),
-      height: Math.max(1, Math.ceil(this.lastState.size.height * scale)) };
+    const stage = this.lastState.size;
+    // Resolution changes do not move the viewport (it is in stage pixels).
+    const viewport = this.lastFrame?.overlay?.viewport;
+    let width = stage.width, height = stage.height;
+    if (viewport && [viewport.x, viewport.y, viewport.width, viewport.height].every(Number.isFinite)) {
+      width = Math.min(stage.width, viewport.x + viewport.width) - Math.max(0, viewport.x);
+      height = Math.min(stage.height, viewport.y + viewport.height) - Math.max(0, viewport.y);
+    }
+    return { width: Math.max(1, Math.ceil(Math.max(0, width) * scale)),
+      height: Math.max(1, Math.ceil(Math.max(0, height) * scale)) };
   }
 
   async cacheFrame(seconds: number): Promise<FrameDescriptor> {
