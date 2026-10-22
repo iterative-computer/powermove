@@ -899,8 +899,11 @@ impl VoicePlan {
                     out.active = false;
                 }
                 tau = if self.offset.is_some() {
-                    // A linear path: `local × 1 + trim` (sourceTime).
-                    let trim = node::js_value_opt(node::member(d, "trim"));
+                    // A linear path: `local × 1 + trim` (sourceTime), with the
+                    // trim as `resolveContent` gives it: a channel (`PM.P(0)`,
+                    // how the app stores it) is evaluated, never read with
+                    // `Number(…)`, which is NaN for the channel object.
+                    let trim = field(ev, "trim")?;
                     (tau - from) * 1.0 + if trim.truthy() { trim.to_number() } else { 0.0 }
                 } else {
                     Scope::new(ev, comp, open).source_time(layer, tau, Some(retime))?

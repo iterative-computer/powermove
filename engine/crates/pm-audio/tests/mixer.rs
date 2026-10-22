@@ -293,6 +293,97 @@ fn precompositions_nest() {
     assert!((out[0][sec(0.6)] - 0.8 * 0.5).abs() < 1e-6);
 }
 
+/// The shape of today's app projects: every content field a channel object
+/// (`PM.P(v)`), as the export-encoding `automation` fixture builds them. A
+/// precomposition's static `trim` channel once reached the linear source-time
+/// map as an object (`Number({…})` is NaN), so the nested voice and the whole
+/// export mix became NaN, written as silence.
+#[test]
+fn channel_valued_precomposition_fields_mix_like_numbers() {
+    let dir = temp_dir("nest-channels");
+    let dc = dir.join("dc.wav");
+    write_wav(&dc, SR, &[vec![0.5; SR as usize * 3]]);
+    let render = |channels: bool| {
+        let v = |x: f64| {
+            if channels {
+                ch(&x.to_string())
+            } else {
+                x.to_string()
+            }
+        };
+        let inner = comp(
+            30.0,
+            1.0,
+            &[audio(
+                "I",
+                "dc",
+                0.0,
+                1.0,
+                &format!(
+                    r#","gain":{},"trim":{},"speed":{},"fadeIn":{},"fadeOut":{}"#,
+                    v(0.35),
+                    v(0.1),
+                    v(1.0),
+                    v(0.08),
+                    v(0.1)
+                ),
+                "",
+            )],
+            // Today reads a composition's own level with `Number(…)`: a
+            // channel object there is unity, in both forms.
+            &format!(
+                r#","audioGain":{}"#,
+                if channels { ch("0.7") } else { "1".into() }
+            ),
+        );
+        let gain = keys(&[(0.0, 0.25), (0.4, 0.9), (0.85, 0.4)]);
+        let layers = [
+            audio(
+                "A",
+                "dc",
+                0.1,
+                0.85,
+                &format!(
+                    r#","gain":{gain},"trim":{},"fadeIn":{},"fadeOut":{}"#,
+                    v(0.05),
+                    v(0.14),
+                    v(0.2)
+                ),
+                "",
+            ),
+            layer(
+                "P",
+                "precomp",
+                0.0,
+                1.0,
+                &format!(
+                    r#"{{"comp":"X","audioGain":{},"trim":{}}}"#,
+                    v(0.75),
+                    v(0.0)
+                ),
+                "",
+            ),
+        ];
+        let doc = project(30.0, 1.0, &layers, &[("X".into(), inner)], "");
+        let rig = Rig::new(&[("dc", &dc)]);
+        let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
+        rig.render(&mut m, 0, SR as i64, 4096)
+    };
+    let numbers = render(false);
+    let channels = render(true);
+    for out in [&numbers, &channels] {
+        assert!(out[0].iter().all(|v| v.is_finite()), "the mix has NaN");
+        // The nested clip alone at 0.05 s: 0.5 × 0.35 × 0.75 × fade 0.625.
+        let at = (0.05 * SR as f64) as usize;
+        assert!(
+            (out[0][at] - 0.5 * 0.35 * 0.75 * 0.625).abs() < 1e-4,
+            "{}",
+            out[0][at]
+        );
+    }
+    assert_eq!(numbers, channels);
+}
+
 #[test]
 fn solo_mute_and_groups_silence() {
     let dir = temp_dir("solo");
