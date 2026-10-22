@@ -502,6 +502,12 @@ for (const event of ['layers', 'project', 'assets', 'quality']) PM.bus.on(event,
 });
 
 PM.bus.on('draw', () => { needsDraw = true; });
+// While the engine draws, its presented frames are the adaptive-quality
+// evidence that the compositor's presented renders are today. Frames served
+// from the engine's memory cache say nothing about drawing cost.
+PM.bus.on('preview:presented', () => {
+  if (engineDrives() && PM.playing) previewQuality.record(window.performance.now(), true, !!(PM as any).EngineConnection?.status?.().presentedCached);
+});
 
 function frame(now: any) {
   window.requestAnimationFrame(frame);
@@ -544,6 +550,9 @@ function frame(now: any) {
       }
       if (now - clock.t0 > 500) { E.fps = Math.round(clock.frames * 1000 / (now - clock.t0)); clock.frames = 0; clock.t0 = now; PM.invalidate('status'); }
     }
+    // As today: Auto quality steps down only while playing, and a settled
+    // paused frame returns to full quality once interaction ends.
+    else if (E.auto && PM.quality < 1 && now >= interactionUntil) { PM.quality = 1; PM.bus.emit('quality'); }
     if (needsDraw) { needsDraw = false; PM.bus.emit('overlay'); }
     return;
   }
