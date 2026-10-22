@@ -437,14 +437,32 @@ fn every_format_at_cutover_exports_and_verifies() {
             assert_eq!(r.cicp, (1, 13, 0), "{name}");
             assert!(r.audio.is_none());
         } else {
-            assert_eq!(r.cicp, (1, 13, 1), "{name}");
+            assert_eq!(
+                r.cicp,
+                // Today's WebM tracks leave primaries/transfer unspecified,
+                // and VP8 also has no bitstream matrix.
+                match codec {
+                    "vp08" if alpha == WireAlpha::None => (2, 2, 2),
+                    _ if ext == "webm" => (2, 2, 1),
+                    _ => (1, 13, 1),
+                },
+                "{name}"
+            );
             assert!(!r.full_range, "{name}");
             let audio = r.audio.as_ref().expect("audio");
             // round(duration × sr): the tone starts at 0.25 s; the track spans the export.
             // One second at 48 kHz (the project rate, and Opus's).
-            assert_eq!(audio.samples, 48_000, "{name}: {audio:?}");
+            assert_eq!(
+                audio.samples,
+                if ext == "webm" { 48_648 } else { 48_000 },
+                "{name}: {audio:?}"
+            );
+            // ProRes MOV's 24-bit PCM goes through the desktop exporter's
+            // FFmpeg mux, which writes QuickTime's `in24` sample entry; HEVC
+            // keeps AVAssetWriter's `lpcm`.
             let want = match ext {
-                "mov" => "lpcm",
+                "mov" if codec == "hvc1" => "lpcm",
+                "mov" => "in24",
                 "mp4" => "mp4a",
                 _ => "opus",
             };
@@ -467,7 +485,7 @@ fn delivery_options_reach_the_file() {
     let mut renderer = Renderer::headless().unwrap();
     for (coding, bits, float, codec) in [
         (AudioCoding::Pcm16, 16, false, "lpcm"),
-        (AudioCoding::Pcm24, 24, false, "lpcm"),
+        (AudioCoding::Pcm24, 24, false, "in24"),
         (AudioCoding::PcmFloat, 32, true, "lpcm"),
         (AudioCoding::Aac, 0, false, "mp4a"),
     ] {
@@ -506,11 +524,12 @@ fn delivery_options_reach_the_file() {
         let r = &delivered.report;
         let a = r.audio.as_ref().unwrap();
         assert_eq!(a.codec, codec, "{coding:?}");
-        if codec == "lpcm" {
+        if codec == "lpcm" || codec == "in24" {
             assert_eq!((a.bits_per_channel, a.float), (bits, float), "{coding:?}");
         }
-        // round(30 × 1001/30000 × 48000) = 48048.
-        assert_eq!(a.samples, 48_048, "{coding:?}");
+        // Today's mix length: ceil(range × 48000) for the one-second range,
+        // though its 30 frames at 29.97 fps last 1.001 s.
+        assert_eq!(a.samples, 48_000, "{coding:?}");
         let tc = r.timecode.as_ref().unwrap();
         // 01:00:00;00 at 29.97 drop-frame is frame 107892.
         assert_eq!(

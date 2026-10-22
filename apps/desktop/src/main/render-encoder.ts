@@ -1,6 +1,6 @@
 import { agentExportDestination } from './agent-export';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtemp, rm, stat, copyFile, appendFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, copyFile, appendFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { app, BrowserWindow, dialog, type IpcMain } from 'electron';
@@ -18,7 +18,7 @@ export function takeRoutedDestination(owner:number,extension:string,now=Date.now
   return routed&&now-routed.at<=ROUTED_TTL_MS&&path.extname(routed.file).slice(1).toLowerCase()===extension?routed.file:undefined;
 }
 export type EncoderOptions={width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number};
-type Job={destination?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string};
+type Job={destination?:string;capture?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string};
 /* CICP 1-13-1, limited range: "Rec.709 (QuickTime and Safari)" (plan section 9,
    S2). VideoToolbox takes primaries and transfer from the frames' attachments,
    not from the output options, so the frames are tagged too (setparams).
@@ -45,13 +45,17 @@ export function validateEncoderOptions(raw:any):EncoderOptions {
 export class RenderEncoder {
   jobs=new Map<string,Job>();
   constructor(readonly binary:string,readonly tempRoot:string){}
-  async start(raw:unknown,owner:number){const options=validateEncoderOptions(raw),dir=await mkdtemp(path.join(this.tempRoot,'powermove-render-')),file=path.join(dir,options.format==='prores'?'video.mov':'video.mp4');
+  async start(raw:unknown,owner:number){const options=validateEncoderOptions(raw);
+    // Parity captures are explicit, hidden-test-only, and owned by the harness.
+    const capture=process.env['POWERMOVE_BACKGROUND_TEST']==='1'?process.env['PM_EXPORT_INPUT_CAPTURE_DIR']:undefined;
+    if(capture){await writeFile(path.join(capture,'legacy.rgba'),new Uint8Array(),{mode:0o600});await writeFile(path.join(capture,'legacy.wav'),new Uint8Array(),{mode:0o600});}
+    const dir=await mkdtemp(path.join(this.tempRoot,'powermove-render-')),file=path.join(dir,options.format==='prores'?'video.mov':'video.mp4');
     const proc=spawn(this.binary,encoderArgs(options,file),{stdio:['pipe','pipe','pipe']});let error='';proc.stderr.on('data',d=>{error=(error+d.toString()).slice(-8000);});
     const done=new Promise<void>((resolve,reject)=>{proc.once('error',reject);proc.once('close',code=>code===0?resolve():reject(new Error(error||'Video encoder stopped')));});done.catch(()=>undefined);proc.stdin.on('error',()=>undefined);
-    const token=randomUUID();this.jobs.set(token,{dir,file,audio:path.join(dir,'audio.wav'),process:proc,done,bytes:0,frameBytes:options.width*options.height*4,frames:0,options,owner,error});return token;
+    const token=randomUUID();this.jobs.set(token,{capture,dir,file,audio:path.join(dir,'audio.wav'),process:proc,done,bytes:0,frameBytes:options.width*options.height*4,frames:0,options,owner,error});return token;
   }
   job(token:string,owner:number){const job=this.jobs.get(token);if(!job||job.owner!==owner)throw new Error('Unknown render job');return job;}
-  async write(token:string,owner:number,data:Uint8Array,audio=false){const job=this.job(token,owner);if(!(data instanceof Uint8Array)||data.byteLength===0||data.byteLength>4*1024*1024)throw new Error('Invalid render chunk');if(audio){await appendFile(job.audio,data);return;}if(job.process.exitCode!==null)await job.done;await new Promise<void>((resolve,reject)=>job.process.stdin.write(data,e=>e?reject(e):resolve()));job.bytes+=data.byteLength;}
+  async write(token:string,owner:number,data:Uint8Array,audio=false){const job=this.job(token,owner);if(!(data instanceof Uint8Array)||data.byteLength===0||data.byteLength>4*1024*1024)throw new Error('Invalid render chunk');if(job.capture)await appendFile(path.join(job.capture,audio?'legacy.wav':'legacy.rgba'),data);if(audio){await appendFile(job.audio,data);return;}if(job.process.exitCode!==null)await job.done;await new Promise<void>((resolve,reject)=>job.process.stdin.write(data,e=>e?reject(e):resolve()));job.bytes+=data.byteLength;}
   async finish(token:string,owner:number){const job=this.job(token,owner);if(!job.bytes||job.bytes%job.frameBytes)throw new Error('Incomplete render frame');job.process.stdin.end();await job.done;
     const audio=await stat(job.audio).catch(()=>null);if(audio?.size){const mux=path.join(job.dir,job.options.format==='prores'?'final.mov':'final.mp4');await new Promise<void>((resolve,reject)=>{const p=spawn(this.binary,['-hide_banner','-loglevel','error','-i',job.file,'-i',job.audio,'-map','0:v','-map','1:a','-c:v','copy','-c:a',job.options.format==='prores'?'pcm_s24le':'aac','-shortest','-y',mux]);let error='';p.stderr.on('data',d=>error+=d);p.on('error',reject);p.on('close',code=>code===0?resolve():reject(new Error(error)));});job.file=mux;}return job.file;
   }

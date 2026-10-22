@@ -83,6 +83,11 @@ pub struct Expected {
     pub audio: Option<(AudioSpec, u64)>,
     pub timecode: Option<TimecodeSpec>,
     pub blocks: Vec<BlockSample>,
+    /// The movie timescale when the writer chooses its own: the bundled
+    /// FFmpeg MOV/MP4 muxer (`legacy_video`) uses the denominator of the
+    /// greatest common divisor of its input streams' time bases, at least
+    /// 1000 (FFmpeg 9.0.2 `movenc.c`, `mov_init`).
+    pub movie_timescale: Option<u64>,
 }
 
 impl Expected {
@@ -102,6 +107,7 @@ impl Expected {
             audio: spec.audio.map(|a| (a, audio_frames)),
             timecode: spec.timecode.clone(),
             blocks,
+            movie_timescale: None,
         }
     }
 }
@@ -472,10 +478,24 @@ pub fn check(
             video.stts, t.frame_duration, t.timescale
         ));
     }
-    if video.media_timescale as i32 != t.timescale || movie.movie_timescale as i32 != t.timescale {
+    let expected_movie_timescale = match expected.audio {
+        Some((spec, _)) if spec.ffmpeg_mux(expected.codec, expected.container) => {
+            // The desktop exporter's final FFmpeg mux uses the least common
+            // multiple of input video/audio timebases for the movie header.
+            let (mut a, mut b) = (t.timescale as u64, spec.sample_rate as u64);
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            (t.timescale as u64 / a * spec.sample_rate as u64).max(1000)
+        }
+        _ => expected.movie_timescale.unwrap_or(t.timescale as u64),
+    };
+    if video.media_timescale as i32 != t.timescale
+        || movie.movie_timescale as u64 != expected_movie_timescale
+    {
         fail(format!(
-            "timescales movie {} media {}, expected {}",
-            movie.movie_timescale, video.media_timescale, t.timescale
+            "timescales movie {} media {}, expected movie {} media {}",
+            movie.movie_timescale, video.media_timescale, expected_movie_timescale, t.timescale
         ));
     }
     let duration = video.stts_duration();
@@ -512,6 +532,8 @@ pub fn check(
         (Some((spec, pushed)), Some(got)) => {
             let want_codec = match spec.codec {
                 AudioCodec::Aac => "mp4a",
+                // FFmpeg's MOV muxer uses QuickTime's native 24-bit PCM tag.
+                AudioCodec::Pcm24 if spec.ffmpeg_mux(expected.codec, expected.container) => "in24",
                 _ => "lpcm",
             };
             if got.codec != want_codec {

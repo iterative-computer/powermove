@@ -1543,6 +1543,25 @@ impl AudioDecoder {
     }
 }
 
+/// Chromium's integer → float sample conversion (`media/base/
+/// audio_sample_types.h`, `FixedSampleTypeTraits::ToFloat`), which today's
+/// `decodeAudioData` applies to every integer PCM decode: the offset from the
+/// zero point times `1 / (zero − min)` below zero and `1 / (max − zero)`
+/// above, each an `f32` constant multiplied in `f32`. So a 16-bit 32767 is
+/// exactly 1.0 and −32768 is −1.0, as today's mix hears them.
+fn chromium_to_float(offset: f32, below: f32, above: f32) -> f32 {
+    if offset < 0.0 {
+        offset * below
+    } else {
+        offset * above
+    }
+}
+
+const U8_BELOW: f32 = 1.0 / 128.0;
+const U8_ABOVE: f32 = 1.0 / 127.0;
+const S16_BELOW: f32 = 1.0 / 32768.0;
+const S16_ABOVE: f32 = 1.0 / 32767.0;
+
 /// Converts `n` samples of one channel from FFmpeg memory to f32, skipping
 /// the first `skip`.
 unsafe fn convert(
@@ -1556,11 +1575,14 @@ unsafe fn convert(
     let at = |i: usize| unsafe { base.add(i * stride) };
     unsafe {
         match fmt {
-            ff::AV_SAMPLE_FMT_U8 | ff::AV_SAMPLE_FMT_U8P => {
-                out.extend((skip..n).map(|i| (*at(i) as f32 - 128.0) / 128.0))
-            }
-            ff::AV_SAMPLE_FMT_S16 | ff::AV_SAMPLE_FMT_S16P => out
-                .extend((skip..n).map(|i| (at(i) as *const i16).read_unaligned() as f32 / 32768.0)),
+            ff::AV_SAMPLE_FMT_U8 | ff::AV_SAMPLE_FMT_U8P => out.extend(
+                (skip..n).map(|i| chromium_to_float(*at(i) as f32 - 128.0, U8_BELOW, U8_ABOVE)),
+            ),
+            ff::AV_SAMPLE_FMT_S16 | ff::AV_SAMPLE_FMT_S16P => out.extend((skip..n).map(|i| {
+                let v = (at(i) as *const i16).read_unaligned();
+                chromium_to_float(f32::from(v), S16_BELOW, S16_ABOVE)
+            })),
+            // Chromium's f32 1 / (2^31 − 1) is 2^-31: both sides scale alike.
             ff::AV_SAMPLE_FMT_S32 | ff::AV_SAMPLE_FMT_S32P => out
                 .extend((skip..n).map(|i| {
                     ((at(i) as *const i32).read_unaligned() as f64 / 2147483648.0) as f32
@@ -1582,6 +1604,27 @@ unsafe fn convert(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integer_samples_convert_as_chromium_does() {
+        // decodeAudioData's values for 16-bit PCM, measured in the app.
+        assert_eq!(chromium_to_float(32767.0, S16_BELOW, S16_ABOVE), 1.0);
+        assert_eq!(chromium_to_float(-32768.0, S16_BELOW, S16_ABOVE), -1.0);
+        assert_eq!(
+            chromium_to_float(470.0, S16_BELOW, S16_ABOVE).to_bits(),
+            (470.0f32 * (1.0f32 / 32767.0)).to_bits()
+        );
+        assert_ne!(
+            chromium_to_float(470.0, S16_BELOW, S16_ABOVE),
+            470.0 / 32768.0
+        );
+        assert_eq!(
+            chromium_to_float(-470.0, S16_BELOW, S16_ABOVE),
+            -470.0 / 32768.0
+        );
+        assert_eq!(chromium_to_float(127.0, U8_BELOW, U8_ABOVE), 1.0);
+        assert_eq!(chromium_to_float(-128.0, U8_BELOW, U8_ABOVE), -1.0);
+    }
 
     #[test]
     fn timestamp_conversion_rounds_to_the_nearest_sample() {

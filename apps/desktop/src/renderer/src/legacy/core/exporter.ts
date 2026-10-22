@@ -2,6 +2,8 @@ import { animateExportPreview } from './export-preview';
 import { prepareFrame } from './frame-preparation';
 import { captureFramePixels, renderOpaqueFrame } from './frame-capture';
 import { installRenderQueue, wavBytes } from './render-queue';
+import { muxWebM as muxWebMFile } from './webm-mux';
+import { WEBM_ENCODE_QUEUE_LIMIT, WEBM_VIDEO_CODECS, webmFrameTiming, webmKeyFrame, webmVideoConfig } from './webm-video';
 import { openRenderQueuePanel } from './render-queue-panel';
 /* Ported from js/core/exporter.js — behavior-preserving. */
 import {
@@ -47,101 +49,8 @@ import { captionSidecars } from '../../captions/sidecar';
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
 
-/* ── minimal EBML / WebM muxer ─────────────────────────── */
-function vint(n: any, len?: any) {
-  if (!len) { len = 1; while (n >= 2 ** (7 * len) - 1) len++; }
-  const b: any = new Uint8Array(len);
-  for (let i: any = len - 1; i >= 0; i--) { b[i] = n & 0xff; n = Math.floor(n / 256); }
-  b[0] |= 1 << (8 - len);
-  return b;
-}
-function uintBytes(n: any) {
-  if (n === 0) return new Uint8Array([0]);
-  const out: any = [];
-  while (n > 0) { out.unshift(n & 0xff); n = Math.floor(n / 256); }
-  return new Uint8Array(out);
-}
-function floatBytes(f: any) {
-  const b: any = new Uint8Array(8); new DataView(b.buffer).setFloat64(0, f); return b;
-}
-function idBytes(id: any) {
-  const out: any = [];
-  let n: any = id;
-  while (n > 0) { out.unshift(n & 0xff); n = Math.floor(n / 256); }
-  return new Uint8Array(out);
-}
-function el(id: any, payload: any) {
-  /* ArrayBuffer.isView is realm-safe (unlike instanceof), keeping the muxer testable headlessly */
-  const data: any = ArrayBuffer.isView(payload) ? payload : concat(payload);
-  return concat([idBytes(id), vint(data.length ?? data.byteLength), data]);
-}
-function elUnknownSize(id: any) { return concat([idBytes(id), new Uint8Array([0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])]); }
-function concat(arrs: any) {
-  let n: any = 0; arrs.forEach((a: any) => n += a.length);
-  const out: any = new Uint8Array(n); let o: any = 0;
-  arrs.forEach((a: any) => { out.set(a, o); o += a.length; });
-  return out;
-}
-const str: any = (s: any) => new window.TextEncoder().encode(s);
-
-function muxWebM(frames: any, { width, height, fps, codecId = 'V_VP9', audio }: any) {
-  const scale: any = 1e6; // 1ms ticks
-  const header: any = el(0x1A45DFA3, [
-    el(0x4286, uintBytes(1)), el(0x42F7, uintBytes(1)),
-    el(0x42F2, uintBytes(4)), el(0x42F3, uintBytes(8)),
-    el(0x4282, str('webm')), el(0x4287, uintBytes(2)), el(0x4285, uintBytes(2)),
-  ]);
-  /* merged, time-ordered block stream so clusters interleave video + audio */
-  const blocks: any = frames.map((f: any) => ({ ms: Math.round(f.ts / 1000), track: 1, key: f.key, data: f.data }));
-  if (audio && audio.chunks.length) {
-    audio.chunks.forEach((b: any) => blocks.push({ ms: Math.round(b.ts / 1000), track: 2, key: false, data: b.data }));
-    blocks.sort((a: any, b: any) => a.ms - b.ms || a.track - b.track);
-  }
-  const lastMs: any = blocks.length ? blocks[blocks.length - 1].ms : 0;
-  const durMs: any = lastMs + 1000 / fps;
-  const info: any = el(0x1549A966, [
-    el(0x2AD7B1, uintBytes(scale)),
-    el(0x4D80, str('Powermove')), el(0x5741, str('Powermove ' + PM.version)),
-    el(0x4489, floatBytes(durMs)),
-  ]);
-  const tracks: any = [
-    el(0xAE, [
-      el(0xD7, uintBytes(1)), el(0x73C5, uintBytes(1)), el(0x83, uintBytes(1)),
-      el(0x536E, str('Video')), el(0x86, str(codecId)),
-      el(0xE0, [el(0xB0, uintBytes(width)), el(0xBA, uintBytes(height))]),
-    ]),
-  ];
-  if (audio && audio.chunks.length) {
-    tracks.push(el(0xAE, [
-      el(0xD7, uintBytes(2)), el(0x73C5, uintBytes(2)), el(0x83, uintBytes(2)),
-      el(0x536E, str('Audio')), el(0x86, str('A_OPUS')),
-      ...(audio.priv ? [el(0x63A2, audio.priv)] : []),
-      el(0xE1, [
-        el(0xB5, floatBytes(audio.rate || 48000)),
-        el(0x9F, uintBytes(audio.channels || 2)),
-      ]),
-    ]));
-  }
-  const tracksEl: any = el(0x1654AE6B, tracks);
-  /* one cluster per ~2s keeps block-relative timecodes inside their vint */
-  const clusters: any = [];
-  let cur: any = null, curStart: any = 0;
-  for (const b of blocks) {
-    if (!cur || b.ms - curStart > 2000) {
-      if (cur) clusters.push(el(0x1F43B675, [el(0xE7, uintBytes(curStart)), ...cur]));
-      cur = []; curStart = b.ms;
-    }
-    const rel: any = b.ms - curStart;
-    const bh: any = new Uint8Array(4);
-    bh[0] = 0x80 | b.track;          // track number, single-byte vint
-    bh[1] = (rel >> 8) & 0xff; bh[2] = rel & 0xff;
-    bh[3] = b.key ? 0x80 : 0x00;
-    cur.push(el(0xA3, concat([bh, b.data])));
-  }
-  if (cur) clusters.push(el(0x1F43B675, [el(0xE7, uintBytes(curStart)), ...cur]));
-  const segment: any = el(0x18538067, [info, tracksEl, ...clusters]);
-  return new window.Blob([header, segment], { type: 'video/webm' });
-}
+/* ── minimal EBML / WebM muxer (webm-mux.ts) ───────────── */
+const muxWebM = (frames: any, options: any) => muxWebMFile(frames, { ...options, version: PM.version });
 
 /* ── export core ───────────────────────────────────────── */
 const X: any = { busy: false, cancel: false };
@@ -1008,13 +917,9 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
     error: (e: any) => { encoderError = e; },
   });
   try {
-  const cfgs: any = [
-    { codec: 'vp09.00.31.08', id: 'V_VP9' },
-    { codec: 'vp8', id: 'V_VP8' },
-  ];
   let chosen: any = null;
-  for (const c of cfgs) {
-    const cfg: any = { codec: c.codec, width: W, height: H, bitrate, framerate: opts.fps, latencyMode: 'quality' };
+  for (const c of WEBM_VIDEO_CODECS) {
+    const cfg: any = webmVideoConfig(c.codec, W, H, bitrate, opts.fps);
     const sup: any = await window.VideoEncoder.isConfigSupported(cfg).catch(() => null);
     if (sup && sup.supported) { enc.configure(cfg); chosen = c; configured = true; break; }
   }
@@ -1025,14 +930,14 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
     const T: any = t0 + i / opts.fps;
     await prepareFrame(PM,T,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:20});
     const cv: any = renderInto(T, W, H, opts.mblur);
-    const frame: any = new window.VideoFrame(cv, { timestamp: Math.round(i / opts.fps * 1e6), duration: Math.round(1e6 / opts.fps) });
-    try { if (encoderError) throw encoderError; enc.encode(frame, { keyFrame: i % Math.round(opts.fps * 2) === 0 }); } finally { frame.close(); }
+    const frame: any = new window.VideoFrame(cv, webmFrameTiming(i, opts.fps));
+    try { if (encoderError) throw encoderError; enc.encode(frame, { keyFrame: webmKeyFrame(i, opts.fps) }); } finally { frame.close(); }
     if (i % 3 === 0) {
       pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
       ui.set(i + 1, 'Rendering');
       await new Promise((r: any) => window.setTimeout(r, 0));
     }
-    if (enc.encodeQueueSize > 12) await new Promise((r: any) => window.setTimeout(r, 6));
+    if (enc.encodeQueueSize > WEBM_ENCODE_QUEUE_LIMIT) await new Promise((r: any) => window.setTimeout(r, 6));
   }
   await enc.flush();
   if (encoderError) throw encoderError;
