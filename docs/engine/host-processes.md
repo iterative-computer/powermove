@@ -361,7 +361,7 @@ order they cost:
 | Idle intermediate targets of sizes no frame used again (animated scales) piled up | `pm-gpu/src/target.rs` | After each frame, idle targets the frame did not use are freed down to 64 MiB; the compatibility store is bounded at today's 192 MiB raster budget |
 
 The custom definition reported as failing to compile on these projects
-(`macos.cursor`: a `uniform bool` toggle compared with `> 0.5`) fails the
+(a user effect with a `uniform bool` toggle compared with `> 0.5`) fails the
 same way in WebGL in today's renderer (captured: the same message; 41
 custom definitions of the setup, this one the only failure, and neither
 project uses it). `pm-glsl/tests/uniform_types.rs` holds WebGL's verdicts
@@ -389,8 +389,8 @@ What remains, measured on the private projects, is in the lane report
   layer's targets are returned to the pool at the end of the frame, not
   when the layer has been composited.
 - PMV4 frames at 0 s and 3.2 s differ from today's by up to 6 CV: the
-  glow of a group with the user's `deep-glow-pop.effect` and
-  `progressive-blur` (effects translation), and the edges of a DM Sans text
+  glow of a group with two of the user's effects, a glow and a
+  blur (effects translation), and the edges of a DM Sans text
   layer with typography anchoring (`pm-text` level 1 raster and the
   typography anchor offset).
 
