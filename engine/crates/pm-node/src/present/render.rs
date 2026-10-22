@@ -835,6 +835,11 @@ impl SnapshotPoller {
             pm_protocol::error::EngineProcess::Interactive,
             "pm-snapshot-complete",
             move || {
+                // A synchronous capture's answer waits on this wakeup: it
+                // runs at the presenter's class, as the frame completer
+                // does (a default-class thread can wait behind background
+                // work for milliseconds on a loaded machine).
+                pm_bridge::set_thread_user_interactive();
                 for (device, lost) in rx {
                     if let Err(error) = device.poll(wgpu::PollType::Wait {
                         submission_index: None,
