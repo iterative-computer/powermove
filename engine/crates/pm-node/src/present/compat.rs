@@ -487,6 +487,15 @@ impl CompatStore {
             .map(|_| index.clone())
     }
 
+    /// Whether every one of `needs` has an answer made at `revision` or a
+    /// newer one (the frame that waits for them can draw).
+    pub fn all_answered(&self, key: Key, revision: Revision, needs: &[CompatNeed]) -> bool {
+        needs.iter().all(|n| {
+            let id = answer_id(key, &n.composition, &n.layer, n.time, n.source, n.scale, n.crop);
+            self.answers.get(&id).is_some_and(|a| a.revision >= revision)
+        })
+    }
+
     /// A complete raster, marked used.
     pub fn get(&mut self, key: Key, id: &CompatKey) -> Option<&CompatRaster> {
         self.clock += 1;
@@ -862,6 +871,42 @@ mod tests {
         assert_eq!(store.usage().0.values().sum::<usize>(), 1);
         store.forget_session(session(1));
         assert_eq!(store.usage(), (BTreeMap::new(), 0));
+    }
+
+    #[test]
+    fn a_frame_waits_until_every_need_has_an_answer_at_its_revision() {
+        let mut store = CompatStore::default();
+        let r3 = Revision::new(3).unwrap();
+        let need = |layer: &str| CompatNeed {
+            composition: "c".into(),
+            layer: layer.into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            scale: 1.0,
+            crop: None,
+        };
+        let native = |layer: &str, revision: Revision| {
+            CompatMessage::Native(pm_protocol::snapshot::CompatNative {
+                composition: "c".into(),
+                layer: layer.into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale: 1.0,
+                revision,
+                crop: None,
+            })
+        };
+        let needs = vec![need("A"), need("B"), need("C")];
+        assert!(!store.all_answered(session(1), r3, &needs));
+        store.apply(session(1), native("A", r3));
+        store.apply(session(1), native("B", r3));
+        assert!(!store.all_answered(session(1), r3, &needs));
+        // An answer made at an older revision does not count.
+        store.apply(session(1), native("C", Revision::new(2).unwrap()));
+        assert!(!store.all_answered(session(1), r3, &needs));
+        store.apply(session(1), band(id("C", "k"), 1, 1, 0, 1, 1));
+        assert!(store.all_answered(session(1), r3, &needs));
+        assert!(!store.all_answered(session(2), r3, &needs), "per session");
     }
 
     #[test]

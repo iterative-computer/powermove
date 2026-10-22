@@ -219,7 +219,10 @@ export type CompatAnswerResult =
 export const COMPAT_LOOKAHEAD = 6;
 /** Main-thread time one lookahead call may take (ms); the rest waits for the next frame. */
 const LOOKAHEAD_BUDGET_MS = 6;
-const LOOKAHEAD_MAX_ANSWERS = 16;
+/** Preparations (engine base rasters) started per turn; answers the
+ *  producer gives at once are bounded by the turn's time budget only (a
+ *  large project's frame has dozens of layers each frame). */
+const LOOKAHEAD_MAX_PREPARATIONS = 16;
 const LOOKAHEAD_POLL_MS = 4;
 
 type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; revision: number | null; clockCursor: number | null };
@@ -474,19 +477,20 @@ export class EngineRenderTransport {
       });
       // Breadth first: every layer's current frame precedes speculative
       // work. A slow producer gets at most one turn before another layer.
-      let done = 0, pending = 0;
+      let done = 0, pending = 0, preparations = 0;
       for (let offset = 0; offset <= COMPAT_LOOKAHEAD; offset++) {
         for (let i = 0; i < entries.length; i++) {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
           const time = entry.cursor + offset * entry.step;
           if (time < 0 || entry.sent.has(time) || entry.pending.has(time)) continue;
           pending++;
-          if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
+          if (done > 0 && performance.now() >= deadline) continue;
           // Only a need whose base pixels must come from the engine first is
           // prepared (bounded in flight); one the producer can answer now
           // (a pass-through, pixels already here) is answered at once.
           const prepare = this.prepares({ ...entry.need, time }, revision ?? 0) ? this.preparers.get(entry.need.source) : undefined;
-          if (prepare && this.aheadInFlight >= 2) continue;
+          if (prepare && (this.aheadInFlight >= 2 || preparations >= LOOKAHEAD_MAX_PREPARATIONS)) continue;
+          if (prepare) preparations++;
           done++;
           if (prepare) {
             this.prepareAhead(entry, time, revision ?? 0, prepare, warm, warmUntil);

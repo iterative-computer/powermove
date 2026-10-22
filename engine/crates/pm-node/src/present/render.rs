@@ -567,6 +567,10 @@ struct View {
     /// (`super::wait`). Other views and the audio clock keep running while
     /// its renderer answers on the port.
     external_wait: Option<super::wait::ExternalWait>,
+    /// The compatibility answers the latest frame waits for (revision, the
+    /// needs, since when): it is planned again once all of them arrived,
+    /// not once per answer (`compat_ready`).
+    compat_waiting: Option<(Revision, Vec<pm_protocol::snapshot::CompatNeed>, std::time::Instant, i64)>,
     /// Level 1 SVG buckets the latest frame drew without (the window could
     /// not draw them): asked for again while it shows them.
     svg_without: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
@@ -672,6 +676,11 @@ struct Thread {
     /// Level 1 SVG rasters asked of the renderers (decision S1).
     svg: super::svg::SvgState,
 }
+
+/// A frame waiting for compatibility answers is planned again after this
+/// long even when some are still out (a renderer that skipped a stale need
+/// answers the clock's frame instead).
+const COMPAT_WAIT_REPLAN: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -1237,12 +1246,29 @@ impl Thread {
                     stats.compat_answers = answers.0 as u64;
                     stats.compat_asked = answers.1 as u64;
                 }
-                // A frame waiting on the producer's answers draws now (and
-                // a changed producer list redraws what it decides).
+                // A frame waiting on the producer's answers draws once they
+                // all arrived (a renderer answers a frame's layers in
+                // turns: planning the frame again per answer cost a large
+                // project seconds of render thread per second); a changed
+                // producer list, an eviction or a forget redraws at once.
                 if applied.unblocks()
                     && let Some(view) = self.views.get_mut(&key)
                 {
-                    view.dirty = true;
+                    let ready = match (&view.compat_waiting, applied) {
+                        (Some((revision, needs, since, _)), super::compat::Applied::Answered | super::compat::Applied::Complete) => {
+                            since.elapsed() >= COMPAT_WAIT_REPLAN
+                                || self
+                                    .compat
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .all_answered(key, *revision, needs)
+                        }
+                        _ => true,
+                    };
+                    if ready {
+                        view.dirty = true;
+                        view.compat_waiting = None;
+                    }
                 }
             }
             Command::LoseDevice => {
@@ -2066,6 +2092,7 @@ impl Thread {
             next_seq: 1,
             dirty: true,
             external_wait: None,
+            compat_waiting: None,
             svg_without: Vec::new(),
             requests: VecDeque::new(),
             retry: None,
@@ -2593,6 +2620,10 @@ impl Thread {
             let external_waiting = view.external_wait.as_ref().is_some_and(|w| w.until > now);
             if let Some(w) = &view.external_wait {
                 wake = wake.min(w.until);
+            }
+            if let Some((_, _, since, _)) = &view.compat_waiting {
+                let left = COMPAT_WAIT_REPLAN.saturating_sub(since.elapsed());
+                wake = wake.min(now + left.as_micros() as i64);
             }
             // Buckets the latest frame drew without are asked for again.
             for need in &view.svg_without {
@@ -3133,6 +3164,18 @@ impl Thread {
                 self.stats().stand_in_redraws += 1;
             }
         }
+        // A paused frame whose answers did not all come in time is planned
+        // again (it asks for what is still missing).
+        if let Some(view) = self.views.get_mut(&key)
+            && !view.clock.is_playing()
+            && view
+                .compat_waiting
+                .as_ref()
+                .is_some_and(|w| w.2.elapsed() >= COMPAT_WAIT_REPLAN)
+        {
+            view.compat_waiting = None;
+            view.dirty = true;
+        }
         // A paused frame after a view or transport change.
         let paused_dirty = self
             .views
@@ -3177,6 +3220,20 @@ impl Thread {
                         self.stats().pool_waits += 1;
                         return;
                     }
+                    // A frame that waits for its compatibility answers is
+                    // planned again once they all arrived (or after
+                    // `COMPAT_WAIT_REPLAN`), not on every turn.
+                    if let Some((revision, needs, since, waiting)) = &view.compat_waiting
+                        && *waiting == k
+                        && since.elapsed() < COMPAT_WAIT_REPLAN
+                        && !self
+                            .compat
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .all_answered(key, *revision, needs)
+                    {
+                        return;
+                    }
                     let f = view.clock.frame_ticks();
                     let media = view.clock.wrap(k * f);
                     let shown_for = super::schedule::Schedule::frame_us(&view.clock);
@@ -3196,6 +3253,14 @@ impl Thread {
                     // frame follows when the raster arrives (never skip it
                     // merely because its asynchronous request was sent).
                     if rendered.is_none() && view.external_wait.is_some() {
+                        return;
+                    }
+                    // So does one waiting for compatibility answers (the
+                    // window answers this frame's layers; the schedule
+                    // skips it if it turns late).
+                    if rendered.is_none()
+                        && view.compat_waiting.as_ref().is_some_and(|w| w.3 == k)
+                    {
                         return;
                     }
                     view.schedule.rendered(&view.clock, k);
@@ -3441,6 +3506,7 @@ impl Thread {
             match composed {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                    view.compat_waiting = None;
                     overlay = composed.overlay;
                     cpu_us = composed.cpu_us;
                     failures_n = composed.failures.len();
@@ -3534,6 +3600,13 @@ impl Thread {
                     // override): ask the view's renderer, and render the
                     // frame again when every answer arrived.
                     let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                    view.compat_waiting = Some((revision, needs.clone(), std::time::Instant::now(), k));
+                    // A paused frame is drawn again when its answers are in
+                    // (the compat handler) or after `COMPAT_WAIT_REPLAN`
+                    // (`next_wake`), not on the thread's next turn.
+                    if k < 0 {
+                        view.dirty = false;
+                    }
                     let fresh =
                         self.compat_store()
                             .to_ask(key, revision, needs, std::time::Instant::now());
