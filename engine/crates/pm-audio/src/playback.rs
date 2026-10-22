@@ -3234,7 +3234,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_transport_receipts_preserve_project_order_and_individual_errors() {
+    fn queued_transport_receipts_preserve_control_order_and_individual_errors() {
         use pm_protocol::clock::SeekMode;
         use pm_protocol::common::{PlaybackRate, TickRange, Ticks};
 
@@ -3282,8 +3282,8 @@ mod tests {
             .enqueue_command(TransportCommand::SetLoop { range: None })
             .unwrap();
 
-        // The composition ends before the queued seek. FIFO Project then
-        // Play must restart at zero, even though the earlier loop was invalid.
+        // The composition ends before the queued seek. Play must restart at
+        // zero, even though the earlier loop was invalid.
         let doc = Arc::new(Document::new(
             Some(pm_model::json::parse(
                 r#"{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":30,"dur":2,"layers":[],"comps":{},"assets":{},"params":{}}"#,

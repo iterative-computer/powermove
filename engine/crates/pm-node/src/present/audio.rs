@@ -187,7 +187,12 @@ impl AudioLink {
     }
 
     pub fn send(&self, ctl: AudioCtl) {
+        let sent_us = (control_profile_enabled() && matches!(&ctl, AudioCtl::Play { .. }))
+            .then(pm_audio::clock::host_now_us);
         let _ = self.tx.send(ctl);
+        if let Some(sent_us) = sent_us {
+            eprintln!("pm-audio-node-send sent_us={sent_us}");
+        }
     }
 
     /// The device clock, once the device opened.
@@ -221,6 +226,11 @@ impl Drop for AudioLink {
     }
 }
 
+struct PendingCommand {
+    receipt: CommandReceipt,
+    pause: bool,
+}
+
 struct Control {
     rx: Receiver<AudioCtl>,
     clock: Arc<Mutex<Option<ClockHandle>>>,
@@ -232,7 +242,7 @@ struct Control {
     /// Individually answered Pause, SetLoop, and exact Seek commands. Their
     /// FIFO application is guaranteed by the producer queue even across
     /// separate control-thread receive batches.
-    pending_commands: VecDeque<CommandReceipt>,
+    pending_commands: VecDeque<PendingCommand>,
     /// The mixer plays an older revision, media map, or composition.
     dirty: bool,
     /// An update did not apply; wait for a resync.
@@ -354,6 +364,11 @@ impl Control {
             return;
         }
         let running = self.running();
+        // A queued Pause has not necessarily reached the producer yet. Do
+        // not publish another running meter frame while its ACK is pending.
+        if running && self.pending_commands.iter().any(|pending| pending.pause) {
+            return;
+        }
         if !running && !self.levels_running {
             return;
         }
@@ -526,16 +541,20 @@ impl Control {
         let Some(playback) = &self.playback else {
             return;
         };
+        let pause = matches!(command, TransportCommand::Pause);
         if self.pending_commands.len() == MAX_PENDING_COMMANDS {
             let result = self
                 .pending_commands
                 .pop_front()
                 .expect("bounded receipts")
+                .receipt
                 .wait();
             self.record_transport_result(result);
         }
         match playback.enqueue_command(command) {
-            Ok(receipt) => self.pending_commands.push_back(receipt),
+            Ok(receipt) => self
+                .pending_commands
+                .push_back(PendingCommand { receipt, pause }),
             Err(error) => {
                 self.drain_pending_commands();
                 self.record_transport_result(Err(error));
@@ -548,7 +567,7 @@ impl Control {
         while let Some(result) = self
             .pending_commands
             .front()
-            .and_then(CommandReceipt::try_result)
+            .and_then(|pending| pending.receipt.try_result())
         {
             self.pending_commands.pop_front();
             self.record_transport_result(result);
@@ -558,9 +577,12 @@ impl Control {
     fn record_transport_result(&self, result: pm_audio::Result<()>) {
         if let Err(error) = result {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-            status.problems.push(format!("transport: {error}"));
-            if status.problems.len() > 16 {
-                status.problems.remove(0);
+            let problem = format!("transport: {error}");
+            if !status.problems.contains(&problem) {
+                status.problems.push(problem);
+                if status.problems.len() > 16 {
+                    status.problems.remove(0);
+                }
             }
         }
     }
@@ -724,6 +746,107 @@ mod tests {
         format!(
             r#"{{"id":"{id}","type":"audio","name":"{id}","from":0,"dur":1,"on":true,"solo":false,"group":null,"parent":null,"p":{{}},"fx":[],"masks":[],"d":{{"asset":"{asset}","gain":1,"trim":0,"fadeIn":0,"fadeOut":0}}}}"#
         )
+    }
+
+    #[test]
+    fn queued_controls_report_ordered_errors_and_shutdown_drains() {
+        struct ShutdownCache(Arc<SourceCache>);
+        impl Drop for ShutdownCache {
+            fn drop(&mut self) {
+                self.0.shutdown();
+            }
+        }
+
+        let cache = SourceCache::new(1 << 20, 0);
+        let _decode_workers = ShutdownCache(cache.clone());
+        let (playback, _side) = Playback::start_headless(
+            MixFormat::stereo(48_000),
+            cache,
+            PlaybackConfig::default(),
+            48_000,
+            2,
+            0,
+        )
+        .unwrap();
+        let (_tx, rx) = channel();
+        let status = Arc::new(Mutex::new(AudioStatus {
+            problems: vec!["media: missing".into()],
+            ..AudioStatus::default()
+        }));
+        let mut control = Control {
+            rx,
+            clock: Arc::new(Mutex::new(None)),
+            status: status.clone(),
+            doc: pm_model::Document::new(None, 1),
+            composition: "C".into(),
+            media: MediaMap::default(),
+            playback: Some(playback),
+            pending_commands: VecDeque::new(),
+            dirty: false,
+            broken: false,
+            loop_range: None,
+            last_project: None,
+            audio_scrub: false,
+            solo: None,
+            levels: Box::new(|_| {}),
+            last_levels: None,
+            levels_running: false,
+            watch_until: None,
+            warm: false,
+            warm_due: None,
+            paused_at: 0,
+        };
+        let invalid_loop = TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: Ticks::ZERO,
+                end: Ticks::ZERO,
+            }),
+        };
+        control.enqueue_simple_command(invalid_loop);
+        control.enqueue_simple_command(TransportCommand::Seek {
+            time: Ticks::from_whole_seconds(1),
+            mode: SeekMode::Exact,
+        });
+        control.enqueue_simple_command(invalid_loop);
+        control.commands(&[TransportCommand::Play {
+            rate: PlaybackRate { num: 3, den: 1 },
+        }]);
+
+        assert!(control.pending_commands.is_empty());
+        let problems = status.lock().unwrap().problems.clone();
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(problems[0], "media: missing");
+        assert!(problems[1].contains("loop range must be non-empty"));
+        assert!(problems[2].contains("playback at 3/1"));
+        assert_eq!(
+            control
+                .playback
+                .as_ref()
+                .unwrap()
+                .clock()
+                .unwrap()
+                .media_time,
+            Ticks::from_whole_seconds(1),
+        );
+
+        // Shutdown joins the producer before draining even a receipt that
+        // was deliberately left in the queue without another control poll.
+        status.lock().unwrap().problems.clear();
+        let receipt = control
+            .playback
+            .as_ref()
+            .unwrap()
+            .enqueue_command(invalid_loop)
+            .unwrap();
+        control.pending_commands.push_back(PendingCommand {
+            receipt,
+            pause: false,
+        });
+        control.shutdown();
+        assert!(control.pending_commands.is_empty());
+        let problems = status.lock().unwrap().problems.clone();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("loop range must be non-empty"));
     }
 
     /// The status polls every 33 ms while a bad block fails each segment
