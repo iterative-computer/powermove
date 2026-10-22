@@ -149,7 +149,7 @@ export type HostMediaStore = Omit<LegacyMediaStore, 'getForSave'> & {
    * project opened on another Mac). Read the result with
    * `media.readPlaybackProxy`.
    */
-  convert(kind: ConversionKind, original: Blob, ref: { hash?: string | null; link?: MediaLink | null; name: string }): Promise<MediaConversion>;
+  convert(kind: ConversionKind, original: Blob | null, ref: { hash?: string | null; link?: MediaLink | null; name: string }): Promise<MediaConversion>;
   /**
    * Opening a project file with the new engine: main copies an embedded
    * media range from the open file (`readToken`) straight into the store,
