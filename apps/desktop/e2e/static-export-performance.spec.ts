@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 test('exports a solid background without recapturing every frame', async ({ session }) => {
   test.setTimeout(120_000);
@@ -24,7 +25,7 @@ test('exports a solid background without recapturing every frame', async ({ sess
   console.log('STATIC_EXPORT', JSON.stringify(metrics));
   expect(metrics.result).toEqual({ cancelled: false });
   expect(metrics.captures).toBe(1);
-  const decoded = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+  const decoded = execFileSync(ffmpegBinary,
     ['-v', 'error', '-i', path.join(session.userData, 'solid.mp4'), '-vf', 'scale=1:1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']);
   expect(decoded.length).toBe(90 * 3);
   for (let i = 0; i < decoded.length; i += 3) {
@@ -55,7 +56,7 @@ for (const alpha of [false, true]) test(`retains static frames across layer entr
     } finally { PM.GL.renderToPixels = original; }
   }, alpha);
   expect(result).toEqual({ result: { cancelled: false }, captures: 3 });
-  const decoded = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+  const decoded = execFileSync(ffmpegBinary,
     ['-v', 'error', '-i', output, '-vf', 'scale=1:1', '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1']);
   expect(decoded.length).toBe(20 * 4);
   for (let i = 0; i < 20; i++) {

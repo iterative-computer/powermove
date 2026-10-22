@@ -2,7 +2,8 @@ import { writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { expect, test, repoRoot, type LaunchedApp } from './helpers/app';
+import { expect, test, type LaunchedApp } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 for (const alpha of [false, true]) {
   test(`native export preserves every input pixel (${alpha ? 'alpha' : 'opaque'})`, async ({ session }) => {
@@ -266,8 +267,8 @@ async function readyNativeMedia(session: LaunchedApp, kind: 'image' | 'video') {
       }
       return pixels;
     }));
-    execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), ['-v', 'error', '-f', 'rawvideo',
-      '-pix_fmt', 'rgb24', '-s', '96x64', '-r', '4', '-i', 'pipe:0', '-c:v', 'libx264', '-crf', '0',
+    execFileSync(ffmpegBinary, ['-v', 'error', '-f', 'rawvideo',
+      '-pix_fmt', 'rgb24', '-s', '96x64', '-r', '4', '-i', 'pipe:0', '-c:v', 'h264_videotoolbox', '-allow_sw', '1', '-b:v', '8M',
       '-g', '1', '-pix_fmt', 'yuv420p', source], { input: raw });
     encoded = (await readFile(source)).toString('base64');
   }
@@ -386,7 +387,7 @@ for (const kind of ['image', 'video'] as const) test(`native ready ${kind} prese
           ? Array.from({ length: 4 }, () => ({ motionBlur: mblur !== false, samples: mblur === false ? 1 : 16 })) : []);
         const main = await session.app.evaluate(() => (globalThis as any).__readyNativeWrites);
         expect(main).toMatchObject({ active: 0, maxActive: 1, bytes: 96 * 64 * 4 * 4, writes: 4 });
-        const decoded = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+        const decoded = execFileSync(ffmpegBinary,
           ['-v', 'error', '-i', output, '-pix_fmt', 'rgba', '-f', 'framehash', '-hash', 'sha256', 'pipe:1'], { encoding: 'utf8' });
         const frames = decoded.split('\n').filter(line => line && !line.startsWith('#'));
         expect(frames).toHaveLength(4); expect(new Set(frames.map(line => line.split(',').at(-1))).size).toBeGreaterThan(1);

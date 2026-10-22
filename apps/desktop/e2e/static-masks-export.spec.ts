@@ -2,10 +2,11 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { expect, test, repoRoot, type LaunchedApp } from './helpers/app';
+import { expect, test, type LaunchedApp } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 const frames = 4, width = 128, height = 96;
-const ffmpeg = path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg');
+const ffmpeg = ffmpegBinary;
 const formats = [
   { format: 'mp4', alpha: false }, { format: 'prores', alpha: true },
   { format: 'png', alpha: false }, { format: 'png', alpha: true }, { format: 'webm', alpha: false },

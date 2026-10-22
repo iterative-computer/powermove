@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 test('reuses and releases one opaque PNG surface while preserving every animated frame', async ({ session }) => {
   await session.openEditor();
@@ -40,7 +41,7 @@ test('reuses and releases one opaque PNG surface while preserving every animated
   expect(metrics.encodes).toBe(6);
   expect(metrics.surfaces).toBe(1);
   expect(metrics.released).toBe(true);
-  const decoded = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+  const decoded = execFileSync(ffmpegBinary,
     ['-v', 'error', '-i', path.join(session.userData, 'Animated surface_%05d.png'), '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1']);
   expect(decoded).toEqual(Buffer.from(metrics.expected));
   expect(session.diagnostics.pageErrors).toEqual([]);
@@ -114,7 +115,7 @@ for (const alpha of [false, true]) test(`PNG reuse preserves fractional layer en
     PM.proj = project; PM.touch();
     return PM.Export.run({ format: 'png', alpha, scale: 1, fps: 10, range: 'all', audio: false, mblur: false });
   }, alpha)).toEqual({ cancelled: false });
-  const decoded = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+  const decoded = execFileSync(ffmpegBinary,
     ['-v', 'error', '-i', path.join(session.userData, 'Cuts_%05d.png'), '-vf', 'scale=1:1', '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1']);
   expect(decoded.length).toBe(20 * 4);
   for (let i = 0; i < 20; i++) expect([...decoded.subarray(i * 4, i * 4 + 4)]).toEqual(
@@ -146,7 +147,7 @@ test('PNG reuse preserves grouped motion blur with a negative shutter', async ({
   });
   expect(reference.result).toEqual({ cancelled: false });
   expect(new Set(reference.pixels.map(pixel => pixel[0])).size).toBeGreaterThan(2);
-  const decoded = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+  const decoded = execFileSync(ffmpegBinary,
     ['-v', 'error', '-i', path.join(session.userData, 'Reversed shutter_%05d.png'), '-vf', 'crop=1:1:32:32', '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1']);
   expect(decoded.length).toBe(reference.pixels.length * 4);
   for (const [index, pixel] of reference.pixels.entries()) expect([...decoded.subarray(index * 4, index * 4 + 4)]).toEqual(pixel);

@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { expect, test, repoRoot, type LaunchedApp } from './helpers/app';
+import { expect, test, type LaunchedApp } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 type AlphaFixture = { depth: number; width: number; height: number; frames: number; quality: number; grouped?: boolean; static?: boolean; media?: boolean; coldEffect?: boolean; coldMask?: 'analytic' | 'path' };
 
@@ -249,7 +250,7 @@ async function runAlpha(session: LaunchedApp, fixture: AlphaFixture, enabled: bo
 }
 
 function decoded(filePath: string) {
-  return execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+  return execFileSync(ffmpegBinary,
     ['-v', 'error', '-i', filePath, '-pix_fmt', 'rgba', '-f', 'framehash', '-hash', 'sha256', 'pipe:1'],
     { encoding: 'utf8', maxBuffer: 1024 * 1024 });
 }

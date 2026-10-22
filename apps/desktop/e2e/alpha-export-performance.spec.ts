@@ -2,7 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Page } from 'playwright';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 async function supportsIntegerReadback(page: Page, depth: number): Promise<boolean> {
   return page.evaluate(depth => {
@@ -147,14 +148,14 @@ for (const depth of [16, 32]) for (const { groupedBlur, still, width, height } o
 
   // Hash every decoded RGBA byte at full resolution; each record also carries
   // its DTS, PTS, duration and byte count, so no frame or timestamp can drift.
-  const decoded = outputs.map(output => execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+  const decoded = outputs.map(output => execFileSync(ffmpegBinary,
     ['-v', 'error', '-i', output, '-map', '0:v:0', '-pix_fmt', 'rgba', '-f', 'framehash', '-hash', 'sha256', 'pipe:1'],
     { maxBuffer: 1024 * 1024 }).toString());
   expect(decoded[1]).toBe(decoded[0]);
   if (independentPNG) {
     const reference = path.join(session.userData, 'alpha-independent-reference.png');
     await writeFile(reference, new Uint8Array(independentPNG));
-    const original = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+    const original = execFileSync(ffmpegBinary,
       ['-v', 'error', '-i', reference, '-pix_fmt', 'rgba', '-f', 'framehash', '-hash', 'sha256', 'pipe:1'],
       { maxBuffer: 1024 * 1024 }).toString();
     expect(decoded[1]).toBe(original);
@@ -267,7 +268,7 @@ for (const depth of [16, 32]) test(`rejects GPU loss during a large ${depth}-bit
       range: 'all', audio: false, mblur: false }); }
     finally { PM.GL[name] = factory; PM.GL.createAlphaReadback = asyncFactory; }
   }, depth)).toEqual({ cancelled: false });
-  const decoded = [output, reference].map(filePath => execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+  const decoded = [output, reference].map(filePath => execFileSync(ffmpegBinary,
     ['-v', 'error', '-i', filePath, '-pix_fmt', 'rgba', '-f', 'framehash', '-hash', 'sha256', 'pipe:1'],
     { maxBuffer: 1024 * 1024 }).toString());
   expect(decoded[0]).toBe(decoded[1]);

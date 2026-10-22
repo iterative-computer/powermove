@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 test('idle preparation leaves the canvas and playhead alone, then normal Play reuses accurate frames', async ({ session }) => {
   await session.openEditor();
@@ -153,7 +154,7 @@ for (const matte of [false, true]) test(`automatic video preparation preserves l
     }
     return bytes;
   }));
-  execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), ['-v', 'error', '-f', 'rawvideo',
+  execFileSync(ffmpegBinary, ['-v', 'error', '-f', 'rawvideo',
     '-pix_fmt', 'rgba', '-s', '64x64', '-r', '10', '-i', 'pipe:0', '-c:v', 'libvpx-vp9',
     '-lossless', '1', '-g', '1', '-pix_fmt', 'yuva420p', '-auto-alt-ref', '0', source], { input: raw });
   await session.page.evaluate(() => {

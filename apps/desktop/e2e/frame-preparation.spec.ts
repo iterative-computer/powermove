@@ -2,7 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 for (const format of ['webm', 'mp4']) test(`prepares exact ${format} pixels for independent, shared and nested video layers`, async ({ session }) => {
   test.setTimeout(60_000);
@@ -17,12 +18,12 @@ for (const format of ['webm', 'mp4']) test(`prepares exact ${format} pixels for 
     ipcMain.handle('render:cancel', () => {});
   });
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-prepare-frames-'));
-  const ffmpeg = path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg');
+  const ffmpeg = ffmpegBinary;
   try {
     const source = path.join(root, `steps.${format}`);
     const raw = Buffer.concat(Array.from({ length: 20 }, (_, i) => Buffer.alloc(32 * 32 * 3, 20 + i * 10)));
     execFileSync(ffmpeg, ['-v', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '32x32', '-r', '30', '-i', 'pipe:0',
-      ...(format === 'webm' ? ['-c:v', 'libvpx-vp9', '-lossless', '1'] : ['-c:v', 'libx264', '-crf', '0', '-pix_fmt', 'yuv420p']), source], { input: raw });
+      ...(format === 'webm' ? ['-c:v', 'libvpx-vp9', '-lossless', '1'] : ['-c:v', 'h264_videotoolbox', '-allow_sw', '1', '-b:v', '8M', '-pix_fmt', 'yuv420p']), source], { input: raw });
     const result = await session.page.evaluate(async ({ bytes, format }) => {
       const PM = (window as any).PM;
       PM.pause();

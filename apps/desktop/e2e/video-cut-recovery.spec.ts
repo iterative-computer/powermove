@@ -1,15 +1,16 @@
 import { copyFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 test('scrubbing across a cut presents the incoming clip despite an unfinished outgoing decode', async ({ session }) => {
   await session.openEditor();
   const sources = ['red', 'blue'].map(color => {
     const file = path.join(session.userData, `${color}.mp4`);
-    execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), [
+    execFileSync(ffmpegBinary, [
       '-v', 'error', '-f', 'lavfi', '-i', `color=${color}:size=64x64:rate=30:duration=2`,
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', file,
+      '-c:v', 'h264_videotoolbox', '-allow_sw', '1', '-pix_fmt', 'yuv420p', file,
     ]);
     return file;
   });

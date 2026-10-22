@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 test('retains static WebM pictures while preserving timestamps and every encoded frame', async ({ session }) => {
   test.setTimeout(120_000);
@@ -35,7 +36,7 @@ test('retains static WebM pictures while preserving timestamps and every encoded
     expect(run.result).toEqual({ cancelled: false });
     if (process.env.PM_WEBM_EXPORT_BASELINE !== '1') expect(run.renders).toBe(1);
   }
-  const decoded = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+  const decoded = execFileSync(ffmpegBinary,
     ['-v', 'error', '-i', output, '-vf', 'scale=1:1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']);
   expect(decoded.length).toBe(30 * 3);
   for (let i = 3; i < decoded.length; i++) expect(Math.abs(decoded[i]! - decoded[i % 3]!)).toBeLessThan(3);
@@ -56,7 +57,7 @@ test('WebM reuse refreshes its picture at fractional layer entrances and exits',
     PM.proj = project; PM.touch();
     return PM.Export.run({ format: 'webm', scale: 1, fps: 10, range: 'all', audio: false, mblur: false, quality: 'high' });
   })).toEqual({ cancelled: false });
-  const decoded = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
+  const decoded = execFileSync(ffmpegBinary,
     ['-v', 'error', '-i', output, '-vf', 'scale=1:1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']);
   expect(decoded.length).toBe(20 * 3);
   for (let i = 0; i < 20; i++) {
