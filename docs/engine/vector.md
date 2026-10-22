@@ -684,11 +684,17 @@ canvas", measured table). `svg-buckets.test.ts` now sizes today's canvas
 with the viewer's own `viewerCanvasSize` instead of a copy of its rule;
 today's `outputScale` is still copied (it is private to the compositor).
 
+Round 3 (decision V1b, 2026-10-21): pm-render has an output origin
+(`RenderRequest::origin`, bridge.md "The output origin"), and the viewer
+renders today's cropped canvas from the crop's unrounded origin at today's
+full scale. The 237% views' edges, SVG edges included, now land on
+today's (whole stage max 1 to 2 CV, was up to 59), and a crop far from the
+composition's origin is no longer drawn from a smaller canvas, so its
+buckets are today's too. The bucket grid gained 32 far-crop views (500%
+and 800% at a 1920 composition's right edge, 213% and 250% of a 4K one,
+Auto and Half, four layer scales; every row records its crop): 950 of 950
+buckets are today's, and 12 of the far views had taken a smaller bucket at
+the reduced scale before.
+
 Remaining: a level 1 SVG inside a level 2 precomp keeps the engine's
-continuous density (today has no level 2). Above 100% in a crop-safe
-project the crop's pixel grid starts at the nearest output pixel, not at
-the crop's fractional origin (bridge.md, "Today's viewer canvas"). A crop
-past the largest output (bridge.md, "Beyond the largest output") is drawn
-from a smaller canvas, so its SVG buckets are picked at that smaller
-scale: smaller than today's there, and the frame still waits for exactly
-the bucket it draws.
+continuous density (today has no level 2).

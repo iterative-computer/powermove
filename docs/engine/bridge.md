@@ -1794,10 +1794,10 @@ mount/A/V gates; neither physical-display gate is claimed from unit tests.
 
 With "Use New Engine" on, the viewer renders at today's canvas resolution
 and scales it as the browser scales today's canvas, at every zoom and
-preview resolution. What was measured, and the differences that remain
-(the video's editing copy, the sub-pixel origin of a crop above 100%, the
-crop past the largest output, the P3 canvas), are below: it does not yet
-look like today's in every case.
+preview resolution. Above 100% it renders today's cropped canvas from the
+crop's unrounded origin (decision V1b, "The output origin" below). What
+was measured, and the differences that remain (the video's editing copy,
+the P3 canvas), are below.
 
 **Today.** The legacy viewer draws a view into a WebGL canvas it sizes
 itself (`V.layout` in `extensions/viewer/viewer.ts`):
@@ -1835,24 +1835,27 @@ sends the one a `render.gl.resize` caller sized. pm-node's
 - without a canvas (the integration harnesses, older callers), draws the
   composition at zoom × DPR × the preview resolution as before.
 
-**Beyond the largest output.** pm-render's output starts at the
-composition's origin (it has no output origin), so a cropped canvas's
-output runs from the composition's origin to the crop's far edge, and
-must fit the largest output (16,384 pixels a side, also the GPU's largest
-viewport). Past it (a 1920-pixel composition from 500% on a 2x display
-once the crop passes composition x ≈ 1,638; at 800% from x ≈ 1,024; a 4K
-composition from about 213%), `canvas_placement` draws the same crop from
-the largest smaller canvas that fits (`Placement::reduced`, the fraction of
-today's resolution) into today's snapped box, so every layer lands where
-today's does, only from fewer pixels: a visible softening. The frame
-reports it (`Composed::reduced`), the viewer thread counts
-`reducedFrames` and logs a warning once each time a view starts drawing
-that way. Until this lane, the placement fell back silently to zoom × DPR,
-which clamped the output and drew the composition too small. The same
-applies without a canvas: a view larger than the largest output keeps its
-rectangle and draws fewer pixels. Matching today exactly here needs an
-output origin in pm-render (the crop drawn from its own origin), which is
-also what the sub-pixel origin below needs.
+**The output origin (decision V1b, 2026-10-21).** Today's compositor maps
+composition pixel `x` to canvas pixel `x · sx − viewport.x · sx` with a
+preview viewport (`scaledWorld`), the origin unrounded, and its background
+(`backgroundView`) and effect coordinates (`effectViewportCoordinates`)
+follow the same origin. pm-render now has that origin
+(`RenderRequest::origin`): every level 1 placement goes through it
+(`scaled_world`, `vector_world`: shapes, text, SVG buckets, solids, images,
+video), as do 2.5D planes, masks, local level 2 content, groups, mattes and
+motion-blur accumulations; a precomp renders its own target from (0, 0) as
+today's nested `renderProject` does. The level's `OutputView` gives the
+background gradient today's view and the effect chains (native and the
+fallback runner) today's `u_pxOrigin` and `u_coordRes`. Draw reuse keys on
+it. `canvas_placement` renders today's canvas itself: its backing size, at
+today's `outputScale`, from `crop.x · sx` unrounded. So a crop never needs
+more than today's canvas (at most the largest output): the smaller-canvas
+fallback (`Placement::reduced`, the `reducedFrames` counter) is gone, and a
+crop at 800% of a 1920-pixel composition's right edge or 250% of a 4K
+one draws at today's full resolution and buckets. Without a canvas (the
+harnesses), a view past the largest output draws its visible part from
+that part's whole-pixel origin. Snapshots and exports send no origin and
+are bit-identical to before (measured below).
 
 The preview quality is honoured exactly as today because the canvas is
 today's: Auto follows `api.transport.quality` (the adaptive ladder),
@@ -1937,21 +1940,14 @@ What the numbers say:
   the original (no proxies yet, section 14). With the copy removed, today's
   viewer matches the engine on the whole stage in all five cases. This
   belongs to Phase 4a (proxies).
-- **Above 100%, cropped, the engine does not match today.** Every 237% case
-  (Auto, Full, Half, unpanned and panned) misses the bound outside the
-  video too: 1 to 3.5% of pixels, up to 59 CV. The differences are on the
-  hard edges of every layer and nowhere else
-  (`/tmp/ne-w5/viewer-canvas-evidence3/237-*-diff.png`): the engine's crop
-  is today's (its crop, scale and canvas size are checked equal), but its
-  pixel grid starts at the nearest output pixel, while today's starts at
-  the crop's fractional origin (`crop.x × sx`, here 488.8 output pixels),
-  so every edge moves by a fraction of a device pixel (F4). Fixing it
-  needs an output origin in pm-render (below).
-- At 800% flush with a 1920-pixel composition's right edge, today's crop
-  starts about 28,700 output pixels from the composition's origin; the
-  engine draws it at 53% of today's resolution into today's box: the
-  geometry is today's, the edges softer (up to 226 CV on 3.3% of
-  pixels). The viewer thread counted 2 reduced frames in the run.
+- **Above 100%, cropped (this table, before V1b).** Every 237% case
+  missed the bound outside the video too: 1 to 3.5% of pixels, up to 59
+  CV, on every hard edge, because the engine's crop grid started at the
+  nearest output pixel instead of the crop's fractional origin (`crop.x ×
+  sx`, here 488.8 output pixels). Fixed by V1b; see the table below.
+- At 800% flush with a 1920-pixel composition's right edge the engine
+  drew today's crop at 53% of today's resolution (up to 226 CV on 3.3% of
+  pixels). Fixed by V1b.
 - Content without the scaling holds within 1 CV in 11 of 12 cases. 25%
   Auto misses it on exactly the video layer (3,600 pixels, the 80 × 45 the
   video covers in that 320 × 180 canvas), in both of today's renders, so
@@ -1986,25 +1982,62 @@ same way with the branch's base `viewer.ts`. The svg and text gates (round
 1): `svg_corpus` 34 projects, 105 frames, 0 failed; `text_corpus` 576
 frames, 0 failed; `text_raster` 0 failed. pm-node `tests/compose.rs` checks
 the snapped box, the rendered texels, the bilinear values against the
-8-bit canvas, and a crop past the largest output landing in today's box;
-the compose unit tests check its geometry for 1920 and 4K compositions.
+8-bit canvas, and (V1b) a crop far from the origin drawn at today's scale
+from its unrounded origin, each hard edge on today's texel; the compose
+unit tests check its geometry for 1920 and 4K compositions.
 `canvas-hold.test.ts` checks the gesture hold: holding inside a gesture,
 releasing on a version, time, quality, project or size change, before the
 engine presented the committed canvas, and when the view leaves the crop,
 and the settle's re-layout.
 
+**After V1b** (2026-10-21, the same spec and machine, run
+`viewer-canvas-evidence-v1b`; the 237% and far-crop cases are no longer
+listed as known, so the spec requires the bound on the whole stage):
+
+| Case | Before V1b: whole stage | After V1b: whole stage |
+|---|---|---|
+| 237% Auto (crop 2056 × 1464) | 99.080%, 59 | 100.000%, 1 |
+| 237% panned Auto | 98.315%, 58 | 99.9999%, 2 |
+| 237% Full | 99.080%, 59 | 100.000%, 1 |
+| 237% panned Full | 98.315%, 58 | 99.9999%, 2 |
+| 237% Half (crop 1052 × 756) | 98.524%, 55 | 100.000%, 1 |
+| 237% panned Half | 96.556%, 171 | 99.986%, 2 |
+| 1920 × 1080 at 800%, right edge, Full | 96.719%, 226 (53% resolution) | 100.000%, 1 |
+| 3840 × 2160 at 250%, right edge, Full | not run | 100.000%, 1 |
+
+The 25 to 100% cases are unchanged (within 0.001 points of the table
+above; the five video editing-copy cases still miss the stage bound on the
+video's edges only and pass with today's copy removed). The spec passed
+(1.6 minutes).
+
+Snapshots and exports, which never set an origin, are bit-identical to
+before V1b: `pm-cli parity render` at the branch's pre-V1b head and after
+it, with the SHA-256 of every sample's float output dumped, gave the same
+179 hashes over 98 corpus projects (and the same 9 parity failures), and
+`pm-cli render --format png` of 45 corpus projects (shapes, effects,
+masks, groups, precomps, mattes, backgrounds, transitions, 2.5D, text,
+compositing; 12 frames each) wrote 540 byte-identical PNGs. pm-render
+`tests/output_origin.rs` checks the origin itself: a whole-pixel origin
+draws the part of the whole frame it starts at (gradient background,
+blurred star, masked shape, 2.5D plane, multiply group, precomp), a
+fractional one moves every layer like a composition translation, the
+background follows today's view, and draw reuse follows the origin.
+
+Gates rerun after V1b (2026-10-21): `svg_corpus` 34 projects, 105 frames,
+0 failed; `text_corpus` 576 frames, 0 failed, 4 FONTS-R ratcheted (as
+before); `text_raster` 0 failed; `path_masks`, `effects_webgl` and
+pm-vector `canvas2d` pass; `corpus.rs` 354 frames, 5 failed, all video
+class (`motion/blur-video` at 0.5 and 1.2 s, max 255; `retime/speed` at
+2.9 s, max 3; `space25d/precomps` at 1.5 and 2.6 s, max 7 and 9), failing
+identically (same pixel counts and maxima) at the branch's pre-V1b head,
+so not V1b's. The svg bucket grid: 950 of 950 views pick today's bucket.
+E2e after V1b: `engine-svg.spec.ts` 6 of 7 (E1 unchanged: 56,037 and
+59,892 values off by 1 CV), `engine-render-transport.spec.ts` 7 of 7, the
+`viewer-*` specs 21 of 23 (the two `viewer-resize.spec.ts` failures that
+also fail on the base).
+
 Remaining:
 
-- Above 100% in a crop-safe project (the usual case for 2D projects), the
-  crop's pixel grid starts at the nearest output pixel rather than at the
-  crop's fractional origin: measured above, up to 59 CV on 1 to 3.5% of the
-  pixels, on every hard edge. A visible difference. It needs an output
-  origin in pm-render: the comp-to-output transform `x · sx − origin`
-  (today's `scaledWorld` subtracts the viewport), with the effect
-  coordinates' origin (`effectViewportCoordinates`) and the background
-  view (`backgroundView`) following, the output then being the canvas
-  itself. That also removes the largest-output limit above.
-- Crops past the largest output draw below today's resolution (above).
 - The video's editing copy (Phase 4a).
 - The engine presents a display-p3 canvas on a wide-gamut display where
   today's canvas is sRGB; the 8-bit P3 round trip moves single channels of
