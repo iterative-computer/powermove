@@ -165,9 +165,23 @@ fn triangle_glb(normals: usize, skinned: bool, unlit: bool) -> Vec<u8> {
 /// the native chrome planes, for one GLB on a black background.
 fn color_and_chrome(glb: &[u8], name: &str) -> (usize, usize, usize, usize) {
     let (w, h) = (96, 64);
-    let dir = std::env::temp_dir().join(format!("pm-render-chrome-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("model.glb");
+    struct TempModel(std::path::PathBuf);
+    impl Drop for TempModel {
+        fn drop(&mut self) {
+            let result = std::fs::remove_dir_all(&self.0);
+            if !std::thread::panicking() {
+                result.unwrap();
+            }
+        }
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = TempModel(std::env::temp_dir().join(format!(
+        "pm-render-chrome-{name}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let path = dir.0.join("model.glb");
     std::fs::write(&path, glb).unwrap();
     let mut o = object3d("model", "box", json!({}), "#FFFFFF", w, h, 2.0);
     o["d"]["data"]["object"]["source"] = json!({ "assetId": "model" });
@@ -237,7 +251,6 @@ fn color_and_chrome(glb: &[u8], name: &str) -> (usize, usize, usize, usize) {
     .unwrap();
     let d = pm_gpu::readback::read_f32(r.device(), r.queue(), &depth.texture).unwrap();
     let c = pm_gpu::readback::read_f32(r.device(), r.queue(), &coverage.texture).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     let far = 1.0_f32.to_bits();
     let depth_px = d
         .chunks(4)

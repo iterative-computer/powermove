@@ -51,7 +51,8 @@ function run(): Record<Case, { rgb: number[]; error: number; exception: string |
     'maskOverrideShortNormal', 'maskOverrideSkinnedShortNormal', 'maskOverrideSkinnedNormal'];
   // An equirect env map: WebGLCubeMaps converts it, and the Basic program
   // gets USE_ENVMAP.
-  const env = tex([255, 255, 255, 255]);
+  const env = new THREE.DataTexture(new Uint8Array(8 * 4 * 4).fill(255), 8, 4, THREE.RGBAFormat);
+  env.needsUpdate = true;
   env.mapping = THREE.EquirectangularReflectionMapping;
   // overlay.ts's outline mask override (MeshBasicMaterial, DoubleSide).
   const mask = new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide });

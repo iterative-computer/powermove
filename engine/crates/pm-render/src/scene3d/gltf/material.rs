@@ -392,7 +392,10 @@ pub fn consumes_short_attribute(p: &Parameters, name: &str) -> bool {
         // override on a skinned mesh (Chromium capture: GL error 1282).
         "NORMAL" => match p.shader_type.as_str() {
             "MeshDepthMaterial" | "MeshDistanceMaterial" => p.displacement_map,
-            "MeshStandardMaterial" | "MeshPhysicalMaterial" => true,
+            "MeshLambertMaterial"
+            | "MeshPhongMaterial"
+            | "MeshStandardMaterial"
+            | "MeshPhysicalMaterial" => true,
             // LineBasicMaterial shares `meshbasic_vert` (never skinned in glTF).
             "MeshBasicMaterial" | "LineBasicMaterial" => p.skinning || p.env_map,
             _ => false,
@@ -773,6 +776,58 @@ mod short_normal_tests {
             shader_type: shader_type.into(),
             ..Parameters::default()
         }
+    }
+
+    /// Golden program reflection and draw verdicts captured by Electron,
+    /// independent of the native rule. Invalid Basic.normalMap mutations
+    /// throw in r180's uniform refresh even with complete NORMAL buffers.
+    #[test]
+    fn normal_and_tangent_inputs_match_chromium_matrix() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/short-normal-programs.json"
+        ))
+        .unwrap();
+        let rows = oracle["cases"].as_array().unwrap();
+        assert_eq!(rows.len(), 320);
+        let mut valid = 0;
+        let mut invalid = 0;
+        for row in rows {
+            let flags = &row["flags"];
+            let flag = |name: &str| flags[name].as_bool().unwrap();
+            let kind = row["kind"].as_str().unwrap();
+            if !row["preDrawException"].is_null() {
+                assert_eq!(kind, "Basic");
+                assert!(flag("normalMap"));
+                invalid += 1;
+                continue;
+            }
+            let mut p = params(&format!("Mesh{kind}Material"));
+            p.skinning = flag("skinning");
+            p.morph_normals = flag("morphNormals");
+            p.morph_targets = p.morph_normals;
+            p.env_map = flag("envMap");
+            p.flat_shading = flag("flatShading");
+            p.normal_map = flag("normalMap");
+            p.normal_map_object_space = p.normal_map && row["normalMapType"] == "object";
+            p.normal_map_tangent_space = p.normal_map && !p.normal_map_object_space;
+            p.vertex_tangents = row["tangents"].as_bool().unwrap() && p.normal_map;
+            p.normal_map_uv = p.normal_map.then(|| "uv".into());
+            let active = row["activeAttributes"].as_array().unwrap();
+            for (source, attribute) in [
+                ("NORMAL", "normal"),
+                ("TANGENT", "tangent"),
+                ("TEXCOORD_0", "uv"),
+            ] {
+                assert_eq!(
+                    consumes_short_attribute(&p, source),
+                    active.iter().any(|name| name == attribute),
+                    "{} {source}",
+                    row["caseId"]
+                );
+            }
+            valid += 1;
+        }
+        assert_eq!((valid, invalid), (272, 48));
     }
 
     /// Chromium (Electron 44, three r180) linked-attribute captures; see
