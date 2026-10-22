@@ -206,6 +206,9 @@ pub const REALTIME_DSP_PHASE_LABELS: [&str; 19] = [
     "read-linear-free",
 ];
 
+const _: () =
+    assert!(RealtimePhase::ReadLinearFree as usize + 1 == REALTIME_DSP_PHASE_LABELS.len());
+
 impl RealtimePhase {
     #[cfg(any(target_os = "macos", test))]
     fn from_label(label: &'static str) -> Self {
@@ -3550,12 +3553,13 @@ mod mac {
                             let metrics = Arc::new(MetricCounters::default());
                             let now = Instant::now();
                             let cpu = thread_cpu_ns();
+                            let initial_cpu_start = cpu.saturating_sub(accrued);
                             BUDGET.with(|slot| {
                                 *slot.borrow_mut() = Some(Budget {
                                     id: 0xA710,
                                     depth: 1,
                                     wall_start: now,
-                                    cpu_start_ns: cpu.saturating_sub(accrued),
+                                    cpu_start_ns: initial_cpu_start,
                                     last_checkpoint_cpu_ns: cpu,
                                     last_checkpoint_wall: now - Duration::from_millis(1),
                                     exit_cpu_ns: cpu,
@@ -3574,11 +3578,23 @@ mod mac {
                             } else {
                                 checkpoint_current_phase(phase);
                             }
-                            assert_eq!(
-                                metrics.snapshot().throttle_sleeps,
-                                u64::from(phase == crate::realtime::RealtimePhase::StretchRead),
-                                "{phase:?}, DSP hook: {use_dsp_hook}, computation: {computation}"
-                            );
+                            if phase == crate::realtime::RealtimePhase::StretchRead {
+                                // Both a throttle and an already expired wall
+                                // window reset the admitted budget. A heavily
+                                // descheduled test thread need not actually sleep.
+                                let cpu_start = BUDGET.with(|slot| {
+                                    slot.borrow().as_ref().unwrap().cpu_start_ns
+                                });
+                                assert_ne!(
+                                    cpu_start, initial_cpu_start,
+                                    "{phase:?}, DSP hook: {use_dsp_hook}, computation: {computation}"
+                                );
+                            } else {
+                                assert_eq!(
+                                    metrics.snapshot().throttle_sleeps, 0,
+                                    "{phase:?}, DSP hook: {use_dsp_hook}, computation: {computation}"
+                                );
+                            }
                             BUDGET.with(|slot| *slot.borrow_mut() = None);
                         }
                     }
@@ -3594,10 +3610,9 @@ mod mac {
                 .iter()
                 .enumerate()
             {
-                assert_eq!(
-                    crate::realtime::RealtimePhase::from_id(id as u8).label(),
-                    *label
-                );
+                let phase = crate::realtime::RealtimePhase::from_id(id as u8);
+                assert_eq!(phase as usize, id);
+                assert_eq!(phase.label(), *label);
             }
             let metrics = Arc::new(MetricCounters::default());
             let now = Instant::now();

@@ -20,6 +20,8 @@ use std::ffi::{c_int, c_long, c_void};
 use std::ptr::NonNull;
 
 unsafe extern "C" {
+    fn pm_stretch_diag_enable(enabled: c_int);
+    fn pm_stretch_diag_snapshot(packed: *mut u64, capacity: c_int) -> c_int;
     fn pm_stretch_new(channels: c_int, block: c_int, interval: c_int, seed: c_long) -> *mut c_void;
     fn pm_stretch_new_with_checkpoint(
         channels: c_int,
@@ -88,6 +90,43 @@ pub const DEFAULT_INTERVAL_SECONDS: f64 = 0.03;
 /// The most channels one stretcher processes (the widest layout pm-media
 /// reports is 24 channels, 22.2).
 pub const MAX_CHANNELS: usize = 32;
+
+/// Native DSP regions measured by the optional process-wide diagnostic.
+#[doc(hidden)]
+pub const DSP_DIAGNOSTIC_REGIONS: [&str; 10] = [
+    "energy",
+    "input-copy",
+    "new-block-setup",
+    "analysis-step",
+    "analysis-fft",
+    "spectrum-step",
+    "synthesis-step",
+    "synthesis-fft",
+    "output-read-move",
+    "logical-step",
+];
+
+/// Enable native DSP timing once on an ordinary thread before audio work.
+/// This process-wide diagnostic resets its maxima when enabled.
+#[doc(hidden)]
+pub fn enable_dsp_diagnostics() {
+    // SAFETY: no borrowed buffers; callers enable this before audio work.
+    unsafe { pm_stretch_diag_enable(1) }
+}
+
+/// Process-global maximum thread CPU time and native step ordinal per region
+/// since diagnostics were last enabled.
+/// Returns `None` if the native diagnostic cannot fill the fixed-size snapshot.
+#[doc(hidden)]
+pub fn dsp_diagnostic_snapshot() -> Option<[(u64, u16); DSP_DIAGNOSTIC_REGIONS.len()]> {
+    let mut packed = [0u64; DSP_DIAGNOSTIC_REGIONS.len()];
+    // SAFETY: the native function writes at most `capacity` entries to this array.
+    let written = unsafe { pm_stretch_diag_snapshot(packed.as_mut_ptr(), packed.len() as c_int) };
+    if written != packed.len() as c_int {
+        return None;
+    }
+    Some(packed.map(|entry| (entry >> 16, entry as u16)))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StretchError {
@@ -476,6 +515,56 @@ impl std::fmt::Debug for Stretcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn optional_dsp_diagnostics_preserve_pcm_and_report_native_steps() {
+        extern "C" fn checkpoint() {}
+
+        fn render() -> Vec<f32> {
+            let mut stretch = Stretcher::new(1, 48_000).unwrap();
+            let input: Vec<f32> = (0..32_000)
+                .map(|i| (i as f32 * 0.013).sin() * 0.25)
+                .collect();
+            let lead = stretch.output_seek_length(1.0);
+            stretch.output_seek(&[&input[..lead]]).unwrap();
+            let interval = stretch.interval_samples();
+            let mut output = Vec::new();
+            for step in 0..8 {
+                let from = lead + step * interval;
+                let to = from + interval;
+                let mut block = vec![0.0; interval];
+                stretch
+                    .process_with_checkpoint(&[&input[from..to]], &mut [&mut block], checkpoint)
+                    .unwrap();
+                output.extend(block);
+            }
+            output
+        }
+
+        struct DisableDiagnostics;
+        impl Drop for DisableDiagnostics {
+            fn drop(&mut self) {
+                // SAFETY: no borrowed buffers; changing the diagnostic does not
+                // change the stretcher or its PCM output.
+                unsafe { pm_stretch_diag_enable(0) }
+            }
+        }
+
+        let _disable = DisableDiagnostics;
+        // SAFETY: test setup runs on an ordinary thread, outside native DSP.
+        unsafe { pm_stretch_diag_enable(0) }
+        let reference = render();
+        enable_dsp_diagnostics();
+        let diagnosed = render();
+        let snapshot = dsp_diagnostic_snapshot().expect("all ten native diagnostic regions");
+        assert_eq!(snapshot.len(), DSP_DIAGNOSTIC_REGIONS.len());
+        assert!(snapshot.iter().any(|(ns, _)| *ns > 0));
+        assert_eq!(
+            reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            diagnosed.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn rejects_bad_shapes() {

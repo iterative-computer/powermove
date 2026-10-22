@@ -3659,13 +3659,15 @@ Review of that reserve change found a short-period regression: 250
 microseconds can exceed the old half-computation reserve at 96/192 kHz with
 32-frame buffers. Process admission now uses the smaller of 250 microseconds
 and the old default, for both producer and workers. Explicit setup requests
-remain unchanged. New tests exercise short periods, actual checkpoint paths
-and role/phase attribution. Fixed atomic counters now expose admitted DSP
+remain unchanged. New arithmetic tests exercise short-period thresholds; the
+actual checkpoint path test exercises both roles at 48 kHz / 64 frames, plus
+role/phase attribution. Fixed atomic counters now expose admitted DSP
 span maxima by worker/producer and the 19 stable phase IDs through
 `schedulingMaxDspUnitByRolePhaseNs`; they add no allocation on audio threads.
-This will distinguish the earlier unattributed 394 microsecond maximum from
-the worker-only process measurements. The producer's process units need
-measurement too; no worst-case claim is made from the old worker profiles.
+These are context-lifetime maxima, not per-Play deltas. They attribute new
+measurements only; neither the earlier 394 microsecond maximum nor V40's
+252.875 microsecond stressed maximum can be attributed retrospectively.
+No worst-case claim is made from the old worker profiles.
 
 V40 was not device-qualified. Its plain and stressed 40-test smokes each
 finished 39/40 at the enforced cold-distinct bound. Plain first buffers were
@@ -3674,3 +3676,22 @@ finished 39/40 at the enforced cold-distinct bound. Plain first buffers were
 with zero program underruns and RT errors. The owned temporary tree was
 empty and removed. These failures remain in the evidence; the short-period
 correction and new span attribution require fresh runtime verification.
+
+V41 built the runtime, addons and desktop app, passed strict Clippy and all
+22 realtime unit tests. Its plain and stressed playback smokes again finished
+39/40. The cold-distinct atomic first-512 times were
+11.675/11.034/10.944/11.204 ms plain and
+12.975/11.766/3.203/11.713 ms stressed, against the unchanged 10.667 ms bound.
+The complete 8192-frame PCM comparisons and start/RT counters passed; these
+timing misses remain failures. Both owned temporary trees were empty and removed.
+
+The new context-lifetime counters measured worker/producer stretch-process
+maxima of 180.333/108.458 microseconds plain and 655.416/110.125 microseconds
+stressed. The stressed worker maximum exceeds the 250 microsecond admission
+reserve and the declared 25 percent margin (at most 200 microseconds of work).
+V41 therefore has no device capture. Existing hooks surround logical process
+steps, but some steps execute whole FFTs or full spectrum passes. Opt-in CPU
+timing inside those operators will locate the required checkpoint boundaries;
+the canonical preroll, PCM arithmetic and realtime limits remain unchanged.
+V40's plain cold miss had no throttle sleeps, so its timing cannot be credited
+to a reserve change. The final campaign and its reservation remain pending.

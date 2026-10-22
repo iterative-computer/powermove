@@ -7,6 +7,10 @@
 #	define SIGNALSMITH_STRETCH_SETUP_CHECKPOINT() ((void)0)
 #	define SIGNALSMITH_STRETCH_LOCAL_SETUP_CHECKPOINT
 #endif
+#ifndef SIGNALSMITH_STRETCH_DIAG_SCOPE
+#	define SIGNALSMITH_STRETCH_DIAG_SCOPE(category, step) ((void)0)
+#	define SIGNALSMITH_STRETCH_LOCAL_DIAG_SCOPE
+#endif
 
 #include <vector>
 #include <array>
@@ -232,6 +236,7 @@ struct SignalsmithStretch {
 #endif
 		int prevCopiedInput = 0;
 		auto copyInput = [&](int toIndex){
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(1, 0);
 
 			int length = std::min<int>(int(stft.blockSamples() + stft.defaultInterval()), toIndex - prevCopiedInput);
 			tmpProcessBuffer.resize(length);
@@ -248,11 +253,14 @@ struct SignalsmithStretch {
 		};
 
 		Sample totalEnergy = 0;
-		for (int c = 0; c < channels; ++c) {
-			auto &&inputChannel = inputs[c];
-			for (int i = 0; i < inputSamples; ++i) {
-				Sample s = inputChannel[i];
-				totalEnergy += s*s;
+		{
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(0, 0);
+			for (int c = 0; c < channels; ++c) {
+				auto &&inputChannel = inputs[c];
+				for (int i = 0; i < inputSamples; ++i) {
+					Sample s = inputChannel[i];
+					totalEnergy += s*s;
+				}
 			}
 		}
 
@@ -299,6 +307,7 @@ struct SignalsmithStretch {
 		for (int outputIndex = 0; outputIndex < outputSamples; ++outputIndex) {
 			bool newBlock = blockProcess.samplesSinceLast >= stft.defaultInterval();
 			if (newBlock) {
+				SIGNALSMITH_STRETCH_DIAG_SCOPE(2, 0);
 				blockProcess.step = 0;
 				blockProcess.steps = 0; // how many processing steps this block will have
 				blockProcess.samplesSinceLast = 0;
@@ -348,10 +357,12 @@ struct SignalsmithStretch {
 #ifdef SIGNALSMITH_STRETCH_PROFILE_PROCESS_STEP
 				SIGNALSMITH_STRETCH_PROFILE_PROCESS_STEP(step, blockProcess.steps);
 #endif
+				SIGNALSMITH_STRETCH_DIAG_SCOPE(9, step);
 				if (blockProcess.newSpectrum) {
 					if (blockProcess.reanalysePrev) {
 						// analyse past input
 						if (step < stft.analyseSteps()) {
+							SIGNALSMITH_STRETCH_DIAG_SCOPE(3, step);
 							stashedInput.swap(stft.input);
 							stft.analyseStep(step, stft.defaultInterval());
 							stashedInput.swap(stft.input);
@@ -374,6 +385,7 @@ struct SignalsmithStretch {
 
 					// Analyse latest (stashed) input
 					if (step < stft.analyseSteps()) {
+						SIGNALSMITH_STRETCH_DIAG_SCOPE(3, step);
 						stashedInput.swap(stft.input);
 						stft.analyseStep(step);
 						stashedInput.swap(stft.input);
@@ -395,6 +407,7 @@ struct SignalsmithStretch {
 				}
 
 				if (step < processSpectrumSteps) {
+					SIGNALSMITH_STRETCH_DIAG_SCOPE(5, step);
 					processSpectrum(step);
 					continue;
 				}
@@ -414,6 +427,7 @@ struct SignalsmithStretch {
 				step -= 1;
 				
 				if (step < stft.synthesiseSteps()) {
+					SIGNALSMITH_STRETCH_DIAG_SCOPE(6, step);
 					stft.synthesiseStep(step);
 					continue;
 				}
@@ -422,16 +436,19 @@ struct SignalsmithStretch {
 			SIGNALSMITH_STRETCH_PROFILE_PROCESS_ENDSTEP();
 #endif
 
-			++blockProcess.samplesSinceLast;
-			if (_splitComputation) stashedOutput.swap(stft.output);
-			for (int c = 0; c < channels; ++c) {
-				auto &&outputChannel = outputs[c];
-				Sample v = 0;
-				stft.readOutput(c, 1, &v);
-				outputChannel[outputIndex] = v;
+			{
+				SIGNALSMITH_STRETCH_DIAG_SCOPE(8, 0);
+				++blockProcess.samplesSinceLast;
+				if (_splitComputation) stashedOutput.swap(stft.output);
+				for (int c = 0; c < channels; ++c) {
+					auto &&outputChannel = outputs[c];
+					Sample v = 0;
+					stft.readOutput(c, 1, &v);
+					outputChannel[outputIndex] = v;
+				}
+				stft.moveOutput(1);
+				if (_splitComputation) stashedOutput.swap(stft.output);
 			}
-			stft.moveOutput(1);
-			if (_splitComputation) stashedOutput.swap(stft.output);
 		}
 		
 		copyInput(inputSamples);
@@ -1079,5 +1096,9 @@ private:
 #ifdef SIGNALSMITH_STRETCH_LOCAL_SETUP_CHECKPOINT
 #	undef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
 #	undef SIGNALSMITH_STRETCH_LOCAL_SETUP_CHECKPOINT
+#endif
+#ifdef SIGNALSMITH_STRETCH_LOCAL_DIAG_SCOPE
+#	undef SIGNALSMITH_STRETCH_DIAG_SCOPE
+#	undef SIGNALSMITH_STRETCH_LOCAL_DIAG_SCOPE
 #endif
 #endif // include guard

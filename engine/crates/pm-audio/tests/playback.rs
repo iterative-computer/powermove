@@ -71,6 +71,27 @@ fn stress_enabled() -> bool {
     std::env::var_os("PM_AUDIO_PLAYBACK_STRESS").is_some()
 }
 
+fn native_dsp_diagnostics_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = std::env::var_os("PM_STRETCH_DSP_DIAGNOSTICS").is_some();
+        if enabled {
+            pm_stretch::enable_dsp_diagnostics();
+        }
+        enabled
+    })
+}
+
+fn log_native_dsp_diagnostics(label: &str) {
+    if native_dsp_diagnostics_enabled() {
+        eprintln!(
+            "{label}: native DSP processGlobalSinceEnableNs regions={:?} maxima(ns,ordinal)={:?}",
+            pm_stretch::DSP_DIAGNOSTIC_REGIONS,
+            pm_stretch::dsp_diagnostic_snapshot(),
+        );
+    }
+}
+
 fn ticks(s: f64) -> Ticks {
     Ticks::new((s * TICKS_PER_SECOND as f64).round() as i64).unwrap()
 }
@@ -188,6 +209,7 @@ fn setup_doc(
     device_channels: usize,
     ppm: f64,
 ) -> (Playback, SimDevice, Rig) {
+    native_dsp_diagnostics_enabled();
     let mut rig = Rig::new(media);
     rig.cache = SourceCache::new(64 << 20, 2);
     if stress_enabled() {
@@ -911,8 +933,20 @@ fn time_mapped_playback(loaded: bool) {
         eprintln!(
             "{name}: first program frame {start}, offline lead {lead}, expired callbacks {}, first queued after control {:?} ms",
             dev.expired,
-            playback_timing.map(|t| (t.queued_us - t.applied_us) as f64 / 1000.0)
+            playback_timing
+                .as_ref()
+                .map(|t| (t.queued_us - t.applied_us) as f64 / 1000.0)
         );
+        eprintln!(
+            "{name}: DSP span maxima contextLifetimeNs worker={:?} producer={:?}",
+            playback_timing
+                .as_ref()
+                .map(|t| &t.scheduling_max_dsp_unit_by_role_phase_ns[0]),
+            playback_timing
+                .as_ref()
+                .map(|t| &t.scheduling_max_dsp_unit_by_role_phase_ns[1]),
+        );
+        log_native_dsp_diagnostics(name);
         assert_eq!(stats.starved_renders, 0, "{name}: starved renders");
         assert_eq!(stats.underruns, 0, "{name}: device ring underruns");
         assert_eq!(
@@ -3196,6 +3230,7 @@ fn cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous() {
 static POOL_BURSTS: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
+    native_dsp_diagnostics_enabled();
     let _serial = POOL_BURSTS.write().unwrap_or_else(|e| e.into_inner());
     let _load = stress_enabled().then(CpuContention::start);
     let dir = temp_dir(match (cold, distinct) {
@@ -3526,6 +3561,12 @@ fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
             proof.idle_pool_since_play.wake_count,
             proof.idle_pool_since_play.successful_idle_entries,
         );
+        eprintln!(
+            "A8 DSP span maxima cold={cold} distinct={distinct} trial={trial} contextLifetimeNs worker={:?} producer={:?}",
+            proof.scheduling_max_dsp_unit_by_role_phase_ns[0],
+            proof.scheduling_max_dsp_unit_by_role_phase_ns[1],
+        );
+        log_native_dsp_diagnostics(&format!("A8 cold={cold} distinct={distinct} trial={trial}"));
     }
     playback.command(TransportCommand::Pause).unwrap();
     #[cfg(target_os = "macos")]

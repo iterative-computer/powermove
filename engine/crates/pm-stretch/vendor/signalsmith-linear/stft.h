@@ -3,6 +3,11 @@
 
 #include "./fft.h"
 
+#ifndef SIGNALSMITH_STRETCH_DIAG_SCOPE
+#	define SIGNALSMITH_STRETCH_DIAG_SCOPE(category, step) ((void)0)
+#	define SIGNALSMITH_LINEAR_STFT_LOCAL_DIAG_SCOPE
+#endif
+
 #ifndef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
 #	define SIGNALSMITH_STRETCH_SETUP_CHECKPOINT() ((void)0)
 #	define SIGNALSMITH_LINEAR_STFT_LOCAL_SETUP_CHECKPOINT
@@ -447,12 +452,14 @@ struct DynamicSTFT {
 		}
 		auto *spectrumPtr = spectrum(channel);
 		if (splitComputation) {
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(4, step);
 			fft.fft(step, timeBuffer.data(), spectrumPtr);
 			if (unpacked && step == fft.steps() - 1) {
 				spectrumPtr[_fftBins - 1] = spectrumPtr[0].imag();
 				spectrumPtr[0].imag(0);
 			}
 		} else {
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(4, step);
 			fft.fft(timeBuffer.data(), spectrum(channel));
 			if (unpacked) {
 				spectrumPtr[_fftBins - 1] = spectrumPtr[0].imag();
@@ -487,10 +494,12 @@ struct DynamicSTFT {
 
 		if (splitComputation) {
 			if (step < fftSteps) {
+				SIGNALSMITH_STRETCH_DIAG_SCOPE(7, step);
 				fft.ifft(step, spectrumPtr, timeBuffer.data());
 				return;
 			}
 		} else {
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(7, step);
 			fft.ifft(spectrumPtr, timeBuffer.data());
 		}
 		
@@ -771,5 +780,9 @@ private:
 #ifdef SIGNALSMITH_LINEAR_STFT_LOCAL_HAS_SETUP_CHECKPOINT
 #	undef SIGNALSMITH_STRETCH_HAS_SETUP_CHECKPOINT
 #	undef SIGNALSMITH_LINEAR_STFT_LOCAL_HAS_SETUP_CHECKPOINT
+#endif
+#ifdef SIGNALSMITH_LINEAR_STFT_LOCAL_DIAG_SCOPE
+#	undef SIGNALSMITH_STRETCH_DIAG_SCOPE
+#	undef SIGNALSMITH_LINEAR_STFT_LOCAL_DIAG_SCOPE
 #endif
 #endif // include guard
