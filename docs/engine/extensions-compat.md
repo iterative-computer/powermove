@@ -188,26 +188,69 @@ lane).
 
 A frame whose compatibility answers are missing waits for its window producer.
 Playback preparation follows the audio-clock playhead, quantized to composition
-frames, with six frames ahead. A 4 ms poll replenishes that horizon even when
-nothing has reached the viewer. Delayed needs cannot imply reverse playback:
-the transport rate supplies direction, and obsolete needs yield to the current
-playhead. Each producer turn admits at most sixteen answers within a 6 ms
-budget. Layer/source entries and their time windows are bounded.
+frames, with eighteen frames of answers ahead. A 4 ms poll replenishes that
+horizon even when nothing has reached the viewer. Delayed needs cannot imply
+reverse playback: the transport rate supplies direction, and obsolete needs
+yield to the current playhead. Each producer turn admits at most sixteen
+answers within a 6 ms budget. Layer/source entries and their time windows
+are bounded.
 
-At most two base-raster preparations are in flight. They use asynchronous IPC
-with native dependency priority: ordinary async snapshots yield to due viewer
-frames, but a viewer waiting for these pixels cannot make progress first.
-Each ready result can run its synchronous wrapper independently of a slower
-sibling. A paused need warms at most one six-frame horizon for 50 ms without
-a continuing paused timer, so Play can consume ready pixels immediately.
-Unchanged plain-shape base pixels use the native evaluator’s resolved content
-identity across times; the bounded cache holds at most two surfaces / 32 MiB.
-Wrappers still run for every requested time, including animated wrappers.
-The prepared surface must match live layer identity, time, density,
-crop and revision. Reset, chain changes, fonts and disposal invalidate it;
-snapshots and exports use their existing paths. A modified layer passed by a
-wrapper still asks for that exact layer's base pixels. Nested or retimed layers
-retain the open composition's preparation step and ask for any missing times.
+Two answer preparations and one speculative preparation may be in flight.
+They use asynchronous IPC with native dependency priority: ordinary async
+snapshots yield to due viewer frames, but a viewer waiting for these pixels
+cannot make progress first. Once every layer's eighteen-frame answer horizon
+is answered or in flight, complete results for frames 19 to 24 are prepared
+speculatively. A paused need warms only within a 500 ms deadline, without a
+continuing paused timer. Prepared results stay within 64 MiB and 4096 entries.
+An actual compositor need remains asynchronous even after the stopped clock
+arrives, and must finish even if that warm deadline expires. Required paused
+layers share the same concurrency bound; only speculative warm-up expires.
+The native thread schedules views and processes commands between dependency
+snapshots during playback, rather than draining a burst across a frame deadline.
+
+The base surface is lazy. A wrapper that passes it through untouched costs
+no native raster; the engine draws the layer itself. Reading an unavailable
+base during playback preparation suspends that attempt. The native engine
+prepares the real base asynchronously, then the wrapper retries with those
+pixels. This also discovers detached, retimed and cropped bases computed
+inside a wrapper, including the typewriter's changing prefix. Up to 64
+dependency phases may complete; a nonconvergent chain fails by name. A wrapper
+that catches a missing-base read cannot publish its incomplete result. Once
+the wrapper completes, its pixels and geometry are retained for the exact
+composition, layer, time, density, crop and revision. The presentation answer
+consumes that result without running another synchronous native snapshot.
+
+Wrapper continuations yield through a background scheduler task so frame
+presentation and input can run between preparations. Their canvases are
+captured as premultiplied ImageBitmaps without color conversion and sent to
+a dedicated worker. That worker uses the same WebGL upload/readback function
+as synchronous callers and transfers the pixel buffer back. GPU readback no
+longer waits on the renderer thread. Geometry is captured before the async
+readback, so a wrapper reusing its surface object cannot change an earlier
+frame's quad. The worker closes each bitmap, reports errors to the request,
+and terminates on disposal.
+
+The base cache follows today's raster cache (`legacy/gl/raster.ts`): plain
+text and plain shapes key by native-evaluated content, density and crop,
+with composition/layer identity for document layers and content identity for
+detached copies. It retains at most sixteen surfaces / 32 MiB. Paths, text
+animators and styles, font anchoring and captions are never cached because
+they can change with time beyond their resolved content. A genuinely changed
+base is prepared afresh; the changing-base cadence gates assert asynchronous
+loads throughout playback and zero synchronous loads during the measured span.
+
+Reset, revision, layer identity, chain changes, fonts and disposal invalidate
+prepared answers. Public synchronous APIs, synchronous snapshots and exports
+retain their existing synchronous behavior. An asynchronous or idle snapshot
+(a capture or thumbnail taken during playback) prepares its round's needs the
+same way playback does and posts the prepared answers. Only a need whose
+prepared answer did not survive a reset is answered synchronously. Before
+this, such a snapshot ran the wrapper over a synchronous base raster in the
+middle of playback; one of thirty loaded runs caught it.
+`RasterCompat.stats.syncLoadSites` names the callers of the last four
+synchronous loads, and the gates print them on failure. Nested or retimed
+layers retain the open composition's preparation step and ask for missing
+times.
 
 Timed worker commits retain the earliest queued refresh deadline. When a later
 BeginFrame overtakes an overdue timer, it fulfils that turn immediately. The
@@ -235,6 +278,61 @@ one-frame alignment allowance. Preparation never exceeded two in-flight jobs;
 no native compatibility miss arrived during those playback windows. The
 focused transport, raster, kernel, presenter and anonymized-fixture unit set
 passes 182 tests.
+
+### Round six: bases that change every frame (2026-10-22)
+
+The round-five cadence fixture rotates a static ellipse and reuses its base.
+Three additional gates exercise changing pixels on all 90 composition frames:
+the unchanged compat-typewriter override with progress keyed 0 to 100% and a
+new typed prefix each frame; shape-tint over an ellipse whose size animates
+from 60×40 to 200×120; and shape-tint over a paths layer with animated vertex
+and tangent channels. Each fixture verifies 90 distinct evaluated base states.
+
+Both engine and today play the full three-second composition span, ending at
+the last frame (six-second deadline, no frames after a wrap). This avoids
+comparing today's startup delay with the engine's already advancing clock.
+The today-relative bounds stay: longest gap, first frame and completion at
+most today plus 34 ms; presented and distinct frame counts at least today
+minus one. The changing-base gates additionally require new asynchronous
+base work throughout the span and no synchronous base loads during playback.
+
+The final campaign runs each changing-base gate ten times with two SHA256
+workers, one Playwright worker, the shipping thin-LTO native addon and the
+Electron slot lock. The complete public suite includes the original static
+rotation gate and all three changing-base gates. Worker pixel fidelity has a
+separate gate covering alpha ramps and antialiasing in sRGB and Display P3,
+requiring exact pixel and geometry equality against synchronous readback.
+
+Measured 2026-10-22: ten loaded runs per gate (two SHA256 workers, other lanes'
+Electron runs sharing the machine, load average 10 to 13), engine against
+today in the same run:
+
+| Gate | Pass | Distinct frames | Longest gap | First frame | Last frame |
+| --- | --- | --- | --- | --- | --- |
+| Typewriter keyed 0→100% | 10/10 | 90 vs 90 | 43–50 vs 43–49 ms | 9–45 vs 96–130 ms | 3002–3019 vs 3070–3108 ms |
+| Animated ellipse size | 10/10 | 90 vs 90 | 42–59 vs 35–42 ms | 2–42 vs 95–158 ms | 3001–3018 vs 3065–3130 ms |
+| Animated path vertices | 10/10 | 90 vs 90 | 42–50 vs 35–42 ms | 8–44 vs 101–230 ms | 3002–3016 vs 3071–3205 ms |
+
+All thirty runs had zero synchronous base loads during playback, no native
+compatibility ask during playback (every frame's answer was ahead of the
+engine), and no late native skips. The paused warm-up prepared 19 to 20 bases
+before Play. During playback 71 to 94 more were prepared asynchronously.
+
+The same campaign on the build before the 500 ms warm-up and the
+asynchronous snapshot round passed 7/10, 9/10 and 10/10. With a 150 ms warm
+window only five bases were ready at Play. The typewriter then skipped frames
+4 and 5 at the start (89 to 167 ms gaps). Once a synchronous base load came
+from a snapshot round, and the native presenter skipped two late frames once.
+The unloaded public set passed 34 gates. These are the 30 original gates
+plus the readback gate and the three changing-base gates. One skip is
+expected: the C1 private-setup gate, named, with the private corpus variable
+unset.
+
+Open: Play pressed within a few frames of a seek starts before the paused
+warm-up fills. On a typewriter-class wrapper the first frames are then
+expected to skip, as in the 150 ms runs. No gate measures this case yet. Today's first frame is itself 90 to 230 ms late. A
+native preroll that holds the clock until the first answers are ready would
+close it. That is a playback-clock change outside this lane.
 
 ### Earlier measurements (2026-10-19, before round-three integration)
 
