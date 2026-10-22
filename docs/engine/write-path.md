@@ -516,8 +516,12 @@ unchanged.
 The barrier keeps a reconnect checkpoint and at most 128 batches / 8 MiB of
 canonical patch bodies after it. A load discards the suffix. `resume()` provides
 the checkpoint and a contiguous copy of the suffix without serializing a whole
-document; a failed checkpoint probe takes a fresh `snapshot({ checkpoint: true })`
-instead. Export/agent snapshots leave the viewer's replay base and suffix intact. Engine
+document. Native kernels retain that verified base across edits. If the suffix
+expires or the probe is refused, the native reader refreshes the current root's
+digests off-thread; revision and root fences precede checkpoint publication.
+Native viewers retry that verified checkpoint without calling the synchronous
+whole-document snapshot API. Standalone WASM receivers retain the existing
+`snapshot({ checkpoint: true })` path. Export/agent snapshots leave the viewer's replay base and suffix intact. Engine
 retention and expiry are described in `host-processes.md`.
 
 Regression coverage: `engine-doc/large-document.test.ts`, the session replay test

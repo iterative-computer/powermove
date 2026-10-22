@@ -281,10 +281,8 @@ test('a large project with embedded images and raster-wrapped text opens with th
       // Today's heap, within measurement noise (the engine's shadow of the
       // document replaces the store's clone of the last autosave). Before
       // the fix the engine-on heap grew by several copies of the document.
-      expect(engineHeap).toBeLessThanOrEqual(todayHeap * 1.05 + 32 * 2 ** 20);
       // The opening gate is tied to today's path; extra whole-document
       // diff/hash/resync work must not be hidden behind a fixed allowance.
-      expect(engineSeconds).toBeLessThanOrEqual(todaySeconds);
       // The interactive engine holds the document about once: a pm-model
       // tree is about 11 times its JSON. Before the shared tree it held
       // five or more copies.
@@ -335,6 +333,10 @@ test('a large project with embedded images and raster-wrapped text opens with th
       expect(await ask(engine.page, 'checkpoint resume', () => (window as any).PM.EngineConnection.session()?.resumes ?? 0)).toBeGreaterThan(0);
       const after = await ask(engine.page, 'snapshot after reconnect', () => (window as any).PM.Kernel.api('large-project-wrapper').render.snapshot(2.5, 320) as string, 60_000);
       expect(after.startsWith('data:image/jpeg')).toBe(true);
+      // Keep strict performance failures, after observing the independent
+      // pixel and reconnect gates so a timing miss cannot hide their evidence.
+      expect(engineHeap).toBeLessThanOrEqual(todayHeap * 1.05 + 32 * 2 ** 20);
+      expect(engineSeconds).toBeLessThanOrEqual(todaySeconds);
       expect(engine.diagnostics.pageErrors).toEqual([]);
     } finally {
       await closeSoon(engine);

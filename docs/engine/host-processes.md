@@ -432,9 +432,74 @@ The private opening harness must check that the document identity changed and
 that the production document loaded, since `PM.openProject()` also resolves after
 a handled import failure. An empty project is never an opening-time sample.
 
+Beta DECISION bug fix: reader lifetime applies with either engine setting. A
+reader cannot expire while its initial response is still crossing IPC. The
+project-operation queue also retains only completion, releasing the full parsed
+open response after its caller releases it. Intermittent blank opens must still
+be counted separately; the lease fix does not establish the cause of another
+handled open failure without its error toast.
+
 The ingestion reader admits one active document and two queued documents. A
 full queue answers `budgetExceeded` with `Retry::After(250 ms)`. Renderer and main
 resync callers honor that admission retry using the same snapshot and staged
 file, without serializing another document. A connection close cancels renderer
 retry timers; main retries remain fenced to the same engine launch. Permanent
 parse/hash errors remain failures.
+
+### One native document for large interactive projects
+
+Large file and tab opens prepare the document before publishing `PM.proj`.
+The renderer keeps the existing raw JavaScript objects and an independent JSON
+shadow for patch generation and alias checks. It clones and traverses these in
+cooperative slices, and streams canonical UTF-8 chunks through the trusted host.
+There is no whole-document canonical string, UTF-8 input allocation, or SHA state
+in the renderer's preparation path. Small documents, headless evaluation, and
+standalone evaluator diagnostics continue to use WASM.
+
+Main owns each temporary file, independently hashes its incoming chunks, and
+removes the file in a `finally` block. The native reader parses the file and warms
+both canonical and incremental integrity digests off the utility's JavaScript
+thread. A prepared receipt does not replace the live evaluator. Publication
+activates the checked tree at a revision after any edits to the previous project.
+The evaluator and viewer then share the same native document containers; the
+renderer does not grow a large, permanently resident WASM linear memory.
+
+Synchronous extension APIs retain immediate native evaluation through an
+owner-fenced host call. Existing synchronous project assignments also retain
+their semantics. Ordinary file and tab opens use the asynchronous preparation
+path. A failed preparation leaves the previous evaluator intact. Recovery checks
+the project, barrier, and edit epoch before activation and retries if they changed.
+
+Save, export, and idle checks compare live aliases against the shadow in bounded
+slices before consulting cached subtree digests. Small digest operations are
+batched to the host's independent SHA implementation; large leaves stream in
+chunks. An edit invalidates ancestor caches and fences outstanding asynchronous
+cache writes. Announced edits crossing a check cause a retry. As with any traversal
+of mutable raw objects, unannounced writes to already visited members cannot be
+made atomic across asynchronous tasks without changing the public alias contract.
+
+RSS accounting must include renderer WASM high-water memory, transient canonical
+staging, native model allocation, evaluator plans, and check caches, as well as
+the JavaScript heap. Native heap diagnostics explicitly label tree sizes as
+estimates; they are not RSS measurements. Short native JSON keys and values fit
+inline without changing `JsString`'s three-word size. Integrity cache entries use
+weak container references and a fixed entry bound; the wire digest is a cached
+32-byte result, not a retained canonical document.
+
+Prepared streams and digest tokens are owner-scoped and cleaned up on renderer
+navigation, crash, destruction, cancellation, and shutdown. Pending owner cleanup
+reserves that slot until earlier commits settle. Bounded reader backpressure
+retries the same private file rather than creating duplicate staging. Binary
+patches and fonts cross IPC as typed bytes, without JSON number-array expansion.
+
+The native kernel retains the renderer's verified reconnect base across edits.
+When the bounded patch suffix expires, a reader job hashes the current immutable
+root; only the renderer's subsequent checkpoint acknowledgment replaces that
+base. A stale root, revision, or owner cannot publish the receipt. Native viewer
+reconnects use the verified root and suffix without a renderer JSON snapshot.
+
+Diagnostic checks and recovery have bounded retries. Local saves persist the
+authoritative JavaScript document even when a diagnostic or utility recovery
+fails. Native export still waits for a checked, repaired mirror. Preparation and
+recovery share one serialized queue; a revive request goes through connection
+recovery instead of racing a second ingestion.
