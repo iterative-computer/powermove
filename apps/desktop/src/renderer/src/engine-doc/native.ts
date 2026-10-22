@@ -1332,9 +1332,21 @@ export class NativeApi {
     const proj = this.unwrap(this.PM.proj);
     if (!proj) return;
     const open = proj.compId ?? proj.id ?? '';
-    const visit = async (comp: any, address: string): Promise<void> => {
+    // Each question is a synchronous call to the utility. A project with
+    // hundreds of text layers asked them all in one task (1.4 s for the
+    // private PMV3 project, while its open was finishing): yield between
+    // layers, and stop if another project is shown meanwhile.
+    let slice = performance.now();
+    const pause = async (): Promise<boolean> => {
+      if (performance.now() - slice < 8) return true;
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      slice = performance.now();
+      return this.unwrap(this.PM.proj) === proj;
+    };
+    const visit = async (comp: any, address: string): Promise<boolean> => {
       const layers = Array.isArray(comp.layers) ? comp.layers : [];
       for (let index = 0; index < layers.length; index++) {
+        if (!await pause()) return false;
         const L = layers[index];
         if (L?.type !== 'text') continue;
         // Visit every time the layer's text content keys a change, including
@@ -1353,19 +1365,20 @@ export class NativeApi {
         for (const [key, value] of Object.entries(L)) if (key !== 'p' && key !== 'fx' && key !== 'masks') scan(value);
         for (const t of times) for (let round = 0; round < 6; round++) {
           const wasm = this.ready();
-          if (!wasm) return;
+          if (!wasm) return false;
           const ask = () => wasm.query({ op: 'textLayout', comp: address, open, layer: index, t });
           const reply: any = ask();
           if (!reply?.fonts) break;
           loader.resolve(wasm, ask, (r: any) => !!r?.fonts);
           await loader.whenIdle();
-          if (loader.disabled) return;
+          if (loader.disabled) return false;
         }
       }
       for (const child of Object.values(comp.comps ?? {})) {
         const address = this.address(proj, child);
-        if (address !== null) await visit(child, address);
+        if (address !== null && !await visit(child, address)) return false;
       }
+      return true;
     };
     await visit(proj, open);
   }
