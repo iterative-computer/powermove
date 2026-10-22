@@ -25,6 +25,7 @@ pub mod colr;
 #[cfg(all(target_os = "macos", feature = "cg-masks"))]
 pub mod coretext;
 pub mod cpu;
+pub mod graphite;
 pub mod mask_tables;
 pub mod outline;
 pub mod paint;
@@ -81,11 +82,15 @@ pub fn text_raster<R: FontResolver>(
         height,
         items: Vec::new(),
     };
-    let resolver = compat.resolver();
     let m = Affine::scale(density);
-    for line in &lines {
-        let runs = runs(resolver, &line.runs);
-        painter.fill_text(&mut scene.items, &runs, (x, pad), m, color, 1.0, 0.0);
+    for (row, line) in lines.iter().enumerate() {
+        let (relative, _) = compat.text_runs(d, &line.text, d.tracking.unwrap_or(0.0));
+        let runs = runs(compat.resolver(), &relative);
+        let origin = (
+            f64::from((f64::from(x as f32) + line.x) as f32),
+            f64::from(((pad + row as f64 * d.line_height()) + d.size() * 0.82) as f32),
+        );
+        painter.fill_text(&mut scene.items, &runs, origin, m, color, 1.0, 0.0);
     }
     scene
 }

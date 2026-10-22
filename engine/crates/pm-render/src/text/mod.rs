@@ -13,7 +13,9 @@
 //! [`TextFonts`]; word states, animator poses, raster boxes, and font
 //! anchors are `pm-eval`'s.
 
+mod canvas;
 pub mod gpu;
+mod graphite;
 pub mod served;
 
 use std::hash::{Hash, Hasher};
@@ -262,6 +264,9 @@ impl TextContext {
 #[derive(Debug, Clone)]
 pub struct TextPlan {
     pub scene: Arc<TextScene>,
+    /// Compat level 1 is an N32 Canvas2D backing store, even when the
+    /// composition that samples it has a floating-point working format.
+    pub canvas_n32: bool,
     pub crop: [u32; 4],
     /// Content key of the painted pixels (scene, crop, and the font
     /// generation): equal keys paint equal rasters.
@@ -281,6 +286,7 @@ impl TextPlan {
         let key = scene_key(&scene, crop, u64::MAX);
         TextPlan {
             scene: Arc::new(scene),
+            canvas_n32: false,
             crop,
             key,
         }
@@ -404,10 +410,25 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (i as u64, generation, scene.width, scene.height, crop).hash(&mut h);
         for item in &scene.items {
-            for c in item.color {
-                c.to_bits().hash(&mut h);
+            if matches!(item.content, ItemContent::GlyphMask { .. }) {
+                // Hash the paint uploaded to the shader. CSS Color 4 system
+                // colors already arrive as f32; equivalent legacy syntax
+                // must have the same key after conversion to SkColor4f.
+                let alpha = (item.color[3] * item.opacity) as f32;
+                for c in [
+                    item.color[0] as f32 * alpha,
+                    item.color[1] as f32 * alpha,
+                    item.color[2] as f32 * alpha,
+                    alpha,
+                ] {
+                    c.to_bits().hash(&mut h);
+                }
+            } else {
+                for c in item.color {
+                    c.to_bits().hash(&mut h);
+                }
+                item.opacity.to_bits().hash(&mut h);
             }
-            item.opacity.to_bits().hash(&mut h);
             item.blur.to_bits().hash(&mut h);
             match &item.content {
                 ItemContent::Coverage { paths, curve } => {
@@ -465,8 +486,21 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
                         }
                     }
                 }
-                ItemContent::Image { image, transform } => {
-                    1u8.hash(&mut h);
+                ItemContent::Image { image, transform }
+                | ItemContent::GlyphMask { image, transform, .. }
+                | ItemContent::Graphite {
+                    image, transform, ..
+                } => {
+                    (if matches!(item.content, ItemContent::GlyphMask { .. }) {
+                        2u8
+                    } else {
+                        1u8
+                    })
+                    .hash(&mut h);
+                    if let ItemContent::Graphite { raster, .. } = &item.content {
+                        3u8.hash(&mut h);
+                        raster.hash_content(&mut h);
+                    }
                     image.width.hash(&mut h);
                     image.height.hash(&mut h);
                     image.data.hash(&mut h);
@@ -512,11 +546,13 @@ impl TextContext {
 
     /// The plan of a scene: its ink crop and content key, or `None` when
     /// nothing draws.
-    fn finish(&self, scene: TextScene) -> Option<TextPlan> {
+    fn finish(&self, scene: TextScene, canvas_n32: bool) -> Option<TextPlan> {
         let crop = scene.ink()?;
-        let key = scene_key(&scene, crop, self.generation);
+        let mut key = scene_key(&scene, crop, self.generation);
+        key[0] ^= u64::from(canvas_n32);
         Some(TextPlan {
             scene: Arc::new(scene),
+            canvas_n32,
             crop,
             key,
         })
@@ -581,10 +617,21 @@ impl TextContext {
                     if g.opacity.is_nan() || g.opacity <= 0.0 {
                         continue;
                     }
-                    let m =
-                        Affine::new([density, 0.0, 0.0, density, -a.x0 * density, -a.y0 * density])
-                            * Affine::translate((g.unit.x, *baseline))
-                            * Affine::new(g.matrix);
+                    let m = canvas::transform(
+                        canvas::translate(
+                            canvas::narrow(Affine::new([
+                                density,
+                                0.0,
+                                0.0,
+                                density,
+                                -a.x0 * density,
+                                -a.y0 * density,
+                            ])),
+                            g.unit.x,
+                            *baseline,
+                        ),
+                        g.matrix,
+                    );
                     let fill = match &g.color {
                         Some(c) => JsValue::String(c.clone()),
                         None => get(&g.style, "color").clone(),
@@ -610,7 +657,7 @@ impl TextContext {
                 unsupported.append(&mut painter.unsupported);
                 let anchor = (raster.anchor_x, raster.anchor_y);
                 return Ok(self
-                    .finish(scene)
+                    .finish(scene, true)
                     .map(|p| Self::quad(p, raster.w, raster.h, anchor.0, anchor.1)));
             }
         }
@@ -636,14 +683,23 @@ impl TextContext {
         let (mut painter, fonts, unsupported) = self.painter((cw, ch));
         let lines = fonts.line_runs(&tc);
         let m = Affine::scale(density);
-        for line in &lines {
-            let faces = run_faces(fonts, &line.runs, m);
-            let refs = run_refs(&line.runs, &faces);
-            painter.fill_text(&mut scene.items, &refs, (g.x, g.pad), m, fill, 1.0, 0.0);
+        for (row, line) in lines.iter().enumerate() {
+            // Blink's DrawTextInternal converts the canvas point to float,
+            // then subtracts the double alignment width. The blob's glyphs
+            // remain relative to (0,0): baking this origin into each glyph
+            // changes SDF creation-space and path-matrix rounding.
+            let runs = fonts.text_runs(&tc, &line.text, tc.tracking.unwrap_or(0.0));
+            let origin = (
+                f64::from((f64::from(g.x as f32) + line.x) as f32),
+                f64::from(((g.pad + row as f64 * tc.line_height()) + tc.size() * 0.82) as f32),
+            );
+            let faces = run_faces(fonts, &runs, m);
+            let refs = run_refs(&runs, &faces);
+            painter.fill_text(&mut scene.items, &refs, origin, m, fill, 1.0, 0.0);
         }
         unsupported.append(&mut painter.unsupported);
         Ok(self
-            .finish(scene)
+            .finish(scene, true)
             .map(|p| Self::quad(p, raster.w, raster.h, raster.anchor_x, raster.anchor_y)))
     }
 
@@ -744,7 +800,7 @@ impl TextContext {
             painter.fill_text(&mut scene.items, &refs, (0.0, 0.0), m, fill, 1.0, 0.0);
         }
         self.unsupported.append(&mut painter.unsupported);
-        Ok(self.finish(scene))
+        Ok(self.finish(scene, false))
     }
 
     /// A `compat` level 2 captions layer at output resolution: the same
@@ -775,7 +831,7 @@ impl TextContext {
         };
         self.caption_items(&frame, base, &mut scene);
         self.profile = saved;
-        Ok(self.finish(scene))
+        Ok(self.finish(scene, false))
     }
 
     /// A captions layer at `time` drawn at raster scale `scale`.
@@ -795,7 +851,9 @@ impl TextContext {
             return Ok(None);
         };
         let (scene, w, h, ax, ay) = self.caption_scene(&frame, scale);
-        Ok(self.finish(scene).map(|p| Self::quad(p, w, h, ax, ay)))
+        Ok(self
+            .finish(scene, true)
+            .map(|p| Self::quad(p, w, h, ax, ay)))
     }
 
     /// The captions rasterizer's `draw(frame, scale)` as a scene, with the
@@ -815,8 +873,11 @@ impl TextContext {
             height: canvas_px(h, density),
             items: Vec::new(),
         };
-        let m0 = Affine::new([density, 0.0, 0.0, density, 0.0, 0.0])
-            * Affine::translate((margin, margin));
+        let m0 = canvas::translate(
+            canvas::scale(Affine::IDENTITY, density, density),
+            margin,
+            margin,
+        );
         self.caption_items(f, m0, &mut scene);
         (scene, w, h, margin - block.x0, margin - block.y0)
     }
@@ -880,6 +941,7 @@ impl TextContext {
         // keeps the canvas default, black.
         let stroke_color =
             hex_to_rgba(&style.stroke_color.to_string_lossy(), 1.0).unwrap_or(color::BLACK);
+        let canvas_level1 = self.profile == Profile::CANVAS2D;
         let (mut painter, fonts, unsupported) = self.painter((scene.width, scene.height));
         for line in &layout.lines {
             for word in &line.words {
@@ -901,10 +963,17 @@ impl TextContext {
                 if state.scale != 1.0 {
                     let cx = x + word.width / 2.0;
                     let cy = pad + line.y + layout.line_height / 2.0;
-                    m = m
-                        * Affine::translate((cx, cy))
-                        * Affine::scale(state.scale)
-                        * Affine::translate((-cx, -cy));
+                    m = if canvas_level1 {
+                        canvas::translate(
+                            canvas::scale(canvas::translate(m, cx, cy), state.scale, state.scale),
+                            -cx,
+                            -cy,
+                        )
+                    } else {
+                        m * Affine::translate((cx, cy))
+                            * Affine::scale(state.scale)
+                            * Affine::translate((-cx, -cy))
+                    };
                 }
                 let text = word.text.to_string_lossy();
                 let runs = fonts.text_runs(&content, &text, tracking);

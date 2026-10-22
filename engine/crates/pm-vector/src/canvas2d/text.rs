@@ -29,6 +29,7 @@ impl PathRasterizer for Rasterizer {
         // Its save layer covers the canvas outset by the kernel bounds.
         let pad = pm_text::render::scene::blur_radius(blur);
         let mut cx = Context::new(viewport.0 + 2 * pad, viewport.1 + 2 * pad);
+        cx.retain_native_paths();
         let alpha = (color[3] * opacity) as f32;
         let paint = Paint::Solid([
             color[0] as f32 * alpha,
@@ -110,7 +111,8 @@ impl PathRasterizer for Rasterizer {
         }
         let data = cx.finish_region(r)?;
         Some(Item {
-            content: ItemContent::Image {
+            content: ItemContent::Graphite {
+                raster: Arc::new(cx.graphite_region(r)?),
                 image: Arc::new(Rgba8 {
                     width: (r[2] - r[0]) as u32,
                     height: (r[3] - r[1]) as u32,

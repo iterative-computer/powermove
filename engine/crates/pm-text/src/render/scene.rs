@@ -48,6 +48,18 @@ pub enum ItemContent {
         /// Image pixels to device px.
         transform: Affine,
     },
+    /// A glyph's preblended A8 coverage. Paint is applied when the glyph
+    /// reaches the canvas, rather than quantized into a colored word image.
+    GlyphMask {
+        mask: Arc<GlyphMask>,
+        image: Arc<Rgba8>,
+        transform: Affine,
+    },
+    Graphite {
+        image: Arc<Rgba8>,
+        transform: Affine,
+        raster: Arc<super::graphite::Raster>,
+    },
 }
 
 /// One canvas draw.
@@ -555,6 +567,8 @@ impl Painter<'_> {
         // Glyphs drawn as distance-field text (coverage per pixel).
         #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
         let mut sdf_glyphs: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
+        #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
+        let mut native_sdf = Vec::new();
         let mut curve_size = 0.0f64;
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
@@ -700,6 +714,12 @@ impl Painter<'_> {
                             super::sdf::draw(&field, left_top, matrix, super::sdf::APPLE_GPU)
                         {
                             sdf_glyphs.push(cov);
+                            native_sdf.push(super::graphite::Geometry::Sdf {
+                                font_size: run.size.to_bits(),
+                                field,
+                                left_top,
+                                matrix,
+                            });
                         }
                         continue;
                     }
@@ -873,7 +893,11 @@ impl Painter<'_> {
             ));
         }
         if !sdf_glyphs.is_empty() {
-            out.extend(sdf_image(sdf_glyphs, color, opacity, blur));
+            out.extend(
+                sdf_image(sdf_glyphs, color, opacity, blur).and_then(|item| {
+                    native_sdf_item(item, native_sdf, self.viewport, color, opacity)
+                }),
+            );
         }
         if let Some(bounds) = mask.1 {
             out.push(Item {
@@ -1146,6 +1170,7 @@ impl Painter<'_> {
         }
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
         let mut sdf_quads: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
+        let mut native_sdf = Vec::new();
         let mut images = Vec::new();
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
@@ -1217,6 +1242,12 @@ impl Painter<'_> {
                         super::sdf::draw(&field, left_top, matrix, super::sdf::APPLE_GPU)
                     {
                         sdf_quads.push(cov);
+                        native_sdf.push(super::graphite::Geometry::Sdf {
+                            font_size: run.size.to_bits(),
+                            field,
+                            left_top,
+                            matrix,
+                        });
                     }
                     continue;
                 }
@@ -1270,7 +1301,11 @@ impl Painter<'_> {
             ));
         }
         if !sdf_quads.is_empty() {
-            out.extend(sdf_image(sdf_quads, color, opacity, 0.0));
+            out.extend(
+                sdf_image(sdf_quads, color, opacity, 0.0).and_then(|item| {
+                    native_sdf_item(item, native_sdf, self.viewport, color, opacity)
+                }),
+            );
         }
         out.extend(images);
         true
@@ -1342,6 +1377,87 @@ fn flatten_color_glyphs(items: Vec<Item>, color: Rgba, opacity: f64, blur: f64) 
     }]
 }
 
+/// Keep source distance fields until the native fragment pass; the CPU
+/// image remains the platform-independent reference for the same item.
+fn native_sdf_item(
+    mut item: Item,
+    geometry: Vec<super::graphite::Geometry>,
+    viewport: Option<(u32, u32)>,
+    color: Rgba,
+    opacity: f64,
+) -> Option<Item> {
+    let Some((width, height)) = viewport else {
+        return Some(item);
+    };
+    // Filter layers include the kernel's outset, just as the path adapter.
+    let pad = blur_radius(item.blur);
+    let b = item.bounds;
+    let crop = [
+        (b.x0 + pad as f64).max(0.) as u32,
+        (b.y0 + pad as f64).max(0.) as u32,
+        (b.x1 + pad as f64).min((width + 2 * pad) as f64) as u32,
+        (b.y1 + pad as f64).min((height + 2 * pad) as f64) as u32,
+    ];
+    if crop[0] >= crop[2] || crop[1] >= crop[3] {
+        return None;
+    }
+    let ItemContent::Image { image, .. } = &item.content else {
+        return Some(item);
+    };
+    let (cw, ch) = (crop[2] - crop[0], crop[3] - crop[1]);
+    let (ox, oy) = (
+        (crop[0] as f64 - pad as f64 - b.x0) as usize,
+        (crop[1] as f64 - pad as f64 - b.y0) as usize,
+    );
+    let mut data = Vec::with_capacity((cw * ch * 4) as usize);
+    for y in 0..ch as usize {
+        let i = ((oy + y) * image.width as usize + ox) * 4;
+        data.extend_from_slice(&image.data[i..i + cw as usize * 4]);
+    }
+    let alpha = (color[3] * opacity) as f32;
+    let paint = [
+        color[0] as f32 * alpha,
+        color[1] as f32 * alpha,
+        color[2] as f32 * alpha,
+        alpha,
+    ];
+    let draws = geometry
+        .into_iter()
+        .map(|mut geometry| {
+            if let super::graphite::Geometry::Sdf { matrix, .. } = &mut geometry {
+                matrix[4] += pad as f32;
+                matrix[5] += pad as f32;
+            }
+            super::graphite::Draw {
+                geometry,
+                color: paint,
+            }
+        })
+        .collect();
+    item.bounds = Rect::new(
+        crop[0] as f64 - pad as f64,
+        crop[1] as f64 - pad as f64,
+        crop[2] as f64 - pad as f64,
+        crop[3] as f64 - pad as f64,
+    );
+    item.content = ItemContent::Graphite {
+        image: Arc::new(Rgba8 {
+            width: cw,
+            height: ch,
+            data,
+        }),
+        transform: Affine::translate((item.bounds.x0, item.bounds.y0)),
+        raster: Arc::new(super::graphite::Raster {
+            width: width + 2 * pad,
+            height: height + 2 * pad,
+            crop,
+            multisampled: false,
+            draws,
+        }),
+    };
+    Some(item)
+}
+
 /// Distance-field glyph coverage (`sdf::draw`) as one image item, each
 /// glyph blended source-over into the 8-bit target with its unquantized
 /// coverage (the fragment's value), quantized after every glyph, as the GPU
@@ -1408,6 +1524,58 @@ fn sdf_image(
 /// glyph composited over the earlier ones (Skia draws glyph quads one by
 /// one with source-over), in `color` through the preblend `table`.
 fn mask_image(
+    masks: &[(i64, i64, Arc<GlyphMask>, bool)],
+    tables: [&[u8; 256]; 2],
+    color: Rgba,
+    opacity: f64,
+    blur: f64,
+) -> Vec<Item> {
+    // A filtered fillText has a transparent N32 save layer. Unfiltered
+    // glyphs instead blend directly into the existing canvas, in order.
+    if blur > 0.0 {
+        return mask_save_layer(masks, tables, color, opacity, blur)
+            .into_iter()
+            .collect();
+    }
+    masks
+        .iter()
+        .filter_map(|(x, y, mask, path)| {
+            if mask.width == 0 || mask.height == 0 {
+                return None;
+            }
+            let table = tables[usize::from(*path)];
+            let image = Arc::new(Rgba8 {
+                width: mask.width,
+                height: mask.height,
+                data: mask
+                    .coverage
+                    .iter()
+                    .flat_map(|&c| [table[c as usize]; 4])
+                    .collect(),
+            });
+            let left = *x + i64::from(mask.left);
+            let top = *y + i64::from(mask.top);
+            Some(Item {
+                content: ItemContent::GlyphMask {
+                    mask: mask.clone(),
+                    image,
+                    transform: Affine::translate((left as f64, top as f64)),
+                },
+                color,
+                opacity,
+                blur,
+                bounds: Rect::new(
+                    left as f64,
+                    top as f64,
+                    (left + i64::from(mask.width)) as f64,
+                    (top + i64::from(mask.height)) as f64,
+                ),
+            })
+        })
+        .collect()
+}
+
+fn mask_save_layer(
     masks: &[(i64, i64, Arc<GlyphMask>, bool)],
     tables: [&[u8; 256]; 2],
     color: Rgba,

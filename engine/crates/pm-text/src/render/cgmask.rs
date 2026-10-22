@@ -555,7 +555,9 @@ fn glyph_path_with(
     let back = (1.0 / x_scale) as f32;
     let pts: Vec<(pm_skia_path::PathSegment, ())> = built.segments().map(|s| (s, ())).collect();
     let mut b = pm_skia_path::PathBuilder::new();
-    let m = |q: pm_skia_path::Point| (q.x * back + dx, q.y);
+    // SkMatrix::Scale still maps y as 1*y + 0. In particular, this
+    // canonicalizes the negative zero introduced by the CG y-axis flip.
+    let m = |q: pm_skia_path::Point| (q.x * back + dx, q.y + 0.0);
     for (seg, _) in pts {
         match seg {
             pm_skia_path::PathSegment::MoveTo(a) => {

@@ -103,12 +103,26 @@ fn paint_item(item: &Item, coverage: &dyn Fn(i64, i64) -> f32, rect: [i64; 4], l
                 }
             }
         }
-        ItemContent::Image { image, transform } => {
+        ItemContent::Image { image, transform }
+        | ItemContent::GlyphMask {
+            image, transform, ..
+        }
+        | ItemContent::Graphite {
+            image, transform, ..
+        } => {
             let inv = transform.inverse();
             for y in y0.max(0)..y1.min(i64::from(layer.height)) {
                 for x in x0.max(0)..x1.min(i64::from(layer.width)) {
                     let p = inv * Point::new(x as f64 + 0.5, y as f64 + 0.5);
-                    let s = bilinear(image, p.x, p.y);
+                    let mut s = bilinear(image, p.x, p.y);
+                    if matches!(item.content, ItemContent::GlyphMask { .. }) {
+                        s = [
+                            item.color[0] as f32 * s[3],
+                            item.color[1] as f32 * s[3],
+                            item.color[2] as f32 * s[3],
+                            s[3],
+                        ];
+                    }
                     if s[3] <= 0.0 {
                         continue;
                     }
@@ -187,6 +201,23 @@ pub fn paint_with_filter(
     pages: &[(u32, u32, Vec<u8>)],
     filter: Option<&ImageFilter<'_>>,
 ) -> Image {
+    paint_with_format(scene, atlas, pages, filter, false)
+}
+
+fn paint_with_format(
+    scene: &TextScene,
+    atlas: &Atlas,
+    pages: &[(u32, u32, Vec<u8>)],
+    filter: Option<&ImageFilter<'_>>,
+    n32: bool,
+) -> Image {
+    let quantize = |target: &mut Image| {
+        if n32 {
+            for v in &mut target.data {
+                *v = (*v * 255.0).round().clamp(0.0, 255.0) / 255.0;
+            }
+        }
+    };
     let mut target = Image::new(scene.width, scene.height);
     let mut cells: std::collections::HashMap<usize, Vec<&super::atlas::Cell>> =
         std::collections::HashMap::new();
@@ -222,7 +253,9 @@ pub fn paint_with_filter(
                         ]
                     })
             }
-            ItemContent::Image { .. } => {
+            ItemContent::Image { .. }
+            | ItemContent::GlyphMask { .. }
+            | ItemContent::Graphite { .. } => {
                 let b = item.bounds.inflate(1.0, 1.0);
                 [
                     b.x0.floor() as i64,
@@ -244,7 +277,10 @@ pub fn paint_with_filter(
                 (rect[3] - rect[1] + 2 * r) as u32,
             );
             let mut shifted = item.clone();
-            if let ItemContent::Image { transform, .. } = &mut shifted.content {
+            if let ItemContent::Image { transform, .. }
+            | ItemContent::GlyphMask { transform, .. }
+            | ItemContent::Graphite { transform, .. } = &mut shifted.content
+            {
                 *transform = kurbo::Affine::translate((-(origin[0] as f64), -(origin[1] as f64)))
                     * *transform;
             }
@@ -266,6 +302,7 @@ pub fn paint_with_filter(
                     d[c] = d[c].mul_add(1.0 - s[3], s[c]);
                 }
             }
+            quantize(&mut target);
             continue;
         }
         if item.blur > 0.0 {
@@ -287,6 +324,7 @@ pub fn paint_with_filter(
         } else {
             paint_item(item, &coverage, rect, &mut target);
         }
+        quantize(&mut target);
     }
     target
 }
@@ -297,11 +335,21 @@ pub fn render_cpu(scene: &TextScene) -> Image {
 }
 
 pub fn render_cpu_with_filter(scene: &TextScene, filter: Option<&ImageFilter<'_>>) -> Image {
+    render_cpu_with_format(scene, filter, false)
+}
+
+/// CPU reference for an N32 canvas, rounded after each canvas draw, or a
+/// floating-point level 2 target.
+pub fn render_cpu_with_format(
+    scene: &TextScene,
+    filter: Option<&ImageFilter<'_>>,
+    n32: bool,
+) -> Image {
     let atlas = super::atlas::pack(scene, 4096);
     let pages: Vec<_> = (0..atlas.pages.len())
         .map(|p| super::cpu::render_page(scene, &atlas, p))
         .collect();
-    paint_with_filter(scene, &atlas, &pages, filter)
+    paint_with_format(scene, &atlas, &pages, filter, n32)
 }
 
 #[cfg(test)]

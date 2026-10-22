@@ -62,10 +62,11 @@ fn fs_paint(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let k = mix(curve_value(i), curve_value(i + 1), x - f32(i));
         return it.color * k;
     }
-    if (kind < 1.5) {
+    if (kind < 1.5 || kind > 2.5) {
         let p = vec3<f32>(pos.xy, 1.0);
         let u = vec2<f32>(dot(it.inv0.xyz, p), dot(it.inv1.xyz, p));
         let s = textureSampleLevel(src, smp, u / it.isize.xy, 0.0);
+        if (kind > 2.5) { return it.color * s.a; }
         return s * it.color.w;
     }
     let t = vec2<i32>(floor(pos.xy) + it.map.xy);
