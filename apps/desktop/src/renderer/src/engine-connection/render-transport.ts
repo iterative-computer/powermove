@@ -331,6 +331,9 @@ export class EngineRenderTransport {
    *  are already here). Without one, every need of a producer with a
    *  preparer is prepared first while playing. */
   private readonly readies = new Map<CompatSource, (need: CompatNeed, revision: number) => boolean>();
+  /** Whether a layer is in its composition's frame at a need's time (the
+   *  lookahead answers only those: a project's layers come and go). */
+  private readonly actives = new Map<CompatSource, (need: CompatNeed) => boolean>();
   private aheadInFlight = 0;
   /** Needs answered with `reuse`, so a repeated ask gets pixels instead
    *  (the engine dropped that raster meanwhile). */
@@ -390,9 +393,10 @@ export class EngineRenderTransport {
    * `needsRenderer` rounds). The session learns which producers it has; the
    * engine asks none without one. Returns an unregister.
    */
-  answerCompat(source: CompatSource, answerer: CompatAnswerer, prepare?: (need: CompatNeed, revision: number) => Promise<void>, ready?: (need: CompatNeed, revision: number) => boolean): () => void {
+  answerCompat(source: CompatSource, answerer: CompatAnswerer, prepare?: (need: CompatNeed, revision: number) => Promise<void>, ready?: (need: CompatNeed, revision: number) => boolean, active?: (need: CompatNeed) => boolean): () => void {
     for (const [key, entry] of this.ahead) if (entry.need.source === source) this.ahead.delete(key);
     this.answerers.set(source, answerer);
+    if (active) this.actives.set(source, active); else this.actives.delete(source);
     if (prepare) this.preparers.set(source, prepare); else this.preparers.delete(source);
     if (prepare && ready) this.readies.set(source, ready); else this.readies.delete(source);
     this.syncProducers();
@@ -401,6 +405,7 @@ export class EngineRenderTransport {
       this.answerers.delete(source);
       this.preparers.delete(source);
       this.readies.delete(source);
+      this.actives.delete(source);
       for (const [key, entry] of this.ahead) if (entry.need.source === source) this.ahead.delete(key);
       this.syncProducers();
     };
@@ -483,6 +488,8 @@ export class EngineRenderTransport {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
           const time = entry.cursor + offset * entry.step;
           if (time < 0 || entry.sent.has(time) || entry.pending.has(time)) continue;
+          const active = this.actives.get(entry.need.source);
+          if (active && !active({ ...entry.need, time })) continue;
           pending++;
           if (done > 0 && performance.now() >= deadline) continue;
           // Only a need whose base pixels must come from the engine first is

@@ -96,6 +96,9 @@ export interface RasterCompatHandle {
    *  on this thread: the chain passed this layer through the last time it
    *  ran (it read no base), or the base it reads is already here. */
   ready(need: CompatNeed, revision: number): boolean;
+  /** Whether the need's layer is in its composition's frame at its time
+   *  (on, and within its in and out points, a frame either side). */
+  active(need: CompatNeed): boolean;
   dispose(): void;
 }
 
@@ -393,6 +396,17 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       return prepareBase(need, revision);
     },
 
+    active(need: CompatNeed): boolean {
+      const layer = indexedLayer(String(need.composition), String(need.layer));
+      if (!layer) return false;
+      if (layer.on === false) return false;
+      const time = Number(need.time) / TICKS_PER_SECOND;
+      const from = Number(layer.from), dur = Number(layer.dur);
+      if (!Number.isFinite(from) || !Number.isFinite(dur)) return true;
+      const frame = 1 / (Number(PM?.proj?.fps) || 30);
+      return time >= from - frame && time < from + dur + frame;
+    },
+
     attach(next: EngineRenderTransport): () => void {
       return attachTo(next);
     },
@@ -405,6 +419,28 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       disposeAll();
     }
   };
+
+  /** Layer lookups by id for the lookahead (it asks for every known
+   *  layer at every frame ahead): an index per composition's layer list,
+   *  checked on each use and built again when the list changed. */
+  const indexes = new Map<string, { list: unknown; at: Map<string, number> }>();
+  function indexedLayer(composition: string, id: string): any {
+    const proj = PM?.proj;
+    if (!proj) return null;
+    const rootId = String(proj.compId ?? proj.id ?? '');
+    const list: any[] | undefined = composition === rootId ? proj.layers : (proj.comps?.[composition]?.layers ?? proj.layers);
+    if (!Array.isArray(list)) return null;
+    let index = indexes.get(composition);
+    let at = index?.list === list ? index.at.get(id) : undefined;
+    if (at === undefined || list[at]?.id !== id) {
+      const map = new Map<string, number>();
+      list.forEach((l, i) => { if (l && typeof l.id === 'string' && !map.has(l.id)) map.set(l.id, i); });
+      index = { list, at: map };
+      indexes.set(composition, index);
+      at = map.get(id);
+    }
+    return at === undefined ? null : list[at];
+  }
 
   const readTag = (need: CompatNeed) => `${need.composition}\u0000${need.layer}`;
   function rememberReads(need: CompatNeed, read: boolean): void {
@@ -534,8 +570,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
 
   function register(target: EngineRenderTransport): () => void {
     return options.engineRasterAsync
-      ? target.answerCompat('rasterOverride', (need, revision, o) => handle.answer(need, revision, o), (need, revision) => handle.prepare(need, revision), (need, revision) => handle.ready(need, revision))
-      : target.answerCompat('rasterOverride', (need, revision, o) => handle.answer(need, revision, o));
+      ? target.answerCompat('rasterOverride', (need, revision, o) => handle.answer(need, revision, o), (need, revision) => handle.prepare(need, revision), (need, revision) => handle.ready(need, revision), (need) => handle.active(need))
+      : target.answerCompat('rasterOverride', (need, revision, o) => handle.answer(need, revision, o), undefined, undefined, (need) => handle.active(need));
   }
 
   function resetAnswers(): void {

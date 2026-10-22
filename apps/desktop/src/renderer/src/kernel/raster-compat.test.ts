@@ -234,6 +234,21 @@ describe('the raster override producer', () => {
     expect(compat.answer({ ...need('box'), crop }, 4)).toMatchObject({ kind: 'raster' });
   });
 
+  it('knows which layers are in their frame at a need\'s time, for the lookahead', () => {
+    const { PM, compat, need } = setup();
+    Object.assign(text, { from: 1, dur: 2 });
+    try {
+      expect(compat.active(need('title', 0.5))).toBe(false);
+      expect(compat.active(need('title', 1.5))).toBe(true);
+      expect(compat.active(need('title', 3.5))).toBe(false);
+      expect(compat.active(need('gone', 1.5))).toBe(false);
+      // A layer added after the first lookup is found.
+      PM.proj.layers.push({ id: 'late', type: 'shape', d: {}, fx: [], from: 0, dur: 9 });
+      expect(compat.active(need('late', 4))).toBe(true);
+      PM.proj.layers.pop();
+    } finally { delete (text as any).from; delete (text as any).dur; }
+  });
+
   it('answers native for a wrapper that passes a layer through, without drawing the base', () => {
     const { services, compat, engineRaster, need } = setup();
     const original = services.get<any>('raster');
