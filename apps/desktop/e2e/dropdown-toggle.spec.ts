@@ -16,7 +16,16 @@ test('native dropdowns reopen and custom pickers toggle on repeated clicks', asy
     };
   });
   let menuRequests = 0;
-  const triggers = page.locator('button[aria-haspopup="menu"], button.panel-options');
+  // Panels outside the workspace stay mounted in #pm-panel-pool, an aria-hidden
+  // host parked off screen (layout/PanelPool.svelte) that no one can click.
+  // Its triggers are checked below once their panel is docked.
+  const triggers = page.locator(':is(button[aria-haspopup="menu"], button.panel-options):not(#pm-panel-pool *)');
+  const parked = page.locator('#pm-panel-pool').locator('button[aria-haspopup="menu"], button.panel-options');
+  const parkedVisible: string[] = [];
+  for (let index = 0; index < await parked.count(); index++) {
+    if (await parked.nth(index).isVisible()) parkedVisible.push(await parked.nth(index).getAttribute('aria-label') || String(index));
+  }
+  expect(parkedVisible).toEqual(['Caption actions']);
   expect(await triggers.count()).toBeGreaterThan(5);
   const checked: string[] = [];
   for (let index = 0; index < await triggers.count(); index++) {
@@ -33,6 +42,7 @@ test('native dropdowns reopen and custom pickers toggle on repeated clicks', asy
   }
   await test.info().attach('checked-dropdowns', { body: JSON.stringify(checked, null, 2), contentType: 'application/json' });
 
+  await session.openAgent();
   for (const selector of ['.thread-trigger']) {
     const trigger = page.locator(selector);
     await expect(trigger).toBeVisible();
@@ -76,5 +86,32 @@ test('native dropdowns reopen and custom pickers toggle on repeated clicks', asy
   await expect(page.locator('#composition-zoom')).toHaveValue('1');
   await page.locator('#preview-controls').screenshot({ path: '/private/tmp/pm-dropdown-padding-after.png' });
   await page.locator('#composition-zoom').screenshot({ path: '/private/tmp/pm-dropdown-zoom-after.png' });
+
+  // Caption actions opens a popover menu, not a native one. Dock the Captions
+  // panel as the panel library does, then bring its header into view.
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const ws = PM.WS.current;
+    if (!PM.Layout.findPanel(ws, 'captions')) {
+      const dock = ws.layout.docks.find((d: any) => d.id !== 'center') ?? ws.layout.docks[0];
+      PM.WS.mutate((w: any) => PM.Layout.addPanel(w, 'captions', dock.id));
+    }
+  });
+  const captionActions = page.locator('#panel-captions').getByRole('button', { name: 'Caption actions', exact: true });
+  await captionActions.scrollIntoViewIfNeeded();
+  await expect(captionActions).toBeInViewport();
+  const captionMenu = page.getByRole('menu', { name: 'Caption actions', exact: true });
+  await captionActions.click();
+  await expect(captionActions).toHaveAttribute('aria-expanded', 'true');
+  await expect(captionMenu).toBeVisible();
+  await captionActions.click();
+  await expect(captionActions).toHaveAttribute('aria-expanded', 'false');
+  await expect(captionMenu).toHaveCount(0);
+  await captionActions.click();
+  await expect(captionActions).toHaveAttribute('aria-expanded', 'true');
+  await expect(captionMenu).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(captionActions).toHaveAttribute('aria-expanded', 'false');
+  await expect(captionMenu).toHaveCount(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

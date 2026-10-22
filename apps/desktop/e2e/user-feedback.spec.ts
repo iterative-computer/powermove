@@ -6,24 +6,65 @@ test('background picker keeps every channel above the hex field', async ({ sessi
   const { page } = session;
   await page.evaluate(() => (window as any).PM.theme.apply('light'));
   await page.evaluate(() => (window as any).PM.newProject());
+  const dialog = page.getByRole('dialog', { name: 'New project', exact: true });
   await page.getByRole('button', { name: /^Background · / }).click();
   const picker = page.getByRole('dialog', { name: 'Background', exact: true });
   await expect(picker).toBeVisible();
+  // Measure at rest: the popover scales in from its trigger first.
+  await picker.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished)));
   await picker.screenshot({ path: info.outputPath('background-picker.png') });
+  // The unified picker sets plane | opacity | hue beside the details column,
+  // whose OKLCH, HSL and RGB channel rows (wells, letters and copy buttons)
+  // stack above the value field.
   const geometry = await picker.evaluate(el => {
-    const hex = el.querySelector('.color-dialog-value')!.getBoundingClientRect();
-    const bottom = Math.max(...[...el.querySelectorAll('.color-channel, .color-sv, .color-hue')].map(node => node.getBoundingClientRect().bottom));
-    return { hexTop: hex.top, bottom };
+    const box = (rect: DOMRect) => ({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
+    const text = (node: Node) => { const range = document.createRange(); range.selectNodeContents(node); return box(range.getBoundingClientRect()); };
+    const rows = [...el.querySelectorAll<HTMLElement>('[role="group"]')].filter(row => row.querySelector('input[type="number"]'));
+    return {
+      picker: box(el.getBoundingClientRect()),
+      hex: box(el.querySelector('[aria-label="Background hex value"]')!.getBoundingClientRect()),
+      rows: rows.map(row => row.getAttribute('aria-label')),
+      channels: rows.flatMap(row => [
+        ...[...row.querySelectorAll('input, button')].map(node => box(node.getBoundingClientRect())),
+        ...[...row.querySelectorAll('input + span')].map(text)
+      ]),
+      inputs: rows.reduce((count, row) => count + row.querySelectorAll('input[type="number"]').length, 0),
+      sliders: [...el.querySelectorAll('[role="slider"]')].map(node => ({ name: node.getAttribute('aria-label'), ...box(node.getBoundingClientRect()) }))
+    };
   });
-  expect(geometry.bottom).toBeLessThanOrEqual(geometry.hexTop - 4);
+  expect(geometry.rows).toEqual(['OKLCH', 'HSL', 'RGB']);
+  expect(geometry.inputs).toBe(9);
+  // Nine wells, nine letters and three copy buttons.
+  expect(geometry.channels).toHaveLength(21);
+  for (const channel of geometry.channels) expect(channel.bottom).toBeLessThanOrEqual(geometry.hex.top - 4);
+  expect(geometry.sliders.map(slider => slider.name)).toEqual(['Saturation and brightness', 'Opacity', 'Hue']);
+  const overlaps = (a: typeof geometry.hex, b: typeof geometry.hex) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+  for (const [index, slider] of geometry.sliders.entries()) {
+    expect(slider.left, slider.name!).toBeGreaterThanOrEqual(geometry.picker.left);
+    expect(slider.top, slider.name!).toBeGreaterThanOrEqual(geometry.picker.top);
+    expect(slider.right, slider.name!).toBeLessThanOrEqual(geometry.picker.right);
+    expect(slider.bottom, slider.name!).toBeLessThanOrEqual(geometry.picker.bottom);
+    for (const other of [...geometry.sliders.slice(index + 1), geometry.hex, ...geometry.channels]) {
+      expect(overlaps(slider, other), `${slider.name} overlaps ${JSON.stringify(other)}`).toBe(false);
+    }
+  }
   const before = await page.getByRole('button', { name: /^Background · / }).getAttribute('aria-label');
   const surface = await picker.getByRole('slider', { name: 'Saturation and brightness' }).boundingBox();
   if (!surface) throw new Error('Missing color surface');
   await page.mouse.click(surface.x + surface.width * .7, surface.y + surface.height * .3);
-  const chosen = await picker.getByLabel('Background hex value').inputValue();
-  await expect(page.getByRole('button', { name: `Background · ${chosen}` })).toBeVisible();
-  await picker.getByRole('button', { name: 'Cancel', exact: true }).click();
+  // The field reads "<colour> / <opacity>%"; the document stores the hex alone.
+  const chosen = await picker.getByLabel('Background hex value', { exact: true }).inputValue();
+  expect(chosen).toMatch(/^#[0-9A-F]{6} \/ 100%$/);
+  const chosenHex = chosen.slice(0, 7);
+  expect(`Background · ${chosenHex}`).not.toBe(before);
+  await expect(page.getByRole('button', { name: `Background · ${chosenHex}`, exact: true })).toBeVisible();
+  // This popover has no Cancel button: Escape cancels the preview, restores
+  // the colour it opened with, and stays inside the picker.
+  await page.keyboard.press('Escape');
+  await expect(picker).toHaveCount(0);
   await expect(page.getByRole('button', { name: before!, exact: true })).toBeVisible();
+  await expect(dialog).toBeVisible();
+  expect(await page.evaluate(() => (window as any).PM.hist.busy())).toBe(false);
 });
 
 for (const loseCapture of [false, true]) test(`imported image drag commits and undoes${loseCapture ? ' after pointer capture is lost' : ''}`, async ({ session }, info) => {

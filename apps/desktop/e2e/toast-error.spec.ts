@@ -40,7 +40,7 @@ test('notification close buttons stay at the trailing edge and dismiss by mouse 
       expect(layout.overflow).toBeLessThanOrEqual(1);
     };
     await checkPlacement();
-    const disclosure = toast.getByRole('button', { name: 'Technical details' });
+    const disclosure = toast.getByRole('button', { name: 'Details', exact: true });
     if (await disclosure.count()) {
       await disclosure.click();
       await expect(toast.locator('pre')).toBeVisible();
@@ -88,9 +88,58 @@ test('the error toast matches the status toast it stacks with', async ({ session
     await stack.screenshot({ path: info.outputPath(`toast-error-${theme}.png`) });
   }
 
-  await error.getByRole('button', { name: 'Technical details' }).click();
-  await expect(error.locator('pre')).toContainText('ENOSPC');
+  // The raw text is diagnostics: a quiet Details toggle at the end of the
+  // action row opens a log well holding all of it, with its own copy control.
+  const raw = "Error: ENOSPC: no space left on device, write '/Users/me/Movies/render.mov'";
+  const details = error.getByRole('button', { name: 'Details', exact: true });
+  const log = error.locator('pre');
+  await expect(error.locator('.message')).toHaveText('Free up some storage, then try the operation again.');
+  await expect(details).toHaveAttribute('aria-expanded', 'false');
+  await expect(log).toHaveCount(0);
+  await details.click();
+  await expect(details).toHaveAttribute('aria-expanded', 'true');
+  await expect(log).toHaveText(raw);
+  await expect(details).toHaveAttribute('aria-controls', await log.evaluate(el => el.parentElement!.id));
+
+  // The open log stays on the text column, inside the card, and keeps the
+  // close control at the trailing edge.
+  const opened = await error.evaluate(el => {
+    const shell = el.getBoundingClientRect();
+    const title = el.querySelector(':scope > .body > strong')!.getBoundingClientRect();
+    const body = el.querySelector(':scope > .body')!.getBoundingClientRect();
+    const toggle = el.querySelector('[aria-expanded]')!.getBoundingClientRect();
+    const well = el.querySelector('pre')!.parentElement!.getBoundingClientRect();
+    const close = el.querySelector('[aria-label="Dismiss notification"]')!.getBoundingClientRect();
+    return {
+      wellLeft: Math.round(well.left - shell.left), titleLeft: Math.round(title.left - shell.left),
+      wellRight: well.right, bodyRight: body.right, toggleRight: toggle.right,
+      rightInset: shell.right - close.right, padding: parseFloat(getComputedStyle(el).paddingRight),
+      overflow: el.scrollWidth - el.clientWidth
+    };
+  });
+  expect(opened.wellLeft).toBe(opened.titleLeft);
+  expect(opened.wellRight).toBeLessThanOrEqual(opened.bodyRight + 1);
+  expect(Math.abs(opened.toggleRight - opened.bodyRight)).toBeLessThanOrEqual(1);
+  expect(Math.abs(opened.rightInset - opened.padding)).toBeLessThanOrEqual(1);
+  expect(opened.overflow).toBeLessThanOrEqual(1);
   await stack.screenshot({ path: info.outputPath('toast-error-details.png') });
+
+  // Copy details hands over the whole raw text. Never touch the machine's real
+  // clipboard: the write lands in a list.
+  await page.evaluate(() => {
+    const copied: string[] = [];
+    (window as any).__copied = copied;
+    const write = async (text: string) => { copied.push(text); };
+    Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: write });
+    if (navigator.clipboard.writeText !== write) throw new Error('could not stub the clipboard');
+  });
+  await error.getByRole('button', { name: 'Copy details', exact: true }).click();
+  await expect(error.getByRole('button', { name: 'Copied', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__copied)).toEqual([raw]);
+
+  await details.click();
+  await expect(details).toHaveAttribute('aria-expanded', 'false');
+  await expect(log).toHaveCount(0);
   await error.getByRole('button', { name: 'Dismiss notification' }).click();
   await expect(error).toHaveCount(0);
   expect(session.diagnostics.pageErrors).toEqual([]);

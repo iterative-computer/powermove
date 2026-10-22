@@ -1,7 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test.describe('@viewer direct resize', () => {
-  test('resizes the selected layer in local space with a fixed opposite edge and correct cursors', async ({ session }) => {
+  test('resizes the selected layer in local space with a fixed opposite edge and correct cursors', async ({ session }, testInfo) => {
     await session.openEditor();
     const { page } = session;
     await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
@@ -79,6 +79,8 @@ test.describe('@viewer direct resize', () => {
         parentScaleX: PM.ev(PM.L(parentId), 'scale.x', 1),
       };
     }, { textId: setup.textId, coverId: setup.coverId, parentId: setup.parentId });
+    await page.locator('#panel-viewer').screenshot({ path: testInfo.outputPath('single-resize-result.png') });
+    await testInfo.attach('Resize values', { body: JSON.stringify({ setup, resized }), contentType: 'application/json' });
     expect(resized.selected).toEqual([setup.textId]);
     expect(resized.scaleX).toBeGreaterThan(setup.scaleX);
     expect(resized.scaleY).toBe(setup.scaleY);
@@ -196,7 +198,7 @@ test.describe('@viewer direct resize', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('resizes and rotates a multi-selection around the common pivot with one-step undo', async ({ session }) => {
+  test('resizes and rotates a multi-selection around the common pivot with one-step undo', async ({ session }, testInfo) => {
     await session.openEditor();
     const { page } = session;
     await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
@@ -303,6 +305,8 @@ test.describe('@viewer direct resize', () => {
         textChildScale: [PM.ev(textChild, 'scale.x', 1), PM.ev(textChild, 'scale.y', 1)],
       };
     }, { shapeId: setup.shapeId, textId: setup.textId, textChildId: setup.textChildId });
+    await page.locator('#panel-viewer').screenshot({ path: testInfo.outputPath('multi-resize-result.png') });
+    await testInfo.attach('Resize values', { body: JSON.stringify({ setup, resized }), contentType: 'application/json' });
     expect(resized.bounds.x0).toBeCloseTo(setup.bounds.x0, 1);
     expect(resized.bounds.y0).toBeCloseTo(setup.bounds.y0, 1);
     expect(resized.shapeScale[0]).toBeGreaterThan(setup.shapeScale[0]);

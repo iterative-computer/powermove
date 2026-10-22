@@ -10,8 +10,8 @@ test('flat controls remain consistent across home, editor, settings, library, an
       const selectionCue = button.matches('.export-destination[aria-pressed="true"], .color-choice');
       return style.backgroundImage.includes('gradient') || style.boxShadow !== 'none' && !button.matches(':focus-visible') && !selectionCue;
     }).map(button => ({ label: button.getAttribute('aria-label') || button.textContent?.trim(), className: button.className, shadow: getComputedStyle(button).boxShadow, image: getComputedStyle(button).backgroundImage })));
-    expect(raised, name).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath(`${name}.png`) });
+    expect(raised, name).toEqual([]);
   }
   for (const theme of ['dark', 'light']) {
     await page.evaluate(theme => {

@@ -257,7 +257,7 @@ test.describe('@shell Svelte shell', () => {
     expect(many.overflowing).toBe(true);
   });
 
-  test('keeps a usable window drag area with crowded tabs and overlays', async ({ session }) => {
+  test('keeps a usable window drag area with crowded tabs and overlays', async ({ session }, testInfo) => {
     const { page } = session;
     await session.openEditor();
     await page.setViewportSize({ width: 980, height: 640 });
@@ -281,8 +281,12 @@ test.describe('@shell Svelte shell', () => {
 
     await page.evaluate(() => (window as any).PM.LibraryUI.open());
     await expect(page.locator('#library-screen')).toHaveClass(/\bon\b/);
+    await page.locator('#library-screen').evaluate(async element => {
+      await Promise.all(element.getAnimations().map(animation => animation.finished.catch(() => undefined)));
+    });
     expect(await dragArea()).toMatchObject({ hit: true, region: 'drag' });
     const libraryBounds = await page.locator('#library-screen').boundingBox();
+    await page.locator('#library-screen').screenshot({ path: testInfo.outputPath('library-titlebar-clearance.png') });
     expect(libraryBounds!.y).toBeGreaterThanOrEqual(44);
     expect(libraryBounds!.y + libraryBounds!.height).toBeLessThanOrEqual(640);
     await page.evaluate(() => (window as any).PM.LibraryUI.close());
