@@ -185,6 +185,43 @@ try {
     await run(binary, ['render', cliSource.path, '-o', negative, '--format', 'still', '--definitions', definitions], { env: cliEnv, timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
     assert(!pixels(negative).equals(pixels(before[0])), 'removing the persisted pin must expose different native pixels');
   } finally { for (const pin of pinsBefore) await writeFile(path.join(pins, pin.name), pin.bytes); }
+  // First probes. Neither the CLIs nor the hidden host compare with the
+  // desktop's Electron runner, so a program the desktop has not decided yet
+  // must be probed against their own ANGLE reference and leave no `.native`
+  // or `.runner` marker that the desktop would later trust.
+  const firstProbe = {};
+  const saved = await Promise.all((await readdir(pins)).map(async name => ({ name, bytes: await readFile(path.join(pins, name)) })));
+  try {
+    for (const entry of saved) await rm(path.join(pins, entry.name));
+    for (const mode of ['node', 'direct']) {
+      const still = path.join(root, `cli-first-probe-${mode}.png`);
+      const env = { ...cliEnv }; if (mode === 'node') delete env.POWERMOVE_PM_CLI;
+      await run(mode === 'node' ? process.execPath : binary, mode === 'node'
+        ? [cli, 'render', cliSource.path, still, '--format', 'still']
+        : ['render', cliSource.path, '-o', still, '--format', 'still', '--definitions', definitions], { env, timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
+      assert(pixels(still).equals(pixels(before[0])), `${mode} CLI first probe differs from the desktop`);
+      assert.deepEqual(await readdir(pins), [], `${mode} CLI first probe wrote a decision into the desktop namespace`);
+      firstProbe[`cli-${mode}`] = true;
+    }
+  } finally { for (const entry of saved) await writeFile(path.join(pins, entry.name), entry.bytes); }
+  // The hidden host on a profile whose desktop has not probed the program.
+  const probeProfile = path.join(root, 'first-probe-profile');
+  await cp(profile, probeProfile, { recursive: true, preserveTimestamps: true });
+  const probePins = path.join(probeProfile, 'Engine Cache/Shader Cache/angle-parity');
+  await rm(probePins, { recursive: true, force: true });
+  const prober = mcp(start(process.execPath, [cli, 'mcp', '--user-data', probeProfile, '--exports', path.join(root, 'first-probe-exports')],
+    { env: { ...process.env, POWERMOVE_NEW_ENGINE: '1' }, stdio: ['pipe', 'pipe', 'pipe'] }));
+  await prober.initialize(); await prober.tool('open_project', { projectId: project.projectId }); await prober.tool('start_session', { prompt: 'First probe' });
+  const probeExport = await prober.tool('export_video', { name: 'First probe hidden', format: 'png', audio: false, motionBlur: false });
+  const probed = await pngs(probeExport.path);
+  assert.equal(probed.length, before.length);
+  for (let i = 0; i < probed.length; i++) assert(pixels(probed[i]).equals(pixels(before[i])), `hidden first-probe frame ${i} differs from the desktop`);
+  await prober.tool('finish_session', { commit: true }); await prober.close();
+  const left = existsSync(probePins) ? await readdir(probePins) : [];
+  assert.deepEqual(left, [], 'the hidden host first probe wrote a decision into the desktop namespace');
+  firstProbe.hidden = true;
+  Object.assign(result, { firstProbeLeavesNoMarker: firstProbe });
+  if (evidence) await writeFile(path.join(evidence, 'result.json'), JSON.stringify(result, null, 2));
   const missing = path.join(root, 'cli-missing.png');
   await assert.rejects(run(binary, ['render', cliSource.path, '-o', missing, '--format', 'still', '--definitions', definitions],
     { env: { ...cliEnv, POWERMOVE_CHROMIUM: path.join(root, 'missing-chromium') }, timeout: 120000 }), error => /chromium-unavailable/.test(error.stderr));
@@ -197,5 +234,5 @@ try {
   assert(persistedLayout, 'the custom saved workspace and dock sizes survive both hidden host restarts');
   assert(viewportEqual, 'the complete hidden viewport matches');
   assert(userPanel, 'user panel remains registered');
-  console.log(`Native hidden parity passed: ${before.length} pinned-program PNG frames pixel-identical on hidden host and both CLI entry points; pin-removal control differs; complete workspace bytes equal today's hidden host, including a user panel.`);
+  console.log(`Native hidden parity passed: ${before.length} pinned-program PNG frames pixel-identical on hidden host and both CLI entry points; pin-removal control differs; first probes by both CLIs and the hidden host match the desktop and leave no marker; complete workspace bytes equal today's hidden host, including a user panel.`);
 } finally { for (const child of [...children]) await stop(child); await rm(root, { recursive: true, force: true }); }
