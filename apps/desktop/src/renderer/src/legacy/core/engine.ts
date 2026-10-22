@@ -487,6 +487,8 @@ const clock = { last: 0, base: 0, origin:0, cycle:0, acc: 0, frames: 0, t0: 0 };
 let needsDraw = true;
 let contentGeneration = 0, renderedGeneration = -1;
 let lastRenderTime = NaN, lastProject: any = null;
+/** The project frame the playhead last moved to while the engine plays. */
+let lastEngineFrame = NaN;
 let lastPresentedSeekGeneration = -1;
 let lastPresentedFps = 0;
 let pausedFrame: { time: number; project: any; generation: number } | null = null;
@@ -536,14 +538,22 @@ function frame(now: any) {
           return;
         }
         // A play around and a backward run move below the work area start.
-        if (engine.playing && engine.time !== PM.time && (engine.time >= ws - 1e-6 || backward || PM.playAroundRun)) {
+        // The playhead moves once per project frame, not once per display
+        // tick: today's loop draws each frame inside the tick, so its
+        // timeline, panels and extensions update at the frame rate; with the
+        // engine drawing, every 60 Hz tick would run them again and starve
+        // the window's turns the engine's frames wait on.
+        const frameIndex = Math.floor(engine.time * drawnFps() + 1e-7);
+        if (engine.playing && engine.time !== PM.time && frameIndex !== lastEngineFrame
+          && (engine.time >= ws - 1e-6 || backward || PM.playAroundRun)) {
+          lastEngineFrame = frameIndex;
           PM.time = engine.time;
           PM.bus.emit('time', PM.time);
           PM.invalidate('timeline');
         }
       }
       if (now - clock.t0 > 500) { E.fps = Math.round(clock.frames * 1000 / (now - clock.t0)); clock.frames = 0; clock.t0 = now; PM.invalidate('status'); }
-    }
+    } else lastEngineFrame = NaN;
     if (needsDraw) { needsDraw = false; PM.bus.emit('overlay'); }
     return;
   }

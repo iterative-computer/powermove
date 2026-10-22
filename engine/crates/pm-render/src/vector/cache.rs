@@ -80,10 +80,20 @@ pub struct PrefetchStats {
 /// Each worker's exact canvas emulation holds a multisampled float target
 /// while it draws (up to 64 bytes a pixel): more workers multiply that
 /// transient memory for little more speed.
+/// `PM_VECTOR_PREFETCH_WORKERS` (1 to 8) overrides it for measurements.
 fn prefetch_workers() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| (n.get() / 2).clamp(1, 4))
-        .unwrap_or(2)
+    static WORKERS: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+        std::env::var("PM_VECTOR_PREFETCH_WORKERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| (1..=8).contains(n))
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| (n.get() / 2).clamp(1, 4))
+                    .unwrap_or(2)
+            })
+    });
+    *WORKERS
 }
 
 /// A level 1 shape or paths raster: width, height and premultiplied
