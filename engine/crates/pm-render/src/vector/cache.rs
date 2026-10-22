@@ -73,11 +73,13 @@ pub struct PrefetchStats {
     pub raster_us: u64,
 }
 
-/// Worker threads for [`VectorCache::prefetch`]: half the cores, at most 8
-/// (the render thread and the renderer's own work keep the rest).
+/// Worker threads for [`VectorCache::prefetch`]: half the cores, at most 4.
+/// Each worker's exact canvas emulation holds a multisampled float target
+/// while it draws (up to 64 bytes a pixel): more workers multiply that
+/// transient memory for little more speed.
 fn prefetch_workers() -> usize {
     std::thread::available_parallelism()
-        .map(|n| (n.get() / 2).clamp(1, 8))
+        .map(|n| (n.get() / 2).clamp(1, 4))
         .unwrap_or(2)
 }
 
