@@ -16,7 +16,7 @@ import type { PMRegistry } from './registry';
 import { SCENE3D_DEFINITION, sceneProperties } from '../core/scene3d/schema';
 import { temporalKeys } from './core/temporal-bridge';
 import { packProjectFileBlob, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile, withProjectReader } from './core/project-file';
-import { projectFingerprint } from './core/project-fingerprint';
+import { fingerprintJSON, projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
 import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
@@ -69,6 +69,7 @@ function fileState(id = PM.proj.id): FileState {
       ? (id === PM.proj?.id ? PM.proj : PM.Projects.get(id)) : null;
     if (project) {
       const initialState = state;
+      // The baseline is this moment's document: serialized now, digested later.
       initialState.baselineReady = projectFingerprint(JSON.stringify(project)).then(hash => {
         initialState.baselineHash = hash;
         rememberFile(id, initialState);
@@ -87,12 +88,12 @@ async function refreshFileDirty(project = PM.proj): Promise<boolean> {
   // Fingerprints, not the JSON, are held across the awaits: a large
   // project's JSON is hundreds of megabytes of string (C1), and holding one
   // while building another pushed the window past V8's heap limit.
-  const hash = await projectFingerprint(await stringifyAsync(project));
+  const hash = await fingerprintJSON(project);
   const version = (comparisonVersions.get(project.id) || 0) + 1;
   comparisonVersions.set(project.id, version);
   await state.baselineReady;
   // A newer edit wins over an in-flight comparison.
-  if (await projectFingerprint(await stringifyAsync(project)) !== hash) return true;
+  if (await fingerprintJSON(project) !== hash) return true;
   const baseline = state.savedHash || state.baselineHash;
   const dirty = !baseline || baseline !== hash;
   // Concurrent comparisons of the same content are not edits. Only the

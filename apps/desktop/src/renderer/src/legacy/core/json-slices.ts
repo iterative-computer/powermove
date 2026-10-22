@@ -27,7 +27,27 @@ export const DIGEST_CHUNK = 1 << 22;
 const EMIT_CHARS = 1 << 16;
 
 export type Pause = () => Promise<void>;
-const nextTask: Pause = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+/* The next task, through a message port: chained timers are clamped to 4 ms
+   apart, which would leave a long serialization idle half of the time. */
+let port: { channel: MessageChannel; queue: Array<() => void> } | null = null;
+export const nextTask: Pause = () => {
+  if (typeof MessageChannel !== 'function') return new Promise<void>(resolve => setTimeout(resolve, 0));
+  if (!port) {
+    const state = { channel: new MessageChannel(), queue: [] as Array<() => void> };
+    state.channel.port1.onmessage = () => {
+      state.queue.shift()?.();
+      // Node keeps a referenced port alive only while a task is pending.
+      if (!state.queue.length) (state.channel.port1 as any).unref?.();
+    };
+    port = state;
+  }
+  const state = port;
+  return new Promise<void>(resolve => {
+    if (!state.queue.length) (state.channel.port1 as any).ref?.();
+    state.queue.push(resolve);
+    state.channel.port2.postMessage(null);
+  });
+};
 
 type Frame = {
   holder: any;
