@@ -32,7 +32,9 @@ describe('cooperative JSON', () => {
     try {
       vi.resetModules();
       const fresh = await import('./canonical-async');
-      const values = Array.from({ length: 20_000 }, (_, i) => ({ value: i }));
+      // Long enough to outlast a timer's first millisecond now that the
+      // budget no longer reads the clock per value.
+      const values = Array.from({ length: 200_000 }, (_, i) => ({ value: i }));
       const queued = new Promise<void>(resolve => setTimeout(() => { serviced = true; resolve(); }, 0));
       const [a, b] = await Promise.all([fresh.jsonCloneAsync(values), fresh.jsonCloneAsync(values)]);
       expect(a).toEqual(values);
