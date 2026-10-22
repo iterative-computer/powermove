@@ -216,6 +216,26 @@ load, which also stopped the earlier presentation-driven lookahead. The
 presenter regression test delays every timer past the next BeginFrame and
 requires the timed frame to draw. Viewer version is 1.3.8.
 
+### Shipping playback measurement (2026-10-21)
+
+Ten serial three-second, 30 fps runs used the release addon with thin LTO and
+one Playwright worker, alongside two independent SHA256 CPU workers. Each run
+compared the engine and today's compositor in the same process campaign:
+
+| Metric | Engine | Today |
+| --- | --- | --- |
+| Presented frames | 90–92 | 89–90 |
+| Longest inter-frame gap | 42–46 ms | 37–75 ms |
+| First frame after Play | 1–14 ms | 87–178 ms |
+
+All ten runs meet the original cadence bound (today's longest gap plus one
+30 fps frame, and at least today's frame count minus one). The gate also checks
+distinct frame times and first-frame latency against today with that same
+one-frame alignment allowance. Preparation never exceeded two in-flight jobs;
+no native compatibility miss arrived during those playback windows. The
+focused transport, raster, kernel, presenter and anonymized-fixture unit set
+passes 182 tests.
+
 ### Earlier measurements (2026-10-19, before round-three integration)
 
 Playback (`engine-extension-compat.spec.ts`, a shape override, 3 s at 30
