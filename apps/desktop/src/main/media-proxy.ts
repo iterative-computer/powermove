@@ -97,9 +97,7 @@ export function imageSequenceConverter(binary: string): ConvertSequence {
       '-frames:v', String(count), '-an', '-c:v', 'libvpx-vp9',
       '-pix_fmt', 'yuva420p', '-lossless', '1', '-b:v', '0',
       '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4',
-      // Keep content identity stable across hosts: suppress random container
-      // UIDs/version tags without changing the lossless codec or its pixels.
-      '-fflags', '+bitexact', '-f', 'webm', '-y', output,
+      '-f', 'webm', '-y', output,
     ], { stdio: ['ignore', 'pipe', 'pipe'] }, 'image sequence encoder');
     child.stdout?.on('data', sequenceProgressReader(count, onProgress));
     await new Promise<void>((resolve, reject) => {
