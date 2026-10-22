@@ -277,12 +277,14 @@ describe('file store', () => {
     writer.set('projectHistory.a', history); writer.set('projectState.b', { history }); await writer.flushAll();
     const shared = createStore(directory); await shared.load();
     await shared.preload!('projectHistory.a'); await shared.preload!('projectState.b');
-    // Inspect owned dictionaries: public getters intentionally clone them.
-    const owned = (shared as unknown as { values: Map<string, any> }).values;
-    expect(owned.get('projectHistory.a').records[0]).toBe(owned.get('projectState.b').history.records[0]);
+    // Main holds each key's encoded bytes (the engine packs histories), not
+    // parsed objects, so there is no record identity to share: check contents.
+    expect(shared.get!('projectHistory.a')).toEqual(history);
+    expect(shared.get!('projectState.b')).toEqual({ history });
     shared.delete('projectHistory.a'); await shared.flushAll();
     shared.set('projectHistory.c', history);
-    expect(owned.get('projectHistory.c').records[0]).toBe(owned.get('projectState.b').history.records[0]);
+    expect(shared.get!('projectHistory.c')).toEqual(history);
+    expect(shared.get!('projectState.b')).toEqual({ history });
     await shared.flushAll();
     // Restore A for the independent cache-eviction/re-read test below.
     writer.set('projectHistory.a', history); await writer.flushAll();
@@ -388,31 +390,30 @@ describe('file store', () => {
     expect(reopened.get!('projectState.fresh')).toEqual({ ok: true });
   });
 
-  it('refuses a read it cannot answer on this thread instead of returning an older value', async () => {
+  it('refuses a metadata-only session write whose stored history cannot be read, instead of dropping it', async () => {
     const directory = await temporaryDirectory();
     const history = { version: 1, index: 0, entries: [{ label: 'Edit', forward: [], backward: [] }] };
     await fs.writeFile(path.join(directory, 'projectState.stored.json'), JSON.stringify({ history, time: 1 }));
     let failRead = true;
-    const readFile = (async (...args: Parameters<typeof fs.readFile>) => {
+    const readFileSync = ((...args: Parameters<typeof syncFs.readFileSync>) => {
       if (failRead && String(args[0]).endsWith('projectState.stored.json')) {
         failRead = false;
         throw Object.assign(new Error('Busy'), { code: 'EBUSY' });
       }
-      return fs.readFile(...args);
-    }) as StoreFileSystem['readFile'];
-    const store = createStore(directory, { fs: fileSystemWith({ readFile }) });
+      return syncFs.readFileSync(...args);
+    }) as typeof syncFs.readFileSync;
+    const store = createStore(directory, { syncFs: { ...syncFs, readFileSync } });
     const errors: string[] = [];
     store.onError(event => errors.push(event.error));
     await store.load();
-    expect(errors.some(error => error.includes('could not be read'))).toBe(true);
-    // The session was not read at load, so its history must come from disk
-    // before the write can be published; a read in the meantime is refused.
-    const written = store.set('projectState.stored', { time: 2 });
-    expect(() => store.getSerialized!('projectState.stored')).toThrow(/pending write/);
-    await written;
-    expect(JSON.parse(store.getSerialized!('projectState.stored')!)).toEqual({ history, time: 2 });
+    // Sessions are not read at load: an unread one is unknown, not empty.
+    expect(errors).toEqual([]);
+    await expect(store.set('projectState.stored', { time: 2 })).rejects.toThrow(/could not be read/);
+    expect(store.get!('projectState.stored')).toEqual({ history, time: 1 });
+    await store.set('projectState.stored', { time: 3 });
+    expect(store.get!('projectState.stored')).toEqual({ history, time: 3 });
     await store.flushAll();
-    expect(JSON.parse(await fs.readFile(path.join(directory, 'projectState.stored.json'), 'utf8')).time).toBe(2);
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'projectState.stored.json'), 'utf8')).time).toBe(3);
   });
 
   it('round-trips set, snapshot, delete, and load without sharing references', async () => {
@@ -633,8 +634,9 @@ describe('file store', () => {
     const channel: StoreChannel = {
       post(request) {
         if (!alive) throw new Error('The persistence worker stopped.');
+        if (request.op === 'evict') return;
         const reply = request.op === 'init' ? { type: 'ready', id: request.id }
-          : request.op === 'load' ? { type: 'loaded', id: request.id, entries: [] } : { type: 'flushed', id: request.id };
+          : request.op === 'load' ? { type: 'loaded', id: request.id, entries: [], lazy: [] } : { type: 'flushed', id: request.id };
         queueMicrotask(() => deliver(reply as StoreReply));
       },
       onReply(listener) { deliver = listener; },

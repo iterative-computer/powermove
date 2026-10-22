@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import * as nodeFs from 'node:fs/promises';
+import * as nodeSyncFs from 'node:fs';
 import path from 'node:path';
 import type { App, IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 
@@ -13,7 +14,7 @@ import {
 } from '../shared/ipc';
 import { parseStoreKey, storeFileName } from '../shared/store-keys';
 import { unpackStoredHistory } from '../shared/history-memory';
-import { StoreEngine, storeByteLimit, type StoreEngineOptions, type StoreReply, type StoreRequest } from './store-engine';
+import { HEAVY_KEY, StoreEngine, storeByteLimit, type StoreEngineOptions, type StoreReply, type StoreRequest } from './store-engine';
 
 const WRITE_DELAY_MS = 150;
 const QUIT_FLUSH_CEILING_MS = 5_000;
@@ -21,7 +22,11 @@ const QUIT_FLUSH_CEILING_MS = 5_000;
    for that one answer. Renderers are told about a write only after it is
    encoded, so this wait is rare; the ceiling bounds it if the worker hangs. */
 const SYNC_READ_CEILING_MS = 5_000;
-const LAZY_KEY = /^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./;
+/* A synchronous read of a heavy key not loaded yet waits for the disk; a
+   large legacy history also has to be packed before it is answered. */
+const DISK_READ_CEILING_MS = 60_000;
+/** Loaded heavy values beyond this are dropped, least recently read first. */
+const HEAVY_CACHE_BYTES = 64 * 1024 * 1024;
 const PROJECT_PREFIXES = ['project', 'projectHistory', 'projectState', 'projectJournal', 'agentThreads'];
 
 export type StoreFileSystem = Pick<
@@ -70,8 +75,11 @@ export interface StoreOptions {
   /** Run encoding and writes on this persistence thread (persistence-thread.ts). */
   thread?: { storeChannel(): StoreChannel };
   writeDelayMs?: number;
+  /** Budget for loaded heavy values (projects, histories, sessions, threads). */
+  heavyCacheBytes?: number;
   /* The remaining seams apply to an engine on this thread only. */
   fs?: StoreFileSystem;
+  syncFs?: Pick<typeof nodeSyncFs, 'readFileSync' | 'renameSync'>;
   now?: () => number;
   randomSuffix?: () => string;
 }
@@ -79,10 +87,10 @@ export interface StoreOptions {
 /**
  * The engine on the calling thread, for hosts without the persistence worker
  * (the `powermove serve` host) and for tests that substitute the filesystem.
- * Requests are copied as they would be for a worker, and encoding finishes
- * before `post` returns, except while the engine waits on the disk (loading,
- * or reading back a stored session before it has loaded). Nothing on this
- * thread can finish that wait, so a synchronous read behind it is refused.
+ * Requests are copied as they would be for a worker, and encoding (and a
+ * synchronous disk read) finishes before `post` returns, except while the
+ * engine is loading. Nothing on this thread can finish that wait, so a
+ * synchronous read behind it is refused.
  */
 export class InlineStoreChannel implements StoreChannel {
   private readonly engine: StoreEngine;
@@ -118,27 +126,53 @@ export class InlineStoreChannel implements StoreChannel {
 }
 
 type Waiter = { resolve: (value: unknown) => void; reject: (error: unknown) => void };
+type ReadReply = Extract<StoreReply, { type: 'read' }>;
+
+/** Window metadata whose projects stay cached while they are open. */
+const PIN_KEYS = new Set(['lastActiveProject', 'openWindows', 'windowTabs', 'openTabs']);
+
+const familyOf = (key: string): string => key.slice(0, key.indexOf('.'));
 
 /**
  * Main's side of the store. It holds each key's encoded JSON exactly as the
  * engine published it and answers the renderers' synchronous reads from
  * those bytes. Parsing, history packing, serialization, and file writes all
  * happen in the engine.
+ *
+ * Heavy keys are listed at load without being read. The first read of one
+ * asks the engine for it (synchronously for a synchronous read), and loaded
+ * heavy values share a byte budget: the least recently read clean value is
+ * dropped first, never one that is open in a window, leased by a session, the
+ * most recent of its kind, or not yet on disk.
  */
 class FileStore implements Store {
   private readonly committed = new Map<string, Buffer>();
+  /** Every key that exists: loaded ones and heavy ones not read yet. */
+  private readonly keys = new Set<string>();
+  /** Loaded heavy keys, least recently read first, with their accounted size. */
+  private readonly cacheBytes = new Map<string, number>();
   /** Keys whose newest set or delete the engine has not answered yet. */
   private readonly unsettled = new Map<string, { id: number; present: boolean; settled: Promise<unknown> }>();
   /** Keys whose newest committed value has not reached disk yet. */
   private readonly unwritten = new Map<string, number>();
   private readonly waiters = new Map<number, Waiter>();
+  private readonly reads = new Map<number, (reply: ReadReply | null) => void>();
+  private readonly loading = new Map<string, Promise<Buffer | null>>();
+  /** Bumped by every set or delete posted here, so an older disk read cannot replace it. */
+  private readonly versions = new Map<string, number>();
+  private readonly projectLeases = new Map<string, number>();
+  /** The newest posted value of each pinning window-metadata key. */
+  private readonly pinMetadata = new Map<string, unknown>();
+  /** Attachment payload keys each loaded agent thread archive owns. */
+  private readonly archiveAttachments = new Map<string, string[]>();
   private readonly listeners = new Set<(event: StoreErrorEvent) => void>();
   private nextId = 1;
 
   constructor(
     private readonly directory: string,
     private readonly channel: StoreChannel,
-    private readonly writeDelayMs: number
+    private readonly writeDelayMs: number,
+    private readonly heavyCacheBytes: number
   ) {
     channel.onReply(reply => this.receive(reply));
     channel.onRestart?.(() => this.restarted());
@@ -176,14 +210,14 @@ class FileStore implements Store {
 
   bootstrapSerialized(): Record<string, string> {
     // Lazy keys are listed by name only, so only the others must be settled.
-    this.settle(key => !LAZY_KEY.test(key));
-    const keys = new Set(this.committed.keys());
+    this.settle(key => !HEAVY_KEY.test(key));
+    const keys = new Set(this.keys);
     for (const [key, { present }] of this.unsettled) {
       if (present) keys.add(key); else keys.delete(key);
     }
     const lazy: string[] = [], snapshot: Record<string, string> = {};
     for (const key of keys) {
-      if (LAZY_KEY.test(key)) { lazy.push(key); continue; }
+      if (HEAVY_KEY.test(key)) { lazy.push(key); continue; }
       // Only an engine that missed the read ceiling leaves a key unanswered here.
       const bytes = this.committed.get(key);
       if (bytes) snapshot[key] = bytes.toString('utf8');
@@ -192,36 +226,38 @@ class FileStore implements Store {
     return snapshot;
   }
 
-  /* Main keeps every key's encoded bytes once loaded, so preloading only waits
-     (without blocking this thread) for a value the engine is still encoding. */
-  async preload(key: string): Promise<void> {
-    if (!parseStoreKey(key)) return;
-    for (let pending = this.unsettled.get(key); pending; pending = this.unsettled.get(key)) {
-      await pending.settled.catch(() => undefined);
-      if (this.unsettled.get(key) === pending) break;
-    }
-  }
+  async preload(key: string): Promise<void> { await this.loadValue(key); }
 
   async getEncodedSerializedAsync(key: string): Promise<string | null> {
-    if (!parseStoreKey(key)) return null;
-    await this.preload(key);
-    return this.committed.get(key)?.toString('utf8') ?? null;
+    return (await this.loadValue(key))?.toString('utf8') ?? null;
   }
 
   async preloadProject(id: string): Promise<void> {
-    for (const prefix of PROJECT_PREFIXES) await this.preload(`${prefix}.${id}`);
+    // Serial reads bound the parse peak; attachments are fetched individually.
+    const release = this.acquireProject(id);
+    try {
+      for (const prefix of PROJECT_PREFIXES) await this.preload(`${prefix}.${id}`);
+    } finally { release(); }
   }
 
   /** Independent consumers hold a lease until their project session ends. */
   acquireProject(id: string): () => void {
     if (!parseStoreKey(`project.${id}`)) throw new Error('Invalid project id');
-    // Nothing is evicted from main's encoded bytes, so a lease pins nothing yet.
-    return () => undefined;
+    this.projectLeases.set(id, (this.projectLeases.get(id) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.projectLeases.get(id) ?? 1) - 1;
+      if (remaining) this.projectLeases.set(id, remaining);
+      else this.projectLeases.delete(id);
+      this.evict();
+    };
   }
 
   set(key: string, value: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeSet);
-    return this.mutate(key, true, IPC.storeSet, id => ({ op: 'set', id, key, value }));
+    return this.mutate(key, true, IPC.storeSet, id => ({ op: 'set', id, key, value }), () => value);
   }
 
   setSerialized(key: string, serialized: string): Promise<void> {
@@ -229,12 +265,12 @@ class FileStore implements Store {
     // A string has at least as many UTF-8 bytes as characters; the engine checks
     // the exact byte length without scanning the string on this thread.
     if (typeof serialized !== 'string' || serialized.length > storeByteLimit(key)) throw new IpcValidationError(IPC.storeSetSerialized, 'serialized value exceeds its size limit');
-    return this.mutate(key, true, IPC.storeSetSerialized, id => ({ op: 'setSerialized', id, key, serialized }));
+    return this.mutate(key, true, IPC.storeSetSerialized, id => ({ op: 'setSerialized', id, key, serialized }), () => parseOrUndefined(serialized));
   }
 
   delete(key: string): Promise<void> {
     this.fileNameFor(key, IPC.storeDelete);
-    return this.mutate(key, false, IPC.storeDelete, id => ({ op: 'delete', id, key }));
+    return this.mutate(key, false, IPC.storeDelete, id => ({ op: 'delete', id, key }), () => undefined);
   }
 
   async flushAll(): Promise<void> {
@@ -246,7 +282,7 @@ class FileStore implements Store {
     return () => this.listeners.delete(cb);
   }
 
-  private mutate(key: string, present: boolean, channel: string, build: (id: number) => StoreRequest): Promise<void> {
+  private mutate(key: string, present: boolean, channel: string, build: (id: number) => StoreRequest, pinValue: () => unknown): Promise<void> {
     let posted: { id: number; settled: Promise<unknown> };
     try {
       posted = this.post(build);
@@ -260,7 +296,13 @@ class FileStore implements Store {
       failed.catch(() => undefined);
       return failed;
     }
+    this.versions.set(key, (this.versions.get(key) ?? 0) + 1);
     this.unsettled.set(key, { id: posted.id, present, settled: posted.settled });
+    if (PIN_KEYS.has(key)) {
+      if (present) this.pinMetadata.set(key, pinValue()); else this.pinMetadata.delete(key);
+    }
+    // Closing a window or ending a session can unpin projects now.
+    this.evict();
     const done = posted.settled.then(() => undefined);
     // Fire-and-forget callers rely on onError; awaiting callers get the rejection.
     done.catch(() => undefined);
@@ -283,10 +325,32 @@ class FileStore implements Store {
     return { id, settled };
   }
 
+  /** Asks the engine to read `key` from disk; `done` gets null if the engine stops first. */
+  private postRead(key: string, sync: boolean, done: (reply: ReadReply | null) => void): number {
+    const id = this.nextId++;
+    this.reads.set(id, done);
+    try {
+      this.channel.post({ op: 'read', id, key, sync });
+    } catch (error) {
+      this.reads.delete(id);
+      throw error;
+    }
+    return id;
+  }
+
   private receive(reply: StoreReply): void {
     if (reply.type === 'error') { this.emitError(reply.key, reply.error); return; }
     if (reply.type === 'written') {
-      if (this.unwritten.get(reply.key) === reply.id) this.unwritten.delete(reply.key);
+      if (this.unwritten.get(reply.key) === reply.id) {
+        this.unwritten.delete(reply.key);
+        this.evict();
+      }
+      return;
+    }
+    if (reply.type === 'read') {
+      const done = this.reads.get(reply.id);
+      this.reads.delete(reply.id);
+      done?.(reply);
       return;
     }
     const waiter = this.waiters.get(reply.id);
@@ -294,18 +358,36 @@ class FileStore implements Store {
     switch (reply.type) {
       case 'loaded':
         this.committed.clear();
-        for (const [key, bytes] of reply.entries) this.committed.set(key, asBuffer(bytes));
+        this.keys.clear();
+        this.cacheBytes.clear();
+        this.pinMetadata.clear();
+        this.archiveAttachments.clear();
+        for (const [key, bytes] of reply.entries) {
+          const buffer = asBuffer(bytes);
+          this.committed.set(key, buffer);
+          this.keys.add(key);
+          if (PIN_KEYS.has(key)) this.pinMetadata.set(key, parseOrUndefined(buffer.toString('utf8')));
+        }
+        for (const key of reply.lazy) this.keys.add(key);
         waiter?.resolve(undefined);
         return;
       case 'committed':
-        if (reply.bytes) this.committed.set(reply.key, asBuffer(reply.bytes));
-        else this.committed.delete(reply.key);
         this.unwritten.set(reply.key, reply.id);
         if (this.unsettled.get(reply.key)?.id === reply.id) this.unsettled.delete(reply.key);
+        if (reply.bytes) this.publish(reply.key, asBuffer(reply.bytes));
+        else this.forget(reply.key);
         waiter?.resolve(undefined);
         return;
       case 'rejected': {
-        if (this.unsettled.get(reply.key)?.id === reply.id) this.unsettled.delete(reply.key);
+        if (this.unsettled.get(reply.key)?.id === reply.id) {
+          this.unsettled.delete(reply.key);
+          // The newest posted value was refused: pins follow the published one.
+          if (PIN_KEYS.has(reply.key)) {
+            const bytes = this.committed.get(reply.key);
+            if (bytes) this.pinMetadata.set(reply.key, parseOrUndefined(bytes.toString('utf8')));
+            else this.pinMetadata.delete(reply.key);
+          }
+        }
         const error = new IpcValidationError(reply.channel, reply.detail);
         this.emitError(reply.key, error.message);
         waiter?.reject(error);
@@ -321,6 +403,27 @@ class FileStore implements Store {
     }
   }
 
+  /** A key's newest bytes, from a write or a disk read. */
+  private publish(key: string, bytes: Buffer): void {
+    this.committed.set(key, bytes);
+    this.keys.add(key);
+    if (key.startsWith('agentThreads.')) this.archiveAttachments.set(key, archiveAttachmentKeys(bytes));
+    if (HEAVY_KEY.test(key)) {
+      this.cacheBytes.delete(key);
+      // Account conservatively, as V8 strings once the value is read.
+      this.cacheBytes.set(key, bytes.byteLength * 2);
+    }
+    this.evict();
+  }
+
+  private forget(key: string): void {
+    this.committed.delete(key);
+    this.keys.delete(key);
+    this.cacheBytes.delete(key);
+    this.archiveAttachments.delete(key);
+    this.evict();
+  }
+
   /** A replacement engine: everything not yet on disk is written again. */
   private restarted(): void {
     const stopped = new Error('The storage worker stopped before this change was saved.');
@@ -328,6 +431,9 @@ class FileStore implements Store {
     for (const waiter of this.waiters.values()) waiter.reject(stopped);
     this.waiters.clear();
     this.unsettled.clear();
+    const reads = [...this.reads.values()];
+    this.reads.clear();
+    for (const done of reads) done(null);
     try {
       void this.request(id => ({ op: 'init', id, directory: this.directory, writeDelayMs: this.writeDelayMs })).catch(() => undefined);
       for (const key of [...this.unwritten.keys()]) {
@@ -349,9 +455,138 @@ class FileStore implements Store {
     }
   }
 
+  /** Waits, without blocking this thread, for the engine to answer the key's newest set or delete. */
+  private async pending(key: string): Promise<void> {
+    for (let entry = this.unsettled.get(key); entry; entry = this.unsettled.get(key)) {
+      await entry.settled.catch(() => undefined);
+      if (this.unsettled.get(key) === entry) break;
+    }
+  }
+
   private encoded(key: string): string | null {
     this.settle(candidate => candidate === key);
-    return this.committed.get(key)?.toString('utf8') ?? null;
+    const bytes = this.committed.get(key);
+    if (bytes) { this.touch(key); return bytes.toString('utf8'); }
+    if (!this.keys.has(key)) return null;
+    return this.readSync(key)?.toString('utf8') ?? null;
+  }
+
+  /** Reads a heavy key on demand; this thread waits for the engine's disk read. */
+  private readSync(key: string): Buffer | null {
+    const version = this.versions.get(key);
+    let reply: ReadReply | null | undefined;
+    let id: number;
+    try { id = this.postRead(key, true, answer => { reply = answer; }); }
+    catch (error) { this.emitError(key, `store file could not be read: ${errorText(error)}`); return null; }
+    if (!this.channel.waitSync(() => reply !== undefined, DISK_READ_CEILING_MS)) {
+      this.reads.delete(id);
+      console.warn(`A store read of ${key} gave up: the storage worker did not answer in time.`);
+      return null;
+    }
+    return this.accept(key, version, reply!);
+  }
+
+  private async loadValue(key: string): Promise<Buffer | null> {
+    if (!parseStoreKey(key)) return null;
+    const active = this.loading.get(key);
+    if (active) return active;
+    // Read only from a settled key, and post the read in this same turn: a set
+    // or delete posted after it overtakes it in the engine and wins.
+    if (this.unsettled.has(key)) {
+      await this.pending(key);
+      const joined = this.loading.get(key);
+      if (joined) return joined;
+    }
+    const cached = this.committed.get(key);
+    if (cached) { this.touch(key); return cached; }
+    if (!this.keys.has(key)) return null;
+    const version = this.versions.get(key);
+    const task = new Promise<Buffer | null>(resolve => {
+      try { this.postRead(key, false, reply => resolve(this.accept(key, version, reply))); }
+      catch (error) { this.emitError(key, `store file could not be read: ${errorText(error)}`); resolve(null); }
+    });
+    this.loading.set(key, task);
+    try { return await task; }
+    finally { if (this.loading.get(key) === task) this.loading.delete(key); }
+  }
+
+  /** Publishes a disk read unless a newer set or delete was posted meanwhile. */
+  private accept(key: string, version: number | undefined, reply: ReadReply | null): Buffer | null {
+    if (!reply || this.versions.get(key) !== version || this.committed.has(key)) return this.committed.get(key) ?? null;
+    if (reply.state === 'ok' && reply.bytes) {
+      const bytes = asBuffer(reply.bytes);
+      this.publish(key, bytes);
+      return bytes;
+    }
+    // Absent, or quarantined as corrupt: the key no longer exists.
+    if (reply.state === 'missing') this.forget(key);
+    return null;
+  }
+
+  /** A cache hit makes the key the most recently read. */
+  private touch(key: string): void {
+    const size = this.cacheBytes.get(key);
+    if (size === undefined) return;
+    this.cacheBytes.delete(key);
+    this.cacheBytes.set(key, size);
+  }
+
+  private pinnedKeys(): Set<string> {
+    const projects = new Set(this.projectLeases.keys());
+    const add = (id: unknown): void => {
+      if (typeof id === 'string' && parseStoreKey(`project.${id}`)) projects.add(id);
+    };
+    add(this.pinMetadata.get('lastActiveProject'));
+    for (const name of ['openWindows', 'windowTabs']) {
+      const entries = this.pinMetadata.get(name);
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        add(entry);
+        if (isRecord(entry)) {
+          add(entry.active);
+          if (Array.isArray(entry.tabs)) for (const id of entry.tabs) add(id);
+        }
+      }
+    }
+    // Once current window metadata exists, the old single-window strip is stale.
+    if (!this.pinMetadata.has('openWindows') && !this.pinMetadata.has('windowTabs')) {
+      const tabs = this.pinMetadata.get('openTabs');
+      if (Array.isArray(tabs)) for (const id of tabs) add(id);
+    }
+    const pinned = new Set<string>();
+    for (const id of projects) {
+      for (const prefix of PROJECT_PREFIXES) pinned.add(`${prefix}.${id}`);
+      // Attachment ids are independent of project ids; their owner is the
+      // loaded thread archive. Pin the archived payloads without loading them.
+      for (const key of this.archiveAttachments.get(`agentThreads.${id}`) ?? []) pinned.add(key);
+    }
+    return pinned;
+  }
+
+  private evict(): void {
+    const pinned = this.pinnedKeys();
+    // Unknown consumers still need a warm project AND history, even when
+    // either exceeds the budget alone. Keep the most recent of each heavy kind.
+    const latest = new Map<string, string>();
+    let bytes = 0;
+    for (const [key, size] of this.cacheBytes) {
+      latest.set(familyOf(key), key);
+      if (!pinned.has(key)) bytes += size;
+    }
+    for (const [key, size] of this.cacheBytes) {
+      if (bytes <= this.heavyCacheBytes) break;
+      if (pinned.has(key) || latest.get(familyOf(key)) === key) continue;
+      // A value not yet on disk (pending, in flight, or failed) is the only current copy.
+      if (this.unsettled.has(key) || this.unwritten.has(key) || this.loading.has(key)) continue;
+      this.committed.delete(key);
+      this.cacheBytes.delete(key);
+      this.archiveAttachments.delete(key);
+      bytes -= size;
+      // The engine keeps sessions for metadata-only writes; it reads this one back when needed.
+      if (key.startsWith('projectState.')) {
+        try { this.channel.post({ op: 'evict', key }); } catch { /* A stopped engine holds nothing. */ }
+      }
+    }
   }
 
   /** The value as the renderer stores it, with undo history unpacked. */
@@ -381,15 +616,41 @@ class FileStore implements Store {
 }
 
 export function createStore(dir: string, options: StoreOptions = {}): Store {
-  if (options.thread && (options.fs || options.now || options.randomSuffix)) {
+  if (options.thread && (options.fs || options.syncFs || options.now || options.randomSuffix)) {
     throw new Error('Filesystem seams apply only to a store engine on this thread.');
   }
   const channel = options.thread?.storeChannel() ?? new InlineStoreChannel({
     fs: options.fs ?? nodeFs,
+    syncFs: options.syncFs ?? nodeSyncFs,
     now: options.now ?? Date.now,
     randomSuffix: options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`)
   });
-  return new FileStore(path.resolve(dir), channel, options.writeDelayMs ?? WRITE_DELAY_MS);
+  return new FileStore(path.resolve(dir), channel, options.writeDelayMs ?? WRITE_DELAY_MS, options.heavyCacheBytes ?? HEAVY_CACHE_BYTES);
+}
+
+function parseOrUndefined(serialized: string): unknown {
+  try { return JSON.parse(serialized); } catch { return undefined; }
+}
+
+/** The attachment payload keys an agent thread archive references. */
+function archiveAttachmentKeys(bytes: Buffer): string[] {
+  const archive = parseOrUndefined(bytes.toString('utf8'));
+  if (!isRecord(archive) || !Array.isArray(archive.threads)) return [];
+  const keys: string[] = [];
+  const attachments = (items: unknown): void => {
+    if (!Array.isArray(items)) return;
+    for (const item of items) if (isRecord(item) && item.payloadStored === true && typeof item.id === 'string') {
+      const key = `agentAttachment.${item.id}`;
+      if (parseStoreKey(key)) keys.push(key);
+    }
+  };
+  for (const thread of archive.threads) if (isRecord(thread)) {
+    attachments(thread.attachments);
+    if (Array.isArray(thread.conversation)) for (const message of thread.conversation) {
+      if (isRecord(message)) attachments(message.attachments);
+    }
+  }
+  return keys;
 }
 
 function asBuffer(bytes: Uint8Array): Buffer {
