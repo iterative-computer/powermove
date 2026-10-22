@@ -14,6 +14,7 @@ publish.workspace = true
 
 [dependencies]
 pm-engine = { path = "../pm-engine" }
+pm-cache = { path = "../pm-cache" }
 pm-protocol = { path = "../pm-protocol", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
@@ -38,6 +39,7 @@ wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] 
 pm-blender = { path = "../pm-blender" }
 pm-export = { path = "../pm-export" }
 pm-render = { path = "../pm-render" }
+pm-proxy = { path = "../pm-proxy" }
 # Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).
 pm-media = { path = "../pm-media" }
 pm-audio = { path = "../pm-audio" }
@@ -60,6 +62,7 @@ pm-model = { path = "../pm-model" }
 pm-audio = { path = "../pm-audio", features = ["test-hooks"] }
 pm-node = { path = ".", features = ["test-hooks"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+tempfile = "3"
 
 [[test]]
 # Runs on the main thread (the CoreText registry uses AppKit's font manager).

@@ -24,8 +24,12 @@ pub mod compat;
 pub mod complete;
 pub mod compose;
 pub mod document;
+mod gpu_meter;
 mod layer_reports;
+mod machine_profile;
 pub mod peaks;
+mod preview_cache;
+mod proxy_media;
 pub mod render;
 pub mod schedule;
 pub mod snapshot;
@@ -489,6 +493,22 @@ impl BridgePresenter {
 }
 
 impl FramePresenter for BridgePresenter {
+    fn preview_cache(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        bytes: u64,
+        preparing: bool,
+        clear: bool,
+    ) {
+        self.send(Command::PreviewCache {
+            key: (port, session),
+            bytes: bytes.min(usize::MAX as u64) as usize,
+            preparing,
+            clear,
+        });
+    }
     fn viewer(
         &mut self,
         ctx: &mut PresentContext<'_>,

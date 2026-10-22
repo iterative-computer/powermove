@@ -190,3 +190,52 @@ fn a_transparent_background_shows_black_and_half_resolution_fills_the_same_recta
     let (lx, ly) = (180 + 40 * 3, 165 + 30 * 3);
     assert_eq!(bgra(&bytes, bpr, lx + 20, ly + 10), [0, 0, 255, 255]);
 }
+
+#[test]
+fn cached_preview_has_exact_quality_keys_and_cannot_contaminate_export() {
+    let gpu = pm_gpu::Gpu::new("preview memory cache").unwrap();
+    let mut composer = Composer::new(&gpu.device, &gpu.queue);
+    composer.set_cache_budget(64 << 20);
+    composer.set_preview_limit(32 << 20);
+    let working = WorkingTexture::new(&gpu.device, Size::new(W, H));
+    let document = doc("#234567");
+    let media = MediaMap::default();
+    let mut request =
+        pm_render::RenderRequest::sized(Size::new(160, 90), pm_protocol::color::Precision::Float32);
+    request.export = true;
+    let export = |composer: &mut Composer| {
+        let renderer = composer.renderer();
+        let frame = renderer
+            .render(&document, "P-root", Ticks::ZERO, &request, &media)
+            .unwrap();
+        assert!(frame.failures.is_empty());
+        renderer.read_rgba(&frame).unwrap()
+    };
+    let clean = export(&mut composer);
+    composer.set_playing(true);
+    for resolution in [
+        PreviewResolution::Automatic,
+        PreviewResolution::Half,
+        PreviewResolution::Quarter,
+    ] {
+        let state = state(resolution);
+        let first = composer
+            .compose(&document, "P-root", &media, Ticks::ZERO, &state, &working)
+            .unwrap();
+        assert!(!first.cached, "a different quality must not reuse a frame");
+        let second = composer
+            .compose(&document, "P-root", &media, Ticks::ZERO, &state, &working)
+            .unwrap();
+        assert!(second.cached);
+        let stats = composer.preview_cache_stats();
+        assert!(stats.bytes <= stats.budget);
+    }
+    assert_eq!(
+        export(&mut composer),
+        clean,
+        "export bytes with warmed previews equal empty-cache bytes"
+    );
+    composer.set_cache_budget(0);
+    assert_eq!(composer.preview_cache_stats().bytes, 0);
+    assert_eq!(composer.preview_cache_stats().entries, 0);
+}

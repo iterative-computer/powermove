@@ -281,6 +281,16 @@ pub enum Response {
     tag = "type"
 )]
 pub enum Event {
+    /// Renderer → interactive engine: memory-only Render Work Area cache.
+    /// `preparing` renders playback-quality frames without starting audio.
+    PreviewCache {
+        bytes: crate::common::ByteSize,
+        preparing: bool,
+        clear: bool,
+    },
+    /// Interactive engine → renderer: measured slow original decodes. The
+    /// host applies project intent before scheduling any generation job.
+    ProxyNeeded { assets: Vec<crate::common::AssetId> },
     /// pm-wasm → engine (session-bound): canonical patches, in revision order.
     ApplyPatches(PatchBatch),
     /// Engine → renderer: coalesced acknowledgement of applied patches.
@@ -488,13 +498,16 @@ impl Event {
     pub const fn contract(&self) -> ContractId {
         match self {
             Event::ApplyPatches(_) | Event::PatchesApplied(_) | Event::Fact(_) => ContractId::Patch,
-            Event::Frame(_) | Event::ReleaseFrame(_) | Event::Viewer(_) => ContractId::Frame,
+            Event::Frame(_)
+            | Event::ReleaseFrame(_)
+            | Event::Viewer(_)
+            | Event::PreviewCache { .. } => ContractId::Frame,
             Event::SurfacePool(_) => ContractId::GpuInterop,
             Event::Transport(_) | Event::Clock(_) | Event::Audio(_) => ContractId::Clock,
             Event::Deadline(_) | Event::Slicing(_) => ContractId::Slicing,
             Event::Failure(_) | Event::Crash(_) | Event::InFlight(_) => ContractId::Errors,
             Event::LeaseUsage(_) => ContractId::Lease,
-            Event::JobStatus(_) => ContractId::Priority,
+            Event::JobStatus(_) | Event::ProxyNeeded { .. } => ContractId::Priority,
             Event::BlenderProgress(_) | Event::BlenderSurface(_) => ContractId::Blender,
             Event::ShaderFallback(_) => ContractId::Definitions,
             Event::Compat(_) | Event::RenderStats(_) => ContractId::Frame,
@@ -505,6 +518,8 @@ impl Event {
         matches!(
             self,
             Event::ApplyPatches(_)
+                | Event::ProxyNeeded { .. }
+                | Event::PreviewCache { .. }
                 | Event::PatchesApplied(_)
                 | Event::Frame(_)
                 | Event::ReleaseFrame(_)
@@ -596,6 +611,11 @@ impl Validate for Response {
 impl Validate for Event {
     fn validate(&self) -> Result<(), Violation> {
         match self {
+            Event::ProxyNeeded { assets } => ensure(
+                assets.len() <= 256 && assets.iter().all(|a| a.is_valid()),
+                ContractId::Priority,
+                || "proxy demand contains at most 256 valid asset ids".into(),
+            ),
             Event::ApplyPatches(batch) => batch.validate(),
             Event::Frame(descriptor) => descriptor.validate(),
             Event::SurfacePool(pool) => pool.validate(),

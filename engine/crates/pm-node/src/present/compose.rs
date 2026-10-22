@@ -126,6 +126,7 @@ pub fn placement(state: &ViewerState, width: f64, height: f64) -> Placement {
 /// What a composed frame reports.
 #[derive(Debug, Clone)]
 pub struct Composed {
+    pub proxy_needed: Vec<pm_protocol::common::AssetId>,
     pub overlay: OverlayGeometry,
     pub failures: Vec<LayerFailure>,
     /// Render and placement time on the CPU (µs), the GPU work submitted.
@@ -136,6 +137,8 @@ pub struct Composed {
     /// Level 1 SVG rasters the frame drew without (decision S1): another
     /// bucket stood in, or the layer drew nothing (`super::svg`).
     pub svg_misses: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
+    pub cached: bool,
+    pub representation: pm_protocol::frame::Representation,
 }
 
 const BLIT_WGSL: &str = r#"
@@ -161,6 +164,12 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
 /// Renders documents for the presenter. One per GPU device.
 pub struct Composer {
+    cache_lease: usize,
+    preview_limit: usize,
+    machine_profile: Option<super::machine_profile::MachineProfileCache>,
+    gpu_meter: Option<super::gpu_meter::GpuMeter>,
+    proxy_media: super::proxy_media::ProxyMedia,
+    preview_cache: super::preview_cache::PreviewCache,
     renderer: Renderer,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -194,6 +203,16 @@ fn owner_hash(owner: impl std::hash::Hash) -> u64 {
 
 impl Composer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Composer {
+        let machine_profile = super::machine_profile::MachineProfileCache::default_root()
+            .and_then(|root| super::machine_profile::MachineProfileCache::start(root).ok());
+        let gpu_meter = machine_profile.as_ref().and_then(|profile| {
+            let observer = profile.observer();
+            super::gpu_meter::GpuMeter::new(
+                device,
+                queue,
+                Arc::new(move |duration| observer.observe(duration)),
+            )
+        });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("viewer placement"),
             source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
@@ -276,6 +295,12 @@ impl Composer {
             })
         };
         Composer {
+            cache_lease: 0,
+            preview_limit: 0,
+            machine_profile,
+            gpu_meter,
+            proxy_media: Default::default(),
+            preview_cache: super::preview_cache::PreviewCache::new(),
             renderer: Renderer::new(device.clone(), queue.clone()),
             pipeline,
             layout,
@@ -296,6 +321,51 @@ impl Composer {
         &mut self.renderer
     }
 
+    /// The cached local disk, power, and timestamp-derived GPU profile.
+    /// Unavailable until the worker and enough GPU samples have completed.
+    pub fn machine_profile(&self) -> Option<pm_proxy::MachineProfile> {
+        self.machine_profile
+            .as_ref()
+            .and_then(|profile| profile.snapshot())
+    }
+
+    /// Changes when a profile becomes ready, GPU p95 moves materially, or
+    /// the power source changes. Reevaluate at a playback boundary.
+    pub fn machine_profile_generation(&self) -> u64 {
+        self.machine_profile
+            .as_ref()
+            .map_or(0, |profile| profile.generation())
+    }
+
+    /// Rendered previews share the presenter's frame-cache reservation with
+    /// decoded source frames. Never charge the same lease bytes twice.
+    pub fn set_cache_budget(&mut self, bytes: usize) {
+        self.cache_lease = bytes;
+        self.apply_cache_budget();
+    }
+    pub fn set_preview_limit(&mut self, bytes: usize) {
+        if self.preview_limit != bytes {
+            self.preview_limit = bytes;
+            self.apply_cache_budget();
+        }
+    }
+    fn apply_cache_budget(&mut self) {
+        let preview = self.preview_limit.min(self.cache_lease / 2);
+        self.preview_cache.budget(preview);
+        self.renderer
+            .apply_media_lease(pm_media::decode::service::MediaLease {
+                frame_cache: self.cache_lease - preview,
+                decoders: usize::MAX,
+            });
+    }
+
+    pub fn clear_preview_cache(&mut self) {
+        self.preview_cache.clear();
+    }
+    pub fn preview_cache_stats(&self) -> pm_cache::Stats {
+        self.preview_cache.stats()
+    }
+
     /// Puts `owner`'s definition set in the renderer (parking the one it
     /// held) and brings it up to `definitions` when that set changed: a
     /// changed set translates only definitions whose source changed, and
@@ -314,6 +384,7 @@ impl Composer {
         let owner = owner_hash(owner);
         let version = definitions.map(|(set, version)| (Arc::as_ptr(set) as usize, *version));
         if self.definitions.map(|d| d.0) != Some(owner) {
+            self.preview_cache.clear();
             if let Some((previous, loaded)) = self.definitions.take() {
                 let mut out = self.renderer.effects().sibling();
                 self.renderer.swap_effects(&mut out);
@@ -336,6 +407,7 @@ impl Composer {
             return None;
         }
         current.1 = version;
+        self.preview_cache.clear();
         match definitions {
             Some((set, _)) => Some(self.renderer.set_definitions(set).unwrap_or_default()),
             None => {
@@ -504,6 +576,8 @@ impl Composer {
         let mut quads = Vec::new();
         let mut stand_ins = Vec::new();
         let mut svg_misses = Vec::new();
+        let mut cached = false;
+        let mut representation = pm_protocol::frame::Representation::Original;
         if let Some(region) = place.region {
             let request = RenderRequest {
                 output_size: place.output,
@@ -564,32 +638,104 @@ impl Composer {
                 ));
             }
             let depth_target = depth.and(self.depth_scratch.as_ref());
-            // The viewer's documents live as long as their view and change
-            // in place: frames of a paused time reuse the draws of layers
-            // nothing changed (docs/engine/perf.md, "Draw reuse").
-            self.renderer.set_draw_reuse(self.draw_reuse);
-            // A preview must use the bucket for this frame, just as today's
-            // synchronous SVG canvas redraw does. Render-ahead requests it
-            // before its display deadline; never publish a substituted bucket.
-            // A bucket the window could not draw is drawn as nothing instead
-            // (`super::wait`), as today draws the frame without a layer whose
-            // raster throws.
-            let mut renderer = self.renderer.svg_waiting_viewer();
-            let rendered = renderer.render_into(
-                doc,
-                composition,
-                time,
-                &request,
-                media,
-                scratch,
-                depth_target,
-            );
-            renderer.set_draw_reuse(false);
-            let rendered = rendered?;
-            failures = rendered.failures;
-            quads = rendered.quads;
-            stand_ins = rendered.stand_ins;
-            svg_misses = rendered.svg_misses;
+            self.renderer.set_playing(self.playing);
+            let decode_size = if state.media == pm_protocol::frame::MediaPreference::Originals
+                || !self.playing && state.resolution == PreviewResolution::Automatic
+            {
+                None
+            } else {
+                Some((place.output.width, place.output.height))
+            };
+            self.renderer.set_preview_decode_size(decode_size);
+            let slow = self.renderer.slow_media();
+            let proxy_media =
+                self.proxy_media
+                    .resolver(doc, media, state.media, self.playing, &slow);
+            // Depth/ID and changing Blender preview surfaces are deliberately
+            // outside this cache. Their own source caches retain full keys.
+            let cacheable = self.preview_limit > 0
+                && depth.is_none()
+                && matches!(request.blender, pm_render::blender::BlenderRender::Native)
+                && !self.renderer.watchdog_holding()
+                && self.renderer.watchdog_stopped().is_none();
+            let cache_key = cacheable.then(|| {
+                self.preview_cache.key(
+                    doc,
+                    self.definitions.map_or(0, |d| d.0),
+                    composition,
+                    time,
+                    &request,
+                    media,
+                    &proxy_media.signature(),
+                )
+            });
+            if let Some(hit) = cache_key
+                .as_ref()
+                .and_then(|key| self.preview_cache.get(key))
+            {
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("reuse cached preview"),
+                });
+                super::preview_cache::copy_into(&mut encoder, &hit.color, scratch);
+                queue.submit([encoder.finish()]);
+                quads = hit.quads;
+                representation = hit.representation;
+                cached = true;
+            } else {
+                // The viewer's documents live as long as their view and change
+                // in place: frames of a paused time reuse the draws of layers
+                // nothing changed (docs/engine/perf.md, "Draw reuse").
+                self.renderer.set_draw_reuse(self.draw_reuse);
+                // A preview must use the bucket for this frame, just as today's
+                // synchronous SVG canvas redraw does. Render-ahead requests it
+                // before its display deadline; never publish a substituted bucket.
+                // A bucket the window could not draw is drawn as nothing instead
+                // (`super::wait`), as today draws the frame without a layer whose
+                // raster throws.
+                let sample = self.gpu_meter.as_mut().and_then(|meter| meter.begin());
+                self.renderer
+                    .set_bracket(sample.as_ref().map(super::gpu_meter::Sample::bracket));
+                let mut renderer = self.renderer.svg_waiting_viewer();
+                let rendered = renderer.render_into(
+                    doc,
+                    composition,
+                    time,
+                    &request,
+                    &proxy_media,
+                    scratch,
+                    depth_target,
+                );
+                renderer.set_bracket(None);
+                renderer.set_draw_reuse(false);
+                self.proxy_media.finish(&proxy_media);
+                if let (Some(meter), Some(sample)) = (&self.gpu_meter, sample) {
+                    if rendered.is_ok() {
+                        meter.end(&queue, sample);
+                    } else {
+                        meter.abandon(sample);
+                    }
+                }
+                let rendered = rendered?;
+                failures = rendered.failures;
+                quads = rendered.quads;
+                stand_ins = rendered.stand_ins;
+                svg_misses = rendered.svg_misses;
+                representation = proxy_media.representation();
+                if representation == pm_protocol::frame::Representation::Original {
+                    representation = renderer.media_representation();
+                }
+                if cacheable && failures.is_empty() && stand_ins.is_empty() && svg_misses.is_empty()
+                {
+                    self.preview_cache.put(
+                        cache_key.expect("cacheable"),
+                        scratch,
+                        quads.clone(),
+                        representation,
+                        &device,
+                        &queue,
+                    );
+                }
+            }
         }
         // Place the region (or only clear when nothing is visible).
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -618,12 +764,22 @@ impl Composer {
             );
         }
         queue.submit([encoder.finish()]);
+        let slow = self.renderer.slow_media();
         Ok(Composed {
+            proxy_needed: media
+                .0
+                .iter()
+                .filter(|(_, path)| path.as_ref().is_some_and(|p| slow.contains(p)))
+                .take(256)
+                .map(|(asset, _)| asset.as_str().into())
+                .collect(),
             overlay: overlay(&place, cw, ch, &quads),
             failures,
             cpu_us: super::render::now_us() - start,
             stand_ins,
             svg_misses,
+            cached,
+            representation,
         })
     }
 }

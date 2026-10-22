@@ -94,6 +94,17 @@ impl<'a> PresentContext<'a> {
 /// Presents viewer frames for renderer sessions. Every call names the port
 /// and the session that port owns (the engine checks ownership first).
 pub trait FramePresenter: Send {
+    /// A memory-only preview, bounded by the presenter's existing lease share.
+    fn preview_cache(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _bytes: u64,
+        _preparing: bool,
+        _clear: bool,
+    ) {
+    }
     /// The viewer's state changed. `revision` is the envelope's minimum
     /// document revision to render.
     fn viewer(

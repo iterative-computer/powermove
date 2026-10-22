@@ -132,6 +132,12 @@ pub struct PoolSpec {
 }
 
 pub enum Command {
+    PreviewCache {
+        key: Key,
+        bytes: usize,
+        preparing: bool,
+        clear: bool,
+    },
     Configure {
         key: Key,
         state: Box<ViewerState>,
@@ -310,20 +316,8 @@ fn composer(
     // Viewer sessions come from a renderer with the decision 19 fallback
     // runner (`engine-connection/shader-fallback.ts`).
     composer.renderer().set_shader_fallback_runner(true);
+    composer.set_cache_budget(frame_cache);
     composer
-        .renderer()
-        .apply_media_lease(media_lease(frame_cache));
-    composer
-}
-
-/// The composer's decode-service shares: the frame cache follows the
-/// presenter's lease share; decoders are not leased yet
-/// (docs/engine/scrub.md, "Memory").
-fn media_lease(frame_cache: usize) -> pm_media::decode::service::MediaLease {
-    pm_media::decode::service::MediaLease {
-        frame_cache,
-        decoders: usize::MAX,
-    }
 }
 
 /// One frame's record for the S1 harness.
@@ -591,6 +585,8 @@ struct AudioPrefs {
 pub const AUDIO_START_TIMEOUT_US: i64 = 1_500_000;
 
 struct Thread {
+    proxy_demands: BTreeMap<Key, Vec<pm_protocol::common::AssetId>>,
+    preview_requests: BTreeMap<Key, (usize, bool)>,
     config: ThreadConfig,
     sink: Sink,
     stats: Arc<Mutex<Stats>>,
@@ -699,6 +695,8 @@ pub fn run(
     let mut thread = Thread {
         frame_ticks: TICKS_PER_SECOND / fps,
         frame_cache: pm_render::media::DEFAULT_FRAME_CACHE,
+        preview_requests: Default::default(),
+        proxy_demands: Default::default(),
         config,
         sink,
         stats,
@@ -770,6 +768,7 @@ pub fn slow_turn_band(took: i64) -> Option<usize> {
 /// What a command is, for stall diagnostics.
 fn command_name(command: &Command) -> &'static str {
     match command {
+        Command::PreviewCache { .. } => "preview cache",
         Command::Shutdown => "shutdown",
         Command::Configure { .. } => "viewer state",
         Command::Release { .. } => "release",
@@ -1012,7 +1011,30 @@ impl Thread {
 
     /// Returns false when the thread must stop.
     fn apply(&mut self, command: Command) -> bool {
+        if matches!(
+            &command,
+            Command::Document { .. }
+                | Command::Media { .. }
+                | Command::Definitions { .. }
+                | Command::ShaderFallback { .. }
+                | Command::Compat { .. }
+        ) && let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut())
+        {
+            composer.clear_preview_cache();
+        }
         match command {
+            Command::PreviewCache {
+                key,
+                bytes,
+                preparing,
+                clear,
+            } => {
+                self.preview_requests.insert(key, (bytes, preparing));
+                if clear && let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut())
+                {
+                    composer.clear_preview_cache();
+                }
+            }
             Command::Shutdown => return false,
             Command::Configure {
                 key,
@@ -1057,12 +1079,16 @@ impl Thread {
                 ),
             },
             Command::Close { key } => {
+                self.preview_requests.remove(&key);
+                self.proxy_demands.remove(&key);
                 if let Some(view) = self.views.remove(&key) {
                     self.retire(view);
                 }
                 self.forget_session(key);
             }
             Command::ClosePort { port } => {
+                self.preview_requests.retain(|key, _| key.0 != port);
+                self.proxy_demands.retain(|key, _| key.0 != port);
                 let keys: Vec<Key> = self.views.keys().filter(|k| k.0 == port).copied().collect();
                 for key in keys {
                     if let Some(view) = self.views.remove(&key) {
@@ -1168,7 +1194,7 @@ impl Thread {
                 self.frame_cache = bytes;
                 self.stats().frame_cache = bytes as u64;
                 if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
-                    composer.renderer().apply_media_lease(media_lease(bytes));
+                    composer.set_cache_budget(bytes);
                 }
             }
             Command::Snapshot(job) => {
@@ -1477,6 +1503,8 @@ impl Thread {
     }
 
     fn forget_session(&mut self, key: Key) {
+        self.preview_requests.remove(&key);
+        self.proxy_demands.remove(&key);
         if let Some(blender) = &self.blender {
             blender.forget(key);
         }
@@ -3285,10 +3313,15 @@ impl Thread {
         let mut failures_n = 0usize;
         let mut stand_in = false;
         let mut stand_in_shown = None;
+        let mut cached = false;
+        let mut representation = Representation::Original;
         if document {
             let doc = self.docs.get_mut(&key)?;
             let composer = gpu.composer_with(&self.config, self.frame_cache);
             let composition = view.state.composition.as_str().to_owned();
+            let (preview_bytes, preparing) =
+                self.preview_requests.get(&key).copied().unwrap_or_default();
+            composer.set_preview_limit(preview_bytes);
             // The renderer draws with this view's definitions (one renderer
             // serves every view on the device).
             let registered = doc.take_registered();
@@ -3303,7 +3336,7 @@ impl Thread {
                     port: Some(key.0.0),
                     session: Some(key.1.get()),
                 });
-            composer.set_playing(timing.is_some());
+            composer.set_playing(timing.is_some() || preparing);
             // Paused in Material Preview or Rendered: Blender surfaces
             // (`super::blender`); playback and draft shadings draw natively.
             let paused = timing.is_none() && !view.clock.is_playing();
@@ -3359,6 +3392,7 @@ impl Thread {
             // Text laid out while the font service did not answer must not
             // be shown: keep the frame on screen and draw again.
             if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
+                composer.clear_preview_cache();
                 view.dirty = true;
                 (self.sink)(vec![Action::Log {
                     level: LogLevel::Warn,
@@ -3368,6 +3402,23 @@ impl Thread {
             }
             match composed {
                 Ok(composed) => {
+                    if !composed.proxy_needed.is_empty()
+                        && self.proxy_demands.get(&key) != Some(&composed.proxy_needed)
+                    {
+                        self.proxy_demands
+                            .insert(key, composed.proxy_needed.clone());
+                        let envelope = Envelope::new(Message::Event {
+                            body: Event::ProxyNeeded {
+                                assets: composed.proxy_needed.clone(),
+                            },
+                        })
+                        .with_session(key.1);
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
+                    cached = composed.cached;
+                    representation = composed.representation;
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                     overlay = composed.overlay;
                     cpu_us = composed.cpu_us;
@@ -3436,6 +3487,7 @@ impl Thread {
                     // Effects the GPU watchdog turned off (measured on an
                     // earlier frame): reported at this frame's revision.
                     for error in composer.renderer().watchdog_reports(false) {
+                        composer.clear_preview_cache();
                         let report = pm_protocol::error::FailureReport {
                             revision: view.revision,
                             error,
@@ -3696,9 +3748,9 @@ impl Thread {
                     PreviewResolution::Automatic => PreviewResolution::Full,
                     other => other,
                 },
-                representation: Representation::Original,
+                representation,
                 draft_3d: false,
-                cached: false,
+                cached,
                 stand_in,
             },
             overlay: Some(overlay),

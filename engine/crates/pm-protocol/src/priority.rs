@@ -208,9 +208,9 @@ impl Validate for JobStatus {
             || "only a finished job has a path".into(),
         )?;
         ensure(
-            self.error.is_none() || self.state == JobState::Failed,
+            self.error.is_none() || matches!(self.state, JobState::Failed | JobState::Paused),
             C,
-            || "only a failed job has an error".into(),
+            || "only a failed or paused job has an error".into(),
         )
     }
 }
@@ -293,6 +293,9 @@ pub enum JobState {
     Done,
     Failed,
     Cancelled,
+    /// Paused generation (playback, export, or low disk space); resumes when
+    /// the condition clears. `error` may carry the human-readable reason.
+    Paused,
 }
 
 impl JobState {
@@ -903,7 +906,7 @@ pub fn agent_export_reply(
         JobState::Queued | JobState::WaitingForMedia if queued_ms > queue_bound_ms => {
             Some(AgentExportReply::Queued { job })
         }
-        JobState::Queued | JobState::WaitingForMedia | JobState::Running => None,
+        JobState::Queued | JobState::WaitingForMedia | JobState::Running | JobState::Paused => None,
     }
 }
 

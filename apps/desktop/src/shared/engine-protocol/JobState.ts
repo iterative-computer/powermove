@@ -3,4 +3,4 @@
 /**
  * Job states as `get_render_status` reports them.
  */
-export type JobState = "queued" | "running" | "waitingForMedia" | "done" | "failed" | "cancelled";
+export type JobState = "queued" | "running" | "waitingForMedia" | "done" | "failed" | "cancelled" | "paused";

@@ -348,6 +348,8 @@ fn request_name(request: &Request) -> &'static str {
 
 fn event_name(event: &Event) -> &'static str {
     match event {
+        Event::ProxyNeeded { .. } => "proxyNeeded",
+        Event::PreviewCache { .. } => "previewCache",
         Event::ApplyPatches(_) => "applyPatches",
         Event::PatchesApplied(_) => "patchesApplied",
         Event::Frame(_) => "frame",
@@ -1518,6 +1520,7 @@ impl Engine {
             }
             (
                 event @ (Event::ReleaseFrame(_)
+                | Event::PreviewCache { .. }
                 | Event::Viewer(_)
                 | Event::Transport(_)
                 | Event::Audio(_)
@@ -1540,6 +1543,11 @@ impl Engine {
                 };
                 self.with_presenter(out, |p, ctx| match event {
                     Event::Viewer(state) => p.viewer(ctx, port, sid, state, revision),
+                    Event::PreviewCache {
+                        bytes,
+                        preparing,
+                        clear,
+                    } => p.preview_cache(ctx, port, sid, bytes.get(), preparing, clear),
                     Event::ReleaseFrame(release) => p.release(port, sid, release),
                     Event::Transport(command) => p.transport(ctx, port, sid, command),
                     Event::Audio(message) => p.audio(ctx, port, sid, message),

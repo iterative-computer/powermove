@@ -1538,6 +1538,8 @@ pub fn events() -> Vec<Envelope> {
             }],
             manifest: "{\"objects\":[\"Rocket\"]}".into(),
         })),
+        event(Event::ProxyNeeded { assets: vec!["a1".into()] }),
+        event(Event::PreviewCache { bytes: crate::common::ByteSize::new(256 << 20).unwrap(), preparing: true, clear: false }),
     ]
 }
 
@@ -1753,9 +1755,11 @@ pub const fn event_index(event: &Event) -> usize {
         Event::ShaderFallback(_) => 19,
         Event::Compat(_) => 20,
         Event::RenderStats(_) => 21,
+        Event::ProxyNeeded { .. } => 22,
+        Event::PreviewCache { .. } => 23,
     }
 }
-pub const EVENT_VARIANTS: usize = 22;
+pub const EVENT_VARIANTS: usize = 24;
 
 /// A sample color description for a 10-bit 4:2:2 ProRes source.
 pub fn prores_422_color() -> ColorDescription {

@@ -2,14 +2,15 @@
 //! contracts 12, 13, 14).
 //!
 //! [`JobEngineService`] is the [`JobService`] the job engine installs. It runs
-//! three lanes, each a thread at utility QoS with its own [`Renderer`] on one
-//! shared GPU device:
+//! four lanes at utility QoS. The render lanes share one GPU device; proxy
+//! generation uses its own CPU/codec lane:
 //!
 //! | Lane | Work | Class |
 //! |---|---|---|
 //! | Snapshots | `agentFrames` batches | agent snapshot |
 //! | Agent exports | `export_video` jobs | agent export |
 //! | User jobs | export sheet and render queue jobs, background renders | user job, background |
+//! | Generated media | whole-clip proxy jobs | generation |
 //!
 //! Lanes run concurrently; their GPU submissions pass one [`gate::Gate`],
 //! which keeps one submission in flight, lets the higher class go first, and
@@ -37,6 +38,8 @@ mod compile;
 mod definitions;
 mod fallback;
 pub mod gate;
+mod probe_cost;
+mod proxies;
 mod svg;
 
 use std::collections::{HashMap, VecDeque};
@@ -77,6 +80,7 @@ pub const HOST_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 pub const AGENT_FRAMES_MAX_BYTES: usize = 14 << 20;
 /// Progress events at most this often per job.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
+const PROXY_LANE: usize = 3;
 /// Unix mode of exported files (contract 14 invariant 4: owner-only).
 const OUTPUT_MODE: u32 = 0o600;
 /// How often a queued export waiting for offline media asks the host again
@@ -103,6 +107,14 @@ enum Work {
         document: JobDocument,
         cancel: Arc<AtomicBool>,
     },
+    Proxy {
+        job: JobId,
+        host: PortId,
+        asset: pm_protocol::common::AssetId,
+        format: pm_protocol::priority::ProxyFormat,
+        size: pm_protocol::priority::ProxySize,
+        cancel: Arc<AtomicBool>,
+    },
 }
 
 impl Work {
@@ -116,6 +128,10 @@ impl Work {
             Work::Export { document, .. } => pm_render::text::served::SeedScope {
                 port: None,
                 session: Some(document.session.get()),
+            },
+            Work::Proxy { .. } => pm_render::text::served::SeedScope {
+                port: None,
+                session: None,
             },
         }
     }
@@ -134,6 +150,7 @@ struct JobRecord {
 struct State {
     snapshots: VecDeque<Work>,
     agent_exports: VecDeque<Work>,
+    generation: VecDeque<Work>,
     user: Option<Scheduler<Work>>,
     jobs: HashMap<JobId, JobRecord>,
     /// Ended jobs, oldest first: their records are kept for the last
@@ -187,6 +204,9 @@ pub struct ServiceStats {
     pub exports_failed: u64,
     pub exports_routed: u64,
     pub exports_cancelled: u64,
+    pub proxies_done: u64,
+    pub proxies_failed: u64,
+    pub proxies_cancelled: u64,
     /// Agent frame batches answered while the interactive engine played.
     pub batches_during_playback: u64,
     /// Longest wait of a frame batch behind other work, in ms.
@@ -235,7 +255,7 @@ impl Shared {
         update(record);
         let mut status = status_of(job, record, None, None);
         status.preview = preview;
-        if record.state == JobState::WaitingForMedia {
+        if matches!(record.state, JobState::WaitingForMedia | JobState::Paused) {
             status.error = note;
         }
         st.outbox.messages.push((host, status_event(status)));
@@ -413,7 +433,7 @@ fn status_of(
         state: record.state,
         progress: record.progress.clamp(0.0, 1.0),
         path: path.filter(|_| record.state == JobState::Done),
-        error: error.filter(|_| record.state == JobState::Failed),
+        error: error.filter(|_| matches!(record.state, JobState::Failed | JobState::Paused)),
         preview: None,
     }
 }
@@ -451,7 +471,7 @@ pub struct JobEngineService {
 }
 
 impl JobEngineService {
-    /// Starts the three lanes. `wake` must make the engine's host call
+    /// Starts the render and generation lanes. `wake` must make the engine's host call
     /// [`pm_engine::Engine::pump`] soon.
     pub fn start(wake: Wake) -> Result<JobEngineService, String> {
         Self::start_with_fonts(wake, None)
@@ -481,6 +501,7 @@ impl JobEngineService {
             (SNAPSHOT_LANE, "pm-job-snapshots"),
             (AGENT_EXPORT_LANE, "pm-job-agent-exports"),
             (USER_LANE, "pm-job-user"),
+            (PROXY_LANE, "pm-job-proxies"),
         ] {
             let shared = shared.clone();
             let handle = pm_engine::qos::spawn_engine_thread(EngineProcess::Job, name, move || {
@@ -534,6 +555,7 @@ impl StatsHandle {
                 "snapshots": st.snapshots.len(),
                 "agentExports": st.agent_exports.len(),
                 "user": st.user.as_ref().map_or(0, |s| s.len()),
+                "generation": st.generation.len(),
             },
             "jobs": st.jobs.len(),
         })
@@ -569,20 +591,27 @@ impl JobService for JobEngineService {
         document: Option<JobDocument>,
     ) -> Result<JobAccepted, Box<EngineError>> {
         let job = submit.job.clone();
-        let JobSpec::Export { .. } = &submit.spec else {
+        if !matches!(
+            (&submit.spec, submit.class),
+            (JobSpec::GenerateProxy { .. }, PriorityClass::Generation)
+                | (
+                    JobSpec::Export { .. },
+                    PriorityClass::UserJob | PriorityClass::AgentExport | PriorityClass::Background
+                )
+        ) {
             return Err(Box::new(job_error(
                 &job,
-                ErrorCode::Unsupported,
-                "Proxy generation is not in the job engine yet (Phase 4a).",
+                ErrorCode::InvalidMessage,
+                "The job class does not match its work.",
             )));
-        };
-        let Some(document) = document else {
+        }
+        if matches!(submit.spec, JobSpec::Export { .. }) && document.is_none() {
             return Err(Box::new(job_error(
                 &job,
                 ErrorCode::StaleRevision,
                 "The export has no document snapshot.",
             )));
-        };
+        }
         let mut st = self.shared.lock();
         if st.jobs.get(&job).is_some_and(|r| !r.state.is_terminal()) {
             return Err(Box::new(job_error(
@@ -604,17 +633,35 @@ impl JobService for JobEngineService {
                 cancel: cancel.clone(),
             },
         );
-        let work = Work::Export {
-            job: job.clone(),
-            host,
-            submit: Box::new(submit),
-            document,
-            cancel,
+        let work = match &submit.spec {
+            JobSpec::GenerateProxy {
+                asset,
+                format,
+                size,
+            } => Work::Proxy {
+                job: job.clone(),
+                host,
+                asset: asset.clone(),
+                format: *format,
+                size: *size,
+                cancel,
+            },
+            JobSpec::Export { .. } => Work::Export {
+                job: job.clone(),
+                host,
+                submit: Box::new(submit),
+                document: document.expect("checked above"),
+                cancel,
+            },
         };
         let position = match class {
             PriorityClass::AgentExport => {
                 st.agent_exports.push_back(work);
                 st.agent_exports.len() as u32 - 1
+            }
+            PriorityClass::Generation => {
+                st.generation.push_back(work);
+                st.generation.len() as u32 - 1
             }
             _ => {
                 let scheduler = st.user.as_mut().expect("present");
@@ -661,7 +708,10 @@ impl JobService for JobEngineService {
         }
         // Queued jobs end now; running ones stop at their next frame or band.
         let mut queued: Vec<(PortId, JobId)> = vec![];
-        let is_hit = |w: &Work| matches!(w, Work::Export { job, .. } if hit.contains(job));
+        let is_hit = |w: &Work| match w {
+            Work::Export { job, .. } | Work::Proxy { job, .. } => hit.contains(job),
+            Work::Frames { .. } => false,
+        };
         let mut removed: Vec<Work> = vec![];
         let keep: VecDeque<Work> = st
             .agent_exports
@@ -676,20 +726,40 @@ impl JobService for JobEngineService {
             })
             .collect();
         st.agent_exports = keep;
+        st.generation = st
+            .generation
+            .drain(..)
+            .filter_map(|w| {
+                if is_hit(&w) {
+                    removed.push(w);
+                    None
+                } else {
+                    Some(w)
+                }
+            })
+            .collect();
         if let Some(user) = st.user.as_mut() {
             removed.extend(user.remove_where(is_hit));
         }
         for w in removed {
-            if let Work::Export { job, host, .. } = w {
-                queued.push((host, job));
+            match w {
+                Work::Export { job, host, .. } | Work::Proxy { job, host, .. } => {
+                    queued.push((host, job))
+                }
+                Work::Frames { .. } => (),
             }
         }
         for (host, job) in queued {
             if let Some(record) = st.jobs.get_mut(&job) {
                 record.state = JobState::Cancelled;
                 let status = status_of(&job, record, None, None);
+                let is_generation = record.class == PriorityClass::Generation;
                 st.outbox.messages.push((host, status_event(status)));
-                st.stats.exports_cancelled += 1;
+                if is_generation {
+                    st.stats.proxies_cancelled += 1;
+                } else {
+                    st.stats.exports_cancelled += 1;
+                }
                 st.retire(job);
             }
         }
@@ -851,6 +921,7 @@ fn next_work(shared: &Shared, lane: usize) -> Option<Work> {
         let work = match lane {
             SNAPSHOT_LANE => st.snapshots.pop_front(),
             AGENT_EXPORT_LANE => st.agent_exports.pop_front(),
+            PROXY_LANE => st.generation.pop_front(),
             _ => st
                 .user
                 .as_mut()
@@ -877,6 +948,20 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
     let mut blender = LaneBlender::default();
     let mut definitions = definitions::LaneDefinitions::default();
     while let Some(work) = next_work(shared, lane) {
+        let work = match work {
+            Work::Proxy {
+                job,
+                host,
+                asset,
+                format,
+                size,
+                cancel,
+            } => {
+                proxies::run(shared, &job, host, &asset, format, size, &cancel);
+                continue;
+            }
+            work => work,
+        };
         if renderer.is_none() {
             match shared.renderer() {
                 Ok(r) => renderer = Some(r),
@@ -892,6 +977,7 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
             Work::Frames { document, .. } | Work::Export { document, .. } => {
                 definitions.use_for(r, document)
             }
+            Work::Proxy { .. } => unreachable!("handled above"),
         };
         if let Err(message) = loaded {
             fail_work(shared, work, ErrorCode::InvalidMessage, &message);
@@ -906,6 +992,7 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
             | Work::Export {
                 document, cancel, ..
             } => (document.session, cancel.clone()),
+            Work::Proxy { .. } => unreachable!("handled above"),
         };
         r.set_fallback_host(Some(Arc::new(fallback::HostFallback::new(
             shared.clone(),
@@ -922,6 +1009,7 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
         r.set_svg_wait(true);
         let document = match &work {
             Work::Frames { document, .. } | Work::Export { document, .. } => document,
+            Work::Proxy { .. } => unreachable!("handled above"),
         };
         r.set_svg_source(Some(Arc::new(svg::HostSvgRasters::new(
             shared.clone(),
@@ -961,6 +1049,7 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
                 &cancel,
                 &mut blender,
             ),
+            Work::Proxy { .. } => unreachable!("handled above"),
         }
         r.set_svg_source(None);
         // Keep the pool small between work items (lease pressure).
@@ -974,7 +1063,7 @@ fn fail_work(shared: &Shared, work: Work, code: ErrorCode, message: &str) {
             let error = EngineError::new(code, ErrorScope::Request { id }, message);
             shared.send(port, Envelope::new(Message::Error { id, error }));
         }
-        Work::Export { job, host, .. } => {
+        Work::Export { job, host, .. } | Work::Proxy { job, host, .. } => {
             let error = job_error(&job, code, message);
             let mut st = shared.lock();
             if let Some(record) = st.jobs.get_mut(&job) {
@@ -1702,14 +1791,46 @@ fn probe_media(
         }
         Err(e) => return fail(e.code, e.message),
     };
+    let wait_until_idle = || loop {
+        let st = shared.lock();
+        if st.shutdown {
+            return Err(pm_media::MediaError::Cancelled);
+        }
+        let export_running = st.jobs.values().any(|record| {
+            record.class != PriorityClass::Generation && record.state == JobState::Running
+        });
+        drop(st);
+        if !shared.gate.is_playing() && !export_running {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    if let Err(pm_media::MediaError::Cancelled) = wait_until_idle() {
+        return fail(
+            ErrorCode::Cancelled,
+            "The job engine is shutting down.".into(),
+        );
+    }
     match pm_media::facts::media_facts(&path, probe.interpret.as_deref()) {
-        Ok(facts) => shared.send(
-            port,
-            Envelope::new(pm_protocol::envelope::Message::Response {
-                id,
-                body: Response::MediaFacts(Box::new(facts)),
-            }),
-        ),
+        Ok(mut facts) => {
+            match probe_cost::append_decode_cost(&path, &mut facts, wait_until_idle) {
+                Ok(()) => {}
+                Err(pm_media::MediaError::Cancelled) => {
+                    return fail(
+                        ErrorCode::Cancelled,
+                        "The job engine is shutting down.".into(),
+                    );
+                }
+                Err(error) => return fail(ErrorCode::DecodeFailed, error.to_string()),
+            }
+            shared.send(
+                port,
+                Envelope::new(pm_protocol::envelope::Message::Response {
+                    id,
+                    body: Response::MediaFacts(Box::new(facts)),
+                }),
+            )
+        }
         Err(e) => fail(ErrorCode::DecodeFailed, format!("{}: {e}", path.display())),
     }
 }

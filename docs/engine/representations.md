@@ -65,7 +65,7 @@ higher-priority job work is active; paused time is excluded from measurements.
 Interpret Footage receives readable machine facts: Decode time
 (p95), Frame budget, Random seek time, Measured frames, and Proxy recommended.
 Insufficient samples return `Unknown`, never an assumed `No`. The measured
-recommendation is decode-only evidence; the host combines it with GPU
+recommendation is decode-only evidence; the full policy must combine it with GPU
 headroom and the other machine-policy inputs.
 
 Focused tests cover ProRes partial decode dimensions and exact export bytes
