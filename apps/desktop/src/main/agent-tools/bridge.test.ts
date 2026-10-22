@@ -180,6 +180,36 @@ describe('native Powermove agent tool bridge', () => {
     } finally { await bridge.shutdown(); }
   });
 
+  it('exports the full project through the job engine when the agent context is only an index', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    // Over 2 MB of layers: the full document crosses the ordinary tool reply bound.
+    const project = { id: 'P', name: 'P', compId: 'P-root', w: 320, h: 180, fps: 30, dur: 1,
+      layers: Array.from({ length: 3 }, (_, i) => ({ id: `L${i}`, name: 'x'.repeat(1_000_000) })) };
+    const index = { id: 'P', name: 'P', agentSnapshot: { complete: false, note: 'index' }, layerCount: 3, layers: [] };
+    owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
+      this.requests.push(request);
+      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(index), home: false }
+        : request.tool === '__engine_frames_plan' ? { times: [0], width: 720, project: JSON.stringify(project), revision: 4 }
+        : { tool: request.tool };
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 4 }));
+    } as never;
+    (owner as unknown as { id: number }).id = 3;
+    const engineJobs = {
+      available: true,
+      exportVideo: vi.fn(async () => ({ status: 'done' as const, jobId: 'job-1', path: '/exports/P.mp4', width: 320, height: 180, fps: 30 })),
+      renderFrames: vi.fn(), status: vi.fn(), cancelRun: vi.fn(async () => 0)
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', engineJobs: engineJobs as never });
+    try {
+      const session = await bridge.openSession({ runId: 'engine-run', owner: owner as never, baseRevision: 0 });
+      const done = await bridge.callTool(session, 'export_video', { name: 'P' });
+      expect(JSON.parse((done.content[0] as { text: string }).text)).toMatchObject({ path: '/exports/P.mp4', projectId: 'P' });
+      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, expect.anything(), undefined);
+      expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', '__engine_frames_plan']);
+    } finally { await bridge.shutdown(); }
+  });
+
   it('validates effects by compiling them through the engine, never narrower than WebGL', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);

@@ -48,6 +48,9 @@ const MAX_TOOL_TEXT_CHARS = 2_000_000;
 // The session snapshot is written to the workspace, never returned to agents.
 // JSON string escaping can roughly double the project's size.
 const MAX_SNAPSHOT_TEXT_CHARS = LIMITS.codexProjectJsonBytes * 2;
+// The job engine's full project (`__engine_frames_plan`), never returned to
+// agents: any project the store accepts, escaped inside the reply's JSON.
+const MAX_PROJECT_TEXT_CHARS = LIMITS.fileSaveBytes * 2;
 const MAX_TOOL_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TOOL_CONTENT_ITEMS = 8;
 
@@ -770,7 +773,13 @@ export class PowermoveAgentToolBridge {
   private async engineExport(session: PowermoveAgentToolSession, engine: AgentEngineJobs, input: ExportVideoInput, onJobStarted?: () => void): Promise<AgentToolResponseEvent | null> {
     const context = await this.rendererValue(session, '__mcp_context', {});
     if (context?.home === true) throw new Error('Open a project before exporting.');
-    const project = JSON.parse(String(context?.projectJSON ?? 'null'));
+    let project = JSON.parse(String(context?.projectJSON ?? 'null'));
+    // Over the agent snapshot bound (32 MB) the context is a run-start index
+    // (agentProjectSnapshot); the engine renders from the full document.
+    if (isRecord(project) && isRecord(project.agentSnapshot) && project.agentSnapshot.complete === false) {
+      const plan = await this.rendererValue(session, '__engine_frames_plan', {});
+      project = JSON.parse(String(plan?.project ?? 'null'));
+    }
     const result = await engine.exportVideo(session.owner.id, session.runId, project, input, onJobStarted);
     if (result.status === 'routed') {
       console.info(`[engine] export_video routed to the current engine: ${result.reason}`);
@@ -962,7 +971,8 @@ export class PowermoveAgentToolBridge {
     if (!isRecord(value) || typeof value.callId !== 'string') return;
     const call = this.pending.get(value.callId);
     if (!call || call.session.runId !== value.runId || call.session.owner !== event.sender) return;
-    const response = this.parseRendererResponse(value, call.tool === '__mcp_context' ? MAX_SNAPSHOT_TEXT_CHARS : MAX_TOOL_TEXT_CHARS);
+    const response = this.parseRendererResponse(value, call.tool === '__mcp_context' ? MAX_SNAPSHOT_TEXT_CHARS
+      : call.tool === '__engine_frames_plan' ? MAX_PROJECT_TEXT_CHARS : MAX_TOOL_TEXT_CHARS);
     if (!response) {
       this.pending.delete(value.callId);
       clearTimeout(call.timer);
