@@ -256,8 +256,12 @@ export type ServiceName =
   | 'transcription.status' | 'transcription.transcribe' | 'transcription.cancelTranscribe'
   | 'extensions.list' | 'extensions.bundle' | 'extensions.values';
 
-/** Tool routes the hidden host keeps outside workers (mirrors pm_protocol::document_host). */
-export const DOM_TOOLS = ['capture_panel', 'computer_use_panel', 'interact_panel', 'get_panel_state', 'open_panel', 'get_panel_layout', 'set_panel_layout'] as const;
+/** Tool routes the hidden host keeps outside workers (mirrors pm_protocol::document_host).
+ *  `manage_project` and `publish_visual_reply` act on an editor window (its
+ *  project library and window ownership; the run's thread attachments), not
+ *  on the document: a worker refuses them (`wrong-route`) rather than answer
+ *  from its own in-memory library. */
+export const DOM_TOOLS = ['capture_panel', 'computer_use_panel', 'interact_panel', 'get_panel_state', 'open_panel', 'get_panel_layout', 'set_panel_layout', 'manage_project', 'publish_visual_reply'] as const;
 export const JOB_TOOLS = ['export_video', 'get_render_status'] as const;
 
 /** Explicit entries in the default document route (schema and arguments are
