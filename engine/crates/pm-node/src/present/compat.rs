@@ -195,7 +195,13 @@ pub struct CompatStore {
     asked: HashMap<AnswerId, (Revision, Instant)>,
     /// The rasters as the renderer draws them, made once per raster.
     drawn: HashMap<(Key, CompatKey), Arc<pm_render::compat::CompatRaster>>,
+    /// The latest complete raster per producer key of a layer (any frame).
+    by_key: HashMap<(Key, CompositionId, LayerId, CompatSource, String), CompatKey>,
 }
+
+/// Entries of [`CompatStore::by_key`] before the ones whose raster is gone
+/// are dropped.
+const MAX_KEY_INDEX: usize = 16_384;
 
 fn answer_id(
     key: Key,
@@ -240,6 +246,7 @@ impl CompatStore {
             answers: HashMap::new(),
             asked: HashMap::new(),
             drawn: HashMap::new(),
+            by_key: HashMap::new(),
         }
     }
 
@@ -320,13 +327,22 @@ impl CompatStore {
                     scale,
                     crop,
                 );
-                if !self.complete.contains_key(&(key, id.clone())) {
+                // The producer posted these pixels under this key, at this
+                // frame or at another of the same layer (today's compositor
+                // drew an uploaded key in any frame); the quad is the one
+                // they were posted with, which the producer checked.
+                let held = if self.complete.contains_key(&(key, id.clone())) {
+                    Some(id)
+                } else {
+                    self.same_key(key, &id, scale)
+                };
+                let Some(id) = held else {
                     // Evicted meanwhile: the frame asks again at once, and
                     // the producer, having answered `reuse` for this need
                     // and revision, sends new pixels.
                     self.asked.remove(&answer);
                     return Applied::Evicted;
-                }
+                };
                 self.asked.remove(&answer);
                 self.answers.insert(
                     answer,
@@ -432,12 +448,43 @@ impl CompatStore {
                     },
                 );
                 self.drawn.remove(&id);
+                self.by_key.insert(
+                    (
+                        key,
+                        band.id.composition.clone(),
+                        band.id.layer.clone(),
+                        band.id.source,
+                        band.id.key.clone(),
+                    ),
+                    band.id.clone(),
+                );
+                if self.by_key.len() > MAX_KEY_INDEX {
+                    let complete = &self.complete;
+                    self.by_key
+                        .retain(|_, id| complete.contains_key(&(key, id.clone())));
+                }
                 if let Some((old, _)) = self.complete.insert(id, (raster, self.clock)) {
                     self.bytes -= size(old.width, old.height, old.format);
                 }
                 Applied::Complete
             }
         }
+    }
+
+    /// A complete raster the session's producer posted under `id`'s key for
+    /// the same layer and source at another frame, drawn at `scale`.
+    fn same_key(&self, key: Key, id: &CompatKey, scale: f64) -> Option<CompatKey> {
+        let index = self.by_key.get(&(
+            key,
+            id.composition.clone(),
+            id.layer.clone(),
+            id.source,
+            id.key.clone(),
+        ))?;
+        self.complete
+            .get(&(key, index.clone()))
+            .filter(|(raster, _)| raster.scale.to_bits() == scale.to_bits())
+            .map(|_| index.clone())
     }
 
     /// A complete raster, marked used.
@@ -815,6 +862,89 @@ mod tests {
         assert_eq!(store.usage().0.values().sum::<usize>(), 1);
         store.forget_session(session(1));
         assert_eq!(store.usage(), (BTreeMap::new(), 0));
+    }
+
+    #[test]
+    fn a_reuse_names_pixels_the_layer_posted_at_another_frame() {
+        use pm_render::compat::CompatAnswer;
+        let mut store = CompatStore::default();
+        let r3 = Revision::new(3).unwrap();
+        store.apply(
+            session(1),
+            CompatMessage::Producers {
+                sources: vec![CompatSource::RasterOverride],
+            },
+        );
+        // Posted at frame 0 under key "k".
+        assert_eq!(
+            store.apply(session(1), band(id("L0", "k"), 2, 2, 0, 2, 7)),
+            Applied::Complete
+        );
+        // Frame 1 of the same layer reuses "k": answered with those pixels.
+        let later = |time: i64| CompatKey {
+            time: Ticks::new(time).unwrap(),
+            ..id("L0", "k")
+        };
+        let reuse = |id: CompatKey, scale: f64| CompatMessage::Reuse {
+            id,
+            scale,
+            revision: r3,
+            crop: None,
+        };
+        assert_eq!(
+            store.apply(session(1), reuse(later(23_520_000), 1.0)),
+            Applied::Answered
+        );
+        let frame1 = 23_520_000.0 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        let CompatAnswer::Raster(raster) = store.answer(
+            session(1),
+            "c",
+            "L0",
+            frame1,
+            1.0,
+            CompatSource::RasterOverride,
+            None,
+            r3,
+        ) else {
+            panic!("the frame draws the posted pixels");
+        };
+        assert_eq!((raster.width, raster.height, raster.anchor), (2, 2, [-2.0, -3.0]));
+        // Another density, another layer, or another key is not that raster.
+        assert_eq!(
+            store.apply(session(1), reuse(later(47_040_000), 2.0)),
+            Applied::Evicted
+        );
+        assert_eq!(
+            store.apply(
+                session(1),
+                reuse(
+                    CompatKey {
+                        layer: "L1".into(),
+                        ..later(47_040_000)
+                    },
+                    1.0
+                )
+            ),
+            Applied::Evicted
+        );
+        assert_eq!(
+            store.apply(
+                session(1),
+                reuse(
+                    CompatKey {
+                        key: "other".into(),
+                        ..later(47_040_000)
+                    },
+                    1.0
+                )
+            ),
+            Applied::Evicted
+        );
+        // Another session never sees it.
+        assert_eq!(
+            store.apply(session(2), reuse(later(23_520_000), 1.0)),
+            Applied::Evicted
+        );
     }
 
     #[test]

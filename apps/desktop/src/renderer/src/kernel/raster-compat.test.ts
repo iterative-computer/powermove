@@ -194,6 +194,33 @@ describe('the raster override producer', () => {
     expect(engineRaster).toHaveBeenCalledTimes(7);
   });
 
+  it('answers reuse at a later frame when the same key comes back on the same quad, and pixels when the quad moved', () => {
+    const { services, compat, engineRaster, readPixels, need } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.type, layer.d, scale, crop ?? null]));
+    const original = services.get<any>('raster');
+    // Today's typography-anchor pattern: the base without the crop, its
+    // anchor moved by an amount that changes over time.
+    let shift = 0;
+    services.register('raster', (layer: any, scale: number, time: number) => {
+      const result = original(layer, scale, time);
+      return layer.type === 'text' ? { ...result, anchorX: result.anchorX - shift } : result;
+    });
+    const crop = { x: 0, y: 0, width: 10, height: 10 };
+    expect(compat.answer({ ...need('title', 0.5), crop }, 4)).toMatchObject({ kind: 'raster', anchor: [4, 18] });
+    expect(readPixels).toHaveBeenCalledTimes(1);
+    // The next frames: the same content and quad. Neither the engine nor
+    // the canvas is asked again.
+    const key = (compat.answer({ ...need('title', 0.6), crop }, 4) as any).key;
+    expect(compat.answer({ ...need('title', 0.7), crop }, 4)).toEqual({ kind: 'reuse', key });
+    expect(engineRaster).toHaveBeenCalledTimes(1);
+    expect(readPixels).toHaveBeenCalledTimes(1);
+    // The anchor moved: the same key on another quad is drawn again.
+    shift = 3;
+    expect(compat.answer({ ...need('title', 0.8), crop }, 4)).toMatchObject({ kind: 'raster', key, anchor: [1, 18] });
+    expect(readPixels).toHaveBeenCalledTimes(2);
+    // Asked again after a reuse the engine could not honour: pixels.
+    expect(compat.answer({ ...need('title', 0.9), crop }, 4, { fresh: true })).toMatchObject({ kind: 'raster' });
+  });
+
   it('answers native for a wrapper that passes a layer through, without drawing the base', () => {
     const { services, compat, engineRaster, need } = setup();
     const original = services.get<any>('raster');

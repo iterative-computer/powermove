@@ -273,6 +273,9 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   let unanswer: (() => void) | null = null;
   /** The key last posted per layer, time and density (for `reuse`). */
   const posted = new Map<string, string>();
+  /** The quad each key was posted with per layer and density: the same key
+   *  on the same quad at another time is a `reuse`. */
+  const postedQuads = new Map<string, string>();
   const ready = new Map<string, { layer: unknown; surface: any }>();
   const preparing = new Map<string, { layer: unknown; promise: Promise<void> }>();
   const bases = new Map<string, { layer: unknown; surface: any; bytes: number }>();
@@ -343,6 +346,9 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
           return cached.surface;
         }
         const surface = options.engineRaster(layer, s, t, crop ?? undefined);
+        // Today's surfaces carry their cache key (wrappers key their own
+        // results by it); the same content gets the same key.
+        if (surface && typeof surface === 'object' && surface.key === undefined) surface.key = key ? `powermove-raster:${key}` : `powermove-raster:#${++serial}`;
         rememberBase(key, layer, surface);
         return surface;
       };
@@ -444,16 +450,32 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     if (ownKey && !answerOptions?.fresh && posted.get(tag) === ownKey) return { kind: 'reuse', key: ownKey };
     const source = canvasOf(result);
     if (!source) return TRANSPARENT;
-    const pixels = readPixels(source);
-    if (!pixels) return TRANSPARENT;
-    const w = Number(result.w) || pixels.width / scale;
-    const h = Number(result.h) || pixels.height / scale;
+    // Today's quad (`contentQuad`), from the canvas's size.
+    const width = Math.round(source.width), height = Math.round(source.height);
+    const w = Number(result.w) || width / scale;
+    const h = Number(result.h) || height / scale;
     const centered = layer.type === 'shape' && !layer.d?.paths?.length;
     const anchor: [number, number] = centered ? [w / 2, h / 2] : [Number(result.anchorX) || 0, Number(result.anchorY) || 0];
-    const uv = resultUv(result, pixels.width, pixels.height);
+    const uv = resultUv(result, width, height);
+    // Today's compositor drew a result whose key it had uploaded from that
+    // texture, in any frame, on the quad the result describes. The engine
+    // holds the pixels posted under a key; the same key on the same quad at
+    // another time is answered \`reuse\`, without reading the canvas again.
+    const across = ownKey ? `${String(need.composition)}\u0000${String(need.layer)}\u0000${scale}\u0000${ownKey}` : '';
+    const quad = JSON.stringify([width, height, w, h, anchor, uv ?? null, crop ? cropKey(crop) : '']);
+    if (across && !answerOptions?.fresh && postedQuads.get(across) === quad) {
+      posted.set(tag, ownKey);
+      return { kind: 'reuse', key: ownKey };
+    }
+    const pixels = readPixels(source);
+    if (!pixels) return TRANSPARENT;
     const key = ownKey || `powermove:${++serial}:${revision}`;
     if (!answerOptions?.fresh) posted.set(tag, key);
     if (posted.size > 8192) posted.clear();
+    if (across) {
+      postedQuads.set(across, quad);
+      if (postedQuads.size > 8192) postedQuads.delete(postedQuads.keys().next().value!);
+    }
     return { kind: 'raster', key, ...pixels, anchor, size: [w, h], ...(uv ? { uv } : {}) };
   }
 
@@ -514,6 +536,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
 
   function resetAnswers(): void {
     posted.clear();
+    postedQuads.clear();
     readsBase.clear();
     clearReady();
     if (!transport || !unanswer) return;
@@ -541,6 +564,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       unanswer();
       unanswer = null;
       posted.clear();
+      postedQuads.clear();
       readsBase.clear();
       clearReady();
     } else if (unanswer) {
