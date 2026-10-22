@@ -244,3 +244,240 @@ one worker, no retries.
 | Flaky | 0 |
 | Skipped | 21 (environment; the `PM_PERF_PROJECT` and `PM_PLAYBACK_PROJECT` specs were run separately, above) |
 | Wall time | 996 s (16 min 36 s) |
+
+## Phase 3c consumers serial integration run
+
+The historical quarantine tables above describe Phase 0. The consumer gate
+uses `playwright.consumers.config.ts` and runs every spec, including historical
+quarantine entries, with one worker. It adds no exclusions or retries and leaves
+individual assertion and test budgets unchanged. The app and native modules are
+built before taking the shared Electron lock; the four-hour global budget allows
+the complete serial suite to finish. Existing optional-fixture skips remain
+reported separately. The gate sets `POWERMOVE_NEW_ENGINE=1` or `0` as the default;
+specs that explicitly exercise a particular engine retain that declared mode.
+
+To reproduce without rebuilding while holding the Electron slot:
+
+```sh
+source engine/env.sh
+nice -n 15 bun run --cwd apps/desktop build:engine
+nice -n 15 bun run --cwd apps/desktop build:wasm
+nice -n 15 bun run --cwd apps/desktop build
+cd apps/desktop
+consumer_reports=$(mktemp -d)
+POWERMOVE_NEW_ENGINE=1 POWERMOVE_E2E_OUTPUT_DIR="$consumer_reports/on" \
+  PLAYWRIGHT_JSON_OUTPUT_NAME="$consumer_reports/on.json" \
+  ~/Library/Caches/powermove-engine/bin/pm-electron-lock \
+  nice -n 15 bunx playwright test --config playwright.consumers.config.ts --workers=1
+POWERMOVE_NEW_ENGINE=0 POWERMOVE_E2E_OUTPUT_DIR="$consumer_reports/off" \
+  PLAYWRIGHT_JSON_OUTPUT_NAME="$consumer_reports/off.json" \
+  ~/Library/Caches/powermove-engine/bin/pm-electron-lock \
+  nice -n 15 bunx playwright test --config playwright.consumers.config.ts --workers=1
+```
+
+The first complete default-on run covered 691 cases: **529 passed, 112 failed,
+50 skipped, zero flaky**, in 5,992.8 seconds. It used the initial consumer app
+build, before the later waveform, focus, Library and SVG/3D integration changes.
+It is a complete integration result, not a final-HEAD acceptance claim. There
+were 17 separate worker teardown errors. In 21 failed results the test body
+passed and only teardown failed; those results remain failures and do not imply
+a visible 3D, graph or text difference. Thirty-nine results timed out and
+73 failed without a test-timeout status.
+
+The 50 existing skips require optional private performance/media fixtures,
+live account credentials, transcription models, optional measurement flags, or
+fonts absent on the machine. No native difference was quarantined or skipped.
+Raw JSON, traces and synthetic screenshots are retained outside the repository.
+The grouped table below accounts for all 112 failed results from that build;
+source lines refer to that run, before test ports. Later focused results and the
+complete default-off run are recorded separately below when measured.
+
+| Spec | Cases | Owner | Observed result |
+|---|---:|---|---|
+| `ae-audit-implementation.spec.ts` | 2 | consumers | body timeout (source lines 9, 50) |
+| `agent-attachment-preview.spec.ts` | 1 | consumers | focus restoration assertion on pre-refresh keyboard/pointer port (source lines 3) |
+| `agent-canvas-capture.spec.ts` | 1 | consumers | thumbnail request not observed on pre-refresh native thumbnail port (source lines 85) |
+| `agent-media-management.spec.ts` | 1 | agents | body assertion (source lines 57) |
+| `agent-media-tools.spec.ts` | 1 | agents | body assertion (source lines 42) |
+| `automatic-preview-memory.spec.ts` | 1 | consumers | stale legacy preview-cache instrumentation (source lines 153) |
+| `captions-ui.spec.ts` | 2 | consumers | ambiguous test selector + unvalidated port (source lines 42) |
+| `chatgpt-connection.spec.ts` | 1 | agents | ambiguous test selector (source lines 5) |
+| `cloud-media.spec.ts` | 1 | consumers | cloud state assertion on pre-refresh offload port (source lines 6) |
+| `color-picker-overlay.spec.ts` | 1 | consumers | body timeout on pre-refresh picker-focus port (source lines 4) |
+| `composited-video-sync.spec.ts` | 1 | mediaclose | legacy GL frame probe; presented pixels unverified (source lines 9) |
+| `continuous-rasterization.spec.ts` | 1 | extcompat / renderer | stale legacy GL/raster canvas instrumentation (source lines 4) |
+| `design-language.spec.ts` | 1 | consumers | body assertion (source lines 3) |
+| `dropdown-toggle.spec.ts` | 1 | consumers | body timeout (source lines 6) |
+| `editor-responsiveness.spec.ts` | 1 | dochost | body assertion (source lines 65) |
+| `engine-delivery.spec.ts` | 1 | derouter / export | job completed where unsupported-failure contract was expected; native provenance unresolved (source lines 199) |
+| `engine-export.spec.ts` | 1 | derouter / export | body timeout (source lines 21) |
+| `engine-svg.spec.ts` | 1 | bridge / vectors | body timeout on pre-merge SVG build (source lines 380) |
+| `export-code.spec.ts` | 1 | consumers | body assertion (source lines 9) |
+| `export-destination.spec.ts` | 1 | derouter / export | export fixture/output collision (source lines 38) |
+| `extension-layers.spec.ts` | 1 | threed | compile metadata expectation failed; not a pixel-difference result (source lines 4) |
+| `extension-layers.spec.ts` | 1 | threed | OBJ asset metadata expectation failed; not a pixel-difference result (source lines 60) |
+| `extension-sandbox-clipboard.spec.ts` | 1 | extcompat | body assertion (source lines 9) |
+| `extension-sandbox-perf.spec.ts` | 1 | extcompat | body timeout (source lines 91) |
+| `extension-sandbox.spec.ts` | 1 | extcompat | body assertion (source lines 52) |
+| `extension-sandbox.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 147) |
+| `gpu-recovery.spec.ts` | 1 | bridge | body assertion (source lines 3) |
+| `graph-editor-review.spec.ts` | 1 | consumers | pre-refresh frame probe; native pixel path unverified (source lines 3) |
+| `graph-handle-independence.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 5) |
+| `graph-picking.spec.ts` | 3 | bridge lifecycle (test body passed) | teardown only (source lines 32, 65) |
+| `group-timeline-interactions.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 40) |
+| `group-transforms.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 19) |
+| `groups-25d-occlusion.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 4) |
+| `groups-25d.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 3) |
+| `import-mp4.spec.ts` | 1 | mediaclose | body assertion (source lines 17) |
+| `import-mp4.spec.ts` | 2 | mediaclose | stale legacy audio voice instrumentation (source lines 113, 166) |
+| `import-prores-alpha.spec.ts` | 1 | mediaclose | body assertion (source lines 10) |
+| `import-prores.spec.ts` | 1 | mediaclose | body assertion (source lines 7) |
+| `import-svg.spec.ts` | 1 | mediaclose | body timeout (source lines 7) |
+| `inspector-alignment.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 4) |
+| `legacy-blurred-video-export.spec.ts` | 1 | derouter / export | actual export end-frame difference; paired frames pending (source lines 27) |
+| `local-media-recovery.spec.ts` | 1 | mediaclose | body assertion (source lines 38) |
+| `media-bulk-selection.spec.ts` | 1 | consumers | body assertion (source lines 20) |
+| `media-store.spec.ts` | 2 | agents | body assertion (source lines 296, 324) |
+| `mixer.spec.ts` | 2 | consumers | stale legacy audio voice instrumentation (source lines 43, 165) |
+| `native-edit-kernels.spec.ts` | 1 | dochost | evaluator build-mode mismatch + teardown (source lines 32) |
+| `native-edit-kernels.spec.ts` | 1 | dochost | evaluator build-mode mismatch (source lines 200) |
+| `native-export-performance.spec.ts` | 2 | derouter / export | native export canceled instead of completing (source lines 6) |
+| `native-export-performance.spec.ts` | 2 | derouter / export | GPU-loss export error contract mismatch (source lines 111) |
+| `native-linked-rendition.spec.ts` | 1 | mediaclose | missing test environment variable (source lines 11) |
+| `native-still-orientation-parity.spec.ts` | 1 | mediaclose | stale route expectation; parity metrics are exact (source lines 264) |
+| `native-text-selection-menu.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 15) |
+| `pan-presentation.spec.ts` | 2 | bridge | legacy GL presentation probe; native presentation unverified (source lines 60, 104) |
+| `panel-popout.spec.ts` | 1 | consumers | ambiguous test selector + unvalidated port (source lines 3) |
+| `panel-workflow.spec.ts` | 1 | consumers | panel library count expectation on pending library:false port (source lines 19) |
+| `playback-audio.spec.ts` | 1 | consumers | body timeout (source lines 15) |
+| `playback-audio.spec.ts` | 1 | consumers | body failure + teardown (source lines 72) |
+| `playback-audio.spec.ts` | 1 | consumers | stale legacy audio voice instrumentation (source lines 100) |
+| `playback-source-warmup.spec.ts` | 5 | mediaclose | stale legacy raster/cache instrumentation (source lines 5, 60) |
+| `precomp.spec.ts` | 1 | consumers | stale layer-menu expectation (source lines 46) |
+| `preview-responsiveness.spec.ts` | 1 | consumers | native presented-bus result unvalidated on pre-refresh build (source lines 4) |
+| `project-file-media.spec.ts` | 1 | mediaclose | body assertion (source lines 9) |
+| `project-file-media.spec.ts` | 1 | mediaclose | stale legacy audio voice instrumentation (source lines 65) |
+| `project-settings.spec.ts` | 2 | consumers | settings test expectation/target mismatch (source lines 3, 57) |
+| `prompt-attachments.spec.ts` | 1 | agents | body assertion (source lines 5) |
+| `property-animation.spec.ts` | 1 | threed / extcompat | body timeout (source lines 68) |
+| `shell.spec.ts` | 1 | consumers | body assertion (source lines 260) |
+| `split-text.spec.ts` | 2 | bridge lifecycle (test body passed) | teardown only (source lines 11) |
+| `svelte-panel.spec.ts` | 1 | consumers | performance panel row-count expectation mismatch (source lines 4) |
+| `svelte5-showcase.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 222) |
+| `text-color-drag.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 3) |
+| `text-layout-resize.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 8) |
+| `timeline-gesture-performance.spec.ts` | 1 | consumers | active evaluator spy result from pre-refresh run (source lines 3) |
+| `timeline-keyframe-drag.spec.ts` | 2 | bridge lifecycle (test body passed) | teardown only (source lines 4) |
+| `timeline-keyframe-navigation.spec.ts` | 2 | bridge lifecycle (test body passed) | teardown only (source lines 4, 140) |
+| `timeline-layer-rows.spec.ts` | 1 | consumers | body timeout + teardown (source lines 3) |
+| `timeline.spec.ts` | 1 | consumers | body assertion (source lines 100) |
+| `toast-error.spec.ts` | 1 | consumers | toast details timeout on pre-refresh current-details port (source lines 61) |
+| `user-feedback.spec.ts` | 1 | consumers | background picker target missing on pre-refresh current-picker port (source lines 5) |
+| `video-frame-integrity.spec.ts` | 3 | mediaclose | legacy GL frame probe; presented pixels unverified (source lines 33, 63, 99) |
+| `video-playback-regression.spec.ts` | 1 | mediaclose | body assertion (source lines 6) |
+| `video-playback-regression.spec.ts` | 3 | mediaclose | legacy GL frame probe; presented pixels unverified (source lines 79, 128) |
+| `video-scrubbing.spec.ts` | 2 | mediaclose | legacy GL frame probe; presented pixels unverified (source lines 7) |
+| `viewer-recovery.spec.ts` | 2 | bridge | legacy GL frame probe; presented pixels unverified (source lines 18, 128) |
+| `viewer-resize.spec.ts` | 2 | consumers | body assertion (source lines 4, 199) |
+| `viewer-tools.spec.ts` | 1 | bridge lifecycle (test body passed) | teardown only (source lines 140) |
+| `viewport3d.spec.ts` | 1 | threed | body assertion (source lines 27) |
+
+Native canvas diagnostics confirmed that a paused `engine-present` canvas can
+be copied with `drawImage`. Library cards therefore use the presented image,
+rather than a second snapshot with a different editor view. This preserves
+camera/shading and selection alignment without changing frozen render APIs.
+The initial four-case Library attempt failed before acceptance: two fork cases
+had a test installation path error, and two current-viewer cases sampled an
+unsettled overlay. These are retained as failed attempts, not visual passes.
+
+The source-frame/poster/filmstrip, independent source-audio monitor, composed
+RAM-preview cache and job-engine browser-rendition contracts are still missing.
+The working browser compatibility paths remain. See [consumers.md](consumers.md)
+and [source-preview.md](source-preview.md) for code-level boundaries. The frozen
+web-v1 export test compares against its legacy editor reference and does not
+qualify native editor pixels or native-only source renditions. Native cadence
+measurements and engine rolling frame-cost statistics are reported separately;
+a cadence event is not a per-frame render-duration measurement.
+
+### Refreshed native consumer gate
+
+The rebuilt SVG/3D-integrated app ran 99 consumer cases: **78 passed, 21 failed,
+zero skipped or flaky**, in 468.6 seconds, with no worker teardown errors.
+After test-fixture and active-observer corrections, four native Library cases
+and six focused native ports passed. The latter six cover preview resolution,
+graph caching, dropdowns, and three media-selection cases. These follow-ups
+resolve eight of the 21 original failed results; they are not another complete
+99-case or full-suite run. The failed results below remain accounted for.
+
+| Spec and run line | Owner | Result or measured follow-up |
+|---|---|---|
+| `ae-audit-implementation.spec.ts:9` | consumers | Native preview-size probe fixed; focused recheck passes |
+| `ae-audit-implementation.spec.ts:50` | consumers | C18: composed RAM preview does not become active |
+| `consumer-surfaces.spec.ts:44` | consumers | Synthetic solid position and fork installer fixed; all four native cases pass |
+| `consumer-surfaces.spec.ts:44` | consumers | Synthetic solid position and fork installer fixed; all four native cases pass |
+| `consumer-surfaces.spec.ts:44` | consumers | Synthetic solid position and fork installer fixed; all four native cases pass |
+| `consumer-surfaces.spec.ts:44` | consumers | Synthetic solid position and fork installer fixed; all four native cases pass |
+| `continuous-rasterization.spec.ts:4` | extcompat / renderer | Legacy raster source metadata absent; native density/compatibility unqualified |
+| `design-language.spec.ts:3` | consumers | Selected timeline mode draws a 1 px shadow forbidden by the existing flat-control check |
+| `dropdown-toggle.spec.ts:6` | consumers | Hidden agent and parked Captions controls made reachable; focused recheck passes |
+| `engine-viewer-canvas.spec.ts:294` | bridge / mediaclose | Paired launch mode corrected; later paired gate completes with five video-copy pixel-bound failures still treated as blockers |
+| `graph-editor-review.spec.ts:3` | consumers | Active evaluator probe fixed; focused recheck passes with 1086 cold / 2 warm calls |
+| `legacy-blurred-video-export.spec.ts:27` | derouter / mediaclose | Actual sharp ProRes end frame 200 vs source 210; unchanged limit is less than 7 |
+| `media-bulk-selection.spec.ts:20` | consumers | Undo retained list scroll; visible pointer start restored and focused recheck passes |
+| `playback-audio.spec.ts:15` | consumers / bridge | Native-pressure qualification still uses legacy GL/voice instrumentation |
+| `playback-audio.spec.ts:72` | consumers / bridge | C18: cached preview/audio handoff lacks a composed native cache |
+| `precomp.spec.ts:46` | consumers / captions | Import Captions menu contribution exists only on timeline; exact parity assertion retained |
+| `shell.spec.ts:260` | consumers | Library top is 32 px after animation, below the unchanged 44 px titlebar requirement |
+| `viewer-recovery.spec.ts:18` | bridge / consumers | Legacy canvas instrumentation; actual native recovery pixels still unqualified |
+| `viewer-recovery.spec.ts:128` | bridge / consumers | Legacy canvas instrumentation; actual native recovery pixels still unqualified |
+| `viewer-resize.spec.ts:4` | consumers / dochost | Source audit finds stale shape Scale assertions: resize writes Width/Height; content-dimension port pending, exact edge assertions retained |
+| `viewer-resize.spec.ts:201` | consumers / dochost | Source audit finds stale shape Scale assertions: resize writes Width/Height; content-dimension port pending, exact edge assertions retained |
+
+Fresh native successes include all three mixer cases, all four transport cases,
+both attachment focus cases, both caption themes, autosave thumbnail deferral,
+cloud media restore, picker stacking, toast details, panel-popout workflows,
+Settings, panel library workflows and the native presentation profile.
+The restored-project audio test requires three fresh positive readings after
+the 250 ms meter stale interval and zero legacy voices.
+
+The native Library cases preserve exact composition-bitmap and 2D-overlay hashes
+with unchanged zoom/pan. Two additional current-viewer right-view checks preserve
+the composition bitmap in both themes. **Those bitmap checks do not qualify 3D
+chrome:** image inspection finds the separate WebGL grid and orange selection
+outline absent from the card. That overlay needs a capture at its draw/fence
+boundary. Paired live/card images remain external, and C3 acceptance is blocked.
+
+The explicit on/off viewer-canvas comparison records 25 pairs. Five comparisons
+against the video's browser editing copy miss the channel bound (maximum errors
+37–49), while the comparison outside the video passes. The inherited spec calls
+these known differences; this lane approves no exception. Paired original-video
+controls pass. The media/bridge owners must close the editing-copy/original gap.
+
+### Complete default-off run
+
+The complete serial default-off run covered **698 cases: 621 passed, 28
+unexpected (23 assertions and 5 timeouts), 49 skipped**, in 2,958.9 seconds.
+It used one worker, no quarantine exclusions and no retries. One worker
+teardown timed out. The optional skips comprise 29 opt-in profile cases, 13
+private fixture cases, three absent-font cases, three optional speech-model
+cases and one live-run case. The raw result, traces and screenshots remain
+outside Git under `/tmp/ne-w5/consumers-tests/`; the failure classification is
+`/tmp/ne-w5/consumers-full-off-triage.json`.
+
+| Owner | Unexpected results | Evidence from the serial run |
+|---|---:|---|
+| Consumer UI | 10 | Library overlay hash, selected-mode shadow, engine-status DOM assertion, timeline/canvas menu contents, 3D color stopwatch visibility, Library titlebar clearance, timeline row click, easing values, two resize assertions |
+| Derouter/export | 4 | Native export and video ending cases |
+| Agents/media store | 6 | Agent attachments and media-store behavior |
+| Bridge | 2 | Worker teardown only in text animation and text layout cases |
+| Extension compatibility | 2 | Extension-facing assertions |
+| Media | 2 | Still orientation and media behavior |
+| Document host | 1 | Editor responsiveness |
+| Text | 1 | Local-font query timeout |
+
+The resize assertions were subsequently ported to inspect the prepared content
+dimensions that the current direct-resize implementation changes, while
+retaining fixed-edge, geometry, selection and undo checks. The Library overlay
+hash has a later focused four-case pass after moving the pointer outside the
+viewer and waiting for fonts, but the full-suite result remains a failure until
+the final serial rerun. No engine-on difference has been quarantined.
