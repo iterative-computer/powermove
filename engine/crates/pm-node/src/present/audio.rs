@@ -430,7 +430,9 @@ impl Control {
                 self.paused_at = at.max(0);
                 if !self.audio_scrub {
                     // Paused timeline moves must still reach the warm mixer.
-                    self.command(TransportCommand::Seek {
+                    // This is an ordinary exact seek, so preserve FIFO without
+                    // waiting for its ACK before the following Play is sent.
+                    self.enqueue_simple_command(TransportCommand::Seek {
                         time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
                         mode: SeekMode::Exact,
                     });
@@ -803,10 +805,11 @@ mod tests {
             }),
         };
         control.enqueue_simple_command(invalid_loop);
-        control.enqueue_simple_command(TransportCommand::Seek {
-            time: Ticks::from_whole_seconds(1),
-            mode: SeekMode::Exact,
-        });
+        // The frontend requests a scrub for a paused timeline move even
+        // with audible scrubbing disabled. It must enqueue the exact seek
+        // without waiting for its own or the earlier control's receipt.
+        assert!(control.apply(AudioCtl::Scrub(Ticks::from_whole_seconds(1).get()), None));
+        assert_eq!(control.paused_at, Ticks::from_whole_seconds(1).get());
         control.enqueue_simple_command(invalid_loop);
         control.commands(&[TransportCommand::Play {
             rate: PlaybackRate { num: 3, den: 1 },
