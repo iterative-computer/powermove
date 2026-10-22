@@ -4,7 +4,7 @@
  *
  * The viewer's canvas hands its drawing to an `OffscreenCanvas` in a
  * dedicated worker, and the worker runs the same `EnginePresenter` (jitter
- * buffer, WebGPU painter, release on `onSubmittedWorkDone`) on its own
+ * buffer, F16 painter, release on GPU completion) on its own
  * animation frames. Chromium drives a worker's animation frames and
  * commits its canvas without the page's main thread, so a frame that is
  * already queued here reaches the display on time while the editor's main
@@ -19,7 +19,7 @@
  * (`performance.now()` of the window that made the worker), so arrivals,
  * animation frames, and traces compare with the page's.
  *
- * The painter (the canvas's WebGPU context) lives as long as the worker; a
+ * The painter (the canvas's F16 graphics context) lives as long as the worker; a
  * presenter lives for one viewer session (`open` to `close`), as on the
  * main thread. Messages carry the session, so a release or a presented
  * frame of an ended session never reaches the next one.
@@ -27,7 +27,8 @@
  * This module is the worker's side; `present-worker-entry.ts` is the
  * worker script.
  */
-import { createWebGpuPainter, type FramePainter, type PaintTarget } from './gpu';
+import type { FramePainter, PaintTarget } from './gpu';
+import { createFramePainter } from './painter';
 import { EnginePresenter, type PresentedFrame, type PresenterStats, type TraceRecord } from './presenter';
 import type { ClockSample, FrameDescriptor, FrameRelease, SurfacePool, VsyncHint } from './protocol';
 
@@ -288,7 +289,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
   const init = async (message: Extract<ToWorker, { type: 'init' }>): Promise<void> => {
     shift = scope.performance.timeOrigin - message.pageTimeOrigin;
     try {
-      const made = await (options.createPainter ?? createWebGpuPainter)(message.canvas);
+      const made = await (options.createPainter ?? createFramePainter)(message.canvas);
       painter = options.wrapPainter ? await options.wrapPainter(made) : made;
     } catch (error) {
       failed = true;

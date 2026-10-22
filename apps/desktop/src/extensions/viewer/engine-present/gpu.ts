@@ -49,7 +49,7 @@ type NavigatorGpu = {
  */
 export class DeviceLostError extends Error {
   constructor(message: string) {
-    super(`the WebGPU device was lost: ${message}`);
+    super(`the presentation graphics resource was lost: ${message}`);
     this.name = 'DeviceLostError';
   }
 }
