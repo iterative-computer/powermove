@@ -56,15 +56,27 @@ function compositorOutputScale(W: number, H: number, viewport: { width: number; 
 /** Today's viewer canvas for a view (`V.layout`, through its own
  *  `viewerCanvasSize`): the crop when the project is crop safe and zoomed
  *  in, else the explicit resolution or `previewRenderSize`. */
-function todaysCanvas(zoom: number, devicePixelRatio: number, resolution: string, quality: number, cropSafe: boolean) {
+function todaysCanvas(zoom: number, devicePixelRatio: number, resolution: string, quality: number, cropSafe: boolean,
+  comp: { w: number; h: number } = COMP, pan: { x: number; y: number } = PAN) {
   const dpr = Math.min(devicePixelRatio || 1, 2);
-  const position = compositionFramePosition(STAGE, { width: COMP.w, height: COMP.h }, zoom, PAN);
+  const position = compositionFramePosition(STAGE, { width: comp.w, height: comp.h }, zoom, pan);
   const viewport = cropSafe
-    ? previewRenderViewport(COMP.w, COMP.h, zoom, STAGE.width, STAGE.height, position.x, position.y, dpr, quality, 128, null)
+    ? previewRenderViewport(comp.w, comp.h, zoom, STAGE.width, STAGE.height, position.x, position.y, dpr, quality, 128, null)
     : null;
-  const size = viewerCanvasSize(COMP.w, COMP.h, zoom, dpr, quality, resolution, viewport);
+  const size = viewerCanvasSize(comp.w, comp.h, zoom, dpr, quality, resolution, viewport);
   return { width: size.width, height: size.height, viewport };
 }
+
+/** Views whose crop is far from the composition's origin: the output
+ *  from the origin to the crop's far edge passes the largest output
+ *  (16,384 px), which the engine once drew from a smaller canvas
+ *  (decision V1b). Panned flush with the composition's right edge. */
+const FAR: { comp: { w: number; h: number }; zoom: number }[] = [
+  { comp: { w: 1920, h: 1080 }, zoom: 5 },
+  { comp: { w: 1920, h: 1080 }, zoom: 8 },
+  { comp: { w: 3840, h: 2160 }, zoom: 2.13 },
+  { comp: { w: 3840, h: 2160 }, zoom: 2.5 },
+];
 
 /** The output scale of the canvas the viewer sends for a view. */
 function sent(canvas: { width: number; height: number }, viewport: { x: number; y: number; width: number; height: number } | null): [number, number] {
@@ -75,8 +87,9 @@ type Row = {
   name: string;
   zoom: number; dpr: number; resolution: string; cropSafe: boolean; nested: boolean;
   layerScale: [number, number];
-  /** Today's canvas and whether it was cropped. */
-  canvas: [number, number]; cropped: boolean;
+  /** Today's canvas and whether it was cropped; the crop (composition
+   *  pixels) when it was; the composition when it is not the fixture's. */
+  canvas: [number, number]; cropped: boolean; crop?: [number, number, number, number]; comp?: [number, number];
   /** The output scale of the canvas the viewer sends (`todaysCanvas`). */
   outputScale: [number, number];
   /** Today's bucket. */
@@ -91,10 +104,12 @@ function rows(): Row[] {
       const [sx, sy] = compositorOutputScale(canvas.width, canvas.height, canvas.viewport, COMP);
       const outputScale = sent(canvas, canvas.viewport);
       const bucket = svgRasterDimensions(SOURCE.w, SOURCE.h, BOX.w, BOX.h, [layerScale[0] * sx, 0, 0, layerScale[1] * sy, 0, 0]);
+      const v = canvas.viewport;
       out.push({
         name: `zoom ${zoom} dpr ${dpr} ${resolution} ${cropSafe ? 'crop-safe' : 'crop-unsafe'} layer ${layerScale.join('x')}`,
         zoom, dpr, resolution, cropSafe, nested: false, layerScale,
-        canvas: [canvas.width, canvas.height], cropped: !!canvas.viewport,
+        canvas: [canvas.width, canvas.height], cropped: !!v,
+        ...(v ? { crop: [v.x, v.y, v.width, v.height] as [number, number, number, number] } : {}),
         outputScale, today: [bucket.width, bucket.height]
       });
     }
@@ -114,6 +129,19 @@ function rows(): Row[] {
       zoom, dpr, resolution, cropSafe: false, nested: true, layerScale,
       canvas: [canvas.width, canvas.height], cropped: false,
       outputScale: sent(canvas, null), today: [bucket.width, bucket.height]
+    });
+  }
+  for (const { comp, zoom } of FAR) for (const { resolution, quality } of QUALITIES) for (const layerScale of LAYER_SCALES) {
+    const pan = { x: (STAGE.width - comp.w * zoom) / 2, y: 0 };
+    const canvas = todaysCanvas(zoom, 2, resolution, quality, true, comp, pan);
+    const v = canvas.viewport!;
+    const [sx, sy] = compositorOutputScale(canvas.width, canvas.height, v, comp);
+    const bucket = svgRasterDimensions(SOURCE.w, SOURCE.h, BOX.w, BOX.h, [layerScale[0] * sx, 0, 0, layerScale[1] * sy, 0, 0]);
+    out.push({
+      name: `far: ${comp.w}x${comp.h} zoom ${zoom} dpr 2 ${resolution} right edge layer ${layerScale.join('x')}`,
+      zoom, dpr: 2, resolution, cropSafe: true, nested: false, layerScale,
+      canvas: [canvas.width, canvas.height], cropped: true, crop: [v.x, v.y, v.width, v.height], comp: [comp.w, comp.h],
+      outputScale: canvasOutputScale(viewerCanvas(comp.w, comp.h, canvas, v, { x: 0, y: 0 }, 1)!), today: [bucket.width, bucket.height]
     });
   }
   return out;
@@ -137,10 +165,21 @@ describe('level 1 SVG buckets in the engine viewer (today’s rule)', () => {
 
   it('the canvas the viewer sends has today’s compositor output scale', () => {
     expect(grid.length).toBeGreaterThan(800);
-    for (const row of grid.filter((r) => !r.nested)) {
+    for (const row of grid.filter((r) => !r.nested && !r.comp)) {
       const canvas = todaysCanvas(row.zoom, row.dpr, row.resolution, row.resolution === 'auto' ? 1 : 0.5, row.cropSafe);
       expect(row.outputScale, row.name).toEqual(compositorOutputScale(canvas.width, canvas.height, canvas.viewport, COMP));
     }
+  });
+
+  it('far crops pass the largest output from the composition’s origin', () => {
+    const far = grid.filter((r) => r.comp);
+    expect(far.length).toBe(FAR.length * QUALITIES.length * LAYER_SCALES.length);
+    // At Auto, 500% and 800% of 1920 and 250% of 3840 put the crop's far
+    // edge past 16,384 output pixels from the origin (213% of 3840 lands
+    // just inside it, 16,358); at Half none does.
+    const past = far.filter((r) => (r.crop![0] + r.crop![2]) * r.outputScale[0] > 16384);
+    expect(past.length).toBe(LAYER_SCALES.length * 3);
+    expect(past.every((r) => r.resolution === 'auto')).toBe(true);
   });
 
   it('no scale for a canvas it cannot describe', () => {

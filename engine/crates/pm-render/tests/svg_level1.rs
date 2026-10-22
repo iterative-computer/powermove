@@ -682,20 +682,26 @@ fn planned_buckets(plan: &pm_render::plan::CompPlan, out: &mut Vec<(u32, u32)>) 
     }
 }
 
-/// The engine's viewer request for a view. On today's canvas (decision V1,
-/// `pm_node::present::compose::canvas_placement`): the output at today's
-/// output scale (the canvas over the composition part it holds). Without
-/// it, the composition at zoom × DPR (capped at 2 by the presentation) ×
-/// the preview resolution, as the engine drew before.
+/// The engine's viewer request for a view. On today's canvas (decisions V1
+/// and V1b, `pm_node::present::compose::canvas_placement`): the canvas
+/// itself at today's output scale (the canvas over the composition part it
+/// holds), starting at the crop's unrounded origin. Without it, the
+/// composition at zoom × DPR (capped at 2 by the presentation) × the
+/// preview resolution, as the engine drew before V1.
 fn viewer_request(cw: u32, ch: u32, row: &Value, todays_canvas: bool) -> RenderRequest {
     let f = |k: &str| row[k].as_f64().unwrap();
     if todays_canvas {
         let a = row["outputScale"].as_array().unwrap();
         let (sx, sy) = (a[0].as_f64().unwrap(), a[1].as_f64().unwrap());
-        let px = |v: u32, s: f64| (f64::from(v) * s).ceil() as u32;
+        let c = row["canvas"].as_array().unwrap();
+        let canvas = Size::new(c[0].as_u64().unwrap() as u32, c[1].as_u64().unwrap() as u32);
+        let origin = row["crop"]
+            .as_array()
+            .map(|r| (r[0].as_f64().unwrap() * sx, r[1].as_f64().unwrap() * sy));
         return RenderRequest {
             scale: Some((sx, sy)),
-            ..RenderRequest::sized(Size::new(px(cw, sx), px(ch, sy)), Precision::Float16)
+            origin,
+            ..RenderRequest::sized(canvas, Precision::Float16)
         };
     }
     let res = if row["resolution"] == "auto" {
@@ -735,7 +741,12 @@ fn viewer_frames_pick_todays_buckets_at_todays_viewer_scale() {
     let rows = fixture["rows"].as_array().unwrap();
     assert!(rows.len() > 800, "{} rows", rows.len());
     let (mut wrong, mut own_differs, mut cropped) = (Vec::new(), 0, 0);
+    let (mut far, mut reduced_differs) = (0, 0);
     for row in rows {
+        // The far-crop rows bring their own composition.
+        let (cw, ch) = row["comp"].as_array().map_or((cw, ch), |c| {
+            (c[0].as_u64().unwrap() as u32, c[1].as_u64().unwrap() as u32)
+        });
         let scale = row["layerScale"].as_array().unwrap();
         let nested = row["nested"].as_bool().unwrap();
         let mut svg = layer(
@@ -812,9 +823,36 @@ fn viewer_frames_pick_todays_buckets_at_todays_viewer_scale() {
             own_differs += 1;
         }
         cropped += usize::from(row["cropped"].as_bool().unwrap());
+        // Before V1b a crop whose far edge passed the largest output was
+        // drawn from a canvas reduced by about 16384 / (far edge): its
+        // buckets were picked at that lower scale.
+        if let Some(crop) = row["crop"].as_array().filter(|_| row["comp"].is_array()) {
+            far += 1;
+            let a = row["outputScale"].as_array().unwrap();
+            let (sx, sy) = (a[0].as_f64().unwrap(), a[1].as_f64().unwrap());
+            let edge =
+                |o: &Value, w: &Value, s: f64| (o.as_f64().unwrap() + w.as_f64().unwrap()) * s;
+            let k = (16384.0 / edge(&crop[0], &crop[2], sx))
+                .min(16384.0 / edge(&crop[1], &crop[3], sy))
+                .min(1.0);
+            if k < 1.0 {
+                let reduced = RenderRequest {
+                    scale: Some((sx * k, sy * k)),
+                    ..viewer_request(cw, ch, row, true)
+                };
+                let (plan, _) = renderer
+                    .plan(&doc, "Ptest-root", ticks(0.0), &reduced, &resolver)
+                    .unwrap();
+                let mut out = Vec::new();
+                planned_buckets(&plan, &mut out);
+                if out.first() != Some(&today) {
+                    reduced_differs += 1;
+                }
+            }
+        }
     }
     eprintln!(
-        "svg viewer buckets: {} views ({cropped} cropped), {} differ from today, {own_differs} would at the engine's own scale",
+        "svg viewer buckets: {} views ({cropped} cropped, {far} far from the origin), {} differ from today, {own_differs} would at the engine's own scale, {reduced_differs} far ones at the reduced scale before V1b",
         rows.len(),
         wrong.len()
     );
@@ -827,6 +865,8 @@ fn viewer_frames_pick_todays_buckets_at_todays_viewer_scale() {
     );
     assert!(own_differs > 0, "the grid exercises the cap below fit");
     assert!(cropped > 0, "the grid exercises the cropped viewport");
+    assert!(far >= 32, "the grid exercises crops far from the origin");
+    assert!(reduced_differs > 0, "the far crops would have been reduced");
 }
 
 /// The perf3 review's case (e2e, stage 748 × 452 at DPR 2, zoom 61%): the
