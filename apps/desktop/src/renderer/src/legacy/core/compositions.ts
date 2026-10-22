@@ -15,6 +15,7 @@
 import { applyFrameRate, coerceFrameRate } from '../../../../shared/frame-rate';
 import type { PMRegistry } from '../registry';
 import type { Patch, PathPart } from '../../../../shared/patch';
+import { notifyDocument } from '../../engine-doc/write';
 
 /** Fields that belong to a composition rather than to the project. */
 export const COMP_FIELDS = ['w', 'h', 'fps', 'fpsRational', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'render3d'] as const;
@@ -615,5 +616,7 @@ export function install(PM: PMRegistry): void {
       if (fallback) open(fallback, { tab: false });
     },
   };
-  PM.bus?.on?.('project', () => PM.bus.emit('comps'));
+  // Project publication already synchronized the document. This relay only
+  // refreshes composition consumers; it does not write composition data.
+  PM.bus?.on?.('project', () => notifyDocument(PM, 'comps'));
 }

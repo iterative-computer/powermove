@@ -29,6 +29,13 @@ import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../../shared/engine-
 export function install(PM: PMRegistry): void {
 const h = PM.h;
 const APP: any = { fileHandle: null, dirty: false, saveTimer: 0, importQueue: Promise.resolve() };
+let openGeneration = 0;
+const beginOpen = () => ++openGeneration;
+const isCurrentOpen = (generation: number) => generation === openGeneration;
+const STALE_OPEN = Symbol('a newer project open won');
+async function closeUnopenedReader(result: any): Promise<void> {
+  if (result?.token) await Promise.resolve(hostBridge()?.projectRead?.close(result.token)).catch(() => {});
+}
 const document = window.document;
 type FileState = { path?: string; savedHash?: string; baselineHash?: string; baselineReady?: Promise<void>; dirty: boolean; handle?: any };
 const fileStates = new Map<string, FileState>();
@@ -750,13 +757,16 @@ PM.autosave = () => {
   const generation = ++saveGeneration, projectId = PM.proj.id;
   window.clearTimeout(APP.saveTimer);
   APP.saveTimer = window.setTimeout(async () => {
-    if (discardedProjects.has(projectId)) return;
+    if (discardedProjects.has(projectId) || projectId !== PM.proj.id) return;
     try {
       // A read-only project only tracks whether it differs from its file.
       const readOnly = isReadOnlyProject(PM.proj);
       if (!readOnly) {
         const began = performance.now();
-        PM.EngineDoc?.beforeSave?.('autosave');
+        await PM.EngineDoc?.beforeSave?.('autosave');
+        // Persist the current live document even when an edit arrived during
+        // the diagnostic check; that edit also scheduled its own later save.
+        if (discardedProjects.has(projectId) || projectId !== PM.proj.id) return;
         if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
         PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
         lastAutosaveMs = performance.now() - began;
@@ -797,7 +807,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
     PM.bus.emit('project:flush-edits');
     await APP.importQueue;
     // The native engine's consistency check (docs/rust-engine.md, section 6).
-    PM.EngineDoc?.beforeSave?.('save');
+    await PM.EngineDoc?.beforeSave?.('save');
     progress(0.05);
     const project = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId);
     if (!project) throw new Error('This project is no longer available.');
@@ -912,26 +922,31 @@ PM.saveProject = (options: any = {}) => {
   return save;
 };
 PM.openProject = async () => {
+  const generation = beginOpen();
   if (hostBridge()?.openProjectFile) {
     const result = await hostBridge()!.openProjectFile();
-    if (result.ok) await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
+    if (!isCurrentOpen(generation)) { await closeUnopenedReader(result); return; }
+    if (result.ok) await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result, generation);
     else if (!result.cancelled) PM.toast('Could not open project: ' + result.error, 6000);
     return;
   }
   const inp = h('input', { type: 'file', accept: '.pmv,.json,application/json' });
-  inp.onchange = async () => { const f = inp.files[0]; if (f) await openProjectFile(f); };
+  inp.onchange = async () => { const f = inp.files[0]; if (f && isCurrentOpen(generation)) await openProjectFile(f, undefined, generation); };
   inp.click();
 };
 hostBridge()?.onProjectOpenExternal?.(async result => {
+  const generation = beginOpen();
   if (result.ok) {
-    await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
+    await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result, generation);
   } else {
     PM.toast('Could not open project: ' + result.error, 6000);
   }
 });
-async function openProjectFile(file: any, association?: { path: string; projectId: string }) {
+async function openProjectFile(file: any, association?: { path: string; projectId: string }, generation = beginOpen()) {
+  if (!isCurrentOpen(generation)) { await closeUnopenedReader(file.native); return false; }
   const opening = createImportProgress('Opening project', PM);
   opening.update({ label: file.name });
+  const checkCurrent = () => { if (!isCurrentOpen(generation)) throw STALE_OPEN; };
   try {
     let o: any, mediaRestored = false;
     if (file.native && 'token' in file.native) {
@@ -943,10 +958,12 @@ async function openProjectFile(file: any, association?: { path: string; projectI
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
           (completed, total) => opening.update({ label: file.name, completed, total }), token);
       }, () => bridge.close(token));
+      checkCurrent();
       o = document; mediaRestored = true;
     } else if (file.native) o = unpackProjectFile(file.native.data);
     else if (file instanceof Blob) o = await unpackProjectFileBlob(file);
     else o = unpackProjectFile(file.arrayBuffer ? await file.arrayBuffer() : await file.text());
+    checkCurrent();
     const source = o.proj || o;
     if (refusedByEngine(o)) throw new Error(REQUIRES_NATIVE_MESSAGE);
     const requiredReader = requiredReaderVersion(o);
@@ -959,9 +976,11 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     source.id = association?.projectId || PM.uid('project');
     const project = hydrate(source);
     if (!mediaRestored) { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
+    checkCurrent();
     // Parsing and restoring media have already overlapped module loading.
     // Do not publish the new document to renderer readers before its mirror can answer.
     if (documentPending(PM)) await waitForDocumentReady(PM);
+    checkCurrent();
     // File opens receive a fresh document ID to keep independent copies safe.
     // Recover the most recent layout for this file, rather than reverting to
     // the older workspace embedded the last time its content was saved.
@@ -988,12 +1007,18 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (archive && PM.store.set(`agentThreads.${project.id}`, archive) === false) {
       throw new Error('Could not restore agent threads: project storage is unavailable or full');
     }
-    switchProject(project, o.history || { version: 1, index: -1, entries: [] });
+    await PM.EngineDoc?.prepare?.(project);
+    if (!isCurrentOpen(generation)) PM.EngineDoc?.discardPrepared?.(project);
+    checkCurrent();
+    switchProject(project, o.history || { version: 1, index: -1, entries: [] }, undefined, true);
     const state = fileState(project.id);
     state.path = association?.path;
-    state.savedHash = association ? await projectFingerprint(JSON.stringify(PM.proj)) : undefined;
+    const savedHash = association ? await projectFingerprint(JSON.stringify(project)) : undefined;
+    checkCurrent();
+    state.savedHash = savedHash;
     rememberFile(project.id, state);
     await refreshFileDirty();
+    checkCurrent();
     const workspace = rememberedWorkspace || o.ws;
     if (workspace?.layout?.docks) PM.WS.restoreSnapshot(workspace);
     captureProjectSession();
@@ -1002,6 +1027,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     return true;
   } catch (e: any) {
     opening.close();
+    if (e === STALE_OPEN) return false;
     PM.toast('Could not open project: ' + e.message, 4500);
     return false;
   }
@@ -1019,18 +1045,19 @@ PM.openFiles = () => {
   inp.onchange = () => {
     const files: File[] = [...inp.files];
     cleanup();
-    if (files.length) void openFiles(files);
+    if (files.length) void openFiles(files, beginOpen());
   };
   inp.addEventListener('cancel', cleanup, { once: true });
   window.document.body.appendChild(inp);
   inp.click();
 };
-async function openFiles(files: File[]) {
+async function openFiles(files: File[], generation: number) {
   if (documentPending(PM)) await waitForDocumentReady(PM);
+  if (!isCurrentOpen(generation)) return;
   const projectFile = files.find(f => PROJECT_FILE.test(f.name));
   const media = files.filter(f => !PROJECT_FILE.test(f.name));
   if (projectFile) {
-    if (!await openPickedProject(projectFile)) return;
+    if (!await openPickedProject(projectFile, generation) || !isCurrentOpen(generation)) return;
   } else {
     switchProject(PM.mkProject({
       name: media[0]!.name.replace(/\.[^.]+$/, '') || 'Untitled',
@@ -1039,12 +1066,13 @@ async function openFiles(files: File[]) {
     }));
     PM.ProjectsScreen?.hide?.();
   }
-  if (media.length) await PM.importFiles(media, projectFile ? {} : { matchSource: true, placement: { at: 0 } });
+  if (media.length && isCurrentOpen(generation)) await PM.importFiles(media, projectFile ? {} : { matchSource: true, placement: { at: 0 } });
 }
-async function openPickedProject(file: File) {
+async function openPickedProject(file: File, generation: number) {
   const result = await hostBridge()?.openProjectFromFile?.(file);
-  if (!result) return openProjectFile(file);
-  if (result.ok) return openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
+  if (!isCurrentOpen(generation)) { await closeUnopenedReader(result); return false; }
+  if (!result) return openProjectFile(file, undefined, generation);
+  if (result.ok) return openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result, generation);
   if (!result.cancelled) PM.toast('Could not open project: ' + result.error, 6000);
   return false;
 }
@@ -1059,7 +1087,9 @@ PM.newProject = () => {
   PM.modal({ title: 'New project', body: form.element, width: 420, actions: [
     { label: 'Cancel' },
     { label: 'Create', pri: true, run: async () => {
+      const generation = beginOpen();
       if (documentPending(PM)) await waitForDocumentReady(PM);
+      if (!isCurrentOpen(generation)) return;
       const values = form.values();
       switchProject(PM.mkProject({
         ...values,
@@ -1072,11 +1102,12 @@ PM.newProject = () => {
 };
 /** A default-format project without the New project dialog. Onboarding opens
  * one so an imported workspace is arranged around a real composition. */
-PM.newBlankProject = (options: any = {}) => {
+PM.newBlankProject = (options: any = {}, generation = beginOpen()) => {
   if (documentPending(PM)) {
-    void waitForDocumentReady(PM).then(() => PM.newBlankProject(options)).catch(() => {});
+    void waitForDocumentReady(PM).then(() => { if (isCurrentOpen(generation)) PM.newBlankProject(options, generation); }).catch(() => {});
     return;
   }
+  if (!isCurrentOpen(generation)) return;
   switchProject(PM.mkProject(options));
   PM.ProjectsScreen?.hide?.();
 };
@@ -1088,13 +1119,13 @@ PM.newBlankProject = (options: any = {}) => {
  * running a second editor over one storage slot.
  */
 function claimForThisWindow(id: string | null): void {
+  const generation = openGeneration;
   void Promise.resolve(PM.windows?.claimProject?.(id) ?? { claimed: true }).then((claim: any) => {
-    if (claim?.claimed || !id) return;
+    if (claim?.claimed || !id || !isCurrentOpen(generation) || PM.proj?.id !== id) return;
     tabIds = tabIds.filter(tab => tab !== id);
     PM.bus.emit('projects:open');
-    if (PM.proj?.id !== id) return;
     PM.toast('That project is already open in another window.');
-    showNeighbourOf(-1);
+    void showNeighbourOf(-1, generation).catch((error: unknown) => PM.toast('Could not open project: ' + String(error), 4500));
   });
 }
 
@@ -1120,16 +1151,29 @@ function park(project: any) {
   while (parkedTabs.size > LIVE_TABS - 1) discardParked(parkedTabs.keys().next().value!);
 }
 /** Brings a tab to the front, resumed from memory while it is still live. */
-function showTab(id: string): boolean {
+async function showTab(id: string, generation: number): Promise<boolean> {
   const live = parkedTabs.get(id);
   if (live) {
-    parkedTabs.delete(id);
+    await PM.EngineDoc?.prepare?.(live.project);
+    if (!isCurrentOpen(generation) || parkedTabs.get(id) !== live || !tabIds.includes(id)) {
+      PM.EngineDoc?.discardPrepared?.(live.project);
+      return false;
+    }
     switchProject(live.project, undefined, live);
     return true;
   }
   const project = PM.Projects.get(id);
   if (!project || refusedByEngine(project)) return false;
-  switchProject(project);
+  const wasTab = tabIds.includes(id);
+  const hydrated = hydrate(project);
+  await PM.EngineDoc?.prepare?.(hydrated);
+  // Projects.get rebuilds a fresh object on each read; presence and the tab
+  // membership captured before preparation are the stable checks here.
+  if (!isCurrentOpen(generation) || !PM.Projects.get(id) || (wasTab && !tabIds.includes(id))) {
+    PM.EngineDoc?.discardPrepared?.(hydrated);
+    return false;
+  }
+  switchProject(hydrated, undefined, undefined, true);
   return true;
 }
 
@@ -1138,20 +1182,23 @@ function showTab(id: string): boolean {
  * its own live state as `live`. Anything else — a file just opened, a new
  * composition — is authoritative, so a parked copy of the same id is dropped.
  */
-function switchProject(p: any, history?: any, live?: ParkedTab) {
+function switchProject(p: any, history?: any, live?: ParkedTab, hydrated = false) {
   const previous = PM.proj;
   PM.pause();
   const leaving = !!previous?.id && previous.id !== p.id;
   const trashed = leaving && PM.Projects.trashList?.().some((item: any) => item.id === previous.id);
   if (leaving && !trashed) captureProjectSession();
   closeProjectTransients();
-  if (!live) discardParked(p.id);
   // A tab still in the strip keeps running in the background; a closed or
   // trashed one, or the placeholder, is let go as before.
   const parkable = leaving && !trashed && previous.id !== homeProjectId && tabIds.includes(previous.id)
     && typeof PM.hist.suspend === 'function' && typeof PM.assets.suspend === 'function';
+  // The prepared native activation can refuse a stale receipt. Publish first:
+  // parked history/media and eviction are irreversible until this succeeds.
+  PM.proj = live ? live.project : hydrated ? p : hydrate(p);
+  if (live) parkedTabs.delete(p.id);
+  else discardParked(p.id);
   if (parkable) park(previous);
-  PM.proj = live ? live.project : hydrate(p);
   if (live) {
     // Renamed from Projects while in the background: the library has the name.
     const name = PM.Projects.list().find((meta: any) => meta.id === PM.proj.id)?.name;
@@ -1192,10 +1239,10 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
   else if (!parkable) PM.assets.clear();
   APP.fileHandle = null;
   APP.dirty = fileState().dirty;
-  PM.bus.emit('project');
-  PM.bus.emit('layers');
+  notifyDocument(PM, 'project');
+  notifyDocument(PM, 'layers');
   PM.bus.emit('sel');
-  PM.bus.emit('assets');
+  notifyDocument(PM, 'assets');
   inspectorService(PM)?.refresh();
   viewerService(PM)?.layout();
   PM.invalidate('all');
@@ -1269,10 +1316,15 @@ function liveTabs(): string[] {
 }
 /** After the tab at `index` goes away, shows the tab that slid into its place,
  *  else the one before it, else Projects over the placeholder composition. */
-function showNeighbourOf(index: number) {
+async function showNeighbourOf(index: number, generation: number) {
   const tabs = liveTabs().filter(id => id !== PM.proj?.id);
   const next = tabs[Math.max(0, Math.min(index, tabs.length - 1))];
-  if (next && showTab(next)) return;
+  try {
+    if (next && await showTab(next, generation)) return;
+  } catch (error: any) {
+    if (isCurrentOpen(generation)) PM.toast('Could not open project: ' + (error?.message || String(error)), 4500);
+  }
+  if (!isCurrentOpen(generation)) return;
   switchProject(emptyHomeProject());
   PM.ProjectsScreen?.show?.('recents');
 }
@@ -1282,13 +1334,23 @@ async function dropTab(id: string) {
   const index = liveTabs().indexOf(id);
   if (index < 0 && !tabIds.includes(id)) return false;
   const active = id === PM.proj?.id;
+  const generation = active ? beginOpen() : openGeneration;
   tabIds = tabIds.filter(tab => tab !== id);
   discardUnsavedProject(id);
   discardParked(id);
-  if (active) showNeighbourOf(index);
-  await PM.windows?.releaseProject?.(id);
-  PM.bus.emit('projects:open');
-  return true;
+  try {
+    if (active) await showNeighbourOf(index, generation);
+    return true;
+  } finally {
+    // A newer open can supersede the neighbour while it prepares. Do not
+    // leave a closed project on screen if that newer open also fails.
+    try {
+      if (active && PM.proj?.id === id) switchProject(emptyHomeProject());
+    } finally {
+      try { await PM.windows?.releaseProject?.(id); }
+      finally { PM.bus.emit('projects:open'); }
+    }
+  }
 }
 const closingTabs = new Set<string>();
 PM.Tabs = {
@@ -1655,9 +1717,19 @@ window.addEventListener('beforeunload', () => {
 window.addEventListener('pm-open-project', (e: any) => {
   const p = e.detail;
   if (p && typeof p === 'object' && !refusedByEngine(p)) {
-    if (documentPending(PM)) {
-      void waitForDocumentReady(PM).then(() => switchProject(p)).catch(() => {});
-    } else switchProject(p);
+    const generation = beginOpen();
+    const open = () => {
+      if (!isCurrentOpen(generation)) return;
+      const project = hydrate(p);
+      const prepared = PM.EngineDoc?.prepare?.(project);
+      if (prepared) void prepared.then(() => {
+        if (isCurrentOpen(generation)) switchProject(project, undefined, undefined, true);
+        else PM.EngineDoc?.discardPrepared?.(project);
+      }).catch((error: unknown) => { if (isCurrentOpen(generation)) PM.toast('Could not open project: ' + String(error), 4500); });
+      else switchProject(project, undefined, undefined, true);
+    };
+    if (documentPending(PM)) void waitForDocumentReady(PM).then(open).catch(() => {});
+    else open();
   }
   else if (p && typeof p === 'object') PM.toast(REQUIRES_NATIVE_MESSAGE, 6000, { key: 'project-engine', error: true });
 });
@@ -1669,9 +1741,11 @@ window.addEventListener('pm-open-project', (e: any) => {
  */
 PM.openProjectHere = async (id: string) => {
   if (!id) return true;
+  const generation = beginOpen();
   if (documentPending(PM)) {
     try { await waitForDocumentReady(PM); }
     catch { return false; } // EngineDoc has already reported the named load failure.
+    if (!isCurrentOpen(generation)) return false;
   }
   if (id === PM.proj.id) return true;
   if (!parkedTabs.has(id) && !PM.Projects.list().some((meta: any) => meta.id === id)) {
@@ -1682,16 +1756,33 @@ PM.openProjectHere = async (id: string) => {
     PM.toast(REQUIRES_NATIVE_MESSAGE, 6000, { key: 'project-engine', error: true });
     return false;
   }
-  const claim = await (PM.windows?.claimProject?.(id) ?? Promise.resolve({ claimed: true, focused: false }));
-  if (!claim.claimed) {
-    if (!claim.focused) PM.toast('That project is already open in another window.');
+  const wasTab = tabIds.includes(id);
+  let claimed = false, opened = false;
+  try {
+    const claim = await (PM.windows?.claimProject?.(id) ?? Promise.resolve({ claimed: true, focused: false }));
+    claimed = !!claim.claimed;
+    if (!isCurrentOpen(generation)) return false;
+    if (!claimed) {
+      if (!claim.focused) PM.toast('That project is already open in another window.');
+      return false;
+    }
+    const shown = await showTab(id, generation);
+    if (!isCurrentOpen(generation)) return false;
+    if (!shown) {
+      PM.toast('Could not open this project because its local data is missing.');
+      return false;
+    }
+    opened = true;
+    return true;
+  } catch (error: any) {
+    if (isCurrentOpen(generation)) PM.toast('Could not open project: ' + (error?.message || String(error)), 4500);
     return false;
+  } finally {
+    if (claimed && !opened && !wasTab && PM.proj.id !== id && !tabIds.includes(id)) {
+      try { await PM.windows?.releaseProject?.(id); }
+      catch (error) { console.warn('Could not release unopened project claim', error); }
+    }
   }
-  if (!showTab(id)) {
-    PM.toast('Could not open this project because its local data is missing.');
-    return false;
-  }
-  return true;
 };
 
 /** Opens a project in a window of its own, or raises the one that has it. A

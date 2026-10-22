@@ -575,13 +575,15 @@ async function run(opts: any) {
   if (X.busy) return PM.toast('Export already running');
   // Today's ids (`prores`, `mp4`, `webm`, `rec`) are the new formats' names now.
   opts = { ...opts, format: migrateFormat(opts?.format), delivery: normalizeDelivery(opts?.delivery) };
-  // The native engine's consistency check (docs/rust-engine.md, section 6).
-  PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
+  const requestedProject = PM.proj;
   X.busy = true;
   X.cancel = false;
   const bridge = (hostBridge() as any);
   try {
-    const p = PM.proj;
+    // The native engine's consistency check (docs/rust-engine.md, section 6).
+    await PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
+    if (PM.proj !== requestedProject) return { cancelled: true };
+    const p = requestedProject;
     // With Use New Engine on, every render format runs in the job engine; a
     // project it cannot render yet comes back here and the current exporter
     // writes the file the user already chose (agent exports route in main).

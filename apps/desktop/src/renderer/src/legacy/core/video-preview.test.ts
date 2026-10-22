@@ -109,6 +109,7 @@ it.each([
       put: vi.fn(async (key: string, blob: Blob) => { store.set(key, blob); return true; }),
     },
     bus: { emit: vi.fn() }, invalidate: vi.fn(),
+    doc: { notify: vi.fn((event: string, _paths: unknown[]) => PM.bus.emit(event)) },
   };
   const makeAsset = () => ({
     ...dimensions,
@@ -135,6 +136,8 @@ it.each([
     expect(media.beginPreview).toHaveBeenCalledOnce();
     expect(store.get('media:original')).toBe(source);
     expect(PM.MediaStore.put).toHaveBeenCalledOnce();
+    expect(PM.doc.notify).toHaveBeenCalledWith('assets', []);
+    expect(PM.doc.notify).toHaveBeenCalledTimes(2);
     expect(reloaded.imageSequence).toEqual(dimensions.imageSequence);
     URL.revokeObjectURL(first.preview.url); URL.revokeObjectURL(reloaded.preview.url);
   } finally { vi.unstubAllGlobals();

@@ -1,5 +1,6 @@
 import { cancelPreviewVideoSeek } from './video-seek';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { notifyDocument } from '../../engine-doc/write';
 
 /** Full preview resolution and offline rendering always use the source. */
 export function previewVideoElement(PM: any, asset: any): HTMLVideoElement {
@@ -55,7 +56,7 @@ export function prepareVideoPreview(PM: any, asset: any, source: Blob, disposed:
       if (previewVideoElement(PM, asset) === el) {
         cancelPreviewVideoSeek(asset.el); asset.el.pause();
       }
-      PM.bus.emit('assets'); PM.invalidate('render');
+      notifyDocument(PM, 'assets'); PM.invalidate('render');
     } catch (error) { el.removeAttribute('src'); el.load(); URL.revokeObjectURL(url); throw error; }
   };
   // A cached preview bypasses the conversion queue entirely. Older alpha clips
