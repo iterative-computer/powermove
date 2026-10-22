@@ -20,6 +20,7 @@ export function installNativePreviewCache(PM: any, session: () => DocumentSessio
       const own = generation, old = PM.time, key = signature();
       let current: DocumentSession | null = null;
       try {
+        PM.EngineDoc?.barrier?.flush();
         current = session();
         const size = current?.previewSize();
         if (!current || !size) throw new Error('Open the viewer before rendering the work area.');

@@ -29,6 +29,7 @@ import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { EngineProxyService } from './proxies';
 import { installProxyIpc } from './proxy-ipc';
+import { resolveFfmpeg } from '../ffmpeg-binary';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
 import { askAboutOfflineMedia, offlineClips } from './offline-media';
@@ -324,6 +325,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!compatFrames.answer(event.sender.id, answer)) log('warn', `window ${event.sender.id} sent a compatibility answer nobody asked for`);
   });
   let proxies: EngineProxyService | null = null;
+  const proxyCodecs = resolveFfmpeg({ packaged: options.isPackaged, resourcesPath: options.resourcesPath, appPath: options.appPath, ...(options.env ? { env: options.env } : {}) });
   engine = new NativeEngine({
     generatedMediaDirectory: (context) => proxies?.generatedDirectory(context) ?? path.join(cacheDirectory, CACHE_DIRS.generatedMedia),
     compatFrame: (request) => compatFrames.serve(request),
@@ -346,7 +348,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           POWERMOVE_ENGINE_PARITY_ENV: JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() }),
           // Translated shader programs, kept across launches (plan section 11).
           POWERMOVE_ENGINE_SHADER_CACHE: path.join(cacheDirectory, CACHE_DIRS.shaderCache),
-          POWERMOVE_PROXY_LOCATIONS: path.join(cacheDirectory, 'Proxy Locations.json')
+          POWERMOVE_PROXY_LOCATIONS: path.join(cacheDirectory, 'Proxy Locations.json'),
+          PM_FFMPEG_DIR: proxyCodecs.root
         }
       });
       if (launch) {

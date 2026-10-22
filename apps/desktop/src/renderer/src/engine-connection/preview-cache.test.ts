@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { installNativePreviewCache } from './preview-cache';
+import { DocumentSession, type SessionOptions } from './session';
 
 function fixture() {
   const PM: any = {
@@ -21,6 +22,24 @@ function fixture() {
 }
 
 describe('native Render Work Area', () => {
+  it('releases every warmed presentation slot even across a work area longer than the pool', async () => {
+    const held = new Set<number>();
+    let sequence = 0;
+    const connection = {
+      event: (event: any) => { if (event.type === 'releaseFrame') held.delete(event.seq); },
+      request: async () => {
+        if (held.size >= 3) throw new Error('presentation pool exhausted');
+        const seq = ++sequence; held.add(seq);
+        return { type: 'frame', poolIndex: seq % 3, seq, quality: { cached: seq > 24 } };
+      },
+    };
+    const session = new DocumentSession({ connection } as unknown as SessionOptions);
+    session.id = 1;
+    session.sendViewerState({ size: { width: 64, height: 64 }, composition: 'P', resolution: 'half', media: 'automatic' } as never);
+    for (let i = 0; i < 30; i++) await session.cacheFrame(i / 24);
+    expect(sequence).toBe(30);
+    expect(held.size).toBe(0);
+  });
   it('warms exact frames, verifies their lease residency, and uses the ordinary transport', async () => {
     const f = fixture();
     try {

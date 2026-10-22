@@ -90,10 +90,16 @@ fn prores_preview_and_export_are_isolated_in_renderer() {
     // The export flag overrides the preview preference without changing it.
     let full_after = draw(&mut renderer, &export);
     assert_eq!(renderer.media_representation(), Representation::Original);
-    assert!(full_after == full_before, "export pixels changed after reduced preview");
+    assert!(
+        full_after == full_before,
+        "export pixels changed after reduced preview"
+    );
 
     renderer.set_preview_decode_size(None);
     let full_preview = draw(&mut renderer, &preview);
     assert_eq!(renderer.media_representation(), Representation::Original);
-    assert!(full_preview == preview_before, "original display pixels changed after reduced preview");
+    assert!(
+        full_preview == preview_before,
+        "original display pixels changed after reduced preview"
+    );
 }

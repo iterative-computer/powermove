@@ -621,6 +621,7 @@ export class DocumentSession {
   }
 
   async cacheFrame(seconds: number): Promise<FrameDescriptor> {
+    if (this.resyncing) await this.resyncing;
     const state = this.lastState;
     if (this.closed || this.id === null || !state || this.headless) throw new Error('Open the viewer before rendering the work area.');
     const response = await this.options.connection.request({
@@ -630,9 +631,12 @@ export class DocumentSession {
       color: { kind: 'viewer', space: state.colorSpace }, precision: 'float16',
       motionBlur: 'previewPlaying', view: state.view, draft3d: true,
       draftRender: false, depthId: false, overlay: true,
-    } as Request, this.id, this.applied || null);
+    } as Request, this.id, Math.max(this.applied, this.streamRevision) || null);
     if (response.type !== 'frame') throw new Error('The engine did not return the cached preview frame.');
     const { type: _, ...frame } = response;
+    // Warming retains the engine's texture copy, never a presentation slot.
+    // These response frames are not handed to the viewer's release path.
+    this.release(frame as FrameDescriptor);
     return frame as FrameDescriptor;
   }
 

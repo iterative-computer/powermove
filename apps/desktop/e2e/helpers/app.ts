@@ -201,7 +201,8 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       await page.waitForSelector('#body .dock', { state: 'visible' });
       await page.waitForFunction(() => {
         const PM = (window as any).PM;
-        return Boolean(PM.GL?.gl && PM.Kernel.services.get('viewer')?.stage?.isConnected);
+        return Boolean((PM.EngineConnection?.session()?.id != null || PM.GL?.gl)
+          && PM.Kernel.services.get('viewer')?.stage?.isConnected);
       });
     },
     async openAgent() {
