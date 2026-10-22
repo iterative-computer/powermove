@@ -18,6 +18,30 @@ beforeEach(async () => {
 afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
 
 describe('real project files', () => {
+  it('keeps only completion in the serial queue after returning an open document', async () => {
+    const destination = path.join(directory, 'released.pmv');
+    await writeFile(destination, bytes('returned to caller'));
+    const opened = await files.open(destination);
+    try {
+      expect(opened.document).toEqual(JSON.parse(bytes('returned to caller').toString()));
+      // Inspect the queue's fulfilled value directly: retaining this reply
+      // would keep the last open's complete document alive until another job.
+      expect(await (files as unknown as { queue: Promise<unknown> }).queue).toBeUndefined();
+      expect(await files.destination(opened.projectId)).toBe(destination);
+    } finally { await files.close(opened.token); }
+  });
+  it('continues queued work after a rejected open without retaining its error', async () => {
+    const destination = path.join(directory, 'retry.pmv');
+    await writeFile(destination, bytes('next open'));
+    const failed = files.open(path.join(directory, 'missing.pmv'));
+    const pending = files.open(destination);
+    await expect(failed).rejects.toThrow();
+    const opened = await pending;
+    try {
+      expect(opened.document.proj.name).toBe('next open');
+      expect(await (files as unknown as { queue: Promise<unknown> }).queue).toBeUndefined();
+    } finally { await files.close(opened.token); }
+  });
   it('preserves an external edit made while a save is being written', async () => {
     const destination = path.join(directory, 'race.pmv');
     await files.save('race', bytes('original'), destination);

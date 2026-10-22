@@ -38,7 +38,7 @@ export class ProjectFiles {
   private readers = new Map<string, { handle: FileHandle; size: number; mtime: number; ctime: number; busy: boolean }>();
   private associations = new Map<string, Association>();
   private ready: Promise<void>;
-  private queue: Promise<unknown> = Promise.resolve();
+  private queue: Promise<void> = Promise.resolve();
   private saving = new Set<string>();
   private readonly validateDocument: ProjectDocumentValidator;
   private readonly storedFile: ProjectFilesOptions['storedFile'];
@@ -85,7 +85,9 @@ export class ProjectFiles {
   }
   private serial<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.queue.then(async () => { await this.ready; return operation(); });
-    this.queue = next.catch(() => undefined);
+    // Keep only completion in the queue. A fulfilled open reply can contain
+    // the entire parsed document and must belong only to its caller.
+    this.queue = next.then(() => undefined, () => undefined);
     return next;
   }
   async backups(id: string): Promise<string[]> {
