@@ -75,10 +75,8 @@ export const CLASSES = {
   'project-write': 'a write into PM.proj or an alias of it outside history',
   'render-queue-swap': 'the render queue swapping the live project for a queued job',
   'home-composition-match': "Home's Open matching the new composition to the first media source",
-  'blender-source-asset': 'Blender source assets written into PM.proj.assets',
   'agent-media-folders': 'agent media import placing assets into folders',
   'extension-layer-refresh': 'extension layers refilled with parameters when a definition registers (through writeDocument)',
-  'material-fanout': 'shared-material channels copied to every peer layer',
   'aim-preserving': 'aim-preserving rewrites of 3D camera and light channels after reparenting',
 };
 
@@ -92,8 +90,8 @@ export const ORIGINS = {
   'project-replace': 'load', touch: 'structuralDiff', 'touch.paths': 'edit', 'doc.write': 'edit', 'doc.touched': 'edit',
   'anim.touch': 'structuralDiff', 'shader-uniforms': 'metadata', 'host.pm': 'structuralDiff', 'project-swap': 'load',
   revision: 'metadata', 'asset-metadata': 'metadata', 'project-write': 'structuralDiff', 'render-queue-swap': 'load',
-  'home-composition-match': 'edit', 'blender-source-asset': 'edit', 'agent-media-folders': 'edit',
-  'extension-layer-refresh': 'metadata', 'material-fanout': 'edit', 'aim-preserving': 'edit',
+  'home-composition-match': 'edit', 'agent-media-folders': 'edit',
+  'extension-layer-refresh': 'metadata', 'aim-preserving': 'edit',
 };
 
 /*
@@ -107,11 +105,9 @@ export const NAMED_SITES = [
   { class: 'render-queue-swap', file: 'renderer/src/legacy/core/render-queue.ts', from: ['project-swap'] },
   // The match runs inside writeDocument (a barrier writer): the call is the site.
   { class: 'home-composition-match', file: 'renderer/src/legacy/app.ts', scope: /(^| > )importFiles$/, from: ['doc.write'], code: /^writeDocument\(targetProject === PM\.proj/ },
-  { class: 'blender-source-asset', file: 'renderer/src/core/scene3d/modeling.ts', from: ['asset-metadata'] },
   { class: 'agent-media-folders', file: 'renderer/src/legacy/assistant/media-management.ts', scope: /(^| > )importMedia$/, code: /\.folder\s*=/ },
   // The refresh runs inside writeDocument (a barrier writer): the call is the site.
   { class: 'extension-layer-refresh', file: 'renderer/src/kernel/install.ts', scope: /kernel\.layerTypes\.onChange\(callback\)$/, from: ['doc.write'] },
-  { class: 'material-fanout', file: 'renderer/src/core/scene3d/materials.ts', scope: /(^| > )synchronizeShaderPeers$/, params: true },
   { class: 'aim-preserving', file: 'renderer/src/legacy/core/parenting.ts', scope: /(^| > )preserveWorldAim$/, params: true },
 ];
 
