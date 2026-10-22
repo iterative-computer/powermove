@@ -73,6 +73,7 @@ async function main(): Promise<void> {
   const pids: Record<EngineProcess, number[]> = { interactive: [], job: [] };
 
   const engine = new NativeEngine({
+    eagerJobs: true,
     spawn: (kind) => {
       const child = utilityProcess.fork(enginePath, [], {
         serviceName: `Powermove ${kind} engine (test)`,

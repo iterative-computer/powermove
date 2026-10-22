@@ -122,6 +122,7 @@ class FakeEngine implements ChildLike {
   }
   /** Leaves status requests unanswered (a hung engine). */
   silent = false;
+  holdHandshake = false;
 
   kill(): boolean {
     this.exit(137);
@@ -165,6 +166,7 @@ class FakeEngine implements ChildLike {
     this.received.push(message);
     const body = message.message;
     if (body.kind === 'hello') {
+      if (this.holdHandshake) return;
       this.send(port, envelope({
         kind: 'welcome',
         role: this.process === 'interactive' ? 'interactiveEngine' : 'jobEngine',
@@ -221,6 +223,7 @@ describe('NativeEngine with fake engines', () => {
     logs = [];
     now = 0;
     host = new NativeEngine({
+      eagerJobs: true,
       spawn: (process) => {
         const engine = new FakeEngine(process);
         engines.push(engine);
@@ -619,5 +622,81 @@ describe('NativeEngine with fake engines', () => {
     await host.stop();
     expect(host.status().interactive.state).toBe('stopped');
     expect(timers.filter((t) => !t.cancelled)).toHaveLength(0);
+  });
+});
+
+
+describe('on-demand job engine startup', () => {
+  let dir: string;
+  let host: NativeEngine;
+  let engines: FakeEngine[];
+  let holdJob: boolean;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'pm-lazy-engine-'));
+    engines = [];
+    holdJob = false;
+    host = new NativeEngine({
+      spawn: (kind) => {
+        const child = new FakeEngine(kind);
+        child.holdHandshake = kind === 'job' && holdJob;
+        engines.push(child);
+        return child;
+      },
+      channel,
+      cacheDirectory: path.join(dir, 'cache'),
+      automaticOutputDirectory: path.join(dir, 'outputs'),
+      physicalMemory: 16 * 1024 ** 3,
+      log: () => {},
+      hostNow: () => 42
+    });
+    await host.start();
+    await settle();
+  });
+  afterEach(async () => {
+    await host.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+  it('keeps idle jobs absent and shares one first launch across concurrent work', async () => {
+    expect(engines.map(e => e.process)).toEqual(['interactive']);
+    expect(host.status().job).toMatchObject({ state: 'stopped', pid: null, generation: 0 });
+    expect(host.canRequest('job')).toBe(true);
+    const deliveries: ClientPortInfo[] = [];
+    host.addClient(123, (info, port) => { deliveries.push(info); port.start(); });
+    await Promise.all([host.ensureReady('job'), host.ensureReady('job'), host.ensureReady('job')]);
+    await settle();
+    expect(engines.map(e => e.process)).toEqual(['interactive', 'job']);
+    expect(deliveries.map(d => d.process)).toEqual(['interactive', 'job']);
+    const child = engines[1]!;
+    expect(child.events('slicing')).toHaveLength(1);
+    expect(host.memory.isAcknowledged('job')).toBe(true);
+    // Late startup must still connect the direct peer and replay playback policy.
+    expect(child.controls.some(c => c.type === 'connect' && c.peer === 'peer')).toBe(true);
+  });
+  it('cancels a pending first launch when the host stops and can restart cleanly', async () => {
+    holdJob = true;
+    const pending = host.ensureReady('job');
+    const outcome = pending.then(() => 'ready', (error: Error) => error.message);
+    await settle();
+    await host.stop();
+    expect(await outcome).toMatch(/stopped/);
+    expect(host.canRequest('job')).toBe(false);
+    expect(engines.every(e => e.dead)).toBe(true);
+    holdJob = false;
+    await host.start();
+    await host.ensureReady('job');
+    expect(host.isReady('job')).toBe(true);
+  });
+  it('reports a fatal cold load and never restarts it as a new demand', async () => {
+    holdJob = true;
+    const pending = host.ensureReady('job');
+    const failure = expect(pending).rejects.toThrow('could not start');
+    await settle();
+    const child = engines.find(e => e.process === 'job')!;
+    child.notify({ type: 'fatal', message: 'addon unavailable' });
+    child.exit(70);
+    await failure;
+    expect(host.canRequest('job')).toBe(false);
+    await expect(host.ensureReady('job')).rejects.toThrow('could not start');
+    expect(engines.filter(e => e.process === 'job')).toHaveLength(1);
   });
 });

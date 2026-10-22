@@ -11,7 +11,7 @@ const engineProcesses = (app: import('playwright').ElectronApplication): Promise
     .filter((name) => / Engine/.test(name))
     .sort());
 
-type Host = { engine: { status(): Record<string, { state: string; generation: number }>; reconnectClient(id: number): void } | null };
+type Host = { engine: { ensureReady(process: 'job'): Promise<void>; status(): Record<string, { state: string; generation: number }>; reconnectClient(id: number): void } | null };
 
 test('Use New Engine off: no engine process and no ports', async () => {
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '0' } });
@@ -27,13 +27,14 @@ test('Use New Engine off: no engine process and no ports', async () => {
   }
 });
 
-test('Use New Engine on: the editor window gets a live port to each engine', async () => {
+test('Use New Engine on: idle jobs stay absent and their first request gets live ports', async () => {
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
   try {
     await expect.poll(() => session.app.evaluate(() => {
       const status = (globalThis as { __powermoveNativeEngine?: Host }).__powermoveNativeEngine?.engine?.status();
       return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';
-    }), { timeout: 15_000 }).toBe('ready/ready');
+    }), { timeout: 15_000 }).toBe('ready/stopped');
+    expect(await engineProcesses(session.app)).toHaveLength(1);
 
     // Collect the ports the preload hands to the page, then ask main for fresh ones.
     await session.page.evaluate(() => {
@@ -44,8 +45,9 @@ test('Use New Engine on: the editor window gets a live port to each engine', asy
         w.__enginePorts.push({ process: event.data.process, generation: event.data.generation, port: event.ports[0] });
       });
     });
-    await session.app.evaluate(({ BrowserWindow }) => {
+    await session.app.evaluate(async ({ BrowserWindow }) => {
       const host = (globalThis as { __powermoveNativeEngine?: Host }).__powermoveNativeEngine!;
+      await host.engine!.ensureReady('job');
       for (const window of BrowserWindow.getAllWindows()) host.engine!.reconnectClient(window.webContents.id);
     });
     await session.page.waitForFunction(() => (window as unknown as { __enginePorts: unknown[] }).__enginePorts.length >= 2);

@@ -216,7 +216,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!validProbeRequest(request)) throw new Error('A probe names an asset and its interpretation.');
     if (!engine) return { status: 'unavailable', reason: 'Interpret Footage needs the new engine (Settings › General › Use New Engine).' };
-    if (!engine.isReady('job')) return { status: 'unavailable', reason: 'The engine is starting. Try again in a moment.' };
+
     try {
       const facts = await engine.probeMedia(request.asset, request.interpret ? JSON.stringify(request.interpret) : null);
       return { status: 'facts', facts };
@@ -319,6 +319,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!compatFrames.answer(event.sender.id, answer)) log('warn', `window ${event.sender.id} sent a compatibility answer nobody asked for`);
   });
   engine = new NativeEngine({
+    // A measurement control only; packaged apps always start jobs on demand.
+    eagerJobs: !options.isPackaged && env['POWERMOVE_ENGINE_EAGER_JOBS'] === '1',
     compatFrame: (request) => compatFrames.serve(request),
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;

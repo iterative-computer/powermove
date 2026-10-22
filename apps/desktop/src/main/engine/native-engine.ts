@@ -62,6 +62,8 @@ const STAGED_PER_LAUNCH = 16;
 
 export type NativeEngineOptions = {
   spawn: SpawnEngine;
+  /** Start job utilities on demand; eager startup is for host integration tests. */
+  eagerJobs?: boolean;
   channel: ChannelFactory;
   /** Engine caches (one directory per cache kind). */
   cacheDirectory: string;
@@ -166,7 +168,12 @@ export class NativeEngine {
   private staged = new Map<number, string[]>();
   /** Set by `stop()`: no control messages go to engines that are shutting
    *  down (they would be dropped anyway; see `Launch.exiting`). */
-  private stopping = false;
+  private stopping = true;
+  private started = false;
+  private jobDemanded = false;
+  private prepared: Promise<void> = Promise.resolve();
+  private readiness = new Map<EngineProcess, Promise<void>>();
+  private cancelReadiness = new Set<() => void>();
   /** Interpret Footage probes per asset: the one in flight and the newest
    *  request waiting behind it (the sheet probes on every change and keeps
    *  only its latest answer, so a waiting request a newer one replaces is
@@ -230,15 +237,75 @@ export class NativeEngine {
   }
 
   async start(): Promise<void> {
+    if (this.started) return;
     this.stopping = false;
-    await this.prepareCaches();
-    this.supervisors.interactive.start();
-    this.supervisors.job.start();
+    this.started = true;
+    try {
+      this.prepared = this.prepareCaches();
+      await this.prepared;
+      if (this.stopping) return;
+      this.supervisors.interactive.start();
+      if (this.options.eagerJobs) {
+        this.jobDemanded = true;
+        this.supervisors.job.start();
+      }
+    } catch (error) {
+      this.started = false;
+      throw error;
+    }
   }
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.started = false;
+    this.jobDemanded = false;
+    for (const cancel of this.cancelReadiness) cancel();
     await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop(), this.blender?.dispose()]);
+  }
+
+  /** Cold job utilities can accept work; a fatal startup remains unavailable. */
+  canRequest(process: EngineProcess): boolean {
+    return this.started && !this.stopping && (this.isReady(process) ||
+      (process === 'job' && !this.jobDemanded) || this.supervisors[process].state !== 'stopped');
+  }
+
+  /** One startup shared by concurrent callers. Never retries a fatal addon load. */
+  async ensureReady(process: EngineProcess): Promise<void> {
+    await this.prepared;
+    if (!this.started || this.stopping) return Promise.reject(new Error('The engine host is stopped.'));
+    if (this.isReady(process)) return Promise.resolve();
+    const pending = this.readiness.get(process);
+    if (pending) return pending;
+    if (!this.canRequest(process)) return Promise.reject(new Error(`The ${process} engine could not start.`));
+    const supervisor = this.supervisors[process];
+    let unlisten = (): void => {};
+    let cancel = (): void => {};
+    let timer: ReturnType<typeof setTimeout>;
+    const ready = new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error): void => {
+        clearTimeout(timer);
+        unlisten();
+        this.cancelReadiness.delete(cancel);
+        if (error) reject(error);
+        else resolve();
+      };
+      cancel = () => finish(new Error('The engine host stopped while starting.'));
+      this.cancelReadiness.add(cancel);
+      unlisten = supervisor.listen({
+        ready: () => finish(),
+        state: (state) => { if (state === 'stopped') finish(new Error(`The ${process} engine could not start.`)); }
+      });
+      timer = setTimeout(() => finish(new Error(`The ${process} engine did not become ready.`)), 15_000);
+      if (process === 'job' && !this.jobDemanded) {
+        this.jobDemanded = true;
+        supervisor.start();
+      }
+    });
+    this.readiness.set(process, ready);
+    void ready.finally(() => {
+      if (this.readiness.get(process) === ready) this.readiness.delete(process);
+    }).catch(() => {});
+    return ready;
   }
 
   supervisor(process: EngineProcess): EngineSupervisor {
@@ -387,7 +454,8 @@ export class NativeEngine {
   /** A request main itself sends to an engine (sessions main opens for
    *  exports and agent snapshots; tests). `revision` is the envelope
    *  revision (an agent frame request's read-your-writes revision). */
-  request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
+  async request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
+    if (process === 'job') await this.ensureReady(process);
     return this.supervisors[process].request(body, session, revision);
   }
 
@@ -440,6 +508,7 @@ export class NativeEngine {
   }
 
   private async probeOnce(asset: string, interpret: string | null): Promise<MediaFacts> {
+    await this.ensureReady('job');
     const launch = this.supervisors.job.current;
     if (!launch) throw new Error('the job engine is not running');
     const resolved = await this.options.resolveAsset?.(asset);

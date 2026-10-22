@@ -78,6 +78,8 @@ export interface AgentJobsEngine {
   stageDocument(process: EngineProcess, session: number, bytes: Uint8Array): Promise<{ handle: string; length: number }>;
   listen(listener: { jobStatus?(status: JobStatus): void; status?(status: unknown): void }): () => void;
   isReady(process: EngineProcess): boolean;
+  canRequest?(process: EngineProcess): boolean;
+  ensureReady?(process: EngineProcess): Promise<void>;
   /** A user-chosen destination as a write handle for `job` on `session`,
    *  placed under `overwrite` (the engine's default for chosen files is replace). */
   chooseOutput?(file: string, job: string, session: number, overwrite?: 'uniqueName' | 'replace' | 'fail'): string;
@@ -402,7 +404,7 @@ export class AgentJobs {
 
   /** Whether the job engine can take work now. */
   get available(): boolean {
-    return this.options.engine.isReady('job');
+    return this.options.engine.canRequest?.('job') ?? this.options.engine.isReady('job');
   }
 
   /* ── export_video ──────────────────────────────────────────────────── */
@@ -658,6 +660,9 @@ export class AgentJobs {
   async renderFrames(owner: number, run: string, plan: FramesPlan): Promise<AgentFramesResult> {
     const project = asProject(plan.project);
     if (!plan.times.length) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
+    // Startup announces its generation and invalidates old frame sessions.
+    // Wait before installing the first cached session, so it is not discarded.
+    await this.options.engine.ensureReady?.('job');
     const w = Number(project['w']), h = Number(project['h']);
     // `width` is today's output width; the engine takes the longest edge.
     const maxDimension = Math.max(1, Math.min(8192, Math.round(h > w && w > 0 ? plan.width * h / w : plan.width)));
@@ -791,6 +796,7 @@ export class AgentJobs {
   /* ── sessions ──────────────────────────────────────────────────────── */
 
   private async openSession(document: string, role: 'job' | 'jobSnapshot', owner: number | null): Promise<number> {
+    await this.options.engine.ensureReady?.('job');
     if (!this.available) throw new AgentJobError('The job engine is not running.', 'internal');
     const opened = await this.options.engine.request('job', { type: 'openSession', document, role, process: 'job', color: STANDARD_COLOR });
     if (opened.type !== 'sessionOpened') throw new AgentJobError('The job engine did not open a session.');

@@ -18,6 +18,7 @@ type Sent = { process: EngineProcess; body: Request; session: number | null; rev
 class FakeEngine implements AgentJobsEngine {
   sent: Sent[] = [];
   ready = true;
+  ensureReady?: (process: EngineProcess) => Promise<void>;
   private nextSession = 10;
   private listeners: Array<{ jobStatus?(s: JobStatus): void; status?(s: unknown): void }> = [];
   /** How submitJob, agentFrames answer. */
@@ -232,6 +233,24 @@ describe('agent exports through the job engine', () => {
 });
 
 describe('agent frames through the job engine', () => {
+  it('keeps the first cold frame session across the startup generation announcement', async () => {
+    const engine = new FakeEngine();
+    engine.ready = false;
+    engine.ensureReady = async () => {
+      if (engine.ready) return;
+      engine.ready = true;
+      engine.generation(1);
+    };
+    const jobs = new AgentJobs({ engine });
+    try {
+      const plan = { project: project(), times: [0], width: 720, revision: 1 };
+      await jobs.renderFrames(4, 'cold-first', plan);
+      await jobs.renderFrames(4, 'cold-second', plan);
+      expect(engine.of('openSession')).toHaveLength(1);
+      expect(engine.of('resync')).toHaveLength(1);
+    } finally { jobs.dispose(); }
+  });
+
   const image = (index: number) => ({ status: 'rendered' as const, index, revision: 1, width: 720, height: 405, image: { kind: 'inline' as const, bytes: new Uint8Array([0xff, 0xd8, index]) }, blender: 'notUsed' as const });
 
   it('render at the agent revision in one batch and reuse the window session until the project changes', async () => {
