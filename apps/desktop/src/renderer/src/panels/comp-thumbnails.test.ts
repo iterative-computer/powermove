@@ -174,4 +174,37 @@ describe('composition thumbnails with the new engine on', () => {
     expect(toDataURL).toHaveBeenCalledTimes(1);
     thumbs.dispose();
   });
+
+  it('drop an engine result that lands after the project or the edit changed', async () => {
+    vi.useFakeTimers();
+    const comp = { id: 'c1', compId: 'c1', w: 640, h: 360, dur: 2, layers: [] };
+    const lands: Array<(value: unknown) => void> = [];
+    const engine = {
+      thumbnails: { request: vi.fn(() => new Promise((resolve) => { lands.push(resolve); })) },
+      toCanvas: vi.fn(() => ({ toDataURL: () => 'data:image/jpeg;stale' })),
+    };
+    const PM: Record<string, any> = { proj: comp, Comps: { list: () => [comp] }, EngineRender: engine, playing: false };
+    const thumbs = createCompThumbnails(PM);
+    thumbs.refresh('k1');
+    await vi.advanceTimersByTimeAsync(400);
+    expect(lands).toHaveLength(1);
+    // Another project opens (same composition id) before the draw lands.
+    PM.proj = { ...comp };
+    lands[0]!({ width: 320, height: 180 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(thumbs.urls['c1']).toBeUndefined();
+    // The edit key changes while a draw is out: only the new key's draw shows.
+    engine.toCanvas.mockReturnValue({ toDataURL: () => 'data:image/jpeg;current' });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(lands).toHaveLength(2);
+    thumbs.refresh('k2');
+    lands[1]!({ width: 320, height: 180 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(thumbs.urls['c1']).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(400);
+    lands.at(-1)!({ width: 320, height: 180 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(thumbs.urls['c1']).toBe('data:image/jpeg;current');
+    thumbs.dispose();
+  });
 });

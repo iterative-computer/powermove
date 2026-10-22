@@ -130,14 +130,20 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
     // With the new engine on, never the current engine (its snapshot opens
     // a session when no viewer has one).
     const engine = PM.EngineRender;
+    const project = PM.proj;
+    // A result for an edit that has since changed, or for another project,
+    // is stale: it neither shows nor counts as this key's attempt.
+    const current = () => !disposed && key === renderedKey && PM.proj === project;
     if (engine) {
       void renderWithEngine(engine, next)
-        .then((url) => { if (url && !disposed) urls[next] = url; })
-        .catch((error) => console.warn('Composition thumbnail failed', error))
-        .finally(() => { rendered.set(next, renderedKey); schedule(0); });
+        .then((url) => { if (url && current()) urls[next] = url; })
+        .catch((error) => { if (current()) console.warn('Composition thumbnail failed', error); })
+        .finally(() => {
+          if (current()) rendered.set(next, renderedKey);
+          if (!disposed) schedule(current() ? 0 : SETTLE_MS);
+        });
       return;
     }
-    const project = PM.proj;
     let cancelledAttempt = false;
     const complete = (url: string | null) => {
       if (disposed || key !== renderedKey || PM.proj !== project || blocked()) return;
