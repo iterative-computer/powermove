@@ -1,6 +1,7 @@
 import { copyFile, mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import { afterEach, describe, expect, it } from 'vitest';
 import type { IpcMain, IpcMainInvokeEvent } from 'electron';
@@ -95,6 +96,22 @@ describe('native image sequence conversion', () => {
     const result = await service.createSequence(files, 24);
     expect(result.size).toBeGreaterThan(100);
     await service.release(result.token);
+  }, 30_000);
+  it('gives identical image sequences stable content hashes without changing decoded pixels', async () => {
+    const { root } = await fixture();
+    const binary = resolveFfmpeg({ packaged: false, resourcesPath: '', appPath: path.resolve(__dirname, '../..') }).ffmpeg;
+    for (const n of ['00000000', '00000001']) await copyFile(path.resolve('e2e/fixtures/still-red.png'), path.join(root, `frame-${n}.png`));
+    const pattern = path.join(root, 'frame-%08d.png'), first = path.join(root, 'first.webm'), second = path.join(root, 'second.webm'), today = path.join(root, 'today.webm');
+    const convert = imageSequenceConverter(binary);
+    await convert(pattern, 24, 2, first); await convert(pattern, 24, 2, second);
+    expect(await readFile(first)).toEqual(await readFile(second));
+    // Today's encoder arguments, including the same lossless codec, threads
+    // and pixel format. Only the new output-container flag is absent.
+    execFileSync(binary, ['-v', 'error', '-framerate', '24', '-start_number', '0', '-i', pattern,
+      '-frames:v', '2', '-an', '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-lossless', '1', '-b:v', '0',
+      '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4', '-f', 'webm', today]);
+    const pixels = (file: string) => execFileSync(binary, ['-v', 'error', '-c:v', 'libvpx-vp9', '-i', file, '-f', 'rawvideo', '-pix_fmt', 'rgba', '-']);
+    expect(pixels(first)).toEqual(pixels(today));
   }, 30_000);
   it('rejects invalid inputs and cleans temporary files after failed conversion', async () => {
     const { root } = await fixture();
