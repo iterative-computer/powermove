@@ -41,10 +41,11 @@ body {
 }
 
 .welcome-mark {
-  width: 35px;
-  height: 96px;
+  width: 70px;
+  height: 58px;
   margin-bottom: 32px;
   overflow: visible;
+  fill: var(--tx);
 }
 
 

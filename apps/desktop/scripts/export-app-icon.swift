@@ -28,7 +28,7 @@ let temp = fm.temporaryDirectory.appendingPathComponent("powermove-icon-\(UUID()
 try fm.createDirectory(at: temp, withIntermediateDirectories: true)
 defer { try? fm.removeItem(at: temp) }
 let rendered = temp.appendingPathComponent("render.png")
-try run(ictool, [root.appendingPathComponent("resources/icon/app-icon/Powermove-playhead.icon").path,
+try run(ictool, [root.appendingPathComponent("resources/icon/Powermove.icon").path,
     "--export-image", "--output-file", rendered.path, "--platform", "macOS",
     "--rendition", "Default", "--width", "1024", "--height", "1024", "--scale", "1"])
 guard let image = NSImage(contentsOf: rendered) else { fatalError("Icon Composer produced no image") }

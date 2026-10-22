@@ -42,7 +42,7 @@ if (step) mount(WorkspaceStep, { target: step, props: {
   onback: () => show(transcriptionStep ?? agentStep, transcriptionStep ? '#transcription-title' : '#agent-title'),
   onbegin: choice => window.onboarding.begin({ ...choice, timelineMode, agent })
 } });
-const mark = document.querySelector<SVGSVGElement>('.welcome-mark');
+const mark = document.querySelector<SVGPathElement>('.welcome-mark path');
 
 const reportLogoTarget = () => {
   if (!mark) return;
