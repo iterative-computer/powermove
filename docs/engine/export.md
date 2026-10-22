@@ -469,6 +469,11 @@ Queued user jobs continue waiting for relinked media. The phase 3b routing
 description below records the earlier implementation and is superseded for
 offline media by this decision.
 
+Media that is still loading is not offline. With the setting off (and when an
+engine export comes back to the current exporter), an export waits up to 30 s
+for referenced media that is still loading, then goes on as before: it is
+never refused for it, and only clips that are offline are asked about.
+
 ### Beta decision EXPORT-1 (2026-10-21)
 
 EXPORT-1 replaces OFFLINE-1's encoded-file byte identity criterion. An export

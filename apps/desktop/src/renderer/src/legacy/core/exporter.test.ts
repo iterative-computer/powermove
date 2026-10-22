@@ -121,3 +121,51 @@ it('awaits the media binding acknowledgement before an export is submitted', asy
   expect(await exported).toEqual({ cancelled: true });
   expect(exportVideo).toHaveBeenCalledOnce();
 });
+
+describe('offline media before a current-exporter export (OFFLINE-1)', () => {
+  /* The export stops right after the media check (progress setup throws), so
+     'Preview setup failed' means it went on to write the file. */
+  const setup = (assets: { loaded: string[]; loading: string[] }, choice = 'without') => {
+    const offlineExport = vi.fn(async () => choice);
+    installBridgeForTests({ offlineExport } as any);
+    const loading = new Set(assets.loading), loaded = new Set(assets.loaded);
+    const toast = vi.fn();
+    const X = exporter({
+      proj: {
+        id: 'P1', name: 'Offline', w: 64, h: 64, fps: 30, dur: 1,
+        assets: Object.fromEntries(['a1', 'a2'].map(id => [id, { id, kind: 'video', name: `${id}.mov` }])),
+        layers: ['a1', 'a2'].map(asset => ({ id: `L-${asset}`, type: 'video', d: { asset } })),
+      },
+      projectAssetsReady: Promise.resolve(),
+      assets: { loading, get: (id: string) => loaded.has(id) ? { id } : undefined },
+      toast, pause() {}, setTime() {}, h() { throw new Error('Preview setup failed'); },
+    });
+    return { X, offlineExport, toast, loading, loaded };
+  };
+
+  it('waits for media that is still loading and exports without asking', async () => {
+    const { X, offlineExport, toast, loading, loaded } = setup({ loaded: ['a2'], loading: ['a1'] });
+    const exported = X.run({ format: 'webm' });
+    await new Promise(resolve => setTimeout(resolve, 250));
+    loading.delete('a1'); loaded.add('a1');
+    expect((await exported).error).toBe('Preview setup failed');
+    expect(offlineExport).not.toHaveBeenCalled();
+    expect(toast.mock.calls.map(call => String(call[0])).filter(text => /loading/i.test(text))).toEqual([]);
+  });
+
+  it('goes on as before once the wait ends, and asks only about media that is offline', async () => {
+    const { X, offlineExport } = setup({ loaded: [], loading: ['a1'] });
+    X.mediaWaitMs = 150;
+    expect((await X.run({ format: 'webm' })).error).toBe('Preview setup failed');
+    expect(offlineExport).toHaveBeenCalledOnce();
+    expect(offlineExport).toHaveBeenCalledWith([{ asset: 'a2', name: 'a2.mov' }]);
+  });
+
+  it('asks about offline media: Export Without goes on, Cancel stops', async () => {
+    const without = setup({ loaded: ['a1'], loading: [] });
+    expect((await without.X.run({ format: 'webm' })).error).toBe('Preview setup failed');
+    expect(without.offlineExport).toHaveBeenCalledWith([{ asset: 'a2', name: 'a2.mov' }]);
+    const cancelled = setup({ loaded: ['a1'], loading: [] }, 'cancel');
+    expect(await cancelled.X.run({ format: 'webm' })).toEqual({ cancelled: true });
+  });
+});

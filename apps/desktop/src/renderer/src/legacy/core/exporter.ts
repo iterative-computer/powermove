@@ -148,6 +148,8 @@ function muxWebM(frames: any, { width, height, fps, codecId = 'V_VP9', audio }: 
 /* ── export core ───────────────────────────────────────── */
 const X: any = { busy: false, cancel: false };
 PM.Export = X;
+/** How long an export waits for referenced media that is still loading (OFFLINE-1). */
+X.mediaWaitMs = 30_000;
 X.buildWeb = () => buildWebExport(PM);
 
 /* The project owns its delivery settings; the legacy global store only seeds
@@ -595,11 +597,16 @@ async function run(opts: any) {
       await PM.projectAssetsReady;
       if (PM.proj !== p) return { cancelled: true };
       const referenced = referencedClips(p);
-      if (referenced.some((clip) => PM.assets?.loading?.has(clip.asset))) {
-        PM.toast('Media is still loading. Try the export again.', 4000);
-        return { cancelled: true };
+      /* Media still loading is not offline. The export waits for it, for a
+         while, and then goes on as it always has: it is never refused for
+         it, and only media that is really offline is asked about. */
+      const loading = () => referenced.filter((clip) => PM.assets?.loading?.has(clip.asset));
+      for (const deadline = Date.now() + X.mediaWaitMs; loading().length && Date.now() < deadline;) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        if (PM.proj !== p) return { cancelled: true };
       }
-      const clips = referenced.filter((clip) => !PM.assets?.get(clip.asset));
+      const pending = new Set(loading().map((clip) => clip.asset));
+      const clips = referenced.filter((clip) => !pending.has(clip.asset) && !PM.assets?.get(clip.asset));
       if (clips.length) {
         const choice = await bridge.offlineExport(clips);
         if (choice === 'locate') locateMedia(clips.map((clip) => clip.asset));
