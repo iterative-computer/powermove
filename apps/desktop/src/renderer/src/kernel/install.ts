@@ -49,6 +49,7 @@ import type { ExtensionsBridge } from '../../../shared/extensions';
 import type { VarsBridge } from '../../../shared/vars-ipc';
 import type { PowermoveExtensionsBridge } from '../../../shared/ipc';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps, type PanelsBackend } from './host';
+import { retryPendingWorkspaceAppearance } from './workspace-appearance';
 import { createLoader, type BuiltinFactory, type Loader, type LoaderOptions } from './loader';
 import { createKernel, runKernelCommand, type Kernel } from './registries';
 import { makeScene3DAPI } from '../core/scene3d/api';
@@ -326,7 +327,10 @@ function makeTransport(PM: LegacyPM): TransportAPI {
     get perf() { return PM?.perf ?? emptyPerf; },
     invalidate: (...args) => PM?.invalidate?.(...args),
     get previewResolution() { return PM?.previewResolution ?? null; },
-    set previewResolution(value: string | number | null) { PM.previewResolution = value; }
+    set previewResolution(value: string | number | null) {
+      if (PM.setPreviewResolution && value != null) PM.setPreviewResolution(value);
+      else PM.previewResolution = value;
+    }
   };
 }
 
@@ -732,7 +736,15 @@ function makeAssets(PM: LegacyPM): AssetsAPI {
       if (!(blob instanceof Blob)) throw new Error(`Asset data is missing: ${meta.name || id}`);
       return blob.text();
     },
-    importUrl: (async (url: string, admit?: AdmitDownload) => (await assets.import(await fetchRemoteMedia(url, undefined, admit))).id) satisfies ImportUrl
+    importUrl: (async (url: string, admit?: AdmitDownload) => {
+      const project = PM?.proj;
+      const file = await fetchRemoteMedia(url, undefined, admit);
+      if (PM?.proj !== project) throw Object.assign(
+        new Error('Import stopped because you switched projects · import the URL again in the intended project'),
+        { code: 'STALE_MEDIA_IMPORT' }
+      );
+      return (await assets.import(file)).id;
+    }) satisfies ImportUrl
   };
   return assets;
 }
@@ -874,6 +886,22 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     uiState: makeUIState(PM),
     dnd: makeDnd(PM),
     workspace: makeWorkspace(PM),
+    workspaceAppearance: {
+      load: () => PM?.store?.get?.('extensionWorkspaceAppearance', null),
+      save: (state) => PM?.store?.set?.('extensionWorkspaceAppearance', state),
+      get: (id) => PM?.WS?.current?.id === id ? PM.WS.current : PM?.WS?.get?.(id) ?? null,
+      mutate: (id, fn) => {
+        if (PM?.WS?.current?.id === id) PM.WS.mutate?.(fn, { inPlace: true });
+        else {
+          const workspace = PM?.WS?.get?.(id);
+          if (workspace) { fn(workspace); PM.WS.save?.(); }
+        }
+      }
+    },
+    themeAppearance: {
+      load: () => PM?.store?.get?.('extensionThemeAppearance', null),
+      save: (state) => PM?.store?.set?.('extensionThemeAppearance', state)
+    },
     util,
     ease: makeEase(PM),
     space3d: makeSpace3D(PM),
@@ -892,6 +920,10 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
 
   const handles = new Map<string, ExtensionHandle>();
   const subscriptions: Array<() => void> = [];
+  // Saved project workspaces can be loaded after extensions booted on Home.
+  subscriptions.push(PM?.bus?.on?.('workspaces', () => {
+    retryPendingWorkspaceAppearance(deps.workspace!);
+  }) ?? (() => {}));
 
   // Capture the native rasterizer once (it normally installs after the kernel).
   // Then leave PM.raster as an ordinary writable function so legacy wrappers
@@ -1006,6 +1038,7 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   on('transport', () => kernel.events.emit('transport', { playing: !!PM?.playing }));
   on('fonts', (families: string[]) => kernel.events.emit('fonts', families));
   on('layout', () => kernel.events.emit('layout', undefined));
+  on('quality', () => kernel.events.emit('layout', undefined));
   on('draw', () => kernel.events.emit('invalidate', 'render'));
   on('draw:timeline', () => kernel.events.emit('invalidate', 'timeline'));
   on('draw:ui', () => kernel.events.emit('invalidate', 'ui'));

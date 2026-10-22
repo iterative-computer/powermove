@@ -175,6 +175,7 @@ async function main() {
       throw new Error(`native/${file} is present but --with-engine was not given: electron-builder would ship it. Remove native/ or pass --with-engine.`);
     }
   }
+  await run('node', [path.join(repository, 'scripts/clean-renderer.mjs')]);
   await run('bun', ['run', 'build']);
   if (withEngine) await run('node', [path.join(repository, 'scripts/build-engine-addon.mjs')]);
   await run(path.join(repository, 'node_modules/.bin/electron-builder'), [

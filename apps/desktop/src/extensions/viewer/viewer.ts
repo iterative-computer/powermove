@@ -1,9 +1,7 @@
 import {mount,unmount} from 'svelte';
-import Header3D from './viewport3d/Header3D.svelte';
-import Toolbar3D from './viewport3d/Toolbar3D.svelte';
-import Sidebar3D from './viewport3d/Sidebar3D.svelte';
-import { objectContextMenu, rememberMenuPoint } from './viewport3d/menus';
+import GizmoToolbar from './GizmoToolbar.svelte';
 import type { EditCommand, InspectorService, PowermoveAPI, Space3DAPI, ToolService, ViewerService } from 'powermove';
+import { layerIsLocked } from './layer-locks';
 
 type ViewerSpace3D = Pick<Space3DAPI, 'is3DLayer' | 'planeMatrix' | 'planeContains' | 'projectPoint' | 'inversePlane'>;
 export function visualSelection(api: PowermoveAPI): any[] {
@@ -58,8 +56,8 @@ export function effectViewportSafe(api: PowermoveAPI, layer: any, time: number):
   return true;
 }
 
-/** Return the largest source radius required by viewport-safe effects, in
- * effect parameter pixels. The viewer converts it to CSS pixels before
+/** Return the largest accumulated stack/group support for viewport-safe effects,
+ * in composition pixels. The viewer converts it to CSS pixels before
  * adding it to the overscan. */
 export function effectViewportPadding(api: PowermoveAPI, project: any, time: number): number {
   let padding = 0;
@@ -76,7 +74,7 @@ export function effectViewportPadding(api: PowermoveAPI, project: any, time: num
         const prop = effect.p?.[key];
         const value = prop && typeof prop === 'object'
           ? (api.anim.evP?.(layer, prop, time, `${effect.id}.${key}`) ?? prop.v)
-          : prop;
+          : prop ?? definition.params?.find((param: any) => param.k === key)?.def;
         const numeric = Number(value);
         if (Number.isFinite(numeric)) padding = Math.max(padding, Math.abs(numeric));
       }
@@ -686,12 +684,12 @@ export function drillTarget(api: PowermoveAPI, hit: any): any | null {
     overlay layer sits above it in the render stack. */
 export function editableTextAtPoint(api: PowermoveAPI, x: number, y: number, T: number, space3d: ViewerSpace3D = api.space3d): any | null {
   const selected = visualSelection(api).filter((layer: any) =>
-    layer?.type === 'text' && !layer.lock && api.anim.active(layer, T) !== false);
+    layer?.type === 'text' && !layerIsLocked(api, layer) && api.anim.active(layer, T) !== false);
   for (let index = selected.length - 1; index >= 0; index -= 1) {
     if (layerContainsPoint(api, selected[index], x, y, T, space3d)) return selected[index];
   }
   const picked = api.render.gl?.pick?.(x, y, T);
-  return picked?.type === 'text' && !picked.lock ? picked : null;
+  return picked?.type === 'text' && !layerIsLocked(api, picked) ? picked : null;
 }
 
 /** Install the viewer controller against the typed kernel API. */
@@ -786,6 +784,7 @@ const displayViewport = (viewport: PreviewViewport, zoom = viewport.cssWidth / v
   gl.style.width = viewport.width * zoom + 'px'; gl.style.height = viewport.height * zoom + 'px';
 };
 const eventOffs: Array<() => void> = [];
+let layoutFrame = 0;
 
 /* Engine presentation, behind "Use New Engine": present only when the
    kernel's engine connection registered `engine.viewer` (plan section 18). */
@@ -839,10 +838,11 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // state until the engine's first frame.
     if (presentation.exclusive && V.el) V.el.style.visibility = 'hidden';
   }
-  const scene = api.scene3d?.viewport?.state?.();
+  // The 3D editor no longer has viewport shading or X-ray (Blender viewport
+  // removed on main), so the view override carries no 3D state.
   enginePresentation.update(viewParamsFor({
     shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution,
-    scene3d: scene ? { hasScene: scene.hasScene, shading: scene.shading, xray: scene.xray } : null,
+    scene3d: null,
   }), stage);
 };
 /** The engine frame on screen: its tags and overlay geometry in stage CSS pixels. */
@@ -851,16 +851,18 @@ V.engineFrame = () => {
   return frame ? { seq: frame.seq, revision: frame.revision, viewSeq: frame.viewSeq, pts: frame.pts, standIn: frame.standIn, overlay: enginePresentation!.overlayInCss(frame) } : null;
 };
 
-let viewport3d:ReturnType<PowermoveAPI['scene3d']['viewport']['attach']>|null=null;
-let viewportHeader:any=null,viewportHeaderHost:HTMLElement|null=null,viewportPanels:any[]=[];
+let sceneGizmo:ReturnType<PowermoveAPI['scene3d']['createGizmo']>|null=null;
+let sceneNavigation:ReturnType<PowermoveAPI['scene3d']['createNavigation']>|null=null;
+let gizmoToolbar:any=null,gizmoToolbarHost:HTMLElement|null=null;
 const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id);
 const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
   enginePresentation?.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = ''; engineService = null;
   ((V._boundStage ?? V.stage) as HTMLElement | null | undefined)?.removeAttribute?.(ENGINE_SELF_PRESENTS_ATTRIBUTE);
-  viewport3d?.dispose();viewport3d=null;V.viewport3d=null;V.sceneGizmo=null;
-  if(viewportHeader)void unmount(viewportHeader);viewportHeaderHost?.remove();for(const panel of viewportPanels.splice(0))void unmount(panel);
+  window.cancelAnimationFrame(layoutFrame); layoutFrame = 0;
+  sceneGizmo?.dispose();sceneGizmo=null;if(gizmoToolbar)void unmount(gizmoToolbar);gizmoToolbarHost?.remove();
+  sceneNavigation?.dispose();sceneNavigation=null;
   activeDrag?.cancel(); activeDrag = null;
   unbindStage?.(); unbindStage = null;
   resizeObserver?.disconnect(); resizeObserver = null;
@@ -930,15 +932,8 @@ V.attach = (stage: HTMLElement) => {
       recovery.innerHTML = '<span>Composition is out of view</span><b>Fit composition</b>';
       stage.appendChild(recovery);
     }
-    if(api.scene3d?.viewport){
-      // Blender's 3D viewport: shown only for compositions with 3D layers.
-      viewport3d=api.scene3d.viewport.attach(stage,{
-        panComposition:(dx,dy)=>{leaveFitMode();V.pan=[V.pan[0]+dx,V.pan[1]+dy];V.layout(true);},
-        zoomComposition:(factor,clientX,clientY)=>{zoomGestureUntil=window.performance.now()+80;navigationUntil=window.performance.now()+250;zoomAtEvent({clientX,clientY},factor);}
-      });
-      V.viewport3d=viewport3d;V.sceneGizmo=viewport3d;
-      viewportPanels.push(mount(Toolbar3D,{target:stage,props:{api}}),mount(Sidebar3D,{target:stage,props:{api}}));
-    }
+    if(api.scene3d?.createGizmo)sceneGizmo=api.scene3d.createGizmo(stage);V.sceneGizmo=sceneGizmo;
+    if(api.scene3d?.createNavigation)sceneNavigation=api.scene3d.createNavigation(stage);V.sceneNavigation=sceneNavigation;
     V.el = gl; V.ov = ov; V.octx = ov.getContext('2d'); V.inner = inner; V.stage = stage;
     V.recovery = recovery;
     const zoomHost = stage.closest<HTMLElement>('.panel') ?? stage;
@@ -960,10 +955,10 @@ V.attach = (stage: HTMLElement) => {
     zoomHost.append(zoomControl);
     zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     V.zoomControl = zoomControl;
-    if(api.scene3d?.viewport){
-      viewportHeaderHost=document.createElement('div');viewportHeaderHost.id='composition-3d-controls';viewportHeaderHost.dataset['3dToolbar']='';
-      viewportHeaderHost.style.cssText='position:relative;z-index:6;display:none;align-items:center;padding:26px 4px 6px;flex-shrink:0;min-width:0';
-      stage.parentElement!.insertBefore(viewportHeaderHost,stage);viewportHeader=mount(Header3D,{target:viewportHeaderHost,props:{api}});
+    if(api.scene3d){
+      gizmoToolbarHost=document.createElement('div');gizmoToolbarHost.id='composition-3d-controls';
+      gizmoToolbarHost.style.cssText='position:absolute;right:212px;top:7px;z-index:6;display:none;align-items:center;gap:6px';
+      zoomHost.append(gizmoToolbarHost);gizmoToolbar=mount(GizmoToolbar,{target:gizmoToolbarHost,props:{api}});
     }
 
     let preview=zoomHost.querySelector<HTMLElement>('#preview-controls');
@@ -972,7 +967,15 @@ V.attach = (stage: HTMLElement) => {
     preview.replaceChildren();
     const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     for(const [value,label] of [['auto','Auto'],['1','Full'],['0.5','Half'],['0.25','Quarter']]){const option=document.createElement('option');option.value=value!;option.textContent=label!;quality.append(option);}
-    quality.value=api.transport.perf.auto?'auto':String(api.transport.quality);quality.onchange=()=>{api.transport.perf.auto=quality.value==='auto';api.transport.quality=quality.value==='auto'?1:Number(quality.value);api.transport.previewResolution=quality.value;V.layout();};preview.append(quality);
+    quality.value=api.transport.perf.auto?'auto':String(api.transport.quality);
+    quality.onchange=()=>{
+      api.transport.perf.auto=quality.value==='auto';
+      api.transport.quality=quality.value==='auto'?1:Number(quality.value);
+      api.transport.previewResolution=quality.value;
+      V.layout();
+    };
+    V.qualityControl=quality;
+    preview.append(quality);
     V.previewOff?.(); V.previewOff = undefined;
 
     zoomControl.onchange = () => { if (zoomControl.value === 'fit') V.returnToComposition(); else V.setZoom(Number(zoomControl.value)); };
@@ -1000,6 +1003,7 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   // the engine on, that resize would bind engine presentation to a canvas
   // whose viewer is gone (canvas-binding.ts).
   if (disposed || !V.el || !V.stage) return;
+  if (V.qualityControl) V.qualityControl.value = api.transport.perf.auto ? 'auto' : String(api.transport.quality);
   const gl = V.el as HTMLCanvasElement;
   const p = api.project.get();
   const r = gesture && stageGeometry ? stageGeometry : V.stage.getBoundingClientRect();
@@ -1122,31 +1126,26 @@ const listen = <K extends Parameters<PowermoveAPI['events']['on']>[0]>(event: K,
   const disposable = api.events.on(event, handler);
   eventOffs.push(() => disposable.dispose());
 };
-/* An edit announces several project changes in one task (history, layers,
-   project), and each layout measures the stage, which forces the editor's
-   layout when anything wrote to it: three forced layouts per edit, 9 ms at
-   1,000 layers (docs/engine/perf.md). They lay out once, at the end of the
-   task, before the next frame. */
-let layoutQueued = false;
-const layoutAtEndOfTask = () => {
-  if (layoutQueued) return;
-  layoutQueued = true;
-  queueMicrotask(() => { layoutQueued = false; V.layout(); });
+// Tab activation publishes history, project, layers and media in one burst,
+// and an edit announces several project changes in one task. Measuring and
+// rewriting the stage for every notification forces layout repeatedly across
+// the entire editor (docs/engine/perf.md): they lay out once, before the next
+// frame. Keep direct gesture layouts immediate.
+const scheduleLayout = () => {
+  if (layoutFrame || disposed) return;
+  layoutFrame = window.requestAnimationFrame(() => {
+    layoutFrame = 0;
+    if (!disposed && !V.stage?.closest?.('#pm-panel-pool')) V.layout();
+  });
 };
-listen('project:changed', () => { viewportPlan = null; layoutAtEndOfTask(); });
+listen('project:changed', () => { viewportPlan = null; scheduleLayout(); });
 listen('extensions:changed', () => { viewportPlan = null; V.layout(); });
 // The engine connection registered or disposed `engine.viewer`: attach or
 // detach now, without a full layout.
 const onEngineViewerChanged = () => syncEnginePresentation();
 window.addEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged);
 eventOffs.push(() => window.removeEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged));
-listen('layout', () => V.layout());
-// Shading and X-ray are part of the engine's view override. The 3D viewport
-// reports on every project and selection change; the stage keeps the size
-// the last layout measured (a resize lays out again), so measuring it here
-// only forced the editor's layout once more per edit (docs/engine/perf.md).
-const viewportChange = api.scene3d?.viewport?.onChange?.(() => syncEnginePresentation(stageGeometry ?? undefined));
-if (viewportChange) eventOffs.push(() => viewportChange.dispose());
+listen('layout', scheduleLayout);
 listen('selection', () => { invalidate('render'); drawOverlay(); scheduleHover(); });
 let observedQuality = api.transport.quality;
 listen('time', () => {
@@ -1252,8 +1251,11 @@ function drawOverlay() {
   if (!overlayGeometry) return;
   const selectionInk = selectionOutlineColor(api.project.get());
   const p = api.project.get(), dpr = V.ov.width / overlayGeometry.width;
-  viewport3d?.update({x:overlayGeometry.x,y:overlayGeometry.y,width:p.w*V.shown,height:p.h*V.shown},api.selection.layers());
-  if(viewportHeaderHost)viewportHeaderHost.style.display=api.model.curComp().layers.some((l:any)=>String(l.d?.definition??'').startsWith('powermove.3d.')&&l.d?.definition!=='powermove.3d.scene')?'flex':'none';
+  const gizmoSelection=api.selection.layers();
+  const gizmoVisible=V.showControls!==false && !!sceneGizmo?.covers(gizmoSelection);
+  sceneGizmo?.update({x:overlayGeometry.x,y:overlayGeometry.y,width:p.w*V.shown,height:p.h*V.shown},gizmoVisible?gizmoSelection:[]);
+  sceneNavigation?.update({width:p.w*V.shown,height:p.h*V.shown},gizmoSelection);
+  if(gizmoToolbarHost)gizmoToolbarHost.style.display=api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object')?'flex':'none';
 
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, V.ov.width, V.ov.height);
@@ -1654,7 +1656,7 @@ function bindStage(stage: any, inner: any): () => void {
     listeners.push([target, type, handler, options]);
   };
   const guarded = (handler: (event: any) => void) => ((event: any) => {
-    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, #composition-3d-controls, [data-viewport-chrome], [data-viewport-ui], [contenteditable]')) return;
+    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, #composition-3d-controls, [contenteditable]')) return;
     handler(event);
   }) as EventListener;
   const capture = undefined;
@@ -1662,17 +1664,9 @@ function bindStage(stage: any, inner: any): () => void {
     // Right-clicking edited text gets the native text services menu.
     if ((event.target as Element)?.closest?.('.canvas-text-input')) return;
     event.preventDefault();
-    if (viewport3d?.contextMenu(event)) return;
     const point = pointerComp(event);
     const layer = api.render.gl.pick(point.x, point.y, api.transport.time(), { includeLocked: true });
-    /* Blender: right click opens the Object Context Menu for models, lights and cameras. */
-    const viewport = api.scene3d?.viewport?.state();
-    if (viewport?.hasScene && (layer ? isModel3D(layer) : viewport.selected.length > 0 && viewport.inContext)) {
-      if (layer && !api.selection.layers().includes(layer.id)) api.scene3d.viewport.run('select.click', resolvePickTarget(api, layer, {})?.id ?? layer.id, false);
-      rememberMenuPoint(event);
-      api.ui.menu({ x: event.clientX, y: event.clientY }, objectContextMenu(api, layer));
-    }
-    else if (layer) api.ui.showLayerMenu(layer, event, 'viewer');
+    if (layer) api.ui.showLayerMenu(layer, event, 'viewer');
     else {
       api.ui.menu({ x: event.clientX, y: event.clientY }, api.menus.gather('viewer:context', { layerId: null, time: api.transport.time() }));
     }
@@ -1684,12 +1678,17 @@ function bindStage(stage: any, inner: any): () => void {
     return api.render.gl.pick(point.x, point.y, api.transport.time());
   };
   listen(stage,'pointerdown',guarded((event:any)=>{
-    if(viewport3d?.pointerDown(event)){event.preventDefault();event.stopImmediatePropagation();}
+    if(sceneGizmo?.active())return;
+    if(sceneNavigation?.pointerDown(event))return;
+    if(sceneGizmo?.pointerDown(event))return;
   }),true);
   listen(stage, 'pointerdown', guarded(onDown), capture);
   listen(stage, 'pointermove', guarded((e: any) => {
-    const cursor3d=viewport3d?.cursorAt(e.clientX,e.clientY);
-    if(cursor3d){setStageCursor(cursor3d);return;}
+    const navigationMode=api.scene3d?.getNavigationMode?.();
+    if(navigationMode && navigationMode!=='select' && api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object')){
+      setStageCursor(navigationMode==='dolly'?'ns-resize':'grab');return;
+    }
+    if(sceneGizmo?.hover(e.clientX,e.clientY)){setStageCursor('pointer');return;}
     updateStageCursor(e);
     hoverPointer = { clientX: e.clientX, clientY: e.clientY, deep: e.metaKey || e.ctrlKey };
     scheduleHover();
@@ -1698,7 +1697,8 @@ function bindStage(stage: any, inner: any): () => void {
   listen(stage, 'pointerleave', guarded(() => { V.pointerOver = false; hoverPointer = null; setHover(null); setStageCursor(''); }), capture);
   listen(stage, 'wheel', guarded((e: any) => {
     e.preventDefault();
-    if(viewport3d?.wheel(e))return;
+    if(sceneGizmo?.active())return;
+    if(sceneNavigation?.wheel(e))return;
     if (viewerWheelMode(e) === 'zoom') {
       zoomGestureUntil = window.performance.now() + 80;
       navigationUntil = window.performance.now() + 250;
@@ -1724,6 +1724,12 @@ function bindStage(stage: any, inner: any): () => void {
     V.returnToComposition();
   }) as EventListener);
   listen(window, 'keydown', ((e: any) => {
+    if (e.key === 'Escape' && activeDrag) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      activeDrag.cancel();
+      return;
+    }
     if (!V.pointerOver || e.code !== 'Space' || e.repeat || e.target?.closest?.('input,textarea,[contenteditable]')) return;
     /* Space remains the global transport shortcut even while the pointer is
        over the canvas. The viewer may temporarily expose Hand for a Space-drag,
@@ -1749,7 +1755,7 @@ function bindStage(stage: any, inner: any): () => void {
       const L=api.selection.first();
       const paths=L ? (L.d as any).paths as any[] | undefined : undefined;
       const path=paths?.find((candidate:any)=>candidate.id===V.activePath)||L?.masks?.find(mask=>mask.path?.id===V.activePath)?.path;
-      if(path&&L&&!L.lock){api.edit.mutate('Close path',()=>{if(path.p.closed.kf.length)api.anim.setKeyOn(path.p.closed,api.transport.time()-L.from,true);else path.p.closed.v=true;V.activePath=null;},{origin:'canvas'});invalidate();refreshInspector();}
+      if(path&&L&&!layerIsLocked(api,L)){api.edit.mutate('Close path',()=>{if(path.p.closed.kf.length)api.anim.setKeyOn(path.p.closed,api.transport.time()-L.from,true);else path.p.closed.v=true;V.activePath=null;},{origin:'canvas'});invalidate();refreshInspector();}
       e.preventDefault();e.stopPropagation();return;
     }
     const [x, y] = toComp(e);
@@ -1758,7 +1764,7 @@ function bindStage(stage: any, inner: any): () => void {
     const remembered = V.textDoubleClickCandidate;
     if (!L && remembered && Date.now() - remembered.at < 700) {
       const candidate = api.model.layer(remembered.id);
-      if (candidate?.type === 'text' && !candidate.lock
+      if (candidate?.type === 'text' && !layerIsLocked(api, candidate)
         && api.anim.active(candidate, api.transport.time()) !== false
         && layerContainsPoint(api, candidate, x, y, api.transport.time(), space3d)) L = candidate;
     }
@@ -1920,7 +1926,7 @@ function onDown(e: any) {
     if (remembered && Date.now() - remembered.at < 700
       && Math.hypot(e.clientX - remembered.clientX, e.clientY - remembered.clientY) < 6) {
       const layer = api.model.layer(remembered.id);
-      if (layer?.type === 'text' && !layer.lock && api.anim.active(layer, api.transport.time()) !== false) {
+      if (layer?.type === 'text' && !layerIsLocked(api, layer) && api.anim.active(layer, api.transport.time()) !== false) {
         V.textDoubleClickCandidate = null;
         e.preventDefault();
         e.stopPropagation();
@@ -1945,7 +1951,7 @@ function onDown(e: any) {
     }
     const point = pointerComp(e);
     const candidate = visualSelection(api).find((layer: any) =>
-      layer?.type === 'text' && !layer.lock
+      layer?.type === 'text' && !layerIsLocked(api, layer)
       && api.anim.active(layer, api.transport.time()) !== false
       && layerContainsPoint(api, layer, point.x, point.y, api.transport.time(), space3d));
     if (candidate) V.textDoubleClickCandidate = {
@@ -1953,22 +1959,18 @@ function onDown(e: any) {
     };
   }
 
-  const chosen = V.temporaryTool || toolService()?.tool || 'select';
-  /* The Pen edits 2D paths; with models, lights or cameras selected it selects like the Select tool. */
-  const tool = chosen === 'pen' && visualSelection(api).some(isModel3D) ? 'select' : chosen;
+  const tool = V.temporaryTool || toolService()?.tool || 'select';
   if (tool === 'hand') return startPan(e);
   if (tool === 'zoom') return startZoom(e);
   if (tool === 'pen' && visualSelection(api).some((layer: any) => space3d.is3DLayer(layer))) { api.ui.toast('Turn off 3D temporarily to edit path vertices'); return; }
   if (tool === 'pen') return startPathEdit(api,V,e,pointerComp,beginDrag,V.shown);
   if (tool === 'shape') return startShape(e);
   if (tool === 'text') return startText(e);
-  if (tool === 'rotate' && visualSelection(api).some(isModel3D)){api.scene3d.viewport.run('tool','rotate');return;}
+  if (tool === 'rotate' && visualSelection(api).some(isModel3D)){api.scene3d.setMode('rotate');return;}
   if (tool === 'rotate') return startRotationTool(e);
   if (tool === 'anchor' && visualSelection(api).some(isModel3D))return;
   if (tool === 'anchor') return startAnchorTool(e);
 
-  /* Blender's B: the next drag box-selects wherever it starts. */
-  if (viewport3d?.takeBoxSelect()) return startSelectionMarquee(e);
   const [x, y] = toComp(e);
   const T = api.transport.time();
 
@@ -1998,17 +2000,12 @@ function onDown(e: any) {
     });
   }
   if (!L) return startSelectionMarquee(e);
-  /* Models, lights and cameras follow Blender: click selects (Shift extends and
-     sets the active item), Tweak drags grab, other tools box-select on drag. */
-  if (isModel3D(L)) {
-    if (viewport3d?.objectPress(e, L.id)) return;
-    return startSelectionMarquee(e, () => api.scene3d.viewport.run('select.click', L.id, e.shiftKey));
-  }
   if (e.shiftKey && api.selection.layers().includes(L.id)) {
     selectLayers(api.selection.layers().filter((id: any) => id !== L.id));
     return;
   }
   selectLayers(L.id, e.shiftKey);
+  if(isModel3D(L))return;
   const nextSelection = resolveSelectionGeometry(api, visualSelection(api), T, space3d);
   if (nextSelection) startMove(e, nextSelection.roots, T, { selectionLayers: nextSelection.layers });
 }
@@ -2054,10 +2051,9 @@ function startZoom(e: any): void {
   });
 }
 
-function startSelectionMarquee(e: any, click?: () => void): void {
+function startSelectionMarquee(e: any): void {
   const start = pointerComp(e);
   const before = [...api.selection.layers()];
-  const blender = !!api.scene3d?.viewport?.state().hasScene;
   let moved = false;
   beginDrag(e, {
     cursor: 'default',
@@ -2071,19 +2067,15 @@ function startSelectionMarquee(e: any, click?: () => void): void {
       const box = V.toolRect?.box as DragBox | undefined;
       clearToolRect();
       if (!moved || !box) {
-        if (click) click();
-        else if (!e.shiftKey) selectLayers([]);
+        if (!e.shiftKey) selectLayers([]);
         return;
       }
-      /* Models are box-selected when they touch the box (Blender); 2D layers when enclosed. */
       const enclosed = api.project.get().layers.filter((layer: any) => {
         if (!api.anim.active(layer, api.transport.time()) || layerTypeMeta(api, layer)?.pickable === false) return false;
         const bounds = layerWorldBounds(api, layer, api.transport.time(), space3d);
-        if (bounds && isModel3D(layer) && layer.type !== 'group') return bounds.x1 >= box.x0 && bounds.x0 <= box.x1 && bounds.y1 >= box.y0 && bounds.y0 <= box.y1;
         return !!bounds && bounds.x0 >= box.x0 && bounds.x1 <= box.x1 && bounds.y0 >= box.y0 && bounds.y1 <= box.y1;
       }).map((layer: any) => layer.id);
-      if (blender) api.scene3d.viewport.run('select.box', { ids: enclosed, rect: box, mode: e.ctrlKey || e.metaKey ? 'sub' : e.shiftKey ? 'add' : 'set' });
-      else if (!e.shiftKey) selectLayers(enclosed);
+      if (!e.shiftKey) selectLayers(enclosed);
       else {
         const next = new Set(before);
         for (const id of enclosed) next.has(id) ? next.delete(id) : next.add(id);
@@ -2189,7 +2181,7 @@ function openTextEditor(layer: any, options: Omit<TextEditOptions, 'drag' | 'onF
 function startText(e: any): void {
   const [hitX, hitY] = toComp(e);
   const hit = api.render.gl.pick(hitX, hitY, api.transport.time());
-  if (hit?.type === 'text' && !hit.lock && !e.shiftKey) {
+  if (hit?.type === 'text' && !layerIsLocked(api, hit) && !e.shiftKey) {
     openTextEditor(hit, { caretAt: { x: hitX, y: hitY } });
     return;
   }
@@ -2582,7 +2574,7 @@ function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T:
       const c = resolvedContent(api, L, T);
       return { w: Number(c.w) || 0, h: Number(c.h) || 0, stroke: Math.max(0, Number(c.stroke) || 0) };
     })(),
-    textOwnsDescendants: L.type === 'text' && api.project.get().layers.some((layer: any) => layer.parent === L.id),
+    ownsDescendants: api.project.get().layers.some((layer: any) => layer.parent === L.id),
   }));
   if (!snapshots.length) return;
 
@@ -2634,12 +2626,13 @@ function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T:
         const scaleX = next.scaleX, scaleY = next.scaleY;
         const pivot = next.pivotLocal;
         for (const snapshot of snapshots) {
-          if (snapshot.textSize != null && !snapshot.textOwnsDescendants) {
+          // Roots with children use transform scale so the whole subtree follows.
+          if (snapshot.textSize != null && !snapshot.ownsDescendants) {
             api.edit.dispatch({
               type: 'set_content', target: snapshot.L.id,
               patch: { size: api.util.round(Math.max(4, snapshot.textSize * scaleX), 2) },
             });
-          } else if (snapshot.shape) {
+          } else if (snapshot.shape && !snapshot.ownsDescendants) {
             const { w, h, stroke } = snapshot.shape;
             setOrKey(snapshot.L, 'c.w', api.util.round(Math.max(1, (w + stroke) * scaleX - stroke), 3), T);
             setOrKey(snapshot.L, 'c.h', api.util.round(Math.max(1, (h + stroke) * scaleY - stroke), 3), T);

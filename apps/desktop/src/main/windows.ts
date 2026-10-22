@@ -223,6 +223,24 @@ export function restorableSessions(
   return sessions;
 }
 
+/** Launch restores one active document; the other tabs remain in Recents.
+ * Old profiles have no focus record, so use their saved activity timestamps. */
+export function lastActiveSession(
+  lastActiveProject: unknown,
+  sessions: WindowSession[],
+  isKnown: (id: string) => boolean,
+  lastActiveAt: (id: string) => number,
+): WindowSession | null {
+  if (lastActiveProject !== undefined) {
+    return typeof lastActiveProject === 'string' && isKnown(lastActiveProject)
+      ? { tabs: [lastActiveProject], active: lastActiveProject } : null;
+  }
+  const candidates = sessions.filter(session => session.active && isKnown(session.active));
+  candidates.sort((a, b) => lastActiveAt(b.active!) - lastActiveAt(a.active!));
+  const active = candidates[0]?.active;
+  return active ? { tabs: [active], active } : null;
+}
+
 export interface ScreenRect { x: number; y: number; width: number; height: number }
 
 /** How far below a window's top edge a dropped tab still lands in its strip.

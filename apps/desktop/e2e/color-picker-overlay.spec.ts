@@ -10,18 +10,17 @@ test('color picker stays above adjacent panels and inside the viewport', async (
     const timeline = PM.Kernel.services.get('timeline');
     return Boolean(timeline?.cv);
   });
-  await page.evaluate(() => {
+  const fixture = await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Color picker overlay', dur: 5 }));
-    const layer = PM.mkLayer('shape', {
+    const added = PM.Edit.apply({
+      type: 'add_layer', layerType: 'shape', id: 'picker-shape',
       name: 'Orange shape',
-      dur: 5,
-      d: { shape: 'rect', color: '#FF6B1A', w: 180, h: 120 }
+      duration: 5, select: true,
+      content: { shape: 'rect', color: '#FF6B1A', w: 180, h: 120 }
     });
-    PM.proj.layers.push(layer);
-    PM.selectLayers(layer.id);
-    PM.bus.emit('layers');
-    PM.invalidate();
+    if (!added.ok) throw new Error(added.message);
+    return { id: 'picker-shape', history: PM.hist.list().length };
   });
 
   const fillRow = page.locator('#panel-inspector .row').filter({ has: page.locator('[data-property-path="c.color"]') });
@@ -41,6 +40,7 @@ test('color picker stays above adjacent panels and inside the viewport', async (
   });
   await eyedropper.click();
   await expect(page.getByRole('textbox', { name: 'Fill hex value', exact: true })).toHaveValue('#0A84FF / 100%');
+  expect(await page.evaluate(id => (window as any).PM.L(id).d.color, fixture.id)).toBe('#0A84FF');
 
   const geometry = await picker.evaluate(element => {
     const rect = element.getBoundingClientRect();
@@ -62,6 +62,10 @@ test('color picker stays above adjacent panels and inside the viewport', async (
   for (const top of [70, 520, 290]) {
     await page.keyboard.press('Escape');
     await expect(picker).toHaveCount(0);
+    expect(await page.evaluate(id => {
+      const PM = (window as any).PM;
+      return { selection: PM.sel.layers, color: PM.L(id).d.color, history: PM.hist.list().length };
+    }, fixture.id)).toEqual({ selection: [fixture.id], color: '#FF6B1A', history: fixture.history });
     const trigger = fillRow.locator('.color-field');
     await trigger.evaluate((element, y) => {
       Object.assign((element as HTMLElement).style, { position: 'fixed', top: `${y}px`, right: '24px' });

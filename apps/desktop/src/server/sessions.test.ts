@@ -22,6 +22,22 @@ function harness(slot: Record<string, unknown> = {}) {
 }
 
 describe('ProjectSessions', () => {
+  it('holds a store lease through the last member and saves before releasing it', () => {
+    const release = vi.fn();
+    const store = { read: vi.fn(() => null), set: vi.fn(), acquireProject: vi.fn(() => release) };
+    const sessions = new ProjectSessions(store, { channel: 'sync', version: 't' });
+    const a = member(1), b = member(2);
+    sessions.join(a, 'p1', { id: 'p1' }); sessions.join(b, 'p1', { id: 'p1' });
+    expect(store.acquireProject).toHaveBeenCalledExactlyOnceWith('p1');
+    expect(store.acquireProject.mock.invocationCallOrder[0]).toBeLessThan(store.read.mock.invocationCallOrder[0]!);
+    sessions.patch(a, 'p1', [{ path: ['name'], exists: true, value: 'saved' }]);
+    sessions.leave(a, 'p1');
+    expect(release).not.toHaveBeenCalled();
+    b.destroy();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(store.set.mock.invocationCallOrder[0]).toBeLessThan(release.mock.invocationCallOrder[0]!);
+  });
+
   it('seeds from the first member and forwards patches to the others only', () => {
     const { sessions } = harness();
     const a = member(1), b = member(2);

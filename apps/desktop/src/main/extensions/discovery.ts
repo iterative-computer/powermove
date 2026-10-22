@@ -104,14 +104,13 @@ async function enforceSourceFileLimit(root: string): Promise<void> {
     const directory = pending.pop();
     if (!directory) break;
 
-    const names = await readdir(directory);
-    for (const name of names) {
-      if (name.startsWith('.')) continue;
-      const itemPath = path.join(directory, name);
-      const stats = await lstat(itemPath);
-      if (stats.isSymbolicLink()) continue;
-      if (stats.isDirectory()) {
-        pending.push(itemPath);
+    // Directory entries already carry the file type. A separate lstat for
+    // every source file makes startup and refresh wait on hundreds of reads.
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        pending.push(path.join(directory, entry.name));
         continue;
       }
 

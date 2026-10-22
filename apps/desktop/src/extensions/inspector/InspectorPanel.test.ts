@@ -1156,6 +1156,25 @@ describe('InspectorPanel', () => {
     expect(point.querySelector('[aria-label="Add keyframe for Center Y"]')).not.toBeNull();
   });
 
+  it('falls back to available effect fields when an older instance lacks widget properties', () => {
+    const candidate = layer('A');
+    candidate.fx.push({ id: 'fx-old', type: 'old', on: true, p: {
+      centerX: { v: .4, kf: [], expr: null }, startColor: { v: '#112233', kf: [], expr: null }
+    } });
+    setup([candidate], ['A'], { fxOpen: true, effects: true, definitions: {
+      old: { label: 'Old effect', params: [
+        {k:'centerX',label:'Center X',min:0,max:1,def:0},
+        {k:'centerY',label:'Center Y',min:0,max:1,def:0},
+        {k:'startColor',label:'Start Color',type:'color',def:'#000000'},
+        {k:'endColor',label:'End Color',type:'color',def:'#FFFFFF'}
+      ] }
+    } });
+    expect(target.querySelector('.point-field')).toBeNull();
+    expect(target.querySelector('.ramp-field')).toBeNull();
+    expect(channelRow('A','fx-old.centerX').querySelector('[role="spinbutton"]')).not.toBeNull();
+    expect(target.querySelector('.color-field')).not.toBeNull();
+  });
+
   it('uses set_effect for toggles and exposes one controlled expansion button', () => {
     const candidate = layer('A');
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } });

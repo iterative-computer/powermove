@@ -16,6 +16,8 @@ type InspectorLayer = Layer & {
   [key: string]: any;
 };
 const inspectable = (layer: Layer): InspectorLayer => layer as InspectorLayer;
+export const isInspectorLayerEditable = (api: Pick<InspectorAPI, 'groups'>, layer: Layer): boolean =>
+  !layer.lock && !api.groups.ancestors(layer).some(group => group.lock);
 
 type ContentPatch = Extract<EditCommand, { type: 'set_content' }>['patch'];
 
@@ -86,7 +88,7 @@ function currentValue(api: InspectorAPI, layer: Layer | null, command: EditComma
 export function inspectorTargets(api: InspectorAPI, layer: Layer, path: string) {
   const selected = inspectorSelection(api, selectedLayers(api));
   return (selected.some((candidate) => candidate.id === layer.id) ? selected : [layer])
-    .filter((candidate) => !candidate.lock)
+    .filter((candidate) => isInspectorLayerEditable(api, candidate))
     .flatMap((candidate) => {
       const translated = translatePath(layer, candidate, path);
       return translated ? [{ layer: candidate, path: translated, prop: api.anim.findProp(candidate, translated) ?? inspectable(candidate).p?.[translated] }] : [];
@@ -101,7 +103,7 @@ export function createInspectorEdit(api: InspectorAPI) {
   const expandKeys = (commands: EditCommand[]): EditCommand[] => commands.flatMap((command) => {
     if (command.type !== 'set_property' || typeof command.value !== 'number' || command.mode === 'static') return [command];
     const layer = api.model.layer(String(command.target));
-    if (!layer || layer.lock) return [command];
+    if (!layer || !isInspectorLayerEditable(api, layer)) return [command];
     const prop = api.anim.findProp(layer, command.path) ?? inspectable(layer).p?.[command.path];
     const selected = new Set(api.selection.keys());
     const keys = prop?.kf?.filter((key) => selected.has(key.i) && typeof key.v === 'number') ?? [];
@@ -123,7 +125,7 @@ export function createInspectorEdit(api: InspectorAPI) {
 
   const expand = (input: EditCommand | EditCommand[], relative = false): EditCommand[] => {
     const allSelected = selectedLayers(api);
-    const selected = inspectorSelection(api, allSelected).filter((layer) => !layer.lock);
+    const selected = inspectorSelection(api, allSelected).filter((layer) => isInspectorLayerEditable(api, layer));
     const first = inspectorSelection(api, allSelected)[0];
     return ([] as EditCommand[]).concat(input).flatMap((command) => {
       if (!first || !('target' in command) || command.target !== first.id || allSelected.length < 2) return [command];
@@ -199,7 +201,7 @@ export function createInspectorEdit(api: InspectorAPI) {
 /** `time` is the one the inspector shows; the edit paths read the transport's own. */
 export function inspectorMixed(api: InspectorAPI, binding: ControlEditBinding, value: unknown, time = api.transport.time()): boolean {
   if (binding.mode !== 'command' || typeof binding.command !== 'function') return false;
-  const selected = inspectorSelection(api, selectedLayers(api)).filter((layer) => !layer.lock);
+  const selected = inspectorSelection(api, selectedLayers(api)).filter((layer) => isInspectorLayerEditable(api, layer));
   if (selected.length < 2) return false;
   const primary = selected[0]!;
   const commands = ([] as EditCommand[]).concat(binding.command(value));

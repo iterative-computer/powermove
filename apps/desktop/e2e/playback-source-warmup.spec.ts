@@ -1,5 +1,72 @@
 import { expect, test } from './helpers/app';
 
+test('prepares editable paths for a held zoom cut without allocating huge background bitmaps', async ({ session }) => {
+  await session.openEditor();
+  const { page } = session;
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const p = PM.mkProject({ name: 'Path zoom cut', w: 640, h: 360, dur: 8, fps: 30 });
+    const camera = PM.mkLayer('null', {}, p);
+    for (const channel of ['scale.x', 'scale.y']) camera.p[channel].kf = [
+      { ...PM.KF(0, 150, 'linear'), outInterp: 'hold', hold: true }, PM.KF(4, 100, 'linear'),
+    ];
+    const path = (size: number, color: string) => ({ id: PM.uid('path'), parent: null, name: 'Rectangle',
+      p: Object.fromEntries(Object.entries({ x: 0, y: 0, rotation: 0, scaleX: 100, scaleY: 100,
+        closed: true, fill: color, fillEnabled: true, fillOpacity: 100, stroke: color, strokeWidth: 0,
+        strokeOpacity: 100, trimStart: 0, trimEnd: 100, trimOffset: 0, copies: 1,
+        repeatX: 0, repeatY: 0, repeatRotation: 0 }).map(([key, value]) => [key, PM.P(value)])),
+      vertices: [[-size, -size], [size, -size], [size, size], [-size, size]].map(([x, y]) => ({ id: PM.uid('v'),
+        p: Object.fromEntries(Object.entries({ x, y, inX: 0, inY: 0, outX: 0, outY: 0 }).map(([key, value]) => [key, PM.P(value)])) })),
+    });
+    const background = PM.mkLayer('shape', { parent: camera.id, d: { paths: [path(4000, '#232323')] } }, p);
+    const tiles = Array.from({ length: 24 }, (_, i) => PM.mkLayer('shape', {
+      parent: camera.id, d: { paths: [path(8, '#' + (0x200000 + i * 4000).toString(16))] },
+      p: { 'position.x': 25 + i % 8 * 70, 'position.y': 25 + Math.floor(i / 8) * 70 },
+    }, p));
+    for (const layer of [...tiles, background]) layer.parent = camera.id;
+    p.layers = [camera, ...tiles, background];
+    // Keep independent card-thumbnail renders from warming the fixture at a
+    // different resolution before this source-preparation check.
+    PM.interactionActive = () => true;
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: p }));
+    PM.ProjectsScreen.hide(); PM.perf.auto = false; PM.quality = 1; PM.pause();
+    const viewer = PM.Kernel.services.get('viewer'); viewer.fit = false; viewer.zoom = .618; viewer.pan = [0, 0]; viewer.layout();
+    (window as any).cutWarmLayers = new Set();
+    const raster = PM.raster;
+    PM.raster = (...args: any[]) => {
+      if (args[2] === 4 && PM.time < 4 && args[5] === 4 * 1024 * 1024) (window as any).cutWarmLayers.add(args[0].id);
+      return raster(...args);
+    };
+    PM.setTime(3);
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).cutWarmLayers.size), { timeout: 3000 }).toBe(25);
+  const result = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.agentFrameCapture = true;
+    const gl = PM.GL.gl, upload = gl.texImage2D;
+    let uploads = 0;
+    gl.texImage2D = function (...args: any[]) { if (args.length === 6) uploads++; return upload.apply(this, args); };
+    const read = (sourceClipping: boolean) => {
+      PM.GL.render(4, { mblur: false, sourceClipping });
+      const pixels = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+      gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      return pixels;
+    };
+    const first = read(true), entranceUploads = uploads;
+    gl.texImage2D = upload;
+    const bytes = PM.GL.memoryStats().textures.bytes;
+    const reference = read(false);
+    let maxDifference = 0;
+    for (let i = 0; i < first.length; i++) maxDifference = Math.max(maxDifference, Math.abs(first[i]! - reference[i]!));
+    return { entranceUploads, bytes, maxDifference, time: PM.time };
+  });
+  expect(result.entranceUploads).toBe(0);
+  expect(result.bytes).toBeLessThan(16 * 1024 * 1024);
+  expect(result.maxDifference).toBeLessThanOrEqual(1);
+  expect(result.time).toBe(3);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
 for (const threeD of [false, true]) {
 for (const paused of [false, true]) {
 test(`prepares a dense ${threeD ? '3D' : '2D'} group entrance while ${paused ? 'paused just before it' : 'playing'}`, async ({ session }) => {

@@ -61,8 +61,7 @@ export type LaunchedApp = {
   /** A fresh profile boots to the Projects home screen. Specs that exercise
    * editor panels open an empty composition first, the way a user would. */
   openEditor(): Promise<void>;
-  /** Opens the agent popover under its titlebar launcher. Sending a message
-   * folds it away, so call again to read the conversation after a send. */
+  /** Opens the agent popover under its titlebar launcher. */
   openAgent(): Promise<void>;
   close(): Promise<void>;
 };
@@ -151,6 +150,8 @@ async function startElectron(
   instrument(page);
   await page.waitForLoadState('domcontentloaded');
   await page.waitForFunction(() => Boolean((window as any).PM));
+  await page.waitForFunction(() => Boolean((window as any).PM?.app));
+  await page.evaluate(async () => { await (window as any).PM.projectReady; });
   return { app, page };
 }
 

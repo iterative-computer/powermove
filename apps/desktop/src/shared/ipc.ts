@@ -46,10 +46,6 @@ export const IPC = {
   clipboardWriteText: 'clipboard:write-text',
   mediaPaste: 'media:paste',
 
-  blenderStatus: 'blender:status',
-  blenderChoose: 'blender:choose',
-  blenderRun: 'blender:run',
-  blenderCancel: 'blender:cancel',
   renderStart: 'render:start',
   renderWrite: 'render:write',
   renderFinish: 'render:finish',
@@ -121,6 +117,7 @@ export const IPC = {
   storeSnapshotSerializedSync: 'store:snapshot-serialized-sync',
   storeBootstrapSync: 'store:bootstrap-sync',
   storeGetEncodedSync: 'store:get-encoded-sync',
+  storeGetEncoded: 'store:get-encoded',
   storeSnapshotSync: 'store:snapshot-sync', // ipcRenderer.sendSync from preload, boot barrier only
   storeSet: 'store:set',
   storeSetSerialized: 'store:set-serialized',
@@ -292,10 +289,12 @@ export interface ProjectSaveRequest {
   linked?: import('./project-incremental').LinkedRecord[];
 }
 export type ProjectSaveBeginResult = { ok: true; token: string; required: string[] } | { ok: false; cancelled: boolean; error?: string };
-export type ProjectOpenResult = {
+export type ProjectOpenResult = ({
   ok: true; path: string; projectId: string; token: string; size: number;
-  document: any; media: import('./project-container').ProjectMediaRange[];
-} | { ok: true; path: string; projectId: string; data: Uint8Array }
+  media: import('./project-container').ProjectMediaRange[];
+} & ({ document: any; documentRange?: import('./project-incremental').ProjectRecord }
+  | { document?: never; documentRange: import('./project-incremental').ProjectRecord }))
+  | { ok: true; path: string; projectId: string; data: Uint8Array }
   | { ok: false; cancelled: boolean; error?: string };
 export type CloseDecision = 'save' | 'discard' | 'cancel';
 /** The longest text `clipboard:write-text` takes: 1 MB of UTF-16. */
@@ -397,7 +396,13 @@ export type CodexRunResult =
       /** One history entry containing every live edit made during this run. */
       liveEditHistoryId?: string;
     }
-  | { ok: false; error: string; cancelled: boolean };
+  | {
+      ok: false;
+      error: string;
+      cancelled: boolean;
+      /** An extension publication conflict must not roll back completed project tools. */
+      preserveLiveEdits?: boolean;
+    };
 
 export interface CodexCancelRequest {
   id: string;
@@ -760,15 +765,10 @@ export interface PowermoveBridge {
   /** Native user-initiated media paste. Returns false when there is no media; exposes no clipboard data. */
   pasteMedia?(): Promise<boolean>;
 
-  blender?: {
-    status(): Promise<import('./blender').BlenderStatus>;
-    choose(): Promise<import('./blender').BlenderStatus | null>;
-    run(job: import('./blender').BlenderJob): Promise<import('./blender').BlenderOutput>;
-    cancel(): Promise<void>;
-  };
   render: {
-    start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number}):Promise<string | null>;
-    write(token:string,data:Uint8Array,audio?:boolean):Promise<void>;
+    start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number;expectsAudio?:boolean}):Promise<string | null>;
+    write(token:string,data:Uint8Array,audio?:boolean,retain?:boolean):Promise<void>;
+    repeat?(token:string,count:number):Promise<void>;
     finish(token:string):Promise<{path?:string;cancelled?:boolean}>;
     cancel(token:string):Promise<void>;
   };
@@ -868,6 +868,7 @@ export interface PowermoveBridge {
     snapshotSerializedSync?(): Record<string, string>;
     bootstrapSerializedSync?(): Record<string, string>;
     getEncodedSync?(key: string): string | null;
+    getEncoded?(key: string): Promise<string | null>;
     snapshot(): Promise<StoreSnapshot>;
     set(key: string, value: unknown): void;
     setSerialized?(key: string, serialized: string): Promise<void>;

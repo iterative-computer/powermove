@@ -1,6 +1,6 @@
 import { validateFrameRate } from '../../../../shared/frame-rate';
-import {sceneProperties} from '../../core/scene3d/schema';
 import { CHANNELS_3D } from './space-3d';
+import { normalizeColorDepth } from '../../core/color-depth';
 /* Ported from js/core/model.js — behavior-preserving. */
 import { normalizeExportDefaults } from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
@@ -193,6 +193,7 @@ PM.normalizeFill = (value: any, fallback = '#000000') => {
 
 PM.mkProject = (o: any = {}) => ({
   id: uid('P'),
+  colorDepth: normalizeColorDepth(o.colorDepth),
   name: o.name || 'Untitled',
   w: o.w || 1920, h: o.h || 1080, fps: o.fps || 30, dur: o.dur || 10,
   /* The exact rate beside the float (docs/rust-engine.md, section 5, rule 1). */
@@ -278,7 +279,6 @@ PM.cloneLayer = (L: any) => {
   (c.masks || []).forEach((mask: any) => { renew(mask.shape); renew(mask.mode); renew(mask.on); });
   Object.values(c.d?.uniforms || {}).forEach(renew);
   Object.values(c.d?.params || {}).forEach(renew);
-  for(const {prop} of sceneProperties(c))renew(prop);
   for (const field of ['transitionIn', 'transitionOut']) Object.values(c[field]?.p || {}).forEach(renew);
   return c;
 };

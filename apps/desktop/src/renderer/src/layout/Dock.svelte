@@ -6,6 +6,7 @@
   import { defaultDockSize, type DockSpec, type PanelSpec } from './model';
   import { panelSlot } from './portal';
   import { roundedScroll } from './rounded-scroll';
+  import { routeSideWheel, SIDE_DOCKS } from './side-scroll';
   import Splitter from './Splitter.svelte';
 
   let {
@@ -30,9 +31,16 @@
      surrounding panels settle into their final sizes before it arrives. */
   const ghost = $derived(agentState.phase === 'running' ? agentState.uiPlacement : null);
   const ghostSlot = $derived(ghostSlotIndex(ghost, dock.id, specs.map(spec => spec.id)));
+
+  /* Not passive: when no panel inside can move, the column takes the wheel. */
+  function sideWheel(node: HTMLElement, id: string) {
+    const onWheel = (event: WheelEvent): void => routeSideWheel(node, event);
+    if (SIDE_DOCKS.has(id)) node.addEventListener('wheel', onWheel, { passive: false });
+    return { destroy: () => node.removeEventListener('wheel', onWheel) };
+  }
 </script>
 
-<div class="dock col" id={`dock-${dock.id}`} data-dock={dock.id} style:flex={dockFlex} use:roundedScroll>
+<div class="dock col" id={`dock-${dock.id}`} data-dock={dock.id} style:flex={dockFlex} use:roundedScroll use:sideWheel={dock.id}>
   {#each specs as spec, index (spec.id)}
     {#if index > 0}
       <Splitter

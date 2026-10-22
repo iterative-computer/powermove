@@ -13,6 +13,7 @@ export const STATIC_KEYS = [
   // profile can still be read once.
   'openWindows',
   'windowTabs',
+  'lastActiveProject',
   'openTabs',
   'restoreWindows',
   'autoDownloadCloudMedia',
@@ -21,6 +22,7 @@ export const STATIC_KEYS = [
   'useNewEngine',
   // "Scrub audio" (the new engine's transport; Settings › General › Engine).
   'audioScrub',
+  'previewResolution',
   'projectTrash',
   'takes',
   'workspaces',
@@ -51,6 +53,8 @@ export const STATIC_KEYS = [
   'agentAutoApplyPanels',
   'extensions',
   'activeTheme',
+  'extensionWorkspaceAppearance',
+  'extensionThemeAppearance',
   // Powermove Cloud account. Design pass: a local record of the signed-in
   // user, no credentials. Real sessions will belong in the keychain.
   'cloudAccount'

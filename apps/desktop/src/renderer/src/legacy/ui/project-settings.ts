@@ -10,6 +10,7 @@ import {
 } from '../../core/export-defaults';
 import { writableFormat } from '../../../../shared/delivery';
 import { createSettingsSection } from './settings-section';
+import { COLOR_DEPTH_OPTIONS, normalizeColorDepth, type ColorDepth } from '../../core/color-depth';
 import { PRECISION_OPTIONS, type ProjectColorSettings } from '../../../../shared/project-color';
 import { bridge as hostBridge } from '../../kernel/bridge';
 
@@ -25,6 +26,7 @@ export function deliveryEngineOn(): boolean {
 
 /** Composition fields the Project tab and the New project dialog both edit. */
 export interface CompositionValues {
+  colorDepth?: ColorDepth;
   name: string;
   w: number;
   h: number;
@@ -34,6 +36,7 @@ export interface CompositionValues {
 
 /** Field names accepted by the `set_composition` edit command. */
 export interface CompositionPatch {
+  colorDepth?: ColorDepth;
   name?: string;
   width?: number;
   height?: number;
@@ -42,6 +45,7 @@ export interface CompositionPatch {
 }
 
 export interface ProjectSettingsBridge {
+  supportedColorDepths?(): readonly ColorDepth[];
   /** Current composition, re-read on every refresh. */
   composition(): CompositionValues;
   applyComposition(patch: CompositionPatch): void;
@@ -285,6 +289,9 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   const frameRate = numberInput('Frame rate', MIN_FRAME_RATE, MAX_FRAME_RATE, 0.001);
   const duration = numberInput('Duration in seconds', MIN_DURATION, MAX_DURATION, 0.5);
 
+  const colorDepth = select('Color depth');
+  fillOptions(colorDepth, COLOR_DEPTH_OPTIONS);
+
   const sizeRow = row('Size', 'Width and height of every frame, in pixels.', size);
   const durationRow = row('Duration', 'Total length of the composition, in seconds.', duration);
   composition.body.append(
@@ -292,7 +299,8 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
     row('Resolution', 'Pick a common size, or set your own pixel dimensions.', preset).element,
     sizeRow.element,
     row('Frame rate', 'Frames rendered per second of the composition, from 1 to 240, including 23.976, 29.97, and 59.94.', frameRate).element,
-    durationRow.element
+    durationRow.element,
+    row('Color depth', 'Precision per color channel. Applies to every composition in this project.', colorDepth).element
   );
 
   let backgroundControl: HTMLElement | null = null;
@@ -433,6 +441,9 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
     if (!editing(height)) height.value = String(current.h);
     if (!editing(frameRate)) frameRate.value = String(current.fps);
     if (!editing(duration)) duration.value = String(current.dur);
+    colorDepth.value = String(normalizeColorDepth(current.colorDepth));
+    const supported = bridge.supportedColorDepths?.();
+    for (const item of colorDepth.options) item.disabled = !!supported && !supported.includes(Number(item.value) as ColorDepth);
     if (backgroundSwatch && bridge.background && !editing(backgroundSwatch)) {
       backgroundSwatch.value = bridge.background().toLowerCase();
     }
@@ -514,6 +525,11 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   duration.addEventListener('change', () => {
     const next = clampDuration(duration.value, current.dur);
     if (next !== current.dur) bridge.applyComposition({ duration: next });
+    refresh();
+  });
+  colorDepth.addEventListener('change', () => {
+    const next = normalizeColorDepth(Number(colorDepth.value));
+    if (next !== normalizeColorDepth(current.colorDepth)) bridge.applyComposition({ colorDepth: next });
     refresh();
   });
 
@@ -608,6 +624,13 @@ export function createNewProjectForm(
   let backgroundValue = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(seed.bg) ? seed.bg.toUpperCase() : NEW_PROJECT_DEFAULTS.bg;
   const element = document.createElement('div');
   element.className = 'new-project-form';
+  // Initial focus is deferred until the modal mounts. Rapid entry may already
+  // have moved to another field or positioned a caret before that callback runs.
+  let interacted = false;
+  const markInteraction = (): void => { interacted = true; };
+  for (const event of ['pointerdown', 'keydown', 'input']) {
+    element.addEventListener(event, markInteraction, { capture: true });
+  }
 
   const field = (label: string, control: HTMLElement | HTMLElement[]): HTMLElement => {
     const wrap = document.createElement('label');
@@ -699,6 +722,11 @@ export function createNewProjectForm(
       dur: clampDuration(duration.value, seed.dur),
       bg: backgroundValue
     }),
-    focus: () => { name.focus(); name.select(); }
+    focus: () => {
+      if (!element.isConnected || interacted
+        || (element.contains(document.activeElement) && document.activeElement !== name)) return;
+      name.focus();
+      name.select();
+    }
   };
 }

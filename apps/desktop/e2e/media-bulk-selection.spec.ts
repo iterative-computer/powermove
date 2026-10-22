@@ -25,6 +25,9 @@ test('drag a selection box, delete media, and undo the whole batch in both theme
     if (theme === 'light') await importMedia(page);
     const list = page.getByRole('listbox', { name: 'Project media' });
     const cards = page.locator('.asset-card[data-asset-id]');
+    // The previous marquee scrolls the list; Undo restores media, not its viewport.
+    await list.evaluate(element => { element.scrollTop = 0; });
+    await expect.poll(() => list.evaluate(element => element.scrollTop)).toBe(0);
     const bounds = await list.boundingBox();
     const first = await cards.first().boundingBox();
     const last = await cards.last().boundingBox();

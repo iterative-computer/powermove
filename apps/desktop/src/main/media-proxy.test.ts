@@ -1,4 +1,5 @@
 import { copyFile, mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -219,7 +220,7 @@ describe('animated image conversion', () => {
     const handlers = new Map<string, (...args: any[]) => any>();
     registerMediaProxyIpc({ handle: (channel: string, handler: (...args: any[]) => any) => handlers.set(channel, handler) } as unknown as IpcMain,
       service, { isTrustedSender: () => true });
-    const event = { sender: { isDestroyed: () => true, send: () => undefined } } as unknown as IpcMainInvokeEvent;
+    const event = { sender: Object.assign(new EventEmitter(), { isDestroyed: () => false, send: () => undefined }) } as unknown as IpcMainInvokeEvent;
 
     const token = await handlers.get(IPC.mediaAnimationBegin)!(event, { fps: 30, repeats: [1] });
     await handlers.get(IPC.mediaAnimationFrame)!(event, { token, index: 0, offset: 0, data: Buffer.from('x') });

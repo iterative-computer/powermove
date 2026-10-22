@@ -1,7 +1,4 @@
 import * as THREE from 'three';
-import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
-let areaLightsReady=false;
-import {materialPreview} from './materials';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { parseScene, type Scene3D, type SceneObject, type SceneSource } from './schema';
 
@@ -20,7 +17,6 @@ export function primitiveGeometry(source: SceneSource): THREE.BufferGeometry {
     if (m.indices) g.setIndex(m.indices);
     if (m.normals) g.setAttribute('normal',new THREE.Float32BufferAttribute(m.normals,3)); else g.computeVertexNormals();
     if (m.uvs) g.setAttribute('uv',new THREE.Float32BufferAttribute(m.uvs,2));
-    for(const group of m.groups || [])g.addGroup(group.start,group.count,group.materialIndex);
     return g;
   }
   if ('lathe' in source) return new THREE.LatheGeometry(source.lathe.map(v=>new THREE.Vector2(...v)),source.segments || 48);
@@ -146,38 +142,27 @@ export class SceneRuntime {
       const v = values(node.p,`o.${node.id}`);
       object.position.set(v.x,v.y,v.z);object.rotation.set(radians(v.rx),radians(v.ry),radians(v.rz),'XYZ');
       object.scale.set(v.sx,v.sy,v.sz);object.visible=v.visible !== false;
+      const m = values(node.material.p,`o.${node.id}.m`), maps=node.material.maps;
       this.traverseOwned(object,(c:any)=>{
         c.userData.sceneId=node.id;
         if (!c.isMesh) return;
         c.castShadow=node.castShadow;c.receiveShadow=node.receiveShadow;
-        if(c.userData.missing)return;
-        const definitions=node.slots?.length?node.slots.map(s=>s.material):[node.material];
-        if(node.useSourceMaterials && !node.slots?.length)return;
-        const existing=Array.isArray(c.material)?c.material:[c.material];
-        const list=definitions.map((definition,index)=>{
-          const preview=materialPreview(definition),m=values(preview.p,`o.${node.id}.m`),maps=definition.maps;
-          const material=existing[index] instanceof THREE.MeshStandardMaterial?existing[index]:new THREE.MeshStandardMaterial();
-          material.name=node.slots?.[index]?.name || definition.shader?.name || 'Surface';
-          material.color.set(m.color);material.roughness=m.roughness;material.metalness=m.metalness;
-          material.emissive.set(m.emissive);material.emissiveIntensity=m.emissiveIntensity;
-          const transparent=m.opacity<1,side=definition.doubleSided?THREE.DoubleSide:THREE.FrontSide;
-          if(transparent!==material.transparent||side!==material.side)material.needsUpdate=true;
-          material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;
-          for(const [key,slot,isColor] of [['color','map',true],['normal','normalMap',false],['roughness','roughnessMap',false],['metalness','metalnessMap',false],['emissive','emissiveMap',true],['ao','aoMap',false]] as const){
-            const texture=this.texture(maps[key],isColor);
-            const placement=definition.placement,placementKey=texture&&placement?JSON.stringify([maps[key],placement]):null;
-            const previous=material[slot];
-            if(placementKey&&placement){
-              if(material.userData[slot+'Placement']!==placementKey){
-                if(previous?.userData.scenePlacement)previous.dispose();
-                const copy=texture!.clone();copy.repeat.set(placement.scaleX,placement.scaleY);copy.offset.set(placement.offsetX,placement.offsetY);copy.rotation=radians(placement.rotation);copy.userData.scenePlacement=true;copy.needsUpdate=true;material[slot]=copy;material.needsUpdate=true;material.userData[slot+'Placement']=placementKey;
-              }
-            }else if(previous!==texture){if(previous?.userData.scenePlacement)previous.dispose();material[slot]=texture;material.needsUpdate=true;delete material.userData[slot+'Placement'];}
-          }
-          return material;
-        });
-        for(const material of existing)if(!list.includes(material))material.dispose();
-        c.material=node.slots?.length?list:list[0];
+        if (c.userData.missing || node.useSourceMaterials) return;
+        if (!(c.material instanceof THREE.MeshStandardMaterial) || Array.isArray(c.material)) {
+          for (const material of Array.isArray(c.material)?c.material:[c.material]) material.dispose();
+          c.material=new THREE.MeshStandardMaterial();
+        }
+        const material=c.material as THREE.MeshStandardMaterial;
+        material.color.set(m.color);material.roughness=m.roughness;material.metalness=m.metalness;
+        material.emissive.set(m.emissive);material.emissiveIntensity=m.emissiveIntensity;
+        const transparent=m.opacity<1,side=node.material.doubleSided?THREE.DoubleSide:THREE.FrontSide;
+        if (transparent!==material.transparent || side!==material.side) material.needsUpdate=true;
+        material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;
+        for (const [key,slot,isColor] of [['color','map',true],['normal','normalMap',false],['roughness','roughnessMap',false],
+          ['metalness','metalnessMap',false],['emissive','emissiveMap',true],['ao','aoMap',false]] as const) {
+          const texture=this.texture(maps[key],isColor);
+          if (material[slot]!==texture) { material[slot]=texture;material.needsUpdate=true; }
+        }
       });
       this.mixers.get(node.id)?.mixer.setTime(Math.max(0,animationTime?.(node.id) ?? time));
     }
@@ -191,8 +176,7 @@ export class SceneRuntime {
       let object=this.objects.get(node.id) as THREE.Light|undefined;
       if (!object || object.userData.lightType!==node.type) {
         if (object) this.remove(node.id,object);
-        if(node.type==='area'&&!areaLightsReady){RectAreaLightUniformsLib.init();areaLightsReady=true;}
-        object=node.type==='sun'?new THREE.DirectionalLight():node.type==='spot'?new THREE.SpotLight():node.type==='area'?new THREE.RectAreaLight():new THREE.PointLight();
+        object=node.type==='sun'?new THREE.DirectionalLight():node.type==='spot'?new THREE.SpotLight():new THREE.PointLight();
         object.userData.lightType=node.type;object.userData.sceneId=node.id;this.objects.set(node.id,object);this.scene.add(object);
         if ('target' in object) this.scene.add((object as THREE.DirectionalLight).target);
       }
@@ -202,8 +186,6 @@ export class SceneRuntime {
       const light=object as any;
       light.castShadow=node.castShadow && data.environment.shadows && shadowLights++<4;
       if (light.target) light.target.position.set(v.targetX,v.targetY,v.targetZ);
-      // Area lights face their target and have a real size; they cast no native shadows.
-      if (light.isRectAreaLight) { light.width=v.width;light.height=v.height;light.castShadow=false;light.lookAt(v.targetX,v.targetY,v.targetZ); }
       if ('distance' in light) { light.distance=v.distance;light.decay=v.decay; }
       if ('angle' in light) { light.angle=radians(v.angle);light.penumbra=v.penumbra; }
       if (light.shadow) {
@@ -225,7 +207,7 @@ export class SceneRuntime {
     this.scene.background=data.environment.background?new THREE.Color(data.environment.background):null;
     if (this.renderer) { this.renderer.toneMappingExposure=environment.exposure;this.renderer.shadowMap.enabled=data.environment.shadows; }
     this.scene.updateMatrixWorld(true);this.camera.updateMatrixWorld(true);this.revision++;
-    const textureKeys=new Set(data.objects.flatMap(o=>[o.material,...(o.slots||[]).map(s=>s.material)].flatMap(m=>Object.entries(m.maps).map(([slot,id])=>`${id}:${slot==='color'||slot==='emissive'}`))));
+    const textureKeys=new Set(data.objects.flatMap(o=>Object.entries(o.material.maps).map(([slot,id])=>`${id}:${slot==='color'||slot==='emissive'}`)));
     for(const [key,entry] of this.textures)if(!textureKeys.has(key)){entry.texture.dispose();this.textures.delete(key);}
   }
 
@@ -235,23 +217,7 @@ export class SceneRuntime {
     else { camera.left=-3*aspect;camera.right=3*aspect;camera.top=3;camera.bottom=-3; }
     camera.updateProjectionMatrix();camera.updateMatrixWorld();
   }
-  /** `look` is the editor's Wireframe shading and X-ray; output never sets it. */
-  render(w:number,h:number,objectId?:string,depthIds?:Set<string>,background=true,camera=this.camera,look:{wireframe?:boolean;xray?:boolean}={}): HTMLCanvasElement {
-    const saved:[any,{wireframe:boolean;transparent:boolean;opacity:number;depthWrite:boolean}][]=[];
-    if(look.wireframe||look.xray)this.scene.traverse((child:any)=>{
-      if(!child.isMesh)return;
-      for(const material of Array.isArray(child.material)?child.material:[child.material]){
-        if(!material||saved.some(([m])=>m===material))continue;
-        saved.push([material,{wireframe:!!material.wireframe,transparent:material.transparent,opacity:material.opacity,depthWrite:material.depthWrite}]);
-        if(look.wireframe&&'wireframe' in material)material.wireframe=true;
-        // X-ray: models become see-through and stop hiding one another.
-        if(look.xray){material.transparent=true;material.opacity*=.45;material.depthWrite=false;}
-      }
-    });
-    try{return this.renderPass(w,h,objectId,depthIds,background,camera,`${!!look.wireframe}:${!!look.xray}`);}
-    finally{for(const [material,old] of saved)Object.assign(material,old);}
-  }
-  private renderPass(w:number,h:number,objectId:string|undefined,depthIds:Set<string>|undefined,background:boolean,camera:THREE.PerspectiveCamera|THREE.OrthographicCamera,lookKey=''): HTMLCanvasElement {
+  render(w:number,h:number,objectId?:string,depthIds?:Set<string>,background=true,camera=this.camera): HTMLCanvasElement {
     if (!this.renderer) {
       // Output passes share one GPU context; a project can contain many 3D layers.
       outputRenderer ??= new THREE.WebGLRenderer({alpha:true,antialias:true,preserveDrawingBuffer:true,premultipliedAlpha:true});
@@ -275,8 +241,7 @@ export class SceneRuntime {
       const saved=new Map<THREE.Material,{colorWrite:boolean;depthWrite:boolean;visible:boolean}>();
       const originalBackground=this.scene.background,originalAutoClear=this.renderer.autoClear;
       const autoShadow=this.renderer.shadowMap.autoUpdate;
-      // The editor's X-ray writes no depth; its prepass must never be reused for output.
-      const depthKey=`${lookKey}:${this.revision}:${width}:${height}:${camera.matrixWorld.elements}:${camera.projectionMatrix.elements}:${[...(depthIds || this.objects.keys())].sort().join(',')}`;
+      const depthKey=`${this.revision}:${width}:${height}:${camera.matrixWorld.elements}:${camera.projectionMatrix.elements}:${[...(depthIds || this.objects.keys())].sort().join(',')}`;
       const visit=(phase:'depth'|'color')=>{
         this.scene.traverse((child:any)=>{
           if(!child.isMesh)return;

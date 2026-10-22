@@ -22,6 +22,7 @@ const QUIT_FLUSH_CEILING_MS = 5_000;
    encoded, so this wait is rare; the ceiling bounds it if the worker hangs. */
 const SYNC_READ_CEILING_MS = 5_000;
 const LAZY_KEY = /^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./;
+const PROJECT_PREFIXES = ['project', 'projectHistory', 'projectState', 'projectJournal', 'agentThreads'];
 
 export type StoreFileSystem = Pick<
   typeof nodeFs,
@@ -31,9 +32,14 @@ export type StoreFileSystem = Pick<
 export interface Store {
   load(): Promise<void>;
   snapshot(): StoreSnapshot;
+  preload?(key: string): Promise<void>;
+  preloadProject?(id: string): Promise<void>;
+  /** Independent consumers hold a lease until their project session ends. */
+  acquireProject?(id: string): () => void;
   get?(key: string): unknown;
   getSerialized?(key: string): string | null;
   getEncodedSerialized?(key: string): string | null;
+  getEncodedSerializedAsync?(key: string): Promise<string | null>;
   bootstrapSerialized?(): Record<string, string>;
   snapshotSerialized?(): Record<string, string>;
   /** Throws for an unknown key; the promise rejects if the value is refused. */
@@ -122,7 +128,7 @@ type Waiter = { resolve: (value: unknown) => void; reject: (error: unknown) => v
 class FileStore implements Store {
   private readonly committed = new Map<string, Buffer>();
   /** Keys whose newest set or delete the engine has not answered yet. */
-  private readonly unsettled = new Map<string, { id: number; present: boolean }>();
+  private readonly unsettled = new Map<string, { id: number; present: boolean; settled: Promise<unknown> }>();
   /** Keys whose newest committed value has not reached disk yet. */
   private readonly unwritten = new Map<string, number>();
   private readonly waiters = new Map<number, Waiter>();
@@ -143,9 +149,11 @@ class FileStore implements Store {
     await this.request(id => ({ op: 'load', id }));
   }
 
+  /** Snapshots are bootstrap metadata, never a full-store materialization. */
   snapshot(): StoreSnapshot {
-    this.settle();
-    return Object.fromEntries([...this.committed].map(([key, bytes]) => [key, unpackStoredHistory(key, JSON.parse(bytes.toString('utf8')))]));
+    const bootstrap = this.bootstrapSerialized();
+    if (bootstrap.__powermoveLazyKeys === '[]') delete bootstrap.__powermoveLazyKeys;
+    return Object.fromEntries(Object.entries(bootstrap).map(([key, value]) => [key, JSON.parse(value)]));
   }
 
   get(key: string): unknown {
@@ -159,10 +167,7 @@ class FileStore implements Store {
     return this.serialized(key);
   }
 
-  snapshotSerialized(): Record<string, string> {
-    this.settle();
-    return Object.fromEntries([...this.committed.keys()].map(key => [key, this.serialized(key)!]));
-  }
+  snapshotSerialized(): Record<string, string> { return this.bootstrapSerialized(); }
 
   getEncodedSerialized(key: string): string | null {
     if (!parseStoreKey(key)) return null;
@@ -185,6 +190,33 @@ class FileStore implements Store {
     }
     snapshot.__powermoveLazyKeys = JSON.stringify(lazy);
     return snapshot;
+  }
+
+  /* Main keeps every key's encoded bytes once loaded, so preloading only waits
+     (without blocking this thread) for a value the engine is still encoding. */
+  async preload(key: string): Promise<void> {
+    if (!parseStoreKey(key)) return;
+    for (let pending = this.unsettled.get(key); pending; pending = this.unsettled.get(key)) {
+      await pending.settled.catch(() => undefined);
+      if (this.unsettled.get(key) === pending) break;
+    }
+  }
+
+  async getEncodedSerializedAsync(key: string): Promise<string | null> {
+    if (!parseStoreKey(key)) return null;
+    await this.preload(key);
+    return this.committed.get(key)?.toString('utf8') ?? null;
+  }
+
+  async preloadProject(id: string): Promise<void> {
+    for (const prefix of PROJECT_PREFIXES) await this.preload(`${prefix}.${id}`);
+  }
+
+  /** Independent consumers hold a lease until their project session ends. */
+  acquireProject(id: string): () => void {
+    if (!parseStoreKey(`project.${id}`)) throw new Error('Invalid project id');
+    // Nothing is evicted from main's encoded bytes, so a lease pins nothing yet.
+    return () => undefined;
   }
 
   set(key: string, value: unknown): Promise<void> {
@@ -228,7 +260,7 @@ class FileStore implements Store {
       failed.catch(() => undefined);
       return failed;
     }
-    this.unsettled.set(key, { id: posted.id, present });
+    this.unsettled.set(key, { id: posted.id, present, settled: posted.settled });
     const done = posted.settled.then(() => undefined);
     // Fire-and-forget callers rely on onError; awaiting callers get the rejection.
     done.catch(() => undefined);
@@ -448,6 +480,15 @@ export function registerStoreIpc(
     event.returnValue = store.getEncodedSerialized?.(payload.key) ?? store.getSerialized?.(payload.key) ?? null;
   });
 
+  ipcMain.handle(IPC.storeGetEncoded, async (event, payload: unknown) => {
+    if (!ctx.isTrustedSender(event) || !isRecord(payload) || typeof payload.key !== 'string') {
+      throw new IpcValidationError(IPC.storeGetEncoded, 'expected a trusted store key');
+    }
+    if (store.getEncodedSerializedAsync) return store.getEncodedSerializedAsync(payload.key);
+    await store.preload?.(payload.key);
+    return store.getEncodedSerialized?.(payload.key) ?? store.getSerialized?.(payload.key) ?? null;
+  });
+
   ipcMain.on(IPC.storeSnapshotSync, (event) => {
     if (!ctx.isTrustedSender(event)) {
       event.returnValue = {};
@@ -499,7 +540,7 @@ export function registerStoreIpc(
     }
     if (store.getSerialized) event.returnValue = store.getSerialized(payload['key'] as string);
     else {
-      const value = store.snapshot()[payload['key'] as string];
+      const value = store.get ? store.get(payload['key'] as string) : store.snapshot()[payload['key'] as string];
       event.returnValue = value === undefined ? null : JSON.stringify(value);
     }
   });

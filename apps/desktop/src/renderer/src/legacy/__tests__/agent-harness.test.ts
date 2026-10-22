@@ -45,6 +45,20 @@ describe('agent harness oracle', () => {
     expect(state.layers[0].properties.find((prop: any) => prop.path === 'opacity').value).toBe(10);
   });
 
+  it('cancels a multi-frame observation without mixing project state or images after a switch', async () => {
+    const PM = harnessEditor(), originalId = PM.proj.id;
+    PM.Export.snapshotAsync = vi.fn(async () => {
+      PM.proj = PM.mkProject({ name: 'Other project' });
+      return 'data:image/jpeg;base64,stale-frame';
+    });
+    const observation = await PM.AgentHarness.observeVisual([0, 1]);
+    expect(observation.cancelled).toBe(true);
+    expect(observation.images).toEqual([]);
+    expect(observation.state.composition.id).toBe(originalId);
+    expect(PM.Export.snapshotAsync).toHaveBeenCalledOnce();
+    expect(observation.visualError).toBe('');
+  });
+
   it('keeps oversized review context valid and directs discovery to complete live pages', async () => {
     const PM = harnessEditor();
     PM.proj.layers = [PM.mkLayer('text', { d: { text: 'Long content '.repeat(20_000) } })];
@@ -194,10 +208,10 @@ describe('agent harness oracle', () => {
       runId: 'validate-effect', callId: 'validate', tool: 'validate_effect',
       arguments: { definition }, baseRevision: 0
     });
-    await expect(call()).rejects.toThrow('too many params (36 > 32)');
-    definition.params = definition.params.slice(0, 32);
+    // Registration supports effects with more than 32 named uniforms.
+    // Preflight must accept the same definitions and still reject invalid ones.
     const result = await call();
-    expect(JSON.parse(result.content[0].text)).toMatchObject({ valid: true, id: 'typewriter', parameterCount: 32 });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ valid: true, id: 'typewriter', parameterCount: 36 });
     expect(result.changed).not.toBe(true);
     expect(JSON.stringify(PM.proj)).toBe(before);
     definition.params[1]!.k = definition.params[0]!.k;
@@ -339,6 +353,18 @@ describe('agent harness oracle', () => {
     });
     await expect(call('get_project_state')).rejects.toThrow('response budget');
     await expect(call('apply_commands', { commands: [{ type: 'add_layer', layerType: 'text' }] })).rejects.toThrow('revision 3');
+  });
+
+  it('returns the full MCP session snapshot for projects over the response budget', async () => {
+    const PM = harnessEditor();
+    const layer = PM.mkLayer('text');
+    layer.d.text = 'x'.repeat(2_000_000);
+    PM.proj.layers.push(layer);
+    const result = await PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'large-context', callId: 'context', tool: '__mcp_context', arguments: {}, baseRevision: 0,
+    });
+    const snapshot = JSON.parse((result.content[0] as any).text);
+    expect(JSON.parse(snapshot.projectJSON).layers[0].d.text).toHaveLength(2_000_000);
   });
 
   it('never refreshes or rolls a transaction into a different project with the same revision', async () => {

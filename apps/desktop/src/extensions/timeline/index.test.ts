@@ -50,6 +50,37 @@ describe('timeline extension', () => {
     vi.restoreAllMocks();
   });
 
+  it.each(['layers', 'tracks'])('adds and removes ruler markers in %s mode', async mode => {
+    const value = activate();
+    const canvas = build(value).querySelector<HTMLCanvasElement>('#tl-canvas')!;
+    const timeline = value.state.timeline as any;
+    timeline.mode = mode; timeline.w = 900; timeline.pps = 90; timeline.scrollT = 0;
+    const context = (time: number, y: number) => {
+      const event = new MouseEvent('contextmenu', { clientX: 400, clientY: 100, cancelable: true });
+      Object.defineProperties(event, { offsetX: { value: timeline.gut + time * timeline.pps }, offsetY: { value: y } });
+      canvas.dispatchEvent(event);
+    };
+    context(2, 15);
+    const pending = vi.mocked(value.api.ui.menu).mock.calls.at(-1)![1];
+    const items = await pending as any[];
+    const add = items.find(item => item.label === 'Add marker here');
+    expect(add).toBeTruthy();
+    add.run();
+    expect(value.api.edit.apply).toHaveBeenLastCalledWith({ type: 'add_marker', time: 2 }, { label: 'Add marker', origin: 'timeline' });
+    value.state.project.markers = [{ id: 'beat', t: 2, name: 'Beat' }];
+    context(2, timeline.ruler - 6);
+    const remove = (vi.mocked(value.api.ui.menu).mock.calls.at(-1)![1] as any[])[0];
+    expect(remove.label).toBe('Remove marker');
+    remove.run();
+    expect(value.api.edit.apply).toHaveBeenLastCalledWith({ type: 'remove_marker', index: 0 }, { label: 'Remove marker', origin: 'timeline' });
+    expect(value.state.time).toBe(0);
+    const commands = vi.mocked(value.api.commands.register).mock.calls.map(([command]) => command);
+    expect(commands.find(command => command.id === 'timeline.addMarker')).toBeTruthy();
+    expect(commands.find(command => command.id === 'timeline.removeMarker')!.when!()).toBe(false);
+    value.state.time = 2;
+    expect(commands.find(command => command.id === 'timeline.removeMarker')!.when!()).toBe(true);
+  });
+
   it('registers the live timeline service and panel with automatic disposal', () => {
     const value = activate();
     expect(value.state.panel).toMatchObject({
@@ -341,6 +372,46 @@ describe('timeline extension', () => {
     expect(snap.hidden).toBe(true);
   });
 
+  it.each(['cancel', 'escape', 'dispose'] as const)('restores a live multi-clip track drag on %s, including absent track fields', finish => {
+    const value = harness();
+    const layers = ['First', 'Second', 'Base'].map((name, index) => ({
+      id: name, name, type: 'solid', from: index < 2 ? 2 : 0, dur: index < 2 ? 2 : 10,
+      collapsed: true, d: {}, p: {}, fx: [], masks: [],
+    })) as any[];
+    value.state.project.layers = layers;
+    value.state.selection.layers = ['First', 'Second'];
+    const original = JSON.stringify(layers);
+    let drag: any;
+    vi.mocked(value.api.ui.drag).mockImplementation((_event: any, handlers: any) => {
+      drag = handlers;
+      return { cancel: () => handlers.cancel() };
+    });
+    activate(value);
+    const body = build(value);
+    body.querySelector<HTMLButtonElement>('[data-mode="tracks"]')!.click();
+    const timeline = value.state.timeline as any;
+    timeline.pps = 100; timeline.scrollT = 0; timeline.trackSnap = false;
+    const x = timeline.gut + 300;
+    const y = timeline.trackView.laneY('video', 2) + timeline.trackView.rowHeight() / 2;
+    timeline.trackView.down(new PointerEvent('pointerdown', { clientX: x, clientY: y }), x, y);
+    expect(drag).toBeDefined();
+    drag.move(1, 0, {});
+    expect(value.api.history.begin).not.toHaveBeenCalled();
+    expect(JSON.stringify(value.state.project.layers)).toBe(original);
+    drag.move(100, 0, {});
+    expect(layers.slice(0, 2).map(layer => layer.from)).toEqual([3, 3]);
+    expect(value.api.transport.invalidate).toHaveBeenLastCalledWith(undefined);
+    expect(value.api.history.begin).toHaveBeenCalledExactlyOnceWith('Move clips');
+    if (finish === 'dispose') value.dispose();
+    else if (finish === 'escape') window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    else drag.cancel();
+    expect(JSON.stringify(value.state.project.layers)).toBe(original);
+    expect(value.state.project.layers).toBe(layers);
+    expect(value.api.edit.mutate).not.toHaveBeenCalled();
+    expect(value.api.history.cancel).toHaveBeenCalledOnce();
+    expect(timeline.trackDrag).toBeNull();
+  });
+
   it('preserves the live panel move handle when the extension rebuilds in place', () => {
     const value = activate();
     const body = build(value);
@@ -406,7 +477,10 @@ describe('timeline extension', () => {
     const timeline = value.state.timeline as any;
     timeline.rows = area === 'below' ? [] : [{ kind: area === 'prop' ? 'prop' : 'layer', L: layer, key: 'opacity', prop }];
     timeline.graph = area === 'graph';
-    timeline._graph = { target: { L: layer, prop }, series: [{ prop }], points: [] };
+    timeline._graph = {
+      target: { L: layer, prop }, series: [{ prop }], points: [],
+      y2v: (y: number) => -y, v2y: (v: number) => -v,
+    };
     for (const modifier of ['none', 'shiftKey', 'metaKey'] as const) {
       value.state.selection.layers = [layer.id];
       value.state.selection.keys = ['key-1'];

@@ -35,8 +35,8 @@ describe('autonomous agent contract', () => {
   });
 
   it('keeps every distinct edit command reachable by the agent', () => {
-    expect(EDIT_COMMAND_TYPES).toHaveLength(25);
-    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(25);
+    expect(EDIT_COMMAND_TYPES).toHaveLength(26);
+    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(26);
     expect(AGENT_COMMAND_TYPES).toEqual(EDIT_COMMAND_TYPES);
   });
 
@@ -85,7 +85,7 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain("result's extensions array");
   });
 
-  it('keeps scene edits on typed commands and stays below 10 KB', () => {
+  it('keeps scene edits on typed commands and stays below 9 KB', () => {
     const instructions = agentInstructions({
       projectName: 'Project',
       artifactPath: 'artifacts/run-1',
@@ -100,7 +100,20 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain('source checkout, package scripts, and Electron test harness are not available');
     expect(instructions).not.toMatch(/src\/extensions|npm run|bun run/u);
     expect(instructions).toContain('isolated temporary test data');
-    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(10 * 1024);
+    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(9000);
+  });
+
+  it('explains pose preservation and safe group sibling ordering within the full prompt budget', () => {
+    const instructions = agentInstructions({
+      projectName: 'Golden Project', artifactPath: 'artifacts/run-123', access: 'project',
+      extensionsDir: '/Users/test/Library/Application Support/Powermove/extensions'
+    });
+    expect(instructions).toContain('move_to_group preserves world pose at the playhead');
+    expect(instructions).toContain('rebasing local transforms');
+    expect(instructions).toContain('Join before animating the rig');
+    expect(instructions).toContain('reorder_layer uses composition-wide indices and may change groups');
+    expect(instructions).toContain('edit_layer_strips {operation:"reorder",layerIds,anchorId,placement:"before"|"after"}');
+    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(9000);
   });
 
   it('holds every user-visible field to the shared response style', () => {

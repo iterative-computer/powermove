@@ -21,12 +21,12 @@ function rebase(PM: PMRegistry, layer: any, offset: number): void {
  * The caller supplies the agent run's revision guard and history group. */
 export function editVideo(PM: PMRegistry, args: Record<string, any>, meta: Record<string, any>): any {
   const operation = args.operation;
-  const supported = ['insert', 'split', 'trim', 'move', 'speed', 'remove', 'separate_audio', 'audio'];
+  const supported = ['insert', 'split', 'trim', 'move', 'speed', 'remove', 'separate_audio', 'audio', 'slip'];
   if (!supported.includes(operation)) throw new Error('Unknown video editing operation.');
   const layers = PM.proj.layers;
   const layer = layers.find((item: any) => item.id === args.layerId);
   if (operation !== 'insert' && (!layer || !['video', 'audio'].includes(layer.type))) throw new Error('Choose a video or audio layer from get_project_state.');
-  if (layer?.lock) throw new Error('The clip is locked.');
+  if (layer?.lock || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock)) throw new Error('The clip is locked.');
   if (layer && Object.values(layer.locked_intent || {}).some(Boolean)) throw new Error('The clip contains protected hand edits. Edit unprotected channels explicitly with apply_commands.');
   return PM.Edit.mutate(meta.label, () => {
     if (operation === 'insert') {
@@ -48,7 +48,7 @@ export function editVideo(PM: PMRegistry, args: Record<string, any>, meta: Recor
     const end = layer.from + layer.dur;
     const d = resolveContent(PM, layer, layer.from);
     const rate = layer.type === 'video' ? Number(d.speed ?? 1) : 1;
-    if (['split', 'trim', 'speed', 'separate_audio'].includes(operation)) {
+    if (['split', 'trim', 'speed', 'separate_audio', 'slip'].includes(operation)) {
       staticTiming(layer);
       if (!(rate > 0)) throw new Error('This clip needs explicit time-remapping edits.');
     }
@@ -58,11 +58,19 @@ export function editVideo(PM: PMRegistry, args: Record<string, any>, meta: Recor
       layer.from = from;
     } else if (operation === 'trim') {
       const start = number(args.start, 'start'), stop = number(args.end, 'end');
-      if (start < layer.from || stop > end || stop - start < 1 / PM.proj.fps - 1e-6) throw new Error('Trim must retain at least one frame inside the current clip.');
+      if (stop > PM.proj.dur || stop - start < 1 / PM.proj.fps - 1e-6) throw new Error('Trim must retain at least one frame inside the composition.');
+      const sourceIn = Number(d.trim || 0) + (start - layer.from) * rate;
+      const sourceDuration = PM.assets?.get?.(d.asset)?.dur ?? PM.proj.assets?.[d.asset]?.dur;
+      if (sourceIn < -1e-6 || ((start < layer.from || stop > end) && (!Number.isFinite(sourceDuration) || sourceIn + (stop - start) * rate > sourceDuration + 1e-6))) throw new Error('Trim exceeds available source handles.');
       const offset = start - layer.from;
       rebase(PM, layer, offset);
       layer.d.trim = PM.P(Number(d.trim || 0) + offset * rate);
       layer.from = start; layer.dur = stop - start;
+    } else if (operation === 'slip') {
+      const sourceIn = number(args.sourceIn, 'sourceIn');
+      const sourceDuration = PM.assets?.get?.(d.asset)?.dur ?? PM.proj.assets?.[d.asset]?.dur;
+      if (!Number.isFinite(sourceDuration) || sourceIn + layer.dur * rate > sourceDuration + 1e-6) throw new Error('Slip exceeds available source handles.');
+      layer.d.trim = PM.P(sourceIn);
     } else if (operation === 'split') {
       const at = number(args.at, 'at');
       if (at - layer.from < 1 / PM.proj.fps - 1e-6 || end - at < 1 / PM.proj.fps - 1e-6) throw new Error('Split must leave at least one frame on each side.');

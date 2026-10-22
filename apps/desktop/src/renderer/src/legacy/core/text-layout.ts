@@ -63,9 +63,22 @@ export function glyphLayout(d: any, meas: CanvasRenderingContext2D | any): Glyph
   const lh = size * (d.leading || 1.15);
   const lines = textSourceLines(d, meas, lh).map(line => line.text);
   const width = (value: any) => meas.measureText(value).width;
+  // Metrics stay local to this layout: a later font load or axis change must
+  // measure again. Repeated glyphs can share their isolated width, but joined
+  // prefixes still use the canvas so kerning and tracking remain exact.
+  const segmentWidths = new Map<string, number>();
+  const segmentWidth = (value: string): number => {
+    const cached = segmentWidths.get(value);
+    if (cached !== undefined) return cached;
+    const measured = width(value);
+    segmentWidths.set(value, measured);
+    return measured;
+  };
+  const segmenter = typeof Intl !== 'undefined' && Intl.Segmenter
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
   const graphemes = (value: any): any[] => {
-    if (typeof Intl !== 'undefined' && Intl.Segmenter) {
-      return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].map(item => item.segment);
+    if (segmenter) {
+      return [...segmenter.segment(value)].map(item => item.segment);
     }
     return Array.from(value);
   };
@@ -73,7 +86,7 @@ export function glyphLayout(d: any, meas: CanvasRenderingContext2D | any): Glyph
   /* measureText(prefix) omits kerning between the prefix and the next glyph.
      Measuring the joined run and subtracting the isolated segment preserves
      that incoming pair adjustment when the segment becomes its own layer. */
-  const segmentX = (lineStart: any, prefix: any, segment: any) => lineStart + width(prefix + segment) - width(segment);
+  const segmentX = (lineStart: any, prefix: any, segment: any) => lineStart + width(prefix + segment) - segmentWidth(segment);
   let characterIndex = 0, wordIndex = 0, lineIndex = 0, sourceOffset=0;
   lines.forEach((line, row) => {
     const lineWidth = width(line);
@@ -87,7 +100,7 @@ export function glyphLayout(d: any, meas: CanvasRenderingContext2D | any): Glyph
     for (const segment of graphemes(line)) {
       const x = segmentX(startX, prefix, segment);
       const space=/^\s+$/u.test(segment);if(!space&&wasSpace)localWord++;
-      if (!space) output.characters.push({ text: segment, x, y, w: width(segment), line: row, lineUnit, word:wordIndex+localWord, sourceStart:lineSource+prefix.length,index: characterIndex++ });
+      if (!space) output.characters.push({ text: segment, x, y, w: segmentWidth(segment), line: row, lineUnit, word:wordIndex+localWord, sourceStart:lineSource+prefix.length,index: characterIndex++ });
       wasSpace=space;
       prefix += segment;
     }
@@ -97,7 +110,7 @@ export function glyphLayout(d: any, meas: CanvasRenderingContext2D | any): Glyph
     let match;
     while ((match = matcher.exec(line))) {
       const prefix = line.slice(0, match.index);
-      output.words.push({ text: match[0], x: segmentX(startX, prefix, match[0]), y, w: width(match[0]), line: row, sourceStart: lineSource + match.index, index: wordIndex++ });
+      output.words.push({ text: match[0], x: segmentX(startX, prefix, match[0]), y, w: segmentWidth(match[0]), line: row, sourceStart: lineSource + match.index, index: wordIndex++ });
     }
   });
   return output;
