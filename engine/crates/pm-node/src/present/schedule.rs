@@ -217,7 +217,12 @@ impl Schedule {
             self.next_k = Some(k + Self::step(clock));
             return Next::Skip { k };
         }
-        let due = from - f64::from(lead) * Self::frame_us(clock);
+        // Start a frame at least its measured cost (plus delivery) before it
+        // shows. With a render cost above the lead, waiting for the lead
+        // window would find every frame late at its start and skip them all.
+        let due = from
+            - (f64::from(lead) * Self::frame_us(clock))
+                .max(self.cost_us.map_or(0.0, |c| c + delivery));
         let now_f = now as f64;
         let Some(phase) = phase else {
             if due > now_f {
@@ -371,6 +376,36 @@ mod tests {
         // Frame 600 shows at the end of the 50 ms preroll; a lead of 4
         // frames (66.7 ms) makes 600 and 601 due at once, 602 at 16.7 ms.
         assert_eq!(rendered, vec![600, 601]);
+    }
+
+    #[test]
+    fn a_render_cost_above_the_lead_starts_frames_early_instead_of_skipping_them_all() {
+        // 24 fps-like spacing at 60 fps ticks is not needed: a 275 ms cost at
+        // 60 fps with a lead of 2 frames (33 ms). Every frame must still get a
+        // turn: the schedule waits until cost + delivery before the frame
+        // shows, then renders it, rather than waking at the lead and skipping.
+        let clock = playing(0, PlaybackRate::NORMAL);
+        let mut schedule = Schedule::default();
+        schedule.observe(275_000.0);
+        let mut now = 0_i64;
+        let mut rendered = 0;
+        for _ in 0..400 {
+            match schedule.next(&clock, now, 2) {
+                Next::Render { k, .. } => {
+                    rendered += 1;
+                    schedule.rendered(&clock, k);
+                    now += 275_000;
+                }
+                Next::Skip { .. } => {}
+                Next::WaitUntil(at) => now = now.max(at.ceil() as i64),
+                Next::Idle => break,
+            }
+            if now > 3_000_000 {
+                break;
+            }
+        }
+        // About one frame per 275 ms render over three seconds.
+        assert!(rendered >= 8, "rendered {rendered}");
     }
 
     #[test]
