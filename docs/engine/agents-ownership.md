@@ -86,5 +86,6 @@ No changes to `docs/rust-engine.md` were made by this lane.
 | `apps/desktop/src/renderer/src/media/host-media-store.test.ts` | Verify that native hidden tabs install verified host storage while ordinary remote tabs retain their existing store. |
 | `apps/desktop/src/main/media-proxy.ts` | The temporary container-identity change in 44e4110f3 was fully reverted by 02150c06d: production must preserve today’s exact metadata and container size. |
 | `apps/desktop/src/main/media-proxy.test.ts` | Prove the import contract’s test-only frozen WebM container preserves today’s decoded RGBA; temporary inputs and outputs are removed. |
+| `apps/desktop/src/main/codex/__fixtures__/fake-codex-app-server.sh` | Answer model discovery in the existing fake account runtime, so MCP contracts avoid real provider caches, discovery timeouts and an immediately exiting stub’s broken pipe. |
 
 This inventory itself is the additional `docs/engine/agents-ownership.md` edit requested by Round 4 blocker 7.

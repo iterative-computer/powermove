@@ -29,7 +29,7 @@ if (process.env.POWERMOVE_REQUIRE_BACKGROUND === '1') {
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 // The MCP contract does not use an agent provider. Isolate account discovery
 // so a real provider cannot recreate its cache after the profile is removed.
-process.env.CODEX_BINARY = '/usr/bin/false'; // Provider login is outside this MCP contract.
+process.env.CODEX_BINARY = path.join(repository, 'apps/desktop/src/main/codex/__fixtures__/fake-codex-app-server.sh');
 // Powermove's FFmpeg build, found the way the CLI host finds it (src/server/cli.ts hostFfmpeg).
 const ffmpegDir = [process.env.PM_FFMPEG_DIR, path.join(os.homedir(), 'Library/Caches/powermove-engine/ffmpeg/out')]
   .find(dir => dir && existsSync(path.join(dir, 'bin/ffmpeg')));

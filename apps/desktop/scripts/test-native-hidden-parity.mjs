@@ -12,7 +12,7 @@ import os from 'node:os';
 import assert from 'node:assert/strict';
 
 const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-process.env.CODEX_BINARY = '/usr/bin/false'; // Provider login is outside this MCP contract.
+process.env.CODEX_BINARY = path.join(desktop, 'src/main/codex/__fixtures__/fake-codex-app-server.sh');
 const cli = process.env.POWERMOVE_TEST_CLI ?? path.resolve(desktop, '../../packages/cli/bin/powermove.mjs');
 const ffmpeg = path.join(process.env.PM_FFMPEG_DIR ?? path.join(os.homedir(), 'Library/Caches/powermove-engine/ffmpeg/out'), 'bin/ffmpeg');
 const root = await mkdtemp(path.join(os.tmpdir(), 'pm-native-parity-'));
