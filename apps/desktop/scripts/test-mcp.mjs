@@ -157,6 +157,18 @@ async function desktopSmoke() {
   assert.equal(images.length, 2);
   assert(images.every(item => item.mimeType === 'image/jpeg'), 'agent frames from the job engine are JPEG');
   assert(!/render_frames routed/.test(appLog), `render_frames was routed to the current engine: ${appLog.match(/render_frames routed[^\n]*/)?.[0]}`);
+  // A composition contact sheet renders its cells through the same engine batches.
+  assert(tools.includes('media_contact_sheet'), 'media_contact_sheet');
+  const sheet = await tool('media_contact_sheet', { target: 'composition', count: 4 });
+  const sheetInfo = text(sheet);
+  assert.equal(sheetInfo.cells.length, 4, JSON.stringify(sheetInfo)); assert(!sheetInfo.incomplete, JSON.stringify(sheetInfo));
+  const sheetImage = sheet.content.find(item => item.type === 'image');
+  assert.equal(sheetImage?.mimeType, 'image/jpeg');
+  const sheetFile = path.join(root, `sheet-${native ? 'hidden' : 'desktop'}.jpg`);
+  await writeFile(sheetFile, Buffer.from(sheetImage.data, 'base64'));
+  const sheetPixel = execFileSync(ffmpeg, ['-v', 'error', '-i', sheetFile, '-frames:v', '1', '-vf', 'crop=2:2:4:4', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
+  assert(sheetPixel[0] > 150 && sheetPixel[1] < 120, `the first sheet cell shows the red composition: ${[...sheetPixel.subarray(0, 3)]}`);
+  assert(!/render_frames routed|media_contact_sheet routed|capture fallback/.test(appLog), 'the composition contact sheet must not route to the legacy renderer');
   if (native) {
     // Imports are today's editor import in the project tab: it decodes the media and writes its record.
     assert(diagnostics.includes('Chromium started on demand'), 'imports run today\'s editor import in the project-pinned tab');
