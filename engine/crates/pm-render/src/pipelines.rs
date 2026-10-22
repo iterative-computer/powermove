@@ -1,6 +1,43 @@
 //! Compiled pipelines and the uniform layouts they read.
 
 use pm_protocol::color::Precision;
+use std::sync::{Mutex, OnceLock};
+
+/// A pipeline compiled on first use. The factory owns only handles from its
+/// device; neither it nor the device keeps a reference to this wrapper.
+pub(crate) struct LazyRenderPipeline {
+    pipeline: OnceLock<wgpu::RenderPipeline>,
+    create: Mutex<Option<Box<dyn FnOnce() -> wgpu::RenderPipeline + Send>>>,
+}
+
+impl LazyRenderPipeline {
+    pub(crate) fn new(create: impl FnOnce() -> wgpu::RenderPipeline + Send + 'static) -> Self {
+        Self {
+            pipeline: OnceLock::new(),
+            create: Mutex::new(Some(Box::new(create))),
+        }
+    }
+
+    pub(crate) fn get(&self) -> &wgpu::RenderPipeline {
+        self.pipeline.get_or_init(|| {
+            // OnceLock admits one initializer. Take the factory before running
+            // it so its captured device, module, and layout handles drop as
+            // soon as the new pipeline has been installed.
+            let create = self
+                .create
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .expect("a lazy pipeline initializes only once");
+            create()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_built(&self) -> bool {
+        self.pipeline.get().is_some()
+    }
+}
 
 /// Dynamic uniform offsets are aligned to this (Metal's 256-byte rule).
 pub const UNIFORM_STRIDE: u64 = 256;
@@ -70,12 +107,12 @@ pub struct Pipelines {
     pub id_3d: wgpu::RenderPipeline,
     /// The compositing passes (`crate::composite`).
     pub(crate) ops: crate::composite::gpu::OpPipelines,
-    draw: [wgpu::RenderPipeline; 3],
-    solid: [wgpu::RenderPipeline; 3],
-    draw_add: [wgpu::RenderPipeline; 3],
-    solid_add: [wgpu::RenderPipeline; 3],
-    background: [wgpu::RenderPipeline; 3],
-    flip: [wgpu::RenderPipeline; 3],
+    draw: [LazyRenderPipeline; 3],
+    solid: [LazyRenderPipeline; 3],
+    draw_add: [LazyRenderPipeline; 3],
+    solid_add: [LazyRenderPipeline; 3],
+    background: [LazyRenderPipeline; 3],
+    flip: [LazyRenderPipeline; 3],
     source: [wgpu::ComputePipeline; 2],
     /// Level 2 sampling (`crate::sampling`).
     pub(crate) resample: crate::sampling::gpu::Resampler,
@@ -206,76 +243,87 @@ impl Pipelines {
             },
         };
         let blended = |layout: &wgpu::PipelineLayout,
-                       entry: &str,
+                       entry: &'static str,
                        format: wgpu::TextureFormat,
                        blend: wgpu::BlendState| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(entry),
-                layout: Some(layout),
-                vertex: wgpu::VertexState {
-                    module: &composite,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &composite,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(blend),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
+            let device = device.clone();
+            let composite = composite.clone();
+            let layout = layout.clone();
+            LazyRenderPipeline::new(move || {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &composite,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &composite,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: Some(blend),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         };
-        let pipeline = |layout: &wgpu::PipelineLayout, entry: &str, format: wgpu::TextureFormat| {
-            blended(layout, entry, format, over)
-        };
+        let pipeline =
+            |layout: &wgpu::PipelineLayout, entry: &'static str, format: wgpu::TextureFormat| {
+                blended(layout, entry, format, over)
+            };
         let draw = TARGET_FORMATS.map(|f| pipeline(&draw_layout, "fs_draw", f));
         let solid = TARGET_FORMATS.map(|f| pipeline(&solid_layout, "fs_solid", f));
         let draw_add = TARGET_FORMATS.map(|f| blended(&draw_layout, "fs_draw", f, add));
         let solid_add = TARGET_FORMATS.map(|f| blended(&solid_layout, "fs_solid", f, add));
         let background = TARGET_FORMATS.map(|f| pipeline(&background_layout, "fs_background", f));
         let flip_pipeline = |format: wgpu::TextureFormat| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("fs_flip"),
-                layout: Some(&draw_layout),
-                vertex: wgpu::VertexState {
-                    module: &composite,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &composite,
-                    entry_point: Some("fs_flip"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
+            let device = device.clone();
+            let composite = composite.clone();
+            let draw_layout = draw_layout.clone();
+            LazyRenderPipeline::new(move || {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("fs_flip"),
+                    layout: Some(&draw_layout),
+                    vertex: wgpu::VertexState {
+                        module: &composite,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &composite,
+                        entry_point: Some("fs_flip"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         };
         let flip = TARGET_FORMATS.map(flip_pipeline);
@@ -432,11 +480,11 @@ impl Pipelines {
     }
 
     pub fn draw(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
-        &self.draw[format_index(format)]
+        self.draw[format_index(format)].get()
     }
 
     pub fn solid(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
-        &self.solid[format_index(format)]
+        self.solid[format_index(format)].get()
     }
 
     /// [`Self::draw`] with a pass's blending.
@@ -446,8 +494,8 @@ impl Pipelines {
         blend: PassBlend,
     ) -> &wgpu::RenderPipeline {
         match blend {
-            PassBlend::Over => &self.draw[format_index(format)],
-            PassBlend::Additive => &self.draw_add[format_index(format)],
+            PassBlend::Over => self.draw[format_index(format)].get(),
+            PassBlend::Additive => self.draw_add[format_index(format)].get(),
         }
     }
 
@@ -458,18 +506,18 @@ impl Pipelines {
         blend: PassBlend,
     ) -> &wgpu::RenderPipeline {
         match blend {
-            PassBlend::Over => &self.solid[format_index(format)],
-            PassBlend::Additive => &self.solid_add[format_index(format)],
+            PassBlend::Over => self.solid[format_index(format)].get(),
+            PassBlend::Additive => self.solid_add[format_index(format)].get(),
         }
     }
 
     pub fn background(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
-        &self.background[format_index(format)]
+        self.background[format_index(format)].get()
     }
 
     /// The exact row flip from GL row order into a top-down target.
     pub fn flip(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
-        &self.flip[format_index(format)]
+        self.flip[format_index(format)].get()
     }
 
     pub fn source(&self, precision: Precision) -> &wgpu::ComputePipeline {
@@ -483,5 +531,117 @@ impl Pipelines {
     /// format has its own).
     pub fn source_layout(&self, precision: Precision) -> wgpu::BindGroupLayout {
         self.source(precision).get_bind_group_layout(0)
+    }
+
+    #[cfg(test)]
+    fn initialized_2d_pipelines(&self) -> usize {
+        [
+            &self.draw,
+            &self.solid,
+            &self.draw_add,
+            &self.solid_add,
+            &self.background,
+            &self.flip,
+        ]
+        .into_iter()
+        .flat_map(|variants| variants.iter())
+        .filter(|pipeline| pipeline.is_built())
+        .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn fixed_2d_variants_compile_once_on_demand() {
+        let gpu = pm_gpu::Gpu::new("lazy pipeline probe").unwrap();
+        let start = Instant::now();
+        let pipelines = Pipelines::new(&gpu.device);
+        let construction = start.elapsed();
+        assert_eq!(pipelines.initialized_2d_pipelines(), 0);
+
+        let start = Instant::now();
+        let first = pipelines.solid(wgpu::TextureFormat::Rgba16Float);
+        let first_use = start.elapsed();
+        assert_eq!(pipelines.initialized_2d_pipelines(), 1);
+        let start = Instant::now();
+        let again = pipelines.solid(wgpu::TextureFormat::Rgba16Float);
+        let repeat = start.elapsed();
+        assert!(std::ptr::eq(first, again));
+        assert_eq!(pipelines.initialized_2d_pipelines(), 1);
+
+        pipelines.solid_with(wgpu::TextureFormat::Rgba32Float, PassBlend::Additive);
+        assert_eq!(pipelines.initialized_2d_pipelines(), 2);
+        eprintln!(
+            "lazy 2D pipelines: construct={construction:?} first={first_use:?} repeat={repeat:?} built=2/18"
+        );
+
+        let captured = std::sync::Arc::new(());
+        let weak = std::sync::Arc::downgrade(&captured);
+        let handle = first.clone();
+        let one_shot = LazyRenderPipeline::new(move || {
+            std::hint::black_box(&captured);
+            handle
+        });
+        assert!(weak.upgrade().is_some());
+        let cached = one_shot.get();
+        assert!(
+            weak.upgrade().is_none(),
+            "the finished factory kept its captures"
+        );
+        assert!(std::ptr::eq(cached, one_shot.get()));
+    }
+
+    #[test]
+    fn probe_first_use_of_every_deferred_render_pipeline() {
+        let gpu = pm_gpu::Gpu::new("lazy pipeline family probe").unwrap();
+        let pipelines = Pipelines::new(&gpu.device);
+        let text = crate::text::gpu::TextGpu::new(&gpu.device);
+        let built = || {
+            pipelines.initialized_2d_pipelines()
+                + pipelines.ops.built_count()
+                + pipelines.ops.path_masks.built_count()
+                + pipelines.resample.built_count()
+                + text.built_count()
+        };
+        assert_eq!(built(), 0, "constructors compiled a deferred pipeline");
+        let mut times: Vec<(String, std::time::Duration)> = Vec::new();
+        macro_rules! timed {
+            ($name:expr, $pipeline:expr) => {{
+                let start = Instant::now();
+                std::hint::black_box($pipeline);
+                times.push(($name, start.elapsed()));
+            }};
+        }
+        for format in TARGET_FORMATS {
+            timed!(format!("2D draw {format:?}"), pipelines.draw(format));
+            timed!(format!("2D solid {format:?}"), pipelines.solid(format));
+            timed!(
+                format!("2D draw additive {format:?}"),
+                pipelines.draw_with(format, PassBlend::Additive)
+            );
+            timed!(
+                format!("2D solid additive {format:?}"),
+                pipelines.solid_with(format, PassBlend::Additive)
+            );
+            timed!(
+                format!("2D background {format:?}"),
+                pipelines.background(format)
+            );
+            timed!(format!("2D flip {format:?}"), pipelines.flip(format));
+        }
+        assert_eq!(pipelines.initialized_2d_pipelines(), 18);
+        times.extend(pipelines.ops.probe_all());
+        times.extend(pipelines.ops.path_masks.probe_all());
+        times.extend(pipelines.resample.probe_all());
+        times.extend(text.probe_all());
+        assert_eq!(times.len(), 47);
+        assert_eq!(built(), 47);
+        for (name, duration) in times {
+            eprintln!("lazy pipeline first use: {name}={duration:?}");
+        }
     }
 }

@@ -48,7 +48,11 @@ const FORMATS: [wgpu::TextureFormat; 2] = [
 
 pub(crate) struct OpPipelines {
     pub layout: wgpu::BindGroupLayout,
-    pipelines: Vec<(Op, wgpu::TextureFormat, wgpu::RenderPipeline)>,
+    pipelines: Vec<(
+        Op,
+        wgpu::TextureFormat,
+        crate::pipelines::LazyRenderPipeline,
+    )>,
     /// Bound when a pass has no path mask coverage canvas.
     no_coverage: wgpu::TextureView,
     /// Today's coverage texture filtering (`texFor`: linear, clamp).
@@ -129,34 +133,39 @@ impl OpPipelines {
                 Op::EncodeFlip => "fs_encode_flip",
             };
             for format in FORMATS {
-                let p = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some("vs"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleStrip,
-                        cull_mode: None,
-                        ..Default::default()
-                    },
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some(entry),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
+                let device = device.clone();
+                let module = module.clone();
+                let pipeline_layout = pipeline_layout.clone();
+                let p = crate::pipelines::LazyRenderPipeline::new(move || {
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some(entry),
+                        layout: Some(&pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &module,
+                            entry_point: Some("vs"),
+                            compilation_options: Default::default(),
+                            buffers: &[],
+                        },
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleStrip,
+                            cull_mode: None,
+                            ..Default::default()
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        fragment: Some(wgpu::FragmentState {
+                            module: &module,
+                            entry_point: Some(entry),
+                            compilation_options: Default::default(),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                        }),
+                        multiview_mask: None,
+                        cache: None,
+                    })
                 });
                 pipelines.push((op, format, p));
             }
@@ -202,12 +211,32 @@ impl OpPipelines {
     }
 
     pub fn get(&self, op: Op, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
-        &self
-            .pipelines
+        self.pipelines
             .iter()
             .find(|(o, f, _)| *o == op && *f == format)
             .expect("a working format")
             .2
+            .get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn built_count(&self) -> usize {
+        self.pipelines
+            .iter()
+            .filter(|(_, _, pipeline)| pipeline.is_built())
+            .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_all(&self) -> Vec<(String, std::time::Duration)> {
+        self.pipelines
+            .iter()
+            .map(|(op, format, pipeline)| {
+                let start = std::time::Instant::now();
+                pipeline.get();
+                (format!("composite {op:?} {format:?}"), start.elapsed())
+            })
+            .collect()
     }
 
     /// Records one full-screen pass of `op` into `target`.
