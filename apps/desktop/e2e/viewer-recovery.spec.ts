@@ -1,6 +1,7 @@
+import type { Page } from 'playwright';
 import { expect, test } from './helpers/app';
 
-async function waitForViewer(page: any): Promise<void> {
+async function waitForViewer(page: Page): Promise<void> {
   // A fresh profile starts on Projects, whose overlay intercepts wheel/drag
   // input even though the viewer canvas has already initialized behind it.
   await page.evaluate(() => {
@@ -14,6 +15,41 @@ async function waitForViewer(page: any): Promise<void> {
   ); });
 }
 
+async function sampleViewerPixels(page: Page): Promise<{ visible: boolean; color: number[] | null }> {
+  return page.evaluate(() => {
+    const PM = (window as any).PM;
+    if (PM.EngineRender) {
+      const viewer = PM.Kernel.services.get('viewer');
+      const presentation = viewer?.enginePresentation;
+      const latest = presentation?.latest;
+      const frame = viewer?.engineFrame?.();
+      const revision = PM.Kernel.services.get('engine.viewer')?.revision?.();
+      const canvas = document.querySelector<HTMLCanvasElement>('#stage #engine-present');
+      const gl = document.querySelector<HTMLCanvasElement>('#gl');
+      const visible = presentation?.presenting === true && latest != null && frame != null
+        && latest.seq === frame.seq && latest.revision === frame.revision
+        && latest.viewSeq === frame.viewSeq && frame.standIn === false
+        && revision != null && frame.revision === revision
+        && frame.pts === Math.max(0, Math.round(PM.time * 705_600_000))
+        && canvas != null && canvas === presentation.canvas && canvas.width > 0 && canvas.height > 0
+        && canvas.getBoundingClientRect().width > 0 && canvas.getBoundingClientRect().height > 0
+        && getComputedStyle(canvas).visibility === 'visible'
+        && gl != null && getComputedStyle(gl).visibility === 'hidden';
+      if (!visible || !canvas) return { visible: false, color: null };
+      const copy = document.createElement('canvas');
+      copy.width = canvas.width; copy.height = canvas.height;
+      const ctx = copy.getContext('2d')!;
+      ctx.drawImage(canvas, 0, 0);
+      return { visible: true, color: Array.from(ctx.getImageData(Math.floor(copy.width / 2), Math.floor(copy.height / 2), 1, 1).data).slice(0, 3) };
+    }
+    const canvas = document.querySelector('#gl');
+    const gl = PM.GL.gl as WebGL2RenderingContext;
+    const pixel = new Uint8Array(4);
+    gl.readPixels(gl.drawingBufferWidth / 2, gl.drawingBufferHeight / 2, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+    return { visible: canvas === gl.canvas, color: [...pixel].slice(0, 3) };
+  });
+}
+
 test.describe('@viewer composition recovery', () => {
   test('keeps rendered pixels on the visible canvas across extension reloads', async ({ session }) => {
     await session.openEditor();
@@ -24,14 +60,7 @@ test.describe('@viewer composition recovery', () => {
       PM.replaceProject(PM.mkProject({ name: 'Reload preview', w: 640, h: 360, dur: 4, bg: '#D92D20' }));
       PM.Kernel.services.get('viewer').returnToComposition();
     });
-    const sample = () => page.evaluate(() => {
-      const PM = (window as any).PM;
-      const canvas = document.querySelector('#gl');
-      const gl = PM.GL.gl as WebGL2RenderingContext;
-      const pixel = new Uint8Array(4);
-      gl.readPixels(gl.drawingBufferWidth / 2, gl.drawingBufferHeight / 2, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
-      return { visible: canvas === gl.canvas, color: [...pixel].slice(0, 3) };
-    });
+    const sample = () => sampleViewerPixels(page);
     await expect.poll(sample).toEqual({ visible: true, color: [217, 45, 32] });
     for (let reload = 0; reload < 3; reload++) {
       await page.evaluate(async () => {
@@ -125,11 +154,11 @@ test.describe('@viewer composition recovery', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('keeps the last composition frame visible while zoom resizes its drawing buffer', async ({ session }) => {
+  test('keeps the last composition frame visible through rapid zoom changes', async ({ session }) => {
     await session.openEditor();
     const { page } = session;
     await waitForViewer(page);
-    const pixels = await page.evaluate(async () => {
+    await page.evaluate(async () => {
       const PM = (window as any).PM;
       const viewer = PM.Kernel.services.get('viewer');
       const project = PM.mkProject({
@@ -138,14 +167,56 @@ test.describe('@viewer composition recovery', () => {
       PM.replaceProject(project);
       viewer.returnToComposition();
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    await expect.poll(() => sampleViewerPixels(page)).toEqual({ visible: true, color: [217, 45, 32] });
+
+    const pixels = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
       const sample = () => {
+        const frameWidth = viewer.inner.getBoundingClientRect().width;
+        const stageWidth = viewer.stage.getBoundingClientRect().width;
+        if (PM.EngineRender) {
+          const presentation = viewer.enginePresentation;
+          const latest = presentation?.latest;
+          const frame = viewer.engineFrame?.();
+          const canvas = document.querySelector<HTMLCanvasElement>('#stage #engine-present');
+          const gl = document.querySelector<HTMLCanvasElement>('#gl');
+          const rect = canvas?.getBoundingClientRect();
+          const css = rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null;
+          const tag = latest ? { seq: latest.seq, revision: latest.revision, viewSeq: latest.viewSeq,
+            pts: latest.pts, standIn: latest.standIn } : null;
+          const presenting = presentation?.presenting === true;
+          const visible = presenting && latest != null && frame != null
+            && latest.seq === frame.seq && latest.revision === frame.revision
+            && latest.viewSeq === frame.viewSeq && frame.standIn === false
+            && frame.revision === PM.Kernel.services.get('engine.viewer')?.revision?.()
+            && frame.pts === Math.max(0, Math.round(PM.time * 705_600_000))
+            && canvas != null && canvas === presentation.canvas && canvas.width > 0 && canvas.height > 0
+            && getComputedStyle(canvas).visibility === 'visible'
+            && gl != null && getComputedStyle(gl).visibility === 'hidden';
+          if (!visible || !canvas) return { native: true, visible: false, presenting, latest: tag,
+            color: null, frameWidth, stageWidth, zoom: viewer.shown,
+            width: canvas?.width ?? 0, height: canvas?.height ?? 0, css };
+          const copy = document.createElement('canvas');
+          copy.width = canvas.width; copy.height = canvas.height;
+          const ctx = copy.getContext('2d')!;
+          ctx.drawImage(canvas, 0, 0);
+          return { native: true, visible: true, presenting, latest: tag,
+            color: Array.from(ctx.getImageData(Math.floor(copy.width / 2), Math.floor(copy.height / 2), 1, 1).data).slice(0, 3),
+            frameWidth, stageWidth, zoom: viewer.shown, width: canvas.width, height: canvas.height, css };
+        }
         const gl = PM.GL.gl as WebGL2RenderingContext;
         const rgba = new Uint8Array(4);
         gl.readPixels(
           Math.floor(PM.GL.canvas.width / 2), Math.floor(PM.GL.canvas.height / 2),
           1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba,
         );
-        return [...rgba];
+        const rect = PM.GL.canvas.getBoundingClientRect();
+        return { native: false, visible: true, presenting: false, latest: null,
+          color: Array.from(rgba).slice(0, 3), frameWidth, stageWidth, zoom: viewer.shown,
+          width: PM.GL.canvas.width, height: PM.GL.canvas.height,
+          css: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
       };
       const before = sample();
       const duringResize = [];
@@ -162,9 +233,22 @@ test.describe('@viewer composition recovery', () => {
       return { before, duringResize };
     });
 
-    expect(pixels.before.slice(0, 3)).toEqual([217, 45, 32]);
-    for (const pixel of pixels.duringResize) {
-      expect(pixel.slice(0, 3)).toEqual(pixels.before.slice(0, 3));
+    expect(pixels.before.visible).toBe(true);
+    expect(pixels.before.color).toEqual([217, 45, 32]);
+    expect(pixels.before.frameWidth).toBeLessThanOrEqual(pixels.before.stageWidth);
+    expect(pixels.duringResize.some((state) => state.frameWidth > state.stageWidth)).toBe(true);
+    expect(pixels.duringResize.at(-1)!.frameWidth).toBeLessThanOrEqual(pixels.duringResize.at(-1)!.stageWidth);
+    for (const state of pixels.duringResize) {
+      expect(state.visible, JSON.stringify(state)).toBe(true);
+      expect(state.color, JSON.stringify(state)).toEqual([217, 45, 32]);
+      expect(state.width).toBeGreaterThan(0);
+      expect(state.height).toBeGreaterThan(0);
+      expect(state.css?.width).toBeGreaterThan(0);
+      expect(state.css?.height).toBeGreaterThan(0);
+      if (state.native) {
+        expect(state.presenting).toBe(true);
+        expect(state.latest?.standIn).toBe(false);
+      }
     }
     expect(session.diagnostics.pageErrors).toEqual([]);
   });

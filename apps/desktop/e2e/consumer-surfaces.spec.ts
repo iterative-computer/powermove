@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import type { Page } from 'playwright';
 import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -31,6 +32,17 @@ async function installFrozenViewer(userData: string): Promise<void> {
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
+}
+
+async function clearViewerHover(page: Page): Promise<void> {
+  const outside = await page.evaluate(() => {
+    const stage = document.querySelector('#panel-viewer #stage')!.getBoundingClientRect();
+    const candidates: Array<[number, number]> = [[1, 1], [innerWidth - 2, 1], [1, innerHeight - 2], [innerWidth - 2, innerHeight - 2]];
+    const point = candidates.find(([x, y]) => x < stage.left || x > stage.right || y < stage.top || y > stage.bottom);
+    if (!point) throw new Error('no pointer position outside the viewer stage');
+    return { x: point[0]!, y: point[1]! };
+  });
+  await page.mouse.move(outside.x, outside.y);
 }
 
 type Box = { left: number; top: number; width: number; height: number };
@@ -70,7 +82,9 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
 
     /* Wait for the synthetic pixels and selected outline to settle together.
        A visible presentation canvas may still hold the previous frame. */
-    await expect.poll(() => page.evaluate(async ({ engine, layer, zoom }) => {
+    await clearViewerHover(page);
+    await page.evaluate(() => document.fonts.ready);
+    const stableViewer = () => page.evaluate(async ({ engine, layer, zoom }) => {
       const panel = (window as any).PM.panelInst.viewer.el as HTMLElement;
       const stage = panel.querySelector<HTMLElement>('#stage')!;
       const inner = panel.querySelector<HTMLElement>('#stage-inner')!;
@@ -104,7 +118,8 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
       for (let frame = 0; frame < 3; frame++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       const last = sample();
       return first.visible && first.picture && last.visible && last.picture && first.hash === last.hash;
-    }, { engine, layer: LAYER, zoom: ZOOM }), { timeout: 10_000 }).toBe(true);
+    }, { engine, layer: LAYER, zoom: ZOOM });
+    await expect.poll(stableViewer, { timeout: 10_000 }).toBe(true);
 
     /* The live viewer's geometry, overlay, and native bitmap from its DOM. */
     const live = () => page.evaluate(() => {
@@ -162,6 +177,10 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
     await expect(card.locator('.library-clone')).toBeAttached();
     await expect(card.locator('[data-library-engine-frame]')).toHaveCount(0);
 
+    // Compare the same non-hover state after the Library has loaded its fonts.
+    await clearViewerHover(page);
+    await page.evaluate(() => document.fonts.ready);
+    await expect.poll(stableViewer, { timeout: 10_000 }).toBe(true);
     // The live viewer kept its zoom, pan and overlay while the Library opened.
     const after = await live();
     expect(after).toEqual(before);

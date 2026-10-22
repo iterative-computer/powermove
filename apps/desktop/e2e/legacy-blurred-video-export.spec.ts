@@ -64,7 +64,7 @@ for (const source of SOURCES) for (const mblur of [false, true]) test(`legacy ex
     await info.attach('levels', { body: report, contentType: 'application/json' });
     // Keep both real last frames before cleanup, so an end-frame mismatch
     // has visual evidence as well as the sampled code values.
-    if (!mblur) for (const [name, input] of [['source-last-frame', file], ['export-last-frame', output]]) {
+    for (const [name, input] of [['source-last-frame', file], ['export-last-frame', output]]) {
       const png = execFileSync(ffmpegBinary, ['-v', 'error', '-i', input!, '-vf', 'select=eq(n\\,19)', '-frames:v', '1', '-f', 'image2pipe', '-c:v', 'png', 'pipe:1']);
       await info.attach(name!, { body: png, contentType: 'image/png' });
     }
