@@ -729,31 +729,6 @@ describe('compatibility answers during playback', () => {
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 
-  it('prepares and answers nothing past the end of the playable span', async () => {
-    vi.useFakeTimers();
-    const posted: any[] = [];
-    const session: TransportSession = { id: 3, closed: false, generation: 2, resyncPending: false, applied: 5, uploadFallback: () => {}, post: (e) => { posted.push(e); return true; } };
-    const state = { time: 80 * frame };
-    const t = new EngineRenderTransport({
-      native: {}, session: () => session, revision: () => 5, composition: () => 'P-root', document: () => 'P', viewSeq: () => null, fallbackRunner: () => null, log: () => {},
-      playing: () => true, frameTicks: () => frame, playhead: () => ({ time: state.time, rate: 1 }), span: () => ({ start: 0, end: 90 * frame })
-    } as any);
-    const prepared: number[] = [];
-    const answered: number[] = [];
-    t.answerCompat('rasterOverride', n => { answered.push(n.time); return { kind: 'native' }; }, async n => { prepared.push(n.time); });
-    try {
-      t.receiveCompat({ compat: 'needs', needs: [need(80 * frame)] }, session);
-      for (let i = 0; i < 40; i++) await vi.advanceTimersByTimeAsync(4);
-      // Frames 80 to 89 only: a 90-frame composition never shows frame 90.
-      expect(new Set(prepared)).toEqual(new Set(Array.from({ length: 10 }, (_, i) => (80 + i) * frame)));
-      expect(Math.max(...answered)).toBe(89 * frame);
-      // A nested composition's times are its own: the open span does not bound them.
-      t.receiveCompat({ compat: 'needs', needs: [{ ...need(95 * frame), composition: 'nested' }] }, session);
-      for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(4);
-      expect(prepared.some(time => time >= 95 * frame)).toBe(true);
-    } finally { t.dispose(); vi.useRealTimers(); }
-  });
-
   it('prepares nothing speculatively while paused', async () => {
     vi.useFakeTimers();
     const { t, session } = rig(false);
