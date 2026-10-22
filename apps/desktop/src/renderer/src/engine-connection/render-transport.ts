@@ -255,6 +255,10 @@ export type RenderTransportOptions = {
   frameTicks?: () => number | null;
   /** Audio-clock playhead in ticks, independent of frames reaching the viewer. */
   playhead?: () => { time: number; rate: number } | null;
+  /** The open composition's playable span in ticks, `[start, end)`: the
+   *  loop the clock wraps by, else the composition. Playback never shows a
+   *  frame outside it, so the lookahead prepares none there. */
+  span?: () => { start: number; end: number } | null;
   /** Every open session of the window (viewer sessions and the standby):
    *  each learns which compatibility producers the window has. */
   sessions?: () => TransportSession[];
@@ -328,6 +332,9 @@ export function layerRasterScale(scale: number): number {
  *  ten-thousandth of a pixel: a one-pixel canvas with no visible ink. */
 export const VANISHING_RASTER_SCALE = 1e-9;
 
+/** Answers {@link EngineRenderTransport.answeredAt} remembers. */
+export const ANSWER_LOG_LIMIT = 4096;
+
 export class EngineRenderTransport {
   private readonly producers = new Map<CompatSource, CompatProducer>();
   /** Producers of viewer frames' and snapshots' compatibility answers. */
@@ -339,6 +346,11 @@ export class EngineRenderTransport {
    *  (the engine dropped that raster meanwhile). */
   private readonly reused = new Set<string>();
   readonly compatStats = { needs: 0, rasters: 0, natives: 0, reuses: 0, unanswered: 0, exportAsks: 0 };
+  /** The latest answer posted for each layer and time (`layer`, `time` in
+   *  ticks), with its revision and kind, most recent last; at most
+   *  {@link ANSWER_LOG_LIMIT}. Counts answers by the frame they are for,
+   *  wherever they were made (a need, the lookahead, the paused warm-up). */
+  private readonly answerLog = new Map<string, { revision: number; kind: 'raster' | 'reuse' | 'native' }>();
   private answering = 0;
   /** Clock-driven, bounded playback lookahead. Answers are keyed by the
    * layer's exact need (including scale/crop) and document revision. */
@@ -495,11 +507,13 @@ export class EngineRenderTransport {
       // Breadth first: every layer's current frame precedes speculative
       // work. A slow producer gets at most one turn before another layer.
       let done = 0, pending = 0;
+      const span = this.options.span?.() ?? null;
+      const outside = (entry: AheadEntry, time: number) => time < 0 || (!!span && entry.need.composition === this.options.composition() && (time < span.start || time >= span.end));
       for (let offset = 0; offset <= COMPAT_LOOKAHEAD; offset++) {
         for (let i = 0; i < entries.length; i++) {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
           const time = entry.cursor + offset * entry.step;
-          if (time < 0 || entry.sent.has(time) || entry.pending.has(time)) continue;
+          if (outside(entry, time) || entry.sent.has(time) || entry.pending.has(time)) continue;
           if (warm && performance.now() >= warmUntil && !entry.required.has(time)) continue;
           pending++;
           if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
@@ -527,7 +541,7 @@ export class EngineRenderTransport {
             if (this.prefetchInFlight >= COMPAT_PREFETCH_IN_FLIGHT) break;
             const prepare = this.preparers.get(entry.need.source);
             const time = entry.cursor + offset * entry.step;
-            if (!prepare || time < 0 || entry.prefetched.has(time)) continue;
+            if (!prepare || outside(entry, time) || entry.prefetched.has(time)) continue;
             entry.prefetched.add(time);
             this.prefetchAhead(entry.need, time, revision ?? 0, prepare);
           }
@@ -677,18 +691,34 @@ export class EngineRenderTransport {
       return false;
     }
     const id = { composition: need.composition, layer: need.layer, time: need.time, source: need.source };
+    let posted: boolean;
     if (answer.kind === 'native') {
       this.compatStats.natives++;
-      return session.post({ type: 'compat', compat: 'native', ...id, scale: need.scale, revision, ...crop });
-    }
-    if (answer.kind === 'reuse') {
+      posted = session.post({ type: 'compat', compat: 'native', ...id, scale: need.scale, revision, ...crop });
+    } else if (answer.kind === 'reuse') {
       this.compatStats.reuses++;
       this.reused.add(`${tag}\u0000${revision}`);
       if (this.reused.size > 4096) this.reused.clear();
-      return session.post({ type: 'compat', compat: 'reuse', id: { ...id, key: answer.key }, scale: need.scale, revision, ...crop });
+      posted = session.post({ type: 'compat', compat: 'reuse', id: { ...id, key: answer.key }, scale: need.scale, revision, ...crop });
+    } else {
+      this.compatStats.rasters++;
+      posted = this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer, need.crop ?? undefined);
     }
-    this.compatStats.rasters++;
-    return this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer, need.crop ?? undefined);
+    if (posted) this.logAnswer(need, revision, answer.kind);
+    return posted;
+  }
+
+  private logAnswer(need: CompatNeed, revision: number, kind: 'raster' | 'reuse' | 'native'): void {
+    const key = `${need.layer}\u0000${need.time}`;
+    this.answerLog.delete(key);
+    this.answerLog.set(key, { revision, kind });
+    if (this.answerLog.size > ANSWER_LOG_LIMIT) this.answerLog.delete(this.answerLog.keys().next().value!);
+  }
+
+  /** The latest answer this window posted for `layer` at `time` (ticks):
+   *  its revision and kind, or null (diagnostics and the cadence gates). */
+  answeredAt(layer: string, time: number): { revision: number; kind: 'raster' | 'reuse' | 'native' } | null {
+    return this.answerLog.get(`${layer}\u0000${time}`) ?? null;
   }
 
   private postRaster(session: TransportSession, id: { composition: string; layer: string; time: number; source: CompatSource; key: string }, revision: number, scale: number,

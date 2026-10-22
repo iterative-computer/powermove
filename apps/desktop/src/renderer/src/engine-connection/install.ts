@@ -380,6 +380,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const rate = current?.clock?.rate;
       return position ? { time: ticks(position.time), rate: rate ? rate.num / rate.den : 1 } : null;
     },
+    span: () => {
+      const loop = current?.clock?.loopRange;
+      if (loop) return { start: Number(loop.start), end: Number(loop.end) };
+      const duration = Number((PM.curComp?.() ?? PM.proj)?.dur);
+      return duration > 0 ? { start: 0, end: ticks(duration) } : null;
+    },
     // A snapshot's own failure (an extension's request): recorded, never on the stage.
     onFailure: (code, message) => current?.reportFailure(code, message, undefined, false),
     onProducerError: (error) => {

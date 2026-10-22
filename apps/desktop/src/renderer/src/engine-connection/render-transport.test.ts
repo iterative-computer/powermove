@@ -729,6 +729,54 @@ describe('compatibility answers during playback', () => {
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 
+  it('prepares and answers nothing past the end of the playable span', async () => {
+    vi.useFakeTimers();
+    const posted: any[] = [];
+    const session: TransportSession = { id: 3, closed: false, generation: 2, resyncPending: false, applied: 5, uploadFallback: () => {}, post: (e) => { posted.push(e); return true; } };
+    const state = { time: 80 * frame };
+    const t = new EngineRenderTransport({
+      native: {}, session: () => session, revision: () => 5, composition: () => 'P-root', document: () => 'P', viewSeq: () => null, fallbackRunner: () => null, log: () => {},
+      playing: () => true, frameTicks: () => frame, playhead: () => ({ time: state.time, rate: 1 }), span: () => ({ start: 0, end: 90 * frame })
+    } as any);
+    const prepared: number[] = [];
+    const answered: number[] = [];
+    t.answerCompat('rasterOverride', n => { answered.push(n.time); return { kind: 'native' }; }, async n => { prepared.push(n.time); });
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(80 * frame)] }, session);
+      for (let i = 0; i < 40; i++) await vi.advanceTimersByTimeAsync(4);
+      // Frames 80 to 89 only: a 90-frame composition never shows frame 90.
+      expect(new Set(prepared)).toEqual(new Set(Array.from({ length: 10 }, (_, i) => (80 + i) * frame)));
+      expect(Math.max(...answered)).toBe(89 * frame);
+      // A nested composition's times are its own: the open span does not bound them.
+      t.receiveCompat({ compat: 'needs', needs: [{ ...need(95 * frame), composition: 'nested' }] }, session);
+      for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(4);
+      expect(prepared.some(time => time >= 95 * frame)).toBe(true);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('remembers the answer posted for each layer and frame, and only once posted', () => {
+    let open = true;
+    const session: TransportSession = { id: 3, closed: false, generation: 2, resyncPending: false, applied: 5, uploadFallback: () => {}, post: () => open };
+    const state = { time: 0, revision: 5 };
+    const t = new EngineRenderTransport({
+      native: {}, session: () => session, revision: () => state.revision, composition: () => 'P-root', document: () => 'P', viewSeq: () => null, fallbackRunner: () => null, log: () => {},
+      playing: () => false, frameTicks: () => frame, playhead: () => ({ time: state.time, rate: 1 }), span: () => ({ start: 0, end: 90 * frame })
+    } as any);
+    t.answerCompat('rasterOverride', n => n.time === frame ? { kind: 'native' } : { kind: 'reuse', key: `k${n.time}` });
+    try {
+      // Paused needs, answered at once.
+      t.receiveCompat({ compat: 'needs', needs: [need(0), need(frame)] }, session);
+      expect(t.answeredAt('title', 0)).toEqual({ revision: 5, kind: 'reuse' });
+      expect(t.answeredAt('title', frame)).toEqual({ revision: 5, kind: 'native' });
+      expect(t.answeredAt('other', 0)).toBeNull();
+      // An answer the session did not take is not remembered.
+      open = false;
+      state.revision = 6;
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      expect(t.answeredAt('title', 0)).toEqual({ revision: 5, kind: 'reuse' });
+    } finally { t.dispose(); }
+  });
+
   it('prepares nothing speculatively while paused', async () => {
     vi.useFakeTimers();
     const { t, session } = rig(false);
