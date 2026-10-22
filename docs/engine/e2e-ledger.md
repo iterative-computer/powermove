@@ -481,3 +481,118 @@ retaining fixed-edge, geometry, selection and undo checks. The Library overlay
 hash has a later focused four-case pass after moving the pointer outside the
 viewer and waiting for fonts, but the full-suite result remains a failure until
 the final serial rerun. No engine-on difference has been quarantined.
+
+### Final-HEAD serial runs (2026-10-22)
+
+Both runs used the same build of `feat/ne-consumers` after merging the latest
+3D lane (`e80c7c458`; later commits change only specs and docs), the command
+above, one worker, no retries and no exclusions. Nothing is quarantined; the
+engine-on differences below are fixed or owned with evidence. Raw JSON,
+traces and screenshots stay outside Git under `/tmp/ne-w5/consumers-r4/`.
+
+| Run | Cases | Passed | Failed | Skipped | Flaky | Wall time |
+|---|---:|---:|---:|---:|---:|---:|
+| Use New Engine on | 698 | 588 | 60 | 50 | 0 | 3,437.2 s |
+| Use New Engine off | 698 | 631 | 17 | 50 | 0 | 2,118.9 s |
+
+Against the previous complete runs: 54 engine-on results that failed now pass
+and 2 that passed now fail; 13 engine-off failures now pass and 3 are new. No
+failed result was teardown-only this time. Worker teardown outlived its 30 s
+budget after a passing worker four times with the engine on and once off
+(reported by Playwright as global errors, not as failed tests).
+
+Consumer-owned failures with the engine off: none. The Phase 0 consumer rows
+for the timeline mode ring, Library titlebar clearance, canvas/timeline menu
+parity, easing grid, nested group disclosure, extension stopwatches, direct
+resize and the flat-control walk pass (see [consumers.md](consumers.md)).
+
+Consumer-owned failures with the engine on are the four C18 results (no
+composed native RAM-preview cache or cached-preview audio voice). The
+multi-selection rotate is triaged to the document host: its native mirror
+answers an undone resize during the next gesture.
+
+New since the previous runs: `engine-blender-png-transport.spec.ts:15`
+crashes the renderer in both modes and `engine-present-recovery.spec.ts:132`
+retires 8 late surfaces where 16 are required, both first seen after merging
+the latest 3D lane; `engine-shader-parity.spec.ts:84` (off) failed reading a
+shader-cache temp file that was renamed while the spec listed the directory.
+
+Engine on, every failed result:
+
+| Spec and line | Results | Owner | Observed |
+|---|---:|---|---|
+| `ae-audit-implementation.spec.ts:51` | 1 | phase4a (C18) | Preview cache never becomes active: no composed native RAM-preview cache |
+| `agent-media-management.spec.ts:57` | 1 | agents / media store | Import aborted: "Media operation stopped because the project or agent run changed" |
+| `agent-media-tools.spec.ts:42` | 1 | agents | Request carries 8 images, spec expects 4 (Phase 0 row) |
+| `automatic-preview-memory.spec.ts:153` | 1 | phase4a (C18) | Zero remembered-frame hits during playback/back-scrub: composed cache absent |
+| `chatgpt-connection.spec.ts:5` | 1 | agents | Two Disconnect buttons match the exact locator |
+| `composited-video-sync.spec.ts:9` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `continuous-rasterization.spec.ts:4` | 1 | extcompat / renderer | Legacy raster source metadata absent (`undefined` density) |
+| `editor-responsiveness.spec.ts:65` | 1 | dochost | Save tick gap over 100 ms (Phase 0 row) |
+| `engine-blender-png-transport.spec.ts:15` | 1 | threed | Renderer process crashed ("Target crashed") during material-preview renderFrame; first seen after the latest 3D merge |
+| `engine-delivery.spec.ts:199` | 1 | derouter / export | Queue job completes where the routed-failure contract expects Failed |
+| `engine-export.spec.ts:21` | 1 | derouter / export | Routed MP4 encoder tag empty |
+| `engine-present-recovery.spec.ts:132` | 1 | threed / bridge | Retired late surface transfers 8, expected >= 16; first seen after merging the 3D lane's demand-sized paused pools (e6832538b); cause unconfirmed |
+| `engine-svg.spec.ts:380` | 1 | derouter / vectors | Body timeout in the bucket request walk |
+| `export-destination.spec.ts:38` | 1 | derouter / export | Export fixture/output collision |
+| `extension-layers.spec.ts:4` | 1 | threed | compileError "renderer did not run" for the bundled 3D layer |
+| `extension-layers.spec.ts:60` | 1 | threed | missingAsset flag differs after OBJ asset removal |
+| `extension-sandbox-clipboard.spec.ts:9` | 1 | extcompat | Sandboxed panel never arms the gesture (Phase 0 row) |
+| `extension-sandbox-perf.spec.ts:91` | 1 | extcompat | Body timeout |
+| `extension-sandbox.spec.ts:52` | 1 | extcompat | Sandboxed view never takes focus (Phase 0 row) |
+| `gpu-recovery.spec.ts:3` | 1 | bridge | No presented frame after the GPU context restore |
+| `import-mp4.spec.ts:17` | 1 | mediaclose | "Restored video did not seek" after the source was removed |
+| `import-mp4.spec.ts:113` | 1 | mediaclose | Legacy audio-voice instrumentation; timeout |
+| `import-mp4.spec.ts:166` | 1 | mediaclose | Legacy audio-voice instrumentation; timeout |
+| `import-prores-alpha.spec.ts:10` | 1 | mediaclose | Imported ProRes 4444 has no playback proxy (`proxy` false) |
+| `import-prores.spec.ts:7` | 1 | mediaclose | No live or durable proxy, 0 frames presented |
+| `legacy-blurred-video-export.spec.ts:27` | 1 | derouter / mediaclose | Sharp ProRes end frame 200 vs source 210 (limit < 7) |
+| `local-media-recovery.spec.ts:38` | 1 | mediaclose | A changed source file is reported ready (no "source file has changed" error) |
+| `media-store.spec.ts:296` | 1 | agents / media store | Import aborted: project or agent run changed |
+| `media-store.spec.ts:324` | 1 | agents / media store | Import aborted: project or agent run changed |
+| `native-edit-kernels.spec.ts:32` | 1 | dochost | Build has the native evaluator on; spec expects VITE_POWERMOVE_NATIVE_EVALUATOR off |
+| `native-edit-kernels.spec.ts:200` | 1 | dochost | Build has the native evaluator on; spec expects VITE_POWERMOVE_NATIVE_EVALUATOR off |
+| `native-export-performance.spec.ts:6` | 2 | derouter / export | Native export canceled instead of completing |
+| `native-export-performance.spec.ts:111` | 2 | derouter / export | GPU-loss export error contract mismatch |
+| `native-linked-rendition.spec.ts:11` | 1 | mediaclose | PM_FFMPEG_DIR undefined in the spec environment |
+| `native-still-orientation-parity.spec.ts:264` | 1 | derouter | Route expected legacy, got engine; pixel metrics exact |
+| `pan-presentation.spec.ts:60` | 1 | bridge | Legacy GL presentation probe: refined=false |
+| `pan-presentation.spec.ts:104` | 1 | bridge | Legacy GL presentation probe: redraw flags false |
+| `playback-audio.spec.ts:15` | 1 | phase4a (C18) / bridge | Adaptive-quality pressure still measured through legacy GL/voice instrumentation; body timeout |
+| `playback-audio.spec.ts:72` | 1 | phase4a (C18) | Cached playback has frames but no cached-preview audio voice (`cached.audio.running` false) |
+| `playback-source-warmup.spec.ts:5` | 4 | mediaclose | Legacy raster/cache warm-up instrumentation |
+| `playback-source-warmup.spec.ts:60` | 1 | mediaclose | Legacy raster/cache warm-up instrumentation |
+| `project-file-media.spec.ts:9` | 1 | mediaclose | Phase 0 flaky row: metadata-only re-save returns false |
+| `project-file-media.spec.ts:65` | 1 | mediaclose | Legacy audio-voice instrumentation; timeout |
+| `prompt-attachments.spec.ts:5` | 1 | agents | Request carries 4 images, spec expects 1 (Phase 0 row) |
+| `scene3d-budget-parity.spec.ts:107` | 1 | threed | 600k-vertex sparse placement body timeout |
+| `video-frame-integrity.spec.ts:33` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `video-frame-integrity.spec.ts:63` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `video-frame-integrity.spec.ts:99` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `video-playback-regression.spec.ts:6` | 1 | mediaclose | An inactive copy pauses playback (`paused` true) |
+| `video-playback-regression.spec.ts:79` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `video-playback-regression.spec.ts:128` | 2 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `video-scrubbing.spec.ts:7` | 2 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `viewer-resize.spec.ts:206` | 1 | dochost | Native mirror answers the undone resize during the next rotate press; rotate writes scale 111.481 (evidence /tmp/ne-w5/consumers-r4/rotate-evidence.txt) |
+
+Engine off, every failed result:
+
+| Spec and line | Results | Owner | Observed |
+|---|---:|---|---|
+| `agent-media-management.spec.ts:57` | 1 | agents / media store | Import aborted: "Media operation stopped because the project or agent run changed" |
+| `agent-media-tools.spec.ts:42` | 1 | agents | Request carries 8 images, spec expects 4 (Phase 0 row) |
+| `chatgpt-connection.spec.ts:5` | 1 | agents | Two Disconnect buttons match the exact locator |
+| `editor-responsiveness.spec.ts:65` | 1 | dochost | Save tick gap over 100 ms (Phase 0 row) |
+| `engine-blender-png-transport.spec.ts:15` | 1 | threed | Renderer process crashed ("Target crashed") during material-preview renderFrame; first seen after the latest 3D merge |
+| `engine-delivery.spec.ts:199` | 1 | derouter / export | Queue job completes where the routed-failure contract expects Failed |
+| `engine-export.spec.ts:21` | 1 | derouter / export | Routed MP4 encoder tag empty |
+| `engine-present-recovery.spec.ts:132` | 1 | threed / bridge | Retired late surface transfers 8, expected >= 16; first seen after merging the 3D lane's demand-sized paused pools (e6832538b); cause unconfirmed |
+| `engine-shader-parity.spec.ts:84` | 1 | bridge / renderer | ENOENT reading a shader-cache temp file the cache renamed while the spec listed it; new in this run |
+| `engine-svg.spec.ts:286` | 1 | derouter / vectors | Job-engine control still differs from today by max 1 over 59,892 pixels (also in the previous default-off run) |
+| `extension-sandbox-clipboard.spec.ts:9` | 1 | extcompat | Sandboxed panel never arms the gesture (Phase 0 row) |
+| `extension-sandbox.spec.ts:52` | 1 | extcompat | Sandboxed view never takes focus (Phase 0 row) |
+| `media-store.spec.ts:296` | 1 | agents / media store | Import aborted: project or agent run changed |
+| `media-store.spec.ts:324` | 1 | agents / media store | Import aborted: project or agent run changed |
+| `native-linked-rendition.spec.ts:11` | 1 | mediaclose | PM_FFMPEG_DIR undefined in the spec environment |
+| `native-still-orientation-parity.spec.ts:264` | 1 | derouter | Route expected legacy, got engine; pixel metrics exact |
+| `prompt-attachments.spec.ts:5` | 1 | agents | Request carries 4 images, spec expects 1 (Phase 0 row) |
