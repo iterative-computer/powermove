@@ -1,3 +1,4 @@
+import { installDocumentKernelIpc } from './document-kernel';
 /*
  * Wires the native engine into the Electron app behind "Use New Engine".
  *
@@ -401,7 +402,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // Sync snapshots a window's own session cannot serve (none yet, or a
   // staged resync in flight) come from a session main opens for the window.
   const windowSessions = new WindowSnapshotSessions(
-    { isReady: (p) => engine.isReady(p), hostPort: (p) => engine.hostPort(p), request: (p, body, session, revision) => engine.request(p, body, session, revision), stageDocument: (p, session, bytes) => engine.stageDocument(p, session, bytes), event: (p, body, session) => engine.event(p, body, session) },
+    { isReady: (p) => engine.isReady(p), hostPort: (p) => engine.hostPort(p), request: (p, body, session, revision) => engine.request(p, body, session, revision), stageDocument: (p, session, bytes) => engine.stageDocument(p, session, bytes), event: (p, body, session) => engine.event(p, body, session), adoptNativeDocument: (owner, session, document, revision) => engine.adoptNativeDocument(owner, session, document, revision) },
     engine.definitions,
     log,
     undefined,
@@ -413,6 +414,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     windowSessions,
     log
   });
+
+  const uninstallDocumentKernel = installDocumentKernelIpc({ ipc: options.ipc, cache: path.join(cacheDirectory, 'Documents'), trusted: options.isTrustedSender, call: (owner, request, bytes) => engine!.documentKernel(owner, request, bytes) });
 
   // The font registry and subsetting run in the interactive engine (plan
   // section 12, Phase 2): main relays pm-wasm's font requests over its own
@@ -688,6 +691,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     attachWindow,
     dispose: async () => {
       removeSnapshotIpc();
+      await uninstallDocumentKernel();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
       windowSessions.dispose();
       snapshots = null;

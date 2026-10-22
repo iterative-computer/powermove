@@ -268,7 +268,7 @@ export type EngineSnapshotRequest = {
 /** A `compat` session event (pm_protocol `CompatMessage`) a window sends. */
 export type EngineCompatEvent = { type: 'compat'; compat: 'producers' | 'native' | 'reuse' | 'pixels' } & Record<string, unknown>;
 
-export type EngineSnapshotDocument = { id: string; revision: number; hash?: string | null; json?: Uint8Array | null };
+export type EngineSnapshotDocument = { id: string; revision: number; nativeKernel?: true; hash?: string | null; json?: Uint8Array | null };
 
 /** What a snapshot came back with. `data` is RGBA8, rows top-down, in
  *  `pixels`'s encoding. `empty`: a layer target that draws nothing then
@@ -343,6 +343,7 @@ export type EngineCompatAnswer =
  *  (`ENGINE_WINDOW_MESSAGE`) because a `MessagePort` cannot cross the
  *  context bridge. */
 export interface EngineBridge {
+  documentKernel?: import('./document-kernel').DocumentKernelBridge;
   status(): Promise<EngineStatusMessage>;
   /** Whether this launch runs the new engine (read once at launch). */
   enabledSync(): boolean;

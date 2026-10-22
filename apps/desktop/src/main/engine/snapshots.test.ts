@@ -252,6 +252,14 @@ describe('SnapshotService', () => {
 describe('sync snapshots served by main’s session for the window', () => {
   const doc = { id: 'doc', revision: 41, hash: 'ab'.repeat(32), json: new TextEncoder().encode('{}') };
 
+  it('accepts an opaque native reference but rejects mixed native and JSON/hash bodies', () => {
+    const reference = { id: 'doc', revision: 41, nativeKernel: true as const };
+    expect(validSnapshotRequest(request({}, { session: null, document: reference }))).toBe(true);
+    expect(validSnapshotRequest(request({}, { session: null, document: { ...reference, json: doc.json } }))).toBe(false);
+    expect(validSnapshotRequest(request({}, { session: null, document: { ...reference, hash: doc.hash } }))).toBe(false);
+    expect(validSnapshotRequest(request({}, { session: null, document: { ...reference, nativeKernel: false as never } }))).toBe(false);
+  });
+
   it('accept a document in place of the session, never neither', () => {
     expect(validSnapshotRequest(request({}, { session: null, document: doc }))).toBe(true);
     expect(validSnapshotRequest(request({}, { session: null, document: { id: 'doc', revision: 41 } }))).toBe(true);
@@ -277,6 +285,17 @@ describe('sync snapshots served by main’s session for the window', () => {
     expect(prepare).toHaveBeenCalledWith(12, doc, [], [], []);
     expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
     expect(service.status().windowSessions).toBe(1);
+  });
+
+  it('derives a native reference owner from the IPC sender, never a renderer field', async () => {
+    const e = engine(async () => rendered({ kind: 'inline', bytes: new Uint8Array(32) }));
+    const prepare = vi.fn(async () => ({ port: 3, session: 77 }));
+    const service = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare }, log: () => {} });
+    const reference = { id: 'doc', revision: 41, nativeKernel: true as const };
+    expect(await service.snapshot(12, request({}, { session: null, generation: 0, document: reference }))).toMatchObject({ status: 'rendered' });
+    expect(prepare).toHaveBeenCalledExactlyOnceWith(12, reference, [], [], []);
+    expect(reference).not.toHaveProperty('owner');
+    expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
   });
 
   it('answer needsDocument, and a bounded failure when main’s session is not ready in time', async () => {

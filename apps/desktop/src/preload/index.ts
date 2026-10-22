@@ -1,3 +1,4 @@
+import { DOCUMENT_KERNEL_IPC } from '../shared/document-kernel';
 import { contextBridge, ipcRenderer, sharedTexture, webUtils, type IpcRendererEvent } from 'electron';
 
 import {
@@ -575,6 +576,18 @@ const bridge: PowermoveBridge = {
 
   /* ── native engine (behind "Use New Engine") ── */
   nativeEngine: {
+    documentKernel: {
+      automaticRecovery: true,
+      call: (request, bytes) => ipcRenderer.sendSync(DOCUMENT_KERNEL_IPC.call, String(request), bytes),
+      begin: () => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.begin),
+      write: (token, chunk) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.write, String(token), chunk),
+      commit: (token, document, revision) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.commit, String(token), String(document), revision),
+      abort: (token) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.abort, String(token)),
+      beginDigest: (prefix) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.digestBegin, String(prefix)),
+      writeDigest: (token, chunk) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.digestWrite, String(token), chunk),
+      endDigest: (token) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.digestEnd, String(token)),
+      digestBatch: (instructions) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.digestBatch, instructions)
+    },
     status: () => ipcRenderer.invoke(ENGINE_IPC.getStatus) as Promise<EngineStatusMessage>,
     enabledSync: () => ipcRenderer.sendSync(ENGINE_IPC.enabledSync) === true,
     hostTime: () => ipcRenderer.invoke(ENGINE_IPC.hostTime) as Promise<number>,

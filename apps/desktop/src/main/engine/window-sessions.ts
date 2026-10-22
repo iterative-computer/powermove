@@ -50,6 +50,8 @@ export type WindowDocument = {
   /** The engine's document id. */
   id: string;
   revision: number;
+  /** Main adopts this window's current native root without JSON or hashing. */
+  nativeKernel?: true;
   /** The canonical hash (hex), with `json`. */
   hash?: string | null;
   /** Canonical JSON; absent when the window expects main to have it. */
@@ -70,6 +72,7 @@ export interface WindowSessionEngine {
   request(process: 'interactive', body: Request, session?: number | null, revision?: number | null): Promise<Response>;
   stageDocument(process: 'interactive', session: number, bytes: Uint8Array): Promise<{ handle: string; length: number }>;
   event(process: 'interactive', body: Event, session: number | null): void;
+  adoptNativeDocument?(owner: number, session: number, document: string, revision: number): Promise<void>;
 }
 
 export interface WindowDefinitions {
@@ -134,7 +137,7 @@ export class WindowSnapshotSessions {
     // the window's session when the page loads again), so the document id
     // and revision name the content.
     const sameDocument = record?.document === document.id && record.revision === document.revision;
-    if (!sameDocument && !(document.json && document.hash)) {
+    if (!sameDocument && !(document.nativeKernel || (document.json && document.hash))) {
       this.stats.needsDocument++;
       return 'needsDocument';
     }
@@ -166,16 +169,21 @@ export class WindowSnapshotSessions {
       }
     }
     if (!sameDocument) {
-      const json = document.json!;
-      let source: { kind: 'inline'; body: Uint8Array } | { kind: 'cacheFile'; handle: string; length: number };
-      if (json.byteLength > INLINE_LIMIT) {
-        const staged = await this.engine.stageDocument('interactive', record.session, json);
-        source = { kind: 'cacheFile', handle: staged.handle, length: staged.length };
-        this.stats.staged++;
+      if (document.nativeKernel) {
+        if (!this.engine.adoptNativeDocument) throw new Error('The native document reference is unavailable');
+        await this.engine.adoptNativeDocument(windowId, record.session, document.id, document.revision);
       } else {
-        source = { kind: 'inline', body: json };
+        const json = document.json!;
+        let source: { kind: 'inline'; body: Uint8Array } | { kind: 'cacheFile'; handle: string; length: number };
+        if (json.byteLength > INLINE_LIMIT) {
+          const staged = await this.engine.stageDocument('interactive', record.session, json);
+          source = { kind: 'cacheFile', handle: staged.handle, length: staged.length };
+          this.stats.staged++;
+        } else {
+          source = { kind: 'inline', body: json };
+        }
+        await this.engine.request('interactive', { type: 'resync', document: document.id, revision: document.revision, encoding: 'canonicalJsonV1', source, hash: hexBytes(document.hash!) } as unknown as Request, record.session);
       }
-      await this.engine.request('interactive', { type: 'resync', document: document.id, revision: document.revision, encoding: 'canonicalJsonV1', source, hash: hexBytes(document.hash!) } as unknown as Request, record.session);
       record.document = document.id;
       record.revision = document.revision;
       record.hash = document.hash ?? null;

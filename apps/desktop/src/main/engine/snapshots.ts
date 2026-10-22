@@ -145,6 +145,7 @@ function validDocument(value: unknown): boolean {
   const d = value as Record<string, unknown>;
   if (!id(d['id']) || !safeUint(d['revision'])) return false;
   const json = d['json'];
+  if (d['nativeKernel'] !== undefined) return d['nativeKernel'] === true && json == null && d['hash'] == null;
   if (json === undefined || json === null) return d['hash'] === undefined || d['hash'] === null || (typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']));
   // A document's body comes with its canonical hash.
   return typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']) && json instanceof Uint8Array && json.byteLength > 0 && json.byteLength <= MAX_DOCUMENT_BYTES;

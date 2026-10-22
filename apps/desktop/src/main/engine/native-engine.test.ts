@@ -368,6 +368,19 @@ describe('NativeEngine with fake engines', () => {
     expect(await pending).toBeNull();
   });
 
+  it('forwards native document bytes separately and reports evaluator transport loss on exit', async () => {
+    const launch = host.supervisor('interactive').current!;
+    const bytes = new Uint8Array([0x50, 0x4d, 0x50, 1]);
+    const request = '{"op":"apply","args":{"base":1,"revision":2}}';
+    const pending = launch.documentKernel!(7, request, bytes);
+    await settle();
+    const control = live('interactive').controls.find(message => message.type === 'documentKernel');
+    expect(control).toMatchObject({ owner: 7, request, bytes });
+    expect(request).not.toContain('body');
+    live('interactive').kill();
+    expect(JSON.parse(await pending)).toMatchObject({ ok: false, code: 'unavailable' });
+  });
+
   it("keeps the interactive engine's fallback texture bands for the snapshot answer they precede", async () => {
     const key = 'c'.repeat(64);
     const band = { type: 'shaderFallback', fallback: 'input', key, texture: 0, width: 2, height: 1, row: 0, rows: 1, rgba16f: new Uint8Array(16).fill(5) } as unknown as Event;

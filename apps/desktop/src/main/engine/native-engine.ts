@@ -16,6 +16,7 @@
  * When an engine restarts, every client gets new ports with a new
  * generation and re-sends its document (resync).
  */
+import { DocumentRecovery } from './document-recovery';
 import { randomBytes } from 'node:crypto';
 import { mkdir, open, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -151,6 +152,7 @@ export class NativeEngine {
   readonly fallbackInputs = new FallbackInputs();
   readonly ledger = new CrashLedger();
   private readonly supervisors: Record<EngineProcess, EngineSupervisor>;
+  private readonly documentRecovery: DocumentRecovery;
   private nextPort = 1;
   private clients = new Map<number, Client>();
   private peer: { interactive: number; job: number; generations: [number, number] } | null = null;
@@ -223,6 +225,24 @@ export class NativeEngine {
       return supervisor;
     };
     this.supervisors = { interactive: make('interactive'), job: make('job') };
+    this.documentRecovery = new DocumentRecovery({
+      cache: path.join(options.cacheDirectory, 'DocumentRecovery'),
+      ready: async (deadline, after) => {
+        while (!this.stopping && Date.now() < deadline) {
+          const launch = this.supervisors.interactive.current;
+          if (launch?.documentKernel && !launch.exiting && launch.generation !== after) return launch.generation;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        throw new Error('The native document recovery timed out');
+      },
+      call: async (owner, request, bytes, flush) => {
+        const launch = this.supervisors.interactive.current;
+        if (!launch?.documentKernel || launch.exiting) throw Object.assign(new Error('The document engine is unavailable.'), { code: 'unavailable' });
+        const answer = await launch.documentKernel(owner, request, bytes, flush);
+        if (this.supervisors.interactive.current !== launch) throw Object.assign(new Error('The document engine restarted.'), { code: 'unavailable' });
+        return answer;
+      }
+    });
   }
 
   listen(listener: NativeEngineListener): () => void {
@@ -240,6 +260,7 @@ export class NativeEngine {
   async stop(): Promise<void> {
     this.stopping = true;
     await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop(), this.blender?.dispose()]);
+    await this.documentRecovery.dispose();
   }
 
   supervisor(process: EngineProcess): EngineSupervisor {
@@ -262,6 +283,15 @@ export class NativeEngine {
     const launch = this.supervisors[process].current;
     if (!launch || launch.exiting) return null;
     return launch.report();
+  }
+
+  async documentKernel(owner: number, request: string, bytes?: Uint8Array, flushDocumentUpdates = false): Promise<string> {
+    return this.documentRecovery.call(owner, request, bytes, flushDocumentUpdates);
+  }
+
+  async adoptNativeDocument(owner: number, session: number, document: string, revision: number): Promise<void> {
+    const reply = JSON.parse(await this.documentKernel(owner, JSON.stringify({ op: 'adoptSession', args: { session, document, revision } }), undefined, true));
+    if (!reply.ok) throw new Error(reply.error || 'The native document reference is unavailable');
   }
 
   status(): NativeEngineStatus {
@@ -510,6 +540,7 @@ export class NativeEngine {
         restartInMs: 0
       });
     }
+    if (process === 'interactive') await this.documentRecovery.recoverAll();
     for (const client of this.clients.values()) if (client.kind.processes.includes(launch.process)) this.connectClient(client, launch);
     this.connectPeer();
     this.emitStatus();
