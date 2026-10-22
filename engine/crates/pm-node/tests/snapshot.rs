@@ -152,6 +152,11 @@ fn raster_override_layers_wait_for_the_producer_s_answer() {
 }
 
 #[test]
+fn a_playing_view_asks_for_the_next_frames_raster_override_layers_ahead() {
+    run_child("child_compat_ahead");
+}
+
+#[test]
 fn the_host_snapshots_sessions_it_opened_for_a_window() {
     run_child("child_host_session");
 }
@@ -2444,6 +2449,116 @@ fn svg_file(tag: &str) -> std::path::PathBuf {
     )
     .unwrap();
     path
+}
+
+#[test]
+#[ignore = "run by a_playing_view_asks_for_the_next_frames_raster_override_layers_ahead"]
+fn child_compat_ahead() {
+    use pm_protocol::snapshot::{CompatMessage, CompatNative, CompatSource};
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    const FRAME: i64 = 705_600_000 / 30;
+    enum Seen {
+        Needs(Vec<pm_protocol::snapshot::CompatNeed>, Revision),
+        Frame(pm_protocol::frame::FrameDescriptor),
+    }
+    let mut c = Child::start();
+    c.resync(2, 1, &shape_project(60.0));
+    c.event(Event::Compat(CompatMessage::Producers {
+        sources: vec![CompatSource::RasterOverride],
+    }));
+    c.event(Event::Viewer(viewer_state()));
+    // The window: every need answered at once as a pass-through (one
+    // batch per message), every frame handed back. Records when each ask
+    // and each playing frame arrived.
+    let mut asks: Vec<(Instant, i64)> = Vec::new();
+    let mut frames: Vec<(Instant, i64)> = Vec::new();
+    let mut serve = |c: &mut Child, for_: Duration, playing: bool| {
+        let until = Instant::now() + for_;
+        while Instant::now() < until {
+            let seen = c.inbox.try_wait(Duration::from_millis(5), &mut |port, m| {
+                if port != WINDOW {
+                    return None;
+                }
+                match &m.message {
+                    Message::Event {
+                        body: Event::Compat(CompatMessage::Needs { needs, revision }),
+                    } => Some(Seen::Needs(needs.clone(), *revision)),
+                    Message::Event {
+                        body: Event::Frame(d),
+                    } => Some(Seen::Frame(d.clone())),
+                    _ => None,
+                }
+            });
+            match seen {
+                Some(Seen::Needs(needs, revision)) => {
+                    if playing {
+                        let latest = needs.iter().map(|n| n.time.get()).max().unwrap_or(0);
+                        asks.push((Instant::now(), latest));
+                    }
+                    c.event(Event::Compat(CompatMessage::Answers {
+                        natives: needs
+                            .iter()
+                            .map(|n| CompatNative {
+                                composition: n.composition.clone(),
+                                layer: n.layer.clone(),
+                                time: n.time,
+                                source: n.source,
+                                scale: n.scale,
+                                revision,
+                                crop: n.crop,
+                            })
+                            .collect(),
+                        reuses: Vec::new(),
+                    }));
+                }
+                Some(Seen::Frame(d)) => {
+                    if playing {
+                        frames.push((Instant::now(), d.pts.get()));
+                    }
+                    c.event(Event::ReleaseFrame(FrameRelease {
+                        pool_index: d.pool_index,
+                        seq: d.seq,
+                    }));
+                }
+                None => {}
+            }
+        }
+    };
+    // The paused frame, answered.
+    serve(&mut c, Duration::from_millis(1500), false);
+    let before = presenter_stats(&c);
+    c.event(Event::Transport(TransportCommand::Play {
+        rate: PlaybackRate::NORMAL,
+    }));
+    serve(&mut c, Duration::from_millis(1800), true);
+    c.event(Event::Transport(TransportCommand::Pause));
+    let stats = presenter_stats(&c);
+    assert!(frames.len() >= 10, "{} playing frames: {stats}", frames.len());
+    // While it plays, the engine asks for frames well past the one it just
+    // drew, so the next frames find their answers in.
+    let ahead = asks
+        .iter()
+        .filter(|(at, time)| {
+            let drawn = frames.iter().filter(|(f, _)| f <= at).map(|(_, t)| *t).max();
+            drawn.is_some_and(|d| *time >= d + 6 * FRAME)
+        })
+        .count();
+    assert!(ahead >= 3, "asks ahead of the drawn frame: {ahead} of {}", asks.len());
+    assert!(stats["compatKeptAhead"].as_u64().unwrap_or(0) > 0, "{stats}");
+    // The playing frames did not each wait for their own answers.
+    let waits = stats["compatWaits"].as_u64().unwrap_or(0) - before["compatWaits"].as_u64().unwrap_or(0);
+    assert!(
+        (waits as usize) * 4 <= frames.len(),
+        "{waits} waits for {} frames: {stats}",
+        frames.len()
+    );
+    println!(
+        "CHILD-OK compat ahead ({} frames, {} asks, {ahead} ahead, {waits} waits)",
+        frames.len(),
+        asks.len()
+    );
 }
 
 #[test]

@@ -468,6 +468,9 @@ pub struct Stats {
     pub compat_asked: u64,
     /// Viewer frames that waited for producer answers.
     pub compat_waits: u64,
+    /// Raster-override needs asked ahead of the frames a playing view will
+    /// draw (`keep_compat_asked`).
+    pub compat_kept_ahead: u64,
     /// Planning time spent asking the next frames' compatibility needs
     /// while a playing frame waited for its own (µs).
     pub compat_asked_ahead_us: u64,
@@ -598,6 +601,9 @@ struct View {
     /// needs, since when): it is planned again once all of them arrived,
     /// not once per answer (`compat_ready`).
     compat_waiting: Option<(Revision, Vec<pm_protocol::snapshot::CompatNeed>, std::time::Instant, i64)>,
+    /// The farthest frame whose raster-override needs were asked ahead
+    /// (`keep_compat_asked`), at which revision and clock epoch.
+    compat_asked_ahead: Option<(Revision, u32, i64)>,
     /// Level 1 SVG buckets the latest frame drew without (the window could
     /// not draw them): asked for again while it shows them.
     svg_without: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
@@ -713,6 +719,15 @@ const COMPAT_WAIT_REPLAN: std::time::Duration = std::time::Duration::from_millis
 /// needs are asked with it, and the most planning time spent on them.
 const COMPAT_ASK_AHEAD: i64 = 3;
 const COMPAT_ASK_AHEAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(30);
+
+/// Frames (at the schedule's stride) past the frame a playing view just drew
+/// whose raster-override needs are kept asked: the window answers them in
+/// its next animation frame, long before the schedule draws them, so a
+/// frame does not wait a turn of the window's main thread for its own.
+const COMPAT_KEEP_AHEAD: i64 = 8;
+/// Planning time spent keeping them asked after a frame (the first turn of
+/// a run, which asks the whole span, gets [`COMPAT_ASK_AHEAD_BUDGET`]).
+const COMPAT_KEEP_AHEAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -2236,6 +2251,7 @@ impl Thread {
             dirty: true,
             external_wait: None,
             compat_waiting: None,
+            compat_asked_ahead: None,
             svg_without: Vec::new(),
             requests: VecDeque::new(),
             retry: None,
@@ -3416,6 +3432,7 @@ impl Thread {
                         view.schedule.observe((now() - started) as f64);
                     }
                     let remote = view.pool.as_ref().is_some_and(|l| l.remote.is_some());
+                    let drew = rendered.is_some();
                     if let Some(descriptor) = rendered {
                         if remote {
                             self.present_remote(key, &descriptor, shown_from);
@@ -3423,6 +3440,9 @@ impl Thread {
                             let revision = descriptor.revision;
                             self.event(key, Event::Frame(descriptor), Some(revision));
                         }
+                    }
+                    if drew {
+                        self.keep_compat_asked(key, k);
                     }
                 }
                 Next::Skip { .. } => {
@@ -3526,6 +3546,84 @@ impl Thread {
     /// Renders the frame showing `media` into a free surface, waits for the
     /// GPU, and returns its descriptor. `timing` is `(shown_from, shown_for)`
     /// in host µs for timed frames.
+    /// After playing frame `k` drew: the raster-override needs of the next
+    /// [`COMPAT_KEEP_AHEAD`] frames the schedule will draw (at its stride)
+    /// are asked of the window now, planned within a budget (their plans
+    /// only, `Composer::compat_needs_at`); each later frame adds the next.
+    /// Needs already answered or asked are not asked again.
+    fn keep_compat_asked(&mut self, key: Key, k: i64) {
+        if !self.config.document
+            || !self
+                .compat
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .has_producers(key)
+        {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let (Some(view), Some(doc)) = (self.views.get_mut(&key), self.docs.get_mut(&key)) else {
+            return;
+        };
+        if !view.clock.is_playing() {
+            return;
+        }
+        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        let epoch = view.clock.epoch();
+        let frame_us = super::schedule::Schedule::frame_us(&view.clock).max(1.0);
+        let cost = view.schedule.cost_us().unwrap_or(0.0);
+        let stride = ((cost + super::schedule::DELIVERY_US) / frame_us)
+            .ceil()
+            .clamp(1.0, 240.0) as i64;
+        let dir = if view.clock.rate().num < 0 { -1 } else { 1 };
+        let step = dir * stride;
+        let target = k + COMPAT_KEEP_AHEAD * step;
+        let (mut at, budget) = match view.compat_asked_ahead {
+            Some((r, e, j)) if r == revision && e == epoch && (j - k) * dir > 0 => {
+                (j, COMPAT_KEEP_AHEAD_BUDGET)
+            }
+            _ => (k, COMPAT_ASK_AHEAD_BUDGET),
+        };
+        let composition = view.state.composition.as_str().to_owned();
+        let f = view.clock.frame_ticks();
+        let mut fresh = Vec::new();
+        composer
+            .renderer()
+            .set_compat_rasters(self::compat_view(&self.compat, key, revision));
+        while (target - at) * dir > 0 && started.elapsed() < budget {
+            at += step;
+            let time = view.clock.wrap(at * f);
+            let needs = composer.compat_needs_at(
+                doc.document(),
+                &composition,
+                doc.media(),
+                Ticks::new(time.max(0)).unwrap_or(Ticks::ZERO),
+                &view.state,
+            );
+            fresh.extend(self.compat.lock().unwrap_or_else(|e| e.into_inner()).to_ask(
+                key,
+                revision,
+                needs,
+                std::time::Instant::now(),
+            ));
+        }
+        composer.renderer().set_compat_rasters(None);
+        view.compat_asked_ahead = Some((revision, epoch, at));
+        for chunk in fresh.chunks(pm_protocol::snapshot::MAX_COMPAT_NEEDS) {
+            let envelope = super::compat::needs_event(key.1, revision, chunk.to_vec());
+            if let Ok(bytes) = codec::encode(&envelope) {
+                (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+            }
+        }
+        let mut stats = self.stats();
+        stats.compat_kept_ahead += fresh.len() as u64;
+        stats.compat_asked_ahead_us += started.elapsed().as_micros() as u64;
+    }
+
     fn render(
         &mut self,
         key: Key,
