@@ -1,5 +1,13 @@
 # WebM export parity: VP9/VP8 and Opus
 
+**Where this applies.** In the desktop app, an opaque WebM job export is now
+encoded by Chromium's own WebCodecs encoders (`hostEncode`, see
+[export.md](export.md#export-encoding-parity-export-1)), so the libvpx/libopus
+settings below are used only where there is no host: the CLI and alpha WebM
+(which today's exporter does not write). The measurements below are of that
+libvpx/libopus path and explain why the app does not use it for parity: the
+library revisions differ from Chromium's pins.
+
 The current exporter submits canvas `VideoFrame`s to Chromium 152 WebCodecs
 with `latencyMode: "quality"`, a target bitrate from the export quality tier,
 the selected frame rate, and a forced keyframe every rounded two seconds. Its

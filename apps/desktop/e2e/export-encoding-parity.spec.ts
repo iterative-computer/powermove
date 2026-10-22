@@ -20,7 +20,7 @@ import { importFixture } from './helpers/media';
 
 type Format = { id: string; format: 'prores' | 'mp4' | 'webm'; alpha: boolean; extension: string };
 type Mode = 'legacy' | 'native';
-type Fixture = { name: 'basic' | 'advanced' | 'large'; width: number; height: number; fps: number; dur: number; capture: boolean };
+type Fixture = { name: 'basic' | 'automation' | 'advanced' | 'large'; width: number; height: number; fps: number; dur: number; capture: boolean };
 type Exported = { file: string; captures: Record<string, string>; elapsedMs: number; statuses: Array<{ state: string; routed?: boolean; error?: string }> };
 
 const FORMATS: Format[] = [
@@ -31,6 +31,9 @@ const FORMATS: Format[] = [
 ];
 const FIXTURES: Fixture[] = [
   { name: 'basic', width: 320, height: 180, fps: 30, dur: 1, capture: true },
+  // Gain automation, fades, trims and a nested composition's levels.
+  { name: 'automation', width: 320, height: 180, fps: 30, dur: 1, capture: true },
+  // The same with the nested clip at speed 1.2.
   { name: 'advanced', width: 320, height: 180, fps: 30, dur: 1, capture: true },
   // Timing and multi-threaded encoders (libvpx uses 8 threads at 1080p);
   // no captures, which would slow both exporters.
@@ -76,7 +79,7 @@ async function project(session: LaunchedApp, fixture: Fixture): Promise<void> {
   }, fixture);
   await importFixture(session.page, 'tone.wav');
   await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((layer: any) => layer.type === 'audio'));
-  await session.page.evaluate(({ advanced, dur }) => {
+  await session.page.evaluate(({ advanced, speed, dur }) => {
     const PM = (window as any).PM;
     const audio = PM.proj.layers.find((layer: any) => layer.type === 'audio');
     audio.from = 0;
@@ -97,7 +100,7 @@ async function project(session: LaunchedApp, fixture: Fixture): Promise<void> {
       nested.audioGain = PM.P(0.7);
       nested.layers = [PM.mkLayer('audio', { name: 'Nested tone', from: 0, dur: 1,
         d: { asset: audio.d.asset, gain: PM.P(0.35), trim: PM.P(0.1),
-          speed: PM.P(1.2), fadeIn: PM.P(0.08), fadeOut: PM.P(0.1) } }, nested)];
+          speed: PM.P(speed), fadeIn: PM.P(0.08), fadeOut: PM.P(0.1) } }, nested)];
       PM.proj.comps[nested.id] = nested;
       PM.proj.layers.push(PM.mkLayer('precomp', { name: 'Nested mix', from: 0, dur: 1,
         d: { comp: nested.id, audioGain: PM.P(0.75), trim: PM.P(0) } }, PM.proj));
@@ -105,7 +108,7 @@ async function project(session: LaunchedApp, fixture: Fixture): Promise<void> {
     PM.ProjectIndex.invalidate();
     PM.touch();
     PM.bus.emit('project'); PM.bus.emit('layers'); PM.bus.emit('assets');
-  }, { advanced: fixture.name === 'advanced', dur: fixture.dur });
+  }, { advanced: fixture.name === 'advanced' || fixture.name === 'automation', speed: fixture.name === 'advanced' ? 1.2 : 1, dur: fixture.dur });
 }
 
 async function runExport(session: LaunchedApp, mode: Mode, format: Format, fixture: Fixture, serial: number,

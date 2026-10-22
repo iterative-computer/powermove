@@ -8,6 +8,17 @@ import { ffmpegBinary } from './ffmpeg';
 
 const ffprobeBinary = ffmpegBinary.replace(/ffmpeg$/, 'ffprobe');
 const MAX_BUFFER = 96 * 1024 * 1024;
+/** Decoded video above this is compared by per-frame hashes. */
+const LARGE_BYTES = 64 * 1024 * 1024;
+
+function frameHashes(file: string, kind: 'video' | 'audio'): string[] {
+  const args = kind === 'video'
+    ? ['-map', '0:v:0', '-fps_mode', 'passthrough', '-pix_fmt', 'rgba']
+    : ['-map', '0:a:0', '-acodec', 'pcm_f32le'];
+  const text = execFileSync(ffmpegBinary, ['-v', 'error', '-i', file, ...args, '-f', 'framemd5', 'pipe:1'],
+    { encoding: 'utf8', maxBuffer: MAX_BUFFER });
+  return text.split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(',').at(-1)!.trim());
+}
 
 type Stream = Record<string, unknown>;
 type Probe = { streams: Stream[]; format: Record<string, unknown> };
@@ -120,13 +131,20 @@ export function compareExports(reference: string, candidate: string, expectedFra
   for (const field of ['start_time', 'duration'] as const) {
     add(checks, `container.${field}`, old.format[field] ?? null, current.format[field] ?? null);
   }
-  if (videoA && videoB) {
+  const frameBytes = Number(videoA?.width) * Number(videoA?.height) * 4;
+  if (videoA && videoB && expectedFrames * frameBytes > LARGE_BYTES) {
+    // Large exports: per-frame hashes of the decoded RGBA (and f32 audio).
+    const a = frameHashes(reference, 'video'), b = frameHashes(candidate, 'video');
+    const unequal = a.filter((hash, i) => hash !== b[i]).length + Math.abs(a.length - b.length);
+    metrics.decodedVideo = { legacyFrames: a.length, candidateFrames: b.length, unequalFrames: unequal };
+    add(checks, 'video.decoded_frame_count', a.length, b.length);
+    add(checks, 'video.decoded_rgba_identical', true, unequal === 0);
+  } else if (videoA && videoB) {
     const a = decode(reference, 'video'), b = decode(candidate, 'video');
     const diff = byteDifference(a, b);
     metrics.decodedVideo = { legacyBytes: a.length, candidateBytes: b.length, ...diff };
     add(checks, 'video.decoded_rgba_bytes', a.length, b.length);
     add(checks, 'video.decoded_rgba_identical', true, a.equals(b));
-    const frameBytes = Number(videoA.width) * Number(videoA.height) * 4;
     add(checks, 'video.legacy_rgba_frame_bytes', expectedFrames * frameBytes, a.length);
     add(checks, 'video.candidate_rgba_frame_bytes', expectedFrames * frameBytes, b.length);
   }
