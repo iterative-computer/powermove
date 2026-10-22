@@ -186,20 +186,26 @@ describe('FrameBridge', () => {
     expect(launch.status()).toMatchObject({ sendFailures: 2, sendRetries: 2, undelivered: 0 });
   });
 
-  it('gives up after the last retry, and never retries a released import', async () => {
+  it('keeps offering an undelivered import at the last interval while it lives, and never retries a released one', async () => {
     const { bridge, hosts, sends, timers, runTimers, failSends, log } = fakes();
     const launch = bridge.prepareLaunch()!;
     launch.spawned(1);
     failSends();
     hosts[0]!.emit(surface(1, 0));
-    for (let i = 0; i <= SEND_RETRY_MS.length; i++) {
+    for (let i = 0; i <= SEND_RETRY_MS.length + 2; i++) {
       await new Promise((r) => setTimeout(r, 0));
       runTimers();
     }
     await new Promise((r) => setTimeout(r, 0));
-    expect(sends).toHaveLength(SEND_RETRY_MS.length + 1);
-    expect(launch.status()).toMatchObject({ undelivered: 1, sendRetries: SEND_RETRY_MS.length });
-    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('never reached client port 11'));
+    // The schedule, then the last interval again (a page busy for seconds).
+    expect(sends.length).toBeGreaterThanOrEqual(SEND_RETRY_MS.length + 3);
+    expect(launch.status()).toMatchObject({ undelivered: 1 });
+    expect(launch.status().sendRetries).toBeGreaterThan(SEND_RETRY_MS.length);
+    expect(timers.filter((t) => !t.cleared).map((t) => t.ms)).toEqual([SEND_RETRY_MS[SEND_RETRY_MS.length - 1]]);
+    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('has not reached client port 11'));
+    // Released with its pool: no more offers.
+    hosts[0]!.emit({ kind: 'retire', clientPort: 11, generation: 1 });
+    expect(timers.filter((t) => !t.cleared)).toHaveLength(0);
     // A retry pending when the pool is retired is cancelled.
     hosts[0]!.emit(surface(2, 0));
     await new Promise((r) => setTimeout(r, 0));

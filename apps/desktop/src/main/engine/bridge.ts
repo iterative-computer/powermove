@@ -436,11 +436,17 @@ export class BridgeLaunch {
 
   private retrySend(entry: Import): void {
     if (entry.released || entry.receiverGone || this.stopped || entry.retry !== null) return;
-    const delay = SEND_RETRY_MS[entry.retries];
+    let delay: number | undefined = SEND_RETRY_MS[entry.retries];
     if (delay === undefined) {
-      this.stats.undelivered++;
-      this.log('error', `frame bridge: generation ${entry.args.generation} surface ${entry.args.poolIndex} never reached client port ${entry.clientPort}; that slot stays undrawn until the pool is replaced`);
-      return;
+      // A renderer busy for longer than the schedule (a large project's
+      // open or save blocks its page for seconds) has not taken the slot:
+      // reported once, then offered again at the last interval while the
+      // import lives, so the pool does not stay short a slot for good.
+      if (entry.retries === SEND_RETRY_MS.length) {
+        this.stats.undelivered++;
+        this.log('error', `frame bridge: generation ${entry.args.generation} surface ${entry.args.poolIndex} has not reached client port ${entry.clientPort}; it is offered again every ${SEND_RETRY_MS[SEND_RETRY_MS.length - 1]} ms until the pool is replaced`);
+      }
+      delay = SEND_RETRY_MS[SEND_RETRY_MS.length - 1]!;
     }
     entry.retries++;
     this.stats.sendRetries++;
