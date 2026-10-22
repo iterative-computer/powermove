@@ -448,7 +448,15 @@ test.describe('Use New Engine: existing extensions', () => {
    * holds the engine to today's cadence. The callers run it under the
    * CPU-load harness too (docs/engine/extensions-compat.md).
    */
-  async function cadenceGate(session: { userData: string; relaunch(): Promise<void>; openEditor(): Promise<void>; close(): Promise<void>; page: Page; diagnostics: { pageErrors: unknown[] } }, extension: string, setup: (page: Page) => Promise<void>, label: string) {
+  /**
+   * `layer`: the overridden layer whose answers are counted per presented
+   * time. `from`: where playback starts (seconds). `warmAt`: when set, the
+   * playhead first rests there (the paused warm-up prepares its frames),
+   * then seeks to `from` and plays in the same task: Play right after a
+   * seek, before any warm-up of `from`.
+   */
+  async function cadenceGate(session: { userData: string; relaunch(): Promise<void>; openEditor(): Promise<void>; close(): Promise<void>; page: Page; diagnostics: { pageErrors: unknown[] } }, extension: string, setup: (page: Page) => Promise<void>, label: string, options: { layer?: string; from?: number; warmAt?: number | null } = {}) {
+    const run = { layer: options.layer ?? 'tinted', from: options.from ?? 0, warmAt: options.warmAt ?? null };
     await cp(path.join(__dirname, FIXTURE[extension]!), path.join(session.userData, 'extensions', extension), { recursive: true });
     await session.relaunch();
     await session.openEditor();
@@ -463,19 +471,26 @@ test.describe('Use New Engine: existing extensions', () => {
      * engine's at 3003 ms). Playback stops once the last frame is presented,
      * or after 6 s; frames after a wrap to the start are not counted.
      */
-    const play = (page: Page) => page.evaluate(async () => {
+    const play = (page: Page, traced = false) => page.evaluate(async ({ traced, run }) => {
       const PM = (window as any).PM;
       const api = PM.Kernel.api('cadence-probe');
       const at: number[] = [], times: number[] = [];
+      // Diagnostics (PM_COMPAT_TRACE=1): the lookahead's state at each
+      // presented frame, joined with the native and viewer traces below.
+      const lookaheadTrace: number[][] = [];
       let wrapped = false;
       const off: any = api.events.on('frame:rendered', (event: any) => {
         if (times.length && event.time < times.at(-1)! - 1e-9) wrapped = true;
         if (!wrapped) { at.push(performance.now()); times.push(event.time); }
+        if (traced && !wrapped) {
+          const la = PM.EngineRender?.lookaheadStats ?? {}, cs = PM.EngineRender?.compatStats ?? {}, bs = PM.RasterCompat?.stats ?? {};
+          lookaheadTrace.push([Math.round(performance.now() * 10) / 10, Math.round(event.time * 30 * 100) / 100, la.inFlight ?? -1, la.pending ?? -1, la.answered ?? -1, la.prefetched ?? -1, la.obsolete ?? -1, (cs.rasters ?? 0) + (cs.reuses ?? 0), cs.needs ?? 0, bs.asyncLoads ?? -1, la.asked ?? -1]);
+        }
       });
       const needs = PM.EngineRender?.compatStats?.needs ?? 0;
       const rasters = (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0);
-      PM.setTime(0);
-      await new Promise((r) => setTimeout(r, 300));
+      PM.setTime(run.warmAt ?? run.from);
+      await new Promise((r) => setTimeout(r, run.warmAt === null ? 300 : 800));
       at.length = 0; times.length = 0; wrapped = false;
       const longTasks: { startTime: number; duration: number }[] = [];
       const observer = new PerformanceObserver(list => { for (const entry of list.getEntries()) longTasks.push({ startTime: entry.startTime, duration: entry.duration }); });
@@ -483,6 +498,8 @@ test.describe('Use New Engine: existing extensions', () => {
       const last = PM.proj.dur - 1 / PM.proj.fps - 1e-6;
       const started = performance.now();
       const basesBefore = PM.RasterCompat?.stats ? JSON.parse(JSON.stringify(PM.RasterCompat.stats)) : null;
+      const revision = PM.EngineDoc?.barrier?.revision ?? null;
+      if (run.warmAt !== null) PM.setTime(run.from);
       PM.play();
       while (!wrapped && !(times.length && times.at(-1)! >= last) && performance.now() - started < 6000) await new Promise((r) => setTimeout(r, 4));
       PM.pause();
@@ -491,8 +508,17 @@ test.describe('Use New Engine: existing extensions', () => {
       const gaps = at.slice(1).map((v, i) => v - at[i]!);
       const sorted = [...gaps].sort((a, b) => a - b);
       const firstFrameMs = Math.round(at.length ? at[0]! - started : 3000);
-      return { longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
-    });
+      // Answers counted by the frame they are for: the window's latest
+      // answer for the overridden layer at each presented time, at this
+      // revision, wherever it was made (asked by a frame, prepared by the
+      // lookahead, or by the paused warm-up before Play). Raw ask counts
+      // also count frames the lookahead prepared that playback never shows.
+      const shown = [...new Set(times)].map((t) => PM.EngineRender?.answeredAt?.(run.layer, Math.round(t * 705_600_000)) ?? null)
+        .filter((a: any) => a && (revision === null || a.revision >= revision));
+      const answeredShown = shown.length, rasterShown = shown.filter((a: any) => a.kind !== 'native').length;
+      const trace = traced ? { started, hostOffsetUs: PM.EngineConnection?.status?.()?.hostOffsetUs ?? null, lookahead: lookaheadTrace, viewer: await PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.().catch(() => null) ?? null } : undefined;
+      return { answeredShown, rasterShown, trace, longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
+    }, { traced, run });
     const { page } = session;
     await page.waitForFunction((id) => (window as any).PM?.Kernel?.loader?.activeIds?.().includes(id) && Boolean((window as any).PM?.EngineRender), extension);
     await setup(page);
@@ -501,7 +527,22 @@ test.describe('Use New Engine: existing extensions', () => {
     const profileDirectory = process.env.PM_COMPAT_CPU_PROFILE_DIR;
     const profiler = profileDirectory ? await page.context().newCDPSession(page) : null;
     if (profiler) { await profiler.send('Profiler.enable'); await profiler.send('Profiler.start'); }
-    const engine = await play(page);
+    // Per-frame diagnostics: the viewer presenter's trace (arrivals, draws,
+    // drops), the native presenter's (POWERMOVE_BRIDGE_TRACE=1: schedule,
+    // render, GPU and send times), and the lookahead at each presented frame.
+    const traced = process.env.PM_COMPAT_TRACE === '1';
+    const nativeReport = () => session.app.evaluate(async () => {
+      const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
+      return { presentTrace: report?.presentTrace ?? null, presenter: report?.presenter ?? null, loadavg: (process as any).getBuiltinModule?.('os')?.loadavg?.() ?? null };
+    });
+    if (traced) {
+      await page.evaluate(() => (window as any).PM.EngineConnection.setTrace(true));
+      await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
+      await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.());
+      await nativeReport();
+    }
+    const engine = await play(page, traced);
+    if (traced) (engine as any).trace.native = await nativeReport();
     if (profiler && profileDirectory) {
       const { profile } = await profiler.send('Profiler.stop');
       await mkdir(profileDirectory, { recursive: true });
@@ -525,9 +566,10 @@ test.describe('Use New Engine: existing extensions', () => {
       await off.close();
       await rm(off.userData, { recursive: true, force: true });
     }
-    console.log(JSON.stringify({ cadence: label, engine, today }));
-    // Each presented frame asked the window for the override's layer.
-    expect(engine.asked).toBeGreaterThanOrEqual(engine.frames);
+    // The machine's load during this run (the campaigns record it per run).
+    console.log(JSON.stringify({ cadence: label, load: os.loadavg(), engine, today }));
+    // The window answered for the override's layer at every presented time.
+    expect(engine.answeredShown, 'presented times the window answered for').toBe(engine.uniqueTimes);
     // No stall (an unanswered need waits a second before it is asked again),
     // and no fewer frames than today's compositor presents.
     // Today's longest gap plus one frame at 30 fps, at most.
@@ -580,10 +622,10 @@ test.describe('Use New Engine: existing extensions', () => {
 
   test('playback with the typewriter override keyed 0 to 100% keeps today\'s cadence: a new typed base every frame', async ({ session }) => {
     test.setTimeout(240_000);
-    const { engine } = await cadenceGate(session, 'compat-typewriter', typewriterCadenceProject, 'typewriter 0-100%');
+    const { engine } = await cadenceGate(session, 'compat-typewriter', typewriterCadenceProject, 'typewriter 0-100%', { layer: 'typed' });
     // The override drew the typed text itself for every presented time (its
     // pixels for that time, posted or reused), never the engine's text.
-    expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+    expect(engine.rasterShown).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
     expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
@@ -592,7 +634,7 @@ test.describe('Use New Engine: existing extensions', () => {
   test('playback with a raster override over a shape whose size animates keeps today\'s cadence', async ({ session }) => {
     test.setTimeout(240_000);
     const { engine } = await cadenceGate(session, 'shape-tint', shapeSizeProject, 'shape-tint animated size');
-    expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+    expect(engine.rasterShown).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
     expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
@@ -601,8 +643,21 @@ test.describe('Use New Engine: existing extensions', () => {
   test('playback with a raster override over a path whose vertices animate keeps today\'s cadence', async ({ session }) => {
     test.setTimeout(240_000);
     const { engine } = await cadenceGate(session, 'shape-tint', pathProject, 'shape-tint animated path');
-    expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+    expect(engine.rasterShown).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+    expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
+    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
+  });
+
+  test('Play right after a seek with the typewriter override keeps today\'s cadence: the first frames wait in the native preroll, none is skipped', async ({ session }) => {
+    test.setTimeout(240_000);
+    // Rest at 0 (its frames warm), then seek to 1 s and Play in one task:
+    // nothing of 1 s onward was prepared before Play.
+    const { engine } = await cadenceGate(session, 'compat-typewriter', typewriterCadenceProject, 'typewriter seek then play', { layer: 'typed', from: 1, warmAt: 0 });
+    expect(engine.head[0]?.[0]).toBe(30);
+    // No frame of the run's start was skipped while its answers were on their way.
+    expect(engine.skipped.filter(([index]: number[]) => index! <= 6)).toEqual([]);
+    expect(engine.rasterShown).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
     expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
   });
