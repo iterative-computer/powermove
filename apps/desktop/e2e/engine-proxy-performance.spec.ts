@@ -7,7 +7,7 @@
  * hevc10-longgop-4k.mov, h26442210-longgop-4k.mov, prores-4k.mov.
  */
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
@@ -198,7 +198,9 @@ async function pauseFirstFrame(session: LaunchedApp, playingPreference: 'automat
     const first = await new Promise<{ ms: number; representation: string | null; standIn: boolean } | null>(resolve => {
       let done = false;
       const off = presentation.onPresented((frame: any) => {
-        if (done || PM.playing) return;
+        // Playback frames (timed, with a duration) already in flight when
+        // the transport paused are not the paused frame.
+        if (done || PM.playing || frame.timed) return;
         const row = { ms: frame.rafMs - before,
           representation: frame.quality?.representation ?? null,
           standIn: !!frame.standIn };
@@ -259,6 +261,7 @@ test('paired 60-second Automatic 4K long-GOP playback uses measured presentation
     }
   } finally {
     await testInfo.attach('phase4a-paired-playback.json', { body: Buffer.from(JSON.stringify(rows)), contentType: 'application/json' });
+    if (process.env.PM_PHASE4A_EVIDENCE) await writeFile(path.join(process.env.PM_PHASE4A_EVIDENCE, 'paired-playback.json'), JSON.stringify(rows)).catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -308,6 +311,7 @@ test('paused ProRes and HEVC upgrade to original on the first presented frame', 
     }
   } finally {
     await testInfo.attach('phase4a-paused-upgrade.json', { body: Buffer.from(JSON.stringify(rows)), contentType: 'application/json' });
+    if (process.env.PM_PHASE4A_EVIDENCE) await writeFile(path.join(process.env.PM_PHASE4A_EVIDENCE, 'paused-upgrade.json'), JSON.stringify(rows)).catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -347,7 +351,9 @@ test('one-hour native playback keeps process memory and native cache bounded', a
     const intercept = meanY - slopeKBPerMinute * meanX;
     const residual = fit.reduce((sum, point) => sum + (point.y - intercept - slopeKBPerMinute * point.x) ** 2, 0);
     const slopeUpper95KBPerMinute = slopeKBPerMinute + 1.96 * Math.sqrt(residual / (fit.length - 2) / sxx);
-    await testInfo.attach('phase4a-one-hour-memory.json', { body: Buffer.from(JSON.stringify({ points, warmupKB: avg(warmup), tailKB: avg(tail), slopeKBPerMinute, slopeUpper95KBPerMinute })), contentType: 'application/json' });
+    const hour = JSON.stringify({ points, warmupKB: avg(warmup), tailKB: avg(tail), slopeKBPerMinute, slopeUpper95KBPerMinute });
+    await testInfo.attach('phase4a-one-hour-memory.json', { body: Buffer.from(hour), contentType: 'application/json' });
+    if (process.env.PM_PHASE4A_EVIDENCE) await writeFile(path.join(process.env.PM_PHASE4A_EVIDENCE, 'one-hour-memory.json'), hour).catch(() => undefined);
     expect(avg(tail) - avg(warmup), 'Process working-set plateau rose by more than 128 MiB after warmup').toBeLessThan(128 * 1024);
     expect(slopeUpper95KBPerMinute, 'Post-warmup process memory has a sustained positive slope').toBeLessThan(512);
     for (const point of points) {

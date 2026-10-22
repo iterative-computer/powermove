@@ -213,3 +213,30 @@ app. Run the dedicated `playwright.phase4a-performance.config.ts` under
 `pm-electron-lock` from `apps/desktop`; it disables the ordinary Playwright
 global build and extends the suite timeout beyond the one-hour run. Missing
 prepared sources fail the measurement rather than marking a row skipped.
+
+## Cached preview through the engine memory cache (C18)
+
+The viewer composer's GPU memory cache serves both of today's preview
+memories. Render Work Area warms the work area into it (the session asks
+for `cacheFrame` until no stand-in remains) and then plays it through the
+ordinary transport, so cached playback keeps the engine's audio clock and
+mix. Outside Render Work Area the session gives the cache today's automatic
+remembered-frame budget, the Preview memory limit (Settings › General),
+follows changes to it and evicts on project, layer, quality, asset and font
+changes, as today's compositor clears its remembered frames.
+
+With today's viewer canvas (decision V1) the engine caches that 8-bit
+canvas, which is exactly what it presents, at four bytes per pixel: Render
+Work Area checks the limit with today's canvas size and bitmap cost. Without
+a canvas it keeps the float working region (eight bytes per pixel). A
+document with no motion-blurred and no level 2 resampled layer draws the
+same pixels playing and paused, so the two share entries, as today's
+remembered playback frames serve a paused time. Proxy and reduced-decode
+playback frames carry their representation in the key and can never serve
+a paused frame (PROXY-1). The cache's share is bounded by the presenter's
+frame-cache lease as well as the user's limit; export and snapshot renders
+never read it.
+
+While the engine draws, its presented frames feed today's adaptive-quality
+monitor (cached frames are not evidence), so Auto preview quality steps down
+under real render pressure and a settled paused frame returns to Full.
