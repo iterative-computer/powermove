@@ -9,14 +9,21 @@ async function fixture() {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-recovery-'));
   let generation = 1, revision = 0, value = 0, next = 0, prepared: any, persisted: any, lose = false;
   let ready = Promise.resolve(), resume = () => {}, ids = new Map<number, string>(), context: string[] = [];
-  const ops: string[] = [];
+  const ops: string[] = [], loads: string[] = [];
   const kill = (block = false) => { generation++; revision = 0; value = 0; ids = new Map(); context = []; next = 0; if (block) ready = new Promise(resolve => { resume = resolve; }); };
   const recovery = new DocumentRecovery({ cache: path.join(directory, 'cache'), ready: async () => { await ready; return generation; },
     call: async (_, json, bytes) => {
       const { op, args } = JSON.parse(json); ops.push(op); let answer: any = null;
-      if (op === 'load') { const text = await readFile(args.path, 'utf8'); prepared = { pending: false, revision: args.revision, hash: hash(text), integrity: 'checked', value: JSON.parse(text).value }; answer = prepared; }
+      if (op === 'load') {
+        // As the utility: a text source is checked against its bytes' hash and
+        // answered with the tree's canonical hash (here a different digest).
+        const text = await readFile(args.path, 'utf8');
+        if (hash(text) !== args.hash) return JSON.stringify({ ok: false, error: 'hash' });
+        loads.push(args.source ?? 'canonical');
+        prepared = { pending: false, revision: args.revision, hash: args.source === 'text' ? hash('canonical:' + text) : hash(text), integrity: 'checked', value: JSON.parse(text).value }; answer = prepared;
+      }
       else if (op === 'poll') answer = prepared;
-      else if (op === 'activate') { value = prepared.value; revision = args.revision; }
+      else if (op === 'activate') { if (args.hash !== prepared.hash) return JSON.stringify({ ok: false, error: 'activation hash' }); value = prepared.value; revision = args.revision; }
       else if (op === 'apply') { expect(args.base).toBe(revision); value += JSON.parse(Buffer.from(bytes!).toString()).increment; revision = args.revision; if (lose) { lose = false; kill(); return '{"ok":false,"code":"unavailable"}'; } answer = { code: 0 }; }
       else if (op === 'intern') { const key = JSON.stringify(args), old = [...ids].find(([, s]) => key === s); answer = old?.[0] ?? next++; ids.set(answer, key); }
       else if (op === 'release') ids.delete(args.id);
@@ -30,7 +37,14 @@ async function fixture() {
     }
   });
   const call = async (op: string, args?: any, bytes?: Uint8Array) => { const r = JSON.parse(await recovery.call(7, JSON.stringify({ op, args }), bytes)); expect(r.ok).toBe(true); return r.value; };
-  return { call, kill, resume: () => resume(), ops, context: () => context, lose: () => { lose = true; },
+  return { call, kill, resume: () => resume(), ops, loads, context: () => context, lose: () => { lose = true; },
+    async openText() {
+      const file = path.join(directory, 'staging'), text = '{ "value": 1 }';
+      await writeFile(file, text);
+      const receipt = await call('load', { path: file, document: 'test', revision: 1, hash: hash(text), source: 'text' });
+      await rm(file);
+      await call('activate', { revision: 1, preparedRevision: 1, hash: receipt.hash });
+    },
     async open() { const file = path.join(directory, 'staging'), text = '{"value":1}'; await writeFile(file, text); await call('load', { path: file, document: 'test', revision: 1, hash: hash(text) }); await rm(file); await call('activate', { revision: 1, preparedRevision: 1, hash: hash(text) }); },
     async count() { const root = path.join(directory, 'cache'); const dirs = await readdir(root); return dirs.length ? (await readdir(path.join(root, dirs[0]!))).length : 0; },
     async stop() { await recovery.dispose(); expect(await readdir(path.join(directory, 'cache'))).toEqual([]); await rm(directory, { recursive: true, force: true }); }
@@ -64,5 +78,14 @@ it('compacts a bounded suffix and deduplicates context before recovery', async (
     expect(f.ops.filter(op => op === 'persist')).toHaveLength(1); expect(await f.count()).toBeLessThan(10);
     f.kill(); expect(await f.call('toJson')).toBe('{"value":133}'); expect(f.context()).toHaveLength(3);
     await f.call('close'); expect(await f.count()).toBe(0);
+  } finally { await f.stop(); }
+});
+it('restores a document received as JSON text with its byte hash, then activates it by its canonical hash', async () => {
+  const f = await fixture(); try {
+    await f.openText();
+    await f.call('apply', { base: 1, revision: 2 }, Buffer.from('{"increment":4}'));
+    f.kill();
+    expect(await f.call('toJson')).toBe('{"value":5}');
+    expect(f.loads).toEqual(['text', 'text']);
   } finally { await f.stop(); }
 });

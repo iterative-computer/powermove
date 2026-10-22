@@ -4,7 +4,11 @@ import path from 'node:path';
 
 type Reply = { ok: boolean; code?: string; error?: string; value?: any; special?: boolean };
 type Request = { op: string; args?: any };
-type Checkpoint = { file: string; document: string; revision: number; hash: string; preparedRevision: number };
+/** `hash` is the tree's canonical hash ('' until a text checkpoint's first
+ *  load answers it). A checkpoint main received as JSON text in any member
+ *  order (document-kernel commit) also keeps `sourceHash`, its bytes' hash,
+ *  and is loaded as text. */
+type Checkpoint = { file: string; document: string; revision: number; hash: string; preparedRevision: number; sourceHash?: string };
 type Intern = { request: string; native: number };
 type SavedCall = { request: string; file?: string; jsonFile?: string };
 type Owner = {
@@ -64,12 +68,15 @@ export class DocumentRecovery {
     }
   }
   private async load(id: number, checkpoint: Checkpoint, deadline: number): Promise<void> {
-    let receipt = await this.checked(id, { op: 'load', args: { path: checkpoint.file, document: checkpoint.document, revision: checkpoint.preparedRevision, hash: checkpoint.hash } }, deadline);
+    const text = checkpoint.sourceHash !== undefined;
+    let receipt = await this.checked(id, { op: 'load', args: { path: checkpoint.file, document: checkpoint.document, revision: checkpoint.preparedRevision,
+      hash: text ? checkpoint.sourceHash : checkpoint.hash, ...(text ? { source: 'text' } : {}) } }, deadline);
     while (receipt.pending) {
       if (Date.now() >= deadline) throw new Error('Native document recovery timed out');
       await pause();
       receipt = await this.checked(id, { op: 'poll' }, deadline);
     }
+    if (text && !checkpoint.hash && typeof receipt.hash === 'string') checkpoint.hash = receipt.hash;
     if (receipt.revision !== checkpoint.preparedRevision || receipt.hash !== checkpoint.hash) throw new Error('Native recovery checkpoint did not match');
   }
   private async restore(id: number, state: Owner, generation: number, deadline: number): Promise<void> {
@@ -114,7 +121,9 @@ export class DocumentRecovery {
       if (receipt.revision !== revision) throw new Error('Native checkpoint persistence revision changed');
       await this.checked(id, { op: 'acceptPersist', args: { revision, hash: receipt.hash } }, deadline);
       const old = state.base;
-      state.base = { ...old, file, revision, preparedRevision: revision, hash: receipt.hash };
+      // The utility persisted canonical bytes: no longer a text checkpoint.
+      const { sourceHash: _text, ...previous } = old ?? {} as Partial<Checkpoint>;
+      state.base = { ...previous as Checkpoint, file, revision, preparedRevision: revision, hash: receipt.hash };
       accepted = true;
       await this.resetPatches(state);
       await this.remove(old);
@@ -137,7 +146,9 @@ export class DocumentRecovery {
           // copy is the only recovery source and is removed on replacement.
           const file = path.join(state.dir, randomUUID());
           await copyFile(request.args.path, file);
-          const prepared = { file, document: request.args.document, revision: request.args.revision, preparedRevision: request.args.revision, hash: request.args.hash };
+          const text = request.args.source === 'text';
+          const prepared: Checkpoint = { file, document: request.args.document, revision: request.args.revision, preparedRevision: request.args.revision,
+            hash: text ? '' : request.args.hash, ...(text ? { sourceHash: request.args.hash } : {}) };
           const previous = state.prepared;
           state.prepared = prepared;
           await this.remove(previous);
