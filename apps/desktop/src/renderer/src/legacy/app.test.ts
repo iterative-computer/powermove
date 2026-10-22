@@ -1228,6 +1228,43 @@ it('opens streamed document ranges with Unicode and working Undo and Redo', asyn
   expect(toasts.some(message => message.startsWith('Could not open'))).toBe(false);
 });
 
+it.each([false, true])('reads a streamed document range, then lets main copy its media with the same reader token (stamped native: %s)', async stamped => {
+  const { PM, toasts } = appRegistry();
+  installHistory(PM);
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.WS.activate = vi.fn(); PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  const project = PM.mkProject({ id: 'source', name: 'Ranged', assets: { clip: { id: 'clip', kind: 'video', storageKey: 'media:clip' } },
+    ...(stamped ? { requiresEngine: 'native' } : {}) });
+  const bytes = new TextEncoder().encode(JSON.stringify({ proj: project, history: { version: 1, index: -1, entries: [] } }));
+  const offset = 9, media = [{ id: 'clip', type: 'video/mp4', offset: offset + bytes.length, length: 4096, revision: 'saved', sha256: 'a'.repeat(64) }];
+  const read = vi.fn(async (_token: string, at: number, length: number) => {
+    if (at < offset || at + length > offset + bytes.length) throw new Error('The page read media bytes');
+    return bytes.subarray(at - offset, at - offset + length);
+  });
+  const close = vi.fn(async () => undefined);
+  const putProjectRange = vi.fn(async (_token: string, source: any, _asset: any, onBytes?: (bytes: number) => void) => { onBytes?.(source.length); return true; });
+  PM.MediaStore = { get: async () => null, put: vi.fn(async () => true), putProjectRange };
+  installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Ranged.pmv', projectId: 'ranged-open', token: 'ranged-reader',
+    size: offset + bytes.length + 4096, media, documentRange: { offset, length: bytes.length, sha256: sha256Hex(bytes) } }),
+    projectRead: { read, close } } as any);
+  await PM.openProject();
+  expect(read).toHaveBeenCalled();
+  expect(read.mock.calls.every(([token]) => token === 'ranged-reader')).toBe(true);
+  expect(close).toHaveBeenCalledWith('ranged-reader');
+  expect(PM.MediaStore.put).not.toHaveBeenCalled();
+  if (stamped) {
+    // The legacy engine refuses a native-stamped document read from its range, before any media is copied.
+    expect(putProjectRange).not.toHaveBeenCalled();
+    expect(PM.proj.id).not.toBe('ranged-open');
+    expect(toasts.some(message => message.startsWith('Could not open'))).toBe(true);
+  } else {
+    expect(putProjectRange).toHaveBeenCalledOnce();
+    expect(putProjectRange).toHaveBeenCalledWith('ranged-reader', media[0], expect.objectContaining({ id: 'clip' }), expect.any(Function));
+    expect(PM.proj.id).toBe('ranged-open');
+    expect(PM.proj.name).toBe('Ranged');
+  }
+});
+
 it('does not recapture a trashed active project while switching, but still captures an ordinary outgoing project', () => {
   for (const trashed of [true, false]) {
     const { PM, listeners } = appRegistry();
