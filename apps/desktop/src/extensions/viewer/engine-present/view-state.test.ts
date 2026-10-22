@@ -45,6 +45,23 @@ describe('ViewSequencer', () => {
     expect(sequencer.next({ ...input }).state.view).toBeNull();
   });
 
+  it('carries today’s canvas; a change of it is a new view', () => {
+    const canvas = { width: 600, height: 338, crop: { x: 0, y: 0, width: 600, height: 338 }, css: { x: 10, y: 20, width: 366, height: 206.18 } };
+    const sequencer = new ViewSequencer();
+    const none = sequencer.next(input).state;
+    expect(none).not.toHaveProperty('canvas');
+    const withCanvas = sequencer.next({ ...input, canvas });
+    expect(withCanvas.changed).toBe(true);
+    expect(withCanvas.state.canvas).toEqual(canvas);
+    expect(withCanvas.state.viewSeq).toBe(none.viewSeq + 1);
+    expect(sequencer.next({ ...input, canvas: { ...canvas, crop: { ...canvas.crop } } }).changed).toBe(false);
+    expect(sequencer.next({ ...input, canvas: { ...canvas, width: 300 } }).changed).toBe(true);
+    // A canvas the engine would refuse is not sent (it draws at zoom × DPR).
+    for (const bad of [{ ...canvas, width: 0 }, { ...canvas, height: 1.5 }, { ...canvas, crop: { ...canvas.crop, width: 0 } }, { ...canvas, css: { ...canvas.css, x: Number.NaN } }]) {
+      expect(new ViewSequencer().next({ ...input, canvas: bad }).state).not.toHaveProperty('canvas');
+    }
+  });
+
   it('sanitizes sizes and numbers', () => {
     expect(deviceSize(0, 10_000, 2)).toEqual({ width: 1, height: 16384 });
     const state = new ViewSequencer().next({ ...input, zoom: Number.NaN, devicePixelRatio: 0, pan: [Number.POSITIVE_INFINITY, 2] }).state;

@@ -79,6 +79,14 @@ pub struct RenderRequest {
     pub sampling: Sampling,
     /// The end-of-clip padding of video sources ([`VideoEnd`]).
     pub video_end: VideoEnd,
+    /// Where output pixel (0, 0) sits in scaled composition pixels:
+    /// composition pixel `(x, y)` lands at output pixel `(x · sx − ox,
+    /// y · sy − oy)` at the top level (today's `scaledWorld` with a
+    /// preview viewport, the origin being `viewport.x × sx`; decision V1b).
+    /// Groups, mattes, and motion-blur samples share it; a precomp's own
+    /// level starts at its origin. `None`: `(0, 0)`, every snapshot and
+    /// export.
+    pub origin: Option<(f64, f64)>,
 }
 
 impl RenderRequest {
@@ -99,6 +107,7 @@ impl RenderRequest {
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
             video_end: VideoEnd::Preview,
+            origin: None,
         }
     }
 
@@ -118,6 +127,7 @@ impl RenderRequest {
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
             video_end: VideoEnd::Preview,
+            origin: None,
         }
     }
 
@@ -154,6 +164,7 @@ impl RenderRequest {
             },
             sampling,
             video_end: VideoEnd::of(request.purpose),
+            origin: None,
         })
     }
 
@@ -183,6 +194,13 @@ impl RenderRequest {
                     return Err(RenderError::Request(format!("scale {v} outside 0.01..16")));
                 }
             }
+        }
+        if let Some((ox, oy)) = self.origin
+            && !(ox.is_finite() && oy.is_finite())
+        {
+            return Err(RenderError::Request(format!(
+                "output origin ({ox}, {oy}) is not finite"
+            )));
         }
         if let Some(r) = self.region
             && (r.is_empty() || !s.contains(&r))

@@ -535,6 +535,34 @@ pub struct ViewerState {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub depth_id: Option<bool>,
+    /// The canvas today's viewer draws this view into (decision V1,
+    /// docs/engine/bridge.md "Today's viewer canvas"). With it, the engine
+    /// renders the frame at that canvas's size and scales it into its CSS
+    /// box as Chromium scales today's WebGL canvas; without it, the
+    /// composition is drawn at zoom × DPR × the preview resolution. Added
+    /// as an optional field (RFC 02 version notes); a change of it is a
+    /// new view.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub canvas: Option<ViewerCanvas>,
+}
+
+/// Today's viewer canvas for a view: the WebGL canvas the legacy viewer
+/// sizes (`previewRenderSize`, the explicit preview resolution, or the
+/// cropped `previewRenderViewport`) and the CSS box the browser scales it
+/// into.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerCanvas {
+    /// Backing size in pixels (`canvas.width` × `canvas.height`).
+    pub width: u32,
+    pub height: u32,
+    /// The part of the composition it holds, in composition pixels: the
+    /// whole composition, or the cropped preview viewport.
+    pub crop: Rect,
+    /// Its CSS box in stage CSS pixels.
+    pub css: Rect,
 }
 
 /// A display's refresh grid on the host clock: refreshes (BeginFrame times)
@@ -590,6 +618,21 @@ impl Validate for ViewerState {
         ensure(self.pan.iter().all(|v| v.is_finite()), C, || {
             "pan must be finite".into()
         })?;
+        if let Some(canvas) = &self.canvas {
+            let positive = |r: &Rect| {
+                [r.x, r.y, r.width, r.height].iter().all(|v| v.is_finite())
+                    && r.width > 0.0
+                    && r.height > 0.0
+            };
+            ensure(
+                (1..=MAX_OUTPUT_DIMENSION).contains(&canvas.width)
+                    && (1..=MAX_OUTPUT_DIMENSION).contains(&canvas.height)
+                    && positive(&canvas.crop)
+                    && positive(&canvas.css),
+                C,
+                || format!("viewer canvas {canvas:?} is empty, too large, or not finite"),
+            )?;
+        }
         if let Some(vsync) = &self.vsync {
             let (min, max) = VsyncHint::PERIOD_RANGE_US;
             ensure(
@@ -722,6 +765,7 @@ mod tests {
                 period_us: 8_333.333,
             }),
             depth_id: Some(true),
+            canvas: None,
         }
     }
 

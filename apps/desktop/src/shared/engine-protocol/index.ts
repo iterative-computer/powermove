@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-32fcc175f7a8cc99";
+export const PROTOCOL_BUILD = "protocol-c554dd6b30aa29a5";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -261,6 +261,7 @@ export type { ToolResult } from "./ToolResult";
 export type { TransportCommand } from "./TransportCommand";
 export type { TransportState } from "./TransportState";
 export type { ViewOverride } from "./ViewOverride";
+export type { ViewerCanvas } from "./ViewerCanvas";
 export type { ViewerColorSpace } from "./ViewerColorSpace";
 export type { ViewerState } from "./ViewerState";
 export type { VsyncHint } from "./VsyncHint";
