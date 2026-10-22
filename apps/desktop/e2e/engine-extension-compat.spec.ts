@@ -68,6 +68,53 @@ async function shapeTintProject(page: Page): Promise<void> {
   });
 }
 
+/** A 640×360 composition for playback cadence: a typewriter text whose
+ *  progress is keyed 0 → 100 over the whole 3 s, so the typed prefix (the
+ *  detached layer the fixture rasterizes through the service) changes
+ *  almost every frame, and a plain text, over #203040. */
+async function typewriterCadenceProject(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const project = PM.mkProject({ name: 'Typewriter cadence', w: 640, h: 360, fps: 30, dur: 3, bg: '#203040' });
+    project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
+    const typed = PM.mkLayer('text', { name: 'Typed', from: 0, dur: 3, d: { text: 'Typed on the engine, one letter at a time, every frame', font: 'Helvetica', size: 20, weight: 700, color: '#FFFFFF' } }, project);
+    typed.id = 'typed';
+    typed.p['position.x'].v = 320; typed.p['position.y'].v = 140;
+    const fx = PM.mkEffect('typewriter');
+    fx.p.progress = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(3, 100)] });
+    fx.p.cursor.v = true;
+    typed.fx = [fx];
+    const plain = PM.mkLayer('text', { name: 'Plain', from: 0, dur: 3, d: { text: 'Unaffected', font: 'Helvetica', size: 32, weight: 400, color: '#FFCC00' } }, project);
+    plain.id = 'plain';
+    plain.p['position.x'].v = 320; plain.p['position.y'].v = 260;
+    project.layers = [typed, plain];
+    PM.replaceProject(project);
+    PM.Projects?.put?.(PM.proj);
+  });
+}
+
+/** The shape-tint project with the tinted ellipse's size keyed instead of
+ *  its rotation (60×40 → 200×120 over 3 s): its base pixels change every
+ *  frame, so no frame can reuse an earlier frame's base. */
+async function shapeSizeProject(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const project = PM.mkProject({ name: 'Shape size cadence', w: 320, h: 180, fps: 30, dur: 3, bg: '#203040' });
+    project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
+    const tinted = PM.mkLayer('shape', { name: 'Tinted', from: 0, dur: 3, d: { shape: 'ellipse', w: 120, h: 80, color: '#33CC66', stroke: 0 } }, project);
+    tinted.id = 'tinted';
+    tinted.d.w = PM.P(60, { kf: [PM.KF(0, 60), PM.KF(3, 200)] });
+    tinted.d.h = PM.P(40, { kf: [PM.KF(0, 40), PM.KF(3, 120)] });
+    tinted.p['position.x'].v = 120; tinted.p['position.y'].v = 90;
+    const plain = PM.mkLayer('shape', { name: 'Plain', from: 0, dur: 3, d: { shape: 'rect', w: 80, h: 60, color: '#3366CC', stroke: 0 } }, project);
+    plain.id = 'plain';
+    plain.p['position.x'].v = 260; plain.p['position.y'].v = 90;
+    project.layers = [tinted, plain];
+    PM.replaceProject(project);
+    PM.Projects?.put?.(PM.proj);
+  });
+}
+
 /** The fixtures' folder of each extension id the tests install. */
 const FIXTURE: Record<string, string> = {
   'shape-tint': 'fixtures/compat-corpus/shape-tint',
@@ -363,9 +410,14 @@ test.describe('Use New Engine: existing extensions', () => {
     }
   });
 
-  test('playback with a raster override keeps today\'s cadence: every frame asks the window, none stalls', async ({ session }) => {
-    test.setTimeout(240_000);
-    await cp(path.join(__dirname, 'fixtures/compat-corpus/shape-tint'), path.join(session.userData, 'extensions/shape-tint'), { recursive: true });
+  /**
+   * Plays 3 s with `extension` installed over the project `setup` builds,
+   * on the engine and then in today's app (flag off, a fresh profile), and
+   * holds the engine to today's cadence. The callers run it under the
+   * CPU-load harness too (docs/engine/extensions-compat.md).
+   */
+  async function cadenceGate(session: { userData: string; relaunch(): Promise<void>; openEditor(): Promise<void>; close(): Promise<void>; page: Page; diagnostics: { pageErrors: unknown[] } }, extension: string, setup: (page: Page) => Promise<void>, label: string) {
+    await cp(path.join(__dirname, FIXTURE[extension]!), path.join(session.userData, 'extensions', extension), { recursive: true });
     await session.relaunch();
     await session.openEditor();
     /** Plays 3 s from 0 and records when frames were presented. */
@@ -375,6 +427,7 @@ test.describe('Use New Engine: existing extensions', () => {
       const at: number[] = [], times: number[] = [];
       const off: any = api.events.on('frame:rendered', (event: any) => { at.push(performance.now()); times.push(event.time); });
       const needs = PM.EngineRender?.compatStats?.needs ?? 0;
+      const rasters = (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0);
       PM.setTime(0);
       await new Promise((r) => setTimeout(r, 300));
       at.length = 0; times.length = 0;
@@ -386,32 +439,32 @@ test.describe('Use New Engine: existing extensions', () => {
       const gaps = at.slice(1).map((v, i) => v - at[i]!);
       const sorted = [...gaps].sort((a, b) => a - b);
       const firstFrameMs = Math.round(at.length ? at[0]! - started : 3000);
-      return { firstFrameMs, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null };
+      return { firstFrameMs, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
     });
     const { page } = session;
-    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint') && Boolean((window as any).PM?.EngineRender));
-    await shapeTintProject(page);
+    await page.waitForFunction((id) => (window as any).PM?.Kernel?.loader?.activeIds?.().includes(id) && Boolean((window as any).PM?.EngineRender), extension);
+    await setup(page);
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
     await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
     const engine = await play(page);
     expect(session.diagnostics.pageErrors).toEqual([]);
     await session.close();
-    const off = await flagOffApp('shape-tint');
+    const off = await flagOffApp(extension);
     let today: Awaited<ReturnType<typeof play>>;
     try {
       await off.openEditor();
-      await off.page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint')).catch(async (error) => {
-        console.log('flag off, not active:', JSON.stringify(await off.page.evaluate(() => ({ ids: (window as any).PM?.Kernel?.loader?.activeIds?.(), record: (window as any).PM?.Kernel?.api('corpus')?.extensions?.list?.().find((r: any) => r.id === 'shape-tint') })).catch((e) => String(e))));
+      await off.page.waitForFunction((id) => (window as any).PM?.Kernel?.loader?.activeIds?.().includes(id), extension).catch(async (error) => {
+        console.log('flag off, not active:', JSON.stringify(await off.page.evaluate((id) => ({ ids: (window as any).PM?.Kernel?.loader?.activeIds?.(), record: (window as any).PM?.Kernel?.api('corpus')?.extensions?.list?.().find((r: any) => r.id === id) }), extension).catch((e) => String(e))));
         throw error;
       });
-      await shapeTintProject(off.page);
+      await setup(off.page);
       await off.page.waitForTimeout(800);
       today = await play(off.page);
     } finally {
       await off.close();
       await rm(off.userData, { recursive: true, force: true });
     }
-    console.log(JSON.stringify({ engine, today }));
+    console.log(JSON.stringify({ cadence: label, engine, today }));
     // Each presented frame asked the window for the override's layer.
     expect(engine.asked).toBeGreaterThanOrEqual(engine.frames);
     // No stall (an unanswered need waits a second before it is asked again),
@@ -422,6 +475,26 @@ test.describe('Use New Engine: existing extensions', () => {
     // (A 3 s window can start or end one frame apart: one frame of alignment.)
     expect(engine.frames).toBeGreaterThanOrEqual(today.frames - 1);
     expect(engine.uniqueTimes).toBeGreaterThanOrEqual(today.uniqueTimes - 1);
+    return { engine, today };
+  }
+
+  test('playback with a raster override keeps today\'s cadence: every frame asks the window, none stalls', async ({ session }) => {
+    test.setTimeout(240_000);
+    await cadenceGate(session, 'shape-tint', shapeTintProject, 'shape-tint rotation');
+  });
+
+  test('playback with the typewriter override keyed 0 to 100% keeps today\'s cadence: a new typed base every frame', async ({ session }) => {
+    test.setTimeout(240_000);
+    const { engine } = await cadenceGate(session, 'compat-typewriter', typewriterCadenceProject, 'typewriter 0-100%');
+    // The override drew the typed text itself for every presented time (its
+    // pixels for that time, posted or reused), never the engine's text.
+    expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+  });
+
+  test('playback with a raster override over a shape whose size animates keeps today\'s cadence', async ({ session }) => {
+    test.setTimeout(240_000);
+    const { engine } = await cadenceGate(session, 'shape-tint', shapeSizeProject, 'shape-tint animated size');
+    expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
   });
 
   test('an export of a project with a raster override draws the override, frame by frame', async ({ session }, testInfo) => {
