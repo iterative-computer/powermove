@@ -158,6 +158,9 @@ pub struct RendererMemory {
     /// Prepared keyframe tracks (CPU, estimated), and reads they served.
     pub keyframe_tracks: u64,
     pub keyframe_track_hits: u64,
+    /// The most intermediate-target bytes the last frame held at once
+    /// (GPU; a layer's targets go back to the pool once it is composited).
+    pub pooled_peak: u64,
 }
 
 /// The CPU stages of one frame on the thread that renders it (µs): the
@@ -330,6 +333,8 @@ pub struct Renderer {
     /// The working precision of the last frame: what programs are built
     /// ahead for ([`Renderer::prewarm_programs`]).
     last_precision: pm_protocol::color::Precision,
+    /// [`RendererMemory::pooled_peak`].
+    last_pool_peak: u64,
     /// Whether level 1 shape and path rasters are drawn ahead on worker
     /// threads ([`Renderer::set_vector_prefetch`]).
     vector_prefetch: bool,
@@ -393,6 +398,7 @@ impl Renderer {
             reuse_enabled: false,
             last_stages: FrameStages::default(),
             last_precision: pm_protocol::color::Precision::Float16,
+            last_pool_peak: 0,
             vector_prefetch: true,
             prefix: Default::default(),
             svg_wait: false,
@@ -443,10 +449,10 @@ impl Renderer {
             media_textures: self.media.texture_bytes(),
             keyframe_tracks: self.evaluator.track_cache_bytes() as u64,
             keyframe_track_hits: hits,
+            pooled_peak: self.last_pool_peak,
         }
     }
 
-    /// The stages of the last frame planned (finished or not).
     /// Queues the programs `document` uses, then every other user program,
     /// to be built off the frame thread (decision PROBE-1,
     /// `effects::prewarm`): at project open and when the definition set
@@ -463,6 +469,7 @@ impl Renderer {
         self.effects.prewarm(&self.device, format, &first)
     }
 
+    /// The stages of the last frame planned (finished or not).
     pub fn last_stages(&self) -> FrameStages {
         self.last_stages
     }
@@ -1804,6 +1811,7 @@ impl Renderer {
         }
         // Targets of sizes no recent frame used go (bounded idle bytes).
         self.pool.end_frame(MAX_IDLE_TARGET_BYTES);
+        self.last_pool_peak = self.pool.take_peak();
         if prefix {
             if unsupported.is_empty() && pending.is_empty() {
                 self.prefix.remember(std::mem::take(&mut plan.draws));

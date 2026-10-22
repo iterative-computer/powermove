@@ -119,6 +119,7 @@ impl Exec<'_> {
     ) -> Vec<Resolved> {
         let full = (plan.width, plan.height);
         let want = region.unwrap_or(Region::full(full.0, full.1));
+        let mark = self.taken.len();
         let padding = plan
             .draws
             .iter()
@@ -149,6 +150,9 @@ impl Exec<'_> {
             self.draw_pass(encoder, plan, &pending, pass_region, &acc, !cleared);
             cleared = true;
             ids.append(&mut pending);
+            // The layers beneath are in the accumulator: their images and
+            // intermediates are read by nothing recorded from now on.
+            self.release_since(mark, &[&acc.view, &target.view]);
             match node.as_ref() {
                 Node::Layer(n) => {
                     let Some((res, depth)) = self.layer_node(encoder, plan, n, rect, &acc) else {
@@ -263,6 +267,7 @@ impl Exec<'_> {
             u.off = [dx, dy, 0, 0];
             self.run_op(encoder, Op::Copy, &u, &acc, None, target, want, full);
         }
+        self.release_since(mark, &[&target.view]);
         ids
     }
 

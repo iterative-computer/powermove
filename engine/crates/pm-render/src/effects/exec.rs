@@ -939,7 +939,11 @@ impl<'c> Gpu<'c> {
         {
             self.effects.parity.answer(&request.key, &result);
             self.effects.parity.take_present(&request.fragment);
-            let out = self.take(w, h);
+            // A queue write runs before the frame's commands: a target no
+            // command of the frame reads.
+            let out = self
+                .pool
+                .take_for_upload(device, w, h, pm_gpu::target::working_format(self.precision), pm_gpu::target::working_usage());
             write_half(queue, &out, &result);
             return Some(out);
         }

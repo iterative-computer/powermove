@@ -533,6 +533,33 @@ impl Exec<'_> {
         }
     }
 
+    /// Gives back the working targets taken since `mark` that nothing
+    /// recorded from now on reads (bigrender round 2): every target but
+    /// `live` (the pass's accumulator and output). Called where the layers'
+    /// draws have been recorded into their accumulator, so a frame holds one
+    /// layer's intermediates at a time instead of every layer's until it
+    /// ends. Later passes of the frame may draw into them (the queue runs
+    /// the frame's commands in order); queue writes take only targets no
+    /// command of the frame reads (`TargetPool::take_for_upload`). Nothing
+    /// is given back while the depth and id surface is drawn: it reads the
+    /// layers' images after the color pass.
+    pub(crate) fn release_since(&mut self, mark: usize, live: &[&wgpu::TextureView]) {
+        if self.depth_id {
+            return;
+        }
+        let working = pm_gpu::target::working_usage();
+        let mut i = mark.min(self.taken.len());
+        while i < self.taken.len() {
+            let t = &self.taken[i];
+            if t.texture.usage() != working || live.iter().any(|v| **v == t.view) {
+                i += 1;
+                continue;
+            }
+            let t = self.taken.swap_remove(i);
+            self.pool.give(t);
+        }
+    }
+
     /// Renders `plan` into `target` (the region's size when `region` is set).
     pub fn render_comp(
         &mut self,
@@ -616,8 +643,11 @@ impl Exec<'_> {
         blend: PassBlend,
         clear: bool,
     ) -> Vec<Resolved> {
+        let mark = self.taken.len();
         let resolved = self.resolve_draws(encoder, plan, draws, region);
         self.draw_pass_with(encoder, plan, &resolved, region, target, clear, blend);
+        // The draws' sources (nested compositions, groups, text) are drawn.
+        self.release_since(mark, &[&target.view]);
         resolved
     }
 

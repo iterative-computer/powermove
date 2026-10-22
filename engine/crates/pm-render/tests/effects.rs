@@ -1108,3 +1108,64 @@ fn builtin_costs_at_uhd() {
         );
     }
 }
+
+/// Bigrender round 2: a layer's intermediate targets go back to the pool
+/// once the layer is composited, so a frame of many effect layers holds one
+/// layer's intermediates at a time. The frame is the same pixels as one
+/// that keeps every target to the end (with the depth and id surface on,
+/// which reads the layers' images after the color pass and keeps them),
+/// and its peak of intermediate bytes is lower.
+#[test]
+fn a_layer_s_targets_go_back_once_it_is_composited_and_the_frame_is_unchanged() {
+    let _gpu = gpu();
+    let dur = 2.0;
+    let mut layers = Vec::new();
+    for i in 0..14 {
+        let color = ["#3FCF8E", "#E5484D", "#5B8DEF", "#F5D90A"][i % 4];
+        let mut l = layer(
+            &format!("l{i}"),
+            "solid",
+            json!({ "color": color, "w": 60 + i * 9, "h": 40 + i * 5 }),
+            10.0 + i as f64 * 19.0,
+            8.0 + (i % 5) as f64 * 27.0,
+            dur,
+        );
+        set(&mut l, "rotation", json!(i as f64 * 7.0));
+        l["fx"] = json!([
+            fx(&format!("b{i}"), "blur", json!({ "amount": ch(json!(3 + i % 4)) })),
+            fx(&format!("g{i}"), "glow", json!({})),
+        ]);
+        if i % 3 == 1 {
+            let mode = ["screen", "multiply", "add"][i % 3];
+            l["blend"] = json!(mode);
+        }
+        layers.push(l);
+    }
+    let doc = load(&project(W, H, dur, solid_fill("#14161C"), layers));
+    let res = MapResolver::default();
+    let mut r = builtins();
+    let plain = request();
+    let mut with_ids = request();
+    with_ids.depth_id = true;
+    // Warm both (programs, pooled sizes), then compare.
+    for _ in 0..2 {
+        render(&mut r, &doc, &res, 0.5, &plain).unwrap();
+        render(&mut r, &doc, &res, 0.5, &with_ids).unwrap();
+    }
+    let released = render(&mut r, &doc, &res, 0.5, &plain).unwrap();
+    let released_peak = r.memory().pooled_peak;
+    let kept = render(&mut r, &doc, &res, 0.5, &with_ids).unwrap();
+    let kept_peak = r.memory().pooled_peak;
+    assert_eq!(max_diff(&released, &kept), 0.0, "the same frame");
+    assert!(released.iter().any(|v| *v > 0.0));
+    assert!(
+        released_peak * 2 < kept_peak,
+        "one layer's targets at a time: peak {released_peak} vs {kept_peak} bytes"
+    );
+    // Steady: playing on creates no new targets.
+    let created = r.pooled_bytes();
+    for k in 0..4 {
+        render(&mut r, &doc, &res, 0.5 + 0.1 * k as f64, &plain).unwrap();
+    }
+    assert!(r.pooled_bytes() <= created + created / 4, "{} vs {created}", r.pooled_bytes());
+}
