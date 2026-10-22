@@ -643,6 +643,18 @@ impl Watchdog {
             .copied()
     }
 
+    /// The longest GPU time measured per definition (`kind:id`, ms): where a
+    /// frame's GPU time goes (the presenter reports it).
+    pub fn measured_definitions(&self) -> Vec<(String, f64)> {
+        self.measured
+            .iter()
+            .filter_map(|(subject, ms)| match subject {
+                Subject::Definition { kind, id } => Some((format!("{kind:?}:{}", id.as_str()), *ms)),
+                Subject::Code(_) => None,
+            })
+            .collect()
+    }
+
     /// The longest GPU time measured for a shader layer's code.
     pub fn measured_code_ms(&self, key: &pm_glsl::Key) -> Option<f64> {
         self.measured.get(&Subject::Code(*key)).copied()

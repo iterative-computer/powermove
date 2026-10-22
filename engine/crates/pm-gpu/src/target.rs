@@ -193,12 +193,11 @@ impl TargetPool {
             return;
         }
         self.free.sort_by_key(|(_, _, used)| *used);
-        let mut i = 0;
-        while idle > keep_idle && i < self.free.len() {
-            if self.free[i].2 >= frame {
+        while idle > keep_idle && !self.free.is_empty() {
+            if self.free[0].2 >= frame {
                 break;
             }
-            let (_, t, _) = self.free.remove(i);
+            let (_, t, _) = self.free.remove(0);
             idle -= t.bytes();
             self.live_bytes = self.live_bytes.saturating_sub(t.bytes());
             t.texture.destroy();

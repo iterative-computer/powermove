@@ -473,6 +473,9 @@ pub struct Stats {
     pub stages: StageTotals,
     /// What the viewer renderer's frame caches held after the last frame.
     pub memory: pm_render::RendererMemory,
+    /// The longest GPU time measured per effect, transition and layer
+    /// definition (ms; the effects watchdog's timestamps).
+    pub definition_gpu_ms: BTreeMap<String, f64>,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -3466,10 +3469,18 @@ impl Thread {
             composer.renderer().set_compat_rasters(None);
             let stages = composer.renderer().last_stages();
             let memory = composer.renderer().memory();
-            self.stats
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .memory = memory;
+            let gpu_ms: BTreeMap<String, f64> = composer
+                .renderer()
+                .effects()
+                .watchdog
+                .measured_definitions()
+                .into_iter()
+                .collect();
+            {
+                let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+                stats.memory = memory;
+                stats.definition_gpu_ms = gpu_ms;
+            }
             depth_surface = depth_slot.map(|(index, generation, _)| (index, generation));
             composer.set_blender(pm_render::blender::BlenderRender::Native);
             // What the paused frame lacked (nothing in a draft shading); a
