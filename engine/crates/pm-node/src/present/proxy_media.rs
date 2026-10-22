@@ -43,6 +43,11 @@ pub(super) struct ProxyMedia {
     /// Originals this machine measured as unable to play in real time (main's
     /// cold decode assessments, `Proxy Assessments.json`), by content hash.
     assessed_slow: Option<(Option<(SystemTime, u64)>, std::collections::HashSet<String>)>,
+    /// Eligible originals of the open documents (lookup key, content hash,
+    /// recipe, source size), so an idle viewer can prepare the proxy that
+    /// playback will choose without waiting for its next paused render.
+    watched: Vec<(String, String, ProxyFormat, ProxySize, (u32, u32))>,
+    watched_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -74,6 +79,8 @@ impl Default for ProxyMedia {
             choices: HashMap::new(),
             deletions: None,
             assessed_slow: None,
+            watched: Vec::new(),
+            watched_at: None,
         }
     }
 }
@@ -500,7 +507,43 @@ impl ProxyMedia {
         }
     }
 
+    /// While paused, about once a second: re-read this machine's decode
+    /// assessments and, for an original assessed too slow, find its ready
+    /// proxy off-thread and decode it once on the idle probe worker. That
+    /// measures the proxy's real cost and loads its codec into this process
+    /// (the first ProRes session costs ~350 ms), so playback starts on time
+    /// even when nothing redrew the paused frame after the proxy became ready.
+    fn prepare_playback_proxies(&mut self) {
+        if self.playing || self.watched.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .watched_at
+            .is_some_and(|at| now.duration_since(at) < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.watched_at = Some(now);
+        self.refresh_assessments();
+        let watched = std::mem::take(&mut self.watched);
+        for (key, hash, format, size, dims) in &watched {
+            let slow = self
+                .assessed_slow
+                .as_ref()
+                .is_some_and(|(_, slow)| slow.contains(hash));
+            if !slow {
+                continue;
+            }
+            if let Some(proxy) = self.proxy_path(key.clone(), hash.clone(), *format, *size, false) {
+                self.probe_cost(&proxy, ProbeScale::Full, *dims);
+            }
+        }
+        self.watched = watched;
+    }
+
     pub fn poll_updates(&mut self) -> bool {
+        self.prepare_playback_proxies();
         let mut changed = false;
         if let Some(results) = &self.lookup_rx {
             while let Ok(result) = results.try_recv() {
@@ -705,6 +748,10 @@ impl ProxyMedia {
         let mut reduced = BTreeMap::new();
         self.refresh_deletions();
         self.refresh_assessments();
+        if !playing {
+            // Rebuilt from this paused document below.
+            self.watched.clear();
+        }
         self.probe_state.playing.store(playing, Ordering::Release);
         self.poll_updates();
         let tick = playhead.get();
@@ -782,6 +829,13 @@ impl ProxyMedia {
                     && let Some(hash) = &hash
                 {
                     let key = format!("{hash}:{format:?}:{size:?}");
+                    let dims = |key: &str| match meta.get(key).map(Node::kind) {
+                        Some(pm_model::NodeKind::Number(value)) if value.is_finite() && *value > 0.0 => *value as u32,
+                        _ => 0,
+                    };
+                    if self.watched.len() < 256 {
+                        self.watched.push((key.clone(), hash.clone(), format, size, (dims("w"), dims("h"))));
+                    }
                     let ready = self.proxy_path(key, hash.clone(), format, size, false);
                     // A proxy that playback will choose (its original is known
                     // too slow here) is decoded once on the idle probe worker:
@@ -791,10 +845,6 @@ impl ProxyMedia {
                     let known_slow = original.as_ref().is_some_and(|p| slow.contains(p))
                         || self.assessed_slow.as_ref().is_some_and(|(_, slow)| slow.contains(hash));
                     if let Some(proxy) = ready.filter(|_| known_slow) {
-                        let dims = |key: &str| match meta.get(key).map(Node::kind) {
-                            Some(pm_model::NodeKind::Number(value)) if value.is_finite() && *value > 0.0 => *value as u32,
-                            _ => 0,
-                        };
                         self.probe_cost(&proxy, ProbeScale::Full, (dims("w"), dims("h")));
                     }
                 }

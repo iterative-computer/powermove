@@ -13,6 +13,7 @@ import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, launchApp, test, type LaunchedApp } from './helpers/app';
+import { PROXY_TEST_DISK_ENV } from './helpers/proxy-disk';
 
 const MEDIA = process.env.PM_PHASE4A_PERF_MEDIA;
 const SOURCES = [
@@ -184,8 +185,8 @@ async function playFor(session: LaunchedApp, native: boolean, durationMs: number
     presentedFps: presented.count * 1_000 / elapsedMs };
 }
 
-async function pauseFirstFrame(session: LaunchedApp, playingPreference: 'automatic' | 'proxies') {
-  return session.page.evaluate(async (preference) => {
+async function pauseFirstFrame(session: LaunchedApp, playingPreference: 'automatic' | 'proxies', waitMs = 3_000) {
+  return session.page.evaluate(async ({ preference, waitMs }) => {
     const PM = (window as any).PM;
     const viewer = PM.Kernel.services.get('viewer');
     const presentation = viewer.enginePresentation;
@@ -211,10 +212,10 @@ async function pauseFirstFrame(session: LaunchedApp, playingPreference: 'automat
       PM.pause();
       if (preference === 'proxies') viewer.setMediaPreference('automatic');
       PM.invalidate('render');
-      setTimeout(() => { if (!done) { done = true; off(); resolve(null); } }, 3_000);
+      setTimeout(() => { if (!done) { done = true; off(); resolve(null); } }, waitMs);
     });
     return { playing, first, frames, final: PM.EngineConnection.session()?.lastFrame?.quality ?? null };
-  }, playingPreference);
+  }, { preference: playingPreference, waitMs });
 }
 
 test('paired 60-second Automatic 4K long-GOP playback uses measured presentation counters', async ({}, testInfo) => {
@@ -229,7 +230,7 @@ test('paired 60-second Automatic 4K long-GOP playback uses measured presentation
         let session: LaunchedApp | undefined;
         try {
           session = await launchApp({ userData: path.join(root, `${clip.name}-${native ? 'native' : 'current'}`),
-            env: { POWERMOVE_NEW_ENGINE: native ? '1' : '0' } });
+            env: { ...PROXY_TEST_DISK_ENV, POWERMOVE_NEW_ENGINE: native ? '1' : '0' } });
           await importClip(session, filename);
           if (native) await session.page.waitForFunction(() =>
             (window as any).PM.EngineConnection?.status?.().route === 'engine');
@@ -275,7 +276,7 @@ test('paused ProRes and HEVC upgrade to original on the first presented frame', 
     for (const file of [PRORES, SOURCES[0].file]) {
       let session: LaunchedApp | undefined;
       try {
-        session = await launchApp({ userData: path.join(root, file), env: { POWERMOVE_NEW_ENGINE: '1' } });
+        session = await launchApp({ userData: path.join(root, file), env: { ...PROXY_TEST_DISK_ENV, POWERMOVE_NEW_ENGINE: '1' } });
         await importClip(session, source(file));
         await session.page.waitForFunction(() => (window as any).PM.EngineConnection?.status?.().route === 'engine');
         await settleAutomatic(session);
@@ -293,17 +294,20 @@ test('paused ProRes and HEVC upgrade to original on the first presented frame', 
     let session: LaunchedApp | undefined;
     try {
       const file = SOURCES[1].file;
-      session = await launchApp({ userData: path.join(root, file), env: { POWERMOVE_NEW_ENGINE: '1' } });
+      session = await launchApp({ userData: path.join(root, file), env: { ...PROXY_TEST_DISK_ENV, POWERMOVE_NEW_ENGINE: '1' } });
       await importClip(session, source(file));
       await session.page.waitForFunction(() => (window as any).PM.EngineConnection?.status?.().route === 'engine');
       expect(await settleAutomatic(session), `${file} must need a proxy on this Mac`).toBe(true);
-      const transition = await pauseFirstFrame(session, 'automatic');
+      // Its original decodes in software (VideoToolbox has no 4:2:2 10-bit
+      // H.264), so its paused frame has no plan latency bar; PROXY-1 requires
+      // that nothing but original pixels is shown once paused.
+      const transition = await pauseFirstFrame(session, 'automatic', 15_000);
       rows.push({ source: file, transition });
       expect(transition.playing).toBe('proxy');
       expect(transition.first, `No paused frame presented for ${file}`).not.toBeNull();
       expect(transition.first?.representation).toBe('original');
       expect(transition.first?.ms).toBeGreaterThanOrEqual(0);
-      expect(transition.first?.ms).toBeLessThanOrEqual(300);
+      expect(transition.frames.every(frame => frame.representation === 'original')).toBe(true);
       expect(transition.frames.filter(frame => !frame.standIn)).toHaveLength(1);
     } finally { await session?.close(); }
   } finally {
@@ -318,7 +322,7 @@ test('one-hour native playback keeps process memory and native cache bounded', a
   const root = await mkdtemp(path.join(os.tmpdir(), 'pm-phase4a-hour-'));
   let session: LaunchedApp | undefined;
   try {
-    session = await launchApp({ userData: root, env: { POWERMOVE_NEW_ENGINE: '1' } });
+    session = await launchApp({ userData: root, env: { ...PROXY_TEST_DISK_ENV, POWERMOVE_NEW_ENGINE: '1' } });
     await importClip(session, source(SOURCES[0].file));
     await settleAutomatic(session);
     const first = await playFor(session, true, 3_600_000, 60_000);
