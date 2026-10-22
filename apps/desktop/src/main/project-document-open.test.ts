@@ -106,6 +106,21 @@ it('keeps the full default result, uses a real owned worker only when opted in, 
   await expect(files.save(full.projectId, Buffer.from(source))).rejects.toThrow('outside Powermove');
 }, 15_000);
 
+it('opens a large range stamped for a newer reader without a save association, and says why a newer one cannot open', async () => {
+  const newer = { ...value, proj: { ...value.proj, minReaderVersion: 2 } };
+  await fixture({ source: JSON.stringify(newer) });
+  const ranged = await files.open(tracked.path, { allowDocumentRange: true });
+  expect(ranged).not.toHaveProperty('document');
+  expect(validate).toHaveBeenCalledTimes(1);
+  // Read-only: no association, so no save can target this file without Save As.
+  expect(JSON.parse(await readFile(registry, 'utf8').catch(() => '{}'))[ranged.projectId]).toBeUndefined();
+  await expect(files.save(ranged.projectId, Buffer.from(source))).rejects.toThrow('Save As');
+  await files.close(ranged.token);
+  await fixture({ source: JSON.stringify({ minReaderVersion: 5, proj: { timelines: [] } }) });
+  await expect(files.open(tracked.path, { allowDocumentRange: true })).rejects.toThrow('This project needs a newer version of Powermove.');
+  expect(validate).toHaveBeenCalledTimes(2);
+});
+
 it('keeps the measured boundary, small PMV4, PMV3, and legacy opens on the full native path', async () => {
   await fixture({ length: validator.WORKER_DOCUMENT_BYTES - 1 });
   const below = await files.open(tracked.path, { allowDocumentRange: true });

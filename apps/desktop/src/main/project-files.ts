@@ -1,5 +1,5 @@
 import { readWithRetry } from './read-retry';
-import { assertProjectDocument, ProjectDocumentWorkerError, validateProjectDocumentInWorker, WORKER_DOCUMENT_BYTES } from './project-document-validator';
+import { assertProjectDocument, ProjectDocumentError, ProjectDocumentWorkerError, validateProjectDocumentInWorker, WORKER_DOCUMENT_BYTES } from './project-document-validator';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, unlink, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
@@ -10,7 +10,7 @@ import { checkVersion, changedFile, copySnapshot, fileVersion, publishFile, Reco
 import { isIncrementalProject, readIncrementalIndex, type LinkedRecord, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
 import { nativeHash, ProjectSave, validateSaveMedia } from './project-save';
 import { hashProjectFile } from './project-file-hash';
-import { NEWER_PROJECT_MESSAGE, needsNewerReader } from '../shared/reader-version';
+import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader } from '../shared/reader-version';
 import { validateProjectDocument, type ProjectDocumentValidator } from './project-document';
 
 export interface ProjectFilesOptions {
@@ -244,7 +244,7 @@ export class ProjectFiles {
           return buffer;
         };
         const prefix = await readExactly(0, Math.min(9, info.size));
-        let document: any, rangeValidated = false, media: ProjectMediaRange[] = [], documentRange: ProjectRecord | undefined, mediaToVerify: ProjectRecord[] = [];
+        let document: any, rangeValidated = false, rangeReaderVersion = 0, media: ProjectMediaRange[] = [], documentRange: ProjectRecord | undefined, mediaToVerify: ProjectRecord[] = [];
         if (isIncrementalProject(prefix)) {
           const index = await readIncrementalIndex(info.size, readExactly, nativeHash);
           const workerRange = options.allowDocumentRange && index.document.length >= WORKER_DOCUMENT_BYTES;
@@ -257,9 +257,11 @@ export class ProjectFiles {
             hashing = Promise.resolve().then(() => hashProjectFile(handle, info.size, index.media, hashingAbort!.signal))
               .then(hash => ({ ok: true as const, hash }), error => ({ ok: false as const, error }));
             try {
-              await validation;
+              rangeReaderVersion = (await validation).requiredReaderVersion;
               rangeValidated = true;
             } catch (error) {
+              // A newer build may change the document's shape; say why it cannot open.
+              if (error instanceof ProjectDocumentError && error.requiredReaderVersion > CURRENT_READER_VERSION) throw new Error(`${NEWER_PROJECT_MESSAGE}.`);
               if (!(error instanceof ProjectDocumentWorkerError)) throw error;
               // Transfer detaches the owned bytes even if the worker later
               // fails. Retry the original checksum/parser on the same handle.
@@ -286,9 +288,8 @@ export class ProjectFiles {
           document = JSON.parse((await readExactly(0, info.size)).toString('utf8'));
         }
         // A newer build may change the document's shape; say why it cannot open.
-        // A worker-validated range has no parsed document here; the renderer
-        // still checks its stamp when it reads the range.
-        const newer = !rangeValidated && needsNewerReader(document);
+        // A worker-validated range is parsed only there; it reports the stamps.
+        const newer = rangeValidated ? rangeReaderVersion > CURRENT_READER_VERSION : needsNewerReader(document);
         if (!rangeValidated) {
           try { assertProjectDocument(document); }
           catch (error) { throw newer ? new Error(`${NEWER_PROJECT_MESSAGE}.`) : error; }
