@@ -26,6 +26,7 @@ pub mod compose;
 pub mod document;
 mod layer_reports;
 pub mod peaks;
+pub mod rasters;
 pub mod render;
 pub mod schedule;
 pub mod snapshot;

@@ -417,6 +417,49 @@ impl SnapshotQueue {
         None
     }
 
+    /// The next layer raster for the worker ([`super::rasters`]): `sync`
+    /// first, then `async`, in arrival order. They run off the render
+    /// thread, so playback does not hold them back; `idle` ones still wait
+    /// for the views like every idle job (thumbnails yield to playback and
+    /// gestures on the GPU too).
+    pub fn next_layer(
+        &mut self,
+        revision: impl Fn(Key) -> Option<u64>,
+        outstanding: impl Fn(&str) -> bool,
+        pressure: Pressure,
+        now: i64,
+    ) -> Option<SnapshotJob> {
+        let unpressed = Pressure {
+            playing: false,
+            due_in_us: None,
+            last_interactive: None,
+        };
+        for class in [
+            SnapshotClass::Sync,
+            SnapshotClass::Async,
+            SnapshotClass::Idle,
+        ] {
+            let found = self.jobs.iter().position(|j| {
+                let p = if class == SnapshotClass::Idle {
+                    pressure
+                } else {
+                    unpressed
+                };
+                j.request.class == class
+                    && matches!(
+                        j.request.target,
+                        pm_protocol::snapshot::SnapshotTarget::Layer { .. }
+                    )
+                    && !j.waiting_for.iter().any(|k| outstanding(k))
+                    && self.ready(j, revision(j.key), p, now) == Ready::Run
+            });
+            if let Some(index) = found {
+                return self.jobs.remove(index);
+            }
+        }
+        None
+    }
+
     /// Puts a job back at the front of the queue (it needs another turn).
     pub fn requeue(&mut self, job: SnapshotJob) {
         self.jobs.push_front(job);
@@ -645,6 +688,53 @@ mod tests {
                 .class,
             SnapshotClass::Idle
         );
+    }
+
+    fn layer_job(class: SnapshotClass, k: Key, revision: Option<u64>) -> SnapshotJob {
+        let mut j = job(class, k, revision, 0);
+        j.request.target = SnapshotTarget::Layer {
+            layer: "l".into(),
+            scale: 1.0,
+            crop: None,
+            content: None,
+        };
+        j
+    }
+
+    /// Layer rasters run on the worker, off the render thread: sync and
+    /// async ones do not wait for a playing view's next frame; idle ones
+    /// still wait; frame snapshots are never handed to the worker.
+    #[test]
+    fn layer_rasters_leave_for_the_worker_during_playback() {
+        let mut q = SnapshotQueue::default();
+        let k = key(3, 1);
+        let due_now = Pressure {
+            playing: true,
+            due_in_us: Some(0),
+            last_interactive: None,
+        };
+        q.push(job(SnapshotClass::Async, k, None, 0)).unwrap();
+        q.push(layer_job(SnapshotClass::Idle, k, None)).unwrap();
+        q.push(layer_job(SnapshotClass::Async, k, Some(4))).unwrap();
+        q.push(layer_job(SnapshotClass::Sync, k, None)).unwrap();
+        let first = q.next_layer(|_| Some(3), |_| false, due_now, 0).unwrap();
+        assert_eq!(first.request.class, SnapshotClass::Sync);
+        // The async raster waits for its revision, never for the frame due.
+        assert!(q.next_layer(|_| Some(3), |_| false, due_now, 0).is_none());
+        let second = q.next_layer(|_| Some(4), |_| false, due_now, 0).unwrap();
+        assert_eq!(second.request.class, SnapshotClass::Async);
+        // The idle raster waits for playback to stop (and the async frame
+        // snapshot is not the worker's).
+        assert!(q.next_layer(|_| Some(4), |_| false, due_now, 0).is_none());
+        assert!(
+            q.next_layer(|_| Some(4), |_| false, idle(), 0).is_none(),
+            "an urgent frame snapshot waits"
+        );
+        let frame = q.next(|_| Some(4), |_| false, idle(), 0).unwrap();
+        assert!(matches!(frame.request.target, SnapshotTarget::Frame { .. }));
+        let last = q.next_layer(|_| Some(4), |_| false, idle(), 0).unwrap();
+        assert_eq!(last.request.class, SnapshotClass::Idle);
+        assert!(q.is_empty());
     }
 
     #[test]

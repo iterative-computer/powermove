@@ -147,6 +147,9 @@ pub struct CompatView {
     pub store: Arc<Mutex<CompatStore>>,
     pub key: Key,
     pub revision: Revision,
+    /// Records every need the render consulted (a viewer frame: the
+    /// presenter's preroll checks the next frames' answers by them).
+    pub consulted: Option<Arc<Mutex<Vec<CompatNeed>>>>,
 }
 
 impl pm_render::compat::CompatRasters for CompatView {
@@ -165,6 +168,21 @@ impl pm_render::compat::CompatRasters for CompatView {
         source: CompatSource,
         crop: Option<PixelRect>,
     ) -> pm_render::compat::CompatAnswer {
+        if let Some(consulted) = &self.consulted
+            && self.producing(source)
+        {
+            consulted
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(CompatNeed {
+                    composition: composition.into(),
+                    layer: layer.into(),
+                    time: pm_render::compat::ticks_of(time),
+                    source,
+                    scale,
+                    crop,
+                });
+        }
         self.store.lock().unwrap_or_else(|e| e.into_inner()).answer(
             self.key,
             composition,
