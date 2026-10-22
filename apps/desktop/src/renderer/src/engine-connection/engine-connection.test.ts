@@ -398,6 +398,48 @@ describe('the engine connection', () => {
 });
 
 describe('the transport driver', () => {
+  it('holds a newly requested playhead against an old stopped clock until the run starts', async () => {
+    const { connection, port } = await connected();
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, revision: 3 } } as never, 5));
+    const clock = new HostClock(async () => 0);
+    (clock as unknown as { best: { offsetUs: number; rttUs: number } }).best = { offsetUs: 0, rttUs: 10 };
+    const driver = new EngineTransport(() => session, clock);
+    driver.refresh();
+    const sample = (seq: number, epoch: number, state: 'stopped' | 'playing', time: number, hostTime = 0, rate = 1) => {
+      port.deliver(envelope({ kind: 'event', body: {
+        type: 'clock', seq, epoch, state, hostTime, mediaTime: ticks(time),
+        rate: { num: state === 'playing' ? rate : 0, den: 1 }, outputLatencyUs: 0,
+        sampleRate: 48000, loopRange: null
+      } } as never, 5));
+    };
+
+    sample(1, 1, 'stopped', 6);
+    driver.play(4);
+    expect(driver.now(0)).toEqual({ time: 4, playing: false, ended: false });
+    driver.seek(3, false);
+    expect(driver.now(0)).toEqual({ time: 3, playing: false, ended: false });
+    sample(1, 2, 'playing', 3, 1_000_000);
+    expect(driver.now(1500)).toEqual({ time: 3.5, playing: true, ended: false });
+    sample(2, 2, 'stopped', 6);
+    expect(driver.now(2000)).toEqual({ time: 6, playing: false, ended: true });
+
+    driver.play(4);
+    expect(driver.now(2000)).toEqual({ time: 4, playing: false, ended: false });
+    driver.pause();
+    expect(driver.now(2000)).toEqual({ time: 6, playing: false, ended: false });
+
+    // A rate change on an already moving line continues to follow its
+    // current sample until the producer publishes the new epoch.
+    sample(1, 3, 'playing', 3, 1_000_000);
+    driver.shuttle(4.5, 2);
+    expect(driver.now(1500)).toEqual({ time: 3.5, playing: true, ended: false });
+    sample(1, 4, 'playing', 4.5, 1_000_000, 2);
+    expect(driver.now(1500)).toEqual({ time: 5.5, playing: true, ended: false });
+    session.close(); connection.close('test complete');
+  });
+
   it('runs the transport through the engine and follows its clock', async () => {
     const { connection, port } = await connected();
     const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });

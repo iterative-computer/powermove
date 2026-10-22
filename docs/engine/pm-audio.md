@@ -3585,3 +3585,16 @@ are unchanged. New regressions hold a real decoder while repeatedly
 scheduling preparation, then release it and compare 8192 output frames
 exactly with the reference; they also cover early and error publications.
 Runtime verification and final device qualification are still pending.
+
+A separate native transport counterexample reproduced a stale stopped-clock
+bug: after Play requested 4 s, `EngineTransport.now()` still returned the
+previous stopped sample at 6 s. The frontend's work-area check could cancel
+that pending start. The driver now holds its requested position while a run
+has not played and its available sample is stopped. An exact seek updates
+that held position; a moving sample, a completed run and an explicit Pause
+retain their prior behavior. The pure-module counterexample fails before
+and passes after the fix. A protocol-fixture regression also covers those
+transitions and a rate change; its full Vitest run is pending. This proves
+the standalone bug, not the origin of the earlier V36 warm-Play Pause.
+The two frontend files changed are `engine-connection/transport.ts` and its
+existing `engine-connection.test.ts`.
