@@ -806,6 +806,44 @@ impl Composer {
         }
     }
 
+    /// Draws the viewer frame at `time` offscreen with background parity
+    /// probes and without the paused frame's draw reuse or compatibility
+    /// answers (layers a producer wraps are drawn natively: a valid input
+    /// for a probe), and returns the probes it made (decision PROBE-1's
+    /// idle sweep). Nothing is presented.
+    pub fn probe_frame(
+        &mut self,
+        doc: &pm_model::Document,
+        composition: &str,
+        media: &MediaMap,
+        time: Ticks,
+        state: &ViewerState,
+    ) -> Vec<pm_render::shader_layers::FallbackRequest> {
+        let Ok(comp) = pm_eval::Comp::resolve(doc, composition) else {
+            return Vec::new();
+        };
+        let number = |key: &str| {
+            let v = pm_eval::node::to_number(comp.member(key));
+            if v.is_finite() && v > 0.0 { v } else { 1.0 }
+        };
+        let place = placement(state, number("w"), number("h"));
+        let Some(region) = place.region else {
+            return Vec::new();
+        };
+        let request = self.viewer_request(&place, region, state, false);
+        self.renderer.set_draw_reuse(false);
+        self.renderer.set_compat_rasters(None);
+        self.renderer.set_probe_background(true);
+        let _ = self.renderer.render(doc, composition, time, &request, media);
+        self.renderer.set_probe_background(false);
+        self.renderer.set_draw_reuse(self.draw_reuse);
+        self.renderer
+            .take_probes()
+            .iter()
+            .map(|r| (**r).clone())
+            .collect()
+    }
+
     /// The raster-override answers the viewer frame at `time` lacks (its
     /// plan only, `Renderer::compat_needs`), with the compatibility answers
     /// the caller set on the renderer.
