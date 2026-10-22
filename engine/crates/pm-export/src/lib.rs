@@ -66,17 +66,17 @@ pub enum OutputSink {
 }
 
 impl OutputSink {
-    /// Job rendering supplies working RGBA frames. H.264's desktop conversion
-    /// and encoder settings run in the same bundled FFmpeg as flag-off exports.
-    /// `new` also supports callers supplying already converted encoder planes.
-    pub fn for_job(spec: &ExportSpec) -> Result<OutputSink, Error> {
+    /// Job rendering supplies working RGBA frames. Today's formats run
+    /// through the desktop exporter's own bundled FFmpeg conversion and
+    /// encoder settings (decision EXPORT-1): H.264 MP4 always, ProRes 4444 MOV
+    /// when the document has level 1 content (`level1`: layers made before
+    /// compat level 2, whose exports must match today's 8-bit frames; level 2
+    /// content keeps the engine's float frames). `new` also supports callers
+    /// supplying already converted encoder planes.
+    pub fn for_job(spec: &ExportSpec, level1: bool) -> Result<OutputSink, Error> {
         #[cfg(target_os = "macos")]
-        if matches!(spec.codec, Codec::H264 { .. })
-            && spec.container == Container::Mp4
-            && spec.tags == ColorTags::Rec709QuickTime
-            && spec
-                .audio
-                .is_none_or(|a| a.ffmpeg_mux(spec.codec, spec.container))
+        if mac::legacy_video::Desktop::of(spec)
+            .is_some_and(|d| level1 || d == mac::legacy_video::Desktop::H264)
         {
             return Ok(OutputSink::LegacyVideo(Box::new(
                 mac::legacy_video::LegacyVideoSink::new(spec)?,
@@ -90,13 +90,14 @@ impl OutputSink {
     /// ([`webcodecs::uses_host`]).
     pub fn for_job_with(
         spec: &ExportSpec,
+        level1: bool,
         encoder: Option<Box<dyn webcodecs::EncodeHost>>,
     ) -> Result<OutputSink, Error> {
         match encoder {
             Some(host) if webcodecs::uses_host(spec) => Ok(OutputSink::WebCodecs(Box::new(
                 webcodecs::WebCodecsSink::new(spec, host)?,
             ))),
-            _ => Self::for_job(spec),
+            _ => Self::for_job(spec, level1),
         }
     }
 

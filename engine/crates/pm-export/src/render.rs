@@ -1212,7 +1212,8 @@ pub fn sink_for_with(
     plan: &ExportPlan,
     encoder: Option<Box<dyn crate::webcodecs::EncodeHost>>,
 ) -> Result<crate::OutputSink, JobError> {
-    let mut sink = crate::OutputSink::for_job_with(&plan.spec, encoder)?;
+    let level1 = crate::png_compat::has_level1_content(&plan.document);
+    let mut sink = crate::OutputSink::for_job_with(&plan.spec, level1, encoder)?;
     if let (crate::OutputSink::Png(png), Some(name)) = (&mut sink, &plan.sequence_name) {
         png.set_stem(name);
     }

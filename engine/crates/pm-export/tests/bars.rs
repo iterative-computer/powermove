@@ -418,9 +418,16 @@ fn generation(
         engine.clone(),
     );
     let mut r = renderer_for(&path);
-    let delivered = run_export(
+    // The generation bar measures the engine's VideoToolbox ProRes encoder.
+    // A job export of a level 1 document routes ProRes 4444 to today's
+    // 8-bit FFmpeg path instead (decision EXPORT-1; export.md).
+    let plan = plan_export(&job).unwrap();
+    let sink = OutputSink::new(&plan.spec).unwrap();
+    let delivered = run_export_into(
         &mut r,
         &job,
+        plan,
+        sink,
         &Unrestricted,
         &AtomicBool::new(false),
         &mut |_| {},

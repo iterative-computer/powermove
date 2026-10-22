@@ -214,6 +214,26 @@ fn export(job: &ExportJob) -> Delivered {
     .unwrap_or_else(|e| panic!("{}: {e}", job.destination.display()))
 }
 
+/// An export through the engine's own ProRes encoder (VideoToolbox from the
+/// float frames), whatever the job routing. Job exports of level 1 documents
+/// write ProRes 4444 through today's 8-bit FFmpeg path instead (decision
+/// EXPORT-1); these bars measure the engine's 16-bit delivery.
+fn export_engine_codec(job: &ExportJob) -> Delivered {
+    let mut renderer = Renderer::headless().unwrap();
+    let plan = plan_export(job).unwrap_or_else(|e| panic!("{}: {e}", job.destination.display()));
+    let sink = OutputSink::new(&plan.spec).unwrap();
+    run_export_into(
+        &mut renderer,
+        job,
+        plan,
+        sink,
+        &Unrestricted,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap_or_else(|e| panic!("{}: {e}", job.destination.display()))
+}
+
 fn u16s(input: &EncoderInput, k: usize) -> &[u16] {
     match &input.planes[k].data {
         PlaneData::U16(v) => v,
@@ -469,7 +489,7 @@ fn alpha_bar_prores_4444_exact_straight_and_premultiplied() {
             profile: WireProRes::P4444,
         };
         let out = dir.join(format!("{mode:?}.mov"));
-        export(&video_job(
+        export_engine_codec(&video_job(
             &src,
             settings(fmt, mode, w, h, 1, (24, 1)),
             out.clone(),
@@ -599,7 +619,7 @@ fn alpha_bar_hevc_alpha_psnr_matches_avfoundations_preset() {
     media.insert("clip", src.clone());
     let frames = 24u64;
     let master = dir.join("master.mov");
-    export(&job_of(
+    export_engine_codec(&job_of(
         &doc,
         media.clone(),
         settings(

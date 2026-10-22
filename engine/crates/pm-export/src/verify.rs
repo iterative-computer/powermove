@@ -83,6 +83,11 @@ pub struct Expected {
     pub audio: Option<(AudioSpec, u64)>,
     pub timecode: Option<TimecodeSpec>,
     pub blocks: Vec<BlockSample>,
+    /// The movie timescale when the writer chooses its own: the bundled
+    /// FFmpeg MOV/MP4 muxer (`legacy_video`) uses the denominator of the
+    /// greatest common divisor of its input streams' time bases, at least
+    /// 1000 (FFmpeg 9.0.2 `movenc.c`, `mov_init`).
+    pub movie_timescale: Option<u64>,
 }
 
 impl Expected {
@@ -102,6 +107,7 @@ impl Expected {
             audio: spec.audio.map(|a| (a, audio_frames)),
             timecode: spec.timecode.clone(),
             blocks,
+            movie_timescale: None,
         }
     }
 }
@@ -482,7 +488,7 @@ pub fn check(
             }
             (t.timescale as u64 / a * spec.sample_rate as u64).max(1000)
         }
-        _ => t.timescale as u64,
+        _ => expected.movie_timescale.unwrap_or(t.timescale as u64),
     };
     if video.media_timescale as i32 != t.timescale
         || movie.movie_timescale as u64 != expected_movie_timescale
