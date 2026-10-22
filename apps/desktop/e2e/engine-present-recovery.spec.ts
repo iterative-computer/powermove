@@ -118,7 +118,12 @@ test.describe('Use New Engine: engine presentation recovery', () => {
       const layer = PM.proj.layers[0];
       PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 50 }, { label: 'Opacity', origin: 'inspector' });
     });
-    await expect.poll(() => latestSeq(page), { timeout: 20_000 }).toBeGreaterThan(before);
+    try {
+      await expect.poll(() => latestSeq(page), { timeout: 20_000 }).toBeGreaterThan(before);
+    } catch (error) {
+      console.log('GPU RECOVERY DIAGNOSTIC', JSON.stringify(session.diagnostics.console.filter((r) => /presentation|painter|graphics|WebGL/.test(r.text)).map((r) => r.text.slice(0, 300))));
+      throw error;
+    }
     await expect.poll(() => presenting(page), { timeout: 20_000 }).toBe(true);
     // The edited frame is what the window shows: #FF3300 at 50% over #203040.
     const center = await boxCenter(page);
