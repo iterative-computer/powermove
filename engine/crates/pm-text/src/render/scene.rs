@@ -738,10 +738,13 @@ impl Painter<'_> {
                 let Some(bare) = self.outlines.get(run.face, run.coords, g.id, plain) else {
                     continue;
                 };
-                // `SubRunContainer` draws masks only while
-                // `ApproximateTransformedTextSize` (the size times the
-                // matrix's largest scale) is below 256. Under a skew or a
-                // non-uniform scale that exceeds the uniform device size.
+                // `SubRunContainer::MakeInAlloc` (Skia m152,
+                // src/text/gpu/SubRunContainer.cpp) tries SDFT and direct
+                // masks only while `ApproximateTransformedTextSize` (the
+                // size times `getMaxScale`) is below `maxMaskSize`, Graphite's
+                // `fGlyphsAsPathsFontSize` (256 on macOS); the rest falls to
+                // the path sub run. Under a skew or a non-uniform scale that
+                // exceeds the uniform device size.
                 let as_path = self.profile.glyph_as_path(device_size, bare.bounds)
                     || (self.masks.is_some()
                         && !place.axis_aligned
@@ -2116,13 +2119,16 @@ mod tests {
     }
 
     /// Glyph images beyond Skia's direct-mask atlas draw as paths, never as
-    /// masks (the GPU atlas holds 512 px plots). Two gates, as in
-    /// `SubRunContainer`: text whose `ApproximateTransformedTextSize` (size
-    /// times the matrix's largest scale) is 256 or more draws as paths (an
-    /// 80 degree animator skew of 75 px text at 2x), and a glyph whose mask
-    /// is over 256 px is rejected to the path sub run (`fitsInAtlasDirect`:
-    /// a Zapfino glyph that fits upright, rotated 45 degrees). A nearly
-    /// upright rotation keeps the direct mask.
+    /// masks (the GPU atlas holds 512 px plots). This covers the
+    /// `fitsInAtlasDirect` gate only: a glyph whose mask is over 256 px is
+    /// rejected to the path sub run (Arial 'H' at 75 px, 2x, under an 80
+    /// degree animator skew; a Zapfino glyph that fits upright, rotated 45
+    /// degrees). The skew case is also far above the
+    /// `ApproximateTransformedTextSize` gate (about 860 px), so it passes
+    /// with either gate alone; the rotation keeps the largest scale at 2
+    /// (100 px), so only `fitsInAtlasDirect` sends it to paths. A nearly
+    /// upright rotation keeps the direct mask. The size gate on its own is
+    /// covered by `transformed_text_at_the_path_size_draws_as_paths`.
     #[cfg(all(feature = "cg-masks", target_os = "macos"))]
     #[test]
     fn glyph_images_beyond_the_atlas_draw_as_paths() {
@@ -2230,6 +2236,136 @@ mod tests {
         );
         assert_eq!(masks.len(), 1);
         assert!(masks[0].0.max(masks[0].1) <= 256, "{masks:?}");
+    }
+
+    /// The `ApproximateTransformedTextSize` gate on its own. Skia m152
+    /// `SubRunContainer::MakeInAlloc` tries masks and distance fields only
+    /// while the text size times `SkMatrix::getMaxScale` is below
+    /// `maxMaskSize` (Graphite's `fGlyphsAsPathsFontSize`, 256 on macOS);
+    /// at or above it every outline glyph of the run is a path sub run, even
+    /// when each glyph's mask would fit the atlas. Here every mask is well
+    /// under 256 px and the uniform device size (`sqrt|det|`) is below the
+    /// large and distance-field ranges, so only the largest-scale term sends
+    /// the glyphs to paths. Controls just below the size stay in the atlas
+    /// (as distance fields: 162 to 256 px is the SDFT range).
+    #[cfg(all(feature = "cg-masks", target_os = "macos"))]
+    #[test]
+    fn transformed_text_at_the_path_size_draws_as_paths() {
+        use skrifa::MetadataProvider;
+        use std::cell::RefCell;
+        struct Recorder(RefCell<Vec<usize>>);
+        impl PathRasterizer for Recorder {
+            fn raster(
+                &self,
+                paths: &[PathGlyph],
+                _: (u32, u32),
+                _: Rgba,
+                _: f64,
+                _: f64,
+            ) -> Option<Item> {
+                self.0.borrow_mut().push(paths.len());
+                None
+            }
+        }
+        let arial = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf")
+            .expect("ships with macOS");
+        let face = FaceRef {
+            data: &arial,
+            index: 0,
+            id: 1,
+        };
+        let charmap = skrifa::FontRef::new(&arial).unwrap().charmap();
+        let skewed = |deg: f64| {
+            let k = deg.to_radians().tan();
+            Affine::new([2.0, 0.0, 2.0 * k, 2.0, 0.0, 0.0])
+        };
+        let stretched = |sx: f64| Affine::scale(2.0) * Affine::scale_non_uniform(sx, 1.0);
+        // (name, size, matrix, at the path size)
+        let cases = [
+            ("skew 60", 60.0, skewed(60.0), true),
+            ("scale 2.8x1", 48.0, stretched(2.8), true),
+            ("skew 55", 60.0, skewed(55.0), false),
+            ("scale 2.5x1", 48.0, stretched(2.5), false),
+        ];
+        for (name, size, m, at_path_size) in cases {
+            let place = Placement::of(m);
+            let approx = size * place.max_scale();
+            let device = f64::from(size) * place.scale;
+            assert_eq!(approx >= 256.0, at_path_size, "{name}: approx {approx}");
+            assert!(
+                !Profile::CANVAS2D.as_path(device) && !Profile::CANVAS2D.is_large(device),
+                "{name}: device size {device}"
+            );
+            assert_eq!(sdf_strike(size, &place).is_none(), at_path_size, "{name}");
+            for ch in ['.', 'i', 'l'] {
+                let id = charmap.map(ch).unwrap().to_u32();
+                let mut masks = super::super::cgmask::CgMasks::new();
+                // The mask Skia would gauge for this glyph fits the atlas.
+                let gauge = masks
+                    .matrix_mask(
+                        face,
+                        &[],
+                        id as u16,
+                        size,
+                        place.relaxed_post(),
+                        0.0,
+                        (0, 0),
+                    )
+                    .expect("a matrix mask");
+                assert!(
+                    gauge.width.max(gauge.height) < 256,
+                    "{name} {ch:?}: {}x{}",
+                    gauge.width,
+                    gauge.height
+                );
+                let glyphs = [PlacedGlyph { id, x: 0.0, y: 0.0 }];
+                let mut outlines = Outlines::new();
+                let mut bitmaps = Bitmaps::new();
+                let recorder = Recorder(RefCell::new(Vec::new()));
+                let mut painter = Painter {
+                    outlines: &mut outlines,
+                    bitmaps: &mut bitmaps,
+                    masks: Some(&mut masks),
+                    viewport: Some((2000, 1000)),
+                    path_rasterizer: Some(&recorder),
+                    profile: Profile::CANVAS2D,
+                    unsupported: Vec::new(),
+                };
+                let run = Run {
+                    face,
+                    size,
+                    coords: Coords::User(&[]),
+                    synthetic_bold: false,
+                    synthetic_italic: false,
+                    oblique: 0.0,
+                    glyphs: &glyphs,
+                    bitmap_size: None,
+                };
+                let mut items = Vec::new();
+                painter.fill_text(
+                    &mut items,
+                    &[run],
+                    (300.0, 300.0),
+                    m,
+                    [0.0, 0.0, 0.0, 1.0],
+                    1.0,
+                    0.0,
+                );
+                assert!(painter.unsupported.is_empty(), "{:?}", painter.unsupported);
+                let masks = items
+                    .iter()
+                    .filter(|i| matches!(i.content, ItemContent::GlyphMask { .. }))
+                    .count();
+                let paths = recorder.0.into_inner();
+                if at_path_size {
+                    assert_eq!(masks, 0, "{name} {ch:?}: no mask at the path size");
+                    assert_eq!(paths, [1], "{name} {ch:?}: drawn as its canonical path");
+                } else {
+                    assert!(!items.is_empty(), "{name} {ch:?}: drawn below it");
+                    assert!(paths.is_empty(), "{name} {ch:?}: {paths:?}");
+                }
+            }
+        }
     }
 
     #[test]
