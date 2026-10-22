@@ -381,6 +381,13 @@ impl compat::CompatHost for Shared {
     fn call(&self, request: Request, session: SessionId) -> Result<Response, String> {
         Shared::call(self, request, Some(session)).map_err(|e| e.message)
     }
+
+    fn call_many(&self, requests: Vec<Request>, session: SessionId) -> Vec<Result<Response, String>> {
+        Shared::call_many(self, requests.into_iter().map(|r| (r, Some(session))).collect())
+            .into_iter()
+            .map(|r| r.map_err(|e| e.message))
+            .collect()
+    }
 }
 
 impl blender::HostPort for Shared {

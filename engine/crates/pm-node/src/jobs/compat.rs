@@ -23,7 +23,21 @@ use pm_render::compat::{CompatAnswer, CompatRaster, CompatRasters, ticks_of};
 /// Answers a job's compatibility layers through the host.
 pub(crate) trait CompatHost: Send + Sync {
     fn call(&self, request: Request, session: SessionId) -> Result<Response, String>;
+    /// Several requests at once, answered in order (the host serves them
+    /// back to back instead of one round trip each).
+    fn call_many(&self, requests: Vec<Request>, session: SessionId) -> Vec<Result<Response, String>> {
+        requests
+            .into_iter()
+            .map(|request| self.call(request, session))
+            .collect()
+    }
 }
+
+/// Frames past the asked one whose answers an export fetches with it: one
+/// host round trip serves this many frames of a layer.
+const FETCH_AHEAD: i64 = 4;
+/// Most requests in one batch.
+const MAX_BATCH: usize = 512;
 
 type AnswerKey = (String, String, i64, CompatSource, u64);
 
@@ -37,6 +51,9 @@ pub(crate) struct JobCompat {
     answers: Mutex<HashMap<AnswerKey, CompatAnswer>>,
     /// Why an answer could not be had (the export fails with it).
     failure: Mutex<Option<String>>,
+    /// The earliest time of the last batch (ticks): the frame step is the
+    /// distance to the next one.
+    last_batch: Mutex<Option<i64>>,
 }
 
 impl JobCompat {
@@ -55,6 +72,7 @@ impl JobCompat {
             sources,
             answers: Mutex::new(HashMap::new()),
             failure: Mutex::new(None),
+            last_batch: Mutex::new(None),
         }
     }
 
@@ -73,14 +91,6 @@ impl JobCompat {
             *failure = Some(message.clone());
         }
         message
-    }
-
-    fn fail(&self, message: String) -> CompatAnswer {
-        let mut failure = self.failure.lock().unwrap_or_else(|e| e.into_inner());
-        if failure.is_none() {
-            *failure = Some(message);
-        }
-        CompatAnswer::Missing
     }
 }
 
@@ -274,59 +284,129 @@ impl CompatRasters for JobCompat {
         {
             return answer.clone();
         }
-        if self.failure().is_some() {
-            return CompatAnswer::Missing;
+        // Not answered yet: the frame lists it, and the renderer fetches
+        // the frame's answers in one batch ([`Self::fetch`]).
+        CompatAnswer::Missing
+    }
+
+    fn fetch(&self, needs: &[pm_protocol::snapshot::CompatNeed]) -> bool {
+        if self.failure().is_some() || needs.is_empty() {
+            return false;
         }
-        let request = CompatFrameRequest {
-            document: self.document.as_str().into(),
-            composition: composition.into(),
-            layer: layer.into(),
-            time: ticks,
-            source,
-            scale,
-            revision: self.revision,
-            // Layer producers only: SVG rasters have their own source
-            // (`pm_render::vector::svg_rasters::SvgRasterSource`).
-            svg: None,
-            frame: None,
+        let key_of = |n: &pm_protocol::snapshot::CompatNeed, time: i64| -> AnswerKey {
+            (
+                n.composition.as_str().to_owned(),
+                n.layer.as_str().to_owned(),
+                time,
+                n.source,
+                n.scale.to_bits(),
+            )
         };
-        let answer = match self.host.call(Request::CompatFrame(request), self.session) {
-            Ok(Response::CompatFrame(frame)) if frame.native => CompatAnswer::Native,
-            Ok(Response::CompatFrame(frame)) => {
-                let bytes = match frame.payload {
-                    PixelPayload::Inline { bytes } => Ok(bytes.0),
-                    PixelPayload::SharedMemory { name, length } => {
-                        pm_bridge::shm::take(&name, length.get() as usize)
-                            .map_err(|e| format!("the layer's pixels could not be read: {e}"))
+        // The frame step: from the last batch's earliest time to this one's.
+        let earliest = needs.iter().map(|n| n.time.get()).min().unwrap_or(0);
+        let step = {
+            let mut last = self.last_batch.lock().unwrap_or_else(|e| e.into_inner());
+            let step = last.map_or(0, |l| earliest - l);
+            *last = Some(earliest);
+            step
+        };
+        // The frame's needs first, then the same layers at the next frames,
+        // in time order (the order today's export ran the chain in).
+        let mut asks: Vec<(AnswerKey, bool)> = Vec::new();
+        {
+            let answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
+            let mut seen = std::collections::HashSet::new();
+            let ahead = if step > 0 && step <= pm_protocol::common::TICKS_PER_SECOND {
+                FETCH_AHEAD
+            } else {
+                0
+            };
+            for k in 0..=ahead {
+                for n in needs {
+                    let key = key_of(n, n.time.get() + k * step);
+                    if answers.contains_key(&key) || !seen.insert(key.clone()) {
+                        continue;
                     }
-                };
-                match bytes {
-                    Ok(data) => CompatAnswer::Raster(Arc::new(CompatRaster {
-                        width: frame.width,
-                        height: frame.height,
-                        format: frame.format,
-                        anchor: frame.origin,
-                        size: frame.size.unwrap_or([
-                            f64::from(frame.width) / frame.scale,
-                            f64::from(frame.height) / frame.scale,
-                        ]),
-                        uv: frame.uv.unwrap_or([0.0, 0.0, 1.0, 1.0]),
-                        data: Arc::new(data),
-                    })),
-                    Err(message) => return self.fail(message),
+                    if k > 0 && asks.len() >= MAX_BATCH {
+                        break;
+                    }
+                    asks.push((key, k == 0));
                 }
             }
-            Ok(_) => {
-                return self
-                    .fail("the host answered a compatibility frame with something else".into());
+            // An export moves forward: answers before this frame are done.
+            drop(answers);
+            let floor = earliest - step.max(0);
+            self.answers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|k, _| k.2 >= floor);
+        }
+        let requests = asks
+            .iter()
+            .map(|((composition, layer, time, source, scale), _)| {
+                Request::CompatFrame(CompatFrameRequest {
+                    document: self.document.as_str().into(),
+                    composition: composition.as_str().into(),
+                    layer: layer.as_str().into(),
+                    time: pm_protocol::common::Ticks::new(*time).unwrap_or(pm_protocol::common::Ticks::ZERO),
+                    source: *source,
+                    scale: f64::from_bits(*scale),
+                    revision: self.revision,
+                    // Layer producers only: SVG rasters have their own source
+                    // (`pm_render::vector::svg_rasters::SvgRasterSource`).
+                    svg: None,
+                    frame: None,
+                })
+            })
+            .collect();
+        let results = self.host.call_many(requests, self.session);
+        let mut answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
+        for ((key, needed), result) in asks.into_iter().zip(results) {
+            match answer_of(result) {
+                Ok(answer) => {
+                    answers.insert(key, answer);
+                }
+                // A frame ahead that cannot be had is asked for again when
+                // its frame comes (and fails then, with its own reason).
+                Err(message) if needed => {
+                    drop(answers);
+                    self.fail_message(message);
+                    return false;
+                }
+                Err(_) => {}
             }
-            Err(message) => return self.fail(message),
-        };
-        self.answers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, answer.clone());
-        answer
+        }
+        true
+    }
+}
+
+/// A host answer to a layer's compatibility request.
+fn answer_of(result: Result<Response, String>) -> Result<CompatAnswer, String> {
+    match result {
+        Ok(Response::CompatFrame(frame)) if frame.native => Ok(CompatAnswer::Native),
+        Ok(Response::CompatFrame(frame)) => {
+            let data = match frame.payload {
+                PixelPayload::Inline { bytes } => bytes.0,
+                PixelPayload::SharedMemory { name, length } => {
+                    pm_bridge::shm::take(&name, length.get() as usize)
+                        .map_err(|e| format!("the layer's pixels could not be read: {e}"))?
+                }
+            };
+            Ok(CompatAnswer::Raster(Arc::new(CompatRaster {
+                width: frame.width,
+                height: frame.height,
+                format: frame.format,
+                anchor: frame.origin,
+                size: frame.size.unwrap_or([
+                    f64::from(frame.width) / frame.scale,
+                    f64::from(frame.height) / frame.scale,
+                ]),
+                uv: frame.uv.unwrap_or([0.0, 0.0, 1.0, 1.0]),
+                data: Arc::new(data),
+            })))
+        }
+        Ok(_) => Err("the host answered a compatibility frame with something else".into()),
+        Err(message) => Err(message),
     }
 }
 
@@ -386,11 +466,29 @@ mod tests {
         }))
     }
 
+    fn need(layer: &str, seconds: f64, scale: f64) -> pm_protocol::snapshot::CompatNeed {
+        pm_protocol::snapshot::CompatNeed {
+            composition: "root".into(),
+            layer: layer.into(),
+            time: ticks_of(seconds),
+            source: CompatSource::RasterOverride,
+            scale,
+            crop: None,
+        }
+    }
+
     #[test]
     fn asks_the_host_once_per_layer_frame_and_density_at_the_job_s_revision() {
         let (host, compat) = job(|r| Ok(frame(r.layer.as_str() == "plain")));
         assert!(compat.producing(CompatSource::RasterOverride));
         assert!(!compat.producing(CompatSource::CompatContext));
+        // A frame lists what it lacks; the renderer fetches it in one batch.
+        assert!(matches!(
+            compat.answer("root", "typed", 0.5, 2.0, CompatSource::RasterOverride, None),
+            CompatAnswer::Missing
+        ));
+        assert!(host.calls.lock().unwrap().is_empty());
+        assert!(compat.fetch(&[need("typed", 0.5, 2.0), need("plain", 0.5, 2.0)]));
         let CompatAnswer::Raster(raster) = compat.answer(
             "root",
             "typed",
@@ -449,6 +547,7 @@ mod tests {
     #[test]
     fn a_frame_the_host_cannot_answer_fails_with_its_reason() {
         let (_, compat) = job(|_| Err("open the project in a window to export it".into()));
+        assert!(!compat.fetch(&[need("typed", 0.0, 1.0)]));
         assert!(matches!(
             compat.answer(
                 "root",
@@ -464,6 +563,35 @@ mod tests {
             compat.failure().as_deref(),
             Some("open the project in a window to export it")
         );
+    }
+
+    #[test]
+    fn later_frames_of_the_same_layers_come_with_one_batch_in_time_order() {
+        let (host, compat) = job(|r| Ok(frame(r.layer.as_str() == "plain")));
+        let step = 1.0 / 30.0;
+        // The first frame: its own needs only (no step known yet).
+        assert!(compat.fetch(&[need("typed", 0.0, 2.0), need("plain", 0.0, 2.0)]));
+        assert_eq!(host.calls.lock().unwrap().len(), 2);
+        // The next frame gives the step: its needs and the same layers at
+        // the next frames come in one batch, frame by frame.
+        assert!(compat.fetch(&[need("typed", step, 2.0), need("plain", step, 2.0)]));
+        let times: Vec<(String, i64)> = host.calls.lock().unwrap()[2..]
+            .iter()
+            .map(|c| (c.layer.as_str().to_owned(), c.time.get()))
+            .collect();
+        let at = |k: f64| ticks_of(step).get() + (k * ticks_of(step).get() as f64) as i64;
+        assert_eq!(times.len(), 2 * (1 + FETCH_AHEAD as usize));
+        assert_eq!(&times[..4], &[("typed".into(), at(0.0)), ("plain".into(), at(0.0)), ("typed".into(), at(1.0)), ("plain".into(), at(1.0))]);
+        // Those frames are answered without asking again.
+        let asked = host.calls.lock().unwrap().len();
+        for k in 1..=FETCH_AHEAD {
+            let t = step * (1 + k) as f64;
+            assert!(!matches!(
+                compat.answer("root", "typed", t, 2.0, CompatSource::RasterOverride, None),
+                CompatAnswer::Missing
+            ), "frame {k} ahead");
+        }
+        assert_eq!(host.calls.lock().unwrap().len(), asked);
     }
 
     #[test]

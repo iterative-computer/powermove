@@ -1449,25 +1449,43 @@ impl Renderer {
         if let Some(why) = self.effects.watchdog.stopped() {
             return Err(RenderError::Watchdog(why.to_owned()));
         }
-        let options3d = self.options3d.for_request(request);
-        let blender = crate::blender::PlanState::new(options3d.blender.clone());
-        let (mut plan, build) = plan::build_blender(
-            &mut self.evaluator,
-            &comp,
-            &project,
-            seconds,
-            w,
-            h,
-            scale,
-            assets,
-            effect_host(&self.effect_host, &self.effects),
-            options3d,
-            Some(&mut self.text),
-            build_options(&comp, request, self.shaders.fallback_runner),
-            blender,
-            self.compat.as_deref(),
-            self.reuse_enabled.then_some(&mut self.reuse),
-        );
+        // A compatibility producer that can fetch answers in one batch (an
+        // export's host, `CompatRasters::fetch`) is asked for every answer
+        // the frame lacks at once, and the frame is planned again.
+        let mut fetched = false;
+        let (mut plan, build) = loop {
+            let options3d = self.options3d.for_request(request);
+            let blender = crate::blender::PlanState::new(options3d.blender.clone());
+            let (plan, build) = plan::build_blender(
+                &mut self.evaluator,
+                &comp,
+                &project,
+                seconds,
+                w,
+                h,
+                scale,
+                assets,
+                effect_host(&self.effect_host, &self.effects),
+                options3d,
+                Some(&mut self.text),
+                build_options(&comp, request, self.shaders.fallback_runner),
+                blender,
+                self.compat.as_deref(),
+                self.reuse_enabled.then_some(&mut self.reuse),
+            );
+            if !fetched
+                && !build.compat_missing.is_empty()
+                && build.unsupported.is_empty()
+                && self
+                    .compat
+                    .as_deref()
+                    .is_some_and(|c| c.fetch(&build.compat_missing))
+            {
+                fetched = true;
+                continue;
+            }
+            break (plan, build);
+        };
         if !request.background {
             plan.background = Background::Transparent;
         }

@@ -76,6 +76,15 @@ pub trait CompatRasters: Send + Sync {
         source: CompatSource,
         crop: Option<pm_protocol::common::PixelRect>,
     ) -> CompatAnswer;
+
+    /// Gets the answers of `needs` (the ones a frame lacks) in one batch,
+    /// blocking; true when the frame should be planned again. Producers
+    /// that answer asynchronously (the viewer's store) do not fetch: the
+    /// frame then fails with [`crate::RenderError::CompatPending`].
+    fn fetch(&self, needs: &[CompatNeed]) -> bool {
+        let _ = needs;
+        false
+    }
 }
 
 /// The protocol's time of a composition time in seconds (1/705,600,000 s;
