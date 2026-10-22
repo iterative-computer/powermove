@@ -355,6 +355,10 @@ export function install(PM: PMRegistry): void {
   const digests = new Map<string, { digest: Promise<string | null>; chars: number }>();
   const reportStoreError = (event: { key: string; error: string }) => {
     saveErrors.set(event.key, String(event.error));
+    /* The digest describes text that may not be on disk: a project's next
+       checkpoint must write rather than find it unchanged (the registry
+       drops its own record on the 'storage:error' below). */
+    if (typeof event.key === 'string' && /^project\./.test(event.key)) digests.delete(event.key);
     PM.bus?.emit('storage:error', event);
     if (String(event.error).includes('unknown store key')) {
       cached.delete(legacyKey(event.key));
@@ -496,6 +500,8 @@ export function install(PM: PMRegistry): void {
       posted.delete(service); digests.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       cached.delete(legacyKey(service));
+      // A deletion supersedes an earlier failed write, as a set does; its own failure reports again.
+      saveErrors.delete(service);
       bridge.store.delete(service);
     },
     async flush() {

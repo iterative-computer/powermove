@@ -298,6 +298,109 @@ async function expectEveryCrashPointSafe(log: Op[], states: string[], id: string
   }
 }
 
+describe('a project checkpoint that fails to reach disk', () => {
+  const edit = (PM: any, project: any, revision: number, layer: number, name: string) => {
+    project.revision = revision;
+    project.layers[layer].name = name;
+    PM.bus.emit('history:project-patch', { projectId: project.id, revision, patches: [{ path: ['layers', layer, 'name'], exists: true, value: name }, { path: ['revision'], exists: true, value: revision }] });
+  };
+
+  it('keeps the journal when the slot rename fails, and the next autosave writes the slot again', { timeout: 120_000 }, async () => {
+    const log: Op[] = [];
+    let failRename = false;
+    const store = createStore(await temporaryDirectory(), {
+      fs: loggingFs(log, { rename: to => failRename && path.basename(to) === 'project.F.json' ? failure('EIO', 'i/o error, rename') : null }),
+      writeDelayMs: 0,
+    });
+    await store.load();
+    const PM: any = openWindow(store);
+    const project = largeProject('F');
+    PM.proj = project;
+    const states: string[] = [];
+    const marks: Record<string, number> = {};
+    const step = async (name: string, failing = false) => {
+      await settle(PM, store, { failing });
+      states.push(JSON.stringify(project));
+      marks[name] = log.length;
+    };
+    const slotWrites = () => log.filter(op => op.kind === 'rename' && path.basename(op.to) === 'project.F.json').length;
+
+    PM.Projects.put(project);
+    await step('opened');
+    edit(PM, project, 8, 0, 'Journaled');
+    await step('journaled');
+    // The session capture's checkpoint: posted, but its rename fails.
+    failRename = true;
+    PM.Projects.put(project);
+    await step('slot failed', true);
+    failRename = false;
+    expect(slotWrites()).toBe(1);
+    await expect(PM.store.flush()).rejects.toThrow(/EIO/);
+    // An edit while the slot on disk is the older one.
+    edit(PM, project, 9, 1, 'After the failure');
+    await step('edited after', true);
+    // The next autosave (it has journal entries) repairs it.
+    PM.Projects.recover(project, 'data:image/jpeg;base64,AAAA');
+    await step('autosaved', true);
+    const healed = slotWrites();
+    const flushed = await PM.store.flush().then(() => 'flushed', (error: Error) => error.message);
+    // And checks, rather than rewrites, from then on.
+    PM.Projects.put(project);
+    await step('checked', true);
+
+    // The journaled edit survives the failed checkpoint (the older slot plus its journal) ...
+    expect(jsonDiff(states[1]!, await recover(stateAfter(log, marks['slot failed']!), 'F')), 'after the failed checkpoint').toEqual([]);
+    // ... and the next autosave writes the slot again, which clears the error.
+    expect(jsonDiff(states[3]!, await recover(stateAfter(log, marks['autosaved']!), 'F')), 'after the next autosave').toEqual([]);
+    expect(healed).toBe(2);
+    expect(flushed).toBe('flushed');
+    expect(slotWrites()).toBe(2);
+    await expectEveryCrashPointSafe(log, states, 'F');
+  });
+
+  it('writes a slot whose earlier write ran out of space, though the document matches what was posted', { timeout: 120_000 }, async () => {
+    const log: Op[] = [];
+    let full = false;
+    const store = createStore(await temporaryDirectory(), {
+      fs: loggingFs(log, { writeFile: file => full && path.basename(file).startsWith('project.E.json.tmp-') ? failure('ENOSPC', 'no space left on device, write') : null }),
+      writeDelayMs: 0,
+    });
+    await store.load();
+    const PM: any = openWindow(store);
+    const project = largeProject('E');
+    PM.proj = project;
+    const states: string[] = [];
+    const marks: Record<string, number> = {};
+    const step = async (name: string, failing = false) => {
+      await settle(PM, store, { failing });
+      states.push(JSON.stringify(project));
+      marks[name] = log.length;
+    };
+    const slotWrites = () => log.filter(op => op.kind === 'rename' && path.basename(op.to) === 'project.E.json').length;
+
+    PM.Projects.put(project);
+    await step('opened');
+    // A raw write a capture's check finds: the slot is written, and the disk is full.
+    full = true;
+    project.layers[1].name = 'Raw';
+    PM.Projects.put(project);
+    await step('slot failed', true);
+    full = false;
+    expect(slotWrites()).toBe(1);
+    await expect(PM.store.flush()).rejects.toThrow(/ENOSPC/);
+    // The next autosave (no journal entries: the same object, unchanged since it was posted).
+    PM.Projects.recover(project, 'data:image/jpeg;base64,AAAA');
+    await step('autosaved', true);
+    const flushed = await PM.store.flush().then(() => 'flushed', (error: Error) => error.message);
+
+    // The raw write reaches disk at the next autosave, which clears the error.
+    expect(jsonDiff(states.at(-1)!, await recover(stateAfter(log, marks['autosaved']!), 'E')), 'after the next autosave').toEqual([]);
+    expect(slotWrites()).toBe(2);
+    expect(flushed).toBe('flushed');
+    await expectEveryCrashPointSafe(log, states, 'E');
+  });
+});
+
 describe('a raw write after a journaled edit', () => {
   it('to the same path is not reverted by the journal at any crash point', { timeout: 120_000 }, async () => {
     const log: Op[] = [];

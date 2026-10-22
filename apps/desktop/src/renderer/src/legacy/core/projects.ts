@@ -122,6 +122,23 @@ type Slot = {
 };
 const slots = new Map<string, Slot>();
 const checks = new Map<string, { project: object; again: boolean }>();
+/* Projects whose slot or journal write failed (refused, or not persisted).
+   The slot on disk may be older than this window believes, and main keeps
+   that slot's journal until a slot write succeeds (store-engine.ts). So the
+   next checkpoint writes the slot rather than checking it, and the next
+   autosave checkpoints even when the journal has entries: a later write
+   repairs the failure, as it did before checkpoints were checked. */
+const unsaved = new Set<string>();
+PM.bus?.on?.('storage:error', (event: any) => {
+  const key = typeof event?.key === 'string' ? event.key : '';
+  const id = key.startsWith(R.SLOT) ? key.slice(R.SLOT.length) : key.startsWith(R.JOURNAL) ? key.slice(R.JOURNAL.length) : '';
+  if (!id) return;
+  slots.delete(id);
+  unsaved.add(id);
+  // Main may hold an older checkpoint than the one posted: journal untagged, as before, until the next.
+  if (key.startsWith(R.SLOT)) checkpoints.delete(id);
+});
+
 /*
  * Checkpoint ids. Main writes a project's journal to disk only after the slot
  * posted before it (store-engine.ts), so a crash can leave the newer slot with
@@ -158,6 +175,7 @@ function writeSlot(proj: any) {
   const cp = checkpointId();
   const envelope = { v: PM.version || '1.0.0', cp, proj };
   if (PM.store.set(R.SLOT + proj.id, envelope) === false) throw new Error('Project storage is unavailable or full');
+  unsaved.delete(proj.id);
   checkpoints.set(proj.id, cp);
   const text = typeof PM.store.writtenText === 'function' ? PM.store.writtenText(R.SLOT + proj.id) : null;
   if (text) {
@@ -227,7 +245,7 @@ R.put = (proj: any, thumb: any) => {
   if (frozen) return meta;
   /* Serialize the project passed to us, not whichever project happens to be
      active. This matters for rename/duplicate and keeps every slot canonical. */
-  const slot = slots.get(proj.id);
+  const slot = unsaved.has(proj.id) ? undefined : slots.get(proj.id);
   if (slot && slot.project === proj && slot.digest && slot.chars >= VERIFY_MIN_CHARS && slot.journal !== 'other'
     && (slot.journal === 'assets' || !journal(proj.id).length)) checkSlot(proj);
   else writeSlot(proj);
@@ -264,7 +282,7 @@ R.recover = (proj: any, thumb: any) => {
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
   const entries = journal(proj.id);
-  if (!slotExists(proj.id) || !entries.length || journalBytes(entries) > MAX_JOURNAL_BYTES
+  if (unsaved.has(proj.id) || !slotExists(proj.id) || !entries.length || journalBytes(entries) > MAX_JOURNAL_BYTES
       || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
     return R.put(proj, thumb);
   }
