@@ -227,8 +227,12 @@ export const COMPAT_PREPARE_IN_FLIGHT = 2;
  *  answered or in flight. A base that changes every frame (an animated
  *  size, a keyed text) costs one asynchronous engine raster per frame, and
  *  under CPU load single rasters take up to five frames: the extra frames
- *  of prepared pixels absorb those stalls instead of the presented frames. */
-export const COMPAT_PREFETCH = 15;
+ *  of prepared pixels absorb those stalls instead of the presented frames.
+ *  Measured under load (docs/engine/extensions-compat.md): 15 frames held
+ *  an animated size to today's cadence in 8 of 10 runs, 24 in 10 of 10. A
+ *  deeper answer horizon (10) instead cost the typewriter frames: it runs
+ *  the wrapper, and its synchronous typed-prefix rasters, earlier. */
+export const COMPAT_PREFETCH = 24;
 /** Speculative base preparations in flight at once (beyond the answer horizon's). */
 export const COMPAT_PREFETCH_IN_FLIGHT = 2;
 
