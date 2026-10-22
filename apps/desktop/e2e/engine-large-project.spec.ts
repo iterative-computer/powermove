@@ -176,19 +176,19 @@ function rssMiB(pid: number): number {
 test('a large project with embedded images and raster-wrapped text opens with the engine on, stays connected, and matches today', async () => {
   test.setTimeout(1_500_000);
   const dir = await mkdtemp(path.join(os.tmpdir(), 'powermove-large-project-'));
-  const file = path.join(dir, 'Large.pmv');
-  const images: string[] = [];
-  // Distinct names without frame numbers: numbered files would be offered
-  // as one image sequence.
-  const names = ['harbor', 'meadow', 'canyon', 'glacier', 'orchard', 'lagoon', 'summit', 'prairie', 'delta', 'tundra', 'grove', 'fjord', 'mesa', 'bayou', 'atoll', 'steppe', 'marsh', 'dune', 'ridge', 'cove', 'basin', 'cliff', 'bluff', 'reef'];
-  for (let i = 0; i < IMAGES; i++) {
-    const image = path.join(dir, `${names[i]}.png`);
-    await writeFile(image, png(160 + (i % 5) * 32, 120 + (i % 3) * 24, i));
-    images.push(image);
-  }
   try {
+    const file = path.join(dir, 'Large.pmv');
+    const images: string[] = [];
+    // Distinct names without frame numbers: numbered files would be offered
+    // as one image sequence.
+    const names = ['harbor', 'meadow', 'canyon', 'glacier', 'orchard', 'lagoon', 'summit', 'prairie', 'delta', 'tundra', 'grove', 'fjord', 'mesa', 'bayou', 'atoll', 'steppe', 'marsh', 'dune', 'ridge', 'cove', 'basin', 'cliff', 'bluff', 'reef'];
+    for (let i = 0; i < IMAGES; i++) {
+      const image = path.join(dir, `${names[i]}.png`);
+      await writeFile(image, png(160 + (i % 5) * 32, 120 + (i % 3) * 24, i));
+      images.push(image);
+    }
     // ── build and save it with today's engine ───────────────────────────
-    const author = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '0' } });
+    const author = await launchApp({ userData: path.join(dir, 'author-profile'), env: { POWERMOVE_NEW_ENGINE: '0' } });
     let documentBytes = 0;
     try {
       await author.openEditor();
@@ -244,7 +244,7 @@ test('a large project with embedded images and raster-wrapped text opens with th
     step(`saved ${(documentBytes / 2 ** 20).toFixed(1)} MiB of document`);
 
     // ── today's open: the reference heap and frames ─────────────────────
-    const today = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '0' } });
+    const today = await launchApp({ userData: path.join(dir, 'today-profile'), env: { POWERMOVE_NEW_ENGINE: '0' } });
     let todayHeap = 0, todaySeconds = 0;
     let reference: Buffer[] = [];
     try {
@@ -260,7 +260,7 @@ test('a large project with embedded images and raster-wrapped text opens with th
     }
 
     // ── the same open with the engine on ───────────────────────────────
-    const engine = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
+    const engine = await launchApp({ userData: path.join(dir, 'engine-profile'), env: { POWERMOVE_NEW_ENGINE: '1' } });
     try {
       await engine.openEditor();
       await engine.page.waitForFunction(() => (window as any).PM?.EngineConnection?.status?.().connected === true, null, { timeout: 60_000 });
