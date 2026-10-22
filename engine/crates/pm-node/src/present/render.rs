@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use pm_bridge::rendezvous::{Client, SendRight};
@@ -575,6 +575,32 @@ struct View {
     rate: Option<RatePreference>,
     #[cfg(feature = "remote-layer")]
     rate_tried: bool,
+}
+
+// Presenter transport decisions happen on its ordinary thread. Keep this
+// diagnostic out of audio's real-time producer and disabled in normal runs.
+fn trace_audio_transport(
+    event: &'static str,
+    key: Key,
+    view: &View,
+    command: Option<TransportCommand>,
+) {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("PM_AUDIO_PROFILE").is_some()) {
+        return;
+    }
+    let host_us = now();
+    eprintln!(
+        "pm-audio-presenter event={event} host_us={host_us} key={}:{} composition={:?} route={:?} media_ticks={} playing={} awaiting={:?} deferred={:?} command={command:?}",
+        key.0.0,
+        key.1,
+        view.state.composition,
+        view.reported,
+        view.clock.media_at(host_us),
+        view.clock.is_playing(),
+        view.awaiting,
+        view.deferred_transport,
+    );
 }
 
 type PlaybackRateValue = pm_protocol::common::PlaybackRate;
@@ -1629,6 +1655,7 @@ impl Thread {
                     // Not decided yet (document or media on its way): the
                     // latest Play waits for the route.
                     view.deferred_transport = Some(TransportCommand::Play { rate });
+                    trace_audio_transport("play-deferred", key, view, view.deferred_transport);
                     return;
                 }
                 view.deferred_transport = None;
@@ -1651,6 +1678,12 @@ impl Thread {
                 } else if wants_audio && self.audio_for(key).is_some() {
                     let audio = &self.audio[&key];
                     let before = audio.clock().and_then(|c| c.latest()).map(|s| s.epoch);
+                    trace_audio_transport(
+                        "play-send",
+                        key,
+                        &self.views[&key],
+                        Some(TransportCommand::Play { rate }),
+                    );
                     audio.send(AudioCtl::Play { from, rate });
                     let view = self.views.get_mut(&key).expect("checked");
                     // A new rate while playing holds the line where it is
@@ -1678,6 +1711,12 @@ impl Thread {
                         pre_roll,
                         post_roll,
                     });
+                    trace_audio_transport(
+                        "play-around-deferred",
+                        key,
+                        view,
+                        view.deferred_transport,
+                    );
                     return;
                 }
                 view.deferred_transport = None;
@@ -1709,6 +1748,7 @@ impl Thread {
                 }
             }
             TransportCommand::Pause => {
+                trace_audio_transport("pause-explicit", key, view, None);
                 view.deferred_transport = None;
                 view.awaiting = None;
                 if view.clock.apply(TransportCommand::Pause, at) {
@@ -2798,6 +2838,7 @@ impl Thread {
                 && (link.failed() || t >= deadline)
             {
                 // No playing sample from the device: start on the host clock.
+                trace_audio_transport("pause-fallback", key, view, None);
                 view.awaiting = None;
                 view.clock.apply(TransportCommand::Play { rate }, t);
                 view.schedule.reset();
@@ -2827,6 +2868,7 @@ impl Thread {
         let mut stop = false;
         if changed {
             view.reported = Some(route.clone());
+            trace_audio_transport("route-changed", key, view, None);
             match &route {
                 Route::Engine => {
                     view.dirty = true;
@@ -2852,6 +2894,7 @@ impl Thread {
             view.schedule.reset();
             view.sample_due = true;
             if let Some(link) = self.audio.get(&key) {
+                trace_audio_transport("pause-route-pending", key, view, None);
                 link.send(AudioCtl::Pause);
             }
         }
@@ -2899,7 +2942,12 @@ impl Thread {
                 .get_mut(&key)
                 .and_then(|v| v.deferred_transport.take());
             if let Some(command) = deferred {
+                if let Some(view) = self.views.get(&key) {
+                    trace_audio_transport("deferred-replay", key, view, Some(command));
+                }
                 self.transport(key, command, t);
+            } else if changed && let Some(view) = self.views.get(&key) {
+                trace_audio_transport("decided-without-deferred", key, view, None);
             }
         }
         if let Some(link) = self.audio.get(&key) {
