@@ -1,0 +1,181 @@
+{
+ "source": "Captured from WebGL2 in the app's renderer (Electron 44, Chromium WebGL on ANGLE Metal, Apple M4 Max) on 2026-10-22: each program compiled and linked with the compositor's PM.VERT, as the compositor builds an extension layer program (uniform bool for toggles, float for numbers).",
+ "template": "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nout vec4 o;\nuniform bool u_b;\nuniform int u_i;\nuniform uint u_u;\nuniform float u_f;\nvoid main() {\n  float r = 0.0;\n  @STATEMENT@\n  o = vec4(r, v_uv, 1.0);\n}\n",
+ "probes": [
+  {
+   "id": "bool-gt-float",
+   "statement": "if (u_b > 0.5) r = 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "bool-lt-float",
+   "statement": "if (u_b < 0.5) r = 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "bool-eq-float",
+   "statement": "if (u_b == 1.0) r = 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "bool-eq-true",
+   "statement": "if (u_b == true) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bool-ne-false",
+   "statement": "if (u_b != false) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bool-condition",
+   "statement": "if (u_b) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bool-not",
+   "statement": "if (!u_b) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bool-and-float-compare",
+   "statement": "if (u_b && u_f > 0.5) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bool-xor",
+   "statement": "if (u_b ^^ (u_i > 0)) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bool-ternary",
+   "statement": "r = u_b ? 1.0 : 0.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bool-to-float",
+   "statement": "r = float(u_b);",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bool-to-float-compare",
+   "statement": "if (float(u_b) > 0.5) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bool-to-int",
+   "statement": "r = float(int(u_b) + u_i);",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bool-plus-float",
+   "statement": "r = u_b + 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "bool-times-float",
+   "statement": "r = 2.0 * u_b;",
+   "webgl": "refused"
+  },
+  {
+   "id": "bool-mix-selector",
+   "statement": "r = mix(0.0, 1.0, u_b);",
+   "webgl": "drawn"
+  },
+  {
+   "id": "bvec-mix-selector",
+   "statement": "vec2 m = mix(vec2(0.0), vec2(1.0), bvec2(u_b, u_f > 0.5)); r = m.x;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "int-gt-int",
+   "statement": "if (u_i > 0) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "int-gt-float",
+   "statement": "if (u_i > 0.5) r = 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "int-eq-float",
+   "statement": "if (u_i == 1.0) r = 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "int-condition",
+   "statement": "if (u_i) r = 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "int-to-bool",
+   "statement": "if (bool(u_i)) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "int-plus-float",
+   "statement": "r = u_i + 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "int-to-float",
+   "statement": "r = float(u_i) * 0.5;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "float-gt-float",
+   "statement": "if (u_f > 0.5) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "float-gt-int-literal",
+   "statement": "if (u_f > 0) r = 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "float-eq-int-literal",
+   "statement": "if (u_f == 1) r = 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "float-condition",
+   "statement": "if (u_f) r = 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "float-to-bool",
+   "statement": "if (bool(u_f)) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "float-plus-int-literal",
+   "statement": "r = u_f + 1;",
+   "webgl": "refused"
+  },
+  {
+   "id": "float-assign-int",
+   "statement": "r = u_i;",
+   "webgl": "refused"
+  },
+  {
+   "id": "float-step-bool",
+   "statement": "r = step(0.5, float(u_b));",
+   "webgl": "drawn"
+  },
+  {
+   "id": "uint-gt-int",
+   "statement": "if (u_u > 0) r = 1.0;",
+   "webgl": "refused"
+  },
+  {
+   "id": "uint-gt-uint",
+   "statement": "if (u_u > 0u) r = 1.0;",
+   "webgl": "drawn"
+  },
+  {
+   "id": "uint-to-float",
+   "statement": "r = float(u_u);",
+   "webgl": "drawn"
+  }
+ ]
+}
