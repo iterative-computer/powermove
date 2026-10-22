@@ -1093,6 +1093,11 @@ impl Renderer {
         self.media.set_playing(playing);
     }
 
+    /// Measured fresh original, half and quarter display decode costs.
+    pub fn media_decode_costs(&self) -> Vec<(std::path::PathBuf, [Option<f64>; 3])> {
+        self.media.decode_costs()
+    }
+
     /// Video paths with at least eight fresh exact decodes whose rolling
     /// 95th percentile exceeds a frame budget.
     pub fn slow_media(&self) -> Vec<std::path::PathBuf> {
@@ -1121,7 +1126,7 @@ impl Renderer {
     /// Renderers that never get a share keep
     /// [`crate::media::DEFAULT_FRAME_CACHE`].
     pub fn apply_media_lease(
-        &self,
+        &mut self,
         lease: pm_media::decode::service::MediaLease,
     ) -> pm_media::decode::service::MediaUsage {
         self.media.apply_lease(lease)

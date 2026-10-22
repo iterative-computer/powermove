@@ -179,6 +179,7 @@ fn the_frame_cache_follows_the_lease_share() {
         decoders: usize::MAX,
     });
     assert_eq!(usage.cache.budget, 512 << 20);
+    assert!(usage.frame_cache <= usage.cache.budget);
     let usage = r.apply_media_lease(MediaLease {
         frame_cache: 0,
         decoders: usize::MAX,

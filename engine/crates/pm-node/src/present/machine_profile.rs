@@ -21,6 +21,7 @@ const GPU_MIN_SAMPLES: usize = 8;
 const GPU_BUCKET_MS: f64 = 0.25;
 
 trait Probe: Send {
+    fn root(&self, fallback: &Path) -> PathBuf { fallback.to_path_buf() }
     fn initial(&mut self, root: &Path) -> Result<MachineProfile, String>;
     fn power(&mut self) -> Option<bool>;
 }
@@ -28,6 +29,13 @@ trait Probe: Send {
 struct SystemProbe;
 
 impl Probe for SystemProbe {
+    fn root(&self, fallback: &Path) -> PathBuf {
+        let value = std::env::var_os("POWERMOVE_PROXY_LOCATIONS")
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        selected_store_root(fallback, value.as_ref())
+    }
+
     fn initial(&mut self, root: &Path) -> Result<MachineProfile, String> {
         std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
         pm_proxy::probe_machine_profile(root, 0.0).map_err(|e| e.to_string())
@@ -203,14 +211,27 @@ impl Drop for MachineProfileCache {
     }
 }
 
+fn selected_store_root(fallback: &Path, settings: Option<&serde_json::Value>) -> PathBuf {
+    let Some(settings) = settings else { return fallback.to_path_buf() };
+    let selected = match settings["location"]["kind"].as_str() {
+        Some("folder") => settings["location"]["path"].as_str(),
+        Some("project") => settings["roots"].as_array().and_then(|roots| roots.last()).and_then(|root| root.as_str()),
+        _ => None,
+    };
+    selected.map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(|| fallback.to_path_buf())
+}
+
 fn run(shared: Arc<Shared>, root: PathBuf, interval: Duration, mut probe: Box<dyn Probe>) {
+    let mut measured_root: Option<PathBuf> = None;
     loop {
         if shared.lock().stop {
             return;
         }
-        let needs_initial = shared.lock().disk_write_mib_s.is_none();
+        let selected_root = probe.root(&root);
+        let needs_initial = shared.lock().disk_write_mib_s.is_none() || measured_root.as_ref() != Some(&selected_root);
         if needs_initial {
-            if let Ok(profile) = probe.initial(&root) {
+            if let Ok(profile) = probe.initial(&selected_root) {
+                measured_root = Some(selected_root);
                 let mut state = shared.lock();
                 if !state.stop {
                     state.disk_write_mib_s = Some(profile.disk_write_mib_s);
@@ -282,6 +303,15 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(condition(), "profile worker did not update");
+    }
+
+    #[test]
+    fn generated_media_location_selects_the_volume_to_measure() {
+        let fallback = Path::new("/cache/generated");
+        assert_eq!(selected_store_root(fallback, Some(&serde_json::json!({"location":{"kind":"folder","path":"/external/proxies"}}))), PathBuf::from("/external/proxies"));
+        assert_eq!(selected_store_root(fallback, Some(&serde_json::json!({"location":{"kind":"cache"},"roots":["/external/old"]}))), fallback);
+        assert_eq!(selected_store_root(fallback, Some(&serde_json::json!({"location":{"kind":"project"},"roots":["/old","/project/Generated Media"]}))), PathBuf::from("/project/Generated Media"));
+        assert_eq!(selected_store_root(fallback, Some(&serde_json::json!({"location":{"kind":"folder","path":"relative"}}))), fallback);
     }
 
     #[test]

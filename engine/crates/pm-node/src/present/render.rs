@@ -132,6 +132,7 @@ pub struct PoolSpec {
 }
 
 pub enum Command {
+    ExportActivity(bool),
     PreviewCache {
         key: Key,
         bytes: usize,
@@ -398,6 +399,11 @@ pub struct Stats {
     pub remote_rate_hz: Option<f64>,
     /// Document frames drawn, and the CPU time of the slowest.
     pub document_frames: u64,
+    /// Actual retained viewer cache bytes and current lease shares.
+    pub preview_cache_bytes: u64,
+    pub preview_cache_budget: u64,
+    pub media_cache_bytes: u64,
+    pub media_cache_budget: u64,
     pub compose_us_max: i64,
     pub compose_us_total: i64,
     /// Frames that failed to render (logged), and layer failures.
@@ -483,9 +489,11 @@ struct Gpu {
 impl Gpu {
     /// The device's composer (made on first use), its renderer holding
     /// fonts of the broker's current generation (`crate::fonts::render`).
-    fn composer_with(&mut self, config: &ThreadConfig, frame_cache: usize) -> &mut Composer {
+    fn composer_with(&mut self, config: &ThreadConfig, frame_cache: usize, exporting: bool) -> &mut Composer {
         if self.composer.is_none() {
-            self.composer = Some(composer(&self.device, &self.queue, config, frame_cache));
+            let mut made = composer(&self.device, &self.queue, config, frame_cache);
+            made.set_exporting(exporting);
+            self.composer = Some(made);
             self.fonts_installed = None;
         }
         let composer = self.composer.as_mut().expect("made above");
@@ -614,6 +622,7 @@ struct Thread {
     fallback: Fallback,
     /// The viewer's frame-cache share ([`Command::FrameCache`]).
     frame_cache: usize,
+    exporting: bool,
     /// Host snapshots waiting for their revision or their turn.
     snapshots: super::snapshot::SnapshotQueue,
     /// Shared-memory segments published for main and not reaped yet.
@@ -695,6 +704,7 @@ pub fn run(
     let mut thread = Thread {
         frame_ticks: TICKS_PER_SECOND / fps,
         frame_cache: pm_render::media::DEFAULT_FRAME_CACHE,
+        exporting: false,
         preview_requests: Default::default(),
         proxy_demands: Default::default(),
         config,
@@ -769,6 +779,7 @@ pub fn slow_turn_band(took: i64) -> Option<usize> {
 fn command_name(command: &Command) -> &'static str {
     match command {
         Command::PreviewCache { .. } => "preview cache",
+        Command::ExportActivity(_) => "export activity",
         Command::Shutdown => "shutdown",
         Command::Configure { .. } => "viewer state",
         Command::Release { .. } => "release",
@@ -1023,6 +1034,12 @@ impl Thread {
             composer.clear_preview_cache();
         }
         match command {
+            Command::ExportActivity(active) => {
+                self.exporting = active;
+                if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+                    composer.set_exporting(active);
+                }
+            }
             Command::PreviewCache {
                 key,
                 bytes,
@@ -1159,7 +1176,7 @@ impl Thread {
                 if self.config.document
                     && let Some(gpu) = self.gpu.as_mut()
                 {
-                    let composer = gpu.composer_with(&self.config, self.frame_cache);
+                    let composer = gpu.composer_with(&self.config, self.frame_cache, self.exporting);
                     failures = composer
                         .use_definitions(key, definitions.as_ref(), &registered)
                         .unwrap_or_default();
@@ -1253,7 +1270,7 @@ impl Thread {
                     let (w, h) = (raster.width, raster.height);
                     let stored = match self.gpu.as_mut() {
                         Some(gpu) => gpu
-                            .composer_with(&self.config, self.frame_cache)
+                            .composer_with(&self.config, self.frame_cache, self.exporting)
                             .renderer()
                             .put_svg_raster(raster, data),
                         None => Err("the engine has no GPU device".into()),
@@ -1424,7 +1441,7 @@ impl Thread {
     fn svg_failed(&mut self, raster: pm_protocol::svg_raster::SvgRasterKey, why: &str) {
         let log = self.svg.failed(&raster, now());
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.composer_with(&self.config, self.frame_cache)
+            gpu.composer_with(&self.config, self.frame_cache, self.exporting)
                 .renderer()
                 .fail_svg_raster(raster.clone());
         }
@@ -2552,6 +2569,11 @@ impl Thread {
     fn next_wake(&self) -> Duration {
         let now = now();
         let mut wake = now + 50_000;
+        if self.gpu.as_ref().and_then(|g| g.composer.as_ref())
+            .is_some_and(|composer| composer.has_pending_proxy_lookups())
+        {
+            wake = wake.min(now + 5_000);
+        }
         if let Some(at) = self.fallback.retry_at.values().min() {
             wake = wake.min(*at);
         }
@@ -2655,6 +2677,11 @@ impl Thread {
 
     fn work(&mut self) {
         self.sync_font_generation();
+        if self.gpu.as_mut().and_then(|g| g.composer.as_mut())
+            .is_some_and(|composer| composer.poll_proxy_updates())
+        {
+            for view in self.views.values_mut() { view.dirty = true; }
+        }
         if self
             .gpu
             .as_ref()
@@ -2715,7 +2742,7 @@ impl Thread {
             let revision = Some(view.revision);
             let needs = view.svg_without.clone();
             if let Some(gpu) = self.gpu.as_mut() {
-                let composer = gpu.composer_with(&self.config, self.frame_cache);
+                let composer = gpu.composer_with(&self.config, self.frame_cache, self.exporting);
                 if Self::ask_svg(
                     &mut self.svg,
                     &self.sink,
@@ -3317,7 +3344,7 @@ impl Thread {
         let mut representation = Representation::Original;
         if document {
             let doc = self.docs.get_mut(&key)?;
-            let composer = gpu.composer_with(&self.config, self.frame_cache);
+            let composer = gpu.composer_with(&self.config, self.frame_cache, self.exporting);
             let composition = view.state.composition.as_str().to_owned();
             let (preview_bytes, preparing) =
                 self.preview_requests.get(&key).copied().unwrap_or_default();
@@ -3450,6 +3477,11 @@ impl Thread {
                         }
                     }
                     let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+                    let [preview_bytes, preview_budget, media_bytes, media_budget] = composer.cache_memory_usage();
+                    stats.preview_cache_bytes = preview_bytes;
+                    stats.preview_cache_budget = preview_budget;
+                    stats.media_cache_bytes = media_bytes;
+                    stats.media_cache_budget = media_budget;
                     stats.document_frames += 1;
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
                     stats.compose_us_total += composed.cpu_us;
@@ -4071,7 +4103,7 @@ impl Thread {
             && pm_render::unsupported(doc.document(), job.request.composition.as_str())
                 .iter()
                 .any(|u| u.feature == pm_render::Feature::Blender);
-        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let composer = gpu.composer_with(&self.config, self.frame_cache, self.exporting);
         // The session's definitions, without consuming the re-registrations
         // its viewer's next frame applies.
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
@@ -4406,7 +4438,7 @@ impl Thread {
             },
             None => None,
         };
-        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let composer = gpu.composer_with(&self.config, self.frame_cache, self.exporting);
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         let composition = job.request.composition.as_str();

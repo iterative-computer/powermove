@@ -550,8 +550,24 @@ impl Composer {
         &mut self.renderer
     }
 
-    /// The cached local disk, power, and timestamp-derived GPU profile.
-    /// Unavailable until the worker and enough GPU samples have completed.
+    /// Background integrity checks or representation measurements in flight.
+    /// Overrides the host's generated-media locations for this composer.
+    /// Existing entries and playback choices are invalidated on a move.
+    pub fn set_proxy_locations(&mut self, file: std::path::PathBuf) {
+        self.proxy_media.set_locations_file(file);
+        self.preview_cache.clear();
+    }
+
+    pub fn has_pending_proxy_lookups(&self) -> bool {
+        self.proxy_media.has_pending_lookups()
+    }
+
+    pub fn poll_proxy_updates(&mut self) -> bool {
+        self.proxy_media.poll_updates()
+    }
+
+    /// Cached local disk, power and timestamp-derived GPU profile, available
+    /// after the background probe and enough GPU samples have completed.
     pub fn machine_profile(&self) -> Option<pm_proxy::MachineProfile> {
         self.machine_profile
             .as_ref()
@@ -594,6 +610,15 @@ impl Composer {
     pub fn preview_cache_stats(&self) -> pm_cache::Stats {
         self.preview_cache.stats()
     }
+
+    /// Actual viewer cache retention and their current shares of the lease.
+    /// Decoders' in-flight buffers are reported separately by the media service.
+    pub fn cache_memory_usage(&self) -> [u64; 4] {
+        let preview = self.preview_cache.stats();
+        let media = self.renderer.media_usage();
+        [preview.bytes as u64, preview.budget as u64, media.frame_cache as u64, media.cache.budget as u64]
+    }
+
 
     /// Puts `owner`'s definition set in the renderer (parking the one it
     /// held) and brings it up to `definitions` when that set changed: a
@@ -669,6 +694,10 @@ impl Composer {
     /// Whether the next frames are playback frames (timed) or paused ones.
     pub fn set_playing(&mut self, playing: bool) {
         self.playing = playing;
+    }
+
+    pub fn set_exporting(&mut self, active: bool) {
+        self.proxy_media.set_exporting(active);
     }
 
     /// Blender in the next frames: native shading, or the paused viewer's
@@ -934,18 +963,25 @@ impl Composer {
             }
             let depth_target = depth.and(self.depth_scratch.as_ref());
             self.renderer.set_playing(self.playing);
-            let decode_size = if state.media == pm_protocol::frame::MediaPreference::Originals
-                || !self.playing && state.resolution == PreviewResolution::Automatic
-            {
-                None
-            } else {
-                Some((place.output.width, place.output.height))
-            };
-            self.renderer.set_preview_decode_size(decode_size);
+            // PROXY-1: settled previews sample full-size original texels through
+            // today's canvas. Playback reductions are selected per asset from
+            // measured source costs; canvas size alone ignores layer scale.
+            self.renderer.set_preview_decode_size(None);
             let slow = self.renderer.slow_media();
-            let proxy_media =
-                self.proxy_media
-                    .resolver(doc, media, state.media, self.playing, &slow);
+            let costs: Vec<_> = self.renderer.media_decode_costs().into_iter()
+                .map(|(path, costs)| (path, pm_proxy::DecodeMeasurement {
+                    original_p95_ms: costs[0].unwrap_or(f64::INFINITY),
+                    reduced_half_p95_ms: costs[1],
+                    reduced_quarter_p95_ms: costs[2],
+                    proxy_p95_ms: None,
+                })).collect();
+            let profile = self.machine_profile();
+            let generation = self.machine_profile_generation();
+            let proxy_media = self.proxy_media.resolver(
+                doc, media, state.media, self.playing, &slow, profile, &costs,
+                (place.output.width, place.output.height), number("fps"), generation,
+                composition, time,
+            );
             // Depth/ID and changing Blender preview surfaces are deliberately
             // outside this cache. Their own source caches retain full keys.
             let cacheable = self.preview_limit > 0

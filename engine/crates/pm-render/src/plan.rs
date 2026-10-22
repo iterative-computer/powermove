@@ -190,11 +190,20 @@ pub enum Source {
         interpret: Option<pm_media::interpret::Interpretation>,
     },
     Video {
+        /// Validated generated media; display geometry is preserved by its recipe.
+        proxy: bool,
         level2: bool,
         /// Persisted image-sequence/animation WebM (converter BT.601 default).
         sequence: bool,
         asset: String,
         path: PathBuf,
+        /// Asset-scoped viewer intent: use complete original texels even when
+        /// other clips can use a reduced playback representation.
+        force_original: bool,
+        /// A measured playback decode scale in source coordinates.
+        decode_scale: Option<f64>,
+        fallback_decode_scale: Option<f64>,
+        source_size: (f64, f64),
         /// Source time in seconds after retiming and today's end clamp.
         time: f64,
         /// The asset's Interpret Footage overrides (section 9). With a
@@ -890,7 +899,7 @@ pub(crate) fn layer_draw<'d>(
             }
         }
         Quad::Texture {
-            source,
+            mut source,
             w,
             h,
             ax,
@@ -904,9 +913,32 @@ pub(crate) fn layer_draw<'d>(
             // `crate::text`), except on a plane, where its layer-space raster
             // is resampled too (`crate::space25d::local`).
             let level2 = level2.filter(|_| level2_type || plane.is_some());
+            let matrix = mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]);
+            if let Source::Video {
+                decode_scale,
+                fallback_decode_scale,
+                force_original,
+                sequence,
+                source_size,
+                ..
+            } = &mut source
+            {
+                let safe = |scale| {
+                    plane.is_none() && reduced_video_scale_safe(&matrix, uv, *source_size, scale)
+                };
+                if *force_original || *sequence {
+                    *decode_scale = None;
+                } else if let Some(preferred) = *decode_scale {
+                    *decode_scale = if safe(preferred) {
+                        Some(preferred)
+                    } else {
+                        (*fallback_decode_scale).filter(|fallback| safe(*fallback))
+                    };
+                }
+            }
             Draw {
                 layer: id.clone(),
-                matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
+                matrix,
                 content: placed(Content::Texture { source, uv, alpha }, plane, level2),
             }
         }
@@ -930,6 +962,30 @@ pub(crate) fn layer_draw<'d>(
         },
     };
     Ok(Some(draw))
+}
+
+/// A reduced raster may be sampled only when its source-space resolution
+/// covers each projected video axis. Canvas dimensions alone are insufficient:
+/// a naturally sized source can be clipped in a much smaller composition.
+fn reduced_video_scale_safe(
+    matrix: &Mat2d,
+    uv: [f64; 4],
+    source_size: (f64, f64),
+    decode_scale: f64,
+) -> bool {
+    let source_x = source_size.0 * uv[2].abs();
+    let source_y = source_size.1 * uv[3].abs();
+    let output_x = matrix[0].hypot(matrix[1]);
+    let output_y = matrix[2].hypot(matrix[3]);
+    source_x.is_finite()
+        && source_y.is_finite()
+        && source_x > 0.0
+        && source_y > 0.0
+        && output_x.is_finite()
+        && output_y.is_finite()
+        && decode_scale.is_finite()
+        && decode_scale > 0.0
+        && decode_scale + 1e-12 >= (output_x / source_x).max(output_y / source_y)
 }
 
 /// A motion-blur sample of a 3D object layer at `time`: pushes the
@@ -1269,7 +1325,8 @@ fn native_content_quad<'d>(
                 b.failures.push(LayerFailure {
                     composition: comp_id,
                     layer: js::layer_id(layer),
-                    message: format!("media for asset {asset_id} is offline"),
+                    message: b.assets.unavailable_reason(&asset_id, Some(record))
+                        .unwrap_or_else(|| format!("media for asset {asset_id} is offline")),
                 });
                 return Ok(None);
             };
@@ -1440,8 +1497,13 @@ fn native_content_quad<'d>(
                     (None, None) => playback_time(st, rec("dur").to_number(), b.video_padding),
                 };
                 Source::Video {
+                    proxy: b.assets.is_proxy(&asset_id),
                     level2: crate::sampling::is_level2(layer),
                     sequence,
+                    force_original: b.assets.force_full_original(&asset_id),
+                    decode_scale: b.assets.preview_decode_scale(&asset_id),
+                    fallback_decode_scale: b.assets.preview_decode_fallback_scale(&asset_id),
+                    source_size: (sw, sh),
                     asset: asset_id,
                     path,
                     time,
@@ -2131,6 +2193,31 @@ pub fn normalize_fill(value: Option<&Node>, bg: Option<&Node>) -> Fill {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduced_video_decode_respects_transformed_source_density() {
+        let source = (1920.0, 1080.0);
+        let full_uv = [0.0, 0.0, 1.0, 1.0];
+        // A natural-size source clipped by a 640-wide composition still
+        // projects to 960 pixels at Half preview resolution.
+        let half_canvas = [960.0, 0.0, 0.0, 540.0, 0.0, 0.0];
+        assert!(reduced_video_scale_safe(&half_canvas, full_uv, source, 0.5));
+        assert!(!reduced_video_scale_safe(
+            &half_canvas,
+            full_uv,
+            source,
+            0.25
+        ));
+        // A cover crop samples only half the source width for the same quad.
+        assert!(!reduced_video_scale_safe(
+            &half_canvas,
+            [0.25, 0.0, 0.5, 1.0],
+            source,
+            0.5,
+        ));
+        let small = [320.0, 0.0, 0.0, 180.0, 0.0, 0.0];
+        assert!(reduced_video_scale_safe(&small, full_uv, source, 0.25));
+    }
 
     #[test]
     fn fit_windows_match_the_compositor() {

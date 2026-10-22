@@ -104,6 +104,22 @@ fn imageio_thumbnail_and_tiled_cache_leave_original_exact() {
         .unwrap();
     assert_eq!(from_tile, from_small);
     assert!(cache.bytes() <= 2 << 20);
+    // The first view sees only the right-hand tile. Four neighbor pixels
+    // around it keep its bilinear and Lanczos taps continuous at x=256.
+    let visible = cache.visible_tiles(&path, &pool, 512, [0.51, 0.1, 0.9, 0.6]).unwrap();
+    assert_eq!(visible.len(), 1);
+    let right = &visible[0];
+    assert_eq!(right.full_size, (small.frame.format.width, small.frame.format.height));
+    assert_eq!(right.origin, (256, 0));
+    assert_eq!(right.content_offset, (4, 0));
+    let first_gutter = right.image.frame.with_planes(|p| unsafe {
+        std::slice::from_raw_parts(p[0].ptr, bpp).to_vec()
+    }).unwrap();
+    let left_neighbor = small.frame.with_planes(|p| unsafe {
+        std::slice::from_raw_parts(p[0].ptr.add(252 * bpp), bpp).to_vec()
+    }).unwrap();
+    assert_eq!(first_gutter, left_neighbor);
+    assert!(cache.bytes() <= 2 << 20);
     let after = image::read(&path, &pool).unwrap();
     assert_eq!(after.frame.md5_hex().unwrap(), digest);
     assert_eq!(std::fs::read(&path).unwrap(), file_before);

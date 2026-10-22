@@ -49,6 +49,7 @@ pub mod space25d;
 pub mod stills;
 pub mod text;
 pub mod three;
+mod tiled;
 pub mod vector;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};

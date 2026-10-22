@@ -34,7 +34,8 @@ struct Params {
     p2: vec4<f32>,
     // Matte color for "premultiplied with color".
     matte: vec4<f32>,
-    // HDR tone mapping: x the content peak in cd/m².
+    // HDR tone mapping: x the content peak in cd/m²; y BT.2020 CL;
+    // z Chromium's eight-bit compat video bitmap before GL sampling.
     hdr: vec4<f32>,
 };
 
@@ -219,6 +220,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
             w = select(transform_premultiplied(removed), removed, identity);
         }
+    }
+    if (P.hdr.z == 1.0) {
+        w = round(clamp(w, vec4<f32>(0.0), vec4<f32>(1.0)) * 255.0) / 255.0;
     }
     if (P.c.z == 1u) {
         w = vec4<f32>(quantizeToF16(w.r), quantizeToF16(w.g), quantizeToF16(w.b), quantizeToF16(w.a));

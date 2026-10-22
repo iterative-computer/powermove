@@ -216,10 +216,71 @@ impl Exec<'_> {
                 level2: None,
                 pyramid: None,
             };
+            match self.resolve_visible_image_tiles(encoder, plan, draw, region) {
+                Ok(Some(tiles)) => { out.extend(tiles); continue; }
+                Err(error) => { self.fail(plan, draw, error); out.push(r); continue; }
+                Ok(None) => {}
+            }
             self.resolve_content(encoder, plan, draw, &draw.content, region, &mut r);
             out.push(r);
         }
         out
+    }
+
+    /// A simple level 2 image during playback can use level-0 bilinear
+    /// sampling exactly. Its visible source tiles draw as adjacent subquads;
+    /// paused Final, minified, projective and composited content keep the
+    /// whole-source resampler so its analytic edges and mip kernel remain.
+    fn resolve_visible_image_tiles(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        draw: &Draw,
+        region: Option<Region>,
+    ) -> Result<Option<Vec<Resolved>>, MediaFailure> {
+        if self.export { return Ok(None); }
+        let Content::Placed(placed) = &draw.content else { return Ok(None); };
+        if placed.plane.is_some() || placed.level2 != Some(crate::sampling::Sampling::Playback) {
+            return Ok(None);
+        }
+        let Content::Texture { source: Source::Image { level2: true, path, interpret, .. }, uv, alpha }
+            = &placed.content else { return Ok(None); };
+        let output = match region {
+            Some(r) => [r.x as f64, r.y as f64, r.width as f64, r.height as f64],
+            None => [0.0, 0.0, plan.width as f64, plan.height as f64],
+        };
+        let Some(bounds) = crate::tiled::visible_uv_bounds(draw.matrix, *uv, output) else {
+            return Ok(None);
+        };
+        let Some(tiles) = self.media.image_tiles(
+            self.device, self.queue, self.pipelines, encoder, path,
+            self.working, self.precision, interpret.as_ref(), bounds,
+        )? else { return Ok(None); };
+        if tiles.is_empty() { return Ok(None); }
+        if !crate::tiled::playback_bilinear(draw.matrix, *uv, tiles[0].tile.full_size) {
+            return Ok(None);
+        }
+        let mut out = Vec::with_capacity(tiles.len());
+        for part in tiles {
+            let Some((matrix, tile_uv)) = crate::tiled::quad(draw.matrix, *uv, &part.tile) else {
+                continue;
+            };
+            out.push(Resolved {
+                matrix,
+                view: Some(part.target.view.clone()),
+                depth: None,
+                alpha: *alpha,
+                solid: None,
+                from_fbo: false,
+                encoded: false,
+                uv: tile_uv,
+                layer: draw.layer.clone(),
+                plane: None,
+                level2: None,
+                pyramid: None,
+            });
+        }
+        Ok((!out.is_empty()).then_some(out))
     }
 
     fn resolve_content(
@@ -329,12 +390,15 @@ impl Exec<'_> {
                         }
                     }
                     Source::Video {
+                        proxy,
                         level2,
                         sequence,
                         path,
                         time,
                         interpret,
                         composition_rate,
+                        force_original,
+                        decode_scale,
                         ..
                     } => {
                         match self.media.video(
@@ -352,6 +416,9 @@ impl Exec<'_> {
                             *composition_rate,
                             *sequence,
                             !*level2,
+                            *force_original,
+                            *decode_scale,
+                            *proxy,
                         ) {
                             Ok(Some(t)) => {
                                 r.view = Some(t.view.clone());

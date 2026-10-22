@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::os::unix::fs::MetadataExt;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -23,6 +24,7 @@ use pm_media::decode::service::{
     DecodeService, MediaLease, MediaSource, MediaUsage, ServiceConfig,
 };
 use pm_media::image::icc::IccClass;
+use pm_media::image::mip_cache::{TiledMipCache, VisibleTile};
 use pm_media::interpret::{Interpretation, ToneMap, resolve_video};
 use pm_media::pool::FramePool;
 use pm_media::probe::color::HdrFormat;
@@ -53,6 +55,12 @@ pub struct SourceColor {
     pub primaries: Primaries,
     pub matrix: MatrixCoefficients,
     pub siting: ChromaSiting,
+    /// Chromium's untagged VP9 4:2:0 compatibility upload uses linear
+    /// chroma between centered samples; other readings use section 9 taps.
+    pub chroma_filter: Option<Filter>,
+    /// Compat video enters the legacy GL sampler as Chromium's clamped,
+    /// eight-bit decoded bitmap, before the preview canvas minifies it.
+    pub bitmap_8bit: bool,
     pub alpha: AlphaMode,
     /// HDR input tone mapping (PQ and HLG sources in Standard, section 9).
     pub tone_map: Option<ToneMap>,
@@ -105,6 +113,8 @@ pub fn image_color(still: &pm_media::image::StillImage) -> Result<SourceColor, P
         primaries,
         matrix: MatrixCoefficients::Identity,
         siting: ChromaSiting::Center,
+        chroma_filter: None,
+        bitmap_8bit: false,
         alpha: c.alpha,
         tone_map: None,
     })
@@ -219,6 +229,8 @@ fn interpreted_color(
                 primaries: Primaries::Bt709,
                 matrix: MatrixCoefficients::Identity,
                 siting: ChromaSiting::Center,
+                chroma_filter: None,
+                bitmap_8bit: false,
                 alpha: match r.alpha.value {
                     AlphaMode::Opaque => AlphaMode::Opaque,
                     _ => AlphaMode::Premultiplied,
@@ -250,6 +262,8 @@ fn interpreted_color(
             primaries: r.primaries.value,
             matrix: MatrixCoefficients::Identity,
             siting: ChromaSiting::Center,
+            chroma_filter: None,
+            bitmap_8bit: false,
             alpha: r.alpha.value,
             tone_map: r.tone_map,
         },
@@ -581,6 +595,10 @@ pub fn standard_video_primaries(p: Primaries) -> Primaries {
     }
 }
 
+fn chromium_bitmap(compat: bool, precision: Precision) -> bool {
+    compat && precision == Precision::Float16
+}
+
 /// The source pass parameters for a source.
 fn source_uniform(
     color: &SourceColor,
@@ -649,7 +667,7 @@ fn source_uniform(
             } else {
                 0.0
             },
-            0.0,
+            f32::from(color.bitmap_8bit && working == WorkingEncoding::Standard),
             0.0,
         ],
         ..Default::default()
@@ -664,7 +682,8 @@ fn source_uniform(
         ];
     }
     if let Some((factors, cw, ch)) = chroma {
-        let (fh, fv) = filters(factors);
+        let (default_horizontal, fv) = filters(factors);
+        let fh = color.chroma_filter.unwrap_or(default_horizontal);
         let code = |f: Filter| match f {
             Filter::None => 0,
             Filter::Linear => 1,
@@ -862,6 +881,53 @@ struct ImageKey {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TileTextureKey {
+    image: ImageKey,
+    device: u64,
+    inode: u64,
+    changed: (i64, i64),
+    x: usize,
+    y: usize,
+}
+
+struct CachedTileTexture { target: Target, used: u64 }
+
+struct TileTextures {
+    entries: BTreeMap<TileTextureKey, CachedTileTexture>,
+    bytes: u64,
+    budget: u64,
+    clock: u64,
+}
+
+impl TileTextures {
+    fn new(budget: u64) -> Self { Self { entries: BTreeMap::new(), bytes: 0, budget, clock: 0 } }
+    fn get(&mut self, key: &TileTextureKey) -> Option<Target> {
+        self.clock += 1;
+        let hit = self.entries.get_mut(key)?;
+        hit.used = self.clock;
+        Some(hit.target.clone())
+    }
+    fn insert(&mut self, key: TileTextureKey, target: Target) {
+        let bytes = target.bytes();
+        if bytes > self.budget { return; }
+        self.clock += 1;
+        if let Some(old) = self.entries.insert(key, CachedTileTexture { target, used: self.clock }) {
+            self.bytes -= old.target.bytes();
+        }
+        self.bytes += bytes;
+        self.trim();
+    }
+    fn trim(&mut self) {
+        while self.bytes > self.budget {
+            let Some(key) = self.entries.iter().min_by_key(|(_, value)| value.used).map(|(key, _)| key.clone()) else { break };
+            if let Some(old) = self.entries.remove(&key) { self.bytes -= old.target.bytes(); }
+        }
+    }
+}
+
+pub(crate) struct ImageTile { pub target: Target, pub tile: VisibleTile }
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct FrameKey {
     path: PathBuf,
     frame: usize,
@@ -898,6 +964,7 @@ pub struct MediaCache {
     playing: bool,
     decode_times: HashMap<PathBuf, VecDeque<f64>>,
     slow_sources: BTreeSet<PathBuf>,
+    decode_costs: HashMap<PathBuf, [VecDeque<f64>; 3]>,
     /// The frame (presented index in its source) of each video layer drawn
     /// with a stand-in since the list was reset.
     pub stand_ins: Vec<usize>,
@@ -908,10 +975,17 @@ pub struct MediaCache {
     free_frames: Vec<Target>,
     importer: Option<DecodeImporter>,
     images: BTreeMap<ImageKey, Target>,
+    image_used: BTreeMap<ImageKey, u64>,
+    tiled_stills: TiledMipCache,
+    tile_textures: Mutex<TileTextures>,
     /// Open video sources with the file's size and modification time when
     /// opened: a file replaced at the same path is reopened.
     sources: BTreeMap<PathBuf, ((u64, u128), Arc<MediaSource>)>,
     frames: BTreeMap<FrameKey, Target>,
+    frame_used: BTreeMap<FrameKey, u64>,
+    cache_clock: u64,
+    frame_cache_budget: usize,
+    converted_budget: u64,
     /// "Interpret Footage" overrides by file (section 9, per-source
     /// interpretation): the color reading replaces the probe's.
     interpretations: BTreeMap<PathBuf, ColorDescription>,
@@ -946,7 +1020,7 @@ impl MediaCache {
         // takes its share of the engine's lease through
         // [`MediaCache::apply_lease`] (docs/engine/scrub.md, "Memory").
         let service = Arc::new(DecodeService::new(ServiceConfig {
-            cache_bytes: DEFAULT_FRAME_CACHE,
+            cache_bytes: DEFAULT_FRAME_CACHE / 2,
             ..ServiceConfig::default()
         }));
         MediaCache {
@@ -960,13 +1034,21 @@ impl MediaCache {
             playing: false,
             decode_times: HashMap::new(),
             slow_sources: BTreeSet::new(),
+            decode_costs: HashMap::new(),
             stand_ins: Vec::new(),
             retired_frames: Vec::new(),
             free_frames: Vec::new(),
             importer: DecodeImporter::new(device).ok(),
             images: BTreeMap::new(),
+            image_used: BTreeMap::new(),
+            tiled_stills: TiledMipCache::new(DEFAULT_FRAME_CACHE / 8),
+            tile_textures: Mutex::new(TileTextures::new((DEFAULT_FRAME_CACHE / 8) as u64)),
             sources: BTreeMap::new(),
             frames: BTreeMap::new(),
+            frame_used: BTreeMap::new(),
+            cache_clock: 0,
+            frame_cache_budget: DEFAULT_FRAME_CACHE,
+            converted_budget: (DEFAULT_FRAME_CACHE / 4) as u64,
             interpretations: BTreeMap::new(),
             deinterlacer: None,
             orient: None,
@@ -1013,6 +1095,36 @@ impl MediaCache {
             .collect();
         measured.sort_by(|a, b| a.0.cmp(&b.0));
         measured
+    }
+
+    /// Actual fresh display decode p95 by source and representation
+    /// (original, half, quarter). Unmeasured costs remain absent.
+    pub fn decode_costs(&self) -> Vec<(PathBuf, [Option<f64>; 3])> {
+        let mut costs: Vec<_> = self.decode_costs.iter().map(|(path, times)| {
+            (path.clone(), std::array::from_fn(|i| decode_p95(&times[i])))
+        }).collect();
+        costs.sort_by(|a, b| a.0.cmp(&b.0));
+        costs
+    }
+
+    fn record_representation_cost(&mut self, path: &Path, purpose: DecodePurpose, coded: (u32, u32), millis: f64) {
+        let index = match purpose {
+            DecodePurpose::Display => 0,
+            DecodePurpose::DisplayReduced { width, height } => {
+                let ratio = (f64::from(width) / f64::from(coded.0.max(1)))
+                    .max(f64::from(height) / f64::from(coded.1.max(1)));
+                if ratio <= 0.25 { 2 } else { 1 }
+            }
+            _ => return,
+        };
+        // The window belongs to live media and remains bounded as projects
+        // are opened and sources relinked over a long-running session.
+        if self.decode_costs.len() >= 4096 && !self.decode_costs.contains_key(path) {
+            self.decode_costs.clear();
+        }
+        let samples = self.decode_costs.entry(path.to_path_buf()).or_default();
+        samples[index].push_back(millis);
+        if samples[index].len() > 32 { samples[index].pop_front(); }
     }
 
     fn record_decode(&mut self, path: &Path, millis: f64, budget_millis: f64) {
@@ -1119,8 +1231,10 @@ impl MediaCache {
             reduced_edge,
         };
         if let Some(t) = self.images.get(&key) {
+            let target = t.clone();
+            self.touch_image(&key);
             self.used_reduced |= reduced_edge.is_some();
-            return Ok(t.clone());
+            return Ok(target);
         }
         let issue = |i: ProbeIssue| match i {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
@@ -1162,8 +1276,9 @@ impl MediaCache {
                     || (k.reduced_edge != key.reduced_edge
                         && (k.reduced_edge.is_none() || key.reduced_edge.is_none()))
             });
-            self.images.insert(key, target.clone());
-            self.recount();
+            self.images.insert(key.clone(), target.clone());
+            self.touch_image(&key);
+            self.trim_converted();
             return Ok(target);
         }
         let color = match interpret {
@@ -1231,10 +1346,108 @@ impl MediaCache {
                 || (k.reduced_edge != key.reduced_edge
                     && (k.reduced_edge.is_none() || key.reduced_edge.is_none()))
         });
-        self.images.insert(key, target.clone());
-        self.recount();
+        self.images.insert(key.clone(), target.clone());
+        self.touch_image(&key);
+        self.trim_converted();
         self.used_reduced |= reduced_edge.is_some();
         Ok(target)
+    }
+
+    /// A level 2 still's visible tiles at the requested viewer representation.
+    /// The returned textures hold exactly the color interpretation and depth
+    /// that `image` would use; only the upload and drawing are subdivided.
+    /// `None` leaves unsupported or broad views on the existing whole-image
+    /// path. Compatibility level 1 never calls this method.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn image_tiles(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &Pipelines,
+        encoder: &mut wgpu::CommandEncoder,
+        path: &Path,
+        working: WorkingEncoding,
+        precision: Precision,
+        interpret: Option<&Interpretation>,
+        uv_bounds: [f64; 4],
+    ) -> Result<Option<Vec<ImageTile>>, MediaFailure> {
+        let (source_w, source_h) = pm_media::image::dimensions(path)
+            .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        if source_w.max(source_h) < 1024 { return Ok(None); }
+        let reduced_edge = self.still_reduced_edge(path, false);
+        let edge = reduced_edge.unwrap_or_else(|| source_w.max(source_h));
+        let tiles = match self.tiled_stills.visible_tiles(path, &self.pool, edge, uv_bounds) {
+            Ok(tiles) if !tiles.is_empty() && tiles.len() <= 128 => tiles,
+            _ => return Ok(None),
+        };
+        let issue = |i: ProbeIssue| match i {
+            ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
+            ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
+        };
+        match interpret {
+            Some(i) => probe_interpreted_image(path, i),
+            None => probe_still(path, still_reader(false)),
+        }.map_err(issue)?;
+        let meta = std::fs::metadata(path)
+            .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        let (len, modified) = stamp(path)
+            .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
+        let image_key = ImageKey {
+            path: path.to_path_buf(), len, modified, precision: precision as u8,
+            reading: interpret.map(|i| format!("{i:?}")).unwrap_or_default(),
+            linear: working == WorkingEncoding::LinearLight, compat: false,
+            reduced_edge: Some(edge),
+        };
+        let mut out = Vec::with_capacity(tiles.len());
+        for tile in tiles {
+            let key = TileTextureKey {
+                image: image_key.clone(), device: meta.dev(), inode: meta.ino(),
+                changed: (meta.ctime(), meta.ctime_nsec()),
+                x: tile.origin.0, y: tile.origin.1,
+            };
+            if let Some(target) = self.tile_textures.lock().unwrap().get(&key) {
+                out.push(ImageTile { target, tile });
+                continue;
+            }
+            let mut still = tile.image.clone();
+            let color = match interpret {
+                Some(i) => {
+                    let read = interpreted_image_color(&still, i).map_err(issue)?;
+                    if let Some(alpha) = read.colorsync {
+                        still = pm_media::image::imageio::convert_to_linear_srgb(&still, &self.pool, alpha)
+                            .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+                    }
+                    read.color
+                }
+                None => {
+                    if still.format == pm_media::image::ImageFormat::Png
+                        && let Some(gamma) = pm_media::image::png_gamma::imageio_gamma(path)
+                            .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?
+                    {
+                        still = pm_media::image::png_gamma::gamma_to_linear(&still, gamma, &self.pool)
+                            .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+                    }
+                    if still.color.icc_class == Some(IccClass::Other) {
+                        still = pm_media::image::imageio::convert_to_linear_srgb(&still, &self.pool, still.color.alpha)
+                            .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+                    }
+                    image_color(&still).map_err(issue)?
+                }
+            };
+            let importer = self.importer()?;
+            let imported = importer.import(&still.frame)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+            let normalized = importer.normalize(queue, encoder, &imported)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+            let target = convert(device, queue, pipelines, encoder, &normalized, &color,
+                working, precision, Factors { x: 1, y: 1 }, None);
+            drop(imported);
+            self.tile_textures.lock().unwrap().insert(key, target.clone());
+            out.push(ImageTile { target, tile });
+        }
+        self.used_reduced |= reduced_edge.is_some();
+        self.recount();
+        Ok(Some(out))
     }
 
     fn source(&mut self, path: &Path) -> Result<Arc<MediaSource>, MediaFailure> {
@@ -1250,8 +1463,9 @@ impl MediaCache {
                 }
                 self.frames.retain(|k, _| k.path != path);
                 self.decode_times.remove(path);
+                self.decode_costs.remove(path);
                 self.slow_sources.remove(path);
-                self.recount();
+                self.trim_converted();
             }
             None => {}
         }
@@ -1286,11 +1500,18 @@ impl MediaCache {
         composition: pm_time::Rate,
         sequence: bool,
         compat: bool,
+        force_original: bool,
+        decode_scale: Option<f64>,
+        proxy: bool,
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
         let none = Interpretation::default();
         match interpret {
             Some(i) => video_drawable(&src, i),
+            // A proxy's rounded coded raster can have non-square pixels.
+            // Its validated recipe retains the original display geometry;
+            // this is a new representation, not an unmeasured original.
+            None if proxy => video_drawable(&src, &none),
             None => video_supported(&src),
         }
         .map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
@@ -1301,7 +1522,18 @@ impl MediaCache {
             .as_ref()
             .ok_or_else(|| MediaFailure::Failed("no video stream".into()))?;
         let reading = resolve_video(v, interp);
-        let purpose = self.video_purpose(&src, &reading, export);
+        let purpose = if force_original && !export && !self.force_full {
+            DecodePurpose::Display
+        } else if !export && !self.force_full && src.info.codec == "prores"
+            && let Some(scale) = decode_scale.filter(|s| s.is_finite() && *s > 0.0 && *s < 1.0)
+        {
+            DecodePurpose::DisplayReduced {
+                width: (src.info.width as f64 * scale).ceil().max(1.0) as u32,
+                height: (src.info.height as f64 * scale).ceil().max(1.0) as u32,
+            }
+        } else {
+            self.video_purpose(&src, &reading, export)
+        };
         let timing = Timing::new(&src, &reading, composition);
         let ticks = (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64;
         let Some(Pick { frame: n, second }) = timing.pick(&src, ticks) else {
@@ -1330,8 +1562,10 @@ impl MediaCache {
         };
         // The newest converted frame of the source (a paused redraw).
         if let Some(t) = self.frames.get(&key_of(n)) {
+            let target = t.clone();
+            self.touch_frame(&key_of(n));
             self.used_reduced |= matches!(purpose, DecodePurpose::DisplayReduced { .. });
-            return Ok(Some(t.clone()));
+            return Ok(Some(target));
         }
         // Export frames, and deinterlaced frames (the current frame and its
         // neighbors: random access includes neighboring fields), decode on
@@ -1375,17 +1609,21 @@ impl MediaCache {
             && !self.scrub
             && uncached
             && n == requested_n
-            && purpose == DecodePurpose::Display
         {
             let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-            let budget = composition.den() as f64 * 1000.0 / composition.num() as f64;
-            self.record_decode(path, elapsed, budget);
+            self.record_representation_cost(path, purpose, (src.info.width as u32, src.info.height as u32), elapsed);
+            if purpose == DecodePurpose::Display {
+                let budget = composition.den() as f64 * 1000.0 / composition.num() as f64;
+                self.record_decode(path, elapsed, budget);
+            }
         }
         // A stand-in may be the frame converted last.
         let key = key_of(n);
         if let Some(t) = self.frames.get(&key) {
+            let target = t.clone();
+            self.touch_frame(&key);
             self.used_reduced |= matches!(purpose, DecodePurpose::DisplayReduced { .. });
-            return Ok(Some(t.clone()));
+            return Ok(Some(target));
         }
         let bitmap = if sequence
             && compat
@@ -1466,11 +1704,29 @@ impl MediaCache {
         {
             desc.matrix = pm_protocol::color::MatrixCoefficients::Bt601;
         }
+        // The compatibility viewer uploads Chromium's decoded RGBA VP9
+        // frame. For an untagged 4:2:0 stream, Chromium centers chroma and
+        // linearly interpolates it. Section 9's general untagged-left and
+        // Catmull-Rom reading instead makes a yellow/blue boundary at x959
+        // neutral gray (226,226,226) where the existing viewer has
+        // (242,233,108). Explicit file and Interpret Footage tags still win.
+        // Today's standard-precision viewer and export both upload video
+        // through Chromium's RGBA8 texture. Explicit Float32 projects keep
+        // the source reading and depth instead.
+        let chrome_vp9_420 = chromium_bitmap(compat, precision)
+            && src.info.codec == "vp9"
+            && frame.format.log2_chroma_w == 1 && frame.format.log2_chroma_h == 1
+            && v.color.tagged.chroma_location.is_none()
+            && interp.siting.is_none()
+            && !self.interpretations.contains_key(path);
+        if chrome_vp9_420 { desc.siting = ChromaSiting::Center; }
         let color = SourceColor {
             transfer: desc.transfer,
             primaries: standard_video_primaries(desc.primaries),
             matrix: desc.matrix,
             siting: desc.siting,
+            chroma_filter: chrome_vp9_420.then_some(Filter::Linear),
+            bitmap_8bit: chromium_bitmap(compat, precision),
             alpha: if frame.format.has_alpha() {
                 match desc.alpha {
                     AlphaMode::Opaque if interp.alpha.is_none() => AlphaMode::Straight,
@@ -1573,8 +1829,9 @@ impl MediaCache {
             keep
         });
         self.retired_frames.extend(retired);
-        self.frames.insert(key, target.clone());
-        self.recount();
+        self.frames.insert(key.clone(), target.clone());
+        self.touch_frame(&key);
+        self.trim_converted();
         self.used_reduced |= matches!(purpose, DecodePurpose::DisplayReduced { .. });
         Ok(Some(target))
     }
@@ -1592,7 +1849,7 @@ impl MediaCache {
             }
         }
         self.frames.retain(|k, _| k.path != path);
-        self.recount();
+        self.trim_converted();
     }
 
     /// The coded size of a video file's frames.
@@ -1616,14 +1873,59 @@ impl MediaCache {
 
     /// Bytes of converted textures held.
     fn recount(&mut self) {
-        self.bytes = self
+        self.bytes = self.tile_textures.lock().unwrap().bytes + self
             .images
             .values()
             .chain(self.frames.values())
             .chain(&self.retired_frames)
             .chain(&self.free_frames)
             .map(Target::bytes)
-            .sum();
+            .sum::<u64>();
+    }
+
+    fn touch_image(&mut self, key: &ImageKey) {
+        self.cache_clock = self.cache_clock.wrapping_add(1);
+        self.image_used.insert(key.clone(), self.cache_clock);
+    }
+
+    fn touch_frame(&mut self, key: &FrameKey) {
+        self.cache_clock = self.cache_clock.wrapping_add(1);
+        self.frame_used.insert(key.clone(), self.cache_clock);
+    }
+
+    fn converted_cache_bytes(&self) -> u64 {
+        self.images.values().chain(self.frames.values())
+            .chain(&self.free_frames).map(Target::bytes).sum()
+    }
+
+    /// Keep only cache-owned converted textures under their lease share.
+    /// A caller's returned Target and draws already recorded this frame hold
+    /// their own references, so evicting a map entry cannot invalidate them.
+    fn trim_converted(&mut self) {
+        while self.converted_cache_bytes() > self.converted_budget {
+            if self.free_frames.pop().is_some() { continue; }
+            let image = self.image_used.iter()
+                .filter(|(key, _)| self.images.contains_key(*key))
+                .min_by_key(|(_, used)| *used)
+                .map(|(key, used)| (key.clone(), *used));
+            let frame = self.frame_used.iter()
+                .filter(|(key, _)| self.frames.contains_key(*key))
+                .min_by_key(|(_, used)| *used)
+                .map(|(key, used)| (key.clone(), *used));
+            match (image, frame) {
+                (Some((key, a)), Some((_, b))) if a <= b => {
+                    self.images.remove(&key);
+                }
+                (Some(_), Some((key, _))) | (None, Some((key, _))) => {
+                    self.frames.remove(&key);
+                }
+                (Some((key, _)), None) => { self.images.remove(&key); }
+                (None, None) => break,
+            }
+        }
+        self.image_used.retain(|key, _| self.images.contains_key(key));
+        self.frame_used.retain(|key, _| self.frames.contains_key(key));
+        self.recount();
     }
 
     /// Changes whenever a display frame a scrub asked for has decoded.
@@ -1640,13 +1942,38 @@ impl MediaCache {
     /// service: the frame cache evicts down to `lease.frame_cache` at once
     /// and idle decoders close past `lease.decoders`. Returns what the
     /// service holds afterwards.
-    pub fn apply_lease(&self, lease: MediaLease) -> MediaUsage {
-        self.service.apply_lease(lease)
+    pub fn apply_lease(&mut self, lease: MediaLease) -> MediaUsage {
+        // Tile samples and their converted textures share the frame-cache
+        // lease. A hard cap also bounds renderers without a viewer lease.
+        let tiles = lease.frame_cache.min(128 << 20) / 4;
+        let converted = lease.frame_cache.saturating_sub(tiles) / 3;
+        self.frame_cache_budget = lease.frame_cache;
+        self.converted_budget = converted as u64;
+        self.tiled_stills.set_budget(tiles / 2);
+        let mut gpu = self.tile_textures.lock().unwrap();
+        gpu.budget = (tiles / 2) as u64;
+        gpu.trim();
+        drop(gpu);
+        self.trim_converted();
+        self.service.apply_lease(MediaLease {
+            frame_cache: lease.frame_cache.saturating_sub(tiles).saturating_sub(converted),
+            decoders: lease.decoders,
+        });
+        self.media_usage()
     }
 
     /// What the decode service holds (frame cache, decoders, sessions).
     pub fn media_usage(&self) -> MediaUsage {
-        self.service.usage()
+        let mut usage = self.service.usage();
+        usage.frame_cache += self.tiled_stills.bytes()
+            + self.tile_textures.lock().unwrap().bytes as usize
+            + self.converted_cache_bytes() as usize;
+        // Retired targets are still needed by commands in the current render,
+        // but are not cache-owned and are dropped at flush under pressure.
+        usage.decoders += self.retired_frames.iter().map(Target::bytes).sum::<u64>() as usize;
+        usage.cache.bytes = usage.frame_cache;
+        usage.cache.budget = self.frame_cache_budget;
+        usage
     }
 
     /// After a render's commands are submitted: releases CoreVideo texture
@@ -1659,6 +1986,49 @@ impl MediaCache {
         self.free_frames.append(&mut self.retired_frames);
         let excess = self.free_frames.len().saturating_sub(2);
         self.free_frames.drain(..excess);
-        self.recount();
+        self.trim_converted();
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn centered_linear_vp9_chroma_uses_chromiums_boundary_coordinates() {
+        let color = SourceColor {
+            transfer: Transfer::DisplayE,
+            primaries: Primaries::Bt709,
+            matrix: MatrixCoefficients::Bt709,
+            siting: ChromaSiting::Center,
+            chroma_filter: Some(Filter::Linear),
+            bitmap_8bit: true,
+            alpha: AlphaMode::Opaque,
+            tone_map: None,
+        };
+        let uniforms = source_uniform(&color, WorkingEncoding::Standard,
+            Precision::Float16, Some((Factors { x: 2, y: 2 }, 960, 540)));
+        assert_eq!(uniforms.hdr[2], 1.0);
+        assert_eq!(uniforms.b[2], 1); // horizontal linear interpolation
+        assert_eq!(uniforms.origin[0], 0.5); // first chroma sample centered
+        // At luma x959, centered chroma lies one quarter of the way
+        // between yellow (U16,V146) and blue (U240,V110). Left siting
+        // would use a half mixture and falsely turn this pixel gray.
+        let x = (959.0 - f64::from(uniforms.origin[0])) / 2.0;
+        assert_eq!(x.fract(), 0.25);
+        assert_eq!((16.0 * 0.75 + 240.0 * 0.25,
+            146.0 * 0.75 + 110.0 * 0.25), (72.0, 137.0));
+        // An explicit Float32 source keeps original >8-bit precision and
+        // section 9 chroma interpretation instead of the compat bitmap.
+        let full_precision = SourceColor { bitmap_8bit: false, ..color };
+        let full = source_uniform(&full_precision, WorkingEncoding::Standard,
+            Precision::Float16, Some((Factors { x: 2, y: 2 }, 960, 540)));
+        assert_eq!(full.hdr[2], 0.0);
+        assert!(chromium_bitmap(true, Precision::Float16));
+        assert!(!chromium_bitmap(true, Precision::Float32));
+        assert!(!chromium_bitmap(false, Precision::Float16));
+        let linear = source_uniform(&color, WorkingEncoding::LinearLight,
+            Precision::Float16, Some((Factors { x: 2, y: 2 }, 960, 540)));
+        assert_eq!(linear.hdr[2], 0.0);
     }
 }
