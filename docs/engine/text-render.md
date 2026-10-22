@@ -1670,7 +1670,110 @@ timeout; interaction deadlines are unchanged. All six canvas-editing checks
 pass after separating that cleanup from the interaction budget. The 33 ms
 typing measurement remains unqualified under machine contention.
 
-## Gaps
+### Textexact2 round 2: glyph images beyond the atlas
+
+Review found a crash the shared A8 atlas introduced. Every unfiltered direct
+mask reserved atlas space, and `Atlas::allocate` ended in an `expect` that
+the glyph fits a 512 px plot. A transformed glyph could exceed that while
+its upright outline passed the scene's bounds check. For example, an
+animator skew near its 80° clamp on 75 px text at 2x gives a mask over
+600 px wide, which panicked the native render thread. Before textexact2,
+the same mask was composited as an image. Neither is what Chromium does.
+
+`SubRunContainer` (Skia m152, the pinned source) has two gates, now ported
+for level 1 canvas text under a non-axis-aligned matrix:
+
+- Masks and distance fields are drawn only while
+  `ApproximateTransformedTextSize` is below 256. That size is the text
+  size times `SkMatrix::getMaxScale`, the largest singular value. A skew
+  or non-uniform scale makes it larger than the uniform device size
+  (`sqrt|det|`) the scene previously used. At or above 256, every glyph of
+  the run draws in the path sub run: the canonical 64 px platform outline
+  under the glyph's matrix. Axis-aligned text is unchanged; for it, the
+  two sizes are equal.
+- A direct mask over `kSkSideTooBigForAtlas` (256 px in either dimension,
+  `SkGlyphDigest::fitsInAtlasDirect`) is rejected to the same path sub run.
+  An example is a Zapfino glyph that fits upright but is rotated 45°. This
+  applies to plain, synthetic-bold and transformed masks, as
+  `strokeText` already did. CoreGraphics no longer rasterizes such a mask:
+  `matrix_mask` returns its bounds only, with empty coverage. The
+  previous 4096 px cap had dropped those glyphs silently.
+
+The atlas no longer panics. Allocation is fallible. A mask or field larger
+than a plot is never placed and never resets the atlas generation, so
+placements of fitting glyphs (and the SDF history they feed) are
+unaffected. If a distance field over a plot ever reached the native
+Graphite executor, it would keep the CPU primitive image. The scene emits
+fields only up to 256 px.
+
+Regression tests: `glyph_images_beyond_the_atlas_draw_as_paths` (pm-text,
+both gates plus a nearly upright control that keeps its mask);
+`glyphs_beyond_a_plot_are_never_placed` (pm-render atlas, 624×114 and
+64×4096 masks and a 513 px field); and `text_gpu`'s skew80/rotated
+renders through the full GPU path. Without the fix, the last one panics at
+the old `expect`.
+
+The exactness wording for the thirteen retired cases: eight are
+byte-identical, and five are within their original strict bounds but not
+exact. These are `path-stroke-0001` (1 CV) and the composed and text-only
+frames at t16/t18 (maxima 2, 2, 2, 1 CV, the 2 CV bound).
+
+Determinism. Native SDF pixels depend on the process-wide atlas history,
+as in Chromium. A distance field's atlas texel position changes f32
+interpolation, so `sdf-sizes-0004` matches only after the preceding
+161–210 px draws. Preview and export pixels of 162–256 px text can
+therefore depend on what was drawn before in the same process. The text
+raster cache key does not include atlas placement, so a cached raster
+keeps the placement of its first draw. Exports are reproducible for the
+same draw order, not across arbitrary orders. Matching Chromium exactly
+requires this, and it is disclosed rather than changed.
+
+Unmeasured performance risk in the native Graphite executor (`Gpu::render`):
+
+- Each draw is its own render pass that loads and stores the full
+  canvas-viewport target.
+- MSAA color and depth/stencil attachments are allocated per raster at full
+  viewport size, without pooling.
+- Uniform, storage and vertex buffers and bind groups are created per
+  draw.
+- Atlas lookups are linear scans until the four-page generation reset.
+
+Frame time and memory for large or animated text (for example a 5688×991
+viewport at 4× MSAA) are unmeasured; the performance lane owns them.
+
+The app-level replay of the thirteen cases is now in the repository as
+`e2e/native-engine-text-app-parity.spec.ts`. Every identifier and capture
+path comes from a private manifest named by `PM_TEXT_APP_PARITY`; without
+it, the spec skips. The e2e session fixture now attaches each test's
+`session-teardown` durations (app close and profile cleanup), so a slow
+native shutdown shows up as a number, not only as a fixture timeout.
+
+Round 2 measurements (2026-10-22, release thin-LTO gates, release addon):
+
+| Check | Result |
+|---|---|
+| `text_raster` (main, closure, large paths, source) | 495, 116, 4, 3: all within 1 CV, 0 ratcheted, 0 failed |
+| `text_corpus` | 576/576 within 2 CV; every per-frame line identical to the previous qualified run |
+| `text_residuals`, `text_gpu` (incl. skew80/rotated), `text_colors`, `text_level2` | pass |
+| pm-text (cg-masks) / pm-render lib / pm-vector `render` (debug) | 79 / 114 / 78 + integration, pass |
+| App replay, 18 tests (12 parity + 6 canvas-text), host load about 8–10 | 18/18 |
+
+The app parity rows are unchanged from the first textexact2 run. Natively,
+eight rasters are byte-identical; `path-stroke-0001` has max 1 CV over
+1065 px; the composed and isolated t16/t18 frames have maxima 2, 2, 2 and
+1 CV over 1262, 1331, 860 and 984 px. All are within their strict bounds.
+With the setting off, everything is identical except the legacy SDF
+history's 29 px of 1 CV on `sdf-sizes-0004`. Teardown in this run: app
+close took 55–774 ms and profile cleanup 4–10 ms. The roughly 30 s
+teardowns seen at load 53–67 were not reproduced at this load, so their
+cause remains undiagnosed.
+
+None of the text captures has a rotated or skewed glyph. The raster
+captures contain no rotation or skew keys, and the composed corpus shows
+no change. The two new gates are therefore covered by the source-derived
+regression tests above, not by captured Chromium pixels for a skewed
+glyph beyond the atlas.
+
 
 All thirteen previous FONTS-R residuals meet their original strict bounds
 in the full comparisons above. No residual budget remains. Full
@@ -1693,6 +1796,11 @@ textexact2 lane report. Every case retains its original strict bound.
   four pages fill, preserving already-encoded texture reads; it does not
   reproduce Chromium's complete memory-pressure eviction/draw-token policy.
   Those oversized and eviction paths lack independent captured parity.
+- Skewed, rotated or non-uniformly scaled canvas text now follows Skia's
+  `ApproximateTransformedTextSize` and `fitsInAtlasDirect` gates (round 2).
+  No captured Chromium pixels exist for a glyph beyond the atlas or for
+  text whose largest-scale size crosses 256 px, so those paths are
+  source-ported and regression-tested, not pixel-qualified.
 - The CPU SDF reference retains its earlier half-precision draw emulation;
   native GPU rendering uses the f32 Dawn shader. CPU-only SDF parity has
   not been newly qualified by this round.
@@ -1752,12 +1860,34 @@ textexact2 lane report. Every case retains its original strict bound.
 
 ## Changes outside the lane
 
+2026-10-22 (lane ne-textexact2, round 2):
+
+- `apps/desktop/e2e/helpers/app.ts`: `LaunchedApp.teardown` records the
+  app close and profile cleanup durations; the session fixture attaches
+  them (`session-teardown`) to every test.
+- `apps/desktop/e2e/native-engine-text-app-parity.spec.ts` (new): the
+  manifest-driven app parity replay.
+
 2026-10-21 (lane ne-textexact2):
 
 - `pm-gpu/src/readback.rs` and `tests/readback.rs`: BGRA N32 readback
   returns RGBA channels; a two-pixel test covers both storage formats.
 - `pm-render/src/vector/{svg,svg_rasters}.rs`: test-only scoped fixture
   cleanup. Product SVG rendering is unchanged.
+- `apps/desktop/e2e/helpers/app.ts`: the `session` fixture has its own
+  60 s timeout, separate from the test's deadline. This applies to every
+  e2e spec. App shutdown and profile cleanup had taken about 30 s under
+  load, failing four canvas-text tests in teardown. That slow teardown
+  was not diagnosed; round 2 records its durations.
+- `pm-render/src/renderer/layer_raster.rs`: the text crop converts
+  `TextPlan::crop` edges to the `[x, y, w, h]` origin and extent that
+  `LayerPixels::Float` documents. This is the app crop-stride fix.
+- `pm-node/tests/render_fonts.rs`: served-font snapshot regression for
+  that crop, with independently placed expected rows.
+- `pm-vector/src/canvas2d/{context,stroke,mod,text}.rs` and the new
+  `native.rs`: the `native_paths` opt-in (`retain_native_paths`) that hands
+  Canvas2D glyph paths to the native Graphite executor. `context.rs` and
+  `stroke.rs` also carry large rustfmt-only reformatting.
 
 2026-10-19 (lane ne-textl2, round 4):
 
