@@ -342,17 +342,28 @@ follow the applied revision and apply through a pluggable RFC 05 decoder;
 until the model lane's binary decoder is installed, a batch is reported as
 `unsupported` once per session and the mirror keeps the resynced revision.
 
-Known limit: a resync from a staged file is read (`std::fs::read`, up to
-512 MiB) and parsed on the utility process's JavaScript thread, as an
-inline resync is parsed there; while it runs that engine's ticks and port
-traffic wait. Large documents do take this path now: for C1's 170 MB
-document (release build, M4 Max) the parse is 0.76 s, building the tree
-0.49 s (0.24 s reconciled against the session's previous tree), and the
-hash check 0.53 s, so the engine's JavaScript thread (and the frames and
-clock samples it posts) waits about 1.8 s per resync. A resync to a hash
-another session was just checked at skips all three. Still open: move the
-read, parse, and hash check to an engine thread (`spawn_engine_thread`),
-with the mirror installed when the thread finishes.
+Large ingestion now runs on `pm-document-reader`, a single engine-QoS thread
+with two queued inputs, shared by all sessions. All staged-file reads and inline
+bodies of at least 64 KiB are read/parsed, reconciled, and canonical-hash-checked
+there (`pm-engine/resync.rs`). Smaller inline control documents remain immediate.
+The port loop installs only a completed, checked tree, provided the session,
+project, and applied base revision still match. Cancellation and closing a port
+discard the pending install; an overlapping resync is refused explicitly. The
+reader bounds file reads to the announced length plus one byte and joins at
+engine shutdown. Clock, lease, and port traffic continue during ingestion.
+
+Short reconnects use a verified checkpoint plus the renderer's recent patch
+suffix. A session retains its last checked shared tree while its suffix remains
+within 128 batches and 8 MiB. A disconnected port leaves at most one such tree
+in the process for 15 seconds. A new session can prove the checkpoint hash
+without sending a JSON body, then replay its suffix. A process restart, expired
+checkpoint, different project/hash, or overflow takes the full checked resync.
+The checkpoint shares unchanged subtrees; it is not a second parsed document.
+
+`Document::canonical_digest` caches its digest until a mutation (including a
+partially applied failed batch). The wire hash remains RFC 05 SHA-256; local
+renderer/pm-wasm consistency checks additionally use an incremental integrity
+digest described in `write-path.md`.
 
 Disk: a window may stage at most 16 documents of at most 512 MiB per
 engine launch in `Engine Cache/Scratch`; they are removed when the launch

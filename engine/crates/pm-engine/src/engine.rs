@@ -6,7 +6,7 @@
 //! Electron utility process, or `pm-cli`) delivers bytes per port with
 //! [`Engine::receive`], drives time with [`Engine::tick`], and carries out
 //! the returned [`Action`]s: send bytes on a port, close a port, or log. It
-//! never blocks on I/O except to read a resync file the host resolved.
+//! stages large document ingestion on a bounded reader thread.
 //!
 //! Ports are assigned by the host out of band ([`Engine::attach`]) with the
 //! kind of peer they lead to, and the peer's `hello` must claim that role: a
@@ -26,8 +26,7 @@ use pm_protocol::error::{
     CrashReport, EngineError, EngineProcess, ErrorCode, ErrorScope, FailureReport, Retry,
 };
 use pm_protocol::host::{
-    CapabilityHandle, CapabilityKind, HandleAccess, HandleGrant, HandleResolved, MintHandle,
-    PortId, ResolveHandle,
+    CapabilityHandle, CapabilityKind, HandleAccess, HandleGrant, MintHandle, PortId, ResolveHandle,
 };
 use pm_protocol::patch::{
     Admission, ConsistencyCheck, ConsistencyResult, DocumentEncoding, PatchBatch, PatchEncoding,
@@ -159,6 +158,17 @@ struct Session {
     /// The document's media as the host resolved it for this session
     /// (interactive sessions whose presenter renders documents).
     media: MediaTable,
+    checkpoint: Option<ReconnectMirror>,
+    checkpoint_bytes: usize,
+    checkpoint_batches: usize,
+}
+
+#[derive(Clone)]
+struct ReconnectMirror {
+    document: pm_protocol::common::DocumentId,
+    mirror: pm_model::Document,
+    hash: ContentHash,
+    expires: std::time::Instant,
 }
 
 /// A call this engine made to the host, keyed by its request id on the host port.
@@ -291,6 +301,17 @@ pub struct Engine {
     job_work: BTreeMap<u64, WorkToken>,
     logged_once: BTreeSet<String>,
     overdue_logged: Option<u64>,
+    reader: Option<crate::resync::Reader>,
+    reconnect_mirror: Option<ReconnectMirror>,
+    resync_work: BTreeMap<u64, PendingResync>,
+}
+
+struct PendingResync {
+    port: PortId,
+    id: RequestId,
+    sid: SessionId,
+    resync: Resync,
+    base_revision: u64,
 }
 
 /// A decoded patch body.
@@ -379,10 +400,9 @@ fn event_name(event: &Event) -> &'static str {
 
 /// The canonical hash of a mirror (`null` for an empty document).
 fn mirror_digest(mirror: &pm_model::Document) -> [u8; 32] {
-    match mirror.root() {
-        Some(root) => pm_model::hash::canonical_digest(root),
-        None => pm_model::hash::canonical_digest(&pm_model::Value::Null),
-    }
+    mirror
+        .canonical_digest()
+        .unwrap_or_else(|| pm_model::hash::canonical_digest(&pm_model::Value::Null))
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
@@ -419,6 +439,9 @@ impl Engine {
             job_work: BTreeMap::new(),
             logged_once: BTreeSet::new(),
             overdue_logged: None,
+            reader: None,
+            reconnect_mirror: None,
+            resync_work: BTreeMap::new(),
         }
     }
 
@@ -458,6 +481,7 @@ impl Engine {
     /// wakes it; `receive` and `tick` pump too.
     pub fn pump(&mut self) -> Vec<Action> {
         let mut out = Out::default();
+        self.drain_resyncs(&mut out);
         self.drain_jobs(&mut out);
         self.drain_presenter(&mut out);
         out.0
@@ -587,8 +611,15 @@ impl Engine {
             .map(|(id, _)| *id)
             .collect();
         for id in &closed {
-            self.sessions.remove(id);
+            if let Some(mut session) = self.sessions.remove(id) {
+                if let Some(mut checkpoint) = session.checkpoint.take() {
+                    checkpoint.expires =
+                        std::time::Instant::now() + std::time::Duration::from_secs(15);
+                    self.reconnect_mirror = Some(checkpoint);
+                }
+            }
         }
+        self.resync_work.retain(|_, p| p.port != port);
         self.with_presenter(out, |p, ctx| p.port_closed(ctx, port));
         self.viewers_stopped(|(p, _)| *p == port, out);
         self.waiting_frames.retain(|w| w.port != port);
@@ -1130,6 +1161,9 @@ impl Engine {
                 definitions: DefinitionSet::default(),
                 stale: false,
                 media: MediaTable::default(),
+                checkpoint: None,
+                checkpoint_bytes: 0,
+                checkpoint_batches: 0,
             },
         );
         self.respond(
@@ -1180,6 +1214,24 @@ impl Engine {
         let Some(sid) = self.owned_session(port, id, session, out) else {
             return;
         };
+        if self.resync_work.values().any(|p| p.sid == sid)
+            || self.host_calls.values().any(
+                |call| matches!(call, HostCall::ResyncFromFile { session, .. } if *session == sid),
+            )
+        {
+            self.finish_resync(
+                port,
+                id,
+                sid,
+                &resync,
+                Err((
+                    ErrorCode::StaleRevision,
+                    "A resync is already pending for this session.".into(),
+                )),
+                out,
+            );
+            return;
+        }
         if self.sessions[&sid].document != resync.document
             && self.sessions[&sid].role == SessionRole::Interactive
             && resync.document.is_valid()
@@ -1210,8 +1262,19 @@ impl Engine {
         match &resync.source {
             ResyncSource::Inline { body } => {
                 let body = body.0.clone();
-                let result = self.install_mirror(sid, &resync, &body);
-                self.finish_resync(port, id, sid, &resync, result, out);
+                if body.len() >= 64 * 1024 {
+                    self.start_resync(
+                        port,
+                        id,
+                        sid,
+                        resync,
+                        crate::resync::Source::Inline(body),
+                        out,
+                    );
+                } else {
+                    let result = self.install_mirror(sid, &resync, &body);
+                    self.finish_resync(port, id, sid, &resync, result, out);
+                }
             }
             ResyncSource::CacheFile { handle, length } => {
                 let Some(host) = self.open_host() else {
@@ -1252,42 +1315,7 @@ impl Engine {
         resync: &Resync,
         body: &[u8],
     ) -> Result<(), (ErrorCode, String)> {
-        // Parsed straight into the revisioned tree: no intermediate `Value`
-        // (for a 180 MB document, about 1 GB more at the peak).
-        let root = match resync.encoding {
-            DocumentEncoding::CanonicalJsonV1 => {
-                pm_model::Node::parse_bytes(body, resync.revision.get()).map_err(|e| {
-                    (
-                        ErrorCode::InvalidMessage,
-                        format!("The resync body is not JSON ({e})."),
-                    )
-                })?
-            }
-            DocumentEncoding::CanonicalBinaryV1 => {
-                return Err((
-                    ErrorCode::Unsupported,
-                    "The canonical binary document encoding is not readable yet; resync as canonical JSON.".into(),
-                ));
-            }
-        };
-        // The parsed value becomes the tree; the presenter and audio threads
-        // get the same tree, shared. Reconciled against a mirror this engine
-        // already holds for the document (this session's own, or another
-        // session's: main's snapshot session for the window), the new tree
-        // shares every unchanged subtree with it instead of doubling.
-        let mirror = match self.base_mirror(sid, resync) {
-            Some(base) => {
-                pm_model::Document::reconciled_node(base, Some(root), resync.revision.get())
-            }
-            None => pm_model::Document::from_root(Some(root), resync.revision.get()),
-        };
-        let digest = mirror_digest(&mirror);
-        if ContentHash(digest) != resync.hash {
-            return Err((
-                ErrorCode::InvalidMessage,
-                "The resync body does not match its canonical hash; send it again.".into(),
-            ));
-        }
+        let mirror = crate::resync::parse(resync, self.base_mirror(sid, resync), body)?;
         self.install_document(sid, resync, mirror)
     }
 
@@ -1309,18 +1337,25 @@ impl Engine {
         {
             return None;
         }
+        if let Some(saved) = self.reconnect_mirror.as_ref().filter(|saved| {
+            saved.expires > std::time::Instant::now()
+                && saved.document == resync.document
+                && saved.hash == resync.hash
+                && saved.mirror.revision() <= resync.revision.get()
+        }) {
+            return Some(saved.mirror.shared_at_revision(resync.revision.get()));
+        }
         self.sessions.iter().find_map(|(other, s)| {
             let (revision, hash) = s.verified.as_ref()?;
             let mirror = s.mirror.as_ref()?;
             (*other != sid
+                && s.document == resync.document
                 && !s.stale
                 && *hash == resync.hash
                 && *revision <= resync.revision.get()
                 && s.revisions.applied().get() == *revision
                 && mirror.revision() == *revision)
-                .then(|| {
-                    pm_model::Document::from_root(mirror.root().cloned(), resync.revision.get())
-                })
+                .then(|| mirror.shared_at_revision(resync.revision.get()))
         })
     }
 
@@ -1363,6 +1398,14 @@ impl Engine {
         ))?;
         session.revisions.resynced(resync);
         let root = presents.then(|| mirror.root().cloned());
+        session.checkpoint = Some(ReconnectMirror {
+            document: resync.document.clone(),
+            mirror: mirror.clone(),
+            hash: resync.hash,
+            expires: std::time::Instant::now(),
+        });
+        session.checkpoint_bytes = 0;
+        session.checkpoint_batches = 0;
         session.mirror = Some(mirror);
         session.verified = Some((resync.revision.get(), resync.hash));
         session.stale = false;
@@ -1815,6 +1858,12 @@ impl Engine {
                 let forward = self.presents_documents();
                 let session = self.sessions.get_mut(&sid).expect("exists");
                 let applied = session.revisions.applied();
+                session.checkpoint_bytes =
+                    session.checkpoint_bytes.saturating_add(batch.body.0.len());
+                session.checkpoint_batches += 1;
+                if session.checkpoint_bytes > 8 * 1024 * 1024 || session.checkpoint_batches > 128 {
+                    session.checkpoint = None;
+                }
                 let result = match (&decoded, session.mirror.as_mut()) {
                     (Ok(Decoded::Patches(patches)), Some(mirror)) => mirror
                         .apply_at(patches, batch.revision.get())
@@ -1888,6 +1937,17 @@ impl Engine {
     }
 
     fn on_cancel(&mut self, port: PortId, id: RequestId, out: &mut Out) {
+        let tokens: Vec<_> = self
+            .resync_work
+            .iter()
+            .filter(|(_, p)| p.port == port && p.id == id)
+            .map(|(token, _)| *token)
+            .collect();
+        for token in tokens {
+            self.resync_work.remove(&token);
+            let error = request_error(id, ErrorCode::Cancelled, "The resync was cancelled.");
+            self.send_error(port, id, error, out);
+        }
         // Everything but a resync from a file is answered synchronously, so a
         // cancel normally arrives after its answer and has nothing to do.
         let pending = self
@@ -1952,12 +2012,14 @@ impl Engine {
                 },
                 Response::HandleResolved(resolved),
             ) => {
-                let result = self
-                    .read_resync_file(&resync, &resolved, length)
-                    .and_then(|body| self.install_mirror(session, &resync, &body));
-                if self.ports.contains_key(&port) {
-                    self.finish_resync(port, request, session, &resync, result, out);
-                }
+                self.start_resync(
+                    port,
+                    request,
+                    session,
+                    resync,
+                    crate::resync::Source::File(resolved, length),
+                    out,
+                );
             }
             (HostCall::Lease, Response::Lease(lease)) => {
                 match self.lease.grant(lease, now, self.evict.as_mut()) {
@@ -2115,41 +2177,92 @@ impl Engine {
         }
     }
 
-    fn read_resync_file(
-        &self,
-        resync: &Resync,
-        resolved: &HandleResolved,
-        length: u64,
-    ) -> Result<Vec<u8>, (ErrorCode, String)> {
-        let ResyncSource::CacheFile { handle, .. } = &resync.source else {
-            return Err((ErrorCode::Internal, "not a file resync".into()));
-        };
-        let readable = matches!(
-            resolved.access,
-            HandleAccess::Read | HandleAccess::ReadWrite
-        ) && matches!(resolved.kind, CapabilityKind::Cache { .. });
-        if &resolved.handle != handle || !readable {
-            return Err((
-                ErrorCode::CapabilityRejected,
-                "The resync handle does not name a readable cache file.".into(),
-            ));
+    fn start_resync(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        sid: SessionId,
+        resync: Resync,
+        source: crate::resync::Source,
+        out: &mut Out,
+    ) {
+        let base = self.base_mirror(sid, &resync).cloned();
+        let base_revision = self
+            .sessions
+            .get(&sid)
+            .map(|s| s.revisions.applied().get())
+            .unwrap_or(0);
+        let token = self.next_token;
+        self.next_token += 1;
+        let result = (|| {
+            if self.reader.is_none() {
+                self.reader = Some(crate::resync::Reader::new(self.config.process).map_err(
+                    |_| {
+                        (
+                            ErrorCode::Internal,
+                            "The document reader could not start.".into(),
+                        )
+                    },
+                )?);
+            }
+            self.reader
+                .as_ref()
+                .expect("started")
+                .submit(crate::resync::Work {
+                    token,
+                    resync: resync.clone(),
+                    base,
+                    source,
+                })
+        })();
+        match result {
+            Ok(()) => {
+                self.resync_work.insert(
+                    token,
+                    PendingResync {
+                        port,
+                        id,
+                        sid,
+                        resync,
+                        base_revision,
+                    },
+                );
+            }
+            Err(error) => self.finish_resync(port, id, sid, &resync, Err(error), out),
         }
-        let bytes = std::fs::read(&resolved.path).map_err(|e| {
-            (
-                ErrorCode::CapabilityRejected,
-                format!("The resync file could not be read ({}).", e.kind()),
-            )
-        })?;
-        if bytes.len() as u64 != length {
-            return Err((
-                ErrorCode::InvalidMessage,
-                format!(
-                    "The resync file holds {} bytes, not the {length} announced.",
-                    bytes.len()
-                ),
-            ));
+    }
+
+    fn drain_resyncs(&mut self, out: &mut Out) {
+        while let Some(done) = self.reader.as_ref().and_then(|r| r.poll()) {
+            let Some(pending) = self.resync_work.remove(&done.token) else {
+                continue;
+            };
+            let PendingResync {
+                port,
+                id,
+                sid,
+                resync,
+                base_revision,
+            } = pending;
+            let Some(session) = self.sessions.get(&sid).filter(|s| s.port == port) else {
+                continue;
+            };
+            if !self.ports.contains_key(&port) {
+                continue;
+            }
+            let current = session.document == resync.document
+                && session.revisions.applied().get() == base_revision;
+            let result = if current {
+                done.result
+                    .and_then(|mirror| self.install_document(sid, &resync, mirror))
+            } else {
+                Err((
+                    ErrorCode::StaleRevision,
+                    "The document changed while the resync was being read; resync again.".into(),
+                ))
+            };
+            self.finish_resync(port, id, sid, &resync, result, out);
         }
-        Ok(bytes)
     }
 
     /// The host port, if its handshake finished.
@@ -2277,6 +2390,14 @@ impl Engine {
     /// breadcrumb. Call every 100 ms or so, and after `begin_work`.
     pub fn tick(&mut self, now: HostMicros) -> Vec<Action> {
         let mut out = Out::default();
+        self.drain_resyncs(&mut out);
+        if self
+            .reconnect_mirror
+            .as_ref()
+            .is_some_and(|r| r.expires <= std::time::Instant::now())
+        {
+            self.reconnect_mirror = None;
+        }
         self.retry_media(now, &mut out);
         self.flush_document_updates(now, &mut out);
         if self.jobs.is_some() {

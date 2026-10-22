@@ -42,6 +42,7 @@ export interface DocumentStream {
   /** `bytes`: the canonical JSON as UTF-8 (pm-wasm's, kept out of the
    *  JavaScript heap); otherwise `json` is encoded. */
   snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; bytes?: Uint8Array; hash: string } | null;
+  resume?(): { revision: number; hash: string; batches: StreamBatch[] } | null;
 }
 
 export type StreamBatch = { baseRevision: number; revision: number; origin: PatchOrigin; count: number; body: Uint8Array };
@@ -175,6 +176,8 @@ export class DocumentSession {
   frames = 0;
   lastFrame: FrameDescriptor | null = null;
   resyncs = 0;
+  /** Checkpoint resyncs that needed no document body. */
+  resumes = 0;
   batches = 0;
   failures: string[] = [];
   closed = false;
@@ -308,6 +311,27 @@ export class DocumentSession {
   private async doResync(reason: string): Promise<void> {
     const id = this.id;
     if (id === null || this.closed) return;
+    this.document = documentId(this.options.documentId());
+    const resume = this.options.stream.resume?.();
+    if (resume) {
+      try {
+        await this.options.connection.request({ type: 'resync', document: this.document, revision: resume.revision, encoding: 'canonicalJsonV1', source: { kind: 'inline', body: new Uint8Array() }, hash: hexBytes(resume.hash) } as Request, id);
+        if (this.closed) return;
+        this.applied = this.streamRevision = resume.revision;
+        this.resyncs++;
+        this.resumes++;
+        // The journal bridges edits during the outage. Concurrent batches
+        // already queued here may duplicate it; forward skips older revisions.
+        const pending = [...resume.batches, ...this.queued];
+        this.queued = [];
+        for (const batch of pending) this.forward(batch);
+        return;
+      } catch {
+        // The process restarted, the bounded checkpoint expired, or its
+        // patch journal overflowed: send a fresh, complete snapshot.
+        if (this.closed) return;
+      }
+    }
     const snapshot = this.options.stream.snapshot();
     if (!snapshot) throw new Error('the document mirror has no snapshot');
     this.document = documentId(this.options.documentId());

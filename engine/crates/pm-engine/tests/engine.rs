@@ -22,6 +22,30 @@ use pm_protocol::patch::{
 use pm_protocol::slicing::{DeadlineSignal, SlicingPolicy};
 use pm_protocol::version::PeerRole;
 
+struct TempDirectory(std::path::PathBuf);
+impl TempDirectory {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "pm-engine-resync-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for TempDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 const HOST: PortId = PortId(1);
 const WINDOW: PortId = PortId(2);
 const OTHER_WINDOW: PortId = PortId(3);
@@ -349,9 +373,8 @@ fn a_file_resync_resolves_its_handle_with_the_host_only() {
     let mut engine = connected(EngineProcess::Job);
     let session = open_session(&mut engine, WINDOW, 1);
     let (body, hash) = document(r#"{"layers":[],"name":"Big project"}"#);
-    let dir = std::env::temp_dir().join(format!("pm-engine-resync-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("resync.json");
+    let dir = TempDirectory::new();
+    let file = dir.path().join("resync.json");
     std::fs::write(&file, &body).unwrap();
     let handle = handle_for(0x5a);
     let source = ResyncSource::CacheFile {
@@ -399,7 +422,12 @@ fn a_file_resync_resolves_its_handle_with_the_host_only() {
     assert!(sent(&out, WINDOW).is_empty());
     assert_eq!(engine.status().sessions[0].revision, 0);
     // The host can.
-    let out = engine.receive(HOST, &resolved(&file), at(3));
+    let mut out = engine.receive(HOST, &resolved(&file), at(3));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while sent(&out, WINDOW).is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        out.extend(engine.tick(at(3)));
+    }
     assert!(matches!(
         only_answer(&out, WINDOW),
         Message::Response { id, body: Response::PatchesApplied(_) } if id == rid(2)
@@ -427,7 +455,6 @@ fn a_file_resync_resolves_its_handle_with_the_host_only() {
         error_code(&only_answer(&out, WINDOW)),
         ErrorCode::CapabilityRejected
     );
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -812,4 +839,157 @@ fn patch_batches_follow_the_applied_revision() {
         sent(&out, WINDOW).remove(0).message,
         Message::Event { body: Event::Failure(ref f) } if f.error.code == ErrorCode::StaleRevision
     ));
+}
+
+fn wait_for_answer(engine: &mut Engine, mut actions: Vec<Action>, port: PortId) -> Vec<Action> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while sent(&actions, port)
+        .iter()
+        .all(|e| !matches!(e.message, Message::Response { .. } | Message::Error { .. }))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "document reader did not answer"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        actions.extend(engine.tick(at(5)));
+    }
+    actions
+}
+
+#[test]
+fn large_ingestion_is_async_and_cancellation_never_installs_its_result() {
+    let mut engine = connected(EngineProcess::Interactive);
+    let sid = open_session(&mut engine, WINDOW, 1);
+    let (body, hash) = document(&format!("{{\"payload\":\"{}\"}}", "x".repeat(128 * 1024)));
+    let start = std::time::Instant::now();
+    let out = engine.receive(
+        WINDOW,
+        &request(
+            2,
+            resync(
+                7,
+                ResyncSource::Inline {
+                    body: Bytes(body.clone()),
+                },
+                hash,
+            ),
+            Some(sid),
+        ),
+        at(2),
+    );
+    assert!(
+        sent(&out, WINDOW).is_empty(),
+        "large ingestion must leave the event loop"
+    );
+    assert!(start.elapsed() < std::time::Duration::from_millis(100));
+    let cancel = encode(Envelope::new(Message::Cancel { id: rid(2) }));
+    let out = engine.receive(WINDOW, &cancel, at(3));
+    assert_eq!(error_code(&only_answer(&out, WINDOW)), ErrorCode::Cancelled);
+    // Completion of cancelled work cannot install a mirror or emit another answer.
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        engine.tick(at(4));
+    }
+    assert_eq!(engine.status().sessions[0].revision, 0);
+    let out = engine.receive(
+        WINDOW,
+        &request(
+            3,
+            resync(8, ResyncSource::Inline { body: Bytes(body) }, hash),
+            Some(sid),
+        ),
+        at(4),
+    );
+    let out = wait_for_answer(&mut engine, out, WINDOW);
+    assert!(matches!(
+        only_answer(&out, WINDOW),
+        Message::Response {
+            body: Response::PatchesApplied(_),
+            ..
+        }
+    ));
+    assert_eq!(engine.status().sessions[0].revision, 8);
+    assert_eq!(
+        engine.status().sessions[0].hash,
+        Some(pm_model::hash::hex(&hash.0))
+    );
+}
+
+#[test]
+fn reconnect_installs_a_verified_checkpoint_without_parsing_then_accepts_the_patch_suffix() {
+    let mut engine = connected(EngineProcess::Interactive);
+    let sid = open_session(&mut engine, WINDOW, 1);
+    let (body, hash) = document(r#"{"value":1}"#);
+    engine.receive(
+        WINDOW,
+        &request(
+            2,
+            resync(1, ResyncSource::Inline { body: Bytes(body) }, hash),
+            Some(sid),
+        ),
+        at(1),
+    );
+    let batch = |base, revision, value| PatchBatch {
+        document: "doc".into(),
+        base_revision: Revision::new(base).unwrap(),
+        revision: Revision::new(revision).unwrap(),
+        origin: PatchOrigin::Edit,
+        encoding: PatchEncoding::CanonicalV1,
+        patch_count: 1,
+        body: Bytes(
+            pm_model::binary::encode(&[pm_model::Op::Leaf(pm_model::Patch {
+                path: vec!["value".into()],
+                exists: true,
+                value: Some(pm_model::Value::from(value)),
+            })])
+            .unwrap(),
+        ),
+    };
+    engine.receive(
+        WINDOW,
+        &event(Event::ApplyPatches(batch(1, 2, 2)), Some(sid)),
+        at(2),
+    );
+    engine.detach(WINDOW);
+    engine.attach(WINDOW, PeerKind::Renderer);
+    engine.receive(WINDOW, &hello(PeerRole::Renderer), at(3));
+    let new = open_session(&mut engine, WINDOW, 3);
+    let out = engine.receive(
+        WINDOW,
+        &request(
+            4,
+            resync(
+                1,
+                ResyncSource::Inline {
+                    body: Bytes(Vec::new()),
+                },
+                hash,
+            ),
+            Some(new),
+        ),
+        at(4),
+    );
+    assert!(matches!(
+        only_answer(&out, WINDOW),
+        Message::Response {
+            body: Response::PatchesApplied(_),
+            ..
+        }
+    ));
+    engine.receive(
+        WINDOW,
+        &event(Event::ApplyPatches(batch(1, 2, 2)), Some(new)),
+        at(5),
+    );
+    engine.receive(
+        WINDOW,
+        &event(Event::ApplyPatches(batch(2, 3, 3)), Some(new)),
+        at(6),
+    );
+    let (_, expected) = document(r#"{"value":3}"#);
+    assert_eq!(
+        engine.status().sessions[0].hash,
+        Some(pm_model::hash::hex(&expected.0))
+    );
 }

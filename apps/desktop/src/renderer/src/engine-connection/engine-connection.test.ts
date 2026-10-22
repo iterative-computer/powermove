@@ -654,3 +654,22 @@ describe('the host clock', () => {
     expect(clock.pageMs(clock.hostUs(10)!)).toBeCloseTo(10, 9);
   });
 });
+
+it('resumes a checkpoint and replays only the bounded patch suffix without taking a snapshot', async () => {
+  const { connection, port } = await connected();
+  const snapshot = vi.fn(() => ({ revision: 5, encoding: 'canonicalJsonV1' as const, json: '{"id":"P"}', hash: 'ab'.repeat(32) }));
+  const suffix: StreamBatch[] = [
+    { baseRevision: 3, revision: 4, origin: 'edit', count: 1, body: new Uint8Array([1]) },
+    { baseRevision: 4, revision: 5, origin: 'metadata', count: 1, body: new Uint8Array([2]) },
+  ];
+  const doc = { ...stream(), snapshot, resume: () => ({ revision: 3, hash: 'ab'.repeat(32), batches: suffix }) };
+  const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+  await session.start(); await flush();
+  expect(snapshot).not.toHaveBeenCalled();
+  const request = port.requests('resync')[0]!.message as any;
+  expect(request.body.source.body).toHaveLength(0);
+  expect(session.batches).toBe(2);
+  const patches = port.events('applyPatches').map(e => (e.message as any).body);
+  expect(patches.at(-1).revision).toBe(5);
+  session.close(); connection.close('test complete');
+});
