@@ -3590,11 +3590,18 @@ A separate native transport counterexample reproduced a stale stopped-clock
 bug: after Play requested 4 s, `EngineTransport.now()` still returned the
 previous stopped sample at 6 s. The frontend's work-area check could cancel
 that pending start. The driver now holds its requested position while a run
-has not played and its available sample is stopped. An exact seek updates
-that held position; a moving sample, a completed run and an explicit Pause
-retain their prior behavior. The pure-module counterexample fails before
+has not played and its available stopped sample still has the pre-Play
+epoch. An exact seek updates that held position; newer stopped seek replies
+and completed runs report their actual position even if the UI never polled
+a moving sample. A moving sample and an explicit Pause retain prior behavior. The pure-module counterexample fails before
 and passes after the fix. A protocol-fixture regression also covers those
 transitions and a rate change; its full Vitest run is pending. This proves
 the standalone bug, not the origin of the earlier V36 warm-Play Pause.
 The two frontend files changed are `engine-connection/transport.ts` and its
 existing `engine-connection.test.ts`.
+
+Independent review found that the initial hold also caught an unpolled
+run's newer stopped end sample. The hold now requires the pre-Play epoch;
+protocol regressions include stopped seek replies, unpolled forward and
+reverse ends, PlayAround and moving-clock rate changes. The original pure
+counterexample still passes. This correction does not attribute the V36 Pause.

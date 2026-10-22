@@ -418,25 +418,73 @@ describe('the transport driver', () => {
     sample(1, 1, 'stopped', 6);
     driver.play(4);
     expect(driver.now(0)).toEqual({ time: 4, playing: false, ended: false });
+    // Native Seek answers with a newer stopped epoch before Play publishes a
+    // playing sample; it is no longer the old end-of-work-area clock.
+    sample(1, 2, 'stopped', 4);
+    expect(driver.now(0)).toEqual({ time: 4, playing: false, ended: false });
     driver.seek(3, false);
     expect(driver.now(0)).toEqual({ time: 3, playing: false, ended: false });
-    sample(1, 2, 'playing', 3, 1_000_000);
+    sample(1, 3, 'stopped', 3);
+    expect(driver.now(0)).toEqual({ time: 3, playing: false, ended: false });
+    sample(1, 4, 'playing', 3, 1_000_000);
     expect(driver.now(1500)).toEqual({ time: 3.5, playing: true, ended: false });
-    sample(2, 2, 'stopped', 6);
+    sample(1, 5, 'stopped', 6);
     expect(driver.now(2000)).toEqual({ time: 6, playing: false, ended: true });
 
     driver.play(4);
     expect(driver.now(2000)).toEqual({ time: 4, playing: false, ended: false });
     driver.pause();
-    expect(driver.now(2000)).toEqual({ time: 6, playing: false, ended: false });
 
     // A rate change on an already moving line continues to follow its
     // current sample until the producer publishes the new epoch.
-    sample(1, 3, 'playing', 3, 1_000_000);
+    sample(1, 6, 'playing', 3, 1_000_000);
     driver.shuttle(4.5, 2);
     expect(driver.now(1500)).toEqual({ time: 3.5, playing: true, ended: false });
-    sample(1, 4, 'playing', 4.5, 1_000_000, 2);
+    sample(1, 7, 'playing', 4.5, 1_000_000, 2);
     expect(driver.now(1500)).toEqual({ time: 5.5, playing: true, ended: false });
+    session.close(); connection.close('test complete');
+  });
+
+  it('reports forward and reverse end positions even when no moving sample was polled', async () => {
+    const { connection, port } = await connected();
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, revision: 3 } } as never, 5));
+    const clock = new HostClock(async () => 0);
+    (clock as unknown as { best: { offsetUs: number; rttUs: number } }).best = { offsetUs: 0, rttUs: 10 };
+    const driver = new EngineTransport(() => session, clock);
+    driver.refresh();
+    const sample = (epoch: number, state: 'stopped' | 'playing' | 'shuttling', time: number, rate = 1) => {
+      port.deliver(envelope({ kind: 'event', body: {
+        type: 'clock', seq: 1, epoch, state, hostTime: 1_000_000, mediaTime: ticks(time),
+        rate: { num: state === 'stopped' ? 0 : rate, den: 1 }, outputLatencyUs: 0,
+        sampleRate: 48000, loopRange: null
+      } } as never, 5));
+    };
+
+    sample(1, 'stopped', 6);
+    driver.play(4);
+    expect(driver.now(0)).toEqual({ time: 4, playing: false, ended: false });
+    sample(2, 'stopped', 4); // Seek reply.
+    sample(3, 'playing', 4);
+    sample(4, 'stopped', 6); // The run ended while the page was not polling.
+    expect(driver.now(2000)).toEqual({ time: 6, playing: false, ended: false });
+
+    driver.shuttle(4, -1);
+    expect(driver.now(0)).toEqual({ time: 4, playing: false, ended: false });
+    sample(5, 'stopped', 4);
+    sample(6, 'shuttling', 4, -1);
+    sample(7, 'stopped', 0);
+    expect(driver.now(2000)).toEqual({ time: 0, playing: false, ended: false });
+
+    driver.playAround(3, 1, 1);
+    expect(driver.now(0)).toEqual({ time: 3, playing: false, ended: false });
+    sample(8, 'stopped', 3);
+    expect(driver.now(0)).toEqual({ time: 3, playing: false, ended: false });
+    sample(9, 'playing', 2);
+    expect(driver.now(1500)).toEqual({ time: 2.5, playing: true, ended: false });
+    sample(10, 'stopped', 3);
+    expect(driver.now(2000)).toEqual({ time: 3, playing: false, ended: true });
     session.close(); connection.close('test complete');
   });
 
