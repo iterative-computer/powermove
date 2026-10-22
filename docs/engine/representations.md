@@ -24,14 +24,18 @@ data window equal to the display window. Other EXRs build scene-linear,
 premultiplied box mips in memory, at float precision, from the exact original
 reader. No EXR mip path writes a file.
 
-`image::mip_cache::TiledMipCache` divides a reduced packed-RGBA still into
-256-pixel tiles, preserving its sample bits and color metadata. It has a byte
-budget and LRU eviction. Its key includes path, file length, modification
-time, inode, device, change time, target size, and tile coordinates. Cache
-instances should be discarded when a source is relinked. This is a memory
-cache, with no generated image files. The current full-layer renderer uses
-`read_reduced`; the tile API is for consumers that fetch subregions. Full-
-resolution exports never query either reduced API.
+`image::mip_cache::TiledMipCache` retains only visible 256-pixel tiles of a
+packed-RGBA still, preserving sample bits and color metadata. Each tile has a
+four-pixel neighbor gutter so bilinear sampling has the source pixels it needs
+at a seam. CPU tiles, converted tile textures, and converted whole-image and
+video textures share the renderer frame-cache lease and use LRU eviction.
+Tile keys include the source file identity, requested representation, and
+tile coordinates. Cache instances
+should be discarded when a source is relinked. Tiles are memory-only, with no
+generated image files. The level 2 affine Playback renderer draws visible
+tiles when its selected representation needs bilinear sampling; minified,
+paused Final, projective, and compatibility level 1 draws use the full-image
+path. Full-resolution exports never query the tile cache.
 
 The renderer's `set_preview_decode_size(Some((width, height)))` applies the
 viewer target in display coordinates. For ProRes it requests a coded size
@@ -45,6 +49,12 @@ and still-texture keys distinguish original and reduced pixels and their
 requested size. Changing preview size clears kept draws. Export requests
 force the original reader and decode purpose even if a preview target remains
 set on the renderer.
+
+For untagged 4:2:0 VP9 in a compatibility video layer, the renderer uses
+Chromium's centered, linear chroma reconstruction. This preserves existing
+projects' video pixels; an explicit file siting tag or Interpret Footage
+override retains its specified reading. Other codecs keep the section 9
+untagged-left default.
 
 `Renderer::media_representation()` reports `Original` or
 `ReducedResolution` for the media actually drawn in the last render, including
@@ -70,7 +80,8 @@ headroom and the other machine-policy inputs.
 
 Focused tests cover ProRes partial decode dimensions and exact export bytes
 before and after, ImageIO thumbnail dimensions and original PNG bytes, stored
-EXR mip dimensions, tile size/budget, source-file preservation, and renderer
-export pixels before and after reduced preview. The legacy viewer's half-scale
-pixel parity remains an integration gate; these APIs do not assert that
-different resamplers produce identical pixels.
+EXR mip dimensions, tile size/budget, source-file preservation, a cropped
+tile render against the full image across tile seams, and renderer export
+pixels before and after reduced preview. The legacy viewer's half-scale pixel
+parity remains an integration gate; these APIs do not assert that different
+resamplers produce identical pixels.
