@@ -544,16 +544,20 @@ export class EnginePresenter implements Presenter {
     }
     const submitMs = this.now();
     const width = frame.codedWidth, height = frame.codedHeight;
-    frame.close();
     this.stats.drawn++;
     this.trace?.draws.push([rafMs, desc.seq, desc.revision, desc.pts, item.arrivedMs, submitMs, desc.viewSeq, desc.duration === null ? 0 : 1]);
+    // Keep the external texture's source alive through GPU completion.
+    // Closing it expires Blink's external-texture lease and can return its
+    // shared-image wrapper to the cache while the submitted draw still reads.
     const completed = this.options.painter.workDone().then(
       () => {
+        frame.close();
         this.trace?.releases.push([desc.seq, submitMs, this.now()]);
         this.release(desc);
         this.done(desc.seq);
       },
       () => {
+        frame.close();
         this.release(desc);
         this.done(desc.seq);
       }
