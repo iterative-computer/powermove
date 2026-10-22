@@ -373,26 +373,82 @@ the engine on fresh profiles in one run): presented frames in four seconds
 at least today's within one per second, and scrub p95 within a fifth and
 one frame of today's.
 
-What remains, measured on the private projects, is in the lane report
-(`/tmp/ne-w5/reports/bigrender.json`, outside the repository) and below:
+What remained after round 1 (PMV4 frame residuals at 0 s and 3.2 s, up
+to 6 CV: a group's glow and blur from the user's effects, owned by effects
+translation; a DM Sans text layer's edges with typography anchoring,
+owned by `pm-text`) is unchanged. The round 2 changes and what remains
+are below.
 
-- Neither engine plays PMV4 in real time: in eight seconds today's
-  playhead covers 2.8 s and presents 232 frames, the engine's covers 1.7 s
-  and presents 110. Its only audio clip is offline, and the engine's
-  output underran on nearly every device callback (72,089 of 73,350) while
-  it played; the audio lanes (`pm-audio` playback, `present/audio.rs`) own
-  why an all-offline mix underruns.
-- A fresh profile's first play waits for first-use work: the ANGLE parity
-  probe of each user effect (the frame waits for WebGL's reference) and
-  each program's Metal compile, 1.5 to 3.5 s on the 867-layer project.
-- A frame of PMV3 holds 300 to 360 MiB of intermediate targets: every
-  layer's targets are returned to the pool at the end of the frame, not
-  when the layer has been composited.
-- PMV4 frames at 0 s and 3.2 s differ from today's by up to 6 CV: the
-  glow of a group with two of the user's effects, a glow and a
-  blur (effects translation), and the edges of a DM Sans text
-  layer with typography anchoring (`pm-text` level 1 raster and the
-  typography anchor offset).
+### Round 2 (2026-10-22)
+
+What changed, by cause, measured on the private projects with the stage
+breakdown (now with each frame's program build and probe time, the
+longest frame's stages, and the slowest shape raster drawn ahead and its
+size):
+
+| Cause | Where | Fix |
+|---|---|---|
+| A fresh profile's first plays waited for each unknown user program's ANGLE probe and Metal compile | `effects::parity`, `effects::prewarm`, `present/render.rs` | Decision PROBE-1 (`effects.md`): viewer frames present natively and probe in the background, and programs are built on a worker at open and on definition changes. An idle sweep probes the document's other programs. Exports and snapshots still hold |
+| The engine's own level 1 shape rasters ignored today's preview clipping: an 8000 px background was a 64 Mpx canvas emulated on the CPU every frame (it cannot fit the 192 MiB raster budget) | `plan.rs`, `vector/mod.rs`, `pm_vector::canvas2d::shape` | Today's decision for the engine's draw: a shape the viewport misses is not drawn, and a window is rasterized as today's crop canvas (`rasterShape(d, scale, crop)`) with today's texture coordinates. Inside a plain fill, the window over the viewport is drawn. Exports and snapshots clip the engine's own shapes and paths to their output (a producer still never sees a crop there) |
+| Paths layers (outside today's clipping) had the same 8000 px canvases | `compat_crop::paths_plan`, `raster_paths_window` | The window of the bitmap the frame samples, with today's margin and bucket steps; the frame matches the whole bitmap's at max 0 |
+| The exact canvas emulation visited each triangle's bounding box and blended every draw over the whole canvas | `pm_vector::canvas2d` (`msaa`, `analytic`, `context`) | Spans between the exact edge thresholds, analytic coverage stored for the mesh only, draws bounded to the pixels they reach, `unorm8` rounding in `f32`, a reciprocal table, paint once per pixel. Bit for bit against the kept references, and the canvas2d gate ran in 28 s instead of 83 s |
+| Every layer's intermediate targets stayed out of the pool until the frame ended | `exec.rs`, `composite/exec.rs`, `pm_gpu::target` | Given back where a pass's draws have been recorded into its accumulator. Queue writes take only targets no command of the frame reads, and nothing is given back while the depth and id pass reads layer images. A 14-layer effect frame has less than half the peak, with the same pixels. `pooledPeak` reports the frame's peak |
+| An export waited for a round trip through main to the window every fifth frame | `jobs/compat.rs` | A helper thread keeps the next 12 frames of the last frame's layers asked for (turns of 8, within main's 32), holding at most 384 MiB of answers |
+| A playing frame waiting for raster-override answers was followed by frames waiting for their own | `present/render.rs` (`Renderer::compat_needs`) | While a frame waits, the next three frames the schedule will draw (at its stride) are planned and asked for in the same turn |
+| The window skipped every need more than one frame behind its clock, and on a large project its turns ran longer than a frame | `render-transport.ts` | Needs up to 12 frames behind are answered |
+| After a few heavy frames the schedule's cost estimate made every later frame look unreachable, so nothing was drawn | `present/schedule.rs` | After 250 ms without a rendered frame, a late frame still on display is drawn |
+| With the engine drawing, the window's frame loop moved the playhead on every 60 Hz tick (timeline, panels and extensions followed), and autosave writes (4 s per 8 s of playback, against 1 s today) ran during playback | `legacy/core/engine.ts`, `legacy/app.ts` | The playhead moves once per project frame. An autosave write waits for the engine's playback to stop, for at most 15 s |
+
+Measured after round 2, paired back to back on fresh profiles with the
+user's extensions (release build, load average 12 to 28 from other lanes;
+medians of two pairs, indicative until a quiet window):
+
+| | today | engine | round 1 engine |
+|---|---|---|---|
+| PMV3 playback, frames in 8 s | 114 | 19 | 23 |
+| PMV3 scrub p95 | 123 ms | 522 ms | 307 ms |
+| PMV3 export, MP4 half size | 152 s | 287 s | 378 s |
+| PMV4 playback, frames in 8 s | 175 | 88 | 86.5 |
+| PMV4 scrub p95 | 93 ms | 131 ms | 107.5 ms |
+| PMV3 first play: first moving frame, frames in 2 s | 63 ms, 32 | 159 ms, 19 | (6.4 s stalls) |
+
+The engine's own frame cost on PMV3 fell from 261 ms to 34 to 46 ms per
+playing frame and from 342 to 30 to 34 ms per scrub frame (prefetched
+shape rasters 203 to 8 to 12 ms; program builds and probes 0 and 2 ms).
+What remains:
+
+- **The window's main thread.** Every engine frame of a project with a
+  raster override needs window turns: its answers, then its
+  presentation. On PMV3 the window is idle 0.2 s in 10 s of playback.
+  The user's extension that draws a graph on every animation frame (with
+  layout reads), the panels' rounded scroll and the mixer's edge
+  measures take most of it, as they do today. Today draws each frame
+  inside that animation frame, so it keeps 110 to 120 frames. With the
+  engine, frames wait in its pool for the window to take them (pool
+  waits), or wait for answers (after a slow frame the schedule now draws
+  late rather than skip everything). The engine cannot fix this alone: it
+  needs presentation and answers off the window's main thread, or the
+  window's animation-frame work held to the presented frame rate (owners:
+  bridge, kernel).
+- **PMV4.** There is a render-thread turn of 0.4 to 2.6 s once per play,
+  and about 415 waits for answers. Its only audio clip is offline, and
+  the engine's audio underran on nearly every device callback (audio
+  lanes).
+- **Export.** PMV3 takes 287 s against 152 s. Answers come ahead in the
+  background and the engine's own shapes are clipped. The rest is the
+  job engine's per-frame render and readback (not profiled this round).
+  The 74.7 MB file against 52.8 MB is the encoder settings (export
+  encoding lane).
+- **Memory (total RSS, all processes).** PMV3 is 4.7 to 5.2 GB against
+  3.6 to 4.4 GB today. PMV4 is 8.6 to 10.4 GB against 4.4 to 5.5 GB. The
+  window's JavaScript and wasm heap holds 2.6 to 4.1 GB against 1.9 GB
+  today (the in-window document copy, bigopen; growth while scrubbing,
+  open). The engine process holds 1.3 to 2.1 GB for PMV4, about 1 GB of
+  it the document tree (bigopen). The frame pipeline is now small: PMV4's
+  intermediate-target peak is 96 MB, vector rasters 16 MB, media 12 MB and
+  frame surfaces 67 MB. With one shape-raster worker instead of four,
+  engine RSS is the same (504 to 557 MiB against 467 to 548 MiB on PMV3),
+  because clipped rasters are small. The four-worker cap stays.
 
 ## Resync
 

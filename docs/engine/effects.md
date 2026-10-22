@@ -299,6 +299,75 @@ end-to-end snapshot times under shared machine load, not GPU timings or a
 viewer frame-rate claim. Each snapshot stayed within the transport's 5 s
 bound; the first probe and runner draw deadlines remain unchanged.
 
+### Background probes and program builds (decision PROBE-1, 2026-10-22)
+
+Orchestrator decision PROBE-1 changes the hold above for the viewer: a
+first-use parity probe or a first Metal compile never blocks playback.
+Today's app has no probe, and its own first GL compile on first use is the
+baseline a fresh profile's first play is measured against.
+
+- **Viewer frames present natively and probe in the background.** The
+  presenter renders viewer frames with `Renderer::set_probe_background`.
+  An unknown user program draws through its native pipeline (the path a
+  native-verified pin takes) and the frame is presented at once. The probe
+  (the step's inputs and native result, read back once per program) is
+  queued (`EffectFallback::probe`); the presenter takes the queue after
+  the frame (`Renderer::take_probes`) and sends it like a waiting request.
+  The answer is judged when it lands (`put_fallback_pixels`). A match
+  verifies the program. A mismatch or a lasting reference failure pins it
+  to the runner as before, and the pin count grows (`Renderer::parity_pins`).
+  The presenter then draws its views again, including frames rendered
+  ahead, so frames after the pin come from the runner. While the probe is
+  in flight, frames of the program present natively and probe nothing
+  more. A transient reference failure leaves the program unknown and
+  waits out the runner's backoff before another frame probes it.
+  Effects, transitions, shader layers and extension fragment layers all
+  follow this policy (`a_viewer_frame_presents_an_unknown_program_natively_and_probes_it_in_the_background`).
+- **Exports and snapshots still hold.** They never set the policy. Their
+  frames wait for the runner's result, as described above, so a delivered
+  frame is never an unverified native one.
+- **What this allows.** Until a probe answers, a program whose native
+  draw differs from WebGL's by more than one code value shows its native
+  result for the frames already presented (one round trip of the window's
+  runner, a few frames). DEFS-4 measured no such user program: all 40
+  drawable programs of the qualification ended native-verified. A
+  program is probed the first time a viewer frame draws it, starting
+  with the paused frame at open, so most of a project's programs are
+  judged before Play. There is no sweep of frames not yet drawn: a
+  program first met during playback presents natively until its probe
+  answers. An idle sweep (the first frame of each layer using an
+  unjudged program, drawn offscreen while the view was paused) was tried
+  and taken out: its frames re-seek the project's video decoders and put
+  runner draws on the window before Play, and on the 867-layer project
+  one fresh-profile run with it first moved 4.25 s after Play (another
+  230 ms; 131 to 187 ms without it). A sweep needs a way to probe without
+  the view's decoders (open).
+- **Programs are built off the frame thread.** At project open (a full
+  document replace) and whenever the definition set changes (session
+  start, an extension installed, updated or reloaded), the renderer queues
+  the programs the document's layers name (`fx[].type`, transitions,
+  extension layers' definitions), then every other user program
+  (`Renderer::prewarm_programs`, `effects::prewarm`). A worker thread
+  builds each program exactly as a first frame would: `Prepared::finish`,
+  `GpuProgram::new` and the pipeline for the last frame's working format.
+  wgpu's error scopes are thread-local, so a build failure on the worker
+  turns the definition into a fallback one just as an in-frame failure
+  does. If a frame reaches a program that is still queued, it takes the
+  job back and builds it itself, so it never waits behind other builds.
+  If the program is already being built, the frame waits for that build,
+  which started earlier than the frame would have.
+- **Persistence.** Pins and verifications persist as before, in the
+  content-addressed markers. Translations (steps 0 to 4) persist in
+  `pm_glsl::Cache` on disk. Compiled Metal functions persist in Metal's own
+  shader cache, per app bundle and across profiles. wgpu exposes no
+  Metal binary archive or pipeline cache (its `PipelineCache` is
+  Vulkan-only), so the engine adds none of its own.
+- **Measured.** The presenter reports per frame the time spent building
+  programs or waiting for a build (`programsUs`, `programsMaxUs`) and on
+  probes (`probeUs`), along with the builds done ahead (`prewarmBuilt`,
+  `prewarmBuiltUs`, `prewarmWaited`). First-play numbers on the private
+  projects are in `host-processes.md`, "Large projects, rendering".
+
 ## Where effects run
 
 The compositor (`crate::composite`, `docs/engine/composite.md`) owns the graph: a layer
