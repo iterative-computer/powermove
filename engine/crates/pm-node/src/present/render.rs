@@ -233,6 +233,12 @@ pub enum Command {
         meta: Box<super::complete::FrameMeta>,
         error: String,
     },
+    /// A mapped snapshot slot completed on the GPU completion worker.
+    SnapshotMapReady,
+    SnapshotPollFailed {
+        lost: Arc<AtomicBool>,
+        error: String,
+    },
     /// The session's document changed (document source). `posted`: host
     /// µs the engine handed it to the presenter (the per-frame trace).
     Document {
@@ -630,7 +636,7 @@ struct Gpu {
     queue: wgpu::Queue,
     display: DisplayTransform,
     /// Reused by serial snapshot copies on this device.
-    snapshot_readback: pm_gpu::readback::Readback,
+    snapshot_readback: pm_gpu::readback::ReadbackRing,
     /// One reusable snapshot color attachment. Every capture still redraws it.
     snapshot_target: Option<pm_gpu::Target>,
     /// Draws documents (made with the first document frame).
@@ -662,7 +668,7 @@ impl Gpu {
         frame_cache: usize,
     ) -> (
         &mut Composer,
-        &mut pm_gpu::readback::Readback,
+        &mut pm_gpu::readback::ReadbackRing,
         &mut Option<pm_gpu::Target>,
     ) {
         self.composer_with(config, frame_cache);
@@ -802,6 +808,69 @@ struct AudioPrefs {
 /// the host clock.
 pub const AUDIO_START_TIMEOUT_US: i64 = 1_500_000;
 
+struct PendingSnapshot {
+    job: super::snapshot::SnapshotJob,
+    ticket: pm_gpu::readback::ReadbackTicket,
+    started: i64,
+    map_deadline: i64,
+    revision: Revision,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    rows: pm_render::SnapshotRows,
+    draft_3d: bool,
+}
+
+/// Drives map callbacks off the presentation thread. Mapping still follows
+/// every fresh render+copy submission; this worker never reads the pixels.
+struct SnapshotPoller {
+    tx: Option<Sender<(wgpu::Device, Arc<AtomicBool>)>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SnapshotPoller {
+    fn start(back: Sender<Command>) -> Result<Self, String> {
+        let (tx, rx) = std::sync::mpsc::channel::<(wgpu::Device, Arc<AtomicBool>)>();
+        let thread = pm_engine::qos::spawn_engine_thread(
+            pm_protocol::error::EngineProcess::Interactive,
+            "pm-snapshot-complete",
+            move || {
+                for (device, lost) in rx {
+                    if let Err(error) = device.poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: Some(Duration::from_secs(2)),
+                    }) {
+                        let _ = back.send(Command::SnapshotPollFailed {
+                            lost,
+                            error: error.to_string(),
+                        });
+                    }
+                }
+            },
+        )
+        .map_err(|e| format!("could not start snapshot completion thread: {e}"))?;
+        Ok(Self {
+            tx: Some(tx),
+            thread: Some(thread),
+        })
+    }
+
+    fn submit(&self, device: wgpu::Device, lost: Arc<AtomicBool>) -> bool {
+        self.tx
+            .as_ref()
+            .is_some_and(|tx| tx.send((device, lost)).is_ok())
+    }
+}
+
+impl Drop for SnapshotPoller {
+    fn drop(&mut self) {
+        self.tx.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 struct Thread {
     config: ThreadConfig,
     sink: Sink,
@@ -838,6 +907,10 @@ struct Thread {
     frame_cache: usize,
     /// Host snapshots waiting for their revision or their turn.
     snapshots: super::snapshot::SnapshotQueue,
+    /// Frame copies waiting for their own staging slot's map callback.
+    pending_snapshots: Vec<PendingSnapshot>,
+    snapshot_back: Sender<Command>,
+    snapshot_poller: Option<SnapshotPoller>,
     /// Shared-memory segments published for main and not reaped yet.
     segments: pm_bridge::shm::Segments,
     /// Host µs of the newest frame drawn for a gesture, scrub, or edit
@@ -862,6 +935,7 @@ struct Thread {
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
+const SNAPSHOT_GPU_TIMEOUT_US: i64 = 2_000_000;
 
 /// The decision 19 fallback runner's state on this thread.
 #[derive(Default)]
@@ -903,9 +977,8 @@ pub fn run(
     pm_bridge::set_thread_user_interactive();
     let fps = i64::from(config.fps.max(1));
     let peaks = super::peaks::PeakWorker::new(sink.clone());
-    // Without the completion thread every frame waits for the GPU here.
-    let completer = match super::complete::Completer::start(sink.clone(), back, config.send_delay) {
-        Ok(c) => Some(c),
+    let snapshot_poller = match SnapshotPoller::start(back.clone()) {
+        Ok(worker) => Some(worker),
         Err(error) => {
             sink(vec![Action::Log {
                 level: LogLevel::Warn,
@@ -914,6 +987,18 @@ pub fn run(
             None
         }
     };
+    // Without the completion thread every frame waits for the GPU here.
+    let completer =
+        match super::complete::Completer::start(sink.clone(), back.clone(), config.send_delay) {
+            Ok(c) => Some(c),
+            Err(error) => {
+                sink(vec![Action::Log {
+                    level: LogLevel::Warn,
+                    message: error,
+                }]);
+                None
+            }
+        };
     let mut thread = Thread {
         frame_ticks: TICKS_PER_SECOND / fps,
         frame_cache: pm_render::media::DEFAULT_FRAME_CACHE,
@@ -938,6 +1023,9 @@ pub fn run(
         auto_generation: BTreeMap::new(),
         fallback: Fallback::default(),
         snapshots: super::snapshot::SnapshotQueue::default(),
+        pending_snapshots: Vec::new(),
+        snapshot_back: back,
+        snapshot_poller,
         segments: pm_bridge::shm::Segments::default(),
         last_interactive: None,
         snapshot_costs: BTreeMap::new(),
@@ -1016,6 +1104,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::ShaderFallback { .. } => "shader fallback",
         Command::FrameCache { .. } => "frame cache",
         Command::Snapshot(_) => "snapshot",
+        Command::SnapshotMapReady => "snapshot map ready",
+        Command::SnapshotPollFailed { .. } => "snapshot poll failed",
         Command::Compat { .. } => "compat",
         Command::LoseDevice => "lose device",
         Command::FontsChanged => "fonts",
@@ -1206,7 +1296,7 @@ impl Thread {
                         device,
                         queue,
                         display,
-                        snapshot_readback: pm_gpu::readback::Readback::default(),
+                        snapshot_readback: pm_gpu::readback::ReadbackRing::default(),
                         snapshot_target: None,
                         composer: None,
                         fonts_installed: None,
@@ -1231,6 +1321,10 @@ impl Thread {
     fn recover_gpu(&mut self) {
         // A lost device fails its submissions at once.
         self.drain_frames();
+        self.fail_pending_snapshot_maps(
+            ErrorCode::DeviceLost,
+            "The GPU was lost before the snapshot finished.",
+        );
         let Some(gpu) = self.gpu.take() else {
             return;
         };
@@ -1764,6 +1858,21 @@ impl Thread {
                     format!("frame bridge: the GPU did not finish a frame: {error}"),
                 );
             }
+            Command::SnapshotMapReady => {}
+            Command::SnapshotPollFailed { lost, error } => {
+                if !self
+                    .gpu
+                    .as_ref()
+                    .is_some_and(|gpu| Arc::ptr_eq(&gpu.lost, &lost))
+                {
+                    return true;
+                }
+                lost.store(true, Ordering::Release);
+                self.fail_pending_snapshot_maps(
+                    ErrorCode::DeviceLost,
+                    &format!("The GPU could not finish the snapshot: {error}"),
+                );
+            }
             Command::Definitions {
                 key,
                 set,
@@ -2185,6 +2294,26 @@ impl Thread {
         self.snapshot_costs.remove(&key);
         self.compat.forget_session(key);
         self.peaks_waiting.retain(|(k, _)| *k != key);
+        // A frame already submitted for readback is no longer in the
+        // scheduler. Cancel its mapping too, before the session disappears.
+        let (ended, live): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_snapshots)
+            .into_iter()
+            .partition(|pending| pending.job.key == key);
+        self.pending_snapshots = live;
+        if let Some(gpu) = self.gpu.as_mut() {
+            for pending in &ended {
+                gpu.snapshot_readback
+                    .cancel(pending.ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+            }
+        }
+        for pending in ended {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &pending.job,
+                ErrorCode::UnknownSession,
+                "The window's engine session closed.",
+            );
+        }
         for job in self.snapshots.take_session(key) {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
@@ -3256,6 +3385,9 @@ impl Thread {
     fn next_wake(&self) -> Duration {
         let now = now();
         let mut wake = now + 50_000;
+        if let Some(deadline) = self.pending_snapshots.iter().map(|p| p.map_deadline).min() {
+            wake = wake.min(deadline);
+        }
         if let Some(at) = self.fallback.retry_at.values().min() {
             wake = wake.min(*at);
         }
@@ -5007,6 +5139,7 @@ impl Thread {
     /// that is ready, then at most one `idle` job (so a gesture that starts
     /// is served after one).
     fn work_snapshots(&mut self) {
+        self.finish_pending_snapshots();
         if self.snapshots.is_empty() {
             return;
         }
@@ -5058,6 +5191,24 @@ impl Thread {
             let Some(job) = self.snapshots.next(revision, outstanding, pressure, now) else {
                 return;
             };
+            if matches!(
+                &job.request.target,
+                pm_protocol::snapshot::SnapshotTarget::Frame { .. }
+            ) {
+                // Float32 is the largest possible target format. Reserving
+                // against this bound can delay a Float16 job, never let a
+                // job escape the ring's memory limit after rendering.
+                let width = u64::from(job.request.output_size.width);
+                let height = u64::from(job.request.output_size.height);
+                let estimated = (width * 16).div_ceil(256) * 256 * height;
+                if self.gpu.as_ref().is_some_and(|gpu| {
+                    !gpu.snapshot_readback
+                        .can_reserve(estimated, MAX_CACHED_SNAPSHOT_TARGET_BYTES)
+                }) {
+                    self.snapshots.requeue(job);
+                    return;
+                }
+            }
             let idle = job.request.class == pm_protocol::snapshot::SnapshotClass::Idle;
             if idle && idle_done {
                 self.snapshots.requeue(job);
@@ -5068,11 +5219,134 @@ impl Thread {
         }
     }
 
+    /// Advances map callbacks without waiting for the GPU. A pending
+    /// snapshot owns its staging ticket and result metadata; meanwhile the
+    /// normal work turn may render and submit viewer frames.
+    fn finish_pending_snapshots(&mut self) {
+        if self.pending_snapshots.is_empty() {
+            return;
+        }
+        // Responses stay in request order even if a later slot's map
+        // callback runs first.
+        while let Some(first) = self.pending_snapshots.first() {
+            let result = self
+                .gpu
+                .as_mut()
+                .expect("polled GPU")
+                .snapshot_readback
+                .try_with_mapped_rows(
+                    first.ticket,
+                    |data, row, stride, height| {
+                        super::snapshot::encode_mapped_rgba8(
+                            first.format,
+                            data,
+                            row,
+                            stride,
+                            height,
+                            first.job.request.pixels,
+                            first.rows,
+                        )
+                    },
+                    MAX_CACHED_SNAPSHOT_TARGET_BYTES,
+                );
+            let Some(result) = result else { break };
+            let pending = self.pending_snapshots.remove(0);
+            match result.and_then(|result| result) {
+                Ok(pixels) => self.complete_frame_snapshot(pending, pixels),
+                Err(error) => {
+                    self.stats().snapshot_failures += 1;
+                    self.snapshot_error(
+                        &pending.job,
+                        ErrorCode::Internal,
+                        &format!("The GPU snapshot readback failed: {error}"),
+                    );
+                }
+            }
+        }
+        if self
+            .pending_snapshots
+            .first()
+            .is_some_and(|pending| pending.map_deadline <= now())
+        {
+            if let Some(gpu) = self.gpu.as_ref() {
+                gpu.lost.store(true, Ordering::Release);
+            }
+            self.fail_pending_snapshot_maps(
+                ErrorCode::Timeout,
+                "The GPU snapshot readback did not complete within 2 seconds.",
+            );
+        }
+    }
+
+    fn fail_pending_snapshot_maps(&mut self, code: ErrorCode, message: &str) {
+        let pending = std::mem::take(&mut self.pending_snapshots);
+        if let Some(gpu) = self.gpu.as_mut() {
+            for item in &pending {
+                gpu.snapshot_readback
+                    .cancel(item.ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+            }
+        }
+        for item in pending {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(&item.job, code, message);
+        }
+    }
+
+    fn complete_frame_snapshot(&mut self, pending: PendingSnapshot, pixels: Vec<u8>) {
+        use pm_protocol::snapshot::{SnapshotOutcome, SnapshotResult};
+        let PendingSnapshot {
+            job,
+            started,
+            revision,
+            width,
+            height,
+            draft_3d,
+            ..
+        } = pending;
+        let Some(payload) = self.share_pixels(&job, pixels) else {
+            return;
+        };
+        let render_us = (now() - started).max(0);
+        self.snapshots.observe(render_us as f64);
+        {
+            let mut stats = self.stats();
+            stats.snapshots += 1;
+            stats.snapshot_us_max = stats.snapshot_us_max.max(render_us);
+        }
+        let costs = self.snapshot_costs.entry(job.key).or_default();
+        costs.0 += 1;
+        costs.1 = costs.1.max(render_us);
+        let result = SnapshotResult {
+            revision,
+            view_seq: job.request.view_seq,
+            width,
+            height,
+            pixels: job.request.pixels,
+            payload,
+            origin: [0.0, 0.0],
+            layer_box: None,
+            raster: None,
+            quality: FrameQuality {
+                resolution: PreviewResolution::Full,
+                representation: Representation::Original,
+                draft_3d,
+                cached: false,
+                stand_in: false,
+            },
+            waited_us: (started - job.received).clamp(0, i64::from(u32::MAX)) as u32,
+            render_us: render_us.clamp(0, i64::from(u32::MAX)) as u32,
+        };
+        let mut envelope = Envelope::new(Message::Response {
+            id: job.id,
+            body: Response::Snapshot(Box::new(SnapshotOutcome::Rendered(result))),
+        });
+        envelope.revision = Some(revision);
+        self.send(job.host, envelope);
+    }
+
     /// Renders one snapshot and answers it.
     fn run_snapshot(&mut self, job: super::snapshot::SnapshotJob) {
-        use pm_protocol::snapshot::{
-            SnapshotClass, SnapshotOutcome, SnapshotResult, SnapshotTarget,
-        };
+        use pm_protocol::snapshot::{SnapshotClass, SnapshotOutcome, SnapshotTarget};
         let started = now();
         if self.gpu().is_none() {
             self.stats().snapshot_failures += 1;
@@ -5091,9 +5365,20 @@ impl Thread {
             self.run_layer_snapshot(job, started);
             return;
         }
+        if self.snapshot_poller.is_none() {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::Internal,
+                "The GPU snapshot completion worker is unavailable.",
+            );
+            return;
+        }
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
+        let gpu_lost = gpu.lost.clone();
+        let gpu_device = gpu.device.clone();
         let Some(doc) = self.docs.get(&job.key) else {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
@@ -5198,6 +5483,26 @@ impl Thread {
             size.height,
             format,
         );
+        let (ticket, copy) = match readback.reserve(
+            renderer.device(),
+            &target.texture,
+            MAX_CACHED_SNAPSHOT_TARGET_BYTES,
+        ) {
+            Ok(Some(reserved)) => reserved,
+            Ok(None) => {
+                self.snapshots.requeue(job);
+                return;
+            }
+            Err(error) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::Internal,
+                    &format!("The snapshot could not reserve a GPU readback: {error}"),
+                );
+                return;
+            }
+        };
         // A snapshot never draws an SVG bucket's stand-in: it waits for the
         // renderer's raster (decision S1). The renderer is the viewer's
         // too: the guard gives the viewer its policy back however this
@@ -5206,28 +5511,19 @@ impl Thread {
         let rendered = {
             let mut renderer = renderer.svg_waiting();
             renderer
-                .render_snapshot_into(
+                .render_snapshot_into_copy(
                     doc.document(),
                     job.request.composition.as_str(),
                     job.request.time,
                     &request,
                     doc.media(),
                     &target,
+                    &copy,
                 )
-                .and_then(|(_, rows)| {
-                    let pixels = super::snapshot::read_rgba8(
-                        readback,
-                        renderer.device(),
-                        renderer.queue(),
-                        &target.texture,
-                        job.request.pixels,
-                        rows,
-                    );
-                    readback.trim(MAX_CACHED_SNAPSHOT_TARGET_BYTES);
-                    Ok((target.width(), target.height(), pixels?))
-                })
+                .map(|(_, rows)| (target.width(), target.height(), rows))
         };
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
+            readback.cancel(ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
                 &job,
@@ -5236,7 +5532,10 @@ impl Thread {
             );
             return;
         }
-        let (width, height, pixels) = match rendered {
+        if rendered.is_err() {
+            readback.cancel(ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+        }
+        let (width, height, rows) = match rendered {
             Ok(done) => done,
             Err(pm_render::RenderError::SvgRastersPending(needs)) => {
                 // As for fallback pixels: what the renderer posted is on
@@ -5368,46 +5667,38 @@ impl Thread {
                 return;
             }
         };
-        let Some(payload) = self.share_pixels(&job, pixels) else {
-            return;
-        };
-        let done = now();
-        let render_us = (done - started).max(0);
-        self.snapshots.observe(render_us as f64);
+        let back = self.snapshot_back.clone();
+        readback.start_map(ticket, move || {
+            let _ = back.send(Command::SnapshotMapReady);
+        });
+        if !self
+            .snapshot_poller
+            .as_ref()
+            .expect("checked above")
+            .submit(gpu_device, gpu_lost.clone())
         {
-            let mut stats = self.stats();
-            stats.snapshots += 1;
-            stats.snapshot_us_max = stats.snapshot_us_max.max(render_us);
+            readback.cancel(ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+            gpu_lost.store(true, Ordering::Release);
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::DeviceLost,
+                "The GPU snapshot completion worker stopped.",
+            );
+            return;
         }
-        let costs = self.snapshot_costs.entry(job.key).or_default();
-        costs.0 += 1;
-        costs.1 = costs.1.max(render_us);
-        let result = SnapshotResult {
+        self.pending_snapshots.push(PendingSnapshot {
+            job,
+            ticket,
+            started,
+            map_deadline: now() + SNAPSHOT_GPU_TIMEOUT_US,
             revision,
-            view_seq: job.request.view_seq,
             width,
             height,
-            pixels: job.request.pixels,
-            payload,
-            origin: [0.0, 0.0],
-            layer_box: None,
-            raster: None,
-            quality: FrameQuality {
-                resolution: PreviewResolution::Full,
-                representation: Representation::Original,
-                draft_3d,
-                cached: false,
-                stand_in: false,
-            },
-            waited_us: (started - job.received).clamp(0, i64::from(u32::MAX)) as u32,
-            render_us: render_us.clamp(0, i64::from(u32::MAX)) as u32,
-        };
-        let mut envelope = Envelope::new(Message::Response {
-            id: job.id,
-            body: Response::Snapshot(Box::new(SnapshotOutcome::Rendered(result))),
+            format,
+            rows,
+            draft_3d,
         });
-        envelope.revision = Some(revision);
-        self.send(job.host, envelope);
     }
 
     /// A layer's raster (the base pixels of today's `render.raster()`,
@@ -5891,6 +6182,7 @@ mod tests {
             }
         });
         let peaks = super::super::peaks::PeakWorker::new(sink.clone());
+        let (snapshot_back, _snapshot_rx) = std::sync::mpsc::channel();
         let thread = Thread {
             config: ThreadConfig {
                 bridge_name: None,
@@ -5933,6 +6225,9 @@ mod tests {
             fallback: Fallback::default(),
             frame_cache: pm_render::media::DEFAULT_FRAME_CACHE,
             snapshots: super::super::snapshot::SnapshotQueue::default(),
+            pending_snapshots: Vec::new(),
+            snapshot_back,
+            snapshot_poller: None,
             segments: pm_bridge::shm::Segments::default(),
             last_interactive: None,
             snapshot_costs: BTreeMap::new(),

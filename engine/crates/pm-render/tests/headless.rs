@@ -786,6 +786,7 @@ fn snapshot_row_order_matches_generic_render_for_standard_and_linear() {
     let request = RenderRequest::at_scale(Size::new(width, height), 1.0, Precision::Float16);
     let resolver = MapResolver::default();
     let mut renderer = Renderer::headless().unwrap();
+    let mut ring = pm_gpu::readback::ReadbackRing::default();
     for linear in [false, true] {
         let mut source = project(
             width,
@@ -826,22 +827,41 @@ fn snapshot_row_order_matches_generic_render_for_standard_and_linear() {
                 None,
             )
             .unwrap();
+        let (ticket, copy) = ring
+            .reserve(renderer.device(), &snapshot.texture, 64 * 1024 * 1024)
+            .unwrap()
+            .unwrap();
         let (_, rows) = renderer
-            .render_snapshot_into(
+            .render_snapshot_into_copy(
                 &doc,
                 "Ptest-root",
                 ticks(0.0),
                 &request,
                 &resolver,
                 &snapshot,
+                &copy,
             )
+            .unwrap();
+        ring.start_map(ticket, || {});
+        renderer
+            .device()
+            .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
         let expected =
             pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &generic.texture)
                 .unwrap();
-        let raw =
-            pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &snapshot.texture)
-                .unwrap();
+        let raw = ring
+            .try_with_mapped_rows(
+                ticket,
+                |data, row, stride, height| {
+                    (0..height)
+                        .flat_map(|y| data[y * stride..y * stride + row].iter().copied())
+                        .collect::<Vec<_>>()
+                },
+                64 * 1024 * 1024,
+            )
+            .unwrap()
+            .unwrap();
         let row = width as usize * 8;
         assert_ne!(&expected[..row], &expected[expected.len() - row..]);
         let normalized: Vec<_> = match rows {

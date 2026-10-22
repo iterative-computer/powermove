@@ -430,28 +430,24 @@ pub fn encode_rgba8(half: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
     out
 }
 
-/// Read a frame's RGBA16F or RGBA32F pixels straight from mapped GPU rows into the
-/// final RGBA8 allocation. The mapping belongs to this readback, so every
-/// snapshot still waits for and converts the frame it just rendered.
-pub fn read_rgba8(
-    readback: &mut pm_gpu::readback::Readback,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
+/// The mapped half/float32 rows of one completed snapshot ticket. This is
+/// the single final allocation, preserving alpha, row-order, and rounding.
+pub fn encode_mapped_rgba8(
+    format: wgpu::TextureFormat,
+    data: &[u8],
+    row: usize,
+    stride: usize,
+    height: usize,
     pixels: SnapshotPixels,
     rows: pm_render::SnapshotRows,
 ) -> Result<Vec<u8>, pm_gpu::readback::ReadbackError> {
-    match texture.format() {
+    match format {
         wgpu::TextureFormat::Rgba16Float => {
-            readback.with_mapped_rows(device, queue, texture, |data, row, stride, height| {
-                encode_rgba8_rows(data, row, stride, height, pixels, rows)
-            })
+            Ok(encode_rgba8_rows(data, row, stride, height, pixels, rows))
         }
-        wgpu::TextureFormat::Rgba32Float => {
-            readback.with_mapped_rows(device, queue, texture, |data, row, stride, height| {
-                encode_rgba8_f32_rows(data, row, stride, height, pixels, rows)
-            })
-        }
+        wgpu::TextureFormat::Rgba32Float => Ok(encode_rgba8_f32_rows(
+            data, row, stride, height, pixels, rows,
+        )),
         other => Err(pm_gpu::readback::ReadbackError::Format(other)),
     }
 }

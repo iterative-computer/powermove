@@ -1278,6 +1278,7 @@ impl Renderer {
             target,
             depth_id,
             SnapshotRows::TopDown,
+            None,
         )
     }
 
@@ -1293,6 +1294,52 @@ impl Renderer {
         request: &RenderRequest,
         assets: &dyn AssetResolver,
         target: &Target,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_snapshot_into_with_copy(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+        )
+    }
+
+    /// Snapshot variant that queues the fresh target's staging copy in the
+    /// same GPU submission as its render passes. Mapping begins afterward.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_snapshot_into_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: &pm_gpu::readback::ReadbackCopy,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_snapshot_into_with_copy(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            Some(copy),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_snapshot_into_with_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<(Rendered, SnapshotRows), RenderError> {
         let rows = if self.bracket.is_none()
             && document
@@ -1313,6 +1360,7 @@ impl Renderer {
             target,
             None,
             rows,
+            copy,
         )
         .map(|rendered| (rendered, rows))
     }
@@ -1328,6 +1376,7 @@ impl Renderer {
         target: &Target,
         depth_id: Option<&Target>,
         rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         if self.fallback_host.is_none() {
             return self.render_into_svg(
@@ -1339,6 +1388,7 @@ impl Renderer {
                 target,
                 depth_id,
                 rows,
+                copy,
             );
         }
         self.effects.fallback.retries.clear();
@@ -1355,6 +1405,7 @@ impl Renderer {
                 target,
                 depth_id,
                 rows,
+                copy,
             );
             let Some(host) = self.fallback_host.clone() else {
                 break result;
@@ -1388,6 +1439,7 @@ impl Renderer {
         target: &Target,
         depth_id: Option<&Target>,
         rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         for _ in 0..3 {
             match self.render_into_once(
@@ -1399,6 +1451,7 @@ impl Renderer {
                 target,
                 depth_id,
                 rows,
+                copy,
             ) {
                 Err(RenderError::SvgRastersPending(needs)) if self.svg_source.is_some() => {
                     let source = self.svg_source.clone().expect("checked");
@@ -1431,6 +1484,7 @@ impl Renderer {
             target,
             depth_id,
             rows,
+            copy,
         )
     }
 
@@ -1445,6 +1499,7 @@ impl Renderer {
         target: &Target,
         depth_id: Option<&Target>,
         rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         request.validate()?;
         let root = document
@@ -1691,6 +1746,9 @@ impl Renderer {
         }
         if let Some(bracket) = &self.bracket {
             bracket.end(&mut encoder, &target.view);
+        }
+        if let Some(copy) = copy {
+            copy.record(&mut encoder, &target.texture);
         }
         self.queue.submit([encoder.finish()]);
         self.effects.watchdog.submitted(&self.queue);
