@@ -3256,6 +3256,13 @@ mod tests {
             0,
         )
         .unwrap();
+        // Start a run so the queued Pause must stop it, rather than being a
+        // no-op on an already stopped transport. Epoch 1 becomes 2 here.
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
         let pause = playback.enqueue_command(TransportCommand::Pause).unwrap();
         let seek = playback
             .enqueue_command(TransportCommand::Seek {
@@ -3302,7 +3309,7 @@ mod tests {
         assert!(valid.wait().is_ok());
         assert_eq!(
             playback.shared.start_timing.epoch.load(Ordering::Acquire),
-            2
+            5 // Pause, exact Seek, and the final Play each advance the epoch.
         );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -3312,7 +3319,7 @@ mod tests {
         assert!(side.queued_frames() >= 512);
         side.callback(&mut [0.0; 1_024], 2, host_now_us());
         let clock = playback.clock().expect("first queued callback");
-        assert_eq!(clock.epoch, 2);
+        assert_eq!(clock.epoch, 5);
         assert!((0..TICKS_PER_SECOND).contains(&clock.media_time.get()));
         assert!(playback.shutdown());
     }
