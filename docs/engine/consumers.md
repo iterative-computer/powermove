@@ -61,6 +61,38 @@ the node project's actual transitive source dependencies. It does not disable
 compiler checks. Onboarding's SVG and vendored animation stay unchanged in Phase
 3c; replacement remains Phase 5c. welcome.ts changes are type annotations only.
 
+### Pre-existing consumer UI failures closed (2026-10-22)
+
+These Phase 0 ledger failures had the consumer lane as owner and failed with
+the engine on and off. Each is a product fix or a port to UI that shipped
+after the spec was written; no assertion was loosened.
+
+- The selected timeline mode segment drew a 1 px ring that the flat-control
+  rule forbids. It now matches the Library and Store segmented controls
+  (raised fill, no ring). Timeline 1.1.3.
+- The Library screen sat 32 px from the top in short windows, under the
+  44 px titlebar drag area. The overlay now pads 44 px top and bottom, which
+  leaves tall windows exactly where they were (the centering is symmetric).
+- The canvas layer menu lacked the timeline's Import Captions item. Captions
+  contributes it to `viewer:context` as well, so both menus are identical.
+- Test ports: the unified color picker closes from its header (no OK button);
+  the Library is inspected once `data-previews="ready"`, and controls the page
+  replaced between Playwright's query and callback are skipped; extension
+  parameters inside the inspector's More disclosure are opened as a user
+  would; nested timeline rows are aimed after the group's rows scroll into
+  view; the keyframe menu's item runs after its close blink, so the eased
+  values are polled; the path-mask stage status is read once the engine frame
+  is revealed (the canvas turns visible with the first frame, the starting
+  line clears at reveal).
+- The Library card spec compares two fresh drawings of the live overlay.
+  With the engine on, a presented frame at the same revision redraws the
+  overlay after the spec's own readbacks; the old and new drawings of an
+  identical state (same frame, revision, zoom, pan and handle geometry)
+  differed only in edge coverage (alpha 0x66 vs 0x80 on the outline), the
+  signature of a 2D canvas moved to another rasterizer by readbacks.
+
+The viewer is 1.2.7 after merging the 3D lane's presenter fixes.
+
 ## Required contracts still absent
 
 - C3: all four native current/frozen light/dark card cases pass exact native
@@ -107,12 +139,35 @@ compiler checks. Onboarding's SVG and vendored animation stay unchanged in Phase
   Native raster-source diagnostics and customized font/fork setups also remain
   unqualified by this lane. Media, renderer and extension owners must close them.
 
+- Multi-selection rotate after Undo (engine on): `viewer-resize.spec.ts`
+  resizes a selection, undoes with `PM.hist.undo()`, then rotates by 45°. On
+  the press, `EngineDoc.api.worldMatrix` first answers the undone state for
+  the root text layer (identity) and, a few calls later in the same press,
+  the resized one (scale 1.1148, translation 502.875, 192.987), while
+  `PM.ev` still reads the undone document. The rotate solves from that and
+  writes scale 111.481 into the document. With the engine off the same code
+  rotates exactly. The native mirror replays the resize after the undo; the
+  document-host owner (engine-doc mirror and undo hand-over) must fix it.
+- Session teardown: in targeted runs on a loaded machine `app.close()` hung
+  until the 30 s test budget ended after the body passed (a trace shows the
+  body done at 2.4 s and "Close context" until 32.4 s), with the engine on or
+  off. The final full runs had no teardown-only failures but four (on) and
+  one (off) worker teardowns over budget. Quit and process lifetime belong to
+  the bridge owner (`main/index.ts`).
+
 Panel popout already moves live nodes in the same realm and the bridge presenter
 follows `stage.ownerDocument` (DPR, color capability, resize and drawing backend).
 The existing viewer/timeline/toolbar dock-only rule remains. Both refreshed native
 panel-popout cases pass; broader custom-panel/frozen-fork parity remains a gate.
 
 ## Validation
+
+Final-HEAD serial runs (2026-10-22, 698 cases each, one worker, no
+quarantine): engine on 588 passed, 60 failed, 50 skipped; engine off 631
+passed, 17 failed, 50 skipped. No consumer-owned failure remains with the
+engine off; with it on, the remaining consumer results are the four C18
+RAM-preview cases. Every failed result is owned in the
+[e2e ledger](e2e-ledger.md). The history below records earlier runs.
 
 The complete first default-on suite ran 691 cases: 529 passed, 112 failed and
 50 existing optional-fixture cases skipped, with no quarantine exclusions. It
