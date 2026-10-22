@@ -30,7 +30,7 @@ function canvasFake() {
   return { canvas: canvas as unknown as HTMLCanvasElement, drawn };
 }
 
-function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void>; usesBlender?: () => boolean; svgRasters?: TransportSvgRasters; captionsHidden?: () => boolean } = {}) {
+function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; nativeKernel?: true; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void>; usesBlender?: () => boolean; svgRasters?: TransportSvgRasters; captionsHidden?: () => boolean } = {}) {
   const asked: EngineSnapshotRequest[] = [];
   const s = session();
   const runner = { renderSync: vi.fn((r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })), render: vi.fn(async (r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })) };
@@ -395,6 +395,41 @@ describe('EngineRenderTransport', () => {
         windowDocument: () => ({ id: 'doc-1', revision: 12, full: () => { serialized++; return { json: new TextEncoder().encode('{"a":1}'), hash: 'ab'.repeat(32), revision: 12 }; } })
       };
     };
+
+    it.each(['no session', 'resync pending', 'ready session before crash notification'])('uses only an opaque native reference for every %s snapshot round', (state) => {
+      const full = vi.fn(() => { throw new Error('native references must never serialize JSON'); });
+      const pending = state === 'no session' ? null : { ...session(), resyncPending: state === 'resync pending' };
+      const { transport, asked, runner } = setup([
+        { status: 'needsRenderer', revision: 12, fallback: [fallbackRequest('n'.repeat(64))], compat: [] },
+        rendered(2, 2),
+      ], { session: pending, windowDocument: () => ({ id: 'doc-1', revision: 12, nativeKernel: true, full }) });
+
+      expect(transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+      expect(runner.renderSync).toHaveBeenCalledOnce();
+      expect(full).not.toHaveBeenCalled();
+      expect(asked.map((ask) => ask.document)).toEqual([
+        { id: 'doc-1', revision: 12, nativeKernel: true },
+        { id: 'doc-1', revision: 12, nativeKernel: true },
+      ]);
+      expect(asked.every((ask) => ask.revision === 12 && ask.session === null)).toBe(true);
+      expect(asked.every((ask) => !('owner' in ask.document!))).toBe(true);
+    });
+
+    it('keeps native references after a main-session needsDocument response', () => {
+      const full = vi.fn(() => { throw new Error('native references must never serialize JSON'); });
+      const reference = { id: 'doc-1', revision: 12, nativeKernel: true as const };
+      const { transport, asked } = setup([
+        rendered(2, 2),
+        { status: 'failed', code: 'needsDocument', message: 'session restarted' },
+        rendered(2, 2),
+      ], { session: null, windowDocument: () => ({ ...reference, full }) });
+
+      expect(transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+      expect(() => transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(EngineSnapshotError);
+      expect(transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+      expect(asked.map((ask) => ask.document)).toEqual([reference, reference, reference]);
+      expect(full).not.toHaveBeenCalled();
+    });
 
     it('a staged resync in flight: the document goes along once, then only its revision', () => {
       const d = doc();

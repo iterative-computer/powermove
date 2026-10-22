@@ -18,6 +18,7 @@
  */
 import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import { limitUtf8 } from '../../../shared/protocol-strings';
+import { documentId } from '../../../shared/engine-document-id';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
 
@@ -43,6 +44,7 @@ export interface DocumentStream {
    *  JavaScript heap); otherwise `json` is encoded. */
   snapshot(options?: { checkpoint?: boolean }): { revision: number; encoding: 'canonicalJsonV1'; json: string; bytes?: Uint8Array; hash: string } | null;
   resume?(): { revision: number; hash: string; batches: StreamBatch[] } | null;
+  refreshResume?(force?: boolean): Promise<{ revision: number; hash: string; batches: StreamBatch[] } | null>;
 }
 
 export type StreamBatch = { baseRevision: number; revision: number; origin: PatchOrigin; count: number; body: Uint8Array };
@@ -157,11 +159,7 @@ export function hexBytes(hex: string): Uint8Array {
   return out;
 }
 
-/** A valid document id (contract: non-empty, at most 256 bytes). */
-export function documentId(id: unknown): string {
-  const text = typeof id === 'string' && id ? id : 'untitled';
-  return encoder.encode(text).length <= 256 ? text : text.slice(0, 64);
-}
+export { documentId } from '../../../shared/engine-document-id';
 
 export class DocumentSession {
   /** The engine's session id, once opened. */
@@ -312,11 +310,26 @@ export class DocumentSession {
     const id = this.id;
     if (id === null || this.closed) return;
     this.document = documentId(this.options.documentId());
-    const resume = this.options.stream.resume?.();
+    const refreshingRevision = this.streamRevision, refreshingDocument = this.document;
+    const refreshSuperseded = () => this.resyncAgain || this.streamRevision !== refreshingRevision || documentId(this.options.documentId()) !== refreshingDocument;
+    let nativeResume: { revision: number; hash: string; batches: StreamBatch[] } | null | undefined;
+    try { nativeResume = await this.options.stream.refreshResume?.(); }
+    catch (error) {
+      if (this.closed || this.id !== id) return;
+      if (refreshSuperseded()) { this.resyncAgain = true; return; }
+      throw error;
+    }
+    if (this.closed || this.id !== id) return;
+    if (refreshSuperseded()) { this.resyncAgain = true; return; }
+    const resume = nativeResume ?? this.options.stream.resume?.();
     if (resume) {
+      const streamRevision = this.streamRevision;
+      const document = this.document;
+      const superseded = (): boolean => this.resyncAgain || this.streamRevision !== streamRevision || documentId(this.options.documentId()) !== document;
       try {
         await this.options.connection.request({ type: 'resync', document: this.document, revision: resume.revision, encoding: 'canonicalJsonV1', source: { kind: 'inline', body: new Uint8Array() }, hash: hexBytes(resume.hash) } as Request, id);
         if (this.closed) return;
+        if (superseded()) { this.resyncAgain = true; return; }
         this.applied = this.streamRevision = resume.revision;
         this.resyncs++;
         this.resumes++;
@@ -326,10 +339,31 @@ export class DocumentSession {
         this.queued = [];
         for (const batch of pending) this.forward(batch);
         return;
-      } catch {
+      } catch (error) {
         // The process restarted, the bounded checkpoint expired, or its
         // patch journal overflowed: send a fresh, complete snapshot.
         if (this.closed) return;
+        // A load or another resync arrived while this checkpoint was in
+        // flight. Its replacement may already be prepared natively; let the
+        // queued attempt read that checkpoint instead of serializing it here.
+        if (superseded()) { this.resyncAgain = true; return; }
+        if (nativeResume) {
+          // A native root is already present in this process. Refresh its
+          // verified checkpoint off-thread rather than copying JSON through
+          // a synchronous renderer call after a refused/expired base.
+          const fresh = await this.options.stream.refreshResume!(true);
+          if (this.closed || this.id !== id) return;
+          if (superseded()) { this.resyncAgain = true; return; }
+          if (!fresh) throw error;
+          await this.options.connection.request({ type: 'resync', document: this.document, revision: fresh.revision, encoding: 'canonicalJsonV1', source: { kind: 'inline', body: new Uint8Array() }, hash: hexBytes(fresh.hash) } as Request, id);
+          if (this.closed || this.id !== id) return;
+          if (superseded()) { this.resyncAgain = true; return; }
+          this.applied = this.streamRevision = fresh.revision;
+          this.resyncs++; this.resumes++;
+          const pending = [...fresh.batches, ...this.queued]; this.queued = [];
+          for (const batch of pending) this.forward(batch);
+          return;
+        }
       }
     }
     const snapshot = this.options.stream.snapshot({ checkpoint: true });

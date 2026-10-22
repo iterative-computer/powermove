@@ -264,7 +264,7 @@ export type RenderTransportOptions = {
   /** The window's document for a sync snapshot its session cannot serve
    *  (none yet, the document not arrived, or a staged resync in flight):
    *  main serves it from a session of its own. `full` serializes it. */
-  windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null;
+  windowDocument?: () => { id: string; revision: number; nativeKernel?: true; full(): { json: Uint8Array; hash: string; revision: number } } | null;
   /** Whether the window's document has a composition Blender renders
    *  (`render3d.enabled`): only then does a capture that prepares its
    *  Blender frame ask the engine (and main) to wait for Blender. */
@@ -808,8 +808,12 @@ export class EngineRenderTransport {
     // (the resync's next step would need this thread). Otherwise main serves
     // it from a session of its own, with the document sent along.
     const session = this.options.session();
-    const direct = !!session && session.id !== null && !session.closed && !session.resyncPending && (session.applied ?? 1) > 0;
-    if (!direct && this.options.windowDocument?.()) {
+    const document = this.options.windowDocument?.();
+    // A native document reference also survives a killed utility before this
+    // blocked renderer has received its port-close notification. Main restores
+    // and adopts it independently of the stale viewer session.
+    const direct = !document?.nativeKernel && !!session && session.id !== null && !session.closed && !session.resyncPending && (session.applied ?? 1) > 0;
+    if (!direct && document) {
       // The window's own session (the standby) serves later ones.
       if (!session || session.closed) void this.options.wake?.();
       try {
@@ -870,13 +874,14 @@ export class EngineRenderTransport {
     let send = !(this.sentToMain && this.sentToMain.id === doc.id && this.sentToMain.revision === doc.revision);
     let body: { json: Uint8Array; hash: string; revision: number } | null = null;
     for (let round = 0; round < MAX_DEPENDENCY_PHASES + 1; round++) {
-      if (send && !body) body = doc.full();
+      if (send && !body && !doc.nativeKernel) body = doc.full();
       const request = this.request(options, 'sync', uploaded, true, revision);
       const reply = native.snapshotSync!({
         ...request,
         session: null,
         revision,
-        document: body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
+        document: doc.nativeKernel ? { id: doc.id, revision: doc.revision, nativeKernel: true }
+          : body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
         ...(fallbackPixels.length ? { fallbackPixels } : {}),
         ...(compatEvents.length ? { compatEvents } : {}),
         ...(svgPixels.length ? { svgPixels } : {})

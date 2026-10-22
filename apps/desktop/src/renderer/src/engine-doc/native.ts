@@ -748,6 +748,7 @@ export class NativeApi {
   /** Drops every interned id (after the module is replaced). */
   reset(): void {
     this.generation += 1;
+    this.definitions.clear();
     this.props = new WeakMap();
     this.detached = new DetachedScopes();
     this.detachedProps = new WeakMap();
@@ -889,7 +890,7 @@ export class NativeApi {
         n = wasm.x.pm_ev(id, T);
         status = n === n ? 0 : wasm.x.pm_kind();
       }
-    } catch { wasm.dead = true; return MISS; }
+    } catch { if (!wasm.marksOwnFailures) wasm.dead = true; return MISS; }
     if ((status & 0x7f) !== 0) return MISS; // not a number, or a throw: ask the slow path
     this.stats.fastPath += 1;
     if (raw) {
@@ -964,7 +965,7 @@ export class NativeApi {
         const frame = entry.frame;
         if (rawProp.expr && frame && !frame.released && !entry.wasm.dead) {
           let status = -1;
-          try { status = this.expressionFrames.read(entry.wasm, frame, T, entry.revision); } catch { entry.wasm.dead = true; }
+          try { status = this.expressionFrames.read(entry.wasm, frame, T, entry.revision); } catch { if (!entry.wasm.marksOwnFailures) entry.wasm.dead = true; }
           if (status >= 0 && (status & 0x7f) === 0) {
             const value = this.expressionFrames.value;
             const message = (status & 0x80) ? entry.wasm.expressionError(entry.id) : null;

@@ -110,6 +110,8 @@ export class PmWasm {
   contextRevision = 0;
   readonly x: PmWasmExports;
   dead = false;
+  /** Remote evaluators distinguish transport loss from refused requests themselves. */
+  readonly marksOwnFailures: boolean = false;
   private buffer: ArrayBuffer | null = null;
   private u8: Uint8Array | null = null;
   private inPtr = 0;
@@ -203,7 +205,7 @@ export class PmWasm {
   // ── the document ──────────────────────────────────────────────────────
 
   /** Replaces the mirror; throws with the engine's message on failure. */
-  resync(json: string, revision: number): void {
+  resync(json: string, revision: number, _document?: string): void {
     this.call(() => {
       const len = json ? this.writeString(json) : 0;
       if (this.x.pm_resync(len, revision) !== 0) throw new Error(`pm-wasm resync: ${this.readOut()}`);

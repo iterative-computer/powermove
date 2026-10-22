@@ -99,6 +99,10 @@ describe('incremental large-document synchronization', () => {
     const notificationsMs = performance.now() - started;
     expect(barrier.stats.structuralDiffs).toBe(0);
     expect(notificationsMs).toBeLessThan(Math.max(20, wholeMs));
+    // The built-in project → comps relay is a runtime notification too.
+    // Publication's exact announcement must not become a full-root diff.
+    notifyDocument(PM, 'project'); PM.doc.flush();
+    expect(barrier.stats.structuralDiffs).toBe(0);
     // A known metadata write produces a small patch, without the layers.
     PM.proj.assets.one = { id: 'one', kind: 'image', poster: true };
     notifyDocument(PM, 'assets', [['assets', 'one']]); PM.doc.flush();
@@ -107,6 +111,13 @@ describe('incremental large-document synchronization', () => {
     const stop = PM.bus.on('assets', () => { PM.proj.layers[0].p.x.v = 123; PM.touch(); });
     notifyDocument(PM, 'assets'); PM.doc.flush(); stop();
     expect(barrier.shadow.comps.comp.layers[0].p.x.v).toBe(123);
+    // Custom nested emitters retain the structural safety net even when a
+    // built-in project announcement surrounds them.
+    const nested = PM.bus.on('project', () => {
+      PM.proj.layers[0].p.x.v = 456; PM.bus.emit('layers');
+    });
+    notifyDocument(PM, 'project'); PM.doc.flush(); nested();
+    expect(barrier.shadow.comps.comp.layers[0].p.x.v).toBe(456);
     console.info(JSON.stringify({ wholeDocumentDiffMs: wholeMs, runtimeNotifications73Ms: notificationsMs, bytes: batches[0]?.body.length }));
   });
 
