@@ -253,7 +253,7 @@ interface Context {
   live: any[];
 }
 
-interface Indexed { layers: any[]; revision: number; index: Map<any, number>; firstById: Map<string, number> }
+interface Indexed { layers: any[]; revision: number; index: Map<any, number>; firstById: Map<string, number>; rebuilt?: boolean }
 
 export interface NativeStats {
   calls: Record<string, number>;
@@ -369,6 +369,42 @@ export class NativeApi {
       this.indexed.set(layers, cached);
     }
     return cached;
+  }
+
+  /**
+   * Where `raw` is in `list` now, or undefined. The index is cached per
+   * revision; history can replace a layer object without a revision (a
+   * restore whose values equal the mirror's), so a miss rebuilds it once per
+   * revision before answering that the object is not there.
+   */
+  private positionOf(list: any[], raw: unknown): number | undefined {
+    const cached = this.index(list);
+    const i = cached.index.get(raw);
+    if (i !== undefined && list[i] === raw) return i;
+    if (cached.rebuilt) return undefined;
+    this.indexed.delete(list);
+    const again = this.index(list);
+    again.rebuilt = true;
+    const j = again.index.get(raw);
+    return j !== undefined && list[j] === raw ? j : undefined;
+  }
+
+  /**
+   * Whether every layer object a memoized structural answer hands out is
+   * still the current composition's. The memos are valid while the shape is
+   * unchanged, but undo, redo, and a scoped rollback replace a restored
+   * layer by a clone at an unchanged shape: an answer holding the replaced
+   * object would hand a caller (a transform gesture's press-time snapshot)
+   * the undone state.
+   */
+  private liveAnswer(value: unknown, cur: unknown): boolean {
+    if (!Array.isArray(value)) return true;
+    const list = (cur as any)?.layers;
+    for (const item of value) {
+      if (!item || typeof item !== 'object') continue;
+      if (!Array.isArray(list) || this.positionOf(list, this.unwrap(item)) === undefined) return false;
+    }
+    return true;
   }
 
   /**
@@ -706,7 +742,8 @@ export class NativeApi {
     const memo = this.shapes.get(raw);
     const hit = memo?.get(key);
     // At an unchanged shape the layer is where it was: one look at that index.
-    if (hit && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live && this.mirrored(raw, hit.index, stamp.comp)) {
+    if (hit && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live && this.mirrored(raw, hit.index, stamp.comp)
+      && this.liveAnswer(hit.value, stamp.cur)) {
       this.count(op);
       this.stats.shapeHits += 1;
       return copy(hit.value as T);
@@ -1192,7 +1229,8 @@ export class NativeApi {
     if (!stamp) return ask();
     const key = JSON.stringify(ids);
     const hit = this.rootsAnswer;
-    if (hit && hit.key === key && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live) {
+    if (hit && hit.key === key && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live
+      && this.liveAnswer(hit.value, stamp.cur)) {
       this.count('groups.transformRoots');
       this.stats.shapeHits += 1;
       return hit.value.slice();
