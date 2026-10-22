@@ -1520,9 +1520,8 @@ fn sdf_image(
     })
 }
 
-/// One image item holding the platform masks of a `fillText` call, each
-/// glyph composited over the earlier ones (Skia draws glyph quads one by
-/// one with source-over), in `color` through the preblend `table`.
+/// Ordered platform glyph masks of a `fillText` call, using the paint's
+/// preblend table. Filtered calls instead retain their N32 save layer.
 fn mask_image(
     masks: &[(i64, i64, Arc<GlyphMask>, bool)],
     tables: [&[u8; 256]; 2],

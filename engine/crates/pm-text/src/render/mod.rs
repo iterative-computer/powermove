@@ -10,8 +10,8 @@
 //!   image items) in device pixels; [`text_raster`] builds the scene of a text
 //!   layer's `rasterText` canvas.
 //! - [`atlas`]: coverage cells 1:1 with device pixels.
-//! - [`cpu`], [`paint`]: the `vello_cpu` coverage fallback and the float
-//!   paint pass on the CPU (the reference for the GPU pass in `pm-render`).
+//! - [`cpu`], [`paint`]: the `vello_cpu` coverage fallback and ordered N32
+//!   or float CPU paint reference for the GPU pass in `pm-render`.
 //! - [`color`]: canvas color strings.
 
 pub mod atlas;

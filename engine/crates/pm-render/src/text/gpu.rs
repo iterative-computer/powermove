@@ -1,4 +1,5 @@
-//! Text rasters on the GPU: Vello coverage pages and the float paint pass
+//! Text rasters on the GPU: native Graphite primitives, platform glyph masks
+//! and Vello coverage pages, painted in order into N32 or float canvases
 //! (`shaders/text.wgsl`), with a content-keyed raster cache.
 //!
 //! Vello 0.11 renders only into `Rgba8Unorm` storage textures and submits

@@ -5,9 +5,10 @@
 //! canvas raster (`rasterText`, `rasterAnimatedText`, or the captions
 //! rasterizer's `draw`) at the density `continuousRasterScale` asks for,
 //! sampled through the layer's quad. The raster is a [`TextScene`] painted
-//! by Vello coverage and the engine's float paint pass ([`gpu`]); only the
-//! part of the canvas that holds ink is allocated (the rest is transparent
-//! and the quad shrinks to match, which samples identically).
+//! by platform masks, native Graphite primitives and Vello coverage through
+//! the ordered paint pass ([`gpu`]): N32 for level 1, float for level 2.
+//! Cached rasters retain only the ink crop; native primitives keep the full
+//! canvas viewport while drawing so interpolation and AA stay unchanged.
 //!
 //! Layout is `pm-text`'s level 1 (`compat`) through the host's
 //! [`TextFonts`]; word states, animator poses, raster boxes, and font

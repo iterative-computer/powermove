@@ -1260,27 +1260,96 @@ residual and raise no budget. The new synthetic oracles cover black COLR
 spans, the center-ignoring stroker and the convexity and rectangle
 classifications.
 
+## Textexact2: Chromium 152 GPU and N32 execution
+
+This round retires the thirteen remaining FONTS-R snapshots. Both the JSON
+case list and the immutable `APPROVED` table are empty; contract tests reject
+restoring any retired raster or corpus measurement. The original raster
+bound remains 1 CV and the composed-text bound remains 2 CV. Captures,
+profiles and routing decisions are unchanged.
+
+The native renderer now executes Graphite's analytic rectangle/rrect,
+fixed-count filled-curve and stroked-curve render steps on the GPU. Instance
+attributes, pre-chop/deferred tessellation allocation counts, middle-out
+vertices and indices follow the pinned source. Path unions use stencil and
+per-sample blending into desktop BGRA N32, with Metal's standard four-sample
+pattern and hardware resolve. Full canvas viewports are retained before
+cropping; shrinking a viewport changes interpolation and AA rounding.
+
+Electron 44.0.0 / Chromium 152.0.7977.54 pins Skia
+`b6d106297ff9ef2ff8094033695d045e87775581` and Dawn
+`571752c9cb3ed36a3194854374984427794c4dda`. The relevant shader modules
+and render-step sources agree with the independently built chrome/m152
+Skia `747cf654ed6f864f4402e7d6eb54a6ede60141e5`. Chromium disables
+Graphite ShaderF16 by default: its Dawn shaders execute this arithmetic in
+f32, despite the SkSL source's half declarations. The checked-in WGSL comes
+from the pinned Skia compiler; the production Metal stages come from that
+WGSL through the pinned Tint writer, using Dawn's relaxed math mode.
+Hidden diagnostic Electron runs confirmed the backend, source and buffer
+layout. Regeneration instructions and source licenses accompany the oracles.
+
+Unfiltered A8 glyphs retain coverage until their draw reaches the canvas.
+Paint and source-over blending happen directly into N32, eliminating the
+extra colored word-image quantization that caused the paper-caption pixel.
+Filtered draws retain their N32 save layer. Level 2 keeps its floating-point
+canvas. N32 readback explicitly converts BGRA storage into RGBA channels.
+
+The SDF path samples the source-generated R8 atlas with the source f32
+shader. A8 masks and distance fields share the skyline allocation history;
+original font-size identity is retained alongside the common SDF strike.
+A diagnostic sequence proved why both matter: the same 255 px glyph shader
+produces alpha 87 with a fresh atlas and the captured 89 after the preceding
+161/162/163/180/210 px draws. Repeating a size reuses its coordinates. The
+native sequence now reproduces all eight size captures byte-for-byte,
+including the retired `sdf-sizes-0004` and the previously newly failing
+`sdf-sizes-0005`. Direct masks still use their cached paint textures, while
+participating in the shared A8 allocator; this preserves their existing
+sampling path.
+
+Blink narrows the canvas draw origin before alignment and keeps glyph
+positions relative to the text blob. Canvas translate/scale/concat also
+narrow every argument and use SkM44's operation order. Preserving those
+boundaries closes the large-path sample disagreements and their composed
+frames; baking the origin into each glyph or concatenating in f64 changes
+one or more MSAA samples. Independent synthetic SkM44 records test both
+caption and animated-glyph operation sequences.
+
+Public independent oracles cover tessellation counts, eight complete
+synthetic padded distance fields, thirty skyline allocations and two
+Canvas matrix sequences. Private glyph checks also compared the actual
+padded fields and canonical outlines with pinned Skia, without putting
+fonts, captures or machine logs in Git. Final debug/release and app results
+are recorded in the lane report; no unobserved run is implied here.
+
+| Gate | Debug | Release (shipping thin-LTO) |
+|---|---:|---:|
+| Main raster, 1 CV | 495/495 strict | 495/495 strict |
+| Closure raster, 1 CV | 116/116 strict | 116/116 strict |
+| Large paths, 1 CV | 4/4 strict | 4/4 strict |
+| Source textures, 1 CV | 3/3 byte-identical | 3/3 byte-identical |
+| Composed text, 2 CV | 576/576 strict | 576/576 strict |
+| Ratchet contracts | 13 pass | 13 pass |
+| Canvas2D | 529, existing gate passes | 529, existing gate passes |
+| Path masks, text colors, GPU paint, level 2 | Pass | Pass |
+
+The 113 pm-render, 78 pm-vector and 78 pm-text unit checks pass in both
+profiles, including the new source oracles. All fifteen generated stages
+reproduce byte-for-byte; all eight Metal stages compile with Metal 4.0.
+Canvas2D retains its four pre-existing exceptions; none is added or changed.
+The composed corpus retains the pre-existing non-text typewriter-definition
+refusal, comparing that project's text in isolation. These text results do
+not qualify the missing custom effect. Test-only SVG fixtures now clean up
+their own directories; the changed tests leave no files in a scoped temp
+root in either profile. The app matrix is unmeasured in this round; no
+new app integration or typing-latency qualification is claimed.
+
 ## Gaps
 
-FONTS-R now governs 13 nonzero residual checks, after ten closures above.
-They pass only at their exact recorded snapshot budgets and are not
-owner-rule blockers.
-Every unlisted case keeps its original strict bound; any regression, new
-residual or improvement with a stale budget still fails. The Round 4–6
-strict-failure counts above are historical; Round 7 adds the explicit
-orchestrator-approved ratchet while keeping glyph rasterization and reference
-captures unchanged. The separate capture-transport fixes are described above.
+All thirteen previous FONTS-R residuals meet their original strict bounds
+in the full comparisons above. No residual budget remains. Full
+qualification results and any outstanding measurement gaps are in the
+textexact2 lane report. Every case retains its original strict bound.
 
-- Three paper-caption captures remain nonexact: each has one pixel by
-  2 CV. Caption-pop, colored caption stroke and whisper now meet their
-  original bound. Counts and review filenames are in the ratchet; the lane
-  report resolves full-resolution legacy/native/difference sheets for all
-  13 remaining cases. The exact stage producing the paper pixel is not
-  established; no profile parameter was changed to hide it.
-- The closure distance-field residual `sdf-sizes-0004` remains (4 pixels by
-  2 CV). The three stroke/bold SDF failures are closed by the tangent fix.
-  The row-local backward distance walk still works with debug overflow
-  checks; it never subtracts beyond the first row.
 - COLR v0's two residuals are closed by ordered N32 span blending above.
   Whole-pixel placement uses the text blob's 1/8-pixel x bias.
   Radial/sweep paints, composite modes,
@@ -1289,13 +1358,17 @@ captures unchanged. The separate capture-transport fixes are described above.
   treat them as a closed parity class. Black solid layers (palette black or
   black foreground) match Skia's black blitter in the synthetic N32
   oracle, but none of the captured COLR glyphs has a black layer.
-- The real project is compared in full and in isolation. Shared Canvas2D
-  pass decisions reduce its actual t16/18/24 source-texture residuals to
-  6/6/2 pixels beyond 1 CV, max 64/64/5. Sparse curved-edge/MSAA sample
-  disagreements remain, including with the shared path renderer. These
-  remain nonexact and are covered only by their exact FONTS-R snapshots;
-  the 2-CV composition bound is unchanged. The ratchet lists each composed
-  frame separately.
+- The real project's t16/18/24 source textures are byte-identical in the
+  source-texture gates. Its composed and isolated t16/18 frames meet the
+  unchanged 2-CV bound. Other platform/Chromium versions remain unmeasured.
+- Viewports larger than the GPU's maximum 2D texture dimension retain the
+  CPU primitive reference. The SDF atlas uses bounded generations when all
+  four pages fill, preserving already-encoded texture reads; it does not
+  reproduce Chromium's complete memory-pressure eviction/draw-token policy.
+  Those oversized and eviction paths lack independent captured parity.
+- The CPU SDF reference retains its earlier half-precision draw emulation;
+  native GPU rendering uses the f32 Dawn shader. CPU-only SDF parity has
+  not been newly qualified by this round.
 - Animator blur now meets the unchanged 2-CV corpus bound through the
   shared quantized Graphite plan/executor, including isolation and the
   original project. It no longer uses the text-only float Gaussian.
@@ -1325,13 +1398,19 @@ captures unchanged. The separate capture-transport fixes are described above.
   the private corpus directory (CI): the captures are renders of system
   fonts and a private project and cannot be committed. On a machine with
   the directory, a full run fails for any FONTS-R entry it did not measure.
-- These measurements did not use the shipping LTO profile: test and addon
-  builds set `CARGO_PROFILE_RELEASE_LTO=false` because thin-LTO links
-  reported missing bitcode. The cause was pm-media bundling CrabbyAvif's
-  Rust staticlib into its rlib, not the compile cache; the shipping profile
-  is verified since, see [release-build.md](release-build.md).
+- Textexact2's release gates and native addons use the shipping thin-LTO
+  profile. Earlier rounds' `CARGO_PROFILE_RELEASE_LTO=false` results remain
+  historical; the missing-bitcode cause and fix are documented in
+  [release-build.md](release-build.md).
 
 ## Changes outside the lane
+
+2026-10-21 (lane ne-textexact2):
+
+- `pm-gpu/src/readback.rs` and `tests/readback.rs`: BGRA N32 readback
+  returns RGBA channels; a two-pixel test covers both storage formats.
+- `pm-render/src/vector/{svg,svg_rasters}.rs`: test-only scoped fixture
+  cleanup. Product SVG rendering is unchanged.
 
 2026-10-19 (lane ne-textexact):
 
