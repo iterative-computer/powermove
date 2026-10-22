@@ -64,6 +64,48 @@ struct Entry {
     frame: u64,
 }
 
+/// What [`VectorCache::prefetch`] did for a frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrefetchStats {
+    /// Rasters drawn ahead and cached.
+    pub drawn: u32,
+    /// Wall time of the parallel rasterization (µs).
+    pub raster_us: u64,
+}
+
+/// Worker threads for [`VectorCache::prefetch`]: half the cores, at most 8
+/// (the render thread and the renderer's own work keep the rest).
+fn prefetch_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).clamp(1, 8))
+        .unwrap_or(2)
+}
+
+/// A level 1 shape or paths raster: width, height and premultiplied
+/// `Rgba8Unorm` rows top-down.
+fn raster_level1(source: &VectorSource) -> Result<(u32, u32, Vec<u8>), String> {
+    match source {
+        VectorSource::Shape {
+            content,
+            colors,
+            scale,
+        } => {
+            let b = raster_shape(content, colors, *scale).map_err(|e| e.to_string())?;
+            Ok((b.width, b.height, b.rgba))
+        }
+        VectorSource::Paths {
+            nodes,
+            colors,
+            scale,
+        } => {
+            let layer = PathLayer::new(nodes);
+            let (b, _) = raster_paths(&layer, colors, *scale).map_err(|e| e.to_string())?;
+            Ok((b.width, b.height, b.rgba))
+        }
+        _ => Err("not a level 1 raster".into()),
+    }
+}
+
 /// Today's raster cache bounds (legacy/gl/raster.ts: `MAX` entries and the
 /// `raster` budget's 192 MiB default).
 pub const DEFAULT_MAX_ENTRIES: usize = 4096;
@@ -311,6 +353,80 @@ impl VectorCache {
         }
     }
 
+    /// Rasterizes a frame's level 1 shape and path misses on worker threads
+    /// before the frame records, and caches them as [`Self::resolve`] would
+    /// (same keys, bytes, order and pixels: the rasterizers are pure CPU
+    /// functions of the source). Today's compositor rasterized these on the
+    /// GPU canvas; the exact CPU emulation of it is the slow part of a
+    /// frame with many animated shapes, and a frame's sources are
+    /// independent. A source that fails is left to `resolve`, which reports
+    /// the error in order.
+    pub fn prefetch(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sources: &[&VectorSource],
+        precision: Precision,
+    ) -> PrefetchStats {
+        let mut stats = PrefetchStats::default();
+        let mut misses: Vec<(([u8; 32], u8), &VectorSource)> = Vec::new();
+        for source in sources {
+            if !matches!(source, VectorSource::Shape { .. } | VectorSource::Paths { .. }) {
+                continue;
+            }
+            // Keyed as `resolve` keys them, by the frame's precision.
+            let key = (source.key(), precision as u8);
+            if self.entries.contains_key(&key) || misses.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            misses.push((key, source));
+        }
+        if misses.len() < 2 {
+            // One raster gains nothing from a thread: `resolve` draws it.
+            return stats;
+        }
+        let workers = prefetch_workers().min(misses.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut drawn: Vec<Option<(u32, u32, Vec<u8>)>> = Vec::new();
+        drawn.resize_with(misses.len(), || None);
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut out = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some((_, source)) = misses.get(i) else {
+                                break;
+                            };
+                            out.push((i, raster_level1(source)));
+                        }
+                        out
+                    })
+                })
+                .collect();
+            for handle in handles {
+                if let Ok(results) = handle.join() {
+                    for (i, result) in results {
+                        drawn[i] = result.ok();
+                    }
+                }
+            }
+        });
+        stats.raster_us = started.elapsed().as_micros() as u64;
+        for ((key, _), result) in misses.into_iter().zip(drawn) {
+            let Some((width, height, rgba)) = result else {
+                continue;
+            };
+            self.tick += 1;
+            let texture = upload_rgba8(device, queue, width, height, &rgba);
+            self.insert(key, texture, u64::from(width) * u64::from(height) * 4);
+            stats.drawn += 1;
+        }
+        stats
+    }
+
     /// The texture of `source` (premultiplied working values), creating it
     /// on a miss. Level 1 textures are `Rgba8Unorm` top-down; level 2 ones
     /// are at the frame's precision.
@@ -329,27 +445,11 @@ impl VectorCache {
             return Ok(e.view.clone());
         }
         let (texture, bytes) = match source {
-            VectorSource::Shape {
-                content,
-                colors,
-                scale,
-            } => {
-                let b = raster_shape(content, colors, *scale).map_err(|e| e.to_string())?;
+            VectorSource::Shape { .. } | VectorSource::Paths { .. } => {
+                let (width, height, rgba) = raster_level1(source)?;
                 (
-                    upload_rgba8(device, queue, b.width, b.height, &b.rgba),
-                    u64::from(b.width) * u64::from(b.height) * 4,
-                )
-            }
-            VectorSource::Paths {
-                nodes,
-                colors,
-                scale,
-            } => {
-                let layer = PathLayer::new(nodes);
-                let (b, _) = raster_paths(&layer, colors, *scale).map_err(|e| e.to_string())?;
-                (
-                    upload_rgba8(device, queue, b.width, b.height, &b.rgba),
-                    u64::from(b.width) * u64::from(b.height) * 4,
+                    upload_rgba8(device, queue, width, height, &rgba),
+                    u64::from(width) * u64::from(height) * 4,
                 )
             }
             VectorSource::Scene { scene, rect } => {

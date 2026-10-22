@@ -750,3 +750,107 @@ fn level1_svgs_libxml2_accepts_are_asked_for_not_blank() {
         }
     }
 }
+
+/// A level 1 path layer (an editable triangle) at `(x, y)`, its first
+/// vertex moving with time (an animated path misses the cache every frame).
+fn path_layer(id: &str, x: f64, y: f64, spin: f64) -> Value {
+    let ch = |v: Value| json!({ "v": v, "kf": [], "expr": null });
+    let moving = json!({ "v": -40, "expr": null, "kf": [
+        { "t": 0, "v": -40, "ease": "linear" }, { "t": 2, "v": -40.0 + spin, "ease": "linear" }
+    ] });
+    let mut l = layer(
+        id,
+        "shape",
+        json!({ "shape": "rect", "w": 120.0, "h": 120.0, "color": "#FFFFFF", "paths": [{
+            "id": "path1", "name": "Tri", "parent": null,
+            "p": {
+                "x": ch(json!(0)), "y": ch(json!(0)), "rotation": ch(json!(spin)),
+                "scaleX": ch(json!(100)), "scaleY": ch(json!(100)), "closed": ch(json!(true)),
+                "fill": ch(json!("#3A86FF")), "fillEnabled": ch(json!(true)), "fillOpacity": ch(json!(100)),
+                "stroke": ch(json!("#FF006E")), "strokeWidth": ch(json!(3)), "strokeOpacity": ch(json!(80)),
+                "trimStart": ch(json!(0)), "trimEnd": ch(json!(100)), "trimOffset": ch(json!(0)),
+                "copies": ch(json!(1)), "repeatX": ch(json!(30)), "repeatY": ch(json!(0)), "repeatRotation": ch(json!(0))
+            },
+            "vertices": [
+                { "id": "v1", "p": { "x": moving, "y": ch(json!(-30)), "inX": ch(json!(0)), "inY": ch(json!(0)), "outX": ch(json!(0)), "outY": ch(json!(0)) } },
+                { "id": "v2", "p": { "x": ch(json!(40)), "y": ch(json!(-30)), "inX": ch(json!(0)), "inY": ch(json!(0)), "outX": ch(json!(0)), "outY": ch(json!(0)) } },
+                { "id": "v3", "p": { "x": ch(json!(0)), "y": ch(json!(40)), "inX": ch(json!(0)), "inY": ch(json!(0)), "outX": ch(json!(0)), "outY": ch(json!(0)) } }
+            ]
+        }] }),
+        x,
+        y,
+        2.0,
+    );
+    set(&mut l, "rotation", json!(spin / 3.0));
+    l
+}
+
+#[test]
+fn level1_rasters_drawn_ahead_on_workers_are_the_rasters_drawn_in_order() {
+    // Many animated level 1 shapes and paths, top level, in a nested
+    // composition, and under motion blur: every frame misses the cache for
+    // all of them. Drawn ahead on worker threads, the frame is byte for
+    // byte the frame drawn in order.
+    let mut layers: Vec<Value> = Vec::new();
+    for i in 0..10 {
+        let shape = ["rect", "ellipse", "star", "polygon"][i % 4];
+        let color = ["#FFFFFF", "#80FFDB", "#F72585", "#4CC9F0"][i % 4];
+        let mut l = layer(
+            &format!("s{i}"),
+            "shape",
+            json!({ "shape": shape, "w": 40 + 7 * i, "h": 30 + 5 * i, "points": 5 + i % 3,
+                    "radius": 6, "stroke": 2, "strokeColor": "#FFD60A",
+                    "color": color }),
+            20.0 + 22.0 * i as f64,
+            40.0 + 15.0 * (i % 5) as f64,
+            2.0,
+        );
+        set(&mut l, "scale.x", json!({ "v": 100, "expr": null, "kf": [
+            { "t": 0, "v": 60, "ease": "linear" }, { "t": 2, "v": 180, "ease": "linear" }
+        ] }));
+        if i % 3 == 0 {
+            l["mblur"] = json!(true);
+            set(&mut l, "position.x", json!({ "v": 0, "expr": null, "kf": [
+                { "t": 0, "v": 0, "ease": "linear" }, { "t": 2, "v": 256, "ease": "linear" }
+            ] }));
+        }
+        layers.push(l);
+    }
+    for i in 0..4 {
+        layers.push(path_layer(&format!("p{i}"), 60.0 + 45.0 * f64::from(i), 190.0, 25.0 + 20.0 * f64::from(i)));
+    }
+    layers.push(layer("pre", "precomp", json!({ "comp": "inner", "w": W, "h": H }), 128.0, 128.0, 2.0));
+    let mut doc = project(W, H, 2.0, no_fill(), layers);
+    composition(
+        &mut doc,
+        "inner",
+        W,
+        H,
+        2.0,
+        (0..3).map(|i| path_layer(&format!("n{i}"), 70.0 + 50.0 * f64::from(i), 70.0, 40.0)).collect(),
+    );
+    let doc = load(&doc);
+    let mut request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    request.motion_blur = pm_render::motion::MotionBlur::Samples(6);
+    let draw = |renderer: &mut Renderer, t: f64| {
+        let frame = renderer
+            .render(&doc, "Ptest-root", ticks(t), &request, &MapResolver::default())
+            .expect("render");
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        (renderer.read_rgba(&frame).unwrap(), renderer.last_stages())
+    };
+    let mut ahead = Renderer::headless().unwrap();
+    let mut in_order = Renderer::headless().unwrap();
+    in_order.set_vector_prefetch(false);
+    let mut drawn_ahead = 0;
+    for t in [0.0, 0.37, 0.91, 1.5] {
+        let (a, stages) = draw(&mut ahead, t);
+        let (b, plain) = draw(&mut in_order, t);
+        assert_eq!(plain.prefetched, 0);
+        drawn_ahead += stages.prefetched;
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "frame at {t} differs");
+        assert!(a.chunks(4).any(|p| p[3] > 0.0), "the frame draws something at {t}");
+        assert_eq!(ahead.vector_cache_len(), in_order.vector_cache_len(), "same cache entries at {t}");
+    }
+    assert!(drawn_ahead >= 40, "rasters drawn ahead: {drawn_ahead}");
+}

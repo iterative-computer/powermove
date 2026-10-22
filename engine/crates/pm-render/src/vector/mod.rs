@@ -353,3 +353,35 @@ mod tests {
         );
     }
 }
+
+/// Every level 1 shape and paths source a plan draws, in drawing order
+/// (nested compositions, motion-blur samples, layer targets and matte
+/// passes included): what [`cache::VectorCache::prefetch`] rasterizes ahead.
+pub(crate) fn level1_sources<'p>(plan: &'p crate::plan::CompPlan, out: &mut Vec<&'p VectorSource>) {
+    for draw in &plan.draws {
+        level1_in(&draw.content, out);
+    }
+}
+
+fn level1_in<'p>(content: &'p crate::plan::Content, out: &mut Vec<&'p VectorSource>) {
+    use crate::plan::{Content, Source};
+    match content {
+        Content::Solid(_) => {}
+        Content::Placed(p) => level1_in(&p.content, out),
+        Content::Composite(node) => {
+            if let crate::composite::Node::Layer(layer) = &**node {
+                for draw in &layer.content {
+                    level1_in(&draw.content, out);
+                }
+                if let Some(matte) = &layer.matte {
+                    level1_sources(&matte.source, out);
+                }
+            }
+        }
+        Content::Texture { source, .. } => match source {
+            Source::Vector(v) if matches!(**v, VectorSource::Shape { .. } | VectorSource::Paths { .. }) => out.push(v),
+            Source::Comp(child) | Source::Accumulate(child) => level1_sources(child, out),
+            _ => {}
+        },
+    }
+}

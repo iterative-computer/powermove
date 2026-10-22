@@ -468,8 +468,30 @@ pub struct Stats {
     pub compat_asked: u64,
     /// Viewer frames that waited for producer answers.
     pub compat_waits: u64,
+    /// Where viewer frames' render-thread time went, summed over frames
+    /// (docs/engine/host-processes.md, "Large projects, rendering").
+    pub stages: StageTotals,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
+}
+
+/// Viewer frame stages summed over frames ([`pm_render::FrameStages`]).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageTotals {
+    /// Frames drawn, and the sum of their stages (µs).
+    pub frames: u64,
+    pub plan_us: u64,
+    pub prefetch_us: u64,
+    pub prefetched: u64,
+    pub record_us: u64,
+    pub submit_us: u64,
+    /// The whole compose (the stages, the viewer placement) (µs).
+    pub compose_us: u64,
+    /// Passes that planned a frame and stopped to wait (compatibility
+    /// answers, SVG rasters, fallback pixels), and their planning time.
+    pub waits: u64,
+    pub wait_plan_us: u64,
 }
 
 const TRACE_CAP: usize = 200_000;
@@ -3375,6 +3397,7 @@ impl Thread {
                 depth_slot.as_ref().map(|(_, _, v)| v),
             );
             composer.renderer().set_compat_rasters(None);
+            let stages = composer.renderer().last_stages();
             depth_surface = depth_slot.map(|(index, generation, _)| (index, generation));
             composer.set_blender(pm_render::blender::BlenderRender::Native);
             // What the paused frame lacked (nothing in a draft shading); a
@@ -3397,6 +3420,16 @@ impl Thread {
                     message: format!("viewer: a frame waited for fonts and is drawn again ({why})"),
                 }]);
                 return None;
+            }
+            if let Err(
+                pm_render::RenderError::CompatPending(_)
+                | pm_render::RenderError::SvgRastersPending(_)
+                | pm_render::RenderError::ShaderFallbackPending(_),
+            ) = &composed
+            {
+                let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+                stats.stages.waits += 1;
+                stats.stages.wait_plan_us += stages.plan_us;
             }
             match composed {
                 Ok(composed) => {
@@ -3434,6 +3467,14 @@ impl Thread {
                     stats.document_frames += 1;
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
                     stats.compose_us_total += composed.cpu_us;
+                    let totals = &mut stats.stages;
+                    totals.frames += 1;
+                    totals.plan_us += stages.plan_us;
+                    totals.prefetch_us += stages.prefetch_us;
+                    totals.prefetched += u64::from(stages.prefetched);
+                    totals.record_us += stages.record_us;
+                    totals.submit_us += stages.submit_us;
+                    totals.compose_us += composed.cpu_us.max(0) as u64;
                     stats.layer_failures += composed.failures.len() as u64;
                     stats.stand_in_frames += u64::from(stand_in);
                     stats.scrub = Some(scrub_stats);

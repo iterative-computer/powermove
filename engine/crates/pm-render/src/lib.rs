@@ -61,7 +61,7 @@ pub use capability::{
 pub use effects::{Effects, builtin_definitions};
 pub use error::{LayerFailure, RenderError};
 pub use renderer::{
-    CommandBracket, Frame, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster, PassThrough,
+    CommandBracket, Frame, FrameStages, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster, PassThrough,
     Rendered, Renderer, SvgWaiting, TextRaster,
 };
 pub use request::{RenderRequest, VideoEnd};

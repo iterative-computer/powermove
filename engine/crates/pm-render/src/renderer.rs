@@ -137,6 +137,27 @@ pub struct Rendered {
     /// the frame again when they arrive. Frames that may not substitute
     /// fail with [`RenderError::SvgRastersPending`] instead.
     pub svg_misses: Vec<crate::vector::svg_rasters::SvgRasterNeed>,
+    /// Where the frame's CPU time went ([`FrameStages`]).
+    pub stages: FrameStages,
+}
+
+/// The CPU stages of one frame on the thread that renders it (µs): the
+/// per-frame breakdown the presenter reports (docs/engine/host-processes.md,
+/// "Large projects, rendering").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameStages {
+    /// Evaluating the document and planning the frame (`plan::build`).
+    pub plan_us: u64,
+    /// Level 1 shape and path rasters drawn ahead on worker threads.
+    pub prefetch_us: u64,
+    /// How many rasters that drew.
+    pub prefetched: u32,
+    /// Recording the frame: resolving sources (media, text, the remaining
+    /// vector rasters, effect programs) and encoding the passes.
+    pub record_us: u64,
+    /// Handing the commands to the GPU.
+    pub submit_us: u64,
 }
 
 /// One drawn quad of a top-level layer ([`Rendered::quads`]).
@@ -276,6 +297,12 @@ pub struct Renderer {
     /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
     reuse: crate::reuse::DrawReuse,
     reuse_enabled: bool,
+    /// The stages of the last frame this renderer planned, finished or not
+    /// (a frame that waits for compatibility answers stops after planning).
+    last_stages: FrameStages,
+    /// Whether level 1 shape and path rasters are drawn ahead on worker
+    /// threads ([`Renderer::set_vector_prefetch`]).
+    vector_prefetch: bool,
     /// The bottom of the last reusing frame kept on the GPU
     /// (`crate::frame_prefix`).
     prefix: crate::frame_prefix::FramePrefix,
@@ -334,6 +361,8 @@ impl Renderer {
             compat: None,
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
+            last_stages: FrameStages::default(),
+            vector_prefetch: true,
             prefix: Default::default(),
             svg_wait: false,
             svg_skip_failed: false,
@@ -367,6 +396,18 @@ impl Renderer {
 
     /// The draw reuse's counters (with the frames drawn from a kept bottom
     /// and the draws those did not draw again).
+    /// Draws a frame's uncached level 1 shape and path rasters on worker
+    /// threads before it records (on by default; the pixels are the same
+    /// either way).
+    pub fn set_vector_prefetch(&mut self, on: bool) {
+        self.vector_prefetch = on;
+    }
+
+    /// The stages of the last frame planned (finished or not).
+    pub fn last_stages(&self) -> FrameStages {
+        self.last_stages
+    }
+
     pub fn draw_reuse_stats(&self) -> crate::reuse::ReuseStats {
         crate::reuse::ReuseStats {
             prefix_frames: self.prefix.reused_frames,
@@ -1365,6 +1406,7 @@ impl Renderer {
         target: &Target,
         depth_id: Option<&Target>,
     ) -> Result<Rendered, RenderError> {
+        let began = std::time::Instant::now();
         request.validate()?;
         let root = document
             .root()
@@ -1429,6 +1471,11 @@ impl Renderer {
         if !request.background {
             plan.background = Background::Transparent;
         }
+        let mut stages = FrameStages {
+            plan_us: began.elapsed().as_micros() as u64,
+            ..FrameStages::default()
+        };
+        self.last_stages = stages;
         let quads = LayerQuad::of_plan(&plan);
         // Only the viewer's own frames (the reuse is on around them) keep
         // their bottom; never with the depth and id surface, exports, or
@@ -1456,6 +1503,20 @@ impl Renderer {
         self.vector.begin_frame();
         // Misses belong to the frame that records them.
         self.vector.svg.take_misses();
+        // The frame's level 1 shape and path rasters that are not cached,
+        // drawn on worker threads before the frame records (the executor
+        // then finds them cached; same keys and pixels).
+        if self.vector_prefetch {
+            let started = std::time::Instant::now();
+            let mut sources = Vec::new();
+            crate::vector::level1_sources(&plan, &mut sources);
+            let prefetched = self
+                .vector
+                .prefetch(&self.device, &self.queue, &sources, precision);
+            stages.prefetch_us = started.elapsed().as_micros() as u64;
+            stages.prefetched = prefetched.drawn;
+        }
+        let recording = std::time::Instant::now();
         self.scene3d.begin_frame();
         let mut encoder = self
             .device
@@ -1609,7 +1670,11 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.end(&mut encoder, &target.view);
         }
+        stages.record_us = recording.elapsed().as_micros() as u64;
+        let submitting = std::time::Instant::now();
         self.queue.submit([encoder.finish()]);
+        stages.submit_us = submitting.elapsed().as_micros() as u64;
+        self.last_stages = stages;
         self.effects.watchdog.submitted(&self.queue);
         for t in taken {
             self.pool.give(t);
@@ -1666,6 +1731,7 @@ impl Renderer {
             seconds,
             stand_ins: std::mem::take(&mut self.media.stand_ins),
             svg_misses,
+            stages,
         })
     }
 
