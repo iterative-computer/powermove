@@ -24,6 +24,19 @@ export function installNativePreviewCache(PM: any, session: () => DocumentSessio
         current = session();
         const size = current?.previewSize();
         if (!current || !size) throw new Error('Open the viewer before rendering the work area.');
+        const decodedFrame = async (time: number) => {
+          const deadline = Date.now() + 10_000;
+          let retries = 0;
+          while (generation === own && signature() === key) {
+            const frame = await current!.cacheFrame(time);
+            if (!frame.quality.standIn) return frame;
+            if (Date.now() >= deadline) throw new Error('Media is still loading. Try rendering the work area again.');
+            // Native decode is asynchronous. A stand-in is deliberately not
+            // cached, so ask for this same source frame again after it lands.
+            await new Promise<void>(resolve => setTimeout(resolve, Math.min(100, 20 * 2 ** Math.min(retries++, 3))));
+          }
+          return null;
+        };
         const fps = PM.previewFps || PM.proj.fps;
         const [start, end] = PM.proj.work ?? [0, PM.proj.dur];
         const frames = Math.max(1, Math.ceil((end - start) * fps));
@@ -35,12 +48,13 @@ export function installNativePreviewCache(PM: any, session: () => DocumentSessio
         current.previewCache(limit, true, true);
         for (let i = 0; i < frames; i++) {
           if (generation !== own || signature() !== key) return;
-          await current.cacheFrame(start + i / fps);
+          if (!await decodedFrame(start + i / fps)) return;
           count = i + 1; bytes = count * size.width * size.height * 8; emit();
         }
         // The lease may be smaller than the user's requested ceiling. Prove
         // the whole work area survived warming before offering cached play.
-        const first = await current.cacheFrame(start);
+        const first = await decodedFrame(start);
+        if (!first) return;
         if (!first.quality.cached) throw new Error('This preview exceeds the engine’s available memory. Shorten the work area or lower preview resolution.');
         current.previewCache(limit, false);
         if (generation === own && signature() === key) play();

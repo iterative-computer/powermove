@@ -72,6 +72,92 @@ const make = (PM: Record<string, any>, bridge: EngineProxiesBridge) => {
   return controller;
 };
 
+it('prioritizes pending clips by distance from a paused playhead', async () => {
+  const { bridge } = fakeBridge();
+  const prioritize = vi.fn(async () => {});
+  const { PM } = fakePM();
+  PM.time = 12;
+  PM.proj.layers = [
+    { from: 0, dur: 2, d: { asset: 'v1' } },
+    { from: 10, dur: 4, d: { asset: 'v2' } }
+  ];
+  make(PM, { ...bridge, prioritize });
+  await settle();
+  expect(prioritize).toHaveBeenLastCalledWith('p1', ['v2', 'v1']);
+  PM.time = 1; PM.bus.emit('time');
+  await settle();
+  expect(prioritize).toHaveBeenLastCalledWith('p1', ['v1', 'v2']);
+});
+
+it('prioritizes footage in a nearby precomp instance ahead of a distant top-level clip', async () => {
+  const { bridge } = fakeBridge();
+  const prioritize = vi.fn(async () => {});
+  const { PM } = fakePM();
+  PM.time = 12;
+  PM.proj.comps = { nested: { layers: [{ id: 'inner', type: 'video', from: 5, dur: 2, d: { asset: 'v2' } }] } };
+  PM.proj.layers = [
+    { id: 'far', type: 'video', from: 20, dur: 2, d: { asset: 'v1' } },
+    { id: 'first', type: 'precomp', from: 0, dur: 4, d: { comp: 'nested', trim: 0, speed: 1 } },
+    { id: 'near', type: 'precomp', from: 10, dur: 4, d: { comp: 'nested', trim: 2, speed: 2 } }
+  ];
+  make(PM, { ...bridge, prioritize });
+  await settle();
+  expect(prioritize).toHaveBeenLastCalledWith('p1', ['v2', 'v1']);
+  PM.proj.comps.nested.layers.push({ id: 'cycle', type: 'precomp', from: 0, dur: 10, d: { comp: 'nested' } });
+  PM.time = 11; PM.bus.emit('time');
+  await settle();
+  expect(prioritize).toHaveBeenLastCalledWith('p1', ['v2', 'v1']);
+});
+
+it('maps reverse speed and time remap into the nested composition before ranking assets', async () => {
+  const { bridge } = fakeBridge();
+  const prioritize = vi.fn(async () => {});
+  const { PM } = fakePM();
+  PM.time = 15.5;
+  PM.proj.comps = { nested: { layers: [
+    { id: 'late', type: 'video', from: 5, dur: 1, d: { asset: 'v2' } },
+    { id: 'early', type: 'video', from: 0, dur: 1, d: { asset: 'v1' } }
+  ] } };
+  const instance = { id: 'reverse', type: 'precomp', from: 10, dur: 6,
+    d: { comp: 'nested', trim: 6, speed: -1 } };
+  PM.proj.layers = [instance];
+  make(PM, { ...bridge, prioritize });
+  await settle();
+  expect(prioritize).toHaveBeenLastCalledWith('p1', ['v1', 'v2']);
+  instance.d = { comp: 'nested', timeRemap: true,
+    sourceTime: { v: 6, kf: [] } };
+  PM.evP = (layer: any, _property: any, time: number) => 6 - (time - layer.from);
+  PM.time = 10.6; PM.bus.emit('time');
+  await settle();
+  expect(prioritize).toHaveBeenLastCalledWith('p1', ['v2', 'v1']);
+  PM.evP = () => 0.5; // a frozen remap only visits the early clip
+  PM.time = 10.7; PM.bus.emit('time');
+  await settle();
+  expect(prioritize).toHaveBeenLastCalledWith('p1', ['v1', 'v2']);
+});
+
+it('offers Create Proxies after actual drops and measured slow decoding, once playback stops', async () => {
+  const { bridge } = fakeBridge();
+  const { PM } = fakePM();
+  const controller = make(PM, bridge);
+  await settle();
+  PM.toast.mockClear();
+  PM.playing = true;
+  controller.playbackStats(1);
+  expect(PM.toast).not.toHaveBeenCalled();
+  controller.slowDecodes(['v1', 'a1']);
+  controller.playbackStats(2);
+  expect(PM.toast).not.toHaveBeenCalled();
+  PM.playing = false; PM.bus.emit('transport');
+  const notice = PM.toast.mock.calls.find(([text]: any[]) => text === 'Dropped frames · clips decode slowly');
+  expect(notice?.[2].action.label).toBe('Create Proxies');
+  notice?.[2].action.run();
+  await settle();
+  expect(bridge.create).toHaveBeenCalledWith('p1', ['v1']);
+  controller.playbackStats(3);
+  expect(PM.toast.mock.calls.filter(([text]: any[]) => text === 'Dropped frames · clips decode slowly')).toHaveLength(1);
+});
+
 afterEach(() => {
   for (const controller of controllers.splice(0)) controller.dispose();
   vi.useRealTimers();

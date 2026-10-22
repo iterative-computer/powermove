@@ -35,6 +35,8 @@ export type ProxyAssetDescriptor = {
   sourcePath?: string;
   /** The asset is an image sequence (proxies apply, section 14.3). */
   imageSequence?: boolean;
+  /** Identity of the ordered original frames and exact rate. */
+  originalSequenceHash?: string;
   alwaysPlayOriginal?: boolean;
 };
 
@@ -70,6 +72,8 @@ export type GeneratedMediaLocation =
 export interface EngineProxiesBridge {
   /** Measurements from the native decoder; project intent still decides generation. */
   slowDecodes?(project: string, assets: string[]): Promise<void>;
+  /** Pending generation, nearest visible clip first. Active work is not interrupted. */
+  prioritize?(project: string, assets: string[]): Promise<void>;
   snapshot(project: string): Promise<ProxySnapshot>;
   subscribe(listener: (snapshot: ProxySnapshot) => void): () => void;
   /** On project open and after each intent edit, its undo and redo, and each

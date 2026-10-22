@@ -576,6 +576,7 @@ const bridge: PowermoveBridge = {
   nativeEngine: {
     proxies: {
       slowDecodes: (project: string, assets: string[]) => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'slow', project, assets }),
+      prioritize: (project: string, assets: string[]) => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'prioritize', project, assets }),
       snapshot: (project) => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'snapshot', project }),
       subscribe: (listener) => {
         const handler = (_event: Electron.IpcRendererEvent, snapshot: import('../shared/proxies').ProxySnapshot) => listener(snapshot);

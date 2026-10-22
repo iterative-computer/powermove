@@ -19,6 +19,7 @@ export function proxyDescriptors(value: unknown): Record<string, ProxyAssetDescr
       ...(typeof meta['kind'] === 'string' ? { kind: meta['kind'].slice(0, 32) } : {}),
       ...(typeof meta['name'] === 'string' ? { name: meta['name'].slice(0, 1024) } : {}),
       ...(meta['imageSequence'] === true ? { imageSequence: true } : {}),
+      ...(typeof meta['originalSequenceHash'] === 'string' && HASH.test(meta['originalSequenceHash']) ? { originalSequenceHash: meta['originalSequenceHash'] } : {}),
       ...(meta['alwaysPlayOriginal'] === true ? { alwaysPlayOriginal: true } : {})
     };
   }
@@ -56,6 +57,7 @@ export function installProxyIpc(options: {
     if (action === 'rebuild') return options.service.rebuild(owner, project, assets);
     if (action === 'remove') return options.service.remove(owner, project, assets);
     if (action === 'slow') return options.service.slow(owner, project, assets);
+    if (action === 'prioritize') return options.service.prioritize(owner, project, assets);
     throw new Error('Unknown proxy action.');
   });
   return () => { options.ipc.removeHandler(ENGINE_IPC.proxies); };

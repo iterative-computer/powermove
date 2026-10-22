@@ -9,7 +9,7 @@ import type { ProjectProxyIntent, ProxyAssetDescriptor, ProxySnapshot } from '..
 import { ProtocolError } from './protocol';
 import { ASSESSMENTS_FILE, DELETIONS_FILE, EngineProxyService, LOCATIONS_FILE, PROJECT_ROOT, type ProxyServiceOptions, type ProxySource, type ProxySourceScope } from './proxies';
 
-const H1 = '1'.repeat(64), H2 = '2'.repeat(64), H3 = '3'.repeat(64);
+const H1 = '1'.repeat(64), H2 = '2'.repeat(64), H3 = '3'.repeat(64), H4 = '4'.repeat(64);
 const bytes = (hash: string) => Uint8Array.from(Buffer.from(hash, 'hex'));
 const JOB = { process: 'job', session: 0 } as const;
 const INTERACTIVE = { process: 'interactive', session: 4 } as const;
@@ -80,6 +80,36 @@ const status = (job: string, state: JobStatus['state'], over: Partial<JobStatus>
 const exists = (file: string) => stat(file).then(() => true, () => false);
 
 describe('EngineProxyService', () => {
+  it('keys image sequences by the aggregate original and queues them without probing a manifest as video', async () => {
+    let measured = false;
+    const h = harness({ assess: async () => { measured = true; return false; } });
+    h.sources.set('p1/seq', { path: '/media/sequence.json', contentHash: bytes(H1) });
+    await h.service.setIntent(1, 'p1', intent({ create: 'whenNeeded' }), {
+      seq: { kind: 'image', imageSequence: true, contentHash: H2, originalSequenceHash: H1, name: 'Sequence' }
+    });
+    expect(h.last().assets.seq).toEqual({ state: 'queued' });
+    expect(h.submitted()).toHaveLength(1);
+    expect(h.resolves).toEqual([{ asset: 'seq', scope: { owner: 1, project: 'p1', sequenceHash: H1 } }]);
+    await h.service.settled();
+    expect(measured).toBe(false);
+    const alias = (h.submitted()[0]!.spec as { asset: string }).asset;
+    expect(await h.service.resolveAlias(alias, JOB)).toEqual({ path: '/media/sequence.json', contentHash: bytes(H1) });
+    expect(h.resolves.at(-1)?.scope.sequenceHash).toBe(H1);
+    await h.service.dispose();
+  });
+
+  it('uses an image sequence original hash when a draft job names its stored playback movie', async () => {
+    const h = harness();
+    const stored = await storeProxy(path.join(h.cache, 'Generated Media'), H1);
+    await h.service.setIntent(1, 'p1', intent(), {
+      seq: { kind: 'image', imageSequence: true, contentHash: H2, originalSequenceHash: H1 }
+    });
+    expect(h.last().assets.seq).toMatchObject({ state: 'ready' });
+    expect((await h.service.resolveDraft('seq', { project: 'p1', contentHash: H2 }))?.path).toBe(stored.file);
+    expect((await h.service.resolveDraft('seq', { project: 'p1', contentHash: H1 }))?.path).toBe(stored.file);
+    await h.service.dispose();
+  });
+
   it('queues a whole-clip job by alias, grants it to the job lane only, and finds the proxy after relaunch', async () => {
     const h = harness();
     h.sources.set('p1/a1', { path: '/media/a.mov', contentHash: bytes(H1) });
@@ -178,7 +208,7 @@ describe('EngineProxyService', () => {
     await Promise.all(ops);
     expect(overlapped).toBe(false);
     const jobs = h.submitted().map((r) => r.job);
-    expect(jobs).toHaveLength(3);
+    expect(jobs).toHaveLength(2); // the replacement waits for the cancelled job to retire
     // The first job had already ended when Delete ran, so only the second needed cancelling.
     expect(h.requests.filter((r) => r.type === 'cancelJobs').map((r) => (r as { job: string }).job)).toEqual([jobs[1]]);
     expect(h.last().assets['a']).toEqual({ state: 'queued' });
@@ -186,8 +216,9 @@ describe('EngineProxyService', () => {
     // The rebuilt job's late predecessor finishing does not touch the live job.
     h.service.status(status(jobs[1]!, 'failed', { error: { message: 'boom' } as JobStatus['error'] }));
     await h.service.settled();
+    expect(h.submitted()).toHaveLength(3);
     expect(h.last().assets['a']).toEqual({ state: 'queued' });
-    h.service.status(status(jobs[2]!, 'running', { progress: 0.5 }));
+    h.service.status(status(h.submitted()[2]!.job, 'running', { progress: 0.5 }));
     expect(h.last().assets['a']).toEqual({ state: 'creating', progress: 0.5 });
     await h.service.dispose();
   });
@@ -201,11 +232,73 @@ describe('EngineProxyService', () => {
     expect(h.submitted()).toHaveLength(1);
     await h.service.setIntent(1, 'p1', intent({ create: 'allVideo' }), { a1: video(H1), a2: video(H2) });
     await h.service.setIntent(1, 'p1', intent({ create: 'allVideo' }), { a1: video(H1), a2: video(H2) });
-    expect(h.submitted().map((r) => r.spec)).toHaveLength(2);
+    expect(h.submitted().map((r) => r.spec)).toHaveLength(1);
     expect(h.last().activity.creating).toEqual({ done: 0, total: 2 });
     h.service.status(status(h.submitted()[0]!.job, 'done', { progress: 1 }));
     await h.service.settled();
+    expect(h.submitted()).toHaveLength(2);
     expect(h.last().activity.creating).toEqual({ done: 1, total: 2 });
+    await h.service.dispose();
+  });
+
+  it('starts the nearest clip first and reorders waiting jobs without interrupting a transcode', async () => {
+    const h = harness();
+    for (const [asset, hash] of [['a', H1], ['b', H2], ['c', H3]] as const) {
+      h.sources.set(`p1/${asset}`, { path: `/m/${asset}.mov`, contentHash: bytes(hash) });
+    }
+    await h.service.prioritize(1, 'p1', ['c', 'a', 'b']);
+    await h.service.setIntent(1, 'p1', intent({ create: 'allVideo' }), { a: video(H1), b: video(H2), c: video(H3) });
+    expect(h.submitted()).toHaveLength(1);
+    const first = h.submitted()[0]!;
+    expect(await h.service.resolveAlias((first.spec as { asset: string }).asset, JOB)).toMatchObject({ path: '/m/c.mov' });
+    expect(h.last().activity.creating).toEqual({ done: 0, total: 3 });
+
+    await h.service.prioritize(1, 'p1', ['b', 'a', 'c']);
+    expect(h.submitted()).toHaveLength(1);
+    h.service.status(status(first.job, 'done'));
+    await h.service.settled();
+    const second = h.submitted()[1]!;
+    expect(await h.service.resolveAlias((second.spec as { asset: string }).asset, JOB)).toMatchObject({ path: '/m/b.mov' });
+    h.service.status(status(second.job, 'done'));
+    await h.service.settled();
+    const third = h.submitted()[2]!;
+    expect(await h.service.resolveAlias((third.spec as { asset: string }).asset, JOB)).toMatchObject({ path: '/m/a.mov' });
+    await h.service.dispose();
+  });
+
+  it('removes a waiting job without sending a native cancellation', async () => {
+    const h = harness();
+    h.sources.set('p1/a', { path: '/m/a.mov', contentHash: bytes(H1) });
+    h.sources.set('p1/b', { path: '/m/b.mov', contentHash: bytes(H2) });
+    await h.service.setIntent(1, 'p1', intent({ create: 'allVideo' }), { a: video(H1), b: video(H2) });
+    expect(h.submitted()).toHaveLength(1);
+    await h.service.remove(1, 'p1', ['b']);
+    expect(h.requests.some((request) => request.type === 'cancelJobs')).toBe(false);
+    h.service.status(status(h.submitted()[0]!.job, 'done'));
+    await h.service.settled();
+    expect(h.submitted()).toHaveLength(1);
+    expect(h.last().assets['b']).toEqual({ state: 'none' });
+    await h.service.dispose();
+  });
+
+  it('gives another project a turn before continuing a long generation batch', async () => {
+    const h = harness();
+    h.sources.set('p1/a', { path: '/m/a.mov', contentHash: bytes(H1) });
+    h.sources.set('p1/b', { path: '/m/b.mov', contentHash: bytes(H2) });
+    h.sources.set('p2/c', { path: '/m/c.mov', contentHash: bytes(H3) });
+    h.sources.set('p3/d', { path: '/m/d.mov', contentHash: bytes(H4) });
+    await h.service.setIntent(1, 'p1', intent({ create: 'allVideo' }), { a: video(H1), b: video(H2) });
+    await h.service.setIntent(2, 'p2', intent({ create: 'allVideo' }), { c: video(H3) });
+    await h.service.setIntent(3, 'p3', intent({ create: 'allVideo' }), { d: video(H4) });
+    h.service.status(status(h.submitted()[0]!.job, 'done'));
+    await h.service.settled();
+    expect(await h.service.resolveAlias((h.submitted()[1]!.spec as { asset: string }).asset, JOB)).toMatchObject({ path: '/m/c.mov' });
+    h.service.status(status(h.submitted()[1]!.job, 'done'));
+    await h.service.settled();
+    expect(await h.service.resolveAlias((h.submitted()[2]!.spec as { asset: string }).asset, JOB)).toMatchObject({ path: '/m/d.mov' });
+    h.service.status(status(h.submitted()[2]!.job, 'done'));
+    await h.service.settled();
+    expect(await h.service.resolveAlias((h.submitted()[3]!.spec as { asset: string }).asset, JOB)).toMatchObject({ path: '/m/b.mov' });
     await h.service.dispose();
   });
 
@@ -289,14 +382,15 @@ describe('EngineProxyService', () => {
     h.service.status(status(old.job, 'running', { progress: 0.9 }));
     await h.service.rebuild(1, 'p1', ['a']);
     expect(h.requests.filter((r) => r.type === 'cancelJobs')).toEqual([{ type: 'cancelJobs', kind: 'job', job: old.job }]);
-    expect(h.submitted()).toHaveLength(2);
-    const fresh = h.submitted()[1]!;
+    expect(h.submitted()).toHaveLength(1);
     // The old alias can no longer be granted.
     await expect(h.service.resolveAlias((old.spec as { asset: string }).asset, JOB)).rejects.toBeInstanceOf(ProtocolError);
     // The old job finished before the cancel landed: its file is the new job's key; keep it.
     const { file } = await storeProxy(path.join(h.cache, 'Generated Media'), H1);
     h.service.status(status(old.job, 'done', { progress: 1, path: file }));
     await h.service.settled();
+    expect(h.submitted()).toHaveLength(2);
+    const fresh = h.submitted()[1]!;
     expect(await exists(file)).toBe(true);
     expect(h.last().assets['a']).toEqual({ state: 'queued' });
     h.service.status(status(fresh.job, 'done', { progress: 1, path: file }));
@@ -378,6 +472,19 @@ describe('EngineProxyService', () => {
     await h.service.dispose();
   });
 
+  it('continues the pending queue after a native submit is rejected', async () => {
+    let attempts = 0;
+    const h = harness({ fail: (request) => request.type === 'submitJob' && ++attempts === 1 ? new Error('unavailable') : null });
+    h.sources.set('p1/a', { path: '/m/a.mov', contentHash: bytes(H1) });
+    h.sources.set('p1/b', { path: '/m/b.mov', contentHash: bytes(H2) });
+    await h.service.setIntent(1, 'p1', intent({ create: 'allVideo' }), { a: video(H1), b: video(H2) });
+    await h.service.settled();
+    expect(h.submitted()).toHaveLength(2);
+    expect(h.last().assets['a']).toEqual({ state: 'failed', error: "Couldn't start creating the proxy: unavailable" });
+    expect(h.last().assets['b']).toEqual({ state: 'queued' });
+    await h.service.dispose();
+  });
+
   describe('source guards', () => {
     it('resolves through the project, refuses changed or offline originals, and skips them quietly when automatic', async () => {
       const h = harness();
@@ -399,13 +506,16 @@ describe('EngineProxyService', () => {
       await h.service.setIntent(1, 'p1', intent(), { a: video(H1), b: video(H2) });
       h.sources.set('p1/b', { path: '/m/b.mov', contentHash: bytes(H2) });
       await h.service.create(1, 'p1', ['a', 'b']);
-      const [a, b] = h.submitted().map((r) => (r.spec as { asset: string }).asset);
+      const a = (h.submitted()[0]!.spec as { asset: string }).asset;
       h.sources.set('p1/a', { path: '/relinked/a.mov', contentHash: bytes(H1) });
       expect(await h.service.resolveAlias(a!, JOB)).toEqual({ path: '/relinked/a.mov', contentHash: bytes(H1) });
       h.sources.set('p1/a', { path: '/relinked/a.mov', contentHash: bytes(H3) });
       await expect(h.service.resolveAlias(a!, JOB)).rejects.toThrow('The original changed after the proxy was queued');
       h.service.release(1);
       h.sources.delete('p1/b');
+      h.service.status(status(h.submitted()[0]!.job, 'done'));
+      await h.service.settled();
+      const b = (h.submitted()[1]!.spec as { asset: string }).asset;
       expect(await h.service.resolveAlias(b!, JOB)).toEqual({ path: '/m/b.mov', contentHash: bytes(H2) });
       // Statuses for a closed window are harmless.
       expect(() => h.service.status(status(h.submitted()[1]!.job, 'running', { progress: 0.3 }))).not.toThrow();
@@ -422,10 +532,13 @@ describe('EngineProxyService', () => {
       await h.service.create(1, 'p1', ['a']);
       await h.service.setLocation({ kind: 'folder', path: folderB });
       await h.service.create(1, 'p1', ['b']);
-      const [a, b] = h.submitted().map((r) => (r.spec as { asset: string }).asset);
+      const a = (h.submitted()[0]!.spec as { asset: string }).asset;
       await h.service.resolveAlias(a!, JOB);
       expect(h.service.generatedDirectory(JOB)).toBe(folderA);
-      await h.service.resolveAlias(b!, JOB);
+      h.service.status(status(h.submitted()[0]!.job, 'done', { progress: 1 }));
+      await h.service.settled();
+      const next = (h.submitted()[1]!.spec as { asset: string }).asset;
+      await h.service.resolveAlias(next, JOB);
       expect(h.service.generatedDirectory(JOB)).toBe(folderB);
       h.service.status(status(h.submitted()[0]!.job, 'done', { progress: 1 }));
       expect(h.service.generatedDirectory(JOB)).toBe(folderB); // a late status does not reset the running job's store

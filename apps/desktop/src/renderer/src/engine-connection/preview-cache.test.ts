@@ -52,6 +52,21 @@ describe('native Render Work Area', () => {
       expect(f.calls.at(-1)).toEqual([1024 * 1024, false]);
     } finally { f.dispose(); }
   });
+  it('waits for asynchronous video decode before counting a cached frame', async () => {
+    const f = fixture();
+    const attempts = new Map<number, number>();
+    f.session.cacheFrame.mockImplementation(async (time: number) => {
+      const attempt = (attempts.get(time) ?? 0) + 1;
+      attempts.set(time, attempt);
+      return { quality: { standIn: attempt === 1, cached: attempt > 2 } };
+    });
+    try {
+      await f.PM.Preview.cache();
+      expect(f.session.cacheFrame.mock.calls.map(([time]) => time)).toEqual([0, 0, 1 / 24, 1 / 24, 0]);
+      expect(f.PM.Preview.count).toBe(2);
+      expect(f.PM.toast).not.toHaveBeenCalled();
+    } finally { f.dispose(); }
+  });
   it('releases native memory and restores time after decode failure', async () => {
     const f = fixture();
     f.session.cacheFrame.mockRejectedValueOnce(new Error('source went offline'));

@@ -31,6 +31,8 @@ import {
   type ProxyAssetDescriptor,
   type ProxySnapshot
 } from './proxies-types';
+import { sourceTime } from '../legacy/core/retiming';
+import { isProperty } from '../legacy/core/content-properties';
 
 export type ProjectIntentField = 'create' | 'size' | 'format';
 
@@ -47,6 +49,8 @@ export interface ProxyController {
   /** Whether the asset can have a proxy at all (video, image sequences). */
   eligible(assetId: string): boolean;
   create(assetId: string): Promise<void>;
+  slowDecodes(assets: string[]): void;
+  playbackStats(lateSkipped: number): void;
   rebuild(assetId: string): Promise<void>;
   remove(assetId: string): Promise<void>;
   location(): Promise<GeneratedMediaLocation>;
@@ -80,6 +84,7 @@ export function assetDescriptor(meta: any, recordHash?: (key: string) => string 
   const source = typeof meta?.link?.path === 'string' ? meta.link.path : typeof meta?.sourcePath === 'string' ? meta.sourcePath : null;
   if (source) out.sourcePath = source;
   if (meta?.imageSequence) out.imageSequence = true;
+  if (typeof meta?.imageSequence?.originalHash === 'string' && HASH.test(meta.imageSequence.originalHash)) out.originalSequenceHash = meta.imageSequence.originalHash;
   if (meta?.alwaysPlayOriginal === true) out.alwaysPlayOriginal = true;
   return out;
 }
@@ -102,6 +107,56 @@ export function proxyStatus(activity: ProxySnapshot['activity'] | null | undefin
   return { text: `Creating proxies · ${done + (done < creating.total ? 1 : 0)} of ${creating.total}`, progress: done / creating.total };
 }
 
+/** Distance to footage in the open composition's seconds, through nested
+ * precomp instances. Use the playback time mapping at each boundary so trim,
+ * reverse speed and time remapping place the inner playhead correctly. */
+function nearPlayheadAssets(PM: Registry, current: any, time: number): string[] {
+  const distances = new Map<string, number>();
+  const ancestors = new Set<object>();
+  const visit = (comp: any, at: number, elapsed: number, secondsPerCompSecond: number, depth: number): void => {
+    if (!comp || !Array.isArray(comp.layers) || depth > 8 || ancestors.has(comp)) return;
+    ancestors.add(comp);
+    PM.scope?.push(comp);
+    try {
+      for (const layer of comp.layers) {
+        if (layer?.on === false || !layer.d || !Number.isFinite(Number(layer.from)) || !Number.isFinite(Number(layer.dur))) continue;
+        const from = Number(layer.from), end = from + Math.max(0, Number(layer.dur));
+        if (end <= from) continue;
+        const boundary = Math.max(from, Math.min(end, at));
+        const distance = boundary === at ? elapsed : elapsed + Math.abs(boundary - at) * secondsPerCompSecond;
+        if (layer.type === 'precomp' && typeof layer.d.comp === 'string') {
+          const child = PM.compOf?.(layer) ?? comp.comps?.[layer.d.comp] ?? current.comps?.[layer.d.comp];
+          if (!child) continue;
+          try {
+            const mapped = sourceTime(PM, layer, boundary);
+            // A local derivative gives the correct units for regular speed,
+            // reverse and linear remaps. For a held remap, use its full-span
+            // variation if it later advances; a fully frozen segment can only
+            // prioritize footage at its held source time.
+            let rate = Math.abs(Number(layer.d.speed ?? 1));
+            if (layer.d.timeRemap || isProperty(layer.d.speed) || isProperty(layer.d.trim)) {
+              const step = Math.min(0.05, (end - from) / 2);
+              const lo = Math.max(from, boundary - step), hi = Math.min(end, boundary + step);
+              const localRate = hi > lo ? Math.abs((sourceTime(PM, layer, hi) - sourceTime(PM, layer, lo)) / (hi - lo)) : 0;
+              const samples = Array.from({ length: 5 }, (_, i) => sourceTime(PM, layer, from + (end - from) * i / 4));
+              const variation = samples.slice(1).reduce((sum, value, i) => sum + Math.abs(value - samples[i]!), 0) / (end - from);
+              rate = localRate > 1e-6 ? localRate : variation;
+            }
+            if (Number.isFinite(mapped) && Number.isFinite(rate))
+              visit(child, mapped, distance, rate > 1e-6 ? secondsPerCompSecond / rate : Infinity, depth + 1);
+          } catch (error) { PM.log?.('warn', `[proxies] nested priority: ${reason(error)}`); }
+        } else {
+          const asset = layer.d.asset;
+          if (typeof asset === 'string' && proxyEligible(current.assets?.[asset]))
+            distances.set(asset, Math.min(distances.get(asset) ?? Infinity, distance));
+        }
+      }
+    } finally { PM.scope?.pop(); ancestors.delete(comp); }
+  };
+  visit(PM.curComp?.() ?? current, time, 0, 1, 0);
+  return [...distances].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0])).map(([id]) => id);
+}
+
 /** A rejected call's message, for "Couldn't … · <message>". */
 function reason(error: unknown): string {
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
@@ -115,6 +170,12 @@ export function createProxyController(PM: Registry, bridge: EngineProxiesBridge)
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pendingStatus = false;
   let shownStatus: string | null = null;
+  const slowAssets = new Set<string>();
+  let dropped = 0;
+  let pendingDiagnosis = false;
+  let diagnosisShown = false;
+  let prioritySignature = '';
+
   const listeners = new Set<() => void>();
   const offs: Array<() => void> = [];
 
@@ -153,6 +214,33 @@ export function createProxyController(PM: Registry, bridge: EngineProxiesBridge)
     });
   };
 
+  const prioritize = async (): Promise<void> => {
+    const current = project();
+    if (!current || !bridge.prioritize || PM.playing) return;
+    const time = Number(PM.time) || 0;
+    const assets = nearPlayheadAssets(PM, current, time);
+    const signature = JSON.stringify([current.id, assets]);
+    if (signature === prioritySignature) return;
+    prioritySignature = signature;
+    try { await bridge.prioritize(current.id, assets); }
+    catch (error) { prioritySignature = ''; PM.log?.('warn', `[proxies] priority: ${reason(error)}`); }
+  };
+  const showDiagnosis = (): void => {
+    if (!pendingDiagnosis || PM.playing || diagnosisShown) return;
+    const current = project();
+    const assets = [...slowAssets].filter(id => proxyEligible(current?.assets?.[id]) && !current.assets[id].alwaysPlayOriginal);
+    if (!current || !assets.length) return;
+    diagnosisShown = true;
+    pendingDiagnosis = false;
+    PM.toast?.('Dropped frames · clips decode slowly', 0, {
+      key: 'media-proxy-drops', kind: 'status', sticky: true, dismissible: true,
+      action: { label: 'Create Proxies', run: () => {
+        if (project()?.id !== current.id) return;
+        void bridge.create(current.id, assets).catch(error => toastError('create proxies', assets[0]!, error));
+      } }
+    });
+  };
+
   const send = async (force = false): Promise<void> => {
     if (timer) { clearTimeout(timer); timer = null; }
     const current = project();
@@ -164,6 +252,7 @@ export function createProxyController(PM: Registry, bridge: EngineProxiesBridge)
     if (!force && sent && sent.project === current.id && sent.signature === signature) return;
     sent = { project: current.id, signature };
     try {
+      await prioritize();
       await bridge.setIntent(current.id, intent, assets, path);
     } catch (error) {
       // The next change retries.
@@ -203,6 +292,8 @@ export function createProxyController(PM: Registry, bridge: EngineProxiesBridge)
     if (id !== openId) {
       openId = id;
       snapshot = null;
+      slowAssets.clear(); dropped = 0; pendingDiagnosis = false; diagnosisShown = false; prioritySignature = '';
+      PM.dismissToast?.('media-proxy-drops');
       notify();
       void send(true);
       void refresh();
@@ -214,7 +305,8 @@ export function createProxyController(PM: Registry, bridge: EngineProxiesBridge)
   on('project', projectChanged);
   on('projects:open', projectChanged);
   on('assets', schedule);
-  on('transport', () => { if (!PM.playing && pendingStatus) showStatus(); });
+  on('transport', () => { if (!PM.playing) { if (pendingStatus) showStatus(); showDiagnosis(); void prioritize(); } });
+  on('time', () => { if (!PM.playing) void prioritize(); });
 
   const writeProject = (label: string, fn: () => void): void => {
     PM.hist?.do ? PM.hist.do(label, fn) : fn();
@@ -266,6 +358,13 @@ export function createProxyController(PM: Registry, bridge: EngineProxiesBridge)
       return (snapshot && snapshot.project === project()?.id ? snapshot.assets[assetId] : null) ?? { state: 'none' };
     },
     eligible: (assetId) => proxyEligible(project()?.assets?.[assetId]),
+    slowDecodes(assets) { for (const id of assets) if (proxyEligible(project()?.assets?.[id])) slowAssets.add(id); },
+    playbackStats(lateSkipped) {
+      if (!Number.isFinite(lateSkipped) || lateSkipped < 0) return;
+      if (lateSkipped > dropped && slowAssets.size) pendingDiagnosis = true;
+      dropped = lateSkipped;
+      showDiagnosis();
+    },
     create: (assetId) => run('create a proxy', assetId, () => bridge.create(project().id, [assetId])),
     rebuild: (assetId) => run('rebuild the proxy', assetId, () => bridge.rebuild(project().id, [assetId])),
     remove: (assetId) => run('delete the proxy', assetId, () => bridge.remove(project().id, [assetId])),
@@ -294,6 +393,7 @@ export function createProxyController(PM: Registry, bridge: EngineProxiesBridge)
       for (const off of offs.splice(0)) { try { off(); } catch { /* already gone */ } }
       listeners.clear();
       if (shownStatus) PM.dismissToast?.(STATUS_KEY);
+      PM.dismissToast?.('media-proxy-drops');
     }
   };
 

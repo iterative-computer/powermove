@@ -27,7 +27,7 @@ import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, ty
 import { EngineFontClient, FONT_CLIENT_ID, installEngineFontService, JOB_FONT_CLIENT_ID } from '../engine-fonts';
 import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
-import { EngineProxyService } from './proxies';
+import { EngineProxyService, type ProxySourceScope } from './proxies';
 import { installProxyIpc } from './proxy-ipc';
 import { resolveFfmpeg } from '../ffmpeg-binary';
 import { CACHE_DIRS } from './services';
@@ -101,7 +101,7 @@ export function engineClock(addon: { nowUs(): number } | null): () => number {
 }
 
 export type InstallNativeEngineOptions = {
-  resolveProxySource?: (asset: string, scope: { owner: number; project: string }) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
+  resolveProxySource?: (asset: string, scope: ProxySourceScope) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
   hashGeneratedFile?: (file: string) => Promise<string>;
   proxyDraftScope?: (session: number, asset: string) => { projectId: string | null; hash: string | null } | null;
   enabled: boolean;

@@ -28,7 +28,7 @@ import { isId, ProtocolError } from './protocol';
 
 export type ProxySource = { path: string; contentHash: ContentHash | null };
 /** Which project's binding of an asset id a source comes from. */
-export type ProxySourceScope = { owner: number; project: string };
+export type ProxySourceScope = { owner: number; project: string; sequenceHash?: string };
 /** The host-call context services.ts sees for a capability mint. */
 export type ProxyHostContext = { process: EngineProcess; session: number };
 export type ProxyServiceOptions = {
@@ -83,6 +83,8 @@ type Job = {
   /** project id → asset ids this job makes a proxy for (projects sharing one original share a job). */
   targets: Map<string, Set<string>>;
   state: 'queued' | 'creating' | 'paused'; progress: number; paused: 'lowDisk' | 'interactive' | null;
+  /** Pending jobs can be reordered without cancelling a native transcode. */
+  submitted: boolean; order: number;
   /** Deleted or replaced: its output is not wanted, its statuses change nothing. */
   discarded: boolean;
 };
@@ -146,6 +148,13 @@ export class EngineProxyService {
   private projects = new Map<string, Project>();
   private jobs = new Map<string, Job>();
   private aliases = new Map<string, string>();
+  private pendingGeneration: string[] = [];
+  private activeGeneration: string | null = null;
+  private nextGenerationOrder = 0;
+  private generationTurn = 0;
+  private lastServed = new Map<string, number>();
+  /** Project id → nearest-first asset ids (the most recent editor view wins). */
+  private priority = new Map<string, { owner: number; ranks: Map<string, number> }>();
   /** The generation lane is serial: the job whose original was granted last is the one minting its store. */
   private current: { job: string; root: string } | null = null;
   private roots: string[] = [];
@@ -422,7 +431,8 @@ export class EngineProxyService {
 
   private recipe(intent: ProjectProxyIntent): Recipe { return { format: intent.format, size: intent.size }; }
   private hashOf(p: Project, asset: string): string | null {
-    const hash = p.assets[asset]?.contentHash;
+    const meta = p.assets[asset];
+    const hash = meta?.originalSequenceHash ?? meta?.contentHash;
     return hash && HASH.test(hash) ? hash : null;
   }
   private entries(project: string): Project[] { return [...this.projects.values()].filter((p) => p.id === project); }
@@ -517,7 +527,9 @@ export class EngineProxyService {
     let hash = this.hashOf(p, asset);
     if (!explicit && (this.suppressed(p, asset, hash) || this.failed(p, asset, hash) || this.originalOnly(p, asset))) return;
     if (this.stored(hash, recipe).ready) return;
-    const source = await this.options.resolve(asset, { owner: p.owner, project: p.id }).catch((e) => {
+    const scope: ProxySourceScope = { owner: p.owner, project: p.id,
+      ...(meta.originalSequenceHash ? { sequenceHash: meta.originalSequenceHash } : {}) };
+    const source = await this.options.resolve(asset, scope).catch((e) => {
       this.options.log?.('warn', `[proxies] resolving ${asset}: ${message(e)}`);
       return null;
     });
@@ -545,26 +557,77 @@ export class EngineProxyService {
     const job: Job = {
       id: `proxy-${randomUUID()}`, alias: `proxy-${randomUUID()}`, hash, recipe, root,
       source: { path: source.path, contentHash: Uint8Array.from(source.contentHash) },
-      scope: { owner: p.owner, project: p.id, asset },
-      targets: new Map([[p.id, new Set([asset])]]), state: 'queued', progress: 0, paused: null, discarded: false
+      scope: { ...scope, asset },
+      targets: new Map([[p.id, new Set([asset])]]), state: 'queued', progress: 0, paused: null,
+      submitted: false, order: this.nextGenerationOrder++, discarded: false
     };
     this.jobs.set(job.id, job); this.aliases.set(job.alias, job.id);
+    this.pendingGeneration.push(job.id);
     this.countTarget(p.id, 1);
     this.emit([p.id]);
+  }
+
+  /** A single native proxy lane: the waiting jobs remain reorderable here. */
+  private async startNext(): Promise<{ job: string; error: string } | null> {
+    if (this.activeGeneration || this.stopped) return null;
+    const ranked = this.pendingGeneration
+      .map((id) => this.jobs.get(id))
+      .filter((job): job is Job => !!job && !job.discarded && !job.submitted)
+      .sort((a, b) => this.rank(a) - this.rank(b) || a.order - b.order);
+    // Select the least recently served project, then its nearest clip. This
+    // prevents one project's long batch from starving another open project.
+    const projects = [...new Set(ranked.flatMap((job) => [...job.targets.keys()]))];
+    projects.sort((a, b) => (this.lastServed.get(a) ?? -1) - (this.lastServed.get(b) ?? -1));
+    const chosen = projects[0];
+    const job = chosen ? ranked.find((candidate) => candidate.targets.has(chosen)) : undefined;
+    if (!job) return null;
+    for (const project of job.targets.keys()) this.lastServed.set(project, ++this.generationTurn);
+    this.pendingGeneration = this.pendingGeneration.filter((id) => id !== job.id);
+    this.activeGeneration = job.id;
+    job.submitted = true;
     try {
       await this.options.request({ type: 'submitJob', job: job.id, class: 'generation', run: null,
-        spec: { kind: 'generateProxy', asset: job.alias, format: recipe.format, size: recipe.size }, output: null } as Request);
+        spec: { kind: 'generateProxy', asset: job.alias, format: job.recipe.format, size: job.recipe.size }, output: null } as Request);
+      return null;
     } catch (e) {
       this.forget(job);
       const error = `Couldn't start creating the proxy: ${message(e)}`;
-      for (const [project, assets] of job.targets) for (const a of assets) this.failures.set(target(project, a), { hash, recipe, error });
+      for (const [project, assets] of job.targets) for (const asset of assets) {
+        this.failures.set(target(project, asset), { hash: job.hash, recipe: job.recipe, error });
+      }
       this.emit(job.targets.keys());
-      if (explicit) throw new Error(error);
+      // A failed submit must not strand the rest of the queue.
+      void this.serial(() => this.startNext()).catch((nextError) => this.options.log?.('warn', `[proxies] starting the next job: ${message(nextError)}`));
+      return { job: job.id, error };
     }
+  }
+
+  private rank(job: Job): number {
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const [project, assets] of job.targets) {
+      const priority = this.priority.get(project)?.ranks;
+      for (const asset of assets) nearest = Math.min(nearest, priority?.get(asset) ?? Number.POSITIVE_INFINITY);
+    }
+    return nearest;
+  }
+
+  /** The renderer sends asset ids in nearest-to-playhead order. Running work is not interrupted. */
+  async prioritize(owner: number, id: string, assets: string[]): Promise<void> {
+    return this.serial(async () => {
+      // A new project may send its order before its first setIntent; the next
+      // setIntent will use it when choosing the first job.
+      if (!isId(id) || assets.length > 100_000 || !assets.every(isId)) throw new Error('Invalid proxy priority.');
+      const latest = new Map<string, number>();
+      for (const asset of assets) if (!latest.has(asset)) latest.set(asset, latest.size);
+      this.priority.set(id, { owner, ranks: latest });
+      await this.startNext();
+    });
   }
 
   private forget(job: Job): void {
     this.jobs.delete(job.id); this.aliases.delete(job.alias);
+    this.pendingGeneration = this.pendingGeneration.filter((id) => id !== job.id);
+    if (this.activeGeneration === job.id) this.activeGeneration = null;
     if (this.current?.job === job.id) this.current = null;
   }
 
@@ -597,8 +660,10 @@ export class EngineProxyService {
       this.countTarget(p.id, -1);
       if (!job.targets.size) {
         job.discarded = true;
-        await this.options.request({ type: 'cancelJobs', kind: 'job', job: job.id } as Request)
-          .catch((e) => this.options.log?.('warn', `[proxies] cancelling ${job.id}: ${message(e)}`));
+        if (job.submitted) {
+          await this.options.request({ type: 'cancelJobs', kind: 'job', job: job.id } as Request)
+            .catch((e) => this.options.log?.('warn', `[proxies] cancelling ${job.id}: ${message(e)}`));
+        } else this.forget(job);
       }
     }
     this.failures.delete(target(p.id, asset));
@@ -636,8 +701,12 @@ export class EngineProxyService {
           if (eligible(p.assets[asset]) && hash && this.assessments.get(hash)?.needsProxy) p.slow.add(asset);
         }
       }
-      const wanted = intent.create === 'allVideo' ? Object.keys(p.assets) : intent.create === 'whenNeeded' ? [...p.slow] : [];
+      // An image sequence is not a single decoder input for the cold ProbeMedia
+      // measurement. Its multi-file original needs a proxy under When needed.
+      const wanted = intent.create === 'allVideo' ? Object.keys(p.assets) : intent.create === 'whenNeeded'
+        ? [...new Set([...p.slow, ...Object.keys(p.assets).filter((asset) => p.assets[asset]?.imageSequence)])] : [];
       for (const asset of wanted) await this.submit(p, asset, false);
+      await this.startNext();
       this.emit([id]);
       // Measuring decodes takes seconds per clip: it never holds up the intent.
       if (intent.create === 'whenNeeded') this.scheduleAssessments(p);
@@ -654,7 +723,7 @@ export class EngineProxyService {
   }
 
   private needsAssessment(p: Project, asset: string, hash: string | null): boolean {
-    if (!this.options.assess || p.intent.create !== 'whenNeeded' || !eligible(p.assets[asset]) || p.slow.has(asset)) return false;
+    if (!this.options.assess || p.intent.create !== 'whenNeeded' || !eligible(p.assets[asset]) || p.assets[asset]?.imageSequence || p.slow.has(asset)) return false;
     if (hash && (this.assessments.has(hash) || this.assessFailures.has(hash) || this.assessing.has(hash))) return false;
     if (this.originalOnly(p, asset) || this.suppressed(p, asset, hash) || this.failed(p, asset, hash) || this.activeJob(p.id, asset)) return false;
     return !this.stored(hash, this.recipe(p.intent)).ready;
@@ -677,7 +746,8 @@ export class EngineProxyService {
       const p = this.projects.get(key);
       if (this.stopped || !p || p.intent.create !== 'whenNeeded') return;
       if (expected && this.hashOf(p, asset) !== expected) return;
-      const scope = { owner: p.owner, project: p.id };
+      const scope: ProxySourceScope = { owner: p.owner, project: p.id,
+        ...(p.assets[asset]?.originalSequenceHash ? { sequenceHash: p.assets[asset].originalSequenceHash } : {}) };
       const source = await this.options.resolve(asset, scope).catch(() => null);
       if (!source?.contentHash) return; // offline or unknown: measured when it comes back
       const hash = hex(source.contentHash);
@@ -713,6 +783,7 @@ export class EngineProxyService {
             }
           }
         }
+        await this.startNext();
         this.emit(touched);
       }).catch((e) => this.options.log?.('warn', `[proxies] queuing a measured proxy: ${message(e)}`));
     } finally {
@@ -739,6 +810,8 @@ export class EngineProxyService {
         await this.clearDeletion(p.id, asset);
         await this.submit(p, asset, true).catch((e) => { errors.push(message(e)); });
       }
+      const started = await this.startNext();
+      if (started && [...new Set(assets)].some((asset) => this.failed(p, asset, this.hashOf(p, asset)) === started.error)) errors.push(started.error);
       this.emit([p.id]);
       if (errors.length) throw new Error(errors.length > 1 ? `${errors[0]} (${errors.length - 1} more)` : errors[0]);
     });
@@ -776,6 +849,8 @@ export class EngineProxyService {
           await this.submit(p, asset, true);
         } catch (e) { errors.push(message(e)); }
       }
+      const started = await this.startNext();
+      if (started && [...new Set(assets)].some((asset) => this.failed(p, asset, this.hashOf(p, asset)) === started.error)) errors.push(started.error);
       this.emit([p.id]);
       if (errors.length) throw new Error(errors.length > 1 ? `${errors[0]} (${errors.length - 1} more)` : errors[0]);
     });
@@ -789,6 +864,7 @@ export class EngineProxyService {
       if (p.intent.create !== 'whenNeeded') return;
       await this.rescan();
       for (const asset of new Set(assets)) await this.submit(p, asset, false);
+      await this.startNext();
       this.emit([p.id]);
     });
   }
@@ -861,7 +937,15 @@ export class EngineProxyService {
     if (!await this.ready.then(() => true, () => false)) return null;
     const entries = this.entries(scope.project);
     let hash = typeof scope.contentHash === 'string' && HASH.test(scope.contentHash) ? scope.contentHash : null;
-    if (!hash) {
+    if (hash) {
+      // A sequence's stored playback movie and its ordered original frames
+      // have different identities. Draft jobs freeze the movie binding; the
+      // generated proxy is keyed by the original sequence's aggregate hash.
+      // A frozen job may name a binding that no open window still describes;
+      // in that case its exact hash remains authoritative.
+      const bound = entries.find((p) => p.assets[asset]?.contentHash === hash || p.assets[asset]?.originalSequenceHash === hash);
+      if (bound?.assets[asset]?.originalSequenceHash) hash = bound.assets[asset].originalSequenceHash;
+    } else {
       const hashes = new Set(entries.map((p) => this.hashOf(p, asset)));
       if (hashes.size !== 1) return null;
       hash = [...hashes][0] ?? null;
@@ -884,7 +968,10 @@ export class EngineProxyService {
     }
     if (status.state === 'done' || status.state === 'failed' || status.state === 'cancelled') {
       this.forget(job);
-      void this.serial(() => this.finish(job, status)).catch((e) => this.options.log?.('warn', `[proxies] finishing ${job.id}: ${message(e)}`));
+      void this.serial(async () => {
+        try { await this.finish(job, status); }
+        finally { await this.startNext(); }
+      }).catch((e) => this.options.log?.('warn', `[proxies] finishing ${job.id}: ${message(e)}`));
       return;
     }
     if (job.discarded) return;
@@ -941,6 +1028,8 @@ export class EngineProxyService {
   /** A window closed: its project state goes. Jobs keep running (their output is shared) and later statuses are harmless. */
   release(owner: number): void {
     for (const [key, p] of this.projects) if (p.owner === owner) this.projects.delete(key);
+    for (const [project, priority] of this.priority) if (priority.owner === owner || !this.entries(project).length) this.priority.delete(project);
+    for (const project of [...this.lastServed.keys()]) if (!this.entries(project).length) this.lastServed.delete(project);
   }
 
   /** The job engine launch ended: jobs in flight never report again. */
@@ -955,6 +1044,9 @@ export class EngineProxyService {
       }
     }
     this.current = null;
+    this.activeGeneration = null;
+    this.pendingGeneration = [];
+    this.lastServed.clear();
     this.batches.clear();
     this.exporting.clear();
     this.emit(affected);
@@ -963,8 +1055,9 @@ export class EngineProxyService {
   async dispose(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
-    const jobs = [...this.jobs.keys()];
+    const jobs = [...this.jobs.values()].filter((job) => job.submitted).map((job) => job.id);
     this.jobs.clear(); this.aliases.clear(); this.current = null;
+    this.activeGeneration = null; this.pendingGeneration = []; this.lastServed.clear();
     await Promise.allSettled(jobs.map((job) => this.options.request({ type: 'cancelJobs', kind: 'job', job } as Request)));
     await this.writes;
   }

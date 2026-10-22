@@ -24,7 +24,7 @@ import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { EngineBridge } from '../../../shared/engine-ipc';
 import { ENGINE_WINDOW_MESSAGE } from '../../../shared/engine-ipc';
 import type { EngineViewerChannel, EngineViewerHandlers, EngineViewerService } from '../../../extensions/viewer/engine-present/presentation';
-import type { ClockSample } from '../../../shared/engine-protocol';
+import type { ClockSample, RenderStats } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
@@ -70,6 +70,7 @@ export type EngineConnectionStatus = {
   hostOffsetUs: number | null;
   hostOffsetErrorUs: number | null;
   clock: unknown;
+  renderStats: RenderStats | null;
 };
 
 export interface EngineConnectionHandle {
@@ -283,10 +284,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       },
       onAudio: (message) => audio.receive(message, session),
       onProxyNeeded: (assets) => {
+        PM.Proxies?.slowDecodes?.(assets);
         const proxies = (native.proxies as typeof native.proxies & { slowDecodes?(project: string, assets: string[]): Promise<void> });
         void proxies?.slowDecodes?.(String(PM.proj.id), assets).catch((e: unknown) => log('warn', `proxy generation: ${String(e)}`));
       },
       onStats: (message) => {
+        PM.Proxies?.playbackStats?.(Number(message.lateSkipped));
         stats.receive(message, performance.now());
         PM.invalidate?.('status');
       },
@@ -525,7 +528,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       driving: transport.active(),
       hostOffsetUs: hostClock.offsetUs(),
       hostOffsetErrorUs: hostClock.errorUs(),
-      clock: current?.clock ?? null
+      clock: current?.clock ?? null,
+      renderStats: stats.latest
     }),
     dispose: () => {
       drawingWarmup.dispose();
