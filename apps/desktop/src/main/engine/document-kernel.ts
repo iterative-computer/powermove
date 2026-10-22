@@ -199,7 +199,10 @@ export function installDocumentKernelIpc(options: {
         let result: any;
         while (true) {
           try {
-            result = await request('load', { path: path.join(s.dir, 'canonical.json'), document, revision, hash });
+            // `hash` is this stream's SHA-256; the utility checks the file
+            // against it and answers the canonical hash of the tree it parsed
+            // (the stream may be JSON text in any member order).
+            result = await request('load', { path: path.join(s.dir, 'canonical.json'), document, revision, hash, source: 'text' });
             break;
           } catch (error) {
             if ((error as { code?: string }).code !== 'busy') throw error;
@@ -217,7 +220,7 @@ export function installDocumentKernelIpc(options: {
           result = await request('poll');
           if (Date.now() > deadline) throw new Error('Document ingestion timed out');
         }
-        if (result.revision !== revision || result.hash !== hash) throw new Error('Document ingestion returned a different revision');
+        if (result.revision !== revision || typeof result.hash !== 'string' || !/^[0-9a-f]{64}$/.test(result.hash)) throw new Error('Document ingestion returned a different revision');
         return result;
       } catch (error) {
         // A previous page must not cancel the new page's prepared document.

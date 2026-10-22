@@ -332,7 +332,12 @@ struct Work {
     generation: u64,
     path: String,
     revision: u64,
+    /// The canonical SHA-256 of the tree, or, for `text`, of the file's bytes.
     hash: String,
+    /// The file is JSON text in any member order (OPENWRITE-1 round): its
+    /// bytes are checked against `hash` and the canonical hash is derived
+    /// from the parsed tree, instead of requiring canonical bytes.
+    text: bool,
     cancelled: Arc<AtomicBool>,
 }
 struct Completed {
@@ -647,12 +652,15 @@ fn read(work: &Work, metrics: &ReaderMetrics) -> Result<PreparedDocument, String
     }
     drop(chunk);
     metrics.input(bytes.capacity());
+    if work.text && pm_model::hash::sha256_hex(&bytes) != work.hash {
+        return Err("The native document file does not match the hash of its stream".into());
+    }
     let document = PreparedDocument::parse_tree(&bytes, work.revision)?;
     let source_bytes = bytes.len();
     drop(bytes);
     metrics.input(0);
     let prepared = PreparedDocument::from_document(document, source_bytes);
-    if prepared.hash != work.hash {
+    if !work.text && prepared.hash != work.hash {
         return Err("The native document does not match its canonical hash".into());
     }
     Ok(prepared)
@@ -1188,6 +1196,11 @@ impl NativeKernels {
             {
                 return Err("hash must be a lowercase canonical SHA-256".into());
             }
+            let source_text = match member(args, "source") {
+                None => false,
+                Some(source) if source.as_str() == Some("text") => true,
+                Some(_) => return Err("source must be \"text\" when given".into()),
+            };
             if self.reader.is_none() {
                 self.reader = Some(Reader::new(self.process, self.metrics.clone())?);
             }
@@ -1202,6 +1215,7 @@ impl NativeKernels {
                 path,
                 revision,
                 hash,
+                text: source_text,
                 cancelled: cancelled.clone(),
             })?;
             self.generation = generation;
@@ -1596,6 +1610,78 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn kernel_ingests_json_text_in_any_member_order_against_its_byte_hash() {
+        // JSON.stringify's order, escapes and a lone surrogate; the receipt is
+        // the canonical hash of the parsed tree, as for a canonical stream.
+        let text = format!(
+            r#"{{"z":0,"s":"\ud800","layers":[{{"v":1.5,"t":0,"id":"L"}}],"big":"{}","a":true}}"#,
+            "x".repeat(70_000)
+        );
+        let canonical = pm_model::json::to_canonical_string(&pm_model::json::parse(&text).unwrap());
+        assert_ne!(canonical, text);
+        let file = CacheFile::new(text.as_bytes());
+        let mut k = NativeKernels::new(EngineProcess::Interactive);
+        let mut e = engine();
+        let source = pm_model::hash::sha256_hex(text.as_bytes());
+        assert_eq!(
+            value(
+                &mut k,
+                &mut e,
+                1,
+                "load",
+                json!({"path":file.0,"document":"doc","revision":3,"hash":source,"source":"text"})
+            ),
+            json!({"pending":true})
+        );
+        let receipt = poll(&mut k, &mut e, 1);
+        assert_eq!(receipt["ok"], true, "{receipt}");
+        assert_eq!(
+            receipt["value"]["hash"],
+            pm_model::hash::sha256_hex(canonical.as_bytes())
+        );
+        assert_eq!(receipt["value"]["revision"], 3);
+        let canonical_hash = receipt["value"]["hash"].clone();
+        value(
+            &mut k,
+            &mut e,
+            1,
+            "activate",
+            json!({"revision":3,"preparedRevision":3,"hash":canonical_hash}),
+        );
+        assert_eq!(
+            k.slots[&1].kernel.as_ref().unwrap().engine.to_json(),
+            canonical
+        );
+
+        // Text whose bytes differ from the hash main computed is refused; a
+        // canonical-mode load of the same non-canonical file is refused too.
+        let mut k = NativeKernels::new(EngineProcess::Interactive);
+        let mut e = engine();
+        value(
+            &mut k,
+            &mut e,
+            1,
+            "load",
+            json!({"path":file.0,"document":"doc","revision":3,"hash":pm_model::hash::sha256_hex(b"other"),"source":"text"}),
+        );
+        let refused = poll(&mut k, &mut e, 1);
+        assert_eq!(refused["ok"], false, "{refused}");
+        load(&mut k, &mut e, 1, &file, 3, &source);
+        let refused = poll(&mut k, &mut e, 1);
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert_eq!(
+            call(
+                &mut k,
+                &mut e,
+                1,
+                "load",
+                json!({"path":file.0,"document":"doc","revision":3,"hash":source,"source":"binary"})
+            )["ok"],
+            false
+        );
     }
 
     #[test]

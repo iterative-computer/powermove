@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { canonicalStringify } from '../../../shared/canonical-json';
-import { ingestDocument, RemotePmWasm } from './remote';
+import { ingestDocumentText, RemotePmWasm } from './remote';
 import { RealKernelBridge, realWasm } from './test-helpers/real-kernel';
 
 const project = {
@@ -12,13 +12,16 @@ const address = (key: string) => ({ comp: 'c', layer: 'a', key, via: 'channel' a
 
 async function remote() {
   const bridge = await RealKernelBridge.create();
-  const receipt = await ingestDocument(bridge, project, project.id, 1);
+  const receipt = await ingestDocumentText(bridge, project, project.id, 1);
   const wasm = new RemotePmWasm(bridge, receipt);
   return { bridge, receipt, wasm };
 }
 
 it('constructs a prepared facade without activating or changing the published document', async () => {
   const { bridge, receipt, wasm } = await remote();
+  // Streamed as JSON text; the receipt is the canonical hash of the parsed tree.
+  expect(new TextDecoder().decode(bridge.lastStream!)).toBe(JSON.stringify(project));
+  expect(receipt.hash).toBe((await realWasm().then(fresh => { fresh.resync(canonicalStringify(project)!, 1); return fresh.hash(); })));
   expect(bridge.live.revision()).toBe(0);
   expect(bridge.hasPrepared).toBe(true);
   expect(bridge.calls.filter(call => call.op === 'activate')).toHaveLength(0);

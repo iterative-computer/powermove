@@ -37,8 +37,10 @@ it('streams exactly the supplied bytes, independently hashes them and removes st
       const body = await readFile(args.path);
       expect(body.toString()).toBe('{"a":"🦀","z":2}');
       expect(args.hash).toBe(createHash('sha256').update(body).digest('hex'));
+      // The utility checks the bytes and answers the tree's canonical hash.
+      expect(args.source).toBe('text');
       if (fail) throw new Error('reader failed');
-      receipt = { pending: false, revision: args.revision, hash: args.hash, integrity: 'checked' };
+      receipt = { pending: false, revision: args.revision, hash: 'c'.repeat(64), integrity: 'checked' };
       return JSON.stringify({ ok: true, value: { pending: true } });
     }
     return JSON.stringify({ ok: true, value: op === 'poll' ? receipt : null });

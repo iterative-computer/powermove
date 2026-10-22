@@ -1,7 +1,7 @@
 import { canonicalProject } from '../../../shared/canonical-json';
 import { jsonCloneAsync } from '../../../shared/canonical-async';
 import { ConsistencyHash } from './consistency-hash';
-import { ingestDocument, RemotePmWasm, remoteCanonicalHash } from './remote';
+import { ingestDocumentText, RemotePmWasm, remoteCanonicalHash } from './remote';
 import { documentId } from '../../../shared/engine-document-id';
 /*
  * Installs the document mirror (pm-wasm), the write barrier, and the native
@@ -577,7 +577,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     // renderer's integrity digests (a third pass over the whole document, and
     // a round trip per batch) are no longer computed before publication: the
     // first consistency check fills them and compares them with the tree's.
-    const receipt = await ingestDocument(native, shadow, documentId(project.id), Math.max(barrier?.revision ?? 0, barrier?.recoveryRevision ?? 0, wasm?.revision() ?? 0) + 1);
+    const receipt = await ingestDocumentText(native, shadow, documentId(project.id), Math.max(barrier?.revision ?? 0, barrier?.recoveryRevision ?? 0, wasm?.revision() ?? 0) + 1);
     preparationTiming = { cloneMs: cloned - began, ingestMs: performance.now() - cloned };
     return { shadow, integrity: new ConsistencyHash(), instance: new RemotePmWasm(native, receipt) };
   }

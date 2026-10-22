@@ -38,6 +38,7 @@ export class RealKernelBridge implements DocumentKernelBridge {
   corruptIntegrity = false;
   /** The utility's canonical hash of the parsed tree disagrees with main's hash of the stream. */
   corruptHash = false;
+  lastStream: Uint8Array | null = null;
   currentDocument: string | null = null;
 
   private constructor(readonly live: PmWasm) {}
@@ -63,9 +64,11 @@ export class RealKernelBridge implements DocumentKernelBridge {
     const bytes = Uint8Array.from(Buffer.concat(stream));
     const wasm = await realWasm();
     wasm.resync(new TextDecoder().decode(bytes), revision); wasm.releaseInput();
-    const sourceHash = createHash('sha256').update(bytes).digest('hex');
-    if (wasm.hash() !== sourceHash || this.corruptHash) throw new Error('The native document does not match its canonical hash');
-    const receipt: DocumentKernelReceipt = { pending: false, revision, hash: sourceHash, integrity: wasm.consistencyHash() };
+    // As the utility ingests a text stream: main checked these bytes, and the
+    // receipt is the canonical hash of the tree they parse to.
+    this.lastStream = bytes;
+    if (this.corruptHash) throw new Error('The native document does not match its canonical hash');
+    const receipt: DocumentKernelReceipt = { pending: false, revision, hash: wasm.hash(), integrity: wasm.consistencyHash() };
     this.pending = { wasm, bytes, document, receipt };
     const gate = this.commitGate; this.commitGate = null;
     if (gate) { gate.entered.resolve(); await gate.release.promise; }

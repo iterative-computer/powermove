@@ -1,4 +1,5 @@
 import type { DocumentKernelBridge, DocumentKernelReceipt } from '../../../shared/document-kernel';
+import { serializeInSlices } from '../legacy/core/json-slices';
 import { canonicalChunks } from '../../../shared/canonical-async';
 import { KIND, PmWasm, revive, type PmWasmExports } from './wasm';
 
@@ -162,13 +163,39 @@ export async function remoteCanonicalHash(bridge: DocumentKernelBridge, value: a
   } finally { if (!complete) await bridge.abort(token).catch(() => {}); }
 }
 
-export async function ingestDocument(bridge: DocumentKernelBridge, shadow: any, document: string, revision: number): Promise<DocumentKernelReceipt> {
+/** The shadow's JSON text (JSON.stringify's member order, serialized in
+ * slices), in chunks of up to 1 MiB with two writes in flight. The utility
+ * parses it into the same tree its canonical JSON would give and answers that
+ * tree's canonical hash; main checks the file against its own hash of the
+ * stream. About a tenth of the cost of the canonical stream (sorted members,
+ * a generator step per token) for the large private project. */
+export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: any, document: string, revision: number): Promise<DocumentKernelReceipt> {
   const token = await bridge.begin();
   let complete = false;
   try {
-    for await (const bytes of canonicalChunks(shadow)) await bridge.write(token, bytes);
+    const encoder = new TextEncoder();
+    const inFlight: Promise<void>[] = [];
+    let pending: string[] = [], pendingChars = 0;
+    const send = async (text: string) => {
+      const bytes = encoder.encode(text);
+      for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
+        if (inFlight.length >= 2) await inFlight.shift();
+        // A subarray would cross the context bridge with its whole buffer.
+        const chunk = bytes.length <= CHUNK_BYTES ? bytes : bytes.slice(offset, Math.min(bytes.length, offset + CHUNK_BYTES));
+        inFlight.push(bridge.write(token, chunk));
+      }
+    };
+    // About a third of a chunk of text: UTF-8 takes up to three bytes a unit.
+    await serializeInSlices(shadow, async text => {
+      pending.push(text); pendingChars += text.length;
+      if (pendingChars >= CHUNK_BYTES / 3) { const joined = pending.join(''); pending = []; pendingChars = 0; await send(joined); }
+    });
+    if (pending.length) await send(pending.join(''));
+    await Promise.all(inFlight);
     const receipt = await bridge.commit(token, document, revision);
     complete = true;
     return receipt;
   } finally { if (!complete) await bridge.abort(token).catch(() => {}); }
 }
+const CHUNK_BYTES = 1024 * 1024;
+
