@@ -96,6 +96,72 @@ struct Blocks {
     queue: VecDeque<(Arc<Source>, u64)>,
     queued: HashSet<BlockKey>,
     errors: HashMap<BlockKey, String>,
+    /// Allocated only for opt-in diagnostics; follows a block through an
+    /// ordinary worker or an offline synchronous decode.
+    traces: HashMap<BlockKey, BlockTrace>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct BlockTrace {
+    enqueued_us: u64,
+    queued_duplicates: u64,
+    in_flight_duplicates: u64,
+}
+
+#[derive(Default)]
+struct DecodeTrace {
+    claim_us: u64,
+    decoder_lock_us: u64,
+    seek_done_us: u64,
+    read_done_us: u64,
+    cpu_start_ns: u64,
+}
+
+impl DecodeTrace {
+    fn claimed(profile: bool, claim_us: u64) -> Self {
+        if profile {
+            Self {
+                claim_us,
+                cpu_start_ns: crate::realtime::thread_cpu_ns(),
+                ..Self::default()
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
+
+fn log_decode(
+    source: &Source,
+    index: u64,
+    origin: &'static str,
+    queued: BlockTrace,
+    trace: DecodeTrace,
+    success: bool,
+) {
+    if trace.claim_us == 0 {
+        return;
+    }
+    // Called after the cache mutex is released. This is an upper bound on
+    // publication, including a worker descheduled after insertion.
+    let published_us = crate::clock::host_now_us();
+    let cpu_ns = crate::realtime::thread_cpu_ns().saturating_sub(trace.cpu_start_ns);
+    crate::profile::worker_event(format!(
+        "pm-audio-source-block source={} block={} origin={} success={} enqueued_us={} claim_us={} decoder_lock_us={} seek_done_us={} read_done_us={} published_us={} cpu_ns={} queued_duplicates={} in_flight_duplicates={}",
+        source.id,
+        index,
+        origin,
+        success,
+        queued.enqueued_us,
+        trace.claim_us,
+        trace.decoder_lock_us,
+        trace.seek_done_us,
+        trace.read_done_us,
+        published_us,
+        cpu_ns,
+        queued.queued_duplicates,
+        queued.in_flight_duplicates,
+    ));
 }
 
 /// Counters for diagnostics and tests.
@@ -122,6 +188,7 @@ pub struct SourceCache {
     evicted: AtomicU64,
     stop: AtomicBool,
     workers: Mutex<Vec<JoinHandle<()>>>,
+    profile: bool,
     #[cfg(feature = "test-hooks")]
     decode_delay_us: AtomicU64,
     #[cfg(feature = "test-hooks")]
@@ -153,6 +220,10 @@ impl SourceCache {
     /// `workers` background decode threads for prefetch (0 for none: every
     /// block then decodes on the thread that asks for it).
     pub fn new(budget_bytes: usize, workers: usize) -> Arc<SourceCache> {
+        let profile = crate::profile::enabled();
+        if profile {
+            crate::profile::init_worker_events();
+        }
         let cache = Arc::new(SourceCache {
             sources: Mutex::default(),
             blocks: Mutex::default(),
@@ -166,6 +237,7 @@ impl SourceCache {
             evicted: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             workers: Mutex::default(),
+            profile,
             #[cfg(feature = "test-hooks")]
             decode_delay_us: AtomicU64::new(0),
             #[cfg(feature = "test-hooks")]
@@ -307,7 +379,7 @@ impl SourceCache {
         }
     }
 
-    fn decode(&self, source: &Source, index: u64) -> Result<Block> {
+    fn decode(&self, source: &Source, index: u64, trace: &mut DecodeTrace) -> Result<Block> {
         #[cfg(feature = "test-hooks")]
         {
             let mut gate = lock(&self.decode_gate);
@@ -333,10 +405,19 @@ impl SourceCache {
             }
         }
         let mut decoder = lock(&source.decoder);
+        if self.profile {
+            trace.decoder_lock_us = crate::clock::host_now_us();
+        }
         let start = index * BLOCK as u64;
         decoder.seek_anchored(start)?;
+        if self.profile {
+            trace.seek_done_us = crate::clock::host_now_us();
+        }
         let mut channels = vec![Vec::with_capacity(BLOCK); source.channels()];
         decoder.read(&mut channels, BLOCK)?;
+        if self.profile {
+            trace.read_done_us = crate::clock::host_now_us();
+        }
         Ok(Block { channels })
     }
 
@@ -387,22 +468,41 @@ impl SourceCache {
             }
             if !wait {
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                if !blocks.in_flight.contains(&key) && blocks.queued.insert(key) {
+                if blocks.in_flight.contains(&key) {
+                    if self.profile {
+                        blocks.traces.entry(key).or_default().in_flight_duplicates += 1;
+                    }
+                } else if blocks.queued.insert(key) {
                     blocks.queue.push_front((source.clone(), index));
+                    if self.profile {
+                        blocks.traces.entry(key).or_default().enqueued_us =
+                            crate::clock::host_now_us();
+                    }
                     self.work.notify_one();
+                } else if self.profile {
+                    blocks.traces.entry(key).or_default().queued_duplicates += 1;
                 }
                 return Ok(None);
             }
             if blocks.in_flight.contains(&key) {
+                if self.profile {
+                    blocks.traces.entry(key).or_default().in_flight_duplicates += 1;
+                }
                 blocks = self.ready.wait(blocks).unwrap_or_else(|e| e.into_inner());
                 continue;
             }
             self.misses.fetch_add(1, Ordering::Relaxed);
             blocks.in_flight.insert(key);
             drop(blocks);
-            let decoded = self.decode(source, index);
+            let mut trace = DecodeTrace::claimed(
+                self.profile,
+                self.profile.then(crate::clock::host_now_us).unwrap_or(0),
+            );
+            let decoded = self.decode(source, index, &mut trace);
             let mut b = lock(&self.blocks);
             b.in_flight.remove(&key);
+            let queued = b.traces.remove(&key).unwrap_or_default();
+            let success = decoded.is_ok();
             let out = match decoded {
                 Ok(block) => {
                     self.decoded.fetch_add(1, Ordering::Relaxed);
@@ -416,6 +516,10 @@ impl SourceCache {
                 }
             };
             self.ready.notify_all();
+            drop(b);
+            if self.profile {
+                log_decode(source, index, "inline", queued, trace, success);
+            }
             return out;
         }
     }
@@ -426,14 +530,28 @@ impl SourceCache {
         let mut added = false;
         for index in indexes {
             let key = (source.id, index);
-            if blocks.map.contains_key(&key)
-                || blocks.in_flight.contains(&key)
-                || blocks.errors.contains_key(&key)
-                || !blocks.queued.insert(key)
-            {
+            if blocks.map.contains_key(&key) {
+                continue;
+            }
+            if blocks.in_flight.contains(&key) {
+                if self.profile {
+                    blocks.traces.entry(key).or_default().in_flight_duplicates += 1;
+                }
+                continue;
+            }
+            if blocks.errors.contains_key(&key) {
+                continue;
+            }
+            if !blocks.queued.insert(key) {
+                if self.profile {
+                    blocks.traces.entry(key).or_default().queued_duplicates += 1;
+                }
                 continue;
             }
             blocks.queue.push_back((source.clone(), index));
+            if self.profile {
+                blocks.traces.entry(key).or_default().enqueued_us = crate::clock::host_now_us();
+            }
             added = true;
         }
         if added {
@@ -559,7 +677,12 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
                         continue;
                     }
                     blocks.in_flight.insert(key);
-                    break Some((source, index));
+                    let claim_us = if c.profile {
+                        crate::clock::host_now_us()
+                    } else {
+                        0
+                    };
+                    break Some((source, index, claim_us));
                 }
                 let (b, timeout) = c
                     .work
@@ -571,15 +694,18 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
                 }
             }
         };
-        let Some((source, index)) = job else {
+        let Some((source, index, claim_us)) = job else {
             // Re-check the weak reference so a dropped cache ends the thread.
             drop(c);
             continue;
         };
         let key = (source.id, index);
-        let decoded = c.decode(&source, index);
+        let mut trace = DecodeTrace::claimed(c.profile, claim_us);
+        let decoded = c.decode(&source, index, &mut trace);
         let mut blocks = lock(&c.blocks);
         blocks.in_flight.remove(&key);
+        let queued = blocks.traces.remove(&key).unwrap_or_default();
+        let success = decoded.is_ok();
         match decoded {
             Ok(block) => {
                 c.decoded.fetch_add(1, Ordering::Relaxed);
@@ -590,6 +716,10 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
             }
         }
         c.ready.notify_all();
+        drop(blocks);
+        if c.profile {
+            log_decode(&source, index, "worker", queued, trace, success);
+        }
     }
 }
 
