@@ -31,7 +31,8 @@ import { ChromeLeases } from './chrome-leases';
  * session; until then (and whenever the engine restarts) the current
  * engine's canvas underneath is what the viewer shows.
  */
-import { createWebGpuPainter, type FramePainter } from './gpu';
+import type { FramePainter } from './gpu';
+import { createFramePainter } from './painter';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type Presenter, type PresenterStats, type TraceRecord } from './presenter';
 import { PresentWorker, type WorkerLike } from './worker-presenter';
 import type { PresentationWarmup } from './prewarm';
@@ -678,7 +679,7 @@ export class ViewerPresentation {
     if (this.painterFailed) return false;
     let painter: FramePainter;
     try {
-      painter = await (this.options.createPainter ?? createWebGpuPainter)(this.canvasElement);
+      painter = await (this.options.createPainter ?? createFramePainter)(this.canvasElement);
     } catch (error) {
       this.painterFailed = true;
       const message = error instanceof Error ? error.message : String(error);
@@ -699,8 +700,8 @@ export class ViewerPresentation {
   }
 
   /**
-   * The drawing's WebGPU device was lost (the GPU process restarted): a
-   * new canvas and device (a new worker when presenting from one), and the
+   * The drawing's graphics context was lost (the GPU process restarted): a
+   * new canvas and context (a new worker when presenting from one), and the
    * session carries on. Losses that keep coming back off the drawing are
    * given up after `MAX_DEVICE_LOSSES` within `DEVICE_LOSS_WINDOW_MS`, so a
    * broken GPU cannot spin the viewer; the current engine's canvas shows.
@@ -711,7 +712,7 @@ export class ViewerPresentation {
     this.losses = this.losses.filter((t) => now - t < DEVICE_LOSS_WINDOW_MS);
     this.losses.push(now);
     if (this.losses.length > MAX_DEVICE_LOSSES) {
-      this.options.log?.('error', `engine presentation stopped: the WebGPU device was lost ${this.losses.length} times in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${message})`);
+      this.options.log?.('error', `engine presentation stopped: the graphics context was lost ${this.losses.length} times in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${message})`);
       this.painterFailed = true;
       this.workerUnavailable = true;
       // A visible failure, never another engine's frames.
@@ -720,7 +721,7 @@ export class ViewerPresentation {
       return;
     }
     if (this.exclusive) this.setStatus(PRESENTATION_STATUS.reconnecting);
-    this.options.log?.('warn', `engine presentation lost its WebGPU device (${message}); drawing again on a new one`);
+    this.options.log?.('warn', `engine presentation lost its graphics context (${message}); drawing again on a new one`);
     void this.replaceDrawing();
   }
 

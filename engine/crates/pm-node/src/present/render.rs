@@ -783,6 +783,11 @@ struct View {
     /// The GPU watchdog held the last frame (`RenderError::WatchdogPending`):
     /// it is drawn again once the watchdog has judged the suspect frame.
     watchdog_held: bool,
+    /// The last frame failed with an error that drawing it again cannot
+    /// fix (an over-budget scene, an invalid document). As today's viewer
+    /// does, the failure is logged once and the paused frame is drawn again
+    /// at the next edit, view or transport change, not at every turn.
+    render_failed: bool,
     /// What presenting this session costs (`RenderStats`).
     costs: super::stats::ViewStats,
     /// The depth and object-id pool, while the viewer asks for it.
@@ -835,6 +840,11 @@ impl SnapshotPoller {
             pm_protocol::error::EngineProcess::Interactive,
             "pm-snapshot-complete",
             move || {
+                // A synchronous capture's answer waits on this wakeup: it
+                // runs at the presenter's class, as the frame completer
+                // does (a default-class thread can wait behind background
+                // work for milliseconds on a loaded machine).
+                pm_bridge::set_thread_user_interactive();
                 for (device, lost) in rx {
                     if let Err(error) = device.poll(wgpu::PollType::Wait {
                         submission_index: None,
@@ -2871,6 +2881,7 @@ impl Thread {
             scrub: false,
             stand_in: None,
             watchdog_held: false,
+            render_failed: false,
             costs: Default::default(),
             depth: None,
             #[cfg(feature = "remote-layer")]
@@ -3993,6 +4004,9 @@ impl Thread {
             // At most `MAX_IN_FLIGHT` frames wait on the GPU; the completion
             // thread sends this one (its descriptor is not sent here).
             let deferred = self.completer.is_some();
+            if let Some(view) = self.views.get_mut(&key) {
+                view.render_failed = false;
+            }
             if let Some(descriptor) = self.render(key, media, -1, None, deferred, true) {
                 let seq = descriptor.seq;
                 self.queue_auto_preview(key, seq);
@@ -4004,6 +4018,11 @@ impl Thread {
                     self.event(key, Event::Frame(descriptor), Some(revision));
                     self.preview_frame_sent(key, seq);
                 }
+            } else if let Some(view) = self.views.get_mut(&key)
+                && view.render_failed
+            {
+                // Waits for the next change (which sets `dirty` again).
+                view.dirty = false;
             }
         } else if let Some(view) = self.views.get_mut(&key)
             && view.clock.is_playing()
@@ -4585,6 +4604,7 @@ impl Thread {
                     return None;
                 }
                 Err(error) => {
+                    view.render_failed = true;
                     if preview.is_some() {
                         let why = preview_failure.take().unwrap_or_else(|| {
                             format!("The Blender preview could not be prepared: {error}")

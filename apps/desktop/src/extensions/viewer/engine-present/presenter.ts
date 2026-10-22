@@ -21,7 +21,7 @@
  */
 import { decisionOffsetUs, JitterBuffer, type Queued } from './jitter-buffer';
 import { HINT_INTERVAL_MS, hintChanged, nextVsync, VsyncEstimator, type VsyncFit } from './display-timing';
-import { DeviceLostError, type FramePainter } from './gpu';
+import { DeviceLostError, FrameUnusableError, type FramePainter } from './gpu';
 import type {
   ClockSample,
   EngineFrameMessage,
@@ -537,6 +537,11 @@ export class EnginePresenter implements Presenter {
       // and the presentation replaces the drawing (`FramePainter.lost`).
       if (error instanceof DeviceLostError) {
         this.releaseDesc(desc, 'device-lost');
+        return;
+      }
+      // This frame only: the next one (or the next pool's) draws.
+      if (error instanceof FrameUnusableError) {
+        this.releaseDesc(desc, 'unusable');
         return;
       }
       this.releaseDesc(desc, 'draw-failed');
