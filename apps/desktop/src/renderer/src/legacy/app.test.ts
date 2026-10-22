@@ -347,6 +347,31 @@ describe('legacy app install', () => {
     expect(confirmProjectClose).not.toHaveBeenCalled();
   });
 
+  it('holds an autosave write while the engine plays, up to its bound, and writes once it stops', async () => {
+    const { PM, timers } = appRegistry();
+    const put = vi.spyOn(PM.Projects, PM.Projects.recover ? 'recover' : 'put');
+    let engine = true;
+    PM.engineTransport = () => engine;
+    PM.playing = true;
+    PM.proj.name = 'Edited while playing';
+    PM.autosave();
+    const first = PM.app.saveTimer;
+    await timers.get(first)();
+    // Rescheduled, not written.
+    expect(put).not.toHaveBeenCalled();
+    expect(PM.app.saveTimer).not.toBe(first);
+    // Today's app (the engine not driving) writes during playback at once.
+    engine = false;
+    await timers.get(PM.app.saveTimer)();
+    expect(put).toHaveBeenCalledOnce();
+    // Stopped: the next write is not held.
+    engine = true;
+    PM.playing = false;
+    PM.autosave();
+    await timers.get(PM.app.saveTimer)();
+    expect(put).toHaveBeenCalledTimes(2);
+  });
+
   it('does not treat overlapping unchanged comparisons as edits', async () => {
     const { PM } = appRegistry();
     const confirmProjectClose = vi.fn(async () => 'cancel');

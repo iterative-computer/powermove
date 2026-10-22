@@ -741,6 +741,8 @@ function closeProjectTransients() {
  *  tens of seconds (C1: about 50 s for a 180 MB project) is not written
  *  again after every half-second pause. Small projects keep 550 ms. */
 let lastAutosaveMs = 0;
+/** The longest an autosave write waits for the engine's playback to stop. */
+const AUTOSAVE_PLAYING_DEFER_MS = 15_000;
 PM.autosave = () => {
   if (PM.proj.id === homeProjectId || discardedProjects.has(PM.proj.id)) return;
   APP.dirty = true;
@@ -749,8 +751,19 @@ PM.autosave = () => {
   fileUI();
   const generation = ++saveGeneration, projectId = PM.proj.id;
   window.clearTimeout(APP.saveTimer);
-  APP.saveTimer = window.setTimeout(async () => {
+  const deferredSince = Date.now();
+  const write = async () => {
     if (discardedProjects.has(projectId)) return;
+    // While the engine plays, the write (the whole project cloned, stored
+    // and checked against the engine's copy: seconds of this window's main
+    // thread for a large project) waits for it to stop, up to
+    // AUTOSAVE_PLAYING_DEFER_MS: the engine's frames wait on this thread's
+    // turns. Today's app draws on this thread and is not held up the same
+    // way, so it writes at once.
+    if (PM.playing && PM.engineTransport?.() && Date.now() - deferredSince < AUTOSAVE_PLAYING_DEFER_MS) {
+      APP.saveTimer = window.setTimeout(write, 1000);
+      return;
+    }
     try {
       // A read-only project only tracks whether it differs from its file.
       const readOnly = isReadOnlyProject(PM.proj);
@@ -772,7 +785,8 @@ PM.autosave = () => {
       console.warn('Project save failed', error);
     }
     PM.invalidate('status'); PM.bus.emit('projects:open');
-  }, Math.max(550, Math.min(60_000, lastAutosaveMs)));
+  };
+  APP.saveTimer = window.setTimeout(write, Math.max(550, Math.min(60_000, lastAutosaveMs)));
 };
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
 ['layers','project','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
