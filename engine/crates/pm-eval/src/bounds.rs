@@ -239,6 +239,38 @@ impl<'d> Scope<'_, 'd> {
         })
     }
 
+    /// The values `groupMatrix` reads (main 2b1fa379a): only `path.p`'s
+    /// transform keys, each `isProperty(value) ? PM.evP(...) : value`, and
+    /// no vertices, so a nullish `path.p` throws reading `'x'`.
+    fn transform_values(
+        &mut self,
+        layer: &'d Node,
+        path: &'d Node,
+        time: f64,
+        prefix: &str,
+    ) -> JsResult<EvaluatedPath> {
+        let p = node::get_checked(Some(path), b"p")?;
+        let p = match &p {
+            Got::Node(p) => Some(*p),
+            Got::Value(_) | Got::Undefined => None,
+        };
+        let mut values = Content::new();
+        for key in ["x", "y", "rotation", "scaleX", "scaleY"] {
+            let got = match p {
+                Some(p) => node::get_checked(Some(p), key.as_bytes())?,
+                // `path.p` undefined (a primitive's `p` included).
+                None => node::get_checked(None, key.as_bytes())?,
+            };
+            let v = self.evaluated(layer, got.node(), time, &format!("{prefix}.{key}"))?;
+            values.insert(JsString::from(key), v);
+        }
+        Ok(EvaluatedPath {
+            id: node::js_value_opt(node::member(Some(path), "id")),
+            values,
+            vertices: Vec::new(),
+        })
+    }
+
     /// Every editable path of a shape layer with its values (`d.paths`).
     pub fn layer_paths(&mut self, layer: &'d Node, time: f64) -> JsResult<Vec<EvaluatedPath>> {
         let d = node::get_checked(Some(layer), b"d")?;
@@ -305,7 +337,7 @@ impl<'d> Scope<'_, 'd> {
             })
             .collect();
         let id = node::to_js_string(node::member(Some(path), "id")).to_string_lossy();
-        let own = self.path_values(layer, path, time, &format!("g.{id}"))?;
+        let own = self.transform_values(layer, path, time, &format!("g.{id}"))?;
         nodes.push(PathNode {
             id: own.id.to_js_string().to_string_lossy(),
             parent: parent_of(path),

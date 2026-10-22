@@ -1412,8 +1412,8 @@ export class NativeApi {
 
   groupMatrix(L: any, path: any, time: number): number[] {
     return this.answer('groupMatrix', () => {
-      // Not a path: `seen.has(path.id)` or pathValues' `Object.entries(path.p)` throws before the layer is read.
-      if (!isObject(path)) return { threw: path == null ? readThrows(path, 'id') : entriesThrows() };
+      // Not a path: `seen.has(path.id)`, or reading the transform's first key of `path.p`, throws before the layer is read.
+      if (!isObject(path)) return { threw: path == null ? readThrows(path, 'id') : readThrows(undefined, 'x') };
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const index = (Array.isArray(ctx.raw.d?.paths) ? ctx.raw.d.paths : []).indexOf(this.unwrap(path));
