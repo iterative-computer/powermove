@@ -42,6 +42,8 @@ pm-text = { path = "../pm-text", default-features = false, features = ["render",
 
 [dev-dependencies]
 pm-export = { path = "../pm-export", features = ["test-sinks"] }
+# Anchor edits on level 2 text (the semantic gate runs the edit kernels).
+pm-edit = { path = "../pm-edit" }
 pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }
 flate2 = "1.1"
 read-fonts = "0.45"
@@ -76,6 +78,10 @@ harness = false
 [[test]]
 # Runs on the main thread (the CoreText font registry and reference).
 name = "text_level2"
+harness = false
+
+[[test]]
+name = "text_level2_semantics"
 harness = false
 
 [[test]]

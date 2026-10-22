@@ -2376,6 +2376,7 @@ dependencies = [
  "libm",
  "pm-blender",
  "pm-color",
+ "pm-edit",
  "pm-eval",
  "pm-export",
  "pm-expr",

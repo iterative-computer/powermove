@@ -206,6 +206,183 @@ fn baselines_come_from_font_metrics() {
 }
 
 #[test]
+fn range_typography_participates_in_shaping_wrapping_and_utf16_sources() {
+    use pm_text::level2::StyleSpan;
+    let mut full = engine(false);
+    let mut subsets = engine(true);
+    let content = d(
+        "Office e\u{301} typography wraps here",
+        "Georgia",
+        24.0,
+        200.0,
+    );
+    let mut large = content.clone();
+    large.size = Some(60.0);
+    large.weight = Some(700.0);
+    let spans = [StyleSpan {
+        start: 0,
+        end: 6,
+        content: large,
+    }];
+    let plain = full.layout(&content);
+    let styled = full.layout_styled(&content, &spans);
+    assert!(styled.lines[0].height > plain.lines[0].height);
+    assert!(
+        styled.lines[0].end < plain.lines[0].end,
+        "range font metrics change wrapping"
+    );
+    assert!(styled.runs.iter().any(|r| r.size == 60.0));
+    assert!(styled.runs.iter().any(|r| r.size == 24.0));
+    assert_eq!(
+        styled,
+        subsets.layout_styled(&content, &spans),
+        "full fonts and WASM subsets shape identically"
+    );
+    let starts: std::collections::BTreeSet<_> =
+        graphemes(&content.text.encode_utf16().collect::<Vec<_>>())
+            .into_iter()
+            .map(|r| r.start)
+            .collect();
+    for run in &styled.runs {
+        assert_eq!(run.glyphs.len(), run.sources.len());
+        assert!(run.sources.iter().all(|s| starts.contains(s)));
+    }
+}
+
+/// Every glyph's source, in visual order, across all runs of a line.
+fn sources_by_line(out: &pm_text::level2::Level2Layout) -> Vec<Vec<usize>> {
+    let mut lines = vec![Vec::new(); out.lines.len()];
+    for run in &out.runs {
+        assert_eq!(run.glyphs.len(), run.sources.len(), "glyph/source map");
+        lines[run.line].extend(run.sources.iter().copied());
+    }
+    lines
+}
+
+/// Parley cuts one shaped run into several glyph runs where only a
+/// non-shaping style changes (line height). Each glyph run must carry the
+/// sources of its own glyphs, not the whole shaped run's from the start.
+#[test]
+fn glyph_runs_split_by_line_height_or_tracking_keep_their_own_sources() {
+    use pm_text::level2::StyleSpan;
+    let mut l2 = engine(false);
+    let text = "Hello world again";
+    let base = d(text, "System Font", 40.0, 0.0);
+    let plain = l2.layout(&base);
+    assert_eq!(plain.runs.len(), 1, "one run without styles");
+    let expected = sources_by_line(&plain);
+    assert_eq!(
+        expected[0],
+        (0..17).collect::<Vec<_>>(),
+        "one glyph per letter"
+    );
+    for (name, change) in [
+        (
+            "leading",
+            Box::new(|c: &mut TextContent| c.leading = Some(2.0)) as Box<dyn Fn(&mut TextContent)>,
+        ),
+        (
+            "tracking",
+            Box::new(|c: &mut TextContent| c.tracking = Some(6.0)),
+        ),
+        ("restated base", Box::new(|_: &mut TextContent| {})),
+    ] {
+        let mut styled = base.clone();
+        change(&mut styled);
+        let spans = [StyleSpan {
+            start: 6,
+            end: 11,
+            content: styled,
+        }];
+        let out = l2.layout_styled(&base, &spans);
+        assert_eq!(
+            out.missing_glyphs, 0,
+            "{name}: notdef counted once per cluster"
+        );
+        let total: usize = out.runs.iter().map(|r| r.glyphs.len()).sum();
+        assert_eq!(total, 17, "{name}");
+        assert_eq!(
+            sources_by_line(&out),
+            expected,
+            "{name}: sources follow the glyphs"
+        );
+        // Each run's glyphs are the ones at its sources (same ids as unstyled).
+        let ids: Vec<u32> = out
+            .runs
+            .iter()
+            .flat_map(|r| r.glyphs.iter().map(|g| g.id))
+            .collect();
+        let plain_ids: Vec<u32> = plain.runs[0].glyphs.iter().map(|g| g.id).collect();
+        assert_eq!(ids, plain_ids, "{name}");
+        if name == "leading" {
+            assert!(out.runs.len() >= 3, "line height splits the glyph run");
+            let world: Vec<_> = out
+                .runs
+                .iter()
+                .filter(|r| r.sources.iter().all(|s| (6..11).contains(s)))
+                .collect();
+            assert_eq!(world.len(), 1, "one glyph run holds exactly 'world'");
+            assert_eq!(world[0].sources, (6..11).collect::<Vec<_>>());
+        }
+        if name == "restated base" {
+            assert_eq!(out, plain, "a span equal to the base changes nothing");
+        }
+    }
+    // A missing glyph inside a split run is counted once.
+    let tofu = d("ab\u{0B95}cd", "Georgia", 40.0, 0.0);
+    let mut tall = tofu.clone();
+    tall.leading = Some(3.0);
+    let spans = [StyleSpan {
+        start: 1,
+        end: 4,
+        content: tall,
+    }];
+    let once = l2.layout(&tofu).missing_glyphs;
+    assert_eq!(l2.layout_styled(&tofu, &spans).missing_glyphs, once);
+}
+
+/// Right-to-left glyph runs split by line height keep their visual-order
+/// sources, and a ligature's glyph belongs to its first grapheme.
+#[test]
+fn split_rtl_runs_and_ligatures_keep_sources() {
+    use pm_text::level2::StyleSpan;
+    let mut l2 = engine(false);
+    let arabic = d(
+        "\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064A}\u{0629}",
+        "Geeza Pro",
+        40.0,
+        0.0,
+    );
+    let plain = l2.layout(&arabic);
+    let mut tall = arabic.clone();
+    tall.leading = Some(2.5);
+    let spans = [StyleSpan {
+        start: 2,
+        end: 5,
+        content: tall,
+    }];
+    let split = l2.layout_styled(&arabic, &spans);
+    assert!(
+        split.runs.len() > plain.runs.len(),
+        "line height splits the run"
+    );
+    assert_eq!(sources_by_line(&split), sources_by_line(&plain));
+    // Lam-alef is a mandatory ligature: one glyph for two graphemes.
+    let ligature = d("\u{0628}\u{0644}\u{0627}\u{0628}", "Geeza Pro", 40.0, 0.0);
+    let out = l2.layout(&ligature);
+    let sources = &sources_by_line(&out)[0];
+    assert_eq!(sources.len(), 3, "lam-alef ligates: {sources:?}");
+    assert!(
+        sources.contains(&1),
+        "the ligature takes its first grapheme's source"
+    );
+    assert!(
+        !sources.contains(&2),
+        "the continuation draws nothing of its own"
+    );
+}
+
+#[test]
 fn alignment_places_lines_around_the_origin() {
     let mut l2 = engine(false);
     for (align, want) in [("left", 0.0), ("center", -0.5), ("right", -1.0)] {
