@@ -110,8 +110,9 @@ async function measure(page: Page): Promise<Run> {
       ms.push(performance.now() - start);
     }
     const sorted = [...ms].sort((a, b) => a - b);
-    return { p50: sorted[Math.floor(sorted.length / 2)]!, p95: sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]! };
+    return { p50: sorted[Math.floor(sorted.length / 2)]!, p95: sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]!, all: ms.map(v => Math.round(v)) };
   }, { seeks: SEEKS, duration: DURATION });
+  console.log(`seeks (ms, in order): ${JSON.stringify(scrub.all)}`);
   return { frames: play.frames, distinct: play.distinct, scrubP50: scrub.p50, scrubP95: scrub.p95 };
 }
 

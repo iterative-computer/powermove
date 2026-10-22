@@ -3877,11 +3877,21 @@ impl Thread {
                         let compat = self::compat_view(&self.compat, key, revision);
                         composer.renderer().set_compat_rasters(compat);
                         let f = view.clock.frame_ticks();
+                        // The frames the schedule draws next: it skips
+                        // those its render cost cannot reach in time
+                        // (`Schedule::next_in_phase`), so a slow project
+                        // is asked for every `stride`-th frame.
+                        let frame_us = super::schedule::Schedule::frame_us(&view.clock).max(1.0);
+                        let cost = view.schedule.cost_us().unwrap_or(0.0);
+                        let stride = ((cost + super::schedule::DELIVERY_US) / frame_us)
+                            .ceil()
+                            .clamp(1.0, 240.0) as i64;
+                        let step = if view.clock.rate().num < 0 { -stride } else { stride };
                         for ahead in 1..=COMPAT_ASK_AHEAD {
                             if asking.elapsed() > COMPAT_ASK_AHEAD_BUDGET {
                                 break;
                             }
-                            let at = view.clock.wrap((k + ahead) * f);
+                            let at = view.clock.wrap((k + ahead * step) * f);
                             let later = composer.compat_needs_at(
                                 doc.document(),
                                 &composition,
