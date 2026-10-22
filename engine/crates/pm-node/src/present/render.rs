@@ -555,6 +555,8 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     display: DisplayTransform,
+    /// Reused by serial snapshot copies on this device.
+    snapshot_readback: pm_gpu::readback::Readback,
     /// Draws documents (made with the first document frame).
     composer: Option<Composer>,
     /// The font generation the composer's renderer lays text out with.
@@ -576,6 +578,18 @@ impl Gpu {
             fonts.sync(composer.renderer(), &mut self.fonts_installed);
         }
         composer
+    }
+
+    fn composer_and_readback(
+        &mut self,
+        config: &ThreadConfig,
+        frame_cache: usize,
+    ) -> (&mut Composer, &mut pm_gpu::readback::Readback) {
+        self.composer_with(config, frame_cache);
+        (
+            self.composer.as_mut().expect("made above"),
+            &mut self.snapshot_readback,
+        )
     }
 }
 
@@ -995,6 +1009,7 @@ impl Thread {
                         device,
                         queue,
                         display,
+                        snapshot_readback: pm_gpu::readback::Readback::default(),
                         composer: None,
                         fonts_installed: None,
                         lost,
@@ -4897,7 +4912,7 @@ impl Thread {
             && pm_render::unsupported(doc.document(), job.request.composition.as_str())
                 .iter()
                 .any(|u| u.feature == pm_render::Feature::Blender);
-        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let (composer, readback) = gpu.composer_and_readback(&self.config, self.frame_cache);
         // The session's definitions, without consuming the re-registrations
         // its viewer's next frame applies.
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
@@ -4991,12 +5006,14 @@ impl Thread {
                     doc.media(),
                 )
                 .and_then(|frame| {
-                    let raw = pm_gpu::readback::read_raw(
+                    let pixels = super::snapshot::read_rgba8(
+                        readback,
                         renderer.device(),
                         renderer.queue(),
                         &frame.color.texture,
+                        job.request.pixels,
                     )?;
-                    Ok((frame.color.width(), frame.color.height(), raw))
+                    Ok((frame.color.width(), frame.color.height(), pixels))
                 })
         };
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
@@ -5008,7 +5025,7 @@ impl Thread {
             );
             return;
         }
-        let (width, height, raw) = match rendered {
+        let (width, height, pixels) = match rendered {
             Ok(done) => done,
             Err(pm_render::RenderError::SvgRastersPending(needs)) => {
                 // As for fallback pixels: what the renderer posted is on
@@ -5140,8 +5157,6 @@ impl Thread {
                 return;
             }
         };
-        let pixels = super::snapshot::encode_rgba8(&raw, job.request.pixels);
-        drop(raw);
         let Some(payload) = self.share_pixels(&job, pixels) else {
             return;
         };

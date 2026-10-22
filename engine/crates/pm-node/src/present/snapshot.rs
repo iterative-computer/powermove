@@ -426,11 +426,47 @@ impl SnapshotQueue {
 /// renderbuffer).
 pub fn encode_rgba8(half: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
     let mut out = Vec::with_capacity(half.len() / 2);
-    for px in half.chunks_exact(8) {
-        let c = |i: usize| pm_gpu::readback::half_to_f32(u16::from_le_bytes([px[i], px[i + 1]]));
-        push_rgba8(&mut out, [c(0), c(2), c(4), c(6)], pixels);
+    append_rgba8(half, pixels, &mut out);
+    out
+}
+
+/// Read a frame's RGBA16F pixels straight from the mapped GPU rows into the
+/// final RGBA8 allocation. The mapping belongs to this readback, so every
+/// snapshot still waits for and converts the frame it just rendered.
+pub fn read_rgba8(
+    readback: &mut pm_gpu::readback::Readback,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    pixels: SnapshotPixels,
+) -> Result<Vec<u8>, pm_gpu::readback::ReadbackError> {
+    if texture.format() != wgpu::TextureFormat::Rgba16Float {
+        return Err(pm_gpu::readback::ReadbackError::Format(texture.format()));
+    }
+    readback.with_mapped_rows(device, queue, texture, |data, row, stride, height| {
+        encode_rgba8_rows(data, row, stride, height, pixels)
+    })
+}
+
+fn encode_rgba8_rows(
+    half: &[u8],
+    row: usize,
+    stride: usize,
+    height: usize,
+    pixels: SnapshotPixels,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(row / 2 * height);
+    for y in 0..height {
+        append_rgba8(&half[y * stride..y * stride + row], pixels, &mut out);
     }
     out
+}
+
+fn append_rgba8(half: &[u8], pixels: SnapshotPixels, out: &mut Vec<u8>) {
+    for px in half.chunks_exact(8) {
+        let c = |i: usize| pm_gpu::readback::half_to_f32(u16::from_le_bytes([px[i], px[i + 1]]));
+        push_rgba8(out, [c(0), c(2), c(4), c(6)], pixels);
+    }
 }
 
 /// [`encode_rgba8`] from premultiplied f32 RGBA (a text raster's readback).
@@ -852,5 +888,25 @@ mod tests {
         // binary16 value 1/510 × 255 = 0.5 → 0.
         let px = half([1.0 / 510.0, 0.0, 0.0, 1.0]);
         assert_eq!(encode_rgba8(&px, SnapshotPixels::Opaque)[0], 0);
+    }
+
+    #[test]
+    fn mapped_rows_match_tightly_packed_encoding_with_padding() {
+        let top = half([0.5, 0.25, 0.0, 0.5]);
+        let bottom = half([1.0, 0.0, 0.5, 1.0]);
+        let mut padded = top.clone();
+        padded.extend_from_slice(&[0xa5; 8]);
+        padded.extend_from_slice(&bottom);
+        let packed = [top, bottom].concat();
+        for pixels in [
+            SnapshotPixels::Opaque,
+            SnapshotPixels::Premultiplied,
+            SnapshotPixels::Straight,
+        ] {
+            assert_eq!(
+                encode_rgba8_rows(&padded, 8, 16, 2, pixels),
+                encode_rgba8(&packed, pixels)
+            );
+        }
     }
 }
