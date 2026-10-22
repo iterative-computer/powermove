@@ -376,10 +376,15 @@ one frame of today's.
 What remains, measured on the private projects, is in the lane report
 (`/tmp/ne-w5/reports/bigrender.json`, outside the repository) and below:
 
-- PMV4 plays at the speed of its audio clock: its only audio clip is
-  offline, and the engine's clock advances at about a tenth of real time
-  (72,089 of 73,350 device callbacks underran; today plays silence in real
-  time). Owner: the audio lanes (`pm-audio` playback, `present/audio.rs`).
+- Neither engine plays PMV4 in real time: in eight seconds today's
+  playhead covers 2.8 s and presents 232 frames, the engine's covers 1.7 s
+  and presents 110. Its only audio clip is offline, and the engine's
+  output underran on nearly every device callback (72,089 of 73,350) while
+  it played; the audio lanes (`pm-audio` playback, `present/audio.rs`) own
+  why an all-offline mix underruns.
+- A fresh profile's first play waits for first-use work: the ANGLE parity
+  probe of each user effect (the frame waits for WebGL's reference) and
+  each program's Metal compile, 1.5 to 3.5 s on the 867-layer project.
 - A frame of PMV3 holds 300 to 360 MiB of intermediate targets: every
   layer's targets are returned to the pool at the end of the frame, not
   when the layer has been composited.
