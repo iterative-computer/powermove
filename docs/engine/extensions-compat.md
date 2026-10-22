@@ -350,21 +350,106 @@ gates: the 30 original gates, the readback gate and the three changing-base
 gates. One skip is expected: the C1 private-setup gate, which is named and
 skips with the private corpus variable unset.
 
-Open:
+Round six left three items open: Play right after a seek, the lookahead past
+the end, and base rasters on the native render thread. Round seven closes
+all three (below).
 
-- Play pressed within a few frames of a seek starts before the paused
-  warm-up fills. On a typewriter-class wrapper the first frames are then
-  expected to skip, as in the 150 ms runs. No gate measures this case yet.
-  Today's first frame is itself 90 to 230 ms late. A native preroll that
-  holds the clock until the first answers are ready would close it.
-- The lookahead prepares up to 24 frames past the composition's end before
-  a loop wraps. That work is wasted, and the first frames after the wrap are
-  prepared only after it. Bounding the horizon needs the gates' answer counts
-  to include answers posted during the warm-up first.
-- Base rasters are drawn and read back on the native render thread. A slow
-  GPU readback there delays view frames. Moving compatibility base rasters
-  off that thread would remove the remaining source of whole-pipeline
-  stalls.
+### Round seven: rasters off the presentation thread (2026-10-22)
+
+**Why size frames 67 to 73 were lost.** A traced campaign of the animated
+size gate (`PM_COMPAT_TRACE=1`, `POWERMOVE_BRIDGE_TRACE=1`) showed the
+native render thread starting timed frames 58 ms apart, instead of 33 ms,
+for k 59 to 70, and nowhere else. During those frames the lookahead, 18 to
+24 frames ahead, asked for the bases of frames 80 to 113: the largest
+ellipse sizes, held at 200×120 past the composition's end. Each base was
+rasterized on the CPU, on the render thread, at about 4× density: over
+1 MiB, published through shared memory, about 22 ms unloaded
+(`snapshotUsMax`). Under a load average of 10 to 27 such a raster took long
+enough to push the next timed frame past its delivery deadline. That frame
+then either reached the viewer late (dropped `late`) or found its answer
+missing and was skipped. The other gates' bases are smaller and never
+crossed that point, so only the size gate lost frames, always in the same
+window. Bounding the lookahead alone (round six) removed the bases past the
+end but not those of frames 80 to 89.
+
+**Layer rasters on a worker.** `present/rasters.rs` draws every layer
+snapshot (the `render.raster()` base) on its own thread with a second
+`Renderer` on the same device: its own evaluator, text context and fonts
+(`RenderFonts::sibling`: the session's font seeds, its own health), its own
+command buffer, and a readback that waits for that submission only
+(`pm_gpu::readback` now waits for its own submission index, not the
+queue's latest). It answers main itself; the render thread hears what it
+published (`Command::RasterDone`) for the shared-memory accounting. The
+document is shared as an `Arc` once per revision; a document update drops
+it. A rebuilt device gets a new renderer. Sync and async layer jobs leave
+the snapshot queue for the worker without waiting for a playing view's next
+frame (`SnapshotQueue::next_layer`); idle ones still wait; at most eight are
+in flight. The pixels come from the same `Renderer::layer_raster` over the
+same revision, so the parity gates are unchanged. In the traced loaded runs
+a base took 0.7 to 38 ms on the worker (the path and size gates' 15 to 25 ms
+on the CPU). Timed frames started at most 34 to 41 ms apart in the size
+gate, against 58 ms before.
+
+**A frame waiting for its answers keeps its slot.** A timed frame whose
+compatibility answers were missing used to be passed over at once, even
+with 95 ms to spare (traced: frame 32 tried 104 ms after Play, shown at
+199 ms). It now waits; an arriving answer wakes the thread, and the
+schedule skips it only once it can no longer be shown.
+
+**The native preroll.** With compatibility producers, a Play whose first
+six frames are not all answered holds the stopped line for at most 80 ms.
+Each viewer render records the needs it consulted (`CompatView::consulted`),
+and the preroll checks them at the run's first frames' times. A Play that
+is already answered (the paused warm-up filled it) starts at once, and the
+preroll ends before the pass's clock sample. Otherwise the run's first
+timed frame reached the viewer before the sample of its run and was dropped
+as `stopped`: one 83 ms gap in ten runs before that fix. After a cold seek
+the window's answers arrive two at a time about every 50 ms. Its
+round-trip, not the 1 to 10 ms native text base, is the bound, so the preroll usually
+starts the line at its bound with two to three frames answered. The waiting
+frames above cover the rest. The engine's first frame lands 37 to 70 ms
+after Play, against today's 106 to 216 ms.
+
+**The lookahead stops at the end.** Both horizons are bounded by the open
+composition's span (its loop range, else the composition), as in round
+six's reverted change. The gates no longer count raw answer calls since the
+playhead reset. Those counts included answers for frames past the end and
+missed answers the paused warm-up had posted earlier. The transport
+remembers the latest answer it posted per layer and frame
+(`EngineRenderTransport.answeredAt`). Each gate requires the window's
+answer for the overridden layer at every presented time, at the play's
+revision, and pixels or reuses for all but one of them. No bound changed.
+
+**New gate.** "Play right after a seek with the typewriter override" rests
+at 0, then seeks to 1 s and plays in the same task, so nothing from 1 s on
+was prepared. It holds the same today-relative bounds, and also requires no
+skipped frame among the run's first six and no synchronous base load.
+
+**Measured 2026-10-22 on the final tree.** Two campaigns of ten loaded
+runs per gate, each with two SHA256 workers, one Playwright worker, the
+release thin-LTO addon and the Electron slot lock. Other lanes shared the
+machine, with a 1-minute load average of 10 to 40 per run. Engine against
+today in the same run:
+
+| Gate | Pass | Distinct frames | Longest gap | First frame | Last frame |
+| --- | --- | --- | --- | --- | --- |
+| Typewriter keyed 0→100% | 20/20 | 90 vs 90 | 43–57 vs 41–52 ms | 6–53 vs 98–258 ms | 3002–3018 vs 3072–3236 ms |
+| Animated ellipse size | 20/20 | 90 vs 90 | 42–50 vs 35–43 ms | 2–37 vs 102–239 ms | 3002–3018 vs 3073–3209 ms |
+| Animated path vertices | 20/20 | 90 vs 90 | 42–51 vs 35–42 ms | 1–48 vs 104–281 ms | 3001–3018 vs 3072–3249 ms |
+| Typewriter, Play right after a seek | 20/20 | 60 vs 60 | 42–64 vs 39–48 ms | 37–93 vs 106–360 ms | 2083–2097 vs 2075–2329 ms |
+
+No run skipped a frame, dropped one in the presenter, or loaded a base
+synchronously during playback. Every presented time had the window's
+answer. An earlier campaign, on the build before the preroll's
+clock-sample fix, passed the three required gates 30/30 and the seek gate
+9/10 (the `stopped` drop above). The public set passes 35: the 34 of round
+six and the seek gate. The C1 private-setup gate skips by name with the
+private corpus variable unset.
+
+**Campaign hygiene.** The campaign harness waits for any other SHA256 load
+generator to end before it starts and records the load average before and
+after. Each run prints `os.loadavg()`. Only the harness's own two workers
+are stopped afterwards.
 
 ### Earlier measurements (2026-10-19, before round-three integration)
 
