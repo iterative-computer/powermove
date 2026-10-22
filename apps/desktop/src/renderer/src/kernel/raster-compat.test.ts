@@ -221,6 +221,19 @@ describe('the raster override producer', () => {
     expect(compat.answer({ ...need('title', 0.9), crop }, 4, { fresh: true })).toMatchObject({ kind: 'raster' });
   });
 
+  it('answers native for a pass-through that dropped the preview crop (the whole layer), never for another window', () => {
+    const { services, compat, engineRaster, need } = setup();
+    const original = services.get<any>('raster');
+    // Today's typography-anchor wrapper calls the raster without the crop.
+    services.register('raster', (layer: any, scale: number, time: number) => original(layer, scale, time));
+    const crop = { x: 4, y: 2, width: 20, height: 10 };
+    expect(compat.answer({ ...need('box'), crop }, 4)).toEqual({ kind: 'native' });
+    expect(engineRaster).not.toHaveBeenCalled();
+    // A wrapper asking for another window gets that window drawn.
+    services.register('raster', (layer: any, scale: number, time: number) => original(layer, scale, time, undefined, { x: 0, y: 0, width: 5, height: 5 }));
+    expect(compat.answer({ ...need('box'), crop }, 4)).toMatchObject({ kind: 'raster' });
+  });
+
   it('answers native for a wrapper that passes a layer through, without drawing the base', () => {
     const { services, compat, engineRaster, need } = setup();
     const original = services.get<any>('raster');

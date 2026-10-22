@@ -438,10 +438,14 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       active = null;
     }
     const mark: LazyMark | undefined = result?.[LAZY];
-    // The base itself, for this layer, density and window, untouched: the
-    // engine draws it. A wrapper that wrote a field or took its canvas
-    // (it may have drawn on it) gets its result drawn as returned.
-    if (mark && mark.layer === layer && mark.scale === scale && mark.crop === crop && !mark.touched) return { kind: 'native' };
+    // The base itself, for this layer and density, untouched: the engine
+    // draws it. Its window is the need's, or none: a wrapper that asked for
+    // the whole raster (it dropped the preview crop) gets the whole layer
+    // drawn, which is what the engine's native draw is (the preview crop
+    // only skips pixels outside the view). A wrapper that wrote a field or
+    // took its canvas (it may have drawn on it) gets its result drawn as
+    // returned.
+    if (mark && mark.layer === layer && mark.scale === scale && (mark.crop === crop || mark.crop == null) && !mark.touched) return { kind: 'native' };
     if (result == null) return TRANSPARENT;
     const tag = `${String(need.composition)}\u0000${String(need.layer)}\u0000${need.time}\u0000${scale}\u0000${crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : ''}`;
     // The engine holds the key in at most MAX_COMPAT_KEY_BYTES of UTF-8; a
