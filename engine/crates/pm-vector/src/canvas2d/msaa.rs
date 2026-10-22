@@ -209,11 +209,29 @@ pub struct MsaaTarget {
 }
 
 /// Float to unorm8 as the GPU converts blend results (round to nearest even).
+///
+/// The product is an `f32`; rounding it to an integer is the same in `f32`
+/// as in the `f64` it widens to exactly (`libm::rint`, kept as the test
+/// reference), and NaN still converts to 0.
 #[inline]
 pub fn unorm8(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8
+}
+
+/// The reference conversion [`unorm8`] is tested against.
+#[cfg(test)]
+pub(crate) fn unorm8_reference(v: f32) -> u8 {
     let x = (v.clamp(0.0, 1.0) * 255.0) as f64;
     let r = libm::rint(x);
     r as u8
+}
+
+/// `f32::from(v) / 255.0` for every 8-bit value (the same division, made
+/// once).
+pub fn unit8(v: u8) -> f32 {
+    static TABLE: std::sync::LazyLock<[f32; 256]> =
+        std::sync::LazyLock::new(|| std::array::from_fn(|i| i as f32 / 255.0));
+    TABLE[v as usize]
 }
 
 impl MsaaTarget {
@@ -245,7 +263,7 @@ impl MsaaTarget {
                 let d = &mut self.samples[p * n + s];
                 let inv = 1.0 - color[3];
                 for c in 0..4 {
-                    let dst = f32::from(d[c]) / 255.0;
+                    let dst = unit8(d[c]);
                     d[c] = unorm8(color[c] + dst * inv);
                 }
             }
@@ -267,7 +285,7 @@ impl MsaaTarget {
                     let d = &mut self.samples[(y * self.width + x) as usize * n + s];
                     let inv = 1.0 - src[3];
                     for k in 0..4 {
-                        let dst = f32::from(d[k]) / 255.0;
+                        let dst = unit8(d[k]);
                         d[k] = unorm8(src[k] + dst * inv);
                     }
                 }
@@ -278,8 +296,20 @@ impl MsaaTarget {
     /// Box resolve to RGBA8 (premultiplied): the mean of the four samples,
     /// rounded half up (measured: a 26 in one sample resolves to 7).
     pub fn resolve(&self) -> Vec<u8> {
-        let mut out = vec![0u8; (self.width * self.height * 4) as usize];
         let n = self.pattern.len();
+        if n == 1 {
+            return self.samples.iter().flatten().copied().collect();
+        }
+        let mut out = vec![0u8; (self.width * self.height * 4) as usize];
+        if n == 4 {
+            for (px, o) in self.samples.chunks_exact(4).zip(out.chunks_exact_mut(4)) {
+                for c in 0..4 {
+                    let sum = u32::from(px[0][c]) + u32::from(px[1][c]) + u32::from(px[2][c]) + u32::from(px[3][c]);
+                    o[c] = ((sum + 2) / 4) as u8;
+                }
+            }
+            return out;
+        }
         for p in 0..(self.width * self.height) as usize {
             for c in 0..4 {
                 let sum: u32 = (0..n).map(|s| u32::from(self.samples[p * n + s][c])).sum();
@@ -546,6 +576,26 @@ mod tests {
 #[cfg(test)]
 mod span_tests {
     use super::*;
+
+    #[test]
+    fn the_fast_unorm8_and_unit8_match_their_references_for_every_input() {
+        // Every f32 in and around 0..1 (and the specials).
+        let mut checked = 0u64;
+        for bits in (0u32..=0x3f90_0000).step_by(7).chain([0x7fc0_0000, 0xff80_0000, 0x7f80_0000, 0x8000_0001, 0xbf80_0000]) {
+            let v = f32::from_bits(bits);
+            assert_eq!(unorm8(v), unorm8_reference(v), "{v:e}");
+            checked += 1;
+        }
+        // Every exact tie k + 0.5.
+        for k in 0..255u32 {
+            let v = (k as f32 + 0.5) / 255.0;
+            assert_eq!(unorm8(v), unorm8_reference(v), "{v:e}");
+        }
+        for v in 0..=255u8 {
+            assert_eq!(unit8(v).to_bits(), (f32::from(v) / 255.0).to_bits());
+        }
+        assert!(checked > 100_000_000);
+    }
 
     #[test]
     fn span_triangle_fill_matches_the_per_pixel_test_bit_for_bit() {

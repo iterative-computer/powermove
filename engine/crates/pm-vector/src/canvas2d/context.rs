@@ -740,7 +740,7 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
                 let s = &rgba[p * 4..p * 4 + 4];
                 let inv = 1.0 - f32::from(s[3]) / 255.0 * alpha;
                 for c in 0..4 {
-                    d[c] = unorm8(f32::from(s[c]) / 255.0 * alpha + f32::from(d[c]) / 255.0 * inv);
+                    d[c] = unorm8(super::msaa::unit8(s[c]) * alpha + super::msaa::unit8(d[c]) * inv);
                 }
             }
             return;
@@ -762,7 +762,7 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
                 let s = &pixels[p * 4..p * 4 + 4];
                 let inv = 1.0 - f32::from(s[3]) / 255.0 * alpha;
                 for c in 0..4 {
-                    d[c] = unorm8(f32::from(s[c]) / 255.0 * alpha + f32::from(d[c]) / 255.0 * inv)
+                    d[c] = unorm8(super::msaa::unit8(s[c]) * alpha + super::msaa::unit8(d[c]) * inv)
                 }
             }
             return;
@@ -778,9 +778,15 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
     let Some([x0, y0, x1, y1]) = dirty else {
         return;
     };
+    use super::msaa::unit8;
     for y in y0..y1 {
         for x in x0..x1 {
             let p = (y * target.width + x) as usize;
+            if coverage.is_none() && mask.bits[p] == 0 {
+                continue;
+            }
+            // The paint at the pixel's center (the same for its samples).
+            let mut at: Option<[f32; 4]> = None;
             for s in 0..n {
                 let i = p * n + s;
                 let cov = if let Some(c) = &coverage {
@@ -794,14 +800,14 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
                 if cov == 0.0 {
                     continue;
                 }
-                let color = paint
-                    .at(x as f32 + origin[0] as f32 + 0.5,
-                        y as f32 + origin[1] as f32 + 0.5)
-                    .map(|v| v * cov);
+                let base = *at.get_or_insert_with(|| {
+                    paint.at(x as f32 + origin[0] as f32 + 0.5, y as f32 + origin[1] as f32 + 0.5)
+                });
+                let color = base.map(|v| v * cov);
                 let d = &mut target.samples[i];
                 let inv = 1.0 - color[3];
                 for c in 0..4 {
-                    d[c] = unorm8(color[c] + f32::from(d[c]) / 255.0 * inv)
+                    d[c] = unorm8(color[c] + unit8(d[c]) * inv)
                 }
             }
         }
