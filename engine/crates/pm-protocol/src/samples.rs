@@ -45,7 +45,8 @@ use crate::error::{
 use crate::frame::{
     Caret, DepthIdSurface, EditorCamera, FrameDescriptor, FramePurpose, FrameQuality, FrameRelease,
     FrameRequest, MediaPreference, MotionBlurKind, OverlayGeometry, OverlayLayer, PathCommand,
-    PreviewResolution, Projection, Representation, Shading3d, ViewOverride, ViewerState, VsyncHint,
+    PreviewResolution, Projection, Representation, Shading3d, ViewOverride, ViewerCanvas,
+    ViewerState, VsyncHint,
 };
 use crate::host::{
     CacheKind, CapabilityHandle, CapabilityKind, CommitOutput, HandleAccess, HandleGrant,
@@ -1280,6 +1281,7 @@ pub fn events() -> Vec<Envelope> {
                 period_us: 8_333.333_333_333_334,
             }),
             depth_id: Some(true),
+            canvas: Some(ViewerCanvas { width: 1512, height: 982, crop: Rect { x: 0.0, y: 0.0, width: 1920.0, height: 1080.0 }, css: Rect { x: 12.5, y: 40.0, width: 756.0, height: 425.25 } }),
         })),
         event(Event::Transport(TransportCommand::Seek {
             time: ticks(-705_600_000),
