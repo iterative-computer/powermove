@@ -101,11 +101,36 @@ struct Blocks {
     traces: HashMap<BlockKey, BlockTrace>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 struct BlockTrace {
     enqueued_us: u64,
+    enqueue_thread: Option<String>,
+    urgent: bool,
     queued_duplicates: u64,
     in_flight_duplicates: u64,
+    last_duplicate_us: u64,
+}
+
+impl BlockTrace {
+    fn enqueued(&mut self, urgent: bool) {
+        self.enqueued_us = crate::clock::host_now_us();
+        let thread = std::thread::current();
+        self.enqueue_thread = thread
+            .name()
+            .filter(|name| name.starts_with("pm-audio-"))
+            .map(str::to_owned);
+        self.urgent = urgent;
+    }
+
+    fn queued_duplicate(&mut self) {
+        self.queued_duplicates += 1;
+        self.last_duplicate_us = crate::clock::host_now_us();
+    }
+
+    fn in_flight_duplicate(&mut self) {
+        self.in_flight_duplicates += 1;
+        self.last_duplicate_us = crate::clock::host_now_us();
+    }
 }
 
 #[derive(Default)]
@@ -146,14 +171,21 @@ fn log_decode(
     // publication, including a worker descheduled after insertion.
     let published_us = crate::clock::host_now_us();
     let cpu_ns = crate::realtime::thread_cpu_ns().saturating_sub(trace.cpu_start_ns);
+    let thread = std::thread::current();
     crate::profile::worker_event(format!(
-        "pm-audio-source-block source={} block={} origin={} success={} enqueued_us={} claim_us={} decoder_lock_us={} seek_done_us={} read_done_us={} published_us={} cpu_ns={} queued_duplicates={} in_flight_duplicates={}",
+        "pm-audio-source-block source={} block={} origin={} success={} enqueued_us={} enqueue_thread={} urgent={} claim_us={} decode_thread={} decoder_lock_us={} seek_done_us={} read_done_us={} published_us={} cpu_ns={} queued_duplicates={} in_flight_duplicates={} last_duplicate_us={}",
         source.id,
         index,
         origin,
         success,
         queued.enqueued_us,
+        queued.enqueue_thread.as_deref().unwrap_or("external"),
+        queued.urgent,
         trace.claim_us,
+        thread
+            .name()
+            .filter(|name| name.starts_with("pm-audio-"))
+            .unwrap_or("external"),
         trace.decoder_lock_us,
         trace.seek_done_us,
         trace.read_done_us,
@@ -161,6 +193,7 @@ fn log_decode(
         cpu_ns,
         queued.queued_duplicates,
         queued.in_flight_duplicates,
+        queued.last_duplicate_us,
     ));
 }
 
@@ -455,6 +488,9 @@ impl SourceCache {
     ) -> Result<Option<Arc<Block>>> {
         let key = (source.id, index);
         let mut blocks = lock(&self.blocks);
+        // A waiting caller can wake for unrelated blocks. Count its request
+        // once, while still rechecking readiness after every notification.
+        let mut counted_in_flight = false;
         loop {
             blocks.clock += 1;
             let now = blocks.clock;
@@ -470,23 +506,23 @@ impl SourceCache {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 if blocks.in_flight.contains(&key) {
                     if self.profile {
-                        blocks.traces.entry(key).or_default().in_flight_duplicates += 1;
+                        blocks.traces.entry(key).or_default().in_flight_duplicate();
                     }
                 } else if blocks.queued.insert(key) {
                     blocks.queue.push_front((source.clone(), index));
                     if self.profile {
-                        blocks.traces.entry(key).or_default().enqueued_us =
-                            crate::clock::host_now_us();
+                        blocks.traces.entry(key).or_default().enqueued(true);
                     }
                     self.work.notify_one();
                 } else if self.profile {
-                    blocks.traces.entry(key).or_default().queued_duplicates += 1;
+                    blocks.traces.entry(key).or_default().queued_duplicate();
                 }
                 return Ok(None);
             }
             if blocks.in_flight.contains(&key) {
-                if self.profile {
-                    blocks.traces.entry(key).or_default().in_flight_duplicates += 1;
+                if self.profile && !counted_in_flight {
+                    blocks.traces.entry(key).or_default().in_flight_duplicate();
+                    counted_in_flight = true;
                 }
                 blocks = self.ready.wait(blocks).unwrap_or_else(|e| e.into_inner());
                 continue;
@@ -518,7 +554,12 @@ impl SourceCache {
             self.ready.notify_all();
             drop(b);
             if self.profile {
-                log_decode(source, index, "inline", queued, trace, success);
+                let origin = if queued.enqueued_us != 0 {
+                    "inline-stole-queued"
+                } else {
+                    "inline"
+                };
+                log_decode(source, index, origin, queued, trace, success);
             }
             return out;
         }
@@ -535,7 +576,7 @@ impl SourceCache {
             }
             if blocks.in_flight.contains(&key) {
                 if self.profile {
-                    blocks.traces.entry(key).or_default().in_flight_duplicates += 1;
+                    blocks.traces.entry(key).or_default().in_flight_duplicate();
                 }
                 continue;
             }
@@ -544,13 +585,13 @@ impl SourceCache {
             }
             if !blocks.queued.insert(key) {
                 if self.profile {
-                    blocks.traces.entry(key).or_default().queued_duplicates += 1;
+                    blocks.traces.entry(key).or_default().queued_duplicate();
                 }
                 continue;
             }
             blocks.queue.push_back((source.clone(), index));
             if self.profile {
-                blocks.traces.entry(key).or_default().enqueued_us = crate::clock::host_now_us();
+                blocks.traces.entry(key).or_default().enqueued(false);
             }
             added = true;
         }

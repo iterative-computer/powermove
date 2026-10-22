@@ -83,8 +83,9 @@ pub(crate) struct WorkerEventStats {
     pub(crate) flush_failures: u64,
 }
 
-/// Called from the ordinary Playback constructor before the preparation pool
-/// starts. A failed diagnostic thread cannot fail audio playback: events then
+/// Called before the preparation pool starts, and by SourceCache before its
+/// decode workers start. A failed diagnostic thread cannot fail playback:
+/// events then
 /// report a disconnected channel through the drop and flush counters.
 pub(crate) fn init_worker_events() {
     if !enabled() {
