@@ -596,3 +596,20 @@ Engine off, every failed result:
 | `native-linked-rendition.spec.ts:11` | 1 | mediaclose | PM_FFMPEG_DIR undefined in the spec environment |
 | `native-still-orientation-parity.spec.ts:264` | 1 | derouter | Route expected legacy, got engine; pixel metrics exact |
 | `prompt-attachments.spec.ts:5` | 1 | agents | Request carries 4 images, spec expects 1 (Phase 0 row) |
+
+#### After merging the 3D lane again (`6b3ca920a`)
+
+The 3D lane then added a WebGL2 F16 presentation painter and GPU-recovery
+fixes. The full runs above predate that merge; 19 consumer and presentation
+spec files (82 cases) were rerun serially on the merged build:
+
+| Run | Passed | Failed | Failed results |
+|---|---:|---:|---|
+| Use New Engine on | 77 | 5 | `gpu-recovery.spec.ts:3` (bridge), `playback-audio.spec.ts:15` and `:72` (C18), `viewer-resize.spec.ts:206` (document host), `timeline.spec.ts:55` |
+| Use New Engine off | 82 | 0 | none |
+
+`engine-present-recovery.spec.ts:132` and `engine-blender-png-transport.spec.ts:15`
+pass on the merged build. `timeline.spec.ts:55` (consumers) failed once: the
+Scale key press selected no keys and the keys stayed at 1 s. It passed in the
+full engine-on run and in four repeats on the merged build (one failure in
+six runs); the cause is not yet identified and it stays a consumer item.
