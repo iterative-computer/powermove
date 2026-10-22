@@ -26,6 +26,7 @@ pub mod compose;
 pub mod document;
 mod layer_reports;
 pub mod peaks;
+mod preview_control;
 pub mod render;
 pub mod schedule;
 pub mod snapshot;
@@ -48,6 +49,7 @@ use pm_protocol::error::{EngineError, EngineProcess, ErrorCode, ErrorScope};
 use pm_protocol::frame::{FrameRelease, FrameRequest, ViewerState};
 use pm_protocol::host::PortId;
 use pm_protocol::interop::SurfaceFormat;
+use pm_protocol::preview::PreviewControl;
 
 use render::{Command, Key};
 pub use render::{FrameTrace, Generations, PoolSpec, Sink, Stats, ThreadConfig};
@@ -293,7 +295,41 @@ impl BridgePresenter {
                 stats.clone(),
                 Box::new(move |notice| {
                     let _ = ready.send(match notice {
-                        blender::Notice::Ready(key) => Command::BlenderReady { key },
+                        blender::Notice::Started {
+                            key,
+                            revision,
+                            generation,
+                            shading,
+                        } => Command::BlenderStarted {
+                            key,
+                            revision,
+                            generation,
+                            shading,
+                        },
+                        blender::Notice::Ready {
+                            key,
+                            revision,
+                            generation,
+                            shading,
+                        } => Command::BlenderReady {
+                            key,
+                            revision,
+                            generation,
+                            shading,
+                        },
+                        blender::Notice::Failed {
+                            key,
+                            revision,
+                            generation,
+                            shading,
+                            error,
+                        } => Command::BlenderFailed {
+                            key,
+                            revision,
+                            generation,
+                            shading,
+                            error,
+                        },
                         blender::Notice::Captured { token, result } => {
                             Command::BlenderCaptured { token, result }
                         }
@@ -421,7 +457,7 @@ impl BridgePresenter {
             && state.depth_id == Some(true)
             && self.config.source == Some(FrameSource::Document);
         let size = Size::new(state.size.width, state.size.height);
-        let count = pool_size(RING, self.config.thread.lead);
+        let count = pool_size(RING, self.config.thread.lead) * 2;
         let meta = self.views.get_mut(&key)?;
         let current = meta.depth;
         if let Some((spec, _)) = current
@@ -489,6 +525,19 @@ impl BridgePresenter {
 }
 
 impl FramePresenter for BridgePresenter {
+    fn preview_control(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        control: PreviewControl,
+    ) {
+        self.send(Command::PreviewControl {
+            key: (port, session),
+            control,
+        });
+    }
+
     fn viewer(
         &mut self,
         ctx: &mut PresentContext<'_>,

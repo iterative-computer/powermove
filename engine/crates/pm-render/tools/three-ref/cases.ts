@@ -187,11 +187,13 @@ export function cases(): Case[] {
         floor()] },
     matrices: { vase: matrix([-1.3, 0.3, 0]), star: matrix([0.2, 0.2, 0], [0, -20, 0]), tri: matrix([1.4, 0.1, 0.3], [0, 30, 0]), floor: floorMatrix() },
     outputs: set(['vase', 'star', 'tri', 'floor']) });
+  // Use the renderer's existing fallback name explicitly: parseScene rejects
+  // an empty slot name, while the material and recorded pixels stay Surface.
   add({ id: 'slots-and-groups', width: W, height: H,
     scene: { ...base([light('sun', 'sun')]),
       objects: [
         object('crate', { primitive: 'box' }, material(), { slots: [{ id: 's0', name: 'Red', material: material({ color: '#FF4040' }) },
-          { id: 's1', name: 'Green', material: material({ color: '#40FF40' }) }, { id: 's2', name: '', material: material({ color: '#4040FF', opacity: 0.5 }) },
+          { id: 's1', name: 'Green', material: material({ color: '#40FF40' }) }, { id: 's2', name: 'Surface', material: material({ color: '#4040FF', opacity: 0.5 }) },
           { id: 's3', name: 'Glow', material: material({ color: '#202020', emissive: '#FFAA00', emissiveIntensity: 2 }) }] }),
         object('sheet', { mesh: { positions: [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0, -1, -1, -1, 1, -1, -1], indices: [0, 1, 2, 0, 2, 3, 0, 4, 5, 0, 5, 1],
           groups: [{ start: 0, count: 6, materialIndex: 0 }, { start: 6, count: 6, materialIndex: 1 }], uvs: [0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1] } }, material(),
@@ -210,7 +212,7 @@ export function cases(): Case[] {
   add({ id: 'node-material-and-source', width: W, height: H,
     scene: { ...base([light('sun', 'sun')]),
       objects: [
-        object('noded', { primitive: 'sphere' }, material({ color: '#888888' }, { shader: { id: 'm1', name: 'Clay', inputs: [{ id: 'base', socket: 'Base Color' }, { id: 'rough', socket: 'Roughness' }, { id: 'glow', socket: 'Emission Strength' }],
+        object('noded', { primitive: 'sphere' }, material({ color: '#888888' }, { shader: { id: 'm1', name: 'Clay', graph: { nodes: [{ id: 'surface', type: 'ShaderNodeBsdfPrincipled', inputs: {}, properties: {} }, { id: 'output', type: 'ShaderNodeOutputMaterial', inputs: {}, properties: {} }], links: [{ from: 'surface', output: 'BSDF', to: 'output', input: 'Surface' }] }, inputs: [{ id: 'base', label: 'Base Color', kind: 'color', node: 'surface', socket: 'Base Color' }, { id: 'rough', label: 'Roughness', kind: 'number', node: 'surface', socket: 'Roughness' }, { id: 'glow', label: 'Emission Strength', kind: 'number', node: 'surface', socket: 'Emission Strength' }],
           p: p({ base: '#3366FF', rough: 0.15, glow: 0.5 }) } })),
         object('source', { primitive: 'box' }, material({ color: '#FF0000' }), { useSourceMaterials: true })] },
     matrices: { noded: matrix([-0.8, 0, 0]), source: matrix([0.9, 0, 0], [0, 30, 0]) }, outputs: set(['noded', 'source']) });

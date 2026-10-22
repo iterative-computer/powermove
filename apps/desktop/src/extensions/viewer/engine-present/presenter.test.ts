@@ -125,6 +125,21 @@ describe('EnginePresenter', () => {
     ]);
   });
 
+  it('publishes only metadata of the frame it actually paints', () => {
+    const { source, presenter } = setup();
+    const shown: PresentedFrame[] = [];
+    presenter.onPresented(frame => shown.push(frame));
+    const old = [{ composition: 'main', layers: ['model'], warnings: ['Missing model: old'], error: null }];
+    const current = [{ composition: 'main', layers: ['model'], warnings: ['Missing texture: current'], error: null }];
+    source.arrive(1, 1); source.arrive(1, 2);
+    presenter.receive({ type: 'frame', frame: desc(1, { scene3dMeta: old }) });
+    presenter.receive({ type: 'frame', frame: desc(2, { scene3dMeta: current }) });
+    expect(shown).toHaveLength(0);
+    presenter.refresh(16.7);
+    expect(shown).toHaveLength(1);
+    expect(shown[0]?.scene3dMeta).toEqual(current);
+  });
+
   it('parks a frame until its import arrives and releases it if the import never comes', () => {
     const { source, painter, link, presenter } = setup();
     presenter.receive({ type: 'frame', frame: desc(1) }, 0);
@@ -235,13 +250,25 @@ describe('EnginePresenter', () => {
     source.arrive(1, 1);
     presenter.receive({ type: 'frame', frame: desc(1) });
     presenter.receive({ type: 'surfacePool', pool: { generation: 2, surfaces: [] } });
-    expect(link.releases).toEqual([]);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(source.retired).toEqual([1]);
     expect(source.frames[0]!.closed).toBe(true);
     // A descriptor of the retired generation still in flight is ignored.
     presenter.receive({ type: 'frame', frame: desc(2) });
     expect(presenter.stats.staleGeneration).toBe(1);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+  });
+
+  it('reports a color GPU completion after its pool was retired', async () => {
+    const { source, painter, link, presenter } = setup();
+    source.arrive(1, 1);
+    presenter.receive({ type: 'frame', frame: desc(1) });
+    presenter.refresh(16.7);
+    presenter.receive({ type: 'surfacePool', pool: { generation: 3, surfaces: [] } });
     expect(link.releases).toEqual([]);
+    painter.finishGpu();
+    await flush();
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
   });
 
   it('a depth and object-id pool never replaces the frames, and tags the frames that name it', () => {

@@ -40,9 +40,11 @@
 //!   other images converted to 8-bit PNG (`<id>.png`; today's Canvas2D
 //!   conversion, appendix A item 3), other assets by name.
 //!
-//! Imported glTF models and model-group recipe parts are not built here
-//! (the glTF lane's loader and `pm-geom3d`'s recipe geometry); the builder
-//! answers why, and the caller routes the frame.
+//! - **generated**: a model group's part carries the group's evaluated
+//!   recipe and its part name (`object.blender.object` or the part id),
+//!   unless the recipe is a mesh recipe without a mesh.
+//!
+//! Imported glTF geometry and source materials are built by `snapshot_gltf`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -419,67 +421,98 @@ fn image_extension(path: &Path) -> Option<&'static str> {
     }
 }
 
-/// An image Blender should not load as it is, as an 8-bit straight-alpha
-/// PNG (today: drawn into a canvas and `toBlob('image/png')`).
-fn convert_to_png(path: &Path) -> Result<Vec<u8>, String> {
-    use pm_media::frame::{Layout, PlaneFormat};
-    let pool = pm_media::pool::FramePool::new(0);
-    let still =
-        pm_media::image::read(path, &pool).map_err(|e| format!("{}: {e}", path.display()))?;
-    let f = &still.frame.format;
-    if f.layout != Layout::Rgba {
-        return Err("a texture image layout this engine cannot convert".into());
-    }
-    let (w, h) = (f.width, f.height);
-    let premultiplied = f.rgba_premultiplied;
-    let rgba = still
+/// PNG samples of the TIFF rendition the shipped importer gives Blender
+/// without a canvas conversion. Preserve its 16-bit data and straight alpha.
+fn tiff_to_png(path: &Path) -> Result<Vec<u8>, String> {
+    let source =
+        pm_media::image::compat::read_tiff_png_source(path, &pm_media::pool::FramePool::new(0))
+            .map_err(|e| e.to_string())?;
+    let f = &source.frame.format;
+    let wide = source.bit_depth == 16;
+    let data = source
         .frame
         .with_planes(|planes| {
             let p = &planes[0];
-            let mut out = Vec::with_capacity(w * h * 4);
-            for y in 0..h {
-                for x in 0..w {
-                    let mut px = [0f64; 4];
-                    for (c, v) in px.iter_mut().enumerate() {
-                        // SAFETY: inside the plane (`with_planes` views).
-                        *v = unsafe {
-                            let b = p.desc.format.bytes();
-                            let at = p.ptr.add(y * p.stride + x * b);
-                            match p.desc.format {
-                                PlaneFormat::Rgba8 => f64::from(*at.add(c)) / 255.0,
-                                PlaneFormat::Rgba16 => {
-                                    f64::from(u16::from_le_bytes([
-                                        *at.add(c * 2),
-                                        *at.add(c * 2 + 1),
-                                    ])) / 65535.0
-                                }
-                                PlaneFormat::Rgba32Float => f64::from(f32::from_le_bytes([
-                                    *at.add(c * 4),
-                                    *at.add(c * 4 + 1),
-                                    *at.add(c * 4 + 2),
-                                    *at.add(c * 4 + 3),
-                                ])),
-                                _ => 0.0,
-                            }
-                        };
-                    }
-                    if premultiplied && px[3] > 0.0 {
-                        for c in 0..3 {
-                            px[c] /= px[3];
-                        }
-                    }
-                    out.extend(px.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+            let mut out = Vec::new();
+            for y in 0..f.height {
+                if wide {
+                    // SAFETY: RGBA16 rows are aligned, with width × 4 samples.
+                    let row = unsafe {
+                        std::slice::from_raw_parts(
+                            p.ptr.add(y * p.stride).cast::<u16>(),
+                            f.width * 4,
+                        )
+                    };
+                    out.extend(row.iter().flat_map(|v| v.to_be_bytes()));
+                } else {
+                    // SAFETY: RGBA8 rows hold width × 4 bytes.
+                    out.extend_from_slice(unsafe {
+                        std::slice::from_raw_parts(p.ptr.add(y * p.stride), f.width * 4)
+                    });
                 }
             }
             out
         })
         .map_err(|e| e.to_string())?;
-    if !matches!(
-        f.planes.first().map(|p| p.format),
-        Some(PlaneFormat::Rgba8 | PlaneFormat::Rgba16 | PlaneFormat::Rgba32Float)
-    ) {
-        return Err("a texture image sample format this engine cannot convert".into());
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, f.width as u32, f.height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(if wide {
+            png::BitDepth::Sixteen
+        } else {
+            png::BitDepth::Eight
+        });
+        encoder
+            .write_header()
+            .and_then(|mut w| w.write_image_data(&data))
+            .map_err(|e| e.to_string())?;
     }
+    Ok(png)
+}
+
+/// An image Blender should not load as it is, as an 8-bit straight-alpha
+/// PNG. Today the asset's `ImageBitmap` (Chromium's level 1 bitmap,
+/// premultiplied) is drawn 1:1 into a canvas and `toBlob('image/png')`
+/// reads it back unpremultiplied ([`unpremultiply`]). The PNG container
+/// bytes are this engine's encoder's; the pixels are today's.
+fn convert_to_png(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut head = [0; 16];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut head))
+        .map_err(|e| e.to_string())?;
+    if pm_media::image::sniff(&head[..n]) == pm_media::image::ImageFormat::Tiff {
+        return tiff_to_png(path);
+    }
+    let pool = pm_media::pool::FramePool::new(0);
+    let (bitmap, _) = crate::media::level1_bitmap(path, &pool).map_err(|e| match e {
+        crate::media::ProbeIssue::Unsupported(f) => f.to_string(),
+        crate::media::ProbeIssue::Unreadable(m) => m,
+    })?;
+    let f = &bitmap.frame.format;
+    if f.planes.len() != 1 || f.planes[0].format != pm_media::frame::PlaneFormat::Rgba8 {
+        return Err(format!(
+            "a texture image layout this engine cannot convert ({})",
+            f.label
+        ));
+    }
+    let (w, h) = (f.width, f.height);
+    let mut rgba = bitmap
+        .frame
+        .with_planes(|planes| {
+            let p = &planes[0];
+            let mut out = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                // SAFETY: the plane holds `height` rows of `stride` bytes.
+                out.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(p.ptr.add(y * p.stride), w * 4)
+                });
+            }
+            out
+        })
+        .map_err(|e| e.to_string())?;
+    unpremultiply(&mut rgba);
     let mut png = Vec::new();
     {
         let mut e = png::Encoder::new(&mut png, w as u32, h as u32);
@@ -490,6 +523,28 @@ fn convert_to_png(path: &Path) -> Result<Vec<u8>, String> {
             .map_err(|e| e.to_string())?;
     }
     Ok(png)
+}
+
+/// Skia's read of premultiplied RGBA8 into an unpremultiplied image (the
+/// canvas's `toBlob`): each byte to f32 `b × (1 / 255)`, color times `1 /
+/// a` (0 where a is 0), clamped to [0, 1], stored as `(int)(v × 255 +
+/// 0.5)`.
+pub fn unpremultiply(rgba: &mut [u8]) {
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 255 {
+            continue;
+        }
+        let scale = if a == 0 {
+            0.0
+        } else {
+            1.0 / (f32::from(a) * (1.0 / 255.0))
+        };
+        for c in &mut px[..3] {
+            let v = (f32::from(*c) * (1.0 / 255.0) * scale).clamp(0.0, 1.0);
+            *c = (v * 255.0 + 0.5) as u8;
+        }
+    }
 }
 
 /// The assets the scene's materials name (`assetBytes` of each id).
@@ -559,14 +614,31 @@ fn scene_assets(
                 )
                 .map_err(io)?,
                 None => {
-                    let png = convert_to_png(&path)
-                        .map_err(|e| format!("Could not convert texture {name}: {e}"))?;
-                    SnapshotAsset::new(
-                        id.clone(),
-                        format!("{id}.png"),
-                        AssetBytes::Bytes(Arc::new(png)),
-                    )
-                    .map_err(io)?
+                    let mut head = [0; 4096];
+                    let n = std::fs::File::open(&path)
+                        .and_then(|mut f| {
+                            use std::io::Read;
+                            f.read(&mut head)
+                        })
+                        .map_err(io)?;
+                    let browser_required = matches!(
+                        pm_media::image::sniff(&head[..n]),
+                        pm_media::image::ImageFormat::Avif | pm_media::image::ImageFormat::Svg
+                    );
+                    let png = if browser_required {
+                        assets.blender_png(&id, &path)?.ok_or_else(|| {
+                            format!(
+                                "The editor window did not provide the exact Blender PNG for {name}"
+                            )
+                        })?
+                    } else {
+                        Arc::new(
+                            convert_to_png(&path)
+                                .map_err(|e| format!("Could not convert texture {name}: {e}"))?,
+                        )
+                    };
+                    SnapshotAsset::new(id.clone(), format!("{id}.png"), AssetBytes::Bytes(png))
+                        .map_err(io)?
                 }
             }
         } else {
@@ -578,44 +650,6 @@ fn scene_assets(
 }
 
 /// Builds the snapshot of `frame` (`scope` is the frame's composition).
-/// Whether a model source names an imported glTF scene (`format` `gltf`
-/// or `glb`, or a `.gltf`/`.glb` name without a format), as
-/// `DocumentModels` reads it.
-fn names_gltf(root: &Node, object: Option<&Node>) -> bool {
-    let text = |n: Option<&Node>, k: &str| {
-        node::string(node::member(n, k))
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default()
-    };
-    let asset = text(node::member(object, "source"), "assetId");
-    if asset.is_empty() {
-        return false;
-    }
-    let Some(record) = node::member(node::member(Some(root), "assets"), &asset) else {
-        return false;
-    };
-    let format = text(Some(record), "format");
-    let name = text(Some(record), "name").to_ascii_lowercase();
-    matches!(format.as_str(), "gltf" | "glb")
-        || (format.is_empty() && (name.ends_with(".glb") || name.ends_with(".gltf")))
-}
-
-/// Whether the composition draws an imported glTF model: 3D object layers
-/// and legacy scenes' objects.
-fn imports_gltf(scope: &Scope<'_, '_>) -> bool {
-    let root = scope.comp.root();
-    scope.layers().iter().any(|l| {
-        let data = node::member(node::member(Some(l), "d"), "data");
-        if names_gltf(root, node::member(data, "object")) {
-            return true;
-        }
-        node::array(node::member(node::member(data, "scene"), "objects"))
-            .unwrap_or(&[])
-            .iter()
-            .any(|o| names_gltf(root, Some(o)))
-    })
-}
-
 pub fn build<'d>(
     scope: &mut Scope<'_, 'd>,
     frame: &BlenderFrame,
@@ -633,16 +667,8 @@ pub fn build<'d>(
             }
         }
     };
-    // The 3D pass now loads imported glTF scenes, but this snapshot does
-    // not yet match today's glTF meshes and embedded textures: such
-    // frames stay routed until it does.
-    if imports_gltf(scope) {
-        return Ok(Err("imported models".into()));
-    }
+    // Recipe parts carry their group's evaluated recipe (`generated`).
     let evaluated = scope.composition_scene(time)?;
-    if !evaluated.recipe_parts.is_empty() {
-        return Ok(Err("model-group recipe parts".into()));
-    }
     let scene_json = evaluated.scene;
     let scene = match crate::scene3d::layers::composition_scene(
         scope,
@@ -664,6 +690,7 @@ pub fn build<'d>(
         .map(|l| (js::layer_id(l), l))
         .collect();
     let mut objects = Vec::new();
+    let mut texture_snapshots = super::snapshot_gltf::Textures::default();
     let mut ids = Vec::new();
     for node in scene_json
         .get("objects")
@@ -687,15 +714,56 @@ pub fn build<'d>(
         }
         let mut m = Map::new();
         m.insert("id", Value::String(JsString::from(id.as_str())));
-        m.insert("meshes", Value::Array(object_meshes(node, object)));
+        let source_id = node
+            .get("source")
+            .and_then(|s| s.get("assetId"))
+            .and_then(Value::as_str);
+        let model = source_id.map(|id| {
+            use crate::scene3d::model::ModelSource;
+            crate::scene3d::layers::DocumentModels {
+                root: scope.comp.root(),
+                assets,
+            }
+            .model(id)
+        });
+        let meshes = if let Some(crate::scene3d::model::ModelLookup::Gltf(asset)) = model {
+            let mut world = scope.world3d(layer, time, false)?;
+            if let Some(part) = scope.animated_part(layer, time)? {
+                let d = scope.recipe_world_offset(layer, time, &part)?;
+                for k in 0..3 {
+                    world[12 + k] += d[k];
+                }
+            }
+            let from = node::number(node::member(Some(layer), "from"))
+                .filter(|f| !f.is_nan())
+                .unwrap_or(0.0);
+            super::snapshot_gltf::meshes(
+                &asset,
+                &world,
+                time - from,
+                object,
+                node,
+                objects.len(),
+                &mut texture_snapshots,
+            )
+        } else {
+            object_meshes(node, object)
+        };
+        m.insert("meshes", Value::Array(meshes));
         if let Some(c) = js_and(node.get("castShadow"), environment_shadows) {
             m.insert("castShadow", c);
         }
         if let Some(r) = node.get("receiveShadow") {
             m.insert("receiveShadow", r.clone());
         }
+        if let Some(g) = generated(scope, layer, time)? {
+            m.insert("generated", g);
+        }
         objects.push(Value::Object(m));
         ids.push(id);
+    }
+    if let Err(e) = texture_snapshots.finish(&mut objects) {
+        return Ok(Err(e));
     }
     let lights: Vec<Value> = scene_json
         .get("lights")
@@ -760,13 +828,51 @@ pub fn build<'d>(
         snapshot.insert("background", b.clone());
     }
     snapshot.insert("camera", camera_json(&camera));
-    let assets = match scene_assets(scope.comp.root(), &scene_json, assets) {
+    let mut assets = match scene_assets(scope.comp.root(), &scene_json, assets) {
         Ok(a) => a,
         Err(e) => return Ok(Err(e)),
     };
+    assets.splice(0..0, texture_snapshots.assets);
     Ok(Ok(Snapshot {
         frame: frame.clone(),
         json: Value::Object(snapshot),
         assets,
     }))
+}
+
+/// `generated` of a recipe part: `{ recipe: evaluatedRecipe(group, time),
+/// part }` when `recipe.kind !== 'mesh' || recipe.mesh`.
+fn generated<'d>(scope: &mut Scope<'_, 'd>, layer: &'d Node, time: f64) -> JsResult<Option<Value>> {
+    let object = node::member(
+        node::member(node::member(Some(layer), "d"), "data"),
+        "object",
+    );
+    let Some(generation) = node::member(object, "generation").filter(|g| node::truthy(Some(g)))
+    else {
+        return Ok(None);
+    };
+    let group_id = node::get(generation, b"groupId");
+    let Some(group) = scope.layer_by_id(&group_id) else {
+        return Ok(None);
+    };
+    let Some(recipe) = scope.evaluated_recipe(group, time)? else {
+        return Ok(None);
+    };
+    let mesh_without_mesh = recipe.get("kind").and_then(Value::as_str) == Some("mesh")
+        && !recipe
+            .get("mesh")
+            .is_some_and(|m| pm_eval::JsValue::from(m).truthy());
+    if mesh_without_mesh {
+        return Ok(None);
+    }
+    let blender_object = node::member(node::member(object, "blender"), "object");
+    let part = if node::truthy(blender_object) {
+        node::js_value_opt(blender_object)
+    } else {
+        node::js_value_opt(node::member(Some(generation), "partId"))
+    };
+    let mut m = Map::new();
+    m.insert("recipe", recipe);
+    m.insert("part", part.to_json().unwrap_or(Value::Null));
+    Ok(Some(Value::Object(m)))
 }

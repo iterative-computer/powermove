@@ -184,6 +184,12 @@ pub fn viewer_frame_request() -> FrameRequest {
 
 pub fn frame_descriptor() -> FrameDescriptor {
     FrameDescriptor {
+        scene3d_meta: vec![crate::frame::Scene3dMeta {
+            composition: "main".into(),
+            layers: vec!["model".into()],
+            warnings: vec!["Missing texture: offline".into()],
+            error: None,
+        }],
         pool_index: 3,
         pool_generation: seq(2),
         seq: seq(MAX_SAFE_INTEGER as u64),
@@ -229,11 +235,16 @@ pub fn frame_descriptor() -> FrameDescriptor {
                 bottom: [40.0, 38.0],
             }),
         }),
-        depth_id: Some(DepthIdSurface {
+        depth_id: Some(Box::new(DepthIdSurface {
+            encoding: None,
+            coverage_pool_index: None,
+            legend: vec![],
+            glyphs: vec![],
+            selection: None,
             pool_index: 3,
-            seq: seq(11),
+            seq: seq(MAX_SAFE_INTEGER as u64),
             pool_generation: seq(4),
-        }),
+        })),
         view_seq: seq(17),
         duration: Some(ticks(11_760_000)),
     }
@@ -542,6 +553,7 @@ pub fn blender_job() -> BlenderJobRequest {
     BlenderJobRequest {
         job: "blender-1".into(),
         priority: PriorityClass::UserJob,
+        foreground_capture: false,
         snapshot: SnapshotRef {
             hash: hash(1),
             encoding: SnapshotEncoding::RenderSnapshotJsonV1,
@@ -828,6 +840,7 @@ pub fn requests() -> Vec<Envelope> {
                 scale: 1.0,
                 revision: rev(42),
                 svg: None,
+                blender: None,
             }),
         ),
         request(
@@ -846,6 +859,7 @@ pub fn requests() -> Vec<Envelope> {
 pub fn svg_request() -> crate::svg_raster::SvgRasterRequest {
     crate::svg_raster::SvgRasterRequest {
         key: crate::svg_raster::SvgRasterKey {
+            texture: None,
             content: "9f".repeat(32),
             width: 2,
             height: 2,
@@ -1280,6 +1294,7 @@ pub fn events() -> Vec<Envelope> {
                 period_us: 8_333.333_333_333_334,
             }),
             depth_id: Some(true),
+            chrome_selection: None,
         })),
         event(Event::Transport(TransportCommand::Seek {
             time: ticks(-705_600_000),
@@ -1411,6 +1426,19 @@ pub fn events() -> Vec<Envelope> {
             snapshots: Count::new(3).expect("count"),
             snapshot_us_max: 48_000,
             revision: rev(42),
+        })),
+        event(Event::PreviewControl(crate::preview::PreviewControl {
+            generation: seq(3), revision: rev(42), composition: "comp-1".into(),
+            time: ticks(705_600_000), shading: crate::frame::Shading3d::Rendered,
+            action: crate::preview::PreviewAction::Render,
+            cache_only: false, size: None, camera: None,
+        })),
+        event(Event::PreviewStatus(crate::preview::PreviewStatus {
+            generation: seq(3), revision: rev(42), composition: "comp-1".into(),
+            time: ticks(705_600_000), phase: crate::preview::PreviewPhase::Ready,
+            frame_seq: Some(seq(99)), error: None,
+            automatic: false,
+            cache_only: false,
         })),
         event(Event::Audio(AudioMessage::PeaksWanted {
             asset: "asset-7".into(),
@@ -1753,9 +1781,11 @@ pub const fn event_index(event: &Event) -> usize {
         Event::ShaderFallback(_) => 19,
         Event::Compat(_) => 20,
         Event::RenderStats(_) => 21,
+        Event::PreviewControl(_) => 22,
+        Event::PreviewStatus(_) => 23,
     }
 }
-pub const EVENT_VARIANTS: usize = 22;
+pub const EVENT_VARIANTS: usize = 24;
 
 /// A sample color description for a 10-bit 4:2:2 ProRes source.
 pub fn prores_422_color() -> ColorDescription {

@@ -500,12 +500,9 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
     assert!(f.contains(&Feature::ProjectColor), "{f:?}");
     // The 3D scene pass draws shadows, every light type, several objects
     // per composition (depth sets), transparency, every primitive and
-    // source kind, missing models, and maps; what it routes is listed.
-    let scene = |f: &[Feature], what: &str| {
-        f.iter()
-            .any(|x| matches!(x, Feature::Scene3d(s) if s.contains(what)))
-    };
-    let no_3d = |f: &[Feature]| !f.iter().any(|x| matches!(x, Feature::Scene3d(_)));
+    // source kind, missing and imported models, and maps: nothing about a
+    // 3D layer is listed (a map's still meets the image layer checks).
+    let no_3d = |f: &[Feature]| f.is_empty();
     let f = variant(|d| {
         let i = layer_at(d, "cam");
         d["layers"][i]["d"]["data"]["environment"]["shadows"] = json!(true);
@@ -536,32 +533,37 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
         d["layers"][i]["d"]["data"]["object"]["material"]["maps"] = json!({ "color": "tex" });
     });
     assert!(no_3d(&f), "{f:?}");
-    // An imported model that exists is the glTF lane's.
+    // An imported model: drawn, or today's missing-model box when neither
+    // importer loads its file (`gltf-acceptance.test.ts`).
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "assetId": "model" });
         d["assets"]["model"] =
             json!({ "id": "model", "kind": "model", "format": "glb", "name": "m.glb" });
     });
-    assert!(scene(&f, "imported models"), "{f:?}");
+    assert!(no_3d(&f), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["material"]["maps"] = json!({ "color": "tex" });
         d["assets"]["tex"] =
             json!({ "id": "tex", "kind": "image", "format": "svg", "name": "t.svg" });
     });
-    assert!(scene(&f, "SVG texture maps"), "{f:?}");
+    // SVG maps are Chromium's raster (decision S1).
+    assert!(no_3d(&f), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["generation"] =
             json!({ "groupId": "g", "partId": "p" });
     });
-    assert!(scene(&f, "recipe parts"), "{f:?}");
+    // Recipe parts draw natively (`pm_eval::recipe`, the 3D lane's).
+    assert!(no_3d(&f), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "primitive": "knot" });
     });
-    assert!(scene(&f, "knot primitives"), "{f:?}");
+    // An unknown primitive fails the composition's object layers at draw
+    // time, as today's `compositionScene` throws (`corrupt-scenes.test.ts`).
+    assert!(no_3d(&f), "{f:?}");
     // Nested compositions are checked too.
     let f = variant(|d| {
         d["comps"]["inner"]["layers"]

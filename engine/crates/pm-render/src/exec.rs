@@ -467,6 +467,16 @@ impl Exec<'_> {
                         }
                     },
                     Source::Object3d(object) => {
+                        if !self.scene3d.prepare_svg_maps(
+                            self.device,
+                            self.queue,
+                            encoder,
+                            object,
+                            &mut self.vector.svg,
+                            &plan.composition,
+                        ) {
+                            return;
+                        }
                         match self.scene3d.render(
                             self.device,
                             self.queue,
@@ -487,11 +497,9 @@ impl Exec<'_> {
                                     self.taken.push(d);
                                 }
                             }
-                            Err(crate::scene3d::Error3d::Unsupported(why)) => self.fail(
-                                plan,
-                                draw,
-                                MediaFailure::Unsupported(crate::capability::Feature::Scene3d(why)),
-                            ),
+                            Err(crate::scene3d::Error3d::Unsupported(feature)) => {
+                                self.fail(plan, draw, MediaFailure::Unsupported(feature))
+                            }
                             Err(crate::scene3d::Error3d::Failed(message)) => {
                                 self.fail(plan, draw, MediaFailure::Failed(message))
                             }

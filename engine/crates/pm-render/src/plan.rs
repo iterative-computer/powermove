@@ -1221,6 +1221,7 @@ fn native_content_quad<'d>(
                     return Ok(Some(Quad::Texture {
                         source: Source::Vector(Box::new(crate::vector::VectorSource::SvgImage {
                             key: pm_protocol::svg_raster::SvgRasterKey {
+                                texture: None,
                                 content,
                                 width,
                                 height,
@@ -1488,7 +1489,9 @@ fn native_content_quad<'d>(
                         height,
                         b.video_center.is_some(),
                     )? {
-                        Some(crate::blender::Planned::Draw(source, rect)) => {
+                        Some(crate::blender::Planned::Draw(mut source, rect)) => {
+                            source.scene_metadata =
+                                b.pass3d.last().and_then(|p| p.metadata_scene());
                             return Ok(Some(Quad::Device {
                                 source: Source::Blender(Box::new(source)),
                                 rect,
@@ -1508,12 +1511,16 @@ fn native_content_quad<'d>(
                         Ok(plan) => Ok(Some(Quad::Screen {
                             source: Source::Object3d(Box::new(plan)),
                         })),
-                        Err(reason) => {
-                            b.unsupported.push(Unsupported::layer(
-                                &comp_id,
-                                layer,
-                                Feature::Scene3d(reason),
-                            ));
+                        // The composition's scene did not build (today's
+                        // `compositionScene` throws): every object layer
+                        // draws nothing and fails, as the compositor's
+                        // catch does (an export fails with it).
+                        Err(message) => {
+                            b.failures.push(LayerFailure {
+                                composition: comp_id,
+                                layer: js::layer_id(layer),
+                                message,
+                            });
                             Ok(None)
                         }
                     }
@@ -1538,13 +1545,25 @@ fn native_content_quad<'d>(
                         ay: 0.0,
                         uv: [0.0, 0.0, 1.0, 1.0],
                     })),
-                    Some(Err(reason)) => {
-                        b.unsupported.push(Unsupported::layer(
-                            &comp_id,
+                    // A legacy scene that does not sync, or a mesh layer
+                    // that does not build: the compositor's catch falls
+                    // through to the missing-definition checkerboard.
+                    Some(Err(error)) => {
+                        let mut planned = crate::shader_layers::plan::missing_placeholder(
+                            scope,
                             layer,
-                            Feature::Scene3d(reason),
-                        ));
-                        Ok(None)
+                            &d,
+                            time,
+                            (width, height),
+                            scale,
+                            b.shader_fallback,
+                        )?;
+                        if let crate::shader_layers::plan::Planned::Draw { source, .. } =
+                            &mut planned
+                        {
+                            source.scene_error = Some(error);
+                        }
+                        Ok(shader_quad(b, &comp_id, layer, planned))
                     }
                     None => {
                         b.unsupported.push(Unsupported::layer(

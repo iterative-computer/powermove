@@ -397,19 +397,72 @@ pub struct OverlayGeometry {
     pub caret: Option<Caret>,
 }
 
-/// The depth and object-id surface (`rgbaf16`: r depth, g and b the object
-/// id minus one, a coverage) of a viewer frame, in the depth pool
-/// (`SurfacePool::role` `depthId`) of `pool_generation`, at the frame's own
-/// size and placement. It holds this frame's surface while the frame is on
-/// screen: the engine reuses a depth slot only after `pool size − 2` newer
-/// frames were rendered, more than a viewer holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Selection coverage requested for the native viewport chrome.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ChromeSelection {
+    pub selected: Vec<String>,
+    pub active: Vec<String>,
+}
+
+/// A light/camera glyph evaluated by the engine at this frame's time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ChromeGlyph {
+    pub id: String,
+    pub kind: String,
+    pub position: [f64; 3],
+    pub target: Option<[f64; 3]>,
+    pub up: [f64; 3],
+    pub fov: f64,
+    pub aspect: f64,
+    pub angle: f64,
+    pub size: [f64; 2],
+}
+
+/// Viewport chrome surfaces paired with this color frame. Their native slot
+/// stays owned until the color painter and all chrome readers finish and a
+/// newer displayed/drawn frame replaces it. Pool generation and frame
+/// sequence identify both surfaces; IDs are never filtered.
+/// `chromePlanesV1`: two stage-sized surfaces in one generation. Depth RGB holds
+/// f32 window-depth bits as exact binary half-float fractions (11/11/10
+/// bits divided by 2048). Coverage RG holds a 22-bit visible object ID in
+/// the same fractions; B=0/.5/1 is unoccluded none/selected/active
+/// coverage. Alpha is always 1. IDs are one-based into `legend`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DepthIdSurface {
     pub pool_index: u32,
     pub seq: Seq,
     pub pool_generation: Seq,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub encoding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub coverage_pool_index: Option<u32>,
+    #[serde(default)]
+    pub legend: Vec<String>,
+    #[serde(default)]
+    pub glyphs: Vec<ChromeGlyph>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub selection: Option<ChromeSelection>,
+}
+
+/// The scene metadata of layers that share one evaluated scene. Grouping
+/// avoids repeating a composition's warning array for every object layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct Scene3dMeta {
+    pub composition: CompositionId,
+    pub layers: Vec<LayerId>,
+    pub warnings: Vec<String>,
+    pub error: Option<String>,
 }
 
 /// One presented frame. Sent after the command buffer completes.
@@ -430,7 +483,9 @@ pub struct FrameDescriptor {
     pub format: SurfaceFormat,
     pub quality: FrameQuality,
     pub overlay: Option<OverlayGeometry>,
-    pub depth_id: Option<DepthIdSurface>,
+    pub depth_id: Option<Box<DepthIdSurface>>,
+    #[serde(default)]
+    pub scene3d_meta: Vec<Scene3dMeta>,
     /// The viewer state the frame shows ([`ViewerState::view_seq`]): with
     /// `revision`, it tags the frame so overlays drawn from its geometry match
     /// its pixels during view gestures (zoom, pan, orbit, walk).
@@ -445,6 +500,15 @@ pub struct FrameDescriptor {
 impl Validate for FrameDescriptor {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Frame;
+        ensure(
+            self.scene3d_meta.iter().all(|meta| {
+                meta.composition.is_valid()
+                    && !meta.layers.is_empty()
+                    && meta.layers.iter().all(LayerId::is_valid)
+            }),
+            C,
+            || "invalid 3D scene metadata layer identity".into(),
+        )?;
         ensure(self.duration.is_none_or(|d| d.get() > 0), C, || {
             "a timed frame lasts a positive time".into()
         })?;
@@ -456,6 +520,49 @@ impl Validate for FrameDescriptor {
             C,
             || "viewer frames are bgra8 or rgba16float".into(),
         )?;
+        if let Some(depth) = &self.depth_id {
+            ensure(depth.seq == self.seq, C, || {
+                "depth and color must have the same frame sequence".into()
+            })?;
+            if let Some(encoding) = &depth.encoding {
+                ensure(encoding == "chromePlanesV1", C, || {
+                    "unknown viewport chrome encoding".into()
+                })?;
+                ensure(
+                    depth
+                        .coverage_pool_index
+                        .is_some_and(|index| index != depth.pool_index),
+                    C,
+                    || "viewport chrome requires a separate coverage surface".into(),
+                )?;
+                ensure(
+                    depth.legend.len() < (1 << 22) && depth.legend.iter().all(|id| !id.is_empty()),
+                    C,
+                    || "viewport chrome IDs must fit their one-based 22-bit legend".into(),
+                )?;
+                let mut unique = std::collections::BTreeSet::new();
+                ensure(depth.legend.iter().all(|id| unique.insert(id)), C, || {
+                    "viewport chrome legend IDs must be unique".into()
+                })?;
+                ensure(
+                    depth.glyphs.iter().all(|glyph| {
+                        !glyph.id.is_empty()
+                            && glyph
+                                .position
+                                .iter()
+                                .chain(glyph.up.iter())
+                                .chain(glyph.target.iter().flatten())
+                                .chain(glyph.size.iter())
+                                .all(|v| v.is_finite())
+                            && [glyph.fov, glyph.aspect, glyph.angle]
+                                .iter()
+                                .all(|v| v.is_finite())
+                    }),
+                    C,
+                    || "viewport chrome glyphs must be finite".into(),
+                )?;
+            }
+        }
         if let Some(overlay) = &self.overlay {
             let finite = |v: f64| v.is_finite();
             ensure(
@@ -535,6 +642,9 @@ pub struct ViewerState {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub depth_id: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub chrome_selection: Option<ChromeSelection>,
 }
 
 /// A display's refresh grid on the host clock: refreshes (BeginFrame times)
@@ -722,6 +832,7 @@ mod tests {
                 period_us: 8_333.333,
             }),
             depth_id: Some(true),
+            chrome_selection: None,
         }
     }
 
@@ -919,6 +1030,26 @@ mod tests {
             local_view: vec![],
         });
         assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn viewport_chrome_metadata_is_frame_aligned_and_validated() {
+        let mut frame = crate::samples::frame_descriptor();
+        let depth = frame.depth_id.as_mut().unwrap();
+        depth.encoding = Some("chromePlanesV1".into());
+        depth.coverage_pool_index = Some(depth.pool_index + 1);
+        depth.legend = vec!["object".into()];
+        assert!(frame.validate().is_ok());
+        let mut bad = frame.clone();
+        bad.depth_id.as_mut().unwrap().seq = Seq::new(1).unwrap();
+        assert!(bad.validate().is_err());
+        let mut bad = frame.clone();
+        let depth = bad.depth_id.as_mut().unwrap();
+        depth.coverage_pool_index = Some(depth.pool_index);
+        assert!(bad.validate().is_err());
+        let mut bad = frame;
+        bad.depth_id.as_mut().unwrap().legend.push("object".into());
+        assert!(bad.validate().is_err());
     }
 
     #[test]

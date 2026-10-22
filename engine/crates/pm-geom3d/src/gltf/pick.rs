@@ -71,7 +71,7 @@ impl Ray {
         }
     }
 
-    fn at(&self, t: f64) -> Vec3 {
+    pub fn at(&self, t: f64) -> Vec3 {
         add(self.origin, scale(self.direction, t))
     }
 
@@ -153,7 +153,7 @@ pub fn intersect_triangle(r: &Ray, a: Vec3, b: Vec3, c: Vec3, cull: bool) -> Opt
 
 /// A triangle BVH (binned SAH, leaves of 4), refit for new positions.
 #[derive(Debug, Clone, Default)]
-struct Bvh {
+pub(crate) struct Bvh {
     /// Node bounds and links: leaf `(first, count > 0)`, interior
     /// `(left child, 0)` with the right child after it.
     nodes: Vec<([f64; 3], [f64; 3], u32, u32)>,
@@ -188,7 +188,7 @@ fn area(lo: Vec3, hi: Vec3) -> f64 {
 }
 
 impl Bvh {
-    fn build(p: &[Vec3], tris: &[[u32; 3]]) -> Bvh {
+    pub(crate) fn build(p: &[Vec3], tris: &[[u32; 3]]) -> Bvh {
         let n = tris.len();
         let mut order: Vec<u32> = (0..n as u32).collect();
         let empty = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], 0, 0);
@@ -352,7 +352,11 @@ impl Bvh {
 
     /// Every triangle the ray may hit, nearest boxes first, with `test`
     /// returning a ray parameter; the closest accepted hit.
-    fn closest(&self, r: &Ray, mut test: impl FnMut(u32) -> Option<f64>) -> Option<(f64, u32)> {
+    pub(crate) fn closest(
+        &self,
+        r: &Ray,
+        mut test: impl FnMut(u32) -> Option<f64>,
+    ) -> Option<(f64, u32)> {
         let inv = [
             1.0 / r.direction[0],
             1.0 / r.direction[1],
@@ -428,6 +432,10 @@ pub struct Picker {
     tris: Vec<Option<(Vec<[u32; 3]>, Bvh)>>,
     /// `geometry.boundingSphere` per geometry.
     spheres: Vec<(Vec3, f64)>,
+    /// Per object: a skinned mesh's `boundingBox` as the importer leaves it
+    /// (`loadGltf`'s `Box3.setFromObject(scene)` computes it at the loaded
+    /// pose; every runtime clone copies it and never recomputes it).
+    loaded_boxes: Vec<Option<(Vec3, Vec3)>>,
 }
 
 /// A model posed under a layer at a time (re-posed vertices for skinned
@@ -450,8 +458,14 @@ impl Picker {
                     return None;
                 }
                 let n = g.vertex_count() as u32;
+                // A triangle with an index past the last vertex reads
+                // `undefined` positions in `Mesh.raycast`: never a hit.
                 let t: Vec<[u32; 3]> = match &g.index {
-                    Some(ix) => ix.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+                    Some(ix) => ix
+                        .chunks_exact(3)
+                        .map(|c| [c[0], c[1], c[2]])
+                        .filter(|c| c.iter().all(|&v| v < n))
+                        .collect(),
                     None => (0..n / 3).map(|i| [3 * i, 3 * i + 1, 3 * i + 2]).collect(),
                 };
                 let p: Vec<Vec3> = g
@@ -469,11 +483,32 @@ impl Picker {
             .iter()
             .map(|g| g.bounding_sphere())
             .collect();
+        // The loaded pose: `scene.updateMatrixWorld()` from the glTF scene.
+        let rest = Pose::rest(&model);
+        let rest_world = pose::world(&model, &rest, None);
+        let loaded_boxes = model
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| match &o.kind {
+                ObjectKind::Drawable(d) if d.skin.is_some() => {
+                    pose::local_box(&model, i, d, &rest, &rest_world)
+                }
+                _ => None,
+            })
+            .collect();
         Picker {
             model,
             tris,
             spheres,
+            loaded_boxes,
         }
+    }
+
+    /// A skinned drawable's `boundingBox` as every runtime clone of the
+    /// imported model holds it (the loaded pose), in its local space.
+    pub fn loaded_box(&self, object: usize) -> Option<(Vec3, Vec3)> {
+        self.loaded_boxes.get(object).copied().flatten()
     }
 
     /// Poses the model under the layer matrix `layer` at mixer time `time`.
@@ -539,7 +574,8 @@ impl Picker {
 
     /// The closest hit along the world ray within `[near, far]`; `side`
     /// gives each drawable's material side, `skip` drawables to ignore
-    /// (materials all at opacity 0, hidden).
+    /// (materials all at opacity 0, hidden). Skinned bounding volumes are
+    /// those of the current pose.
     pub fn pick(
         &self,
         posed: &Posed,
@@ -548,6 +584,35 @@ impl Picker {
         far: f64,
         side: &dyn Fn(usize) -> Side,
         skip: &dyn Fn(usize) -> bool,
+    ) -> Option<Hit> {
+        self.pick_with(posed, ray, near, far, side, skip, false)
+    }
+
+    /// [`Picker::pick`] as today's runtime raycasts a clone of the imported
+    /// model: a skinned mesh's box pre-test uses the box the importer
+    /// computed at the loaded pose ([`Picker::loaded_box`]).
+    pub fn pick_as_runtime(
+        &self,
+        posed: &Posed,
+        ray: &Ray,
+        near: f64,
+        far: f64,
+        side: &dyn Fn(usize) -> Side,
+        skip: &dyn Fn(usize) -> bool,
+    ) -> Option<Hit> {
+        self.pick_with(posed, ray, near, far, side, skip, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pick_with(
+        &self,
+        posed: &Posed,
+        ray: &Ray,
+        near: f64,
+        far: f64,
+        side: &dyn Fn(usize) -> Side,
+        skip: &dyn Fn(usize) -> bool,
+        loaded_boxes: bool,
     ) -> Option<Hit> {
         let model = &self.model;
         let mut best: Option<Hit> = None;
@@ -575,7 +640,7 @@ impl Picker {
                     let Some((tris, rest_bvh)) = &self.tris[d.geometry] else {
                         continue;
                     };
-                    let (positions, bvh, (center, radius, bbox)): (Option<&[Vec3]>, &Bvh, _) =
+                    let (positions, bvh, (center, radius, mut bbox)): (Option<&[Vec3]>, &Bvh, _) =
                         match &posed.deformed[i] {
                             Some(x) => (Some(&x.positions), &x.bvh, x.bounds),
                             None => {
@@ -583,6 +648,9 @@ impl Picker {
                                 (None, rest_bvh, (c, r, g.bounding_box))
                             }
                         };
+                    if loaded_boxes && d.skin.is_some() {
+                        bbox = self.loaded_box(i);
+                    }
                     let vertex = |k: u32| -> Vec3 {
                         match positions {
                             Some(p) => p[k as usize],
@@ -703,7 +771,10 @@ fn points_hit(
     let count = indices.map_or(pos.len(), <[u32]>::len);
     for i in 0..count {
         let vi = indices.map_or(i, |ix| ix[i] as usize);
-        let p = pos[vi];
+        // An index past the last vertex reads NaN: never within range.
+        let Some(&p) = pos.get(vi) else {
+            continue;
+        };
         let along = dot(sub(p, r.origin), r.direction);
         let closest = if along < 0.0 { r.origin } else { r.at(along) };
         if distance_sq(closest, p) < threshold_sq {
@@ -726,7 +797,12 @@ fn line_hit(
     world: &Mat4,
     world_ray: &Ray,
 ) -> Option<(Vec3, u32)> {
-    let v = |i: usize| pos[indices.map_or(i, |ix| ix[i] as usize)];
+    // An index past the last vertex reads `undefined`: NaN coordinates.
+    let v = |i: usize| {
+        pos.get(indices.map_or(i, |ix| ix[i] as usize))
+            .copied()
+            .unwrap_or([f64::NAN; 3])
+    };
     let count = indices.map_or(pos.len(), <[u32]>::len);
     if count < 2 {
         return None;

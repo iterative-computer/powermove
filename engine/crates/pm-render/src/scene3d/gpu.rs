@@ -20,6 +20,9 @@ use super::describe::{self, DrawDesc, DrawState, Layer3d, PassDesc, TextureRef};
 use super::model::Scene3d;
 use super::textures::{MapError, Textures};
 
+#[path = "chrome_gpu.rs"]
+mod chrome;
+
 /// The MSAA sample count of the output canvas (`antialias: true`; ANGLE on
 /// Metal allocates 4 samples, recorded by `tools/three-ref`).
 pub const SAMPLES: u32 = 4;
@@ -61,9 +64,10 @@ impl GpuMesh {
 /// Why a 3D render drew nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error3d {
-    /// Something this pass does not draw, met at render time (the frame is
-    /// routed to the legacy engine, `MediaFailure::Unsupported`).
-    Unsupported(String),
+    /// A material map still outside the level 1 classes, met at render
+    /// time: the image feature an image layer of the file reports
+    /// (`MediaFailure::Unsupported`).
+    Unsupported(crate::capability::Feature),
     /// The layer failed and drew nothing.
     Failed(String),
 }
@@ -235,10 +239,12 @@ pub struct Scene3dRenderer {
     /// The last scene whose maps were loaded, and that scene with the maps
     /// that failed to load dropped (shared by the layers of one pass).
     resolved: Option<(Arc<Scene3d>, Arc<Scene3d>)>,
+    warning_scenes: HashMap<usize, (std::sync::Weak<Scene3d>, Vec<String>)>,
     attachments: Option<Attachments>,
     shadows: HashMap<usize, ShadowTarget>,
     prepass: Option<PrepassKey>,
     depth_surface: Option<DepthSurface>,
+    chrome: Option<chrome::Targets>,
     textures: Textures,
     empty: Option<wgpu::TextureView>,
     cache: Option<cache::ProgramCache>,
@@ -260,10 +266,12 @@ impl Default for Scene3dRenderer {
             generation: 0,
             frame_started: false,
             resolved: None,
+            warning_scenes: HashMap::new(),
             attachments: None,
             shadows: HashMap::new(),
             prepass: None,
             depth_surface: None,
+            chrome: None,
             textures: Textures::default(),
             empty: None,
             cache: None,
@@ -362,6 +370,8 @@ impl Scene3dRenderer {
     /// resident set follows the scenes being drawn.
     pub fn begin_frame(&mut self) {
         self.frame_started = true;
+        self.warning_scenes
+            .retain(|_, (scene, _)| scene.strong_count() > 0);
     }
 
     fn start_generation(&mut self) {
@@ -427,10 +437,8 @@ impl Scene3dRenderer {
                 }
             }
         }
-        let out = if failed.is_empty() {
-            scene.clone()
-        } else {
-            let mut s = Scene3d::clone(scene);
+        let mut resolved = (!failed.is_empty()).then(|| Scene3d::clone(scene));
+        if let Some(s) = resolved.as_mut() {
             let mut warnings = Vec::new();
             for o in &mut s.objects {
                 for m in &mut o.meshes {
@@ -447,10 +455,23 @@ impl Scene3dRenderer {
                 }
             }
             s.warnings.extend(warnings);
-            Arc::new(s)
-        };
+        }
+        let out = resolved.map_or_else(|| scene.clone(), Arc::new);
+        self.warning_scenes.insert(
+            Arc::as_ptr(scene) as usize,
+            (Arc::downgrade(scene), out.warnings.clone()),
+        );
         self.resolved = Some((scene.clone(), out.clone()));
         Ok(out)
+    }
+
+    /// Diagnostics of the actual decoded maps, retained with weak scene
+    /// identities while draw/prefix reuse still holds the source scene.
+    pub(crate) fn scene_warnings<'a>(&'a self, scene: &'a Arc<Scene3d>) -> &'a [String] {
+        self.warning_scenes
+            .get(&(Arc::as_ptr(scene) as usize))
+            .filter(|(key, _)| key.upgrade().is_some_and(|key| Arc::ptr_eq(&key, scene)))
+            .map_or(&scene.warnings, |(_, warnings)| warnings)
     }
 
     /// Keeps translated programs in `dir` across processes (the engine
@@ -1001,7 +1022,11 @@ impl Scene3dRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(state.depth_write),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(if state.depth_test {
+                    wgpu::CompareFunction::LessEqual
+                } else {
+                    wgpu::CompareFunction::Always
+                }),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -1022,7 +1047,10 @@ impl Scene3dRenderer {
                     },
                     blend,
                     write_mask: if state.color_write {
-                        wgpu::ColorWrites::ALL
+                        state.color_mask.map_or(
+                            wgpu::ColorWrites::ALL,
+                            wgpu::ColorWrites::from_bits_truncate,
+                        )
                     } else {
                         wgpu::ColorWrites::empty()
                     },
@@ -1074,9 +1102,26 @@ impl Scene3dRenderer {
         scene: &Scene3d,
         draw: &DrawDesc,
         samples: u32,
-    ) -> Result<Prepared, Error3d> {
-        let (key, compiled) = self.program(device, &draw.params)?;
+    ) -> Result<Option<Prepared>, Error3d> {
         let mesh_desc = &scene.objects[draw.object].meshes[draw.mesh];
+        if legacy_morph_packer_error(
+            mesh_desc
+                .geometry
+                .extra
+                .as_deref()
+                .and_then(|e| e.morph.as_ref()),
+        ) {
+            return Err(Error3d::Failed(
+                "Cannot read properties of undefined (reading 'count')".into(),
+            ));
+        }
+        // WebGL rejects a short bound attribute at renderBufferDirect. Use
+        // this pass's final program: a short normal can reject the color
+        // draw while remaining inactive in its shadow depth program.
+        if super::gltf::short_attribute_blocks_draw(mesh_desc, &draw.params) {
+            return Ok(None);
+        }
+        let (key, compiled) = self.program(device, &draw.params)?;
         let pipeline = self.pipeline(
             device,
             key,
@@ -1150,10 +1195,7 @@ impl Scene3dRenderer {
                     ),
                 },
                 Some(TextureRef::Ltc1) | Some(TextureRef::Ltc2) => {
-                    let (a, b) = self
-                        .textures
-                        .ltc(device, queue)
-                        .map_err(Error3d::Unsupported)?;
+                    let (a, b) = self.textures.ltc(device, queue).map_err(Error3d::Failed)?;
                     let v = if matches!(bound, Some(TextureRef::Ltc1)) {
                         a
                     } else {
@@ -1230,14 +1272,14 @@ impl Scene3dRenderer {
             }
             None => 0..total,
         };
-        Ok(Prepared {
+        Ok(Some(Prepared {
             pipeline,
             bind,
             buffers,
             index,
             range,
             instances,
-        })
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1257,7 +1299,9 @@ impl Scene3dRenderer {
                 for (view, draws) in views {
                     let mut list = Vec::new();
                     for d in draws {
-                        list.push(self.prepare(device, queue, encoder, scene, d, 1)?);
+                        if let Some(prepared) = self.prepare(device, queue, encoder, scene, d, 1)? {
+                            list.push(prepared);
+                        }
                     }
                     prepared.push((view.viewport, list));
                 }
@@ -1313,7 +1357,11 @@ impl Scene3dRenderer {
                     }
                     let mut list = Vec::new();
                     for d in draws {
-                        list.push(self.prepare(device, queue, encoder, scene, d, samples)?);
+                        if let Some(prepared) =
+                            self.prepare(device, queue, encoder, scene, d, samples)?
+                        {
+                            list.push(prepared);
+                        }
                     }
                     let resolve = self
                         .gltf
@@ -1381,7 +1429,11 @@ impl Scene3dRenderer {
                 let samples = self.samples;
                 let mut list = Vec::new();
                 for d in draws {
-                    list.push(self.prepare(device, queue, encoder, scene, d, samples)?);
+                    if let Some(prepared) =
+                        self.prepare(device, queue, encoder, scene, d, samples)?
+                    {
+                        list.push(prepared);
+                    }
                 }
                 let a = self.attachments.as_ref().expect("attachments");
                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1415,7 +1467,11 @@ impl Scene3dRenderer {
                 let samples = self.samples;
                 let mut list = Vec::new();
                 for d in draws {
-                    list.push(self.prepare(device, queue, encoder, scene, d, samples)?);
+                    if let Some(prepared) =
+                        self.prepare(device, queue, encoder, scene, d, samples)?
+                    {
+                        list.push(prepared);
+                    }
                 }
                 let a = self.attachments.as_ref().expect("attachments");
                 let resolve = resolve.expect("a resolve target");
@@ -1458,6 +1514,71 @@ impl Scene3dRenderer {
             }
         }
         Ok(())
+    }
+
+    /// Fetches the SVG map uploads this scene needs. No scene geometry is
+    /// drawn by Chromium: it only decodes the SVG image into today's texels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_svg_maps(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &super::Object3dPlan,
+        rasters: &mut crate::vector::svg_rasters::SvgRasters,
+        composition: &str,
+    ) -> bool {
+        self.start_generation();
+        let mut ready = true;
+        for object in &plan.scene.objects {
+            for mesh in &object.meshes {
+                for material in mesh.materials.iter() {
+                    for (_, map) in material.maps.all() {
+                        let Some(map) = map else { continue };
+                        let Some(request) = &map.svg else { continue };
+                        let key = &request.key;
+                        if !rasters.contains(key)
+                            && rasters.rasterizer
+                                == crate::vector::svg_rasters::SvgRasterizer::Resvg
+                        {
+                            // pm-cli's explicitly reported SVG approximation.
+                            if let Ok((doc, _)) = crate::vector::svg::document(&map.path) {
+                                let mut pixels = doc.raster(key.width, key.height).rgba;
+                                crate::blender::snapshot::unpremultiply(&mut pixels);
+                                let row = key.width as usize * 4;
+                                for y in 0..key.height as usize / 2 {
+                                    let other = key.height as usize - 1 - y;
+                                    for x in 0..row {
+                                        pixels.swap(y * row + x, other * row + x);
+                                    }
+                                }
+                                let _ = rasters.put(key.clone(), pixels);
+                            }
+                        }
+                        if rasters.rasterizer == crate::vector::svg_rasters::SvgRasterizer::Resvg {
+                            rasters.approximated += 1;
+                        }
+                        if let Some(pixels) = rasters.get(key) {
+                            // The file was probed when the scene was planned;
+                            // if it disappeared, resolve_maps reports Missing texture.
+                            let _ = self.textures.put_svg(
+                                device, queue, encoder, &map.path, map.srgb, key.width, key.height,
+                                &pixels,
+                            );
+                        } else {
+                            rasters.miss(crate::vector::svg_rasters::SvgRasterNeed {
+                                request: request.clone(),
+                                path: map.path.clone(),
+                                composition: composition.into(),
+                                layer: plan.layer.clone(),
+                            });
+                            ready = false;
+                        }
+                    }
+                }
+            }
+        }
+        ready
     }
 
     /// Records a 3D render into `encoder`: a layer of the 3D scene pass, a
@@ -1801,6 +1922,23 @@ impl Scene3dRenderer {
         pool.give(depth);
         Ok(target)
     }
+}
+
+/// Three r180's `WebGLMorphtargets.update` chooses the first present morph
+/// attribute for its target count, then unconditionally reads the position
+/// target's `.count` while packing. This throws only when a drawable reaches
+/// `renderBufferDirect`; loaders, queries, and Blender snapshot construction
+/// still succeed for a normal-only or color-only target.
+fn legacy_morph_packer_error(
+    morph: Option<&(
+        bool,
+        bool,
+        bool,
+        u32,
+        std::sync::Arc<super::gltf::MorphTexture>,
+    )>,
+) -> bool {
+    morph.is_some_and(|(position, _, _, count, _)| !position && *count > 0)
 }
 
 /// A draw ready to record.

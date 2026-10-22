@@ -85,6 +85,8 @@ impl Camera3d {
 pub struct Texture3d {
     pub asset: String,
     pub path: PathBuf,
+    /// Chromium SVG map upload (distinct from a 2D SVG bucket).
+    pub svg: Option<pm_protocol::svg_raster::SvgRasterRequest>,
     /// Color and emissive maps decode sRGB (`SRGBColorSpace`); data maps
     /// are linear.
     pub srgb: bool,
@@ -503,6 +505,9 @@ pub trait TextureSource {
     /// The image file of an image asset, or `None` when it is not an image
     /// asset (`asset.kind !== 'image'`) or offline.
     fn image(&self, asset: &str) -> Option<PathBuf>;
+    fn svg(&self, _asset: &str) -> Option<pm_protocol::svg_raster::SvgRasterRequest> {
+        None
+    }
 }
 
 /// What an object's `assetId` resolves to (`makeObject`).
@@ -519,9 +524,6 @@ pub enum ModelLookup {
     },
     /// A glTF or GLB scene (`asset.object3d`).
     Gltf(Arc<super::gltf::GltfAsset>),
-    /// A glTF or GLB file this engine does not load although the importer
-    /// accepted it (routed to the legacy engine).
-    Unloadable(String),
 }
 
 /// How a scene finds model assets.
@@ -903,6 +905,7 @@ impl SceneBuilder {
             let id = maps.and_then(|m| text(m, key))?;
             match textures.image(&id) {
                 Some(path) => Some(Texture3d {
+                    svg: textures.svg(&id),
                     asset: id,
                     path,
                     srgb,
@@ -956,6 +959,8 @@ impl SceneBuilder {
         textures: &dyn TextureSource,
         models: &dyn ModelSource,
     ) -> Result<Scene3d, Unsupported> {
+        pm_geom3d::scene_validation::validate_scene(scene)
+            .map_err(|reason| format!("Invalid 3D scene: {reason}"))?;
         let mut warnings = Vec::new();
         let environment = obj(scene, "environment").ok_or("the 3D environment")?;
         let shadows = boolean(environment, "shadows") != Some(false);
@@ -1002,15 +1007,22 @@ impl SceneBuilder {
                             depth: 1.0,
                         })))
                     }
-                    ModelLookup::Unloadable(why) => return Err(why),
                     ModelLookup::Missing => {
                         warnings.push(format!("Missing model: {asset}"));
                         missing = true;
                         None
                     }
-                    ModelLookup::Obj { key, mesh } => Some(self.obj(key, &mesh)),
+                    ModelLookup::Obj { key, mesh } => {
+                        // `SceneRuntime.sync` sums asset.vertices for OBJ too;
+                        // the asset store records its sourceVertexCount.
+                        imported_vertices += mesh.source_vertex_count;
+                        Some(self.obj(key, &mesh))
+                    }
                 }
             } else {
+                // A primitive the schema does not know fails the scene:
+                // `compositionScene` and a legacy layer's `sync` both run
+                // `parseScene`, which refuses it (`corrupt-scenes.test.ts`).
                 Some(self.geometry(&source_of(source)?))
             };
             let slots = arr(node, "slots");

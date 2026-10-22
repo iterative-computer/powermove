@@ -172,15 +172,14 @@ impl<'a> Data<'a> {
                 let target = match isize {
                     1 => ib[k] as usize,
                     2 => u16::from_le_bytes([ib[2 * k], ib[2 * k + 1]]) as usize,
-                    _ => u32::from_le_bytes([
-                        ib[4 * k],
-                        ib[4 * k + 1],
-                        ib[4 * k + 2],
-                        ib[4 * k + 3],
-                    ]) as usize,
+                    _ => {
+                        u32::from_le_bytes([ib[4 * k], ib[4 * k + 1], ib[4 * k + 2], ib[4 * k + 3]])
+                            as usize
+                    }
                 };
+                // `setX` past the end of the typed array writes nothing.
                 if target >= count {
-                    return err("sparse index out of range");
+                    continue;
                 }
                 for c in 0..comps {
                     out[target * comps + c] = decode(&vb[(k * comps + c) * csize..]);

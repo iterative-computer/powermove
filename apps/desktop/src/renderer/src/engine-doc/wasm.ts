@@ -44,6 +44,11 @@ export interface PmWasmExports {
   pm_fonts_clear(): void;
   pm_fonts_seeds(len: number): number;
   pm_fonts_outlines(outlines: number): void;
+  pm_model_set?(len: number): number;
+  pm_model_import?(len: number): number;
+  pm_prepare_model_import?(len: number): number;
+  pm_model_forget?(len: number): void;
+  pm_models_clear?(): void;
   pm_heap_live(): number;
   pm_heap_peak(): number;
   pm_heap_reset_peak(): void;
@@ -198,6 +203,34 @@ export class PmWasm {
 
   revision(): number { return this.call(() => this.x.pm_revision()); }
   hash(): string { return this.call(() => this.readOut(this.x.pm_hash())); }
+
+  /** Parse an imported model using the engine's glTF importer. */
+  importModel(bytes: Uint8Array): any {
+    return this.call(() => {
+      if (!this.x.pm_model_import) throw new Error('The engine model importer is unavailable');
+      const status = this.x.pm_model_import(this.writeBytes(bytes));
+      if (status !== 0) throw new Error(this.readOut());
+      return this.readJson();
+    });
+  }
+
+  /** Pack a selected model bundle using the engine's OBJ/MTL importer. */
+  prepareModelImport(files: { name: string; mime: string; bytes: Uint8Array }[]): { unchanged: number } | { bytes: Uint8Array } {
+    return this.call(() => {
+      if (!this.x.pm_prepare_model_import) throw new Error('The engine model importer is unavailable');
+      const header = encoder.encode(JSON.stringify(files.map(f => ({ name: f.name, mime: f.mime, length: f.bytes.length }))));
+      const length = 4 + header.length + files.reduce((n, f) => n + f.bytes.length, 0);
+      const input = new Uint8Array(length);
+      new DataView(input.buffer).setUint32(0, header.length, true);
+      input.set(header, 4);
+      let offset = 4 + header.length;
+      for (const file of files) { input.set(file.bytes, offset); offset += file.bytes.length; }
+      const status = this.x.pm_prepare_model_import(this.writeBytes(input));
+      if (status === 2) return { unchanged: Number(this.readOut()) };
+      if (status !== 0) throw new Error(this.readOut());
+      return { bytes: this.bytes(this.x.pm_out_ptr(), this.x.pm_out_len()).slice() };
+    });
+  }
   toJson(): string { return this.call(() => this.readOut(this.x.pm_to_json())); }
 
   // ── the fast path ─────────────────────────────────────────────────────
@@ -325,6 +358,38 @@ export class PmWasm {
       bytes.set(data, 8 + key.length);
       if (this.x.pm_fonts_add(this.writeBytes(bytes)) !== 0) throw new Error('pm-wasm: malformed font');
     });
+  }
+
+  /**
+   * Adds 3D model asset `id` for picks and bounds: `missing` (no geometry,
+   * the orange box), OBJ text, glTF/GLB bytes, or `unloadable` (geometry
+   * today's runtime holds that the engine cannot have; `data` is the reason,
+   * UTF-8). Returns the reason when the engine did not load the model: an
+   * OBJ that does not parse is kept as missing, as today; a glTF it cannot
+   * load, and an unloadable model, make every question about the scene a
+   * named `unsupported` failure.
+   */
+  setModel(id: string, kind: 'missing' | 'obj' | 'gltf' | 'unloadable', data: Uint8Array = new Uint8Array()): string | null {
+    return this.call(() => {
+      if (!this.x.pm_model_set) throw new Error('pm-wasm: this module has no 3D models');
+      const key = encoder.encode(id);
+      const bytes = new Uint8Array(5 + key.length + data.length);
+      new DataView(bytes.buffer).setUint32(0, key.length, true);
+      bytes.set(key, 4);
+      bytes[4 + key.length] = kind === 'obj' ? 1 : kind === 'gltf' ? 2 : kind === 'unloadable' ? 3 : 0;
+      bytes.set(data, 5 + key.length);
+      const status = this.x.pm_model_set(this.writeBytes(bytes));
+      if (status === 1) throw new Error('pm-wasm: malformed model');
+      return status === 2 ? this.readOut() : null;
+    });
+  }
+
+  forgetModel(id: string): void {
+    this.call(() => this.x.pm_model_forget?.(this.writeString(id)));
+  }
+
+  clearModels(): void {
+    this.call(() => this.x.pm_models_clear?.());
   }
 
   /** The window's font cache seeds (`{ seeds }` JSON from main): text

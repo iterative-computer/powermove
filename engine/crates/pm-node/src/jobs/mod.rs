@@ -33,6 +33,7 @@
 #![allow(clippy::result_large_err)]
 
 pub(crate) mod blender;
+pub(crate) mod blender_png;
 mod compile;
 mod definitions;
 mod fallback;
@@ -1601,6 +1602,7 @@ fn lane_blender<'b>(
     let params = blender::JobParams {
         session: document.session,
         priority: class,
+        foreground_capture: false,
         export: job.clone(),
     };
     let shared_params = blender
@@ -1625,6 +1627,14 @@ fn lane_blender<'b>(
             Box::new(backend),
         ));
     }
+    blender.stage.as_mut().unwrap().converted_assets =
+        Some(Arc::new(blender_png::HostBlenderPng::new(
+            export.media.clone(),
+            shared.clone(),
+            document.session,
+            document.revision,
+            &export.document,
+        )));
     Ok(blender.stage.as_mut())
 }
 
