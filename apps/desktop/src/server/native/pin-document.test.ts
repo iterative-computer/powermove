@@ -5,7 +5,8 @@ afterEach(() => { (globalThis as any).PM = old; });
 function fixture(joined: { id: string; revision: number; layers: any[] }) {
   const PM: any = { version: '1', proj: { id: 'Pone', revision: 0, layers: [] }, sel: { layers: [] },
     store: { set: vi.fn() }, openProjectHere: vi.fn(async () => true), EngineDoc: { whenReady: Promise.resolve(true) },
-    RemoteSync: { refresh: vi.fn(async () => { PM.proj = joined; }), flush: vi.fn(async () => {}) },
+    EngineDefinitions: { settle: vi.fn(async () => {}) },
+    RemoteSync: { ready: vi.fn(async () => {}), refresh: vi.fn(async () => { PM.proj = joined; }), flush: vi.fn(async () => {}) },
     replaceProject: vi.fn((doc) => { PM.proj = doc; }) };
   (globalThis as any).PM = PM;
   return PM;
@@ -16,6 +17,8 @@ it('loads the authoritative worker seed when opening the already active ID retai
   await pinNativeDocument(seed);
   expect(PM.proj).toEqual(seed);
   expect(PM.RemoteSync.flush).toHaveBeenCalledOnce();
+  expect(PM.EngineDefinitions.settle.mock.invocationCallOrder[0]).toBeLessThan(PM.RemoteSync.ready.mock.invocationCallOrder[0]);
+  expect(PM.RemoteSync.ready.mock.invocationCallOrder[0]).toBeLessThan(PM.RemoteSync.refresh.mock.invocationCallOrder[0]);
 });
 it('keeps a newer joined document rather than rolling it back to the earlier worker snapshot', async () => {
   const joined = { id: 'Pone', revision: 3, layers: [{ id: 'Lone' }, { id: 'Ltwo' }] };

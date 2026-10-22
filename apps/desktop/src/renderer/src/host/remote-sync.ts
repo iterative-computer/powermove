@@ -11,6 +11,7 @@
  */
 import { applyPatch, diffPatches, type Patch } from '../../../shared/patch';
 import { WEB } from '../../../shared/wire';
+import { bridge } from '../kernel/capture-bridge';
 
 export interface SyncLink {
   invoke<T = unknown>(channel: string, ...args: unknown[]): Promise<T>;
@@ -23,7 +24,7 @@ const SYNC_DEBOUNCE_MS = 250;
 interface RemotePatch { projectId: string; seq: number; patches: Patch[]; from: number }
 
 type Registry = {
-  RemoteSync?: { flush(): Promise<void>; refresh(): Promise<void> };
+  RemoteSync?: { flush(): Promise<void>; refresh(): Promise<void>; ready(): Promise<void> };
   proj?: { id?: string; assets?: Record<string, { id: string }> } & Record<string, unknown>;
   assets?: { get(id: string): unknown };
   restoreProjectAssets?(project: unknown, warn?: boolean): Promise<unknown>;
@@ -34,7 +35,11 @@ type Registry = {
   toast?(text: string, ms?: number, options?: { error?: boolean }): void;
 };
 
-export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
+export function attachRemoteSync(link: SyncLink, PM: Registry, options: { deferWrites?: boolean } = {}): () => void {
+  // A native DOM tab is a view of the authoritative worker document. During
+  // extension boot, hydration can temporarily mark valid effects missing.
+  // Join/pull immediately, but never publish that boot state to the worker.
+  let writesHeld = options.deferWrites ?? (bridge()?.nativeHidden === true);
   let joined: string | null = null;
   let applying = false;
   let joining: Promise<void> | null = null;
@@ -64,7 +69,7 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
   const flush = (): void => {
     flushTimer = null;
     const projectId = joined;
-    if (!projectId || applying || joining || current() !== projectId) return;
+    if (writesHeld || !projectId || applying || joining || current() !== projectId) return;
     const before = synced;
     const after = snapshot();
     if (!after || after === before) return;
@@ -77,7 +82,7 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
       .then((next) => { seq = next; }, (error) => { failure = error; console.warn('[remote-sync] patch rejected', error); });
   };
   const schedule = (): void => {
-    if (flushTimer || !joined) return;
+    if (writesHeld || flushTimer || !joined) return;
     flushTimer = setTimeout(flush, SYNC_DEBOUNCE_MS);
   };
 
@@ -144,7 +149,12 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
     joined = null; failure = null;
     track(); await joining;
   };
-  const sync = { refresh, flush: async () => {
+  const sync = { refresh, ready: async () => {
+    if (!writesHeld) return;
+    await refresh();
+    writesHeld = false;
+    synced = snapshot();
+  }, flush: async () => {
     await joining;
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
     flush(); await sending;

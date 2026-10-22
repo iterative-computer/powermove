@@ -38,3 +38,33 @@ it('pulls the latest host document when boot restored an empty document after jo
     expect(leaves).toEqual([['Pone']]);
   } finally { dispose(); }
 });
+
+it('holds native DOM boot writes until extensions settle and the worker document is pulled again', async () => {
+  const host = { id: 'Pone', revision: 2, layers: [{ id: 'Lone', fx: [{ id: 'Fone', type: 'user.effect', on: true, p: {} }] }] };
+  const patches: unknown[] = [];
+  const callbacks = new Map<string, () => void>();
+  const PM: any = {
+    proj: structuredClone(host),
+    bus: { on: (event: string, fn: () => void) => { callbacks.set(event, fn); return () => callbacks.delete(event); }, emit: (event: string) => callbacks.get(event)?.() },
+    replaceProject: (doc: unknown) => { PM.proj = structuredClone(doc); PM.bus.emit('project'); }
+  };
+  const link: SyncLink = {
+    invoke: async <T>(channel: string, ...args: unknown[]) => {
+      if (channel === WEB.syncJoin) return { seq: 2, doc: structuredClone(host) } as T;
+      if (channel === WEB.syncPatch) { patches.push(args); return 3 as T; }
+      throw new Error(channel);
+    }, send: () => {}, on: () => () => {}
+  };
+  const dispose = attachRemoteSync(link, PM, { deferWrites: true });
+  try {
+    await PM.RemoteSync.flush();
+    PM.proj.layers[0].fx[0].missing = true; PM.bus.emit('layers');
+    await PM.RemoteSync.flush();
+    expect(patches).toEqual([]);
+    await PM.RemoteSync.ready();
+    expect(PM.proj).toEqual(host);
+    PM.proj.layers[0].fx[0].on = false; PM.bus.emit('layers');
+    await PM.RemoteSync.flush();
+    expect(patches).toHaveLength(1);
+  } finally { dispose(); }
+});
