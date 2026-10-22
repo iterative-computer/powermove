@@ -54,3 +54,11 @@ of such a document keeps the hash of its bytes and reloads it as text; the
 first load answers the tree's canonical hash, which activation and later
 restores use. Checkpoints the utility persists are canonical again.
 `document-recovery.test.ts` restores a text-ingested document across a kill.
+
+A resync base is a text checkpoint too. The barrier's resync JSON is the
+canonical project form in JSON.stringify's member order, not canonical
+bytes, so a recovery copy that claimed its byte hash as the canonical hash
+could never be restored (the utility refused the load). It keeps the byte
+hash and reloads as text; `document-recovery.test.ts` restores a resync
+base whose members are out of canonical order across two kills, against a
+fixture that checks canonical loads by the canonical hash of the parsed tree.

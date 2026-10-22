@@ -168,7 +168,12 @@ export class DocumentRecovery {
           const file = path.join(state.dir, randomUUID());
           await writeFile(file, request.args.json, { mode: 0o600 });
           const old = state.base;
-          state.base = { file, document: request.args.document || old?.document || 'untitled', revision: request.args.revision, preparedRevision: request.args.revision, hash: createHash('sha256').update(request.args.json).digest('hex') };
+          /* The barrier's resync JSON is the canonical project form in
+             JSON.stringify's member order, not canonical bytes: a text
+             checkpoint, checked against its bytes' hash and then known by
+             the canonical hash its first load answers (as a text open). */
+          state.base = { file, document: request.args.document || old?.document || 'untitled', revision: request.args.revision, preparedRevision: request.args.revision,
+            hash: '', sourceHash: createHash('sha256').update(request.args.json).digest('hex') };
           await this.resetPatches(state); await this.remove(old);
         } else if (request.op === 'apply' && reply.value.code === 0) {
           const saved = await this.save(state, request, bytes);

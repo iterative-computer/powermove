@@ -3,8 +3,11 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, it } from 'vitest';
+import { canonicalStringify } from '../../shared/canonical-json';
 import { DocumentRecovery } from './document-recovery';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
+/** The canonical hash of the tree `text` parses to (pm-model: sorted keys). */
+const canonicalHash = (text: string) => hash(canonicalStringify(JSON.parse(text))!);
 async function fixture() {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-recovery-'));
   let generation = 1, revision = 0, value = 0, next = 0, prepared: any, persisted: any, lose = false;
@@ -15,13 +18,15 @@ async function fixture() {
     call: async (_, json, bytes) => {
       const { op, args } = JSON.parse(json); ops.push(op); let answer: any = null;
       if (op === 'load') {
-        // As the utility: a text source is checked against its bytes' hash and
-        // answered with the tree's canonical hash (here a different digest).
+        // As the utility (pm-node kernel.rs): a text source is checked against
+        // its bytes' hash; a canonical one against the canonical hash of the
+        // tree it parses to. Both are answered with that canonical hash.
         const text = await readFile(args.path, 'utf8');
-        if (hash(text) !== args.hash) return JSON.stringify({ ok: false, error: 'hash' });
+        if ((args.source === 'text' ? hash(text) : canonicalHash(text)) !== args.hash) return JSON.stringify({ ok: false, error: 'hash' });
         loads.push(args.source ?? 'canonical');
-        prepared = { pending: false, revision: args.revision, hash: args.source === 'text' ? hash('canonical:' + text) : hash(text), integrity: 'checked', value: JSON.parse(text).value }; answer = prepared;
+        prepared = { pending: false, revision: args.revision, hash: canonicalHash(text), integrity: 'checked', value: JSON.parse(text).value }; answer = prepared;
       }
+      else if (op === 'resync') { value = JSON.parse(args.json).value; revision = args.revision; }
       else if (op === 'poll') answer = prepared;
       else if (op === 'activate') { if (args.hash !== prepared.hash) return JSON.stringify({ ok: false, error: 'activation hash' }); value = prepared.value; revision = args.revision; }
       else if (op === 'apply') { expect(args.base).toBe(revision); value += JSON.parse(Buffer.from(bytes!).toString()).increment; revision = args.revision; if (lose) { lose = false; kill(); return '{"ok":false,"code":"unavailable"}'; } answer = { code: 0 }; }
@@ -87,5 +92,23 @@ it('restores a document received as JSON text with its byte hash, then activates
     f.kill();
     expect(await f.call('toJson')).toBe('{"value":5}');
     expect(f.loads).toEqual(['text', 'text']);
+  } finally { await f.stop(); }
+});
+it('restores a resync base, whose JSON is not in canonical byte order, by its bytes and then its canonical hash', async () => {
+  const f = await fixture(); try {
+    await f.open();
+    // The barrier's resync body: the canonical project form, but JSON.stringify's member order.
+    const json = '{"value":6,"name":"resynced"}';
+    expect(canonicalStringify(JSON.parse(json))).not.toBe(json);
+    await f.call('resync', { json, revision: 2, document: 'test' });
+    await f.call('apply', { base: 2, revision: 3 }, Buffer.from('{"increment":3}'));
+    f.kill();
+    expect(await f.call('toJson')).toBe('{"value":9}');
+    expect(await f.call('revision')).toBe(3);
+    expect(f.loads).toEqual(['canonical', 'text']);
+    // Recovered again: now checked by the canonical hash the first restore answered.
+    f.kill();
+    expect(await f.call('toJson')).toBe('{"value":9}');
+    expect(f.loads).toEqual(['canonical', 'text', 'text']);
   } finally { await f.stop(); }
 });
