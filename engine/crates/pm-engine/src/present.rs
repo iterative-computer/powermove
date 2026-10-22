@@ -94,6 +94,9 @@ impl<'a> PresentContext<'a> {
 /// Presents viewer frames for renderer sessions. Every call names the port
 /// and the session that port owns (the engine checks ownership first).
 pub trait FramePresenter: Send {
+    /// Whether any host-observed export is running. The viewer's idle media
+    /// probes yield to export just as they yield to playback.
+    fn export_activity(&mut self, _active: bool) {}
     /// A memory-only preview, bounded by the presenter's existing lease share.
     fn preview_cache(
         &mut self,

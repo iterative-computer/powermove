@@ -164,6 +164,10 @@ export class NativeEngine {
    *  the viewer may draw playback without the interactive engine, and the
    *  job engine slices whenever anything plays (contract 13). */
   private editorsPlaying = new Map<number, number>();
+  /** Running non-generation jobs and legacy encoder tokens. A transition of
+   * their union pauses or resumes the interactive viewer's idle probes. */
+  private exportJobs = new Set<string>();
+  private legacyExports = new Set<string>();
   private staged = new Map<number, string[]>();
   /** Set by `stop()`: no control messages go to engines that are shutting
    *  down (they would be dropped anyway; see `Launch.exiting`). */
@@ -240,6 +244,8 @@ export class NativeEngine {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.exportJobs.clear();
+    this.legacyExports.clear();
     await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop(), this.blender?.dispose()]);
   }
 
@@ -481,6 +487,9 @@ export class NativeEngine {
     const { process } = launch;
     this.options.log('info', `the ${process} engine is ready (generation ${launch.generation}, pid ${launch.pid ?? '?'})`);
     this.sendGrants(this.memory.initial(process));
+    if (process === 'interactive' && this.exportActive()) {
+      launch.connection.event({ type: 'deadline', signal: 'exportStarted', at: this.options.hostNow() });
+    }
     if (process === 'job') {
       launch.connection.event({ type: 'slicing', ...DEFAULT_SLICING_POLICY });
       if (this.lastPlaybackStarted) launch.connection.event({ type: 'deadline', ...this.lastPlaybackStarted });
@@ -504,6 +513,11 @@ export class NativeEngine {
 
   private onEnded(launch: Launch, report: CrashReport | null): void {
     const { process } = launch;
+    if (process === 'job') {
+      const wasActive = this.exportActive();
+      this.exportJobs.clear();
+      this.syncExportActivity(wasActive);
+    }
     this.blender?.endPort(launch.hostPort);
     void this.services.endLaunch(process, launch.hostPort).then((n) => {
       if (n) this.options.log('info', `removed ${n} unfinished output(s) of the ${process} engine`);
@@ -657,6 +671,7 @@ export class NativeEngine {
         return;
       case 'jobStatus':
         if (process !== 'job') throw new Error('only the job engine reports jobs');
+        if (body.class !== 'generation') this.jobExportActivity(body.job, body.state === 'running');
         for (const l of this.listeners) l.jobStatus?.(body);
         return;
       default:
@@ -682,6 +697,33 @@ export class NativeEngine {
       // Relay first: the job engine reacts to the miss before main does any bookkeeping.
       this.supervisors.job.event({ type: 'deadline', ...plain });
     }
+  }
+
+  private exportActive(): boolean {
+    return this.exportJobs.size > 0 || this.legacyExports.size > 0;
+  }
+
+  private syncExportActivity(wasActive: boolean): void {
+    const active = this.exportActive();
+    if (wasActive === active) return;
+    this.supervisors.interactive.event({
+      type: 'deadline', signal: active ? 'exportStarted' : 'exportStopped', at: this.options.hostNow()
+    });
+  }
+
+  private jobExportActivity(job: string, active: boolean): void {
+    const wasActive = this.exportActive();
+    if (active) this.exportJobs.add(job);
+    else this.exportJobs.delete(job);
+    this.syncExportActivity(wasActive);
+  }
+
+  /** The current canvas exporter reports its actual encoder lifetime. */
+  legacyExportActivity(token: string, active: boolean): void {
+    const wasActive = this.exportActive();
+    if (active) this.legacyExports.add(token);
+    else this.legacyExports.delete(token);
+    this.syncExportActivity(wasActive);
   }
 
   /** An editor window's transport started or stopped (`frameBudgetUs`: its

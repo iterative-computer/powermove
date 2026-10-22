@@ -10,7 +10,7 @@ import type { Seq } from "./Seq";
  * hands the two engines (S8: 4 ms of relay latency cut export throughput by
  * 24 to 55%).
  */
-export type DeadlineSignal = { "signal": "playbackStarted", at: HostMicros, rate: PlaybackRate, frameBudgetUs: number, } | { "signal": "playbackStopped", at: HostMicros, } | { "signal": "deadlineMiss", at: HostMicros, frameSeq: Seq, overrunUs: number, } | { "signal": "qualityStepDown", at: HostMicros, } | { "signal": "frameDone", at: HostMicros, frameSeq: Seq, tick: HostMicros, nextSubmit: HostMicros, 
+export type DeadlineSignal = { "signal": "playbackStarted", at: HostMicros, rate: PlaybackRate, frameBudgetUs: number, } | { "signal": "playbackStopped", at: HostMicros, } | { "signal": "exportStarted", at: HostMicros, } | { "signal": "exportStopped", at: HostMicros, } | { "signal": "deadlineMiss", at: HostMicros, frameSeq: Seq, overrunUs: number, } | { "signal": "qualityStepDown", at: HostMicros, } | { "signal": "frameDone", at: HostMicros, frameSeq: Seq, tick: HostMicros, nextSubmit: HostMicros, 
 /**
  * The frame completed after its deadline.
  */

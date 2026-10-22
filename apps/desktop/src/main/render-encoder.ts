@@ -44,11 +44,11 @@ export function validateEncoderOptions(raw:any):EncoderOptions {
 }
 export class RenderEncoder {
   jobs=new Map<string,Job>();
-  constructor(readonly binary:string,readonly tempRoot:string){}
+  constructor(readonly binary:string,readonly tempRoot:string,readonly onActivity?:(token:string,active:boolean)=>void){}
   async start(raw:unknown,owner:number){const options=validateEncoderOptions(raw),dir=await mkdtemp(path.join(this.tempRoot,'powermove-render-')),file=path.join(dir,options.format==='prores'?'video.mov':'video.mp4');
     const proc=spawn(this.binary,encoderArgs(options,file),{stdio:['pipe','pipe','pipe']});let error='';proc.stderr.on('data',d=>{error=(error+d.toString()).slice(-8000);});
     const done=new Promise<void>((resolve,reject)=>{proc.once('error',reject);proc.once('close',code=>code===0?resolve():reject(new Error(error||'Video encoder stopped')));});done.catch(()=>undefined);proc.stdin.on('error',()=>undefined);
-    const token=randomUUID();this.jobs.set(token,{dir,file,audio:path.join(dir,'audio.wav'),process:proc,done,bytes:0,frameBytes:options.width*options.height*4,frames:0,options,owner,error});return token;
+    const token=randomUUID();this.jobs.set(token,{dir,file,audio:path.join(dir,'audio.wav'),process:proc,done,bytes:0,frameBytes:options.width*options.height*4,frames:0,options,owner,error});this.onActivity?.(token,true);return token;
   }
   job(token:string,owner:number){const job=this.jobs.get(token);if(!job||job.owner!==owner)throw new Error('Unknown render job');return job;}
   async write(token:string,owner:number,data:Uint8Array,audio=false){const job=this.job(token,owner);if(!(data instanceof Uint8Array)||data.byteLength===0||data.byteLength>4*1024*1024)throw new Error('Invalid render chunk');if(audio){await appendFile(job.audio,data);return;}if(job.process.exitCode!==null)await job.done;await new Promise<void>((resolve,reject)=>job.process.stdin.write(data,e=>e?reject(e):resolve()));job.bytes+=data.byteLength;}
@@ -58,11 +58,11 @@ export class RenderEncoder {
   // A cancelled job's output is discarded. ffmpeg defers SIGTERM while it is
   // blocked reading frames from the still-open stdin, so close the pipe and
   // kill it outright; otherwise release never settles and the export stays busy.
-  async release(token:string,owner:number){const job=this.job(token,owner);this.jobs.delete(token);if(job.process.exitCode===null&&job.process.signalCode===null){job.process.stdin.destroy();job.process.kill('SIGKILL');}await job.done.catch(()=>undefined);await rm(job.dir,{recursive:true,force:true});}
+  async release(token:string,owner:number){const job=this.job(token,owner);this.jobs.delete(token);try{if(job.process.exitCode===null&&job.process.signalCode===null){job.process.stdin.destroy();job.process.kill('SIGKILL');}await job.done.catch(()=>undefined);await rm(job.dir,{recursive:true,force:true});}finally{this.onActivity?.(token,false);}}
 }
 /** `ffmpeg` is Powermove's own FFmpeg build (ffmpeg-binary.ts). */
-export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:any)=>boolean;ffmpeg:string}) {
-  const encoder=new RenderEncoder(ctx.ffmpeg,app.getPath('temp'));
+export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:any)=>boolean;ffmpeg:string;onActivity?:(token:string,active:boolean)=>void}) {
+  const encoder=new RenderEncoder(ctx.ffmpeg,app.getPath('temp'),ctx.onActivity);
   const trusted=(event:any)=>{if(!ctx.isTrustedSender(event))throw new Error('Unauthorized encoder request');return event.sender.id;};
   ipc.handle(IPC.renderStart,async(e,r)=>{
     const owner=trusted(e),options=validateEncoderOptions(r);

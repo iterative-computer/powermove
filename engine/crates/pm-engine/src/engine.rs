@@ -1650,7 +1650,18 @@ impl Engine {
     }
 
     fn on_deadline(&mut self, signal: &DeadlineSignal, now: HostMicros, out: &mut Out) {
+        if let Some(presenter) = self.presenter.as_mut() {
+            match signal {
+                DeadlineSignal::ExportStarted { .. } => presenter.export_activity(true),
+                DeadlineSignal::ExportStopped { .. } => presenter.export_activity(false),
+                _ => {}
+            }
+        }
         let Some(slicer) = self.slicer.as_mut() else {
+            // The interactive engine hears only export activity (above).
+            if self.presenter.is_some() {
+                return;
+            }
             self.log_once(
                 out,
                 "deadline signals sent to the interactive engine".into(),

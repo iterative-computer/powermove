@@ -493,6 +493,9 @@ impl BridgePresenter {
 }
 
 impl FramePresenter for BridgePresenter {
+    fn export_activity(&mut self, active: bool) {
+        self.send(Command::ExportActivity(active));
+    }
     fn preview_cache(
         &mut self,
         _ctx: &mut PresentContext<'_>,

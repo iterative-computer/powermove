@@ -250,6 +250,35 @@ describe('NativeEngine with fake engines', () => {
 
   const live = (process: EngineProcess) => engines.filter((e) => e.process === process && !e.dead).at(-1)!;
 
+  it('pauses viewer probes for overlapping exports and resumes only after the last one ends', async () => {
+    const signals = () => live('interactive').events('deadline').map((e) => (e as { signal: string }).signal);
+    const status = (job: string, state: 'running' | 'done' | 'failed' | 'cancelled', kind: 'userJob' | 'generation' = 'userJob') =>
+      live('job').tell({ type: 'jobStatus', job, class: kind, state, progress: 0, path: null, error: null });
+    status('generation', 'running', 'generation');
+    status('a', 'running');
+    status('b', 'running');
+    host.legacyExportActivity('legacy', true);
+    await settle();
+    expect(signals()).toEqual(['exportStarted']);
+    status('a', 'done');
+    status('b', 'failed');
+    await settle();
+    expect(signals()).toEqual(['exportStarted']);
+    host.legacyExportActivity('legacy', false);
+    await settle();
+    expect(signals()).toEqual(['exportStarted', 'exportStopped']);
+    status('c', 'running');
+    await settle();
+    live('interactive').exit(139);
+    await settle();
+    timers.at(-1)!.fn();
+    await settle();
+    expect(signals()).toEqual(['exportStarted']);
+    status('c', 'cancelled');
+    await settle();
+    expect(signals()).toEqual(['exportStarted', 'exportStopped']);
+  });
+
   it('negotiates both engines, grants leases, sends the slicing policy, and links them', () => {
     expect(host.status().interactive.state).toBe('ready');
     expect(host.status().job.state).toBe('ready');

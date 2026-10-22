@@ -37,6 +37,14 @@ pub enum DeadlineSignal {
     PlaybackStopped {
         at: HostMicros,
     },
+    /// Host-observed offline export activity. Sent only on transitions of
+    /// the set of running non-generation jobs (including legacy exports).
+    ExportStarted {
+        at: HostMicros,
+    },
+    ExportStopped {
+        at: HostMicros,
+    },
     /// The interactive engine missed a presentation deadline.
     DeadlineMiss {
         at: HostMicros,
@@ -188,9 +196,10 @@ impl Validate for DeadlineSignal {
             } => ensure(next_submit > tick, C, || {
                 "the next submission comes after the finished frame's tick".into()
             }),
-            DeadlineSignal::PlaybackStopped { .. } | DeadlineSignal::QualityStepDown { .. } => {
-                Ok(())
-            }
+            DeadlineSignal::PlaybackStopped { .. }
+            | DeadlineSignal::ExportStarted { .. }
+            | DeadlineSignal::ExportStopped { .. }
+            | DeadlineSignal::QualityStepDown { .. } => Ok(()),
         }
     }
 }
@@ -285,6 +294,7 @@ impl SlicingGovernor {
                 self.playing = None;
                 self.yield_until = None;
             }
+            DeadlineSignal::ExportStarted { .. } | DeadlineSignal::ExportStopped { .. } => {}
             DeadlineSignal::DeadlineMiss { at, .. } | DeadlineSignal::QualityStepDown { at } => {
                 let until = at
                     .get()
@@ -555,6 +565,18 @@ mod tests {
         assert!(started(-2, 16_666).validate().is_ok(), "reverse playback");
         assert!(started(0, 16_666).validate().is_err());
         assert!(started(1, 0).validate().is_err());
+        for (signal, wire_name) in [
+            (DeadlineSignal::ExportStarted { at: at(7) }, "exportStarted"),
+            (DeadlineSignal::ExportStopped { at: at(8) }, "exportStopped"),
+        ] {
+            assert!(signal.validate().is_ok());
+            let wire = serde_json::to_value(&signal).unwrap();
+            assert_eq!(wire["signal"], wire_name);
+            assert_eq!(
+                serde_json::from_value::<DeadlineSignal>(wire).unwrap(),
+                signal
+            );
+        }
         assert!(
             DeadlineSignal::DeadlineMiss {
                 at: at(1),

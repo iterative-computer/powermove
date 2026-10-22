@@ -15,6 +15,15 @@ const tools=resolveFfmpeg({packaged:false,resourcesPath:'',appPath:path.resolve(
 async function probe(file:string){const {stdout}=await promisify(execFile)(tools.ffprobe,['-v','error','-count_frames','-select_streams','v:0','-show_entries','stream=codec_name,codec_tag_string,profile,pix_fmt,color_range,color_space,color_transfer,color_primaries,nb_read_frames,r_frame_rate','-of','json',file]);return JSON.parse(stdout).streams[0];}
 describe('native frame encoder',()=>{
  it('rejects invalid sizes and unauthorized render chunks',async()=>{expect(()=>validateEncoderOptions({width:8193})).toThrow();const service=new RenderEncoder(binary,os.tmpdir());expect(()=>service.job('unknown',1)).toThrow();});
+ it('clears export activity when a live encoder is cancelled', async () => {
+   const activity: Array<[string, boolean]> = [];
+   const service = new RenderEncoder(binary, os.tmpdir(), (token, active) => activity.push([token, active]));
+   const token = await service.start({width:16,height:16,fps:24,format:'mp4',alpha:false,name:'Cancel'},1);
+   expect(activity).toEqual([[token, true]]);
+   await service.release(token, 1);
+   expect(activity).toEqual([[token, true], [token, false]]);
+   expect(service.jobs.size).toBe(0);
+ });
  it('encodes exact fractional-rate ProRes with retained alpha',async()=>{const temp=await mkdtemp(path.join(os.tmpdir(),'pm-encoder-test-')),service=new RenderEncoder(binary,temp);let token='';try{token=await service.start({width:16,height:16,fps:24000/1001,format:'prores',alpha:true,name:'Test'},1);const bytes=new Uint8Array(16*16*4);for(let i=0;i<256;i++){bytes[i*4]=255;bytes[i*4+3]=i%16<8?255:0;}for(let i=0;i<3;i++)await service.write(token,1,bytes);const file=await service.finish(token,1);expect((await readFile(file)).length).toBeGreaterThan(1000);const {stdout}=await promisify(execFile)(binary,['-hide_banner','-loglevel','error','-i',file,'-f','rawvideo','-pix_fmt','rgba','pipe:1'],{encoding:'buffer',maxBuffer:1024*1024});expect(stdout.length).toBe(16*16*4*3);expect(stdout[3]).toBeGreaterThan(250);expect(stdout[8*4+3]).toBeLessThan(5);expect(stdout[0]).toBeGreaterThan(250);expect(stdout[1]).toBeLessThan(5);
    expect(await probe(file)).toMatchObject({codec_name:'prores',codec_tag_string:'ap4h',profile:'4444',pix_fmt:expect.stringMatching(/^yuva444p/),color_primaries:'bt709',color_transfer:'iec61966-2-1',color_space:'bt709',color_range:'tv',nb_read_frames:'3',r_frame_rate:'24000/1001'});}finally{if(token)await service.release(token,1);await rm(temp,{recursive:true,force:true});}},30000);
 });
@@ -76,16 +85,19 @@ it.each([false, true])('finishes real video with automatic agent delivery=%s', a
   const folder = await mkdtemp(path.join(os.tmpdir(), 'powermove-render-ipc-'));
   const output = path.join(folder, 'chosen.mp4');
   const handlers = new Map<string, any>();
-  registerRenderEncoder({ handle: (channel: string, handler: any) => handlers.set(channel, handler) } as any, { isTrustedSender: () => true, ffmpeg: binary });
+  const activity: Array<[string, boolean]> = [];
+  registerRenderEncoder({ handle: (channel: string, handler: any) => handlers.set(channel, handler) } as any, { isTrustedSender: () => true, ffmpeg: binary, onActivity: (token, active) => activity.push([token, active]) });
   native.showSaveDialog.mockReset().mockResolvedValue({ canceled: false, filePath: output });
   // The real encoder binary with real frame delivery.
   const event = { sender: { id: 1, isDestroyed: () => false } };
   try {
     await withAgentExport(event.sender, automatic ? folder : undefined, async () => {
       const token = await handlers.get(IPC.renderStart)(event, { width: 16, height: 16, fps: 30, format: 'mp4', alpha: false, name: 'Export' });
+      expect(activity).toEqual([[token, true]]);
       await handlers.get(IPC.renderWrite)(event, { token, data: new Uint8Array(16 * 16 * 4) });
       const destination = automatic ? path.join(folder, 'Export.mp4') : output;
       expect(await handlers.get(IPC.renderFinish)(event, { token })).toEqual({ path: destination });
+      expect(activity).toEqual([[token, true], [token, false]]);
       expect((await readFile(destination)).length).toBeGreaterThan(0);
       expect(native.showSaveDialog).toHaveBeenCalledTimes(automatic ? 0 : 1);
     });
