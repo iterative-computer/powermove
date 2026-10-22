@@ -17,7 +17,7 @@ import { suggestedName } from '../engine/agent-jobs';
 
 export type PackProjectOptions = {
   directory: string;
-  resolveAsset(asset: string): Promise<{ path: string; type?: string } | null>;
+  resolveAsset(asset: string): Promise<{ path: string; type?: string; contentHash?: Uint8Array | null } | null>;
 };
 
 type Source = { id: string; type: string; path: string; info: Stats; data: Blob };
@@ -50,6 +50,9 @@ export async function packAgentProject(project: Record<string, any>, options: Pa
 async function readable(options: PackProjectOptions, id: string, asset: any): Promise<{ path: string; info: Stats; data: Blob } | null> {
   const resolved = await options.resolveAsset(id).catch(() => null);
   if (!resolved) return null;
+  const expectedHash = isLinkedAsset(asset) ? asset.link.hash : asset?.contentHash;
+  if (typeof expectedHash === 'string' && /^[a-f0-9]{64}$/.test(expectedHash) && resolved.contentHash
+    && Buffer.from(resolved.contentHash).toString('hex') !== expectedHash) return null;
   const info = await stat(resolved.path).catch(() => null);
   if (!info?.isFile()) return null;
   // A file-backed Blob refuses to read once its file changes (NotReadableError).

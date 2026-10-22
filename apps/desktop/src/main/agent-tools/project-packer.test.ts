@@ -91,6 +91,17 @@ it('reserves exclusive names for concurrent saves', async () => {
   expect((await readdir(directory)).sort()).toEqual(['Launch (2).pmv', 'Launch.pmv']);
 });
 
+it('skips an absent original when its storage key now names different content', async () => {
+  const root = await tempRoot('pm-agent-pack-reused-key-'), file = path.join(root, 'other.bin');
+  await writeFile(file, new Uint8Array([9]));
+  const asset = { id: 'a', name: 'original.png', storageKey: 'media:shared', contentHash: 'a'.repeat(64) };
+  const project = { id: 'P', name: 'Offline', assets: { a: asset }, layers: [] };
+  const output = await packAgentProject(project, { directory: path.join(root, 'exports'),
+    resolveAsset: async () => ({ path: file, contentHash: new Uint8Array(32).fill(0xbb) }) });
+  const restored = decodeProjectContainer(new Uint8Array(await readFile(output))) as { document: any; media: unknown[] };
+  expect(restored.media).toEqual([]); expect(restored.document.assets.a).toEqual(asset);
+});
+
 it('fails with a named error and leaves no file when an original changes while it is copied', async () => {
   const root = await tempRoot('pm-agent-pack-changed-');
   const { project, document, files, paths } = await fixture(root);
