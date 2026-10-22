@@ -49,6 +49,36 @@ describe('mediaTimeAt', () => {
 });
 
 describe('JitterBuffer', () => {
+  it('draws the newest frame that arrived after its interval when nothing on time is there, within the grace, and never goes back', () => {
+    const buffer = new JitterBuffer<string>(250_000);
+    const c = clock();
+    // Frames 0 to 2 arrive 120 ms after the line started (their intervals
+    // ended 70 to 103 ms ago): the newest is drawn, the others dropped.
+    for (let k = 0; k < 3; k++) buffer.push(item(desc(k + 1, k * F)));
+    const first = buffer.pick(1_120_000, c);
+    expect(first.show?.desc.seq).toBe(3);
+    expect(first.late).toBe(true);
+    expect(first.drop.map((d) => [d.item.desc.seq, d.reason])).toEqual([[1, 'late'], [2, 'late']]);
+    // An older frame arriving later is never drawn over it.
+    buffer.push(item(desc(9, F)));
+    expect(buffer.pick(1_130_000, c).show).toBeNull();
+    // Past the grace: dropped, the picture stays.
+    buffer.push(item(desc(10, 3 * F)));
+    const old = buffer.pick(1_050_000 + 3 * 16_667 + 300_000, c);
+    expect(old.show).toBeNull();
+    expect(old.drop.map((d) => d.item.desc.seq)).toEqual([10]);
+    // A frame on time still wins over a late one.
+    buffer.push(item(desc(11, 30 * F)));
+    buffer.push(item(desc(12, 31 * F)));
+    const onTime = buffer.pick(1_000_000 + 31 * 16_667 + 5_000, c);
+    expect(onTime.show?.desc.seq).toBe(12);
+    expect(onTime.late).toBeUndefined();
+    // Without a grace (the default), late frames are dropped as before.
+    const strict = new JitterBuffer<string>();
+    strict.push(item(desc(1, 0)));
+    expect(strict.pick(1_120_000, c).show).toBeNull();
+  });
+
   it('shows the frame whose interval contains the predicted display time', () => {
     const buffer = new JitterBuffer<string>();
     for (let k = 0; k < 6; k++) buffer.push(item(desc(k + 1, k * F)));

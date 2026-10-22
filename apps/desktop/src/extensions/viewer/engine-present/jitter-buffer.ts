@@ -11,6 +11,14 @@
  * Frames shown at the next refresh (`duration` null: paused, scrub,
  * gesture) bypass the queue; the newest one wins.
  *
+ * A frame that arrives after its interval (the window's main thread, which
+ * hands each frame to the presentation worker, was busy) is still drawn
+ * when nothing on time is there to draw, it is newer than the frame on
+ * screen, and its interval ended at most `lateGraceUs` ago: today's frame
+ * loop draws the playhead's frame when its animation frame runs, as late as
+ * the page's work before it, rather than keep an older picture. Frames
+ * later than that, or with a newer one behind them, are dropped as before.
+ *
  * Decision phase. A decision exactly on a frame boundary is a coin toss
  * between two frames, and rAF timestamps jitter by about a millisecond.
  * When frames last a whole number of refreshes (60 fps on 120 Hz, 24 fps on
@@ -28,11 +36,19 @@ export type Pick<T> = {
   show: Queued<T> | null;
   /** Frames to release without drawing, with why. */
   drop: { item: Queued<T>; reason: 'late' | 'superseded' | 'stopped' }[];
+  /** `show` is a frame past its interval, drawn within the grace. */
+  late?: boolean;
 };
 
 export class JitterBuffer<T> {
   private timed: Queued<T>[] = [];
   private immediate: Queued<T> | null = null;
+  /** The timed frame drawn last (a late frame never goes back past it). */
+  private shownPts: number | null = null;
+
+  /** `lateGraceUs`: how long after its interval a frame may still be drawn
+   *  when nothing on time is there (0: dropped at once). */
+  constructor(private readonly lateGraceUs = 0) {}
 
   get size(): number {
     return this.timed.length + (this.immediate ? 1 : 0);
@@ -98,6 +114,7 @@ export class JitterBuffer<T> {
       // Timed frames belong to a line that stopped.
       for (const item of this.timed) drop.push({ item, reason: 'stopped' });
       this.timed = [];
+      this.shownPts = null;
       const show = this.immediate;
       this.immediate = null;
       return { show, drop };
@@ -130,9 +147,28 @@ export class JitterBuffer<T> {
     if (index >= 0) {
       for (const item of this.timed.splice(0, index)) drop.push({ item, reason: 'late' });
       const show = this.timed.shift() ?? null;
+      if (show) this.shownPts = show.desc.pts;
       return { show, drop };
     }
-    while (this.timed.length && behind(this.timed[0]!)) drop.push({ item: this.timed.shift()!, reason: 'late' });
+    const late: Queued<T>[] = [];
+    while (this.timed.length && behind(this.timed[0]!)) late.push(this.timed.shift()!);
+    // Nothing on time: the newest late frame, within the grace and newer
+    // than the one on screen, rather than none.
+    const newest = late.at(-1);
+    if (newest && this.lateGraceUs > 0) {
+      const rate = Math.abs(clock!.rate.num / clock!.rate.den);
+      const graceTicks = (this.lateGraceUs / 1e6) * TICKS_PER_SECOND * rate;
+      const d = delta(newest.desc.pts);
+      const pastEnd = forward ? -(d + (newest.desc.duration ?? 0)) : d;
+      // Compared on the clock's line (a loop wraps pts).
+      const newer = this.shownPts === null || (forward ? d > delta(this.shownPts) : d < delta(this.shownPts));
+      if (pastEnd <= graceTicks && newer) {
+        for (const item of late.slice(0, -1)) drop.push({ item, reason: 'late' });
+        this.shownPts = newest.desc.pts;
+        return { show: newest, drop, late: true };
+      }
+    }
+    for (const item of late) drop.push({ item, reason: 'late' });
     return { show: null, drop };
   }
 }

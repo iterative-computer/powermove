@@ -143,7 +143,18 @@ export type PresenterOptions = {
    * draw on arrival. Fraction of a refresh after the rAF timestamp. */
   commitPhaseRefreshes?: number;
   timers?: { set(fn: () => void, ms: number): number; clear(id: number): void };
+  /** How long after its interval a timed frame may still be drawn when no
+   *  frame on time is there (`JitterBuffer`); default `LATE_GRACE_MS`. */
+  lateGraceMs?: number;
 };
+
+/**
+ * A frame that reached the presenter after its interval is drawn up to this
+ * long after it when nothing on time is there (the window's main thread
+ * hands each frame over and can be busy for a long animation frame; today's
+ * frame loop is as late then).
+ */
+export const LATE_GRACE_MS = 250;
 
 type Payload = { frame: VideoFrame };
 
@@ -157,6 +168,8 @@ export type PresenterStats = {
   staleGeneration: number;
   maxQueued: number;
   generation: number;
+  /** Frames drawn after their interval, within the late grace. */
+  shownLate?: number;
 };
 
 export type TraceRecord = {
@@ -194,7 +207,7 @@ export interface Presenter {
 }
 
 export class EnginePresenter implements Presenter {
-  private readonly buffer = new JitterBuffer<Payload>();
+  private readonly buffer: JitterBuffer<Payload>;
   private vsync: VsyncEstimator;
   private nominalPeriodMs: number;
   private cancelFrame: (id: number) => void = (id) => cancelAnimationFrame(id);
@@ -236,6 +249,7 @@ export class EnginePresenter implements Presenter {
   readonly trace: TraceRecord | null;
 
   constructor(private readonly options: PresenterOptions) {
+    this.buffer = new JitterBuffer<Payload>((options.lateGraceMs ?? LATE_GRACE_MS) * 1000);
     this.vsync = new VsyncEstimator(options.displayHz ?? null);
     this.nominalPeriodMs = 1000 / (options.displayHz ?? 60);
     this.now = options.now ?? (() => performance.now());
@@ -486,8 +500,9 @@ export class EnginePresenter implements Presenter {
     const { decisionMs, displayMs } = this.decision(rafMs, fit);
     const atUs = this.hostUs(decisionMs);
     if (atUs === null && this.clock && this.clock.state !== 'stopped') return;
-    const { show, drop } = this.buffer.pick(atUs ?? 0, this.clock);
+    const { show, drop, late } = this.buffer.pick(atUs ?? 0, this.clock);
     for (const { item, reason } of drop) this.dropItem(item, reason);
+    if (show && late) this.stats.shownLate = (this.stats.shownLate ?? 0) + 1;
     // The display instant itself, without the shift that puts frame
     // boundaries halfway between decisions.
     if (show) this.draw(show, rafMs, this.hostUs(displayMs));
