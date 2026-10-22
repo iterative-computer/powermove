@@ -333,6 +333,62 @@ Open with the public stand-in (17 MB of document): today 9.5 to 14.2 s,
 engine 15.7 to 20.4 s; heap after GC today 354 to 367 MB, engine 317 to
 325 MB; interactive engine RSS 919 to 925 MB; four frames within 2 CV.
 
+## Large projects, rendering (bigrender, 2026-10-22)
+
+The two private production projects (PMV3: 867 layers, a raster wrapper
+chain from the user's extensions, 75 effects; PMV4: 258 layers baked to a
+key per frame, image-heavy) played one to thirty frames in eight seconds
+with the engine on while today played 135 to 230. Profiled with `sample`
+on the engine and the GPU process, V8 CPU profiles of the renderer, and a
+per-frame stage breakdown the presenter now reports (`stages`: plan,
+prefetch, record, submit, planning passes that waited and their time;
+`memory`: the viewer renderer's caches; `definitionGpuMs`: the longest GPU
+time per effect, transition and layer definition). The causes, in the
+order they cost:
+
+| Cause | Where | Fix |
+|---|---|---|
+| Every raster-override need waited for its base pixels, prepared two at a time over async IPC, while playing; the chain passed nearly all of them through | `kernel/raster-compat.ts`, `engine-connection/render-transport.ts` | The producer remembers which layers' chains read the base (`ready`); the rest are answered in the turn, the lookahead answers ready needs within its time budget (only preparations are capped) and only for layers in their frame (`active`) |
+| A frame waiting on answers was planned again per answer and, while playing, dropped and the next frame tried at once (5,000 plans to show 46 frames) | `present/render.rs` | The frame keeps its playback slot and is planned again once every need has an answer at its revision (`CompatStore::all_answered`), or after 250 ms; a paused one waits the same way instead of spinning |
+| A wrapper that drops the preview crop (typography anchoring over every layer) had each layer's whole raster drawn on the CPU, read back and posted every frame | `raster-compat.ts` | An untouched base of the whole layer is answered native (the engine's native draw is the whole layer) |
+| Base rasters a wrapper reads were a synchronous raster round trip every frame | `raster-compat.ts`, `kernel/install.ts` | Today's raster cache: base surfaces kept by evaluated content and density (text and plain shapes, never animated characters, styles, typography anchoring or paths), within today's 192 MiB and 4,096 entries; surfaces carry a key as today's do |
+| A wrapper result with an unchanged key and quad was read back and posted every frame | `raster-compat.ts`, `present/compat.rs` | `reuse` across frames when the key and the quad hold; the store resolves it to the pixels the layer posted under that key |
+| Every channel read prepared its whole keyframe track again (adoption, auto-bezier) | `pm-eval` | Prepared tracks kept per `kf` array (immutable while shared), within 64 MiB (`track_cache.rs`), as today's `temporalEvaluate` caches per array |
+| A user effect indexing a 1,104-entry glyph table took 1.47 s of GPU per frame: glslang copies a run-time indexed `const` array into each fragment and naga's MSL kept the copy | `pm-glsl` | `const_tables.rs`: such tables are read from a program-scope `constant` array (1.36 ms per frame after) |
+| Level 1 shape and path rasters (the exact CPU emulation of Chromium's canvas) drew one after another | `vector/cache.rs`, `renderer.rs` | A frame's uncached rasters are drawn on worker threads before it records, under the same keys |
+| Exports asked the window for each wrapped layer at each frame, one blocking round trip each | `jobs/compat.rs` | One batch per frame (`CompatRasters::fetch`), carrying the same layers at the next four frames |
+| Window surfaces a busy page never took stayed undrawn: a timed-out transfer takes its import with it | `main/engine/bridge.ts` | Each send after a failure imports the IOSurface again, and an undelivered surface is offered again every 2 s while it lives |
+| Idle intermediate targets of sizes no frame used again (animated scales) piled up | `pm-gpu/src/target.rs` | After each frame, idle targets the frame did not use are freed down to 64 MiB; the compatibility store is bounded at today's 192 MiB raster budget |
+
+The custom definition reported as failing to compile on these projects
+(`macos.cursor`: a `uniform bool` toggle compared with `> 0.5`) fails the
+same way in WebGL in today's renderer (captured: the same message; 41
+custom definitions of the setup, this one the only failure, and neither
+project uses it). `pm-glsl/tests/uniform_types.rs` holds WebGL's verdicts
+for 35 bool, int, uint and float uniform forms; the engine agrees on all.
+
+The public stand-in is `e2e/engine-large-project-render.spec.ts` (288
+layers baked to a key per frame, today's three wrapper patterns, today and
+the engine on fresh profiles in one run): presented frames in four seconds
+at least today's within one per second, and scrub p95 within a fifth and
+one frame of today's.
+
+What remains, measured on the private projects, is in the lane report
+(`/tmp/ne-w5/reports/bigrender.json`, outside the repository) and below:
+
+- PMV4 plays at the speed of its audio clock: its only audio clip is
+  offline, and the engine's clock advances at about a tenth of real time
+  (72,089 of 73,350 device callbacks underran; today plays silence in real
+  time). Owner: the audio lanes (`pm-audio` playback, `present/audio.rs`).
+- A frame of PMV3 holds 300 to 360 MiB of intermediate targets: every
+  layer's targets are returned to the pool at the end of the frame, not
+  when the layer has been composited.
+- PMV4 frames at 0 s and 3.2 s differ from today's by up to 6 CV: the
+  glow of a group with the user's `deep-glow-pop.effect` and
+  `progressive-blur` (effects translation), and the edges of a DM Sans text
+  layer with typography anchoring (`pm-text` level 1 raster and the
+  typography anchor offset).
+
 ## Resync
 
 `resync` with `canonicalJsonV1` installs a `pm-model` mirror after checking
