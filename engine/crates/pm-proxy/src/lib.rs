@@ -19,7 +19,11 @@ pub use policy::{
     choose_representation, probe_machine_profile, source_for,
 };
 pub use sequence::{SequenceFrame, SequenceManifest, SequenceRate};
-pub use store::{ProxyKey, ProxyRecipe, ProxyStore, StoredProxy, disk_guard, free_bytes};
+pub use store::{
+    ProxyKey, ProxyRecipe, ProxyStore, StoredProxy, TEST_DISK_RESERVE_ENV, disk_guard, free_bytes,
+};
+#[cfg(feature = "test-hooks")]
+pub use store::set_test_disk_reserve;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {

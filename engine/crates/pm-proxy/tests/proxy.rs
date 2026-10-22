@@ -6,9 +6,17 @@ use pm_protocol::priority::{ProxyFormat, ProxySize};
 use pm_proxy::{
     AutomaticInput, DecodeMeasurement, GenerationControl, GenerationRequest, MachineProfile,
     MediaAvailability, MediaUse, PlaybackMoment, ProxyRecipe, ProxyStore, Representation,
-    RepresentationIntent, ResolutionIntent, choose_representation, disk_guard, generate,
-    source_for,
+    RepresentationIntent, ResolutionIntent, choose_representation, disk_guard,
+    generate_with_disk_probe, source_for,
 };
+
+/// These codec tests are not about the disk guard (`disk_pause.rs` and
+/// `disk_guard_uses_larger_of_20_gib_and_ten_percent` are): a fixed quota
+/// keeps them independent of the shared build machine's free space.
+fn test_quota(_: &std::path::Path) -> pm_proxy::Result<(u64, u64)> {
+    Ok((40 << 30, 100 << 30))
+}
+const TEST_QUOTA: fn(&std::path::Path) -> pm_proxy::Result<(u64, u64)> = test_quota;
 use tempfile::{NamedTempFile, tempdir};
 
 #[test]
@@ -277,10 +285,10 @@ fn synthetic_video_with_pcm_audio_generates_validated_prores_proxy() {
                 on_pause: &|_| {},
             },
         };
-        let result = generate(request()).unwrap();
+        let result = generate_with_disk_probe(request(), &TEST_QUOTA).unwrap();
         assert!(!result.reused);
         assert!(result.stored.byte_size > 0);
-        let again = generate(request()).unwrap();
+        let again = generate_with_disk_probe(request(), &TEST_QUOTA).unwrap();
         assert!(again.reused);
         assert_eq!(again.stored.path, result.stored.path);
     }
@@ -309,7 +317,7 @@ fn synthetic_video_with_pcm_audio_generates_validated_prores_proxy() {
         "{}",
         String::from_utf8_lossy(&replaced.stderr)
     );
-    let stale = generate(GenerationRequest {
+    let stale = generate_with_disk_probe(GenerationRequest {
         source: &source,
         source_hash: &hash,
         format: ProxyFormat::ProResProxy,
@@ -322,7 +330,7 @@ fn synthetic_video_with_pcm_audio_generates_validated_prores_proxy() {
             pause: &|| false,
             on_pause: &|_| {},
         },
-    });
+    }, &TEST_QUOTA);
     assert!(matches!(stale, Err(pm_proxy::ProxyError::InvalidMedia(_))));
 }
 
@@ -367,7 +375,7 @@ fn alpha_source_forces_prores_4444_even_with_hevc_preference() {
         .to_string();
     let store = ProxyStore::open(temp.path().join("store")).unwrap();
     let cancel = AtomicBool::new(false);
-    let output = generate(GenerationRequest {
+    let output = generate_with_disk_probe(GenerationRequest {
         source: &source,
         source_hash: &hash,
         format: ProxyFormat::Hevc10,
@@ -380,7 +388,7 @@ fn alpha_source_forces_prores_4444_even_with_hevc_preference() {
             pause: &|| false,
             on_pause: &|_| {},
         },
-    })
+    }, &TEST_QUOTA)
     .unwrap();
     assert_eq!(output.stored.recipe.codec(), "prores_4444");
     assert!(output.stored.recipe.source_has_alpha);
@@ -434,7 +442,7 @@ fn float64_pcm_source_keeps_its_coding_and_samples() {
         .to_string();
     let store = ProxyStore::open(temp.path().join("store")).unwrap();
     let cancel = AtomicBool::new(false);
-    let output = generate(GenerationRequest {
+    let output = generate_with_disk_probe(GenerationRequest {
         source: &source,
         source_hash: &hash,
         format: ProxyFormat::ProResProxy,
@@ -447,7 +455,7 @@ fn float64_pcm_source_keeps_its_coding_and_samples() {
             pause: &|| false,
             on_pause: &|_| {},
         },
-    })
+    }, &TEST_QUOTA)
     .unwrap();
     let probed = Command::new(&ffprobe)
         .args([
@@ -516,7 +524,7 @@ fn variable_frame_intervals_keep_exact_pts() {
         .to_string();
     let store = ProxyStore::open(temp.path().join("store")).unwrap();
     let cancel = AtomicBool::new(false);
-    let output = generate(GenerationRequest {
+    let output = generate_with_disk_probe(GenerationRequest {
         source: &source,
         source_hash: &hash,
         format: ProxyFormat::ProResProxy,
@@ -529,7 +537,7 @@ fn variable_frame_intervals_keep_exact_pts() {
             pause: &|| false,
             on_pause: &|_| {},
         },
-    })
+    }, &TEST_QUOTA)
     .unwrap();
     assert!(output.stored.byte_size > 0);
 }
@@ -573,7 +581,7 @@ fn odd_source_dimensions_retain_display_aspect() {
         .to_string();
     let store = ProxyStore::open(temp.path().join("store")).unwrap();
     let cancel = AtomicBool::new(false);
-    let output = generate(GenerationRequest {
+    let output = generate_with_disk_probe(GenerationRequest {
         source: &source,
         source_hash: &hash,
         format: ProxyFormat::ProResProxy,
@@ -586,7 +594,7 @@ fn odd_source_dimensions_retain_display_aspect() {
             pause: &|| false,
             on_pause: &|_| {},
         },
-    })
+    }, &TEST_QUOTA)
     .unwrap();
     assert_eq!(output.stored.recipe.width % 2, 0);
     assert_eq!(output.stored.recipe.height % 2, 0);

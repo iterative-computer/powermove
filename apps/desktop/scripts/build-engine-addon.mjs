@@ -13,7 +13,7 @@
  * packaging and
  * engine/target/pm-bridge/pm_bridge.node, where development runs load it.
  *
- *   node scripts/build-engine-addon.mjs [--debug]
+ *   node scripts/build-engine-addon.mjs [--debug] [--test-hooks]
  */
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
@@ -23,6 +23,9 @@ import path from 'node:path';
 const desktop = path.resolve(import.meta.dirname, '..');
 const engine = path.resolve(desktop, '../../engine');
 const debug = process.argv.includes('--debug');
+// e2e builds only: env-gated test hooks (the proxy disk guard's reserve
+// override). Release builds never pass it.
+const testHooks = process.argv.includes('--test-hooks');
 const profile = debug ? 'debug' : 'release';
 
 // A loaded Mach-O must retain its inode and code signature. Overwriting it
@@ -40,7 +43,7 @@ function installAddon(source, target) {
 
 // Two invocations: in one, feature unification would compile pm-bridge's
 // napi glue into pm_node.node too.
-const cargo = `. ./env.sh && cargo build ${debug ? '' : '--release '}--locked -p pm-node-addon --features node && exec cargo build ${debug ? '' : '--release '}--locked -p pm-bridge-addon --features node`;
+const cargo = `. ./env.sh && cargo build ${debug ? '' : '--release '}--locked -p pm-node-addon --features node${testHooks ? ',test-hooks' : ''} && exec cargo build ${debug ? '' : '--release '}--locked -p pm-bridge-addon --features node`;
 execFileSync('/bin/sh', ['-c', cargo], { cwd: engine, stdio: 'inherit' });
 
 const bridgeBuilt = path.join(engine, 'target', profile, 'libpm_bridge_addon.dylib');

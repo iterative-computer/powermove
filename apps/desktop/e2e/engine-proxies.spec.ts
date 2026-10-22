@@ -3,6 +3,7 @@ import { appendFile, copyFile, mkdtemp, readFile, readdir, rm, unlink, writeFile
 import os from 'node:os';
 import path from 'node:path';
 import { test, expect, launchApp } from './helpers/app';
+import { PROXY_TEST_DISK_ENV } from './helpers/proxy-disk';
 
 for (const enabled of [false, true]) {
   test(`proxy controls and original-only export with the engine ${enabled ? 'on' : 'off'}`, async () => {
@@ -10,7 +11,7 @@ for (const enabled of [false, true]) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'pm-proxy-e2e-'));
     let session: Awaited<ReturnType<typeof launchApp>> | null = null;
     try {
-      session = await launchApp({ userData: path.join(root, 'profile'), env: { POWERMOVE_NEW_ENGINE: enabled ? '1' : '0' } });
+      session = await launchApp({ userData: path.join(root, 'profile'), env: { ...PROXY_TEST_DISK_ENV, POWERMOVE_NEW_ENGINE: enabled ? '1' : '0' } });
       const { app, page } = session;
       await session.openEditor();
       const projectId = await page.evaluate(() => {
@@ -140,7 +141,7 @@ test('a linked original can go offline, relink, and relaunch without losing its 
     // Make the linked file unique so Spotlight cannot relink to the fixture.
     await appendFile(original, Buffer.from([0]));
     const bytes = await readFile(original);
-    session = await launchApp({ userData: path.join(root, 'profile'), env: { POWERMOVE_NEW_ENGINE: '1' } });
+    session = await launchApp({ userData: path.join(root, 'profile'), env: { ...PROXY_TEST_DISK_ENV, POWERMOVE_NEW_ENGINE: '1' } });
     await session.openEditor();
     let { app, page } = session;
     await page.evaluate(() => (window as any).PM.SettingsUI.open('project'));

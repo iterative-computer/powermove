@@ -18,3 +18,9 @@ blake3 = "1.8"
 tempfile = "3"
 libc = "0.2"
 png = "0.18"
+
+[features]
+# Test hooks (the disk guard's reserve override, `TEST_DISK_RESERVE_ENV`);
+# off in the app. Tests and e2e addon builds (`build-engine-addon.mjs
+# --test-hooks`) turn it on.
+test-hooks = []

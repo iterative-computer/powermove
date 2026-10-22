@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { test, expect, launchApp } from './helpers/app';
+import { PROXY_TEST_DISK_ENV } from './helpers/proxy-disk';
 import { ffmpegBinary } from './helpers/ffmpeg';
 
 type Bitmap = { data: Uint8Array; width: number; height: number; profile: string };
@@ -195,7 +196,7 @@ test('PROXY-1: paused Half shows the original through today\'s scaling path, not
     for (const engine of [false, true]) {
       let session: Awaited<ReturnType<typeof launchApp>> | null = null;
       try {
-        session = await launchApp({ userData: path.join(root, engine ? 'native' : 'current'), env: { POWERMOVE_NEW_ENGINE: engine ? '1' : '0' }, args: colorProfileArgs });
+        session = await launchApp({ userData: path.join(root, engine ? 'native' : 'current'), env: { ...PROXY_TEST_DISK_ENV, POWERMOVE_NEW_ENGINE: engine ? '1' : '0' }, args: colorProfileArgs });
         await importVideo(session, source, .5, '0.5');
         if (engine) {
           await session.page.waitForFunction(() => {
@@ -246,7 +247,7 @@ test('Auto, Half and Quarter sample the full video source at the viewer canvas s
       let session: Awaited<ReturnType<typeof launchApp>> | null = null;
       try {
         session = await launchApp({ userData: path.join(root, native ? 'native' : 'current'),
-          env: { POWERMOVE_NEW_ENGINE: native ? '1' : '0' }, args: colorProfileArgs });
+          env: { ...PROXY_TEST_DISK_ENV, POWERMOVE_NEW_ENGINE: native ? '1' : '0' }, args: colorProfileArgs });
         await importVideo(session, source, 1, 'auto');
         await useOriginal(session);
         for (const view of views) {

@@ -387,5 +387,38 @@ pub fn free_bytes(path: &Path) -> Result<(u64, u64)> {
 
 /// Generation pauses when free bytes are below max(20 GiB, 10% capacity).
 pub fn disk_guard(available: u64, capacity: u64) -> bool {
-    available >= (20u64 << 30).max(capacity / 10)
+    available >= disk_reserve(capacity)
+}
+
+/// Test-only: replaces the guard's reserve (bytes) so proxy tests that are
+/// not about the guard do not depend on a shared machine's free space.
+/// Compiled only with the `test-hooks` feature (tests and e2e addon builds);
+/// a production build never reads it.
+pub const TEST_DISK_RESERVE_ENV: &str = "POWERMOVE_TEST_PROXY_DISK_RESERVE_BYTES";
+
+#[cfg(feature = "test-hooks")]
+static TEST_DISK_RESERVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Test-only: the same override for in-process tests (no environment
+/// mutation). `None` restores the production reserve.
+#[cfg(feature = "test-hooks")]
+pub fn set_test_disk_reserve(bytes: Option<u64>) {
+    TEST_DISK_RESERVE.store(bytes.unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn disk_reserve(capacity: u64) -> u64 {
+    #[cfg(feature = "test-hooks")]
+    {
+        let reserve = TEST_DISK_RESERVE.load(std::sync::atomic::Ordering::Relaxed);
+        if reserve != u64::MAX {
+            return reserve;
+        }
+        if let Some(reserve) = std::env::var(TEST_DISK_RESERVE_ENV)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            return reserve;
+        }
+    }
+    (20u64 << 30).max(capacity / 10)
 }

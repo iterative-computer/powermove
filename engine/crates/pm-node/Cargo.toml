@@ -55,7 +55,7 @@ remote-layer = ["pm-gpu/remote-layer"]
 # Test hooks on production types (a held paused frame,
 # POWERMOVE_BRIDGE_TEST_SEND_DELAY_MS); off in the app. The crate's own
 # tests turn it on through the dev-dependency below.
-test-hooks = []
+test-hooks = ["pm-proxy/test-hooks"]
 
 [dev-dependencies]
 pm-model = { path = "../pm-model" }

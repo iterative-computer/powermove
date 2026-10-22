@@ -300,6 +300,8 @@ mod tests {
 
     #[test]
     fn service_resolves_capabilities_and_resumes_generation_after_playback() {
+        // Not a disk guard test: independent of the build machine's free space.
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
         let (ffmpeg, _) = codec_binaries().expect("source engine/env.sh");
         let temp = tempdir().unwrap();
         let source = temp.path().join("source.mov");

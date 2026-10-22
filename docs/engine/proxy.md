@@ -81,6 +81,18 @@ throughout encoding, pausing below max(20 GiB, 10% of the volume). Playback,
 export and low-disk pauses emit a nonterminal `JobState::Paused` status with
 a reason and resume automatically when the condition clears.
 
+The production guard is never relaxed. Tests that are not about the guard
+must not depend on the shared build machine's free space, so the reserve has
+a test-only override, compiled only with pm-proxy's `test-hooks` feature (its
+own and pm-node's tests, and e2e addons built with `build-engine-addon.mjs
+--test-hooks`; release builds never pass the flag and never read it):
+`POWERMOVE_TEST_PROXY_DISK_RESERVE_BYTES` in the engine environment, or
+`pm_proxy::set_test_disk_reserve` in-process. The proxy e2e specs set it
+(`e2e/helpers/proxy-disk.ts`); the pm-proxy codec tests inject a fixed quota
+through `generate_with_disk_probe`. The dedicated low-disk tests
+(`pm-proxy/tests/disk_pause.rs`, `disk_guard_uses_larger_of_20_gib_and_ten_percent`)
+drive the guard with simulated free space and assert pause and resume.
+
 `MachineProfile` records GPU p95, disk throughput and power state;
 `DecodeMeasurement` records each asset's measured decode p95. The automatic
 decision uses decode cost, GPU headroom, power state and viewer device-pixel

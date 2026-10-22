@@ -34,6 +34,9 @@ pm-media = { path = "../pm-media" }
 node = ["pm-node/node"]
 # The C′ prototype (pm-gpu `remote-layer`), measurement builds only.
 remote-layer = ["pm-node/remote-layer"]
+# Env-gated test hooks (e2e builds only: `build-engine-addon.mjs --test-hooks`),
+# e.g. the proxy disk guard's reserve override. Never in release builds.
+test-hooks = ["pm-node/test-hooks"]
 
 [build-dependencies]
 napi-build = "2.6"
