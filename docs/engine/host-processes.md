@@ -417,3 +417,17 @@ start and negotiate in 75 to 86 ms; a SIGKILLed engine is back,
 renegotiated, and resynced by the client in 313 to 337 ms, of which 250 ms
 is the first backoff step. Before the control port, Electron main died
 with SIGSEGV during `stop()` in about a third of runs.
+
+### Reader lifetime during a large file open (2026-10-21)
+
+The main-process project reader starts its 120-second idle timeout after the
+first completed media-range read, and pauses it during reads. Sending a large
+document and history over IPC can itself take longer than that timeout; expiring
+the token before the renderer can request its first range made an import resolve
+with an error toast and an unchanged project. Explicit close and window destruction
+still release readers. Each window has at most 32 outstanding readers, including
+initial responses; a refused open closes its newly opened token.
+
+The private opening harness must check that the document identity changed and
+that the production document loaded, since `PM.openProject()` also resolves after
+a handled import failure. An empty project is never an opening-time sample.

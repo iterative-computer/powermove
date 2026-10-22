@@ -50,9 +50,18 @@ export interface SaveIpcContext {
 }
 
 type ReaderState = {
-  readers: Map<string, { owner: WebContents; timer: ReturnType<typeof setTimeout> }>;
+  readers: Map<string, ProjectReader>;
   watchedOwners: WeakSet<WebContents>;
 };
+
+type ProjectReader = {
+  owner: WebContents;
+  timer?: ReturnType<typeof setTimeout>;
+  activeReads: number;
+};
+
+const PROJECT_READER_IDLE_MS = 120_000;
+const MAX_PROJECT_READERS_PER_WINDOW = 32;
 
 const readerStates = new WeakMap<ProjectFiles, ReaderState>();
 
@@ -69,9 +78,17 @@ async function closeProjectReader(projects: ProjectFiles, token: string, verify 
   const state = projectReaderState(projects);
   const reader = state.readers.get(token);
   if (!reader) return;
-  clearTimeout(reader.timer);
+  if (reader.timer) clearTimeout(reader.timer);
   state.readers.delete(token);
   await projects.close(token, verify);
+}
+
+function startProjectReaderIdleTimer(projects: ProjectFiles, token: string, reader: ProjectReader): void {
+  if (reader.timer) clearTimeout(reader.timer);
+  reader.timer = setTimeout(() => {
+    void closeProjectReader(projects, token).catch(() => undefined);
+  }, PROJECT_READER_IDLE_MS);
+  reader.timer.unref();
 }
 
 function watchProjectReaderOwner(projects: ProjectFiles, owner: WebContents): void {
@@ -91,12 +108,17 @@ function watchProjectReaderOwner(projects: ProjectFiles, owner: WebContents): vo
  * which copies embedded media straight from the file (section 21).
  */
 export async function readProjectRangeFor(projects: ProjectFiles, owner: unknown, token: string, offset: number, length: number): Promise<Uint8Array> {
-  const reader = projectReaderState(projects).readers.get(token);
+  const state = projectReaderState(projects);
+  const reader = state.readers.get(token);
   if (!reader || reader.owner !== owner) throw new Error('Unknown project read token');
-  reader.timer.refresh();
-  const data = await projects.read(token, offset, length);
-  reader.timer.refresh();
-  return data;
+  if (reader.timer) { clearTimeout(reader.timer); reader.timer = undefined; }
+  reader.activeReads++;
+  try {
+    return await projects.read(token, offset, length);
+  } finally {
+    reader.activeReads--;
+    if (reader.activeReads === 0 && state.readers.get(token) === reader) startProjectReaderIdleTimer(projects, token, reader);
+  }
 }
 
 export async function openProjectForWindow(
@@ -111,11 +133,11 @@ export async function openProjectForWindow(
       throw new Error('Project window is unavailable');
     }
     const state = projectReaderState(ctx.projects);
-    const timer = setTimeout(() => {
-      void closeProjectReader(ctx.projects, opened.token).catch(() => undefined);
-    }, 120_000);
-    timer.unref();
-    state.readers.set(opened.token, { owner: webContents, timer });
+    if ([...state.readers.values()].filter((reader) => reader.owner === webContents).length >= MAX_PROJECT_READERS_PER_WINDOW) {
+      await ctx.projects.close(opened.token, false);
+      throw new Error('Too many open project readers for this window.');
+    }
+    state.readers.set(opened.token, { owner: webContents, activeReads: 0 });
     watchProjectReaderOwner(ctx.projects, webContents);
     return { ok: true, ...opened };
   } catch (error: any) {
