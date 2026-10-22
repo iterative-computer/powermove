@@ -158,12 +158,6 @@ describe('EngineRenderTransport', () => {
     expect(transport.stats.lastFailure).toBe('unsupported: x');
   });
 
-  it('uses idle scheduling without changing frozen render option semantics', async () => {
-    const { transport, asked } = setup([rendered(320, 180)]);
-    await transport.renderFrameTo(0, 320, 180, { priority: 'idle', draft3d: true, composition: 'nested', mblur: false });
-    expect(asked[0]!.snapshot).toMatchObject({ class: 'idle', composition: 'comp-1', target: { draft3d: false, motionBlurSamples: 0 } });
-  });
-
   it('carries caption visibility on each sync and async frame without leaking it', async () => {
     const { transport, asked } = setup([rendered(2, 2), rendered(2, 2), rendered(2, 2)]);
     transport.snapshotDataUrlSync(0, 2, { w: 2, h: 2 }, { captionsHidden: true });

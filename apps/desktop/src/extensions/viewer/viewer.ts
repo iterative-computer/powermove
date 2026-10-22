@@ -33,8 +33,17 @@ export const viewerPanelOptions = {
   library: { width: 640, height: 480 },
 } as const;
 
-import { previewRenderSize } from './preview-size';
-export { previewRenderSize };
+export function previewRenderSize(width: number, height: number, zoom: number, dpr: number, quality: number) {
+  const safeWidth = Math.max(2, Number(width) || 2);
+  const safeHeight = Math.max(2, Number(height) || 2);
+  const displayScale = Math.min(1, Math.max(0.05, Number(zoom) || 0.05) * Math.min(2, Math.max(1, Number(dpr) || 1)));
+  const scale = Math.max(0.05, Math.min(1, displayScale * Math.max(0.25, Math.min(1, Number(quality) || 1))));
+  return {
+    width: Math.max(2, Math.round(safeWidth * scale)),
+    height: Math.max(2, Math.round(safeHeight * scale)),
+    scale,
+  };
+}
 
 /** The backing size of today's viewer canvas for a layout (`V.layout`): the
  *  crop's render size when the view is cropped, the composition at the

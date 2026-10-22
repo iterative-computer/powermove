@@ -578,7 +578,7 @@ export class EngineRenderTransport {
   }
 
   async renderFrameTo(time: number, width: number, height: number, options?: Record<string, unknown>): Promise<HTMLCanvasElement> {
-    return this.canvas(await this.snapshot(this.frameOptions(time, width, height, options), options?.['priority'] === 'idle' ? 'idle' : 'async'));
+    return this.canvas(await this.snapshot(this.frameOptions(time, width, height, options)));
   }
 
   /** `render.snapshot(time, maxWidth)`: today's JPEG data URL at quality
