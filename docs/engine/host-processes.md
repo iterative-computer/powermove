@@ -641,6 +641,31 @@ The writes are also coalesced (`core/projects.ts`):
   only after that project's pending or in-flight slot write reaches disk.
   Before, a crash between the two could recover the older slot without its
   journal. The new crash-point test fails on the old order.
+- A failed checkpoint is repaired by the next save, as before. When a slot
+  write is refused or fails to reach disk (ENOSPC, EIO, a storage worker
+  restart), main keeps that project's journal on disk as it is until a slot
+  write succeeds: deleting it, or replacing it with entries meant for the
+  slot that never landed, lost the edits since the older slot. The window
+  drops the slot's digest and the registry's record and marks the project
+  unsaved, so its next checkpoint writes rather than checks, and its next
+  autosave checkpoints even when the journal has entries. That write clears
+  the save error, so `PM.store.flush()` (flushProject, autosave) succeeds
+  again once the disk does.
+- Each slot write carries a checkpoint id (`cp`, before `proj` in the
+  envelope), and each journal entry the id of the checkpoint it follows.
+  Projects.get replays an entry tagged for another checkpoint no longer:
+  with the journal written after the slot, a crash in the one unlink between
+  them left the new slot with the old journal, and replaying it reverted any
+  path an old entry set that a raw (unannounced) write had changed since,
+  next to raw writes it kept. Untagged entries (older builds, or a
+  checkpoint the window does not know) and slots without an id replay as
+  before.
+- Known limit: a write of `project.<id>` by another writer (another window's
+  Projects screen rename, a future main-side writer) marks the key stale in
+  the owning window but does not drop its digest, so that window's next
+  checkpoint of the same, unchanged object is checked against its own last
+  write and skipped where the old code overwrote. Windows own their
+  projects, so no such writer exists today.
 
 The dirty check's fingerprints (twice per autosave and per open) are now
 serialized in slices and hashed on a worker (`project-fingerprint.ts`, the
@@ -658,7 +683,11 @@ what the previous code did. Two tests prove it:
   crash point. Each recovers nothing or a complete state the document had,
   never an older state than an earlier point. Every settled point recovers
   exactly what the previous code recovered there. Slot writes: 1 for the open
-  (was 5), and 3 more only where the document really changed.
+  (was 5), and 3 more only where the document really changed. It recovers
+  through a fresh window's Projects.get. It also covers a failing slot rename
+  and an ENOSPC slot write (the edits survive every crash point, and the next
+  autosave writes the slot and lets flush succeed), and a raw write after a
+  journaled edit to the same path (never reverted by the old journal).
 - `e2e/project-open-crash-recovery.spec.ts` SIGKILLs the whole app at 15
   seeded moments, from 0.2 s into a large open to after it settles, with
   either setting. Every relaunch recovered nothing (killed before the first
