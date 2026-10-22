@@ -8,6 +8,15 @@
  * reached disk) or exactly the document a clean open stores, and the store
  * must load without quarantining a file. With either engine setting.
  *
+ * The fixture's keyframe ids are unique and fixed. With PM.uid's random ids,
+ * its 252,000 keyframes shared an id about one run in three, and every open
+ * gives the second of a pair a new random id (app.ts, sanitizeProp): the
+ * clean open and each killed open then stored different documents at that
+ * one keyframe, though each recovered exactly what its own open stored.
+ * A mismatch prints the paths that differ, not two 57 MB strings.
+ *
+ * POWERMOVE_CRASH_SEED varies the kill moments (repeated runs).
+ *
  * The exhaustive version of this, every prefix of the file operations of an
  * open's checkpoint sequence, is the unit test
  * src/renderer/src/legacy/__tests__/project-checkpoint-crash.test.ts.
@@ -21,6 +30,7 @@ import path from 'node:path';
 import { expect, launchApp, test, type LaunchedApp } from './helpers/app';
 
 const LAYERS = 100;
+const SEED = Number(process.env.POWERMOVE_CRASH_SEED) || 0;
 const DURATION = 12;
 const FPS = 30;
 
@@ -33,6 +43,20 @@ function killMoments(seed: number, count: number): number[] {
     out.push(40 + Math.floor(((seed % 10_000) / 10_000) ** 2 * 6000));
   }
   return out.sort((a, b) => a - b);
+}
+
+/** Where two JSON documents differ: up to `limit` paths with short values. */
+function jsonDiff(a: string, b: string, limit = 12): string[] {
+  if (a === b) return [];
+  const out: string[] = [];
+  const short = (value: unknown) => value === undefined ? 'absent' : JSON.stringify(value).slice(0, 80);
+  const walk = (x: any, y: any, at: string) => {
+    if (out.length >= limit || Object.is(x, y)) return;
+    if (!x || !y || typeof x !== 'object' || typeof y !== 'object' || Array.isArray(x) !== Array.isArray(y)) { out.push(`${at || '/'}: ${short(x)} -> ${short(y)}`); return; }
+    for (const key of new Set([...Object.keys(x), ...Object.keys(y)])) walk(x[key], y[key], `${at}/${key}`);
+  };
+  walk(JSON.parse(a), JSON.parse(b), '');
+  return out.length ? out : ['(same values, different JSON text)'];
 }
 
 async function closeSoon(session: LaunchedApp): Promise<void> {
@@ -86,9 +110,10 @@ test('a crash at any moment of a large open recovers nothing or the opened docum
         const proj = PM.proj, frames = Math.round(dur * fps);
         for (let i = 0; i < layers; i++) {
           const shape = PM.mkLayer('shape', { name: `marker ${i}`, from: 0, dur, d: { shape: i % 2 ? 'ellipse' : 'rect', w: 40 + (i % 7) * 6, h: 30, color: '#3FA9F5', stroke: 0 } }, proj);
-          for (const [name, base] of [['position.x', 80], ['position.y', 60], ['rotation', 0], ['opacity', 70], ['scale.x', 100], ['scale.y', 100], ['skew', 0]] as const) {
+          for (const [c, [name, base]] of ([['position.x', 80], ['position.y', 60], ['rotation', 0], ['opacity', 70], ['scale.x', 100], ['scale.y', 100], ['skew', 0]] as const).entries()) {
             const prop = shape.p[name] ?? (shape.p[name] = PM.P(base));
-            prop.kf = Array.from({ length: frames }, (_, f) => PM.KF(f / fps, base + ((i * 13 + f * 3) % 50)));
+            // Unique, fixed ids: an open renames a duplicate at random (see the header).
+            prop.kf = Array.from({ length: frames }, (_, f) => ({ ...PM.KF(f / fps, base + ((i * 13 + f * 3) % 50)), i: `k${i}.${c}.${f}` }));
           }
           proj.layers.push(shape);
         }
@@ -124,7 +149,7 @@ test('a crash at any moment of a large open recovers nothing or the opened docum
     }
 
     const outcomes: Array<{ engine: boolean; ms: number; recovered: boolean }> = [];
-    const runs = [...killMoments(20261022, 9).map(ms => ({ engine: false, ms })), ...killMoments(7, 4).map(ms => ({ engine: true, ms })),
+    const runs = [...killMoments(20261022 + SEED, 9).map(ms => ({ engine: false, ms })), ...killMoments(7 + SEED, 4).map(ms => ({ engine: true, ms })),
       { engine: false, ms: -1 }, { engine: true, ms: -1 }];
     for (const [index, run] of runs.entries()) {
       const userData = path.join(dir, `kill-${index}`);
@@ -141,12 +166,12 @@ test('a crash at any moment of a large open recovers nothing or the opened docum
       } finally { await kill(session); }
       const result = await recovered(userData, run.engine);
       expect(result.quarantined, `kill ${index}`).toEqual([]);
-      if (result.json !== null) expect(result.json, `kill ${index} (${run.ms} ms, engine ${run.engine}) recovered another document`).toBe(reference);
+      if (result.json !== null) expect(jsonDiff(reference, result.json), `kill ${index} (${run.ms} ms, engine ${run.engine}) recovered another document`).toEqual([]);
       if (run.ms < 0) expect(result.json, `kill ${index}: a settled open must be recovered`).not.toBeNull();
       outcomes.push({ engine: run.engine, ms: run.ms, recovered: result.json !== null });
       await rm(userData, { recursive: true, force: true });
     }
-    console.log(`open crash outcomes ${JSON.stringify(outcomes)}`);
+    console.log(`open crash outcomes (seed ${SEED}) ${JSON.stringify(outcomes)}`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
