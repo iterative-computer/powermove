@@ -1623,3 +1623,9 @@ pm-wasm, pm-eval, pm-protocol, pm-node and pm-engine pass; pm-render
 `blender_snapshots` 2 and `headless` 12 pass. Vitest with
 `PM_WASM_REQUIRED=1` over the 3D, engine-doc, viewer, engine-connection
 and Blender areas: 601 passed, 2 skipped.
+
+200-reset stress without resizes (`PM_GPU_RESET_ITERATIONS=200`, the
+GPU process is killed during playback, paced at three losses per 31 s,
+with no view or window change between resets): 200/200 recovered, with 0
+renderer crashes, 0 page errors, and the final edit's pixel on screen
+(34.3 min, one worker, under the Electron lock).
