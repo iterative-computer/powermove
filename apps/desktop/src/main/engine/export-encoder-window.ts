@@ -12,7 +12,7 @@ import type { EncoderWindow } from './export-encoder';
 /** How long the page may take to load and answer `ready`. */
 const READY_MS = 30_000;
 
-export function openEncoderWindow(options: { preload: string; url: string }): Promise<EncoderWindow> {
+export function openEncoderWindow(options: { preload: string; url: string; log?: (level: 'info' | 'warn', message: string) => void }): Promise<EncoderWindow> {
   const window = new BrowserWindow({
     show: false,
     width: 64,
@@ -39,6 +39,10 @@ export function openEncoderWindow(options: { preload: string; url: string }): Pr
     ended = true;
     for (const listener of gone) listener(reason);
   };
+  // The page reports nothing on success; its warnings and errors go to main's log.
+  window.webContents.on('console-message', (event) => {
+    if (event.level === 'warning' || event.level === 'error') options.log?.('warn', `[export encoder] ${event.message}`);
+  });
   window.webContents.on('render-process-gone', (_event, details) => end(`the encoder process ${details.reason}`));
   window.on('closed', () => end('the encoder window closed'));
   const encoder: EncoderWindow = {

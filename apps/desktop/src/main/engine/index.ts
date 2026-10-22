@@ -326,7 +326,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const exportEncoders = new ExportEncoders({
     openWindow: () => openEncoderWindow({
       preload: path.join(options.mainDirectory, '../preload/exportEncoder.js'),
-      url: `${rendererUrl ?? 'app://powermove'}/export-encoder.html`
+      url: `${rendererUrl ?? 'app://powermove'}/export-encoder.html`,
+      log
     }),
     writeOutput: (file, bytes) => writeFile(file, bytes)
   });

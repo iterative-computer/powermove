@@ -155,7 +155,7 @@ class Encode {
 
 function serve(port: MessagePort): void {
   const encodes = new Map<string, Encode>();
-  const reply = (message: EncoderReply, transfer: Transferable[] = []) => port.postMessage(message, transfer);
+  const reply = (message: EncoderReply) => port.postMessage(message);
   let queue = Promise.resolve();
   const run = async (command: EncoderCommand): Promise<void> => {
     try {
@@ -188,7 +188,8 @@ function serve(port: MessagePort): void {
           encodes.delete(command.id);
           try {
             const bytes = await encode.finish();
-            reply({ type: 'file', seq: command.seq, bytes }, [bytes.buffer]);
+            // Copied, not transferred: a MessagePortMain takes no transferred buffers.
+            reply({ type: 'file', seq: command.seq, bytes });
           } finally { encode.close(); }
           return;
         }
