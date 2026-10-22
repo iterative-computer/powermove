@@ -36,3 +36,14 @@ private recovery files. Utility restart preserves them; app startup uses a fresh
 cache lifecycle. Recovery tests compare a deterministic extension's synchronous
 read/write/evaluation/render loop across SIGKILL with an uninterrupted run,
 including exact final document bytes and frame hashes.
+
+The preload copies the snapshot request field by field. It must forward the
+document's `nativeKernel` flag: without it, main answered every synchronous
+render of a native document with `needsDocument`, even without a crash.
+`e2e/engine-document-recovery.spec.ts` runs the same deterministic v1–3 loop
+twice: once uninterrupted, and once with the interactive utility SIGKILLed
+mid-loop. The first write, evaluation, and render after the kill run before
+the renderer has seen the port close (2026-10-22: the same generation,
+disconnected, 119 ms). Both runs end with 24 ordered edits, zero exceptions
+or fallbacks, equal revisions and frame hashes, and byte-identical final
+documents (four passes).

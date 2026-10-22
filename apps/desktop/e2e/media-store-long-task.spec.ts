@@ -2,9 +2,10 @@ import { expect, launchApp, test } from './helpers/app';
 
 /** With Use New Engine off, opened projects restore embedded media into the
  * page's IndexedDB store. A large project's open reply can block the page for
- * over a minute; when the store's first open was still pending across that
- * task, its timeout used to fail the restore and the project opened blank.
- * Each launch uses and removes its own temporary profile. */
+ * over a minute; the store's first open must not count that stall against
+ * its timeout, or the restore fails and the project opens blank
+ * (docs/engine/host-processes.md). Each launch uses and removes its own
+ * temporary profile. */
 test('the legacy media store survives a long main-thread task during its first open', async () => {
   const session = await launchApp();
   try {

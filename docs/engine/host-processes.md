@@ -439,6 +439,31 @@ open response after its caller releases it. Intermittent blank opens must still
 be counted separately; the lease fix does not establish the cause of another
 handled open failure without its error toast.
 
+Beta DECISION bug fix (2026-10-22, setting off): the large private project
+opened blank in 3 of 6 attempts with today's app; one was the reader expiry
+above. In the other two, the open reply's main-thread task (65 to 85 s)
+ended, and the document was dropped before hydration. Those runs predate
+toast capture, so the error is unknown. Engine opens, which restore embedded
+media through main rather than the page, never blanked.
+
+One candidate on that shared path is fixed. With the setting off, the open
+restores embedded media into the page's IndexedDB store. That store's first
+`indexedDB.open` had a five-second wall-clock timeout, which resolved the
+shared connection to nothing and failed every waiting write ("Could not
+restore … Check available disk space."). A main-thread stall counted against
+it, and a connection that opened after the timeout leaked. The timeout now
+counts only time in which the page could handle the answer: a late poll
+counts at most 500 ms. A late connection is closed. `legacy/core/media.test.ts`
+reproduces the timer-first ordering and keeps the bound.
+
+Live reproduction failed. The page was blocked 8 s during the first open,
+and also with main busy 3 to 20 s plus a 30 s page block. In every case
+Chromium ran the queued open answer before the overdue timer. So this fix is
+not established as the cause of the two blank opens.
+`e2e/media-store-long-task.spec.ts` keeps the blocked-page case as a
+regression test. The private harness now records every toast, the storage
+writes, and the open window; later blank opens will name their error.
+
 The ingestion reader admits one active document and two queued documents. A
 full queue answers `budgetExceeded` with `Retry::After(250 ms)`. Renderer and main
 resync callers honor that admission retry using the same snapshot and staged
