@@ -133,7 +133,9 @@ center-time video pixels. The project, transform sampling, shutter, shaders,
 and 16-sample blur stay unchanged. The capture records the actual video-frame
 timestamps at each upload and requires a second identical capture. Both the
 original and corrected PNGs, hashes, reason, owner decision, and evidence paths
-remain in the corpus metadata outside Git. No native pixels enter the recorder.
+remain in the corpus metadata outside Git. Every evidence file lives inside the
+capture (`references/COMPCLOSE-1/` and its `evidence/` folder), so the gate
+survives a cleared `/tmp`; both verifiers reject evidence outside the capture. No native pixels enter the recorder.
 Every substitution is logged, and any other project, time, or decision fails.
 The normal video bound remains 2 CV on patch interiors. The motion lane's
 historical stale-frame diagnostic continues reading the original PNG.
@@ -413,8 +415,11 @@ previously passing native render established for those samples.
 
 A fresh hidden capture from app 1.1.3 / Electron 44 on the same machine
 matches all ten stored opaque frames pixel for pixel, including both blurred
-video samples. Those references are current; replacing them with native
-center frames would hide an existing-project difference.
+video samples, so the original references faithfully record today's app.
+They were never replaced with native output. For the two blurred-video
+samples only, COMPCLOSE-1 (above) adds a second reference recaptured from
+today's legacy blur with the correct center frame uploaded; the originals
+stay as the record of the stale-upload bug.
 
 The clean integration baseline (`8d772dac8`, normal thin-LTO release profile)
 compares 354 frames and fails exactly those five. The historical release

@@ -116,7 +116,10 @@ The original `sample.png` record and file stay intact. Both the project record
 and manifest receive `sample.referenceSubstitution` with `id: "COMPCLOSE-1"`,
 `ownerDecision: "2026-10-19"`, a reason, `original` and `corrected` file records,
 and absolute `evidence` paths outside Git. The added PNG and provenance JSON
-live under `references/COMPCLOSE-1/` in that project. `verify` checks these
+live under `references/COMPCLOSE-1/` in that project; any further evidence
+(comparison images and measurements) goes in `references/COMPCLOSE-1/evidence/`.
+Evidence must be inside the capture: `verify` and the Rust corpus reject a
+path elsewhere (a `/tmp` file would vanish and break the gate later). `verify` checks these
 annotations alongside the original outputs; original capture byte totals stay
 unchanged. The general Rust corpus validates both PNGs' sizes, hashes, and
 dimensions before selecting corrected pixels, logs every application, and

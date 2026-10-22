@@ -9,7 +9,7 @@
  * project list. Files in the capture the manifest does not account for are
  * reported. Exits 1 on any problem.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { readFloat, sha256, type FileRecord } from './output';
@@ -82,8 +82,11 @@ export function verifyCapture(dir: string): VerifyResult {
           for (const evidence of substitution.evidence) {
             if (typeof evidence !== 'string' || !path.isAbsolute(evidence) || !existsSync(evidence) || !statSync(evidence).isFile()) problems.push(`${at}: missing absolute COMPCLOSE-1 evidence file`);
             else {
-              const relative = path.relative(dir, evidence);
-              if (!relative.startsWith('..') && !path.isAbsolute(relative)) listed.add(relative);
+              // Evidence travels with the capture: a temporary or other
+              // outside path would vanish and break the gate later.
+              const relative = path.relative(realpathSync(dir), realpathSync(evidence));
+              if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) problems.push(`${at}: COMPCLOSE-1 evidence is outside the capture: ${evidence}`);
+              else listed.add(relative);
             }
           }
         }

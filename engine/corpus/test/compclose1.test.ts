@@ -62,3 +62,19 @@ test('COMPCLOSE-1 annotations must agree in the project and manifest', () => {
     expect(verifyCapture(f.root).problems.some(p => p.includes('metadata differs'))).toBe(true);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
+
+test('COMPCLOSE-1 evidence must live in the capture, not a temporary directory', () => {
+  const f = fixture();
+  const outside = mkdtempSync(path.join(os.tmpdir(), 'pm-compclose1-evidence-'));
+  try {
+    const proof = path.join(outside, 'comparison.json');
+    writeFileSync(proof, '{"fixture":true}');
+    for (const sample of f.project.samples) sample.referenceSubstitution.evidence.push(proof);
+    writeFile(f.root, f.project.dir + '/project.json', JSON.stringify(f.project));
+    f.save();
+    expect(verifyCapture(f.root).problems.filter(p => p.includes('outside the capture')).length).toBe(2);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});

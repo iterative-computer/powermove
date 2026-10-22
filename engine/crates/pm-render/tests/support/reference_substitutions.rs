@@ -139,6 +139,14 @@ pub fn opaque_reference(
                 evidence.display()
             ));
         }
+        // Evidence travels with the capture; a temporary or other outside
+        // file would vanish and turn this gate into a later failure.
+        if !canonical.starts_with(&capture) {
+            return Err(format!(
+                "evidence must be inside the capture: {}",
+                evidence.display()
+            ));
+        }
     }
     // Decode the same bytes whose hashes were checked; no second file read
     // can substitute different pixels between verification and comparison.
@@ -212,7 +220,7 @@ mod tests {
             let corrected = capture.join("frames/corrected.png");
             super::super::write_png(&original, 480, 270, &[255, 0, 0, 255].repeat(480 * 270));
             super::super::write_png(&corrected, 480, 270, &[0, 255, 0, 255].repeat(480 * 270));
-            let evidence = root.0.join("evidence.json");
+            let evidence = capture.join("evidence.json");
             std::fs::write(&evidence, b"{\"ownerDecision\":\"2026-10-19\"}").unwrap();
             let metadata = json!({
                 "id": "COMPCLOSE-1", "ownerDecision": "2026-10-19",
@@ -357,10 +365,13 @@ mod tests {
     }
 
     #[test]
-    fn substitution_rejects_missing_relative_and_repository_evidence() {
+    fn substitution_rejects_missing_relative_outside_and_repository_evidence() {
         let mut fixture = Fixture::new();
+        let outside = fixture._root.0.join("comparison.json");
+        std::fs::write(&outside, b"{}").unwrap();
         for evidence in [
-            json!(fixture._root.0.join("missing.json")),
+            json!(fixture.capture.join("missing.json")),
+            json!(outside),
             json!("relative.json"),
             json!(repo_root().join("engine/Cargo.toml")),
         ] {
