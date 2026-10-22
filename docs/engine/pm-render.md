@@ -39,6 +39,11 @@ the authority.
 - `Renderer::headless()` or `Renderer::new(device, queue)`: one per engine. It
   keeps compiled pipelines, the target pool, media caches, the 3D programs,
   and the evaluator's caches across frames.
+  Fixed 2D, composite, resampling, mask, and text paint render pipelines now
+  compile per variant on first use. Each renderer owns the lazy entries;
+  there is no global device cache. Their one-shot factories release captured
+  shader/device/layout handles after compilation. Descriptors and shader
+  sources are unchanged. See [memory.md](memory.md) for attribution and gates.
 - `render(document, composition, tick, &RenderRequest, &dyn AssetResolver) ->
   Frame`: a new texture with premultiplied working values (Standard: E-encoded,
   Rec.709 primaries) at the request's precision and the region's size, the

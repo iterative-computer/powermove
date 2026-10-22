@@ -24,7 +24,17 @@ starts no engine process and behaves as before.
 |---|---|---|
 | Main | `apps/desktop/src/main/engine/` | Host services, supervision, port wiring |
 | Interactive engine | `utilityProcess` running `out/main/engine-process.js`, addon `pm-node` | Viewer sessions, playback (later lanes) |
-| Job engine | same entry, `POWERMOVE_ENGINE_PROCESS=job` | Exports, agent snapshots, job snapshot sessions; utility QoS |
+| Job engine | same entry, `POWERMOVE_ENGINE_PROCESS=job`, started on first request | Exports, agent snapshots, job snapshot sessions; utility QoS |
+
+An idle app starts only the interactive utility. `ensureReady('job')` shares
+one startup among concurrent callers, including media probes and agent work.
+It waits through negotiation, preserves the normal restart policy, cancels
+waiters on host shutdown, and reports a fatal addon load without repeatedly
+forking it. Late startup receives the current playback policy, memory lease,
+font replay, client ports, and direct engine peer connection. The job utility
+remains resident after use; safe retirement with live renderer ports remains
+open. Attribution, latency checks, and remaining memory gates are in
+[memory.md](memory.md).
 
 Main creates every `MessageChannelMain`:
 
