@@ -877,6 +877,34 @@ pub struct RenderStats {
     pub snapshot_us_max: u32,
     /// The revision of the newest frame presented.
     pub revision: Revision,
+    /// The session's audio playback health, once its audio started
+    /// (absent for a session that has not opened audio).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub audio: Option<AudioDiagnostics>,
+}
+
+/// A session's audio playback health in [`RenderStats`], for the status bar
+/// and the performance panel. Counters run since the session's audio
+/// started; a report goes out when any of them changes, paused or not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDiagnostics {
+    /// Why no output device opened (the run follows the host clock).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub error: Option<String>,
+    /// Distinct playback problems, oldest first (at most 16): media that
+    /// did not resolve, mix and transport errors, and voices dropped to
+    /// silence after their source missed the bounded wait (issue A3).
+    pub problems: Vec<String>,
+    /// Segments a missing source block held (each counted once).
+    pub starved_renders: Count,
+    /// Device buffers the mixer did not fill in time (audible gaps).
+    pub underruns: Count,
+    /// Output device cycles that overran their real-time deadline.
+    pub device_overloads: Count,
 }
 
 /// A viewer frame's tag: the frame a consumer asks about (the depth and id

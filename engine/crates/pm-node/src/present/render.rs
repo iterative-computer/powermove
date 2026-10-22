@@ -3422,8 +3422,12 @@ impl Thread {
                 self.transport(key, command, t);
             }
         }
-        if let Some(link) = self.audio.get(&key) {
-            let status = link.status();
+        let status = self.audio.get(&key).map(AudioLink::status);
+        if let Some(view) = self.views.get_mut(&key) {
+            // The renderer's status bar and performance panel (A5).
+            view.costs.audio(status.as_ref());
+        }
+        if let Some(status) = status {
             self.stats().audio.insert(view_name(key), status);
         }
         route == Route::Engine
@@ -3661,8 +3665,10 @@ impl Thread {
             let Some(view) = self.views.get_mut(&key) else {
                 return;
             };
+            // Before its pool arrives a view draws nothing, but its audio
+            // status still reports (below).
             if view.pool.is_none() {
-                return;
+                break;
             }
             let t = now();
             let phase = Self::phase(&self.config, &view.state);

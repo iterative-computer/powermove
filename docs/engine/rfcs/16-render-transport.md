@@ -245,7 +245,10 @@ after a GPU loss.
 
 `RenderStats { frames, timedFrames, lateSkipped, cpuUs, gpuUs, layers,
 frameUsAvg, programs, rasters, layerFailures, snapshots, snapshotUsMax,
-revision }` per session. `frameUsAvg` is today's `E.ms` average (0.85/0.15)
+revision, audio? }` per session. `audio` carries the session’s optional
+`{ error?, problems, starvedRenders, underruns, deviceOverloads }` diagnostics.
+Changes are reported even while paused and before the surface pool arrives,
+at most twice a second. `frameUsAvg` is today's `E.ms` average (0.85/0.15)
 of CPU plus GPU time.
 
 ## The TypeScript interfaces

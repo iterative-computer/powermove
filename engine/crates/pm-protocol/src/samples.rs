@@ -1426,6 +1426,15 @@ pub fn events() -> Vec<Envelope> {
             snapshots: Count::new(3).expect("count"),
             snapshot_us_max: 48_000,
             revision: rev(42),
+            audio: Some(crate::snapshot::AudioDiagnostics {
+                error: None,
+                problems: vec![
+                    "Audio decode exceeded 120 ms; missing voice plays as silence: music".into(),
+                ],
+                starved_renders: Count::new(4).expect("count"),
+                underruns: Count::ZERO,
+                device_overloads: Count::new(1).expect("count"),
+            }),
         })),
         event(Event::PreviewControl(crate::preview::PreviewControl {
             generation: seq(3), revision: rev(42), composition: "comp-1".into(),
