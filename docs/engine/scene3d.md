@@ -1310,14 +1310,96 @@ Queued, undrawn frames still close and release immediately. These lifetime
 corrections are independent of resolving the Chromium crash below.
 
 The round 9 renderer crash is symbolized against Electron 44.0.0 arm64's
-matching Breakpad module UUID. Its top frames are
-`WebGpuSharedImageWrapperCache::AcquireCachedWrapper`, wrapper leasing,
-`CreateExternalTexture`, and `GPUExternalTexture::FromVideoFrame` in the
-WebGPU presentation worker. In that Chromium source, a cached wrapper's
-`GetSharedImage()` returns null after its graphics context is lost, and
-`AcquireCachedWrapper` dereferences it without checking. The faulting read
-is at address 0x1c. This identifies the external-texture wrapper-cache
-failure, rather than a WASM worker or the frame transport worker; it does
-not establish which event lost that graphics context or prove a native
-IOSurface use-after-free. GPU-reset recovery remains a required stress
-gate; ordinary successful reruns do not resolve it.
+matching Breakpad module (UUID 4C4C448B-5555-3144-A179-5775D5EF8BF6). Its
+top frames are `WebGpuSharedImageWrapperCache::AcquireCachedWrapper`,
+`LeaseWebGpuSharedImageWrapper`, `CreateExternalTexture` and
+`GPUExternalTexture::FromVideoFrame`, called from
+`GPUDevice.importExternalTexture` in the presentation worker.
+
+Root cause (Chromium, not engine memory): `importExternalTexture` copies
+an RGBA VideoFrame into a `WebGpuSharedImageWrapper` leased from the
+device's wrapper cache. `WebGpuSharedImageWrapper::GetSharedImage()`
+returns null once that wrapper's raster context is lost, which happens
+on a GPU process restart (crash, kill, watchdog) or any loss of the
+worker's shared raster context. The cache dereferences the result without
+a check in two places:
+
+- `AcquireCachedWrapper`, at the next import. This is the round 9 and
+  round 10 app crash: a read at 0x1c.
+- `ReturnWebGpuSharedImageWrapper`, when `VideoFrame.close()` expires an
+  external texture. This is a read at 0x14.
+
+The loss is observable in JavaScript only asynchronously
+(`device.lost`), so no presenter can avoid importing in that window. No
+IOSurface, VideoFrame or engine-side release ordering is involved.
+
+Reproduction: a standalone Electron 44 page with a worker that imports
+F16 VideoFrames with `importExternalTexture`, killed every 2.5 s
+(`--disable-gpu-process-crash-limit`, domain blocking off). It crashed
+the renderer 10 times in 20 resets, every time with the
+`ReturnWebGpuSharedImageWrapper` signature above.
+
+Fix: the presentation draws through WebGL2 (`webgl-painter.ts`). It
+uploads the VideoFrame into an RGBA16F texture with `texImage2D` and
+draws it 1:1 into an RGBA16F drawing buffer in the canvas's display
+space. That path never touches the WebGPU wrapper cache. GL errors during
+the loss window retire the painter through the same loss path as before.
+`engine-frame-painter.spec.ts` proves that the drawing-buffer values equal
+the WebGPU painter's for 14 F16 cases in sRGB and P3, including values
+above 1.0, negative values, alpha and orientation. The same standalone
+loop on WebGL2 ran 200 resets with 0 crashes, 0 errors and draws resuming
+after every reset. The app loop (`engine-present-recovery.spec.ts`,
+`PM_GPU_RESET_ITERATIONS=200`) kills the GPU process during playback. It
+is paced so at most three losses land in 30 s, because beyond that the
+presentation deliberately stops. It runs with Chromium's 3D-API domain
+blocking off: after repeated resets that blocking also disables today's
+engine canvas ("WebGL unavailable"), whichever painter is used.
+
+On-screen tone mapping: the WebGPU canvas was configured with `extended`
+tone mapping for `rgbaf16` pools. Chromium 152 exposes no tone-mapping
+control for an OffscreenCanvas WebGL drawing buffer. Drawing-buffer values
+above 1.0 are kept exactly, and today's (8-bit WebGL) viewer never showed
+them. Whether the compositor shows them as EDR is not measured here:
+capturePage returns 8-bit.
+
+Frames that fail to render: a refused scene (over the two million
+vertex budget) used to leave the paused view dirty. The presenter then
+re-rendered and logged the same failure at every turn. Round 9's build did
+this too: 794 attempts in one paired run. In a run with the allocation
+inventory enabled, 1543 attempts came with +900 MiB in the interactive
+engine within seconds. The failure is now logged once, and the frame is
+drawn again at the next edit, view or transport change, as today.
+`scene3d-budget-parity.spec.ts` asserts at most 8 render errors after the
+refusal. The snapshot completion thread
+now runs at the presenter's user-interactive QoS.
+
+Paired measurement, round 10: five interleaved fresh-app pairs per cell
+(`scene3d-budget-parity.spec.ts`, 600k vertices x3, no cap). Both routes
+are sampled once the viewer shows the document. "Before" is round 9's
+engine and WASM; "after" is this branch. Both use the same app build. Load
+average was 12–14. Native import deltas (settled baseline) were 192.9 MiB
+sparse and 192.8 MiB dense, against legacy 118.7/132.4 MiB (ratios
+1.63/1.46). Round 9's engine measured 198.2/210.1 MiB.
+
+Import delta by process (native vs legacy, MiB):
+
+| Process | Native | Legacy |
+|---|---|---|
+| Interactive engine | +56–60 | none |
+| Main | +29 | +9 |
+| Renderer | +101–105 | +72–86 |
+| GPU process | +3.5 | +38 |
+
+The engine's share is the depth/ID and coverage pool the 3D chrome asks
+for at import (8 RGBA16F stage-size surfaces, 76 MB nominal) and the
+9.6 MB mesh. The renderer's extra is mainly WASM linear memory: about
+48 MB that never shrinks, against 15.5 MB live (the import and picker
+build peak at 44 MB). Legacy's GPU buffers sit in the GPU process as
+unmapped graphics memory, which working sets do not count.
+
+Capture p50 was 3.3/3.1 ms against legacy 1.3/1.1 ms; p95 was 3.4/3.9 ms
+against 5.3/7.0 ms. Of the native p50, the engine's render and readback is
+2.2–2.3 ms and main's answer 2.7 ms. Round 9's synchronous readback
+measured 3.1/2.7 ms in the same interleaved runs. The asynchronous ring
+frees the presenter during the GPU wait, but a single synchronous capture
+pays its thread hand-off (about 0.2 ms).
