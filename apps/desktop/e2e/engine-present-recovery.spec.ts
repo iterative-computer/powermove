@@ -102,7 +102,7 @@ test.describe('Use New Engine: engine presentation recovery', () => {
     await openEngineViewer(session);
     const pid = await killGpuProcess(session);
     // The page's WebGL context is lost and restored; the presentation makes
-    // a new WebGPU device for its canvas.
+    // a new F16 painter for its canvas.
     await expect.poll(() => session.app.evaluate(({ app }) => app.getAppMetrics().find((m) => m.type === 'GPU')?.pid ?? 0), { timeout: 20_000 }).not.toBe(pid);
     // Pool replacements after the crash release the old imports.
     for (const width of [1180, 1240, 1200]) {
@@ -124,14 +124,18 @@ test.describe('Use New Engine: engine presentation recovery', () => {
       const [r, g, b] = await stagePixel(session, center.x, center.y);
       return Math.max(Math.abs(r! - 0x90), Math.abs(g! - 0x32), Math.abs(b! - 0x20));
     }, { timeout: 10_000 }).toBeLessThanOrEqual(4);
-    // Late releases of the old imports settle within a few seconds.
-    await page.waitForTimeout(3000);
+    // Observe retirement completion rather than sleeping through each run.
+    await expect.poll(async () => {
+      const status = await bridgeStatus(session);
+      return status.allReleased === status.retired;
+    }, { timeout: 10_000 }).toBe(true);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
   test('surface transfers that time out on main and land late are released once, without page errors (D3)', async ({ session }) => {
     const { page } = session;
     await openEngineViewer(session);
+    const initialSlots = await page.evaluate(() => (window as any).__powermoveTestBridge.frameBridge.stats().held);
     // The next pool's first transfer meets a renderer whose main thread is
     // busy for 1.8 s: main's 1000 ms transfer timeout fires for the
     // transfers queued behind it, the bridge sends them again, and the
@@ -154,7 +158,7 @@ test.describe('Use New Engine: engine presentation recovery', () => {
     // Another pool retires the one delivered twice.
     await page.waitForTimeout(1500);
     await resizeViewer(session, 1260);
-    await expect.poll(() => bridgeStatus(session).then((s) => s.retired), { timeout: 20_000 }).toBeGreaterThanOrEqual(16);
+    await expect.poll(() => bridgeStatus(session).then((s) => s.retired), { timeout: 20_000 }).toBeGreaterThanOrEqual(initialSlots * 2);
     await page.waitForTimeout(2000);
     const bridge = await bridgeStatus(session);
     const receiver = await page.evaluate(() => (window as any).__powermoveTestBridge.frameBridge.stats());
