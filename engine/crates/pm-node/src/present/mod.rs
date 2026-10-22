@@ -985,6 +985,7 @@ mod tests {
             vsync: None,
             depth_id: Some(true),
             chrome_selection: None,
+            canvas: None,
         }
     }
 

@@ -303,3 +303,36 @@ and optional editor `camera`. Solid/Wireframe, playback, and viewerless
 and may be Ready with no `frameSeq`, after the native cache contains all
 requested surfaces. A regular paused Material/Rendered request still completes
 only on the matching presented frame. Render requests never pause or seek.
+
+### Version note: optional viewer canvas (decision V1, 2026-10-19)
+
+`ViewerState.canvas?: ViewerCanvas | null` (Rust `canvas:
+Option<ViewerCanvas>`, `#[serde(default)]`) is the WebGL canvas today's
+viewer draws the view into:
+
+```rust
+pub struct ViewerCanvas {
+    pub width: u32,  // backing size: previewRenderSize, the explicit
+    pub height: u32, // preview resolution, or the crop's renderWidth × renderHeight
+    pub crop: Rect,  // the composition part it holds (the whole composition, or the crop)
+    pub css: Rect,   // its CSS box in stage CSS pixels
+}
+```
+
+With it the engine renders the viewer frame at that canvas's size and
+today's `outputScale` (`width / crop.width`), and scales it into the box
+snapped to whole device pixels with bilinear sampling, as Chromium shows
+today's canvas (docs/engine/bridge.md, "Today's viewer canvas"). Absent or
+null: the composition at zoom × DPR × the preview resolution, as before.
+`width` and `height` 1..16384, `crop` and `css` finite with positive size
+(`ViewerState::validate`). A change of it is a new view (`viewSeq`). It
+replaces the `svgScale` field this branch first added, so the branch moves
+the build id once (`protocol-8433dea27e348b5a`); addons and TypeScript are
+rebuilt together.
+
+### Version note: chrome selection and viewer canvas together (3D merge, 2026-10-22)
+
+`ViewerState` carries both optional fields above: `chromeSelection` (3D
+chrome) and `canvas` (decision V1). Each keeps its own meaning; neither
+depends on the other. The combined contract builds as
+`protocol-50a5c6ee43a404de`.

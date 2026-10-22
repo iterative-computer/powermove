@@ -5071,6 +5071,7 @@ impl Thread {
             output_size: control.size.ok_or("The preview has no composition size.")?,
             scale: None,
             region: None,
+            origin: None,
             precision: pm_protocol::color::Precision::Float16,
             depth_id: false,
             background: true,
@@ -5452,6 +5453,7 @@ impl Thread {
             },
             sampling: pm_render::sampling::Sampling::Final,
             video_end: pm_render::VideoEnd::of(purpose),
+            origin: None,
         };
         if needs_blender {
             match blender_frames(renderer, doc, &job, &request, self.blender.as_deref()) {

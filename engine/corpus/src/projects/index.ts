@@ -13,14 +13,17 @@ import { renderEffectProjects } from './render-effects';
 import { shapeProjects } from './shapes';
 import { spaceProjects } from './space';
 import { textProjects } from './text';
+import { textLevel2Projects } from './text-level2';
 import { timeProjects } from './time';
 
 export type { CorpusProject } from './common';
+export { textLevel2Projects };
 
-/** Every synthetic corpus project, in a stable order. */
+/** Every synthetic corpus project, including native level 2 typography,
+ * in a stable order. Level 2 pixels also have a dedicated CoreText gate. */
 export function allProjects(): CorpusProject[] {
   const projects = [
-    ...layerProjects(), ...shapeProjects(), ...textProjects(), ...animationProjects(),
+    ...layerProjects(), ...shapeProjects(), ...textProjects(), ...textLevel2Projects(), ...animationProjects(),
     ...compositingProjects(), ...effectProjects(), ...timeProjects(), ...spaceProjects(), ...renderProjects(), ...renderEffectProjects(), ...compositeProjects(), ...motionProjects(), ...compcloseProjects(), ...compclose3Projects(),
   ];
   const ids = new Set<string>();

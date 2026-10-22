@@ -196,3 +196,83 @@ pub fn without_text(doc: &pm_model::Document) -> pm_model::Document {
     }
     pm_model::Document::new(Some(root), doc.revision() + 1)
 }
+
+/// The corpus ids the native level 2 semantic gate judges
+/// (`tests/text_level2_semantics.rs`, over the shared fixture).
+pub fn semantic_gate_ids() -> std::collections::BTreeSet<String> {
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../../../../corpus/fixtures/text-level2.json"))
+            .expect("the level 2 corpus fixture");
+    cases
+        .iter()
+        .map(|c| c["id"].as_str().expect("a case id").to_owned())
+        .collect()
+}
+
+/// Level 2 text documents a legacy capture holds. Today's engine draws them
+/// at level 1, so the capture is no level 2 reference: a parity gate routes
+/// them here instead of comparing pixels, and every routed project must be
+/// one the semantic gate judges. Routing is counted, printed and asserted;
+/// nothing is skipped silently.
+#[derive(Default)]
+pub struct Level2Routes {
+    gate: std::collections::BTreeSet<String>,
+    /// Routed project label to its level 2 text layer ids.
+    pub routed: std::collections::BTreeMap<String, Vec<String>>,
+    /// Routed projects the semantic gate does not judge.
+    uncovered: Vec<String>,
+}
+
+impl Level2Routes {
+    pub fn new() -> Self {
+        Self::with_gate(semantic_gate_ids())
+    }
+
+    pub fn with_gate(gate: std::collections::BTreeSet<String>) -> Self {
+        Self {
+            gate,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the project's document holds level 2 text (recorded under
+    /// `label`); `name` is its corpus id.
+    pub fn route(&mut self, label: &str, name: &str, doc: &pm_model::Document) -> bool {
+        let layers = pm_eval::text_level2::level2_text_layers(doc);
+        if layers.is_empty() {
+            return false;
+        }
+        if !self.gate.contains(name) {
+            self.uncovered.push(label.to_owned());
+        }
+        self.routed.insert(label.to_owned(), layers);
+        true
+    }
+
+    /// One failure per routed project the semantic gate does not judge.
+    pub fn failures(&self) -> Vec<String> {
+        self.uncovered
+            .iter()
+            .map(|label| {
+                format!(
+                    "{label}: level 2 text with no legacy reference, and the semantic gate (tests/text_level2_semantics.rs) does not judge it"
+                )
+            })
+            .collect()
+    }
+
+    pub fn report(&self) {
+        println!(
+            "\nlevel 2 text routed to the semantic gate (no legacy reference): {} projects",
+            self.routed.len()
+        );
+        for (label, layers) in &self.routed {
+            let covered = !self.uncovered.contains(label);
+            println!(
+                "  {label:<44} layers {}{}",
+                layers.join(", "),
+                if covered { "" } else { "  NOT JUDGED" }
+            );
+        }
+    }
+}

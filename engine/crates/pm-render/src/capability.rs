@@ -454,15 +454,9 @@ fn check_composition(
         // Level 2 content of every layer type is drawn: shapes, solids, and
         // SVG images (`crate::vector`), image, video, precomp, shader, and
         // extension raster content resampled (`crate::sampling`), text and
-        // captions at output resolution (`crate::text`, which names the
-        // level 2 text it does not lay out yet), and layers that draw
+        // captions at output resolution (`crate::text` and shared
+        // `pm_eval::text_level2` geometry), and layers that draw
         // nothing of their own.
-        if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0)
-            && ty == "text"
-            && let Some(why) = level2_text_gap(layer)
-        {
-            add(layer, Feature::Text(why.into()));
-        }
         if !fonts && matches!(ty.as_str(), "text" | "captions") {
             add(
                 layer,
@@ -559,25 +553,6 @@ fn any_member(n: &Node, name: &str, test: &dyn Fn(&Node) -> bool) -> bool {
         NodeKind::Array(list) => list.iter().any(|v| any_member(v, name, test)),
         _ => false,
     }
-}
-
-/// What `crate::text` does not lay out at `compat` level 2 yet (its
-/// `text_layer_level2` checks): animated or range-styled text and
-/// typography anchoring.
-fn level2_text_gap(layer: &Node) -> Option<&'static str> {
-    let d = node::member(Some(layer), "d");
-    let has = |key: &str| {
-        node::member(d, key)
-            .map(|n| node::get(n, b"length").truthy())
-            .unwrap_or(false)
-    };
-    if has("animators") || has("styles") {
-        return Some("animated or range-styled text at compat level 2");
-    }
-    if node::member(d, "fontAnchorBounds").is_some_and(|b| node::truthy(Some(b))) {
-        return Some("typography anchoring at compat level 2");
-    }
-    None
 }
 
 /// Whether any group enclosing `layer` (its `group` chain within `layers`)

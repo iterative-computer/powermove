@@ -17,7 +17,6 @@
 //! `{"host"}`, `{"fonts"}`, `{"ink"}`).
 
 use pm_eval::retime::Retiming;
-use pm_eval::text_geom::text_content;
 use pm_eval::{JsThrow, JsValue, Scope};
 use pm_model::{Node, Value};
 use pm_text::compat::{GlyphLayout, Unit};
@@ -161,8 +160,9 @@ pub(crate) fn dispatch<'d>(
                 inner: &mut fonts.measure,
                 ink: false,
             };
-            let layout = try_js!(scope.text_layout(l, t, &mut probe));
+            let layout = scope.text_layout(l, t, &mut probe);
             text_checks!(probe);
+            let layout = try_js!(layout);
             glyph_layout(out, &layout);
         }
         "textRasterGeometry" => {
@@ -172,8 +172,9 @@ pub(crate) fn dispatch<'d>(
                 inner: &mut fonts.measure,
                 ink: false,
             };
-            let g = try_js!(scope.text_geometry(l, t, &mut probe));
+            let g = scope.text_geometry(l, t, &mut probe);
             text_checks!(probe);
+            let g = try_js!(g);
             let mut first = true;
             out.raw("{");
             for (k, v) in [
@@ -209,11 +210,15 @@ pub(crate) fn dispatch<'d>(
                 ink: false,
             };
             let d = try_js!(scope.resolved_text_content(l, t));
-            let layout =
-                pm_eval::text_geom::TextMeasure::glyph_layout(&mut probe, &text_content(&d));
+            let layout = scope.text_layout(l, t, &mut probe);
             text_checks!(probe);
+            let layout = try_js!(layout);
             let state = try_js!(scope.text_animation_state(l, t, &layout));
-            let glyphs = scope.animated_glyphs(&d, &layout, &state);
+            let glyphs = if pm_eval::text_level2::is_level2(l) {
+                scope.level2_glyphs(&d, &layout, &state)
+            } else {
+                scope.animated_glyphs(&d, &layout, &state)
+            };
             // The style keys every glyph reports: base typography plus every
             // key a range style sets (the capture's `styleKeys`).
             let mut keys: Vec<pm_model::JsString> =

@@ -192,6 +192,24 @@ pub(crate) struct InkProbe<'m> {
 }
 
 impl pm_eval::text_geom::TextMeasure for InkProbe<'_> {
+    fn require_ink(&mut self) {
+        self.ink = true;
+    }
+    fn level2(
+        &mut self,
+        d: &pm_text::compat::TextContent,
+        spans: &[pm_text::level2::StyleSpan],
+    ) -> Result<pm_eval::text_level2::Shaped, String> {
+        self.inner.level2(d, spans)
+    }
+    fn level2_ink(
+        &mut self,
+        data: &pm_text::font::FontBytes,
+        run: &pm_text::level2::Run,
+        glyph: u32,
+    ) -> Option<[f64; 4]> {
+        self.inner.level2_ink(data, run, glyph)
+    }
     fn measure_lines(
         &mut self,
         d: &pm_text::compat::TextContent,
@@ -1502,7 +1520,6 @@ impl Engine {
                         if !host.wanted.is_empty() {
                             return Err(Unanswered::Models(host.wanted));
                         }
-                        let b = try_js!(b);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1510,7 +1527,7 @@ impl Engine {
                         if ink && !outlines {
                             return Err(Unanswered::Ink);
                         }
-                        match b {
+                        match try_js!(b) {
                             Some(b) => {
                                 out.raw("{");
                                 bounds_reply(out, &b);
@@ -1525,7 +1542,6 @@ impl Engine {
                         if !host.wanted.is_empty() {
                             return Err(Unanswered::Models(host.wanted));
                         }
-                        let b = try_js!(b);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1533,7 +1549,7 @@ impl Engine {
                         if ink && !outlines {
                             return Err(Unanswered::Ink);
                         }
-                        match b {
+                        match try_js!(b) {
                             Some(b) => {
                                 out.raw("{");
                                 bounds_reply(out, &b);
@@ -1556,7 +1572,6 @@ impl Engine {
                         if !host.wanted.is_empty() {
                             return Err(Unanswered::Models(host.wanted));
                         }
-                        let hit = try_js!(hit);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1564,7 +1579,7 @@ impl Engine {
                         if ink && !outlines {
                             return Err(Unanswered::Ink);
                         }
-                        match hit {
+                        match try_js!(hit) {
                             Some(l) => indexes(out, layers, &[l]),
                             None => out.raw("null"),
                         }
@@ -1572,10 +1587,18 @@ impl Engine {
                     "textLayout" => {
                         let l = layer!();
                         let d = try_js!(scope.resolved_text_content(l, t));
-                        let caret = probe.inner.compat().caret_layout(&text_content(&d));
+                        let content = text_content(&d);
+                        let caret = if pm_eval::text_level2::is_level2(l) {
+                            scope
+                                .level2_text(l, t, &mut probe, false, false)
+                                .map(|frame| frame.caret_layout(&content))
+                        } else {
+                            Ok(probe.inner.compat().caret_layout(&content))
+                        };
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
                         }
+                        let caret = try_js!(caret);
                         match serde_json::to_string(&caret) {
                             Ok(json) => out.raw(&json),
                             Err(e) => return Ok(Err(JsThrow::type_error(e.to_string()))),
@@ -1583,7 +1606,7 @@ impl Engine {
                     }
                     _ => {
                         let l = layer!();
-                        let r = try_js!(scope.text_raster(l, t, &mut probe));
+                        let r = scope.text_raster(l, t, &mut probe);
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1591,6 +1614,7 @@ impl Engine {
                         if ink && !outlines {
                             return Err(Unanswered::Ink);
                         }
+                        let r = try_js!(r);
                         let mut first = true;
                         out.raw("{");
                         for (k, v) in [

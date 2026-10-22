@@ -152,7 +152,7 @@ pub fn capture_font_anchor(
         l.clone()
     };
     let selection = edit.read_with(&measured, |s, target| {
-        Ok(s.text_raster(target, time, measure)?.selection)
+        s.text_anchor_box(target, time, measure)
     })?;
     edit.set(
         join(&d_path, &[key("fontAnchorBounds")]),
@@ -181,8 +181,8 @@ pub fn anchor_reference(
             if !node::is_str(node::member(Some(l), "type"), "text") {
                 return Ok(None);
             }
-            let raster = edit.read(|s| s.text_raster(&s.layers()[layer], time, measure))?;
-            Ok(Some(raster.selection.rect()))
+            let anchor = edit.read(|s| s.text_anchor_box(&s.layers()[layer], time, measure))?;
+            Ok(Some(anchor.rect()))
         }
         Kind::Size => edit.read(|s| {
             let l = &s.layers()[layer];
@@ -278,7 +278,7 @@ pub fn font_offset(
     let plain = detached(l, &patch);
     edit.read_with(&plain, |s, plain| {
         let l = &s.layers()[layer];
-        let type_bounds = s.text_raster(plain, time, measure)?.selection;
+        let type_bounds = s.text_anchor_box(plain, time, measure)?;
         let ax = s.channel(l, "anchor.x", time)?;
         let ay = s.channel(l, "anchor.y", time)?;
         let o = font_anchor_offset(

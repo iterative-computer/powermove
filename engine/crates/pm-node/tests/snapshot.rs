@@ -799,6 +799,7 @@ fn viewer_state() -> ViewerState {
         vsync: None,
         depth_id: None,
         chrome_selection: None,
+        canvas: None,
     }
 }
 

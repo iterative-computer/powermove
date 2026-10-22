@@ -497,10 +497,8 @@ pub fn routing_forbidden(feature: &pm_render::Feature) -> bool {
         | Feature::CompatLevel2
         | Feature::RequiresEngine
         | Feature::ProjectColor => true,
-        // Level 2 text the text renderer does not lay out yet
-        // (`capability::level2_text_gap`) is compat level 2 content: it is
-        // reported as text so the text lane owns it, and it is forbidden
-        // like every other level 2 route.
+        // Native-only text has no semantic routing exception. The level 2
+        // semantic corpus exercises this predicate as well as rendering.
         Feature::Text(why) => why.contains("compat level 2"),
         _ => false,
     }

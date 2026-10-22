@@ -203,6 +203,7 @@ fn viewer_state(view_seq: u64) -> ViewerState {
         vsync: None,
         depth_id: None,
         chrome_selection: None,
+        canvas: None,
     }
 }
 

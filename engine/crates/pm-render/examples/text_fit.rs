@@ -385,6 +385,7 @@ mod fit {
                     fake_bold: 0.0,
                     fake_bold_y: 1.0,
                     stroke: base.stroke,
+                    ..base.clone()
                 };
                 renderer.text().set_profile(plain);
                 for c in &cases {
