@@ -5206,22 +5206,22 @@ impl Thread {
         let rendered = {
             let mut renderer = renderer.svg_waiting();
             renderer
-                .render_into(
+                .render_snapshot_into(
                     doc.document(),
                     job.request.composition.as_str(),
                     job.request.time,
                     &request,
                     doc.media(),
                     &target,
-                    None,
                 )
-                .and_then(|_| {
+                .and_then(|(_, rows)| {
                     let pixels = super::snapshot::read_rgba8(
                         readback,
                         renderer.device(),
                         renderer.queue(),
                         &target.texture,
                         job.request.pixels,
+                        rows,
                     );
                     readback.trim(MAX_CACHED_SNAPSHOT_TARGET_BYTES);
                     Ok((target.width(), target.height(), pixels?))

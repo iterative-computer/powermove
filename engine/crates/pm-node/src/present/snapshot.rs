@@ -439,16 +439,17 @@ pub fn read_rgba8(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     pixels: SnapshotPixels,
+    rows: pm_render::SnapshotRows,
 ) -> Result<Vec<u8>, pm_gpu::readback::ReadbackError> {
     match texture.format() {
         wgpu::TextureFormat::Rgba16Float => {
             readback.with_mapped_rows(device, queue, texture, |data, row, stride, height| {
-                encode_rgba8_rows(data, row, stride, height, pixels)
+                encode_rgba8_rows(data, row, stride, height, pixels, rows)
             })
         }
         wgpu::TextureFormat::Rgba32Float => {
             readback.with_mapped_rows(device, queue, texture, |data, row, stride, height| {
-                encode_rgba8_f32_rows(data, row, stride, height, pixels)
+                encode_rgba8_f32_rows(data, row, stride, height, pixels, rows)
             })
         }
         other => Err(pm_gpu::readback::ReadbackError::Format(other)),
@@ -461,10 +462,15 @@ fn encode_rgba8_f32_rows(
     stride: usize,
     height: usize,
     pixels: SnapshotPixels,
+    rows: pm_render::SnapshotRows,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(row / 4 * height);
     for y in 0..height {
-        for px in raw[y * stride..y * stride + row].chunks_exact(16) {
+        let source_y = match rows {
+            pm_render::SnapshotRows::TopDown => y,
+            pm_render::SnapshotRows::Gl => height - 1 - y,
+        };
+        for px in raw[source_y * stride..source_y * stride + row].chunks_exact(16) {
             let c = |i: usize| f32::from_le_bytes(px[i..i + 4].try_into().expect("four bytes"));
             push_rgba8(&mut out, [c(0), c(4), c(8), c(12)], pixels);
         }
@@ -478,10 +484,19 @@ fn encode_rgba8_rows(
     stride: usize,
     height: usize,
     pixels: SnapshotPixels,
+    rows: pm_render::SnapshotRows,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(row / 2 * height);
     for y in 0..height {
-        append_rgba8(&half[y * stride..y * stride + row], pixels, &mut out);
+        let source_y = match rows {
+            pm_render::SnapshotRows::TopDown => y,
+            pm_render::SnapshotRows::Gl => height - 1 - y,
+        };
+        append_rgba8(
+            &half[source_y * stride..source_y * stride + row],
+            pixels,
+            &mut out,
+        );
     }
     out
 }
@@ -921,15 +936,19 @@ mod tests {
         let mut padded = top.clone();
         padded.extend_from_slice(&[0xa5; 8]);
         padded.extend_from_slice(&bottom);
-        let packed = [top, bottom].concat();
+        let packed = [top.clone(), bottom.clone()].concat();
         for pixels in [
             SnapshotPixels::Opaque,
             SnapshotPixels::Premultiplied,
             SnapshotPixels::Straight,
         ] {
             assert_eq!(
-                encode_rgba8_rows(&padded, 8, 16, 2, pixels),
+                encode_rgba8_rows(&padded, 8, 16, 2, pixels, pm_render::SnapshotRows::TopDown),
                 encode_rgba8(&packed, pixels)
+            );
+            assert_eq!(
+                encode_rgba8_rows(&padded, 8, 16, 2, pixels, pm_render::SnapshotRows::Gl),
+                encode_rgba8(&[bottom.clone(), top.clone()].concat(), pixels)
             );
         }
     }
@@ -946,10 +965,19 @@ mod tests {
         for value in bottom {
             padded.extend_from_slice(&value.to_le_bytes());
         }
-        let expected = encode_rgba8_f32(&[top, bottom].concat(), SnapshotPixels::Straight);
-        assert_eq!(
-            encode_rgba8_f32_rows(&padded, 16, 32, 2, SnapshotPixels::Straight),
-            expected
-        );
+        for pixels in [
+            SnapshotPixels::Opaque,
+            SnapshotPixels::Premultiplied,
+            SnapshotPixels::Straight,
+        ] {
+            assert_eq!(
+                encode_rgba8_f32_rows(&padded, 16, 32, 2, pixels, pm_render::SnapshotRows::TopDown,),
+                encode_rgba8_f32(&[top, bottom].concat(), pixels)
+            );
+            assert_eq!(
+                encode_rgba8_f32_rows(&padded, 16, 32, 2, pixels, pm_render::SnapshotRows::Gl),
+                encode_rgba8_f32(&[bottom, top].concat(), pixels)
+            );
+        }
     }
 }

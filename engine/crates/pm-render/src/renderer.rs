@@ -13,7 +13,7 @@ pub use layer_raster::{LayerPixels, LayerRaster};
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};
 use pm_model::Document;
-use pm_protocol::color::Precision;
+use pm_protocol::color::{Precision, WorkingEncoding};
 use pm_protocol::common::Ticks;
 
 use crate::assets::AssetResolver;
@@ -141,6 +141,14 @@ pub struct Rendered {
     /// the frame again when they arrive. Frames that may not substitute
     /// fail with [`RenderError::SvgRastersPending`] instead.
     pub svg_misses: Vec<crate::vector::svg_rasters::SvgRasterNeed>,
+}
+
+/// Row order in a snapshot target. `Gl` rows are inverted while the mapped
+/// readback is encoded; other callers always receive top-down targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotRows {
+    TopDown,
+    Gl,
 }
 
 /// One drawn quad of a top-level layer ([`Rendered::quads`]).
@@ -1261,6 +1269,66 @@ impl Renderer {
         target: &Target,
         depth_id: Option<&Target>,
     ) -> Result<Rendered, RenderError> {
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            depth_id,
+            SnapshotRows::TopDown,
+        )
+    }
+
+    /// Renders a fresh presenter snapshot. In Standard working encoding, the
+    /// target keeps GL row order so its mapped readback can reverse rows
+    /// without recording a second render pass. Linear encoding still uses
+    /// its GPU color-conversion and flip pass.
+    pub fn render_snapshot_into(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        let rows = if self.bracket.is_none()
+            && document
+                .root()
+                .and_then(|root| project_settings(root).ok())
+                .is_some_and(|color| color.working == WorkingEncoding::Standard)
+        {
+            SnapshotRows::Gl
+        } else {
+            SnapshotRows::TopDown
+        };
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+            rows,
+        )
+        .map(|rendered| (rendered, rows))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_into_rows(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        depth_id: Option<&Target>,
+        rows: SnapshotRows,
+    ) -> Result<Rendered, RenderError> {
         if self.fallback_host.is_none() {
             return self.render_into_svg(
                 document,
@@ -1270,6 +1338,7 @@ impl Renderer {
                 assets,
                 target,
                 depth_id,
+                rows,
             );
         }
         self.effects.fallback.retries.clear();
@@ -1285,6 +1354,7 @@ impl Renderer {
                 assets,
                 target,
                 depth_id,
+                rows,
             );
             let Some(host) = self.fallback_host.clone() else {
                 break result;
@@ -1317,6 +1387,7 @@ impl Renderer {
         assets: &dyn AssetResolver,
         target: &Target,
         depth_id: Option<&Target>,
+        rows: SnapshotRows,
     ) -> Result<Rendered, RenderError> {
         for _ in 0..3 {
             match self.render_into_once(
@@ -1327,6 +1398,7 @@ impl Renderer {
                 assets,
                 target,
                 depth_id,
+                rows,
             ) {
                 Err(RenderError::SvgRastersPending(needs)) if self.svg_source.is_some() => {
                     let source = self.svg_source.clone().expect("checked");
@@ -1358,6 +1430,7 @@ impl Renderer {
             assets,
             target,
             depth_id,
+            rows,
         )
     }
 
@@ -1371,12 +1444,14 @@ impl Renderer {
         assets: &dyn AssetResolver,
         target: &Target,
         depth_id: Option<&Target>,
+        rows: SnapshotRows,
     ) -> Result<Rendered, RenderError> {
         request.validate()?;
         let root = document
             .root()
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
+        debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
         let precision = effective_precision(request.precision, color.precision);
         if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
@@ -1515,15 +1590,18 @@ impl Renderer {
                 failures: Vec::new(),
                 unsupported: Vec::new(),
             };
-            // Frames are drawn in GL row order and flipped once into the
-            // caller's top-down target (see shaders/composite.wgsl).
-            let gl_rows = exec.pool.take(
-                exec.device,
-                size.width,
-                size.height,
-                target.format(),
-                pm_gpu::target::working_usage(),
-            );
+            // Generic renders flip GL rows into the caller's top-down target.
+            // Standard snapshots draw directly into their readback target.
+            let pooled_gl_rows = (rows == SnapshotRows::TopDown).then(|| {
+                exec.pool.take(
+                    exec.device,
+                    size.width,
+                    size.height,
+                    target.format(),
+                    pm_gpu::target::working_usage(),
+                )
+            });
+            let gl_rows = pooled_gl_rows.as_ref().unwrap_or(target);
             // The viewer's frames draw from the kept bottom of the last one
             // when they start with the same draws (`crate::frame_prefix`).
             let (resolved, kept_legend) = if prefix {
@@ -1544,13 +1622,13 @@ impl Renderer {
                     &mut encoder,
                     &plan,
                     region,
-                    &gl_rows,
+                    gl_rows,
                     &mut self.prefix,
                     key,
                 )
             } else {
                 (
-                    exec.render_comp(&mut encoder, &plan, region, &gl_rows),
+                    exec.render_comp(&mut encoder, &plan, region, gl_rows),
                     Vec::new(),
                 )
             };
@@ -1567,10 +1645,12 @@ impl Renderer {
                 && exec.effects.fallback.fatal.is_none()
                 && !held
                 && !svg_waits;
-            if complete {
-                exec.flip_color(&mut encoder, &gl_rows, target);
+            if complete && rows == SnapshotRows::TopDown {
+                exec.flip_color(&mut encoder, gl_rows, target);
             }
-            exec.taken.push(gl_rows);
+            if let Some(gl_rows) = pooled_gl_rows {
+                exec.taken.push(gl_rows);
+            }
             if let Some(ids) = depth_id.filter(|_| complete) {
                 let id_rows = exec.pool.take(
                     exec.device,
