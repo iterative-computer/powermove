@@ -137,7 +137,25 @@ it('the journal keeps one copy of what each edit rewrites whole and replays to t
   PM.Projects.put(PM.proj);
   assert.equal(mem.has('projectJournal.J1'), false);
   PM.bus.emit('history:project-patch', { projectId: 'J1', revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }] });
-  assert.deepEqual(mem.get('projectJournal.J1'), [{ revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }] }]);
+  // Each entry names the checkpoint it follows (Projects.get replays only those, and untagged ones).
+  const cp = mem.get('project.J1').cp;
+  assert.equal(typeof cp, 'string');
+  assert.deepEqual(mem.get('projectJournal.J1'), [{ revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }], cp }]);
+});
+
+it('replays the journal entries of the slot\'s checkpoint and untagged ones, not those of an older checkpoint', () => {
+  const { PM, mem } = projectsModel();
+  const journal = [
+    { revision: 2, cp: 'older', patches: [{ path: ['name'], exists: true, value: 'Stale' }, { path: ['revision'], exists: true, value: 2 }] },
+    { revision: 3, patches: [{ path: ['layers', 0, 'name'], exists: true, value: 'Untagged' }] },
+    { revision: 4, cp: 'newer', patches: [{ path: ['revision'], exists: true, value: 4 }] },
+  ];
+  mem.set('project.C1', { v: '1.0.0', cp: 'newer', proj: { id: 'C1', name: 'Slot', revision: 3, layers: [{ id: 'L1', name: 'Layer' }] } });
+  mem.set('projectJournal.C1', structuredClone(journal));
+  assert.deepEqual(PM.Projects.get('C1'), { id: 'C1', name: 'Slot', revision: 4, layers: [{ id: 'L1', name: 'Untagged' }] });
+  // A slot from a build without checkpoint ids replays everything, as before.
+  mem.set('project.C1', { v: '1.0.0', proj: { id: 'C1', name: 'Slot', revision: 1, layers: [{ id: 'L1', name: 'Layer' }] } });
+  assert.deepEqual(PM.Projects.get('C1'), { id: 'C1', name: 'Stale', revision: 4, layers: [{ id: 'L1', name: 'Untagged' }] });
 });
 
 it('hands the journal to an asynchronous store as a snapshot of each version', () => {
@@ -163,8 +181,9 @@ it('checkpoints the project when the journal would pass its bound, to the byte',
     const first = { revision: 1, patches: [{ path: ['layers', 0], exists: true, value: { id: 'L1' } }] };
     PM.bus.emit('history:project-patch', { projectId: 'B1', ...first });
     const second = (note) => ({ revision: 2, patches: [{ path: ['layers', 1], exists: true, value: { id: 'L2', note } }] });
-    // The journal's JSON at exactly the bound, or one byte over it.
-    const n = MAX - bytes([first, second('')]) + over;
+    // The journal's JSON (entries tagged with their checkpoint) at exactly the bound, or one byte over it.
+    const cp = mem.get('project.B1').cp;
+    const n = MAX - bytes([{ ...first, cp }, { ...second(''), cp }]) + over;
     PM.bus.emit('history:project-patch', { projectId: 'B1', ...second('é'.repeat(n / 2) + 'x'.repeat(n % 2)) });
     if (over) assert.equal(mem.has('projectJournal.B1'), false, 'one byte over checkpoints the project');
     else assert.equal(bytes(mem.get('projectJournal.B1')), MAX, 'the bound itself fits');

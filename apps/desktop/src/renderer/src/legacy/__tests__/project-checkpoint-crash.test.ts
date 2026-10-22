@@ -5,8 +5,8 @@
  * thread) run an open's checkpoint sequence against a real directory. Every
  * mutating file operation is logged; afterwards the directory is rebuilt as it
  * stood after each prefix of that log (a crash between any two operations),
- * reloaded through a fresh store, and the project recovered the way the
- * Projects registry recovers it (slot plus journal). Every crash point must
+ * reloaded through a fresh store, and the project recovered by a fresh
+ * window's Projects registry (Projects.get: slot plus journal). Every crash point must
  * recover nothing or one complete state the document actually had, never an
  * older state than an earlier crash point, and at every quiescent point
  * exactly the state today's code recovers there (today wrote the whole
@@ -19,7 +19,6 @@ import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
-import { applyPatch } from '../../../../shared/patch';
 import type { PMRegistry } from '../registry';
 import { install as installShim } from '../host/electron-shim';
 import { install as installProjects } from '../core/projects';
@@ -28,7 +27,7 @@ import { install as installProjects } from '../core/projects';
    which does not include main's sources. */
 type StoreFileSystem = any;
 type Store = {
-  load(): Promise<void>; get?(key: string): unknown; getEncodedSerialized?(key: string): string | null;
+  load(): Promise<void>; onError?(cb: (event: { key: string; error: string }) => void): () => void; get?(key: string): unknown; getEncodedSerialized?(key: string): string | null;
   bootstrapSerialized?(): Record<string, string>; set(key: string, value: unknown): void | Promise<void>;
   setSerialized?(key: string, serialized: string): void | Promise<void>; delete(key: string): void | Promise<void>; flushAll(): Promise<void>;
 };
@@ -52,15 +51,23 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map(directory => nodeFs.rm(directory, { recursive: true, force: true })));
 });
 
+/** Failures to inject: return an error to fail that operation (before it changes anything). */
+type Faults = { writeFile?: (file: string) => Error | null; rename?: (to: string) => Error | null };
+const failure = (code: string, message: string) => Object.assign(new Error(`${code}: ${message}`), { code });
+
 /** The file system, logging every operation that changes what a restart reads. */
-function loggingFs(log: Op[]): StoreFileSystem {
+function loggingFs(log: Op[], faults: Faults = {}): StoreFileSystem {
   return {
     ...nodeFs,
     writeFile: (async (file: any, data: any, options: any) => {
+      const fault = faults.writeFile?.(String(file));
+      if (fault) throw fault;
       await nodeFs.writeFile(file, data, options);
       log.push({ kind: 'write', file: String(file), data: typeof data === 'string' ? data : Buffer.from(data).toString('utf8') });
     }) as any,
     rename: (async (from: any, to: any) => {
+      const fault = faults.rename?.(String(to));
+      if (fault) throw fault;
       await nodeFs.rename(from, to);
       log.push({ kind: 'rename', from: String(from), to: String(to) });
     }) as any,
@@ -69,6 +76,21 @@ function loggingFs(log: Op[]): StoreFileSystem {
       log.push({ kind: 'unlink', file: String(file) });
     }) as any,
   } as StoreFileSystem;
+}
+
+/** Where two JSON documents differ: up to `limit` paths with short values (whole documents are megabytes). */
+function jsonDiff(a: string | null, b: string | null, limit = 8): string[] {
+  if (a === b) return [];
+  if (a === null || b === null) return [`(document) ${a === null ? 'absent' : 'present'} -> ${b === null ? 'absent' : 'present'}`];
+  const out: string[] = [];
+  const short = (value: unknown) => value === undefined ? 'absent' : JSON.stringify(value).slice(0, 80);
+  const walk = (x: any, y: any, at: string) => {
+    if (out.length >= limit || Object.is(x, y)) return;
+    if (!x || !y || typeof x !== 'object' || typeof y !== 'object' || Array.isArray(x) !== Array.isArray(y)) { out.push(`${at || '/'}: ${short(x)} -> ${short(y)}`); return; }
+    for (const key of new Set([...Object.keys(x), ...Object.keys(y)])) walk(x[key], y[key], `${at}/${key}`);
+  };
+  walk(JSON.parse(a), JSON.parse(b), '');
+  return out.length ? out : ['(same values, different JSON text)'];
 }
 
 /** The store directory as it was after the first `count` logged operations. */
@@ -82,19 +104,17 @@ function stateAfter(log: Op[], count: number): Map<string, string> {
   return files;
 }
 
-/** What a restart recovers for `id`: the slot with its journal replayed (Projects.get). */
+/** What a restart recovers for `id`: a fresh window's Projects.get (the slot with its journal replayed).
+ *  Call it only after the window under test is done: it installs a window of its own. */
 async function recover(files: Map<string, string>, id: string): Promise<string | null> {
   const directory = await temporaryDirectory();
   for (const [name, data] of files) await nodeFs.writeFile(path.join(directory, name), data);
   const store = createStore(directory);
   await store.load();
-  const slot = store.get?.(`project.${id}`) as any;
-  if (!slot) return null;
-  let project = structuredClone(slot.proj);
-  const journal = store.get?.(`projectJournal.${id}`) as any[] | undefined;
-  for (const entry of Array.isArray(journal) ? journal : []) project = applyPatch(project, entry.patches);
+  const PM: any = openWindow(store);
+  const project = PM.Projects.get(id);
   await nodeFs.rm(directory, { recursive: true, force: true });
-  return JSON.stringify(project);
+  return project ? JSON.stringify(project) : null;
 }
 
 /** A window whose store reaches `store` the way preload and main's IPC do. */
@@ -117,7 +137,7 @@ function openWindow(store: Store) {
       set: (key: string, value: unknown) => { void Promise.resolve(store.set(key, structuredClone(value))).catch(() => undefined); },
       delete: (key: string) => { void Promise.resolve(store.delete(key)).catch(() => undefined); },
       flush: () => store.flushAll(),
-      onError: () => () => {},
+      onError: (cb: (event: { key: string; error: string }) => void) => store.onError?.(cb) ?? (() => {}),
     },
     setTheme: vi.fn(), log: vi.fn(), onMenuCommand: vi.fn(),
     codex: { run: vi.fn(), cancel: vi.fn(), requestComputerConsent: vi.fn() }, artifacts: { read: vi.fn(), reveal: vi.fn() }, captureWindow: vi.fn(), saveFile: vi.fn(),
@@ -144,9 +164,11 @@ function largeProject(id: string) {
   return { id, name: 'Large', w: 1920, h: 1080, revision: 7, assets: { a1: { id: 'a1', kind: 'image', w: 640, h: 480 } } as Record<string, any>, layers: layers as any[] };
 }
 
-async function settle(PM: any, store: Store) {
+async function settle(PM: any, store: Store, options: { failing?: boolean } = {}) {
   for (let round = 0; round < 3; round++) {
-    await PM.store.flush();
+    // While a write is failing, the window's flush reports it (checked separately).
+    if (options.failing) await PM.store.flush().catch(() => undefined);
+    else await PM.store.flush();
     await store.flushAll();
     await new Promise(resolve => setTimeout(resolve, 5));
   }
@@ -213,7 +235,7 @@ describe('open-time project checkpoints', () => {
     await step();
 
     // Settled points recover exactly the current document, as today's code does.
-    for (const { at, state } of settled) expect(await recover(stateAfter(log, at), 'P')).toBe(state);
+    for (const { at, state } of settled) expect(jsonDiff(state, await recover(stateAfter(log, at), 'P')), `settled at operation ${at}`).toEqual([]);
     // Every crash point: nothing, or a complete state, never older than before.
     let newest = -1;
     for (let count = 0; count <= log.length; count++) {
@@ -258,6 +280,48 @@ describe('open-time project checkpoints', () => {
     PM.Projects.put(project);
     await settle(PM, store);
     expect(log.filter(op => op.kind === 'rename' && path.basename(op.to) === 'project.S.json')).toHaveLength(2);
-    expect(await recover(stateAfter(log, log.length), 'S')).toBe(JSON.stringify(project));
+    expect(jsonDiff(JSON.stringify(project), await recover(stateAfter(log, log.length), 'S'))).toEqual([]);
+  });
+});
+
+/** Every crash point of `log` recovers nothing (only before the first checkpoint), or one of
+ *  `states`, never older than an earlier crash point did: no durable edit is lost. */
+async function expectEveryCrashPointSafe(log: Op[], states: string[], id: string) {
+  let newest = -1;
+  for (let count = 0; count <= log.length; count++) {
+    const recovered = await recover(stateAfter(log, count), id);
+    if (recovered === null) { expect(newest, `crash after operation ${count} lost the project`).toBe(-1); continue; }
+    const index = states.lastIndexOf(recovered);
+    if (index < 0) expect(jsonDiff(states[Math.max(newest, 0)]!, recovered), `crash after operation ${count} recovered a state the document never had`).toEqual([]);
+    if (index < newest) expect(jsonDiff(states[newest]!, recovered), `crash after operation ${count} recovered an older state`).toEqual([]);
+    newest = index;
+  }
+}
+
+describe('a raw write after a journaled edit', () => {
+  it('to the same path is not reverted by the journal at any crash point', { timeout: 120_000 }, async () => {
+    const log: Op[] = [];
+    const store = createStore(await temporaryDirectory(), { fs: loggingFs(log), writeDelayMs: 0 });
+    await store.load();
+    const PM: any = openWindow(store);
+    const project = largeProject('R');
+    PM.proj = project;
+    const states: string[] = [];
+    const step = async () => { await settle(PM, store); states.push(JSON.stringify(project)); };
+
+    PM.Projects.put(project);
+    await step();
+    project.revision = 8;
+    project.layers[4].name = 'Journaled';
+    PM.bus.emit('history:project-patch', { projectId: 'R', revision: 8, patches: [{ path: ['layers', 4, 'name'], exists: true, value: 'Journaled' }, { path: ['revision'], exists: true, value: 8 }] });
+    await step();
+    // Unannounced: the same member, and another one, then a capture.
+    project.layers[4].name = 'Raw';
+    project.layers[5].name = 'Raw too';
+    PM.Projects.put(project);
+    await step();
+
+    expect(jsonDiff(states.at(-1)!, await recover(stateAfter(log, log.length), 'R'))).toEqual([]);
+    await expectEveryCrashPointSafe(log, states, 'R');
   });
 });

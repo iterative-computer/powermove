@@ -111,6 +111,8 @@ function slotExists(id: string): boolean {
 const VERIFY_MIN_CHARS = 4 << 20;
 type Slot = {
   project: object; chars: number; digest: Promise<string | null> | null;
+  /** The slot's checkpoint id (its envelope's `cp`). */
+  cp: string;
   /** `assets` as the slot holds it (JSON text; undefined when absent). */
   assets: string | undefined;
   /** What the journal holds since: nothing, only `checkpointAssets` entries
@@ -120,6 +122,22 @@ type Slot = {
 };
 const slots = new Map<string, Slot>();
 const checks = new Map<string, { project: object; again: boolean }>();
+/*
+ * Checkpoint ids. Main writes a project's journal to disk only after the slot
+ * posted before it (store-engine.ts), so a crash can leave the newer slot with
+ * the journal of the older one for the length of one unlink. Replaying that
+ * journal over the newer slot reverted any path an entry set and an
+ * unjournaled (raw) write changed since, next to raw writes it kept: a
+ * document that never existed. Each slot write therefore carries an id (`cp`,
+ * before `proj` in the envelope), each journal entry the id of the checkpoint
+ * it follows, and Projects.get skips entries tagged for another checkpoint.
+ * Untagged entries (older builds, or a checkpoint this window does not know)
+ * are replayed, as before.
+ */
+const checkpoints = new Map<string, string>();
+let checkpointCount = 0;
+const checkpointId = () => `${Date.now().toString(36)}.${(++checkpointCount).toString(36)}.${Math.random().toString(36).slice(2, 10)}`;
+const envelopePrefix = (cp: string) => `{"v":${JSON.stringify(PM.version || '1.0.0')},"cp":${JSON.stringify(cp)},"proj":`;
 /* Announced document changes, so a check that read through one is repeated. */
 let announced = 0;
 for (const event of ['layers', 'project', 'library', 'assets', 'comps', 'history:project-patch']) PM.bus?.on?.(event, () => { announced++; });
@@ -128,27 +146,29 @@ const changeToken = () => `${announced}:${PM.animVersion?.() ?? 0}`;
 /* The JSON this window just wrote for a project, for the rest of the writing
    task while nothing announced a change: opening and switching projects
    fingerprint the document right after checkpointing it. */
-let justWritten: { project: object; token: string; text: string } | null = null;
+let justWritten: { project: object; token: string; text: string; cp: string } | null = null;
 R.writtenJSON = (proj: any): string | null => {
   const entry = justWritten;
   if (!entry || entry.project !== proj || entry.token !== changeToken() || typeof proj?.toJSON === 'function') return null;
-  const prefix = `{"v":${JSON.stringify(PM.version || '1.0.0')},"proj":`;
+  const prefix = envelopePrefix(entry.cp);
   return entry.text.startsWith(prefix) && entry.text.endsWith('}') ? entry.text.slice(prefix.length, -1) : null;
 };
 
 function writeSlot(proj: any) {
-  const envelope = { v: PM.version || '1.0.0', proj };
+  const cp = checkpointId();
+  const envelope = { v: PM.version || '1.0.0', cp, proj };
   if (PM.store.set(R.SLOT + proj.id, envelope) === false) throw new Error('Project storage is unavailable or full');
+  checkpoints.set(proj.id, cp);
   const text = typeof PM.store.writtenText === 'function' ? PM.store.writtenText(R.SLOT + proj.id) : null;
   if (text) {
-    const entry = justWritten = { project: proj, token: changeToken(), text };
+    const entry = justWritten = { project: proj, token: changeToken(), text, cp };
     queueMicrotask(() => { if (justWritten === entry) justWritten = null; });
   }
   PM.store.del(R.JOURNAL + proj.id);
   if (written?.id === proj.id) written = null;
   const digest = typeof PM.store.writtenDigest === 'function' ? PM.store.writtenDigest(R.SLOT + proj.id) : null;
   slots.set(proj.id, {
-    project: proj, digest, chars: digest ? PM.store.writtenChars?.(R.SLOT + proj.id) ?? 0 : 0,
+    project: proj, digest, chars: digest ? PM.store.writtenChars?.(R.SLOT + proj.id) ?? 0 : 0, cp,
     assets: JSON.stringify(proj.assets), journal: 'none',
   });
 }
@@ -178,7 +198,7 @@ function checkSlot(proj: any): void {
         const expected = slot.digest ? await slot.digest : null;
         const token = changeToken();
         const written = expected && slot.journal !== 'other' ? asWritten(proj, slot) : null;
-        const actual = written ? (await digestJSON({ v: PM.version || '1.0.0', proj: written })).digest : null;
+        const actual = written ? (await digestJSON({ v: PM.version || '1.0.0', cp: slot.cp, proj: written })).digest : null;
         if (slots.get(id) !== slot || checks.get(id) !== check) return;
         const same = actual !== null && actual === expected && slot.journal !== 'other'
           && (slot.journal === 'none' ? !journal(id).length : JSON.stringify(proj.assets) === slot.journaledAssets);
@@ -303,10 +323,16 @@ R.get = (id: any) => {
     if (auto && auto.proj && auto.proj.id === id) return auto.proj;
     return null;
   }
+  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch (e) { return null; } }
   let project = R.unwrap(raw);
   if (!project) return null;
   project = clone(project);
-  for (const entry of journal(id)) project = applyPatches(project, entry.patches);
+  const cp = raw && typeof raw === 'object' && typeof raw.cp === 'string' ? raw.cp : null;
+  for (const entry of journal(id)) {
+    // An entry for another checkpoint is already in this slot (see checkpointId).
+    if (cp !== null && typeof entry?.cp === 'string' && entry.cp !== cp) continue;
+    project = applyPatches(project, entry?.patches);
+  }
   return project;
 };
 
@@ -365,7 +391,7 @@ R.pickBoot = ({ open = R.openProjects(), metas = R.list(), get = R.get, getState
 };
 
 R.remove = (id: any) => {
-  slots.delete(id);
+  slots.delete(id); checkpoints.delete(id);
   R.saveList(R.list().filter((x: any) => x.id !== id));
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
@@ -395,7 +421,7 @@ R.restore = (id: any) => {
   return true;
 };
 R.destroy = (id: any) => {
-  slots.delete(id);
+  slots.delete(id); checkpoints.delete(id);
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
   try { PM.store.del(R.STATE + id); } catch (e) { }
@@ -439,7 +465,9 @@ function append(entry: { projectId: string; revision: number; patches: any[] }) 
     return { id: entry.projectId, entries, sizes: entries.map(item => journalBytes(item)) };
   })();
   supersede(state.entries, entry.patches, index => { state.sizes[index] = journalBytes(state.entries[index]); });
-  const item = { revision: Number(entry.revision) || 0, patches: entry.patches };
+  const cp = checkpoints.get(entry.projectId);
+  const item: any = { revision: Number(entry.revision) || 0, patches: entry.patches };
+  if (cp) item.cp = cp;
   state.entries.push(item);
   state.sizes.push(journalBytes(item));
   /* Keep the journal bounded even before the next debounced checkpoint
