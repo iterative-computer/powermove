@@ -1,5 +1,6 @@
 import { persistShaderEnvironment } from './shader-environment';
 import { packAgentProject } from '../agent-tools/project-packer';
+import { ProfileDefinitionsWriter, profileDefinitionsPath } from './profile-definitions';
 import { installAgentFramesIpc } from './agent-frames';
 /*
  * Wires the native engine into the Electron app behind "Use New Engine".
@@ -455,10 +456,14 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       });
     }
   });
+  const profileDefinitions = new ProfileDefinitionsWriter(profileDefinitionsPath(options.userData), (message) => log('warn', message));
   options.ipc.on(ENGINE_IPC.definitions, (event, update: unknown) => {
     if (!options.isTrustedSender(event)) return;
     try {
       engine!.updateDefinitions(event.sender.id, update);
+      // `powermove render` draws the app's winning definitions (amendment 24).
+      const set = engine!.definitions.snapshotSet(event.sender.id);
+      if (set) profileDefinitions.write(set);
     } catch (error) {
       log('warn', `definitions from window ${event.sender.id} refused: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -707,6 +712,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       fontClient.disconnect();
       jobFontClient.disconnect('the job engine stopped');
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
+      await profileDefinitions.flush();
       options.ipc.removeAllListeners(ENGINE_IPC.playback);
       options.ipc.removeAllListeners(ENGINE_IPC.shaderFallbackResult);
       agentJobs.dispose();

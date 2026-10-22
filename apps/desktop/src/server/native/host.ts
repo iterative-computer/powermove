@@ -31,6 +31,7 @@ import type { ProjectSessions, SessionMember } from '../sessions';
 import { WEB } from '../../shared/wire';
 import { NodeEngineTransport } from './ports';
 import { EngineFontClient } from '../../main/engine-fonts';
+import { ProfileDefinitionsWriter, profileDefinitionsPath } from '../../main/engine/profile-definitions';
 
 export type NativeSnapshot = { project: Record<string, any>; document: unknown; definitions: import('../../shared/engine-protocol').DefinitionSnapshot[] };
 export interface NativeBrowser {
@@ -79,6 +80,7 @@ export class NativeHiddenHost {
   readonly fonts = new EngineFontClient();
   private readonly jobFonts = new EngineFontClient();
   private readonly hashes: WorkerPool;
+  private readonly profileDefinitions: ProfileDefinitionsWriter;
   private readonly owners = new Map<string, NativeOwner>();
   private readonly aliases = new Map<number, string>();
   private active = 'powermove-home';
@@ -98,6 +100,7 @@ export class NativeHiddenHost {
     const probeDirectory = shaderCacheDirectory(userData);
     const transport = new NodeEngineTransport();
     this.hashes = new WorkerPool(path.join(distDir, 'native-media-hash.cjs'), 1);
+    this.profileDefinitions = new ProfileDefinitionsWriter(profileDefinitionsPath(userData), message => log(`[native] ${message}`));
     this.media = new MediaStoreService({ root: path.join(userData, STORE_DIRECTORY), userData, executor: this.hashes, enabled: true });
     this.snapshotBridge = new NativeSnapshotBridge(loaded, log);
     const spawn = (role: 'interactive' | 'job', env: Record<string, string> = {}) => transport.spawn(path.join(distDir, 'native-engine-child.cjs'), addon, log, {
@@ -214,6 +217,8 @@ export class NativeHiddenHost {
     if (this.definitionBytes.get(owner) === bytes) return;
     this.engine.definitions.update(owner, { generation: (this.engine.definitions.generationOf(owner) ?? 0) + 1, full: true, upserts: definitions, removals: [] });
     this.definitionBytes.set(owner, bytes);
+    // `powermove render` draws the host's winning definitions (amendment 24).
+    this.profileDefinitions.write({ generation: this.engine.definitions.generationOf(owner) ?? 1, definitions, missing: [] });
   }
   async cpuSnapshot(project: string, request: EngineSnapshotRequest, definitions: NativeSnapshot['definitions']): Promise<EngineSnapshotReply> {
     if (request.document?.id !== project || request.session !== null) throw new Error('invalidMessage: CPU snapshots must name the pinned project document.');
@@ -272,7 +277,7 @@ export class NativeHiddenHost {
     for (const [name, timer] of this.sharedPixels) { clearTimeout(timer); this.unlinkPixels(name); } this.sharedPixels.clear();
     for (const owner of this.owners.values()) owner.destroy();
     try { await this.pool.shutdown(); } finally {
-      this.windowSessions.dispose(); this.jobs.dispose();
+      this.windowSessions.dispose(); this.jobs.dispose(); await this.profileDefinitions.flush();
       try { await this.engine.stop(); } finally { this.snapshotBridge.dispose(); await this.hashes.close(); }
     }
   }

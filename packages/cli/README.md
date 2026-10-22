@@ -85,10 +85,11 @@ The second argument is the destination, including paths outside the exports fold
 Render options are the native `pm-cli render` options: definition snapshots
 (`--definitions`), media overrides, fonts via the host registry, composition, range,
 rate, size, presets and repeatable `--param NAME=JSON` values. Parameter overrides
-use the player's numeric bounds, toggle, color and select validation. Without a browser reference, unverified user GLSL programs fail naming the
-fallback runner; they are never delivered natively. Full CLI runner/pin-store
-integration is incomplete. Existing
-outputs require `--force`. Native process exit codes reach the caller.
+use the player's numeric bounds, toggle, color and select validation. Pinned and not-yet-verified level 1 user GLSL programs run through the
+on-demand Chromium ANGLE runner, using the desktop profile's persisted probe
+namespace and pins. A missing browser is named `chromium-unavailable` when a
+program needs it. The profile's latest published definition snapshot is used
+unless `--definitions` supplies another set. Existing outputs require `--force`. Native process exit codes reach the caller.
 
 A source checkout can set `POWERMOVE_PM_CLI` to its built binary. A packaged build
 looks under `dist/native/<platform>-<arch>/pm-cli` and names a missing runtime as
