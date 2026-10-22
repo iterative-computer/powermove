@@ -40,6 +40,9 @@ import type { CompatNeed } from '../../../shared/engine-protocol';
 import type { CompatAnswerOptions, CompatAnswerResult, EngineRenderTransport } from '../engine-connection/render-transport';
 import { COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT } from '../engine-connection/render-transport';
 import type { Disposable } from './api';
+import { compositorPixels } from './raster-pixels';
+import { createRasterReadback } from './raster-readback';
+export { compositorPixels } from './raster-pixels';
 
 type LegacyPM = Record<string, any>;
 type Raster = (layer: any, scale?: number, time?: number, uploaded?: any, crop?: any) => any;
@@ -73,6 +76,8 @@ export interface RasterCompatOptions {
   rasterKey?: (layer: any, scale: number, time: number, crop?: RasterWindowLike) => string | null;
   /** Reads a surface's pixels as the compositor uploads them. */
   readPixels?: (source: CanvasImageSource & { width: number; height: number }) => { width: number; height: number; format: 'rgba8Premultiplied' | 'rgba8Straight'; data: Uint8Array } | null;
+  /** Async playback readback; synchronous callers retain readPixels. */
+  readPixelsAsync?: (source: Parameters<typeof compositorPixels>[0]) => Promise<ReturnType<typeof compositorPixels>>;
   log?: (message: string) => void;
 }
 
@@ -234,55 +239,6 @@ export function resultUv(result: any, width: number, height: number): [number, n
   return [(uv[0] * w - x) / width, (uv[1] * h - y) / height, (uv[2] * w) / width, (uv[3] * h) / height];
 }
 
-let gl: WebGL2RenderingContext | null | undefined;
-
-/**
- * A canvas's pixels as the compositor's texture holds them: uploaded to a
- * WebGL2 texture with `UNPACK_PREMULTIPLY_ALPHA_WEBGL` and read back, rows
- * top-down. Without WebGL2, the 2D context's straight-alpha pixels.
- */
-export function compositorPixels(source: CanvasImageSource & { width: number; height: number }): { width: number; height: number; format: 'rgba8Premultiplied' | 'rgba8Straight'; data: Uint8Array } | null {
-  const width = Math.round(source.width), height = Math.round(source.height);
-  if (!(width >= 1 && height >= 1)) return null;
-  if (gl === undefined) {
-    try {
-      gl = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(1, 1).getContext('webgl2', { premultipliedAlpha: true, antialias: false }) : null;
-    } catch {
-      gl = null;
-    }
-  }
-  if (gl && !gl.isContextLost()) {
-    const texture = gl.createTexture();
-    const framebuffer = gl.createFramebuffer();
-    try {
-      gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source as TexImageSource);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
-        const data = new Uint8Array(width * height * 4);
-        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
-        return { width, height, format: 'rgba8Premultiplied', data };
-      }
-    } catch {
-      // Fall through to the 2D context.
-    } finally {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.deleteFramebuffer(framebuffer);
-      gl.deleteTexture(texture);
-    }
-  }
-  const canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(width, height) : Object.assign(document.createElement('canvas'), { width, height });
-  const context = (canvas as HTMLCanvasElement).getContext('2d') as CanvasRenderingContext2D | null;
-  if (!context) return null;
-  context.drawImage(source, 0, 0);
-  const pixels = context.getImageData(0, 0, width, height).data;
-  return { width, height, format: 'rgba8Straight', data: new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength) };
-}
-
 /** The canvas of a surface (`cv`, `canvas`, or `bitmap`). */
 function canvasOf(surface: any): (CanvasImageSource & { width: number; height: number }) | null {
   const source = surface?.cv ?? surface?.canvas ?? surface?.bitmap;
@@ -293,6 +249,14 @@ function canvasOf(surface: any): (CanvasImageSource & { width: number; height: n
 const NOT_UPLOADED = (_key: string): undefined => undefined;
 
 const TRANSPARENT: CompatAnswerResult = { kind: 'raster', key: 'powermove:empty', width: 1, height: 1, format: 'rgba8Premultiplied', data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] };
+
+/** Give frame delivery and input a turn before speculative wrapper work.
+ *  Native replies often arrive together; chaining their continuations as
+ *  microtasks would run several wrappers before a presentation event. */
+async function preparationTurn(): Promise<void> {
+  const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'background' }) => Promise<void> } }).scheduler;
+  if (scheduler?.postTask) await scheduler.postTask(() => {}, { priority: 'background' });
+}
 
 export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): RasterCompatHandle {
   let producing = 0;
@@ -305,7 +269,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   // A missing base unwinds only this preparation attempt. Retry with its
   // real pixels; never hand a wrapper a placeholder it could cache.
   const suspended = Symbol('raster preparation suspended');
-  let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object> } | null = null;
+  let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object>; readback: (() => Promise<CompatAnswerResult>) | null } | null = null;
   const preparing = new Map<string, { layer: unknown; promise: Promise<void> }>();
   const running = new Set<Promise<void>>();
   const bases = new Map<string, { layer: unknown; surface: any; bytes: number }>();
@@ -315,6 +279,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   const stats: RasterCompatStats = { prepared: 0, syncLoads: 0, asyncLoads: 0, cacheHits: 0, passThroughSkips: 0, asyncMs: 0, asyncMsMax: 0, prepareCpuMs: 0, prepareCpuMsMax: 0, slowPreparations: [] };
   const log = options.log ?? ((message: string) => console.warn(`[raster-compat] ${message}`));
   const readPixels = options.readPixels ?? compositorPixels;
+  const readback = createRasterReadback();
+  const readPixelsAsync = options.readPixelsAsync ?? (options.readPixels ? async (source: Parameters<typeof compositorPixels>[0]) => options.readPixels!(source) : readback.read);
 
   const cropKey = (crop: RasterWindowLike | undefined) => crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : '';
   const sampleKey = (need: CompatNeed, revision: number) => `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.scale}\u0000${cropKey(need.crop ?? undefined)}\u0000${revision}`;
@@ -460,17 +426,29 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       if (ownKey && !answerOptions?.fresh && posted.get(tag) === ownKey) return { kind: 'reuse', key: ownKey };
       const source = canvasOf(result);
       if (!source) return TRANSPARENT;
-      const pixels = readPixels(source);
-      if (!pixels) return TRANSPARENT;
-      const w = Number(result.w) || pixels.width / scale;
-      const h = Number(result.h) || pixels.height / scale;
+      // Freeze geometry too: a wrapper may reuse and mutate its surface
+      // object for the next frame while this frame's pixels are in flight.
+      const w = Number(result.w) || source.width / scale;
+      const h = Number(result.h) || source.height / scale;
       const centered = layer.type === 'shape' && !layer.d?.paths?.length;
       const anchor: [number, number] = centered ? [w / 2, h / 2] : [Number(result.anchorX) || 0, Number(result.anchorY) || 0];
-      const uv = resultUv(result, pixels.width, pixels.height);
+      const window = resultUv(result, source.width, source.height);
+      const uv = window ? [...window] as [number, number, number, number] : undefined;
       const key = (ownKey || `powermove:${++serial}:${revision}`).slice(0, 512);
-      if (!answerOptions?.fresh && !preparation) posted.set(tag, key);
-      if (posted.size > 8192) posted.clear();
-      return { kind: 'raster', key, ...pixels, anchor, size: [w, h], ...(uv ? { uv } : {}) };
+      const finish = (pixels: ReturnType<typeof compositorPixels>): CompatAnswerResult => {
+        if (!pixels) return TRANSPARENT;
+        if (!answerOptions?.fresh && !preparation) posted.set(tag, key);
+        if (posted.size > 8192) posted.clear();
+        return { kind: 'raster', key, ...pixels, anchor, size: [w, h], ...(uv ? { uv } : {}) };
+      };
+      if (preparation) {
+        // Keep the completed canvas. Reading it back on this thread can
+        // wait hundreds of milliseconds on the GPU under load; the worker
+        // uses the same premultiplied WebGL upload/readback as sync callers.
+        preparation.readback = async () => finish(await readPixelsAsync(source));
+        return null;
+      }
+      return finish(readPixels(source));
     },
 
     async prepare(need: CompatNeed, revision: number): Promise<void> {
@@ -483,7 +461,9 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const existing = preparing.get(key);
       if (existing) { if (existing.layer === layer) await existing.promise; return; }
       if (pending >= COMPAT_PREPARE_IN_FLIGHT + COMPAT_PREFETCH_IN_FLIGHT) {
+        const waitingGeneration = generation;
         await Promise.race(running);
+        if (generation !== waitingGeneration) return;
         return handle.prepare(need, revision);
       }
       const epoch = generation;
@@ -498,7 +478,9 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
           // dependency with the actual previous pixels, then resume on a
           // later turn. The finite bound also rejects a nonconvergent chain.
           for (let phase = 0; phase < 64 && valid(); phase++) {
-            const attempt = { samples, tainted, missing: null as Dependency | null };
+            await preparationTurn();
+            if (!valid()) return;
+            const attempt = { samples, tainted, missing: null as Dependency | null, readback: null as (() => Promise<CompatAnswerResult>) | null };
             let answer: CompatAnswerResult = null;
             preparation = attempt;
             const beganCpu = performance.now();
@@ -512,6 +494,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
             }
             const missing = attempt.missing;
             if (!missing) {
+              if (attempt.readback) answer = await attempt.readback();
+              if (!valid()) return;
               if (answer?.kind === 'native') stats.passThroughSkips++;
               ready.set(key, { layer, answer, bytes: answer?.kind === 'raster' ? answer.data.byteLength : 0 });
               keepReady();
@@ -562,6 +546,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     },
 
     dispose(): void {
+      readback.dispose();
       clearReady();
       chainChange.dispose();
       offFonts?.();

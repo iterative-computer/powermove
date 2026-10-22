@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createServicesRegistry } from './services';
-import { createRasterCompat, findLayer, TICKS_PER_SECOND } from './raster-compat';
+import { createRasterCompat, findLayer, TICKS_PER_SECOND, type RasterCompatOptions } from './raster-compat';
 import { EngineRenderTransport, type TransportSession } from '../engine-connection/render-transport';
 import type { CompatNeed } from '../../../shared/engine-protocol';
 
@@ -9,7 +9,7 @@ const shape = { id: 'box', type: 'shape', d: { shape: 'rect', w: 40, h: 20 }, fx
 const captions = { id: 'subs', type: 'captions', d: {}, fx: [] as any[] };
 const nested = { id: 'inner', type: 'text', d: { text: 'Nested' }, fx: [] as any[] };
 
-function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: number, crop?: any) => string | null) {
+function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: number, crop?: any) => string | null, readPixelsAsync?: RasterCompatOptions['readPixelsAsync']) {
   const PM: any = {
     time: 0,
     proj: { id: 'P', compId: 'P-root', layers: [text, shape, captions], comps: { inner: { id: 'inner', layers: [nested] } } },
@@ -31,6 +31,7 @@ function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: 
     engineRasterAsync: withAsync ? engineRasterAsync : undefined,
     rasterKey,
     readPixels,
+    readPixelsAsync,
     log: () => {}
   });
   base = (...args: any[]) => compat.producing ? compat.base(args as any) : null;
@@ -192,6 +193,20 @@ describe('the raster override producer', () => {
     expect(engineRaster).not.toHaveBeenCalled();
   });
 
+  it('freezes geometry while a shared wrapper surface waits for asynchronous readback', async () => {
+    let resolve!: (pixels: any) => void;
+    const readback = vi.fn(() => new Promise<any>(done => { resolve = done; }));
+    const { services, compat, need } = setup(true, undefined, readback);
+    const surface = { cv: { width: 96, height: 48 }, w: 48, h: 24, anchorX: 4, anchorY: 18, uv: [0, 0, 1, 1], key: 'shared' };
+    services.register('raster', () => surface);
+    const pending = compat.prepare(need('title'), 4);
+    await vi.waitFor(() => expect(readback).toHaveBeenCalledOnce());
+    surface.w = 200; surface.h = 100; surface.anchorX = 50; surface.anchorY = 60; surface.uv[0] = .5;
+    resolve({ width: 96, height: 48, format: 'rgba8Premultiplied', data: new Uint8Array(96 * 48 * 4) });
+    await pending;
+    expect(compat.answer(need('title'), 4, { prepared: true })).toMatchObject({ size: [48, 24], anchor: [4, 18], uv: [0, 0, 1, 1] });
+  });
+
   it('keeps a synchronous caller on the current base after preparation', async () => {
     const { services, compat, engineRaster, need } = setup(true);
     const original = services.get<any>('raster');
@@ -237,7 +252,7 @@ describe('the raster override producer', () => {
     let resolve!: (surface: any) => void;
     engineRasterAsync.mockImplementation(() => new Promise((done) => { resolve = done; }));
     const pending = compat.prepare(need('title'), 4);
-    await Promise.resolve();
+    await vi.waitFor(() => expect(resolve).toBeTypeOf('function'));
     compat.reset();
     resolve({ cv: { width: 96, height: 48 }, w: 48, h: 24, anchorX: 4, anchorY: 18 });
     await pending;
