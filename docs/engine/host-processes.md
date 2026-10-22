@@ -681,27 +681,32 @@ Preparation (engine on) also lost two of its three whole-document passes:
   main's hash of the stream and answers the canonical hash of the parsed
   tree. Recovery copies keep the byte hash (document-recovery.md).
 
-PMV4 preparation went from 23 to 35 s to 7.2 s: clone 0.75 s, stream and
-native load 6.5 s.
-
 The font prewarm yields every 8 ms. Five seconds after a large ingestion,
 main reports moderate memory pressure to that window (DevTools'
 `Memory.simulatePressureNotification`, `memory-relief.ts`).
 
-Paired medians, with one build, three runs per mode and project, interleaved,
-and the load average at 14 to 40 (other lanes running):
+Paired medians, on the final build. There were three runs per mode and
+project, interleaved, at a load average of 10 to 22 with other lanes running,
+so this was not a quiet window. An earlier batch, before the two font-prewarm
+changes, is in brackets (load 14 to 40). In that batch the PMV4 engine open
+was 30.7 s and today's was 31.6 s.
 
 | Median | PMV4 today | PMV4 engine | PMV3 today | PMV3 engine |
 |---|---|---|---|---|
-| Open (s) | 31.6 (was 372) | 30.7 (was 419) | 9.5 (was 120) | 14.7 (was 135) |
-| Renderer RSS (MiB) | 1,896 | 2,594 | 1,305 | 1,376 |
-| Total RSS (MiB) | 2,818 | 4,520 | 2,369 | 3,098 |
-| Renderer footprint (MiB) | 1,452 | 1,811 | 922 | 1,071 |
-| Total footprint (MiB) | 2,303 | 3,899 | 2,624 | 4,044 |
-| Engine processes' footprint (MiB) | n/a | 1,052 | n/a | 1,078 |
-| Longest main-thread task in the open (s) | 6.1 | 3.1 | 2.8 | 2.7 |
-| Tasks over 100 ms in the open | 48 | 4 | 7 | 9 |
+| Open (s) | 22.4 [31.6] (was 372) | 30.9 [30.7] (was 419) | 8.0 [9.5] (was 120) | 13.9 [14.7] (was 135) |
+| Renderer RSS (MiB) | 1,899 | 2,383 | 1,369 | 1,358 |
+| Total RSS (MiB) | 2,928 | 4,393 | 2,501 | 3,154 |
+| Renderer footprint (MiB) | 1,428 | 1,668 | 1,004 | 1,013 |
+| Total footprint (MiB) | 2,467 | 3,755 | 2,645 | 4,019 |
+| Engine processes' footprint (MiB) | n/a | 1,050 | n/a | 1,079 |
+| Longest main-thread task in the open (s) | 4.0 | 2.8 | 2.5 | 2.5 |
+| Tasks over 100 ms in the open | 4 [48] | 3 [4] | 5 | 8 |
 | Blank opens | 0 of 3 | 0 of 3 | 0 of 3 | 0 of 3 |
+
+PMV4 preparation in the final batch took 5.3 to 7.9 s. Of that, 0.65 to
+0.8 s was the clone, and the rest was the text stream plus the utility's
+load: reading 180 MB, its SHA-256, the parse, the canonical hash, and the
+integrity digest.
 
 What remains:
 
@@ -713,7 +718,7 @@ What remains:
   revisions held by containers rather than by every node.
 - **PMV3 open.** The engine's tail asks the utility synchronous font and
   raster questions while the open finishes.
-- **PMV4 tasks.** Today's 48 tasks over 100 ms are mostly its legacy viewer
-  drawing 258 layers once the window stays responsive. The engine's are the
-  reply parse (0.6 s), switchProject (3.1 s, the same as today's), and two of
-  about 0.2 s.
+- **PMV4 tasks.** In the earlier batch, today's 48 tasks over 100 ms were
+  mostly its legacy viewer drawing 258 layers once the window stayed
+  responsive. The engine's tasks are the reply parse (0.6 s), switchProject
+  (about 3 s, the same work as today's), and one or two of about 0.2 s.
