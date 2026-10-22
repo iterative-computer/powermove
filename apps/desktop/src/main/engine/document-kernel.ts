@@ -24,8 +24,6 @@ export function installDocumentKernelIpc(options: {
   cache: string;
   trusted(event: Sender): boolean;
   call(owner: number, request: string, bytes?: Uint8Array): Promise<string>;
-  /** After a large document is ingested for this window (memory-relief.ts). */
-  ingested?(sender: Sender['sender'], bytes: number): void;
 }): () => Promise<void> {
   const streams = new Map<string, Stream>();
   const owners = new Map<number, Owner>();
@@ -223,7 +221,6 @@ export function installDocumentKernelIpc(options: {
           if (Date.now() > deadline) throw new Error('Document ingestion timed out');
         }
         if (result.revision !== revision || typeof result.hash !== 'string' || !/^[0-9a-f]{64}$/.test(result.hash)) throw new Error('Document ingestion returned a different revision');
-        try { options.ingested?.(event.sender, s.bytes); } catch { /* an optimization only */ }
         return result;
       } catch (error) {
         // A previous page must not cancel the new page's prepared document.

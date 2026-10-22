@@ -681,9 +681,10 @@ Preparation (engine on) also lost two of its three whole-document passes:
   main's hash of the stream and answers the canonical hash of the parsed
   tree. Recovery copies keep the byte hash (document-recovery.md).
 
-The font prewarm yields every 8 ms. Five seconds after a large ingestion,
-main reports moderate memory pressure to that window (DevTools'
-`Memory.simulatePressureNotification`, `memory-relief.ts`).
+The font prewarm yields every 8 ms. A simulated memory-pressure
+notification to the window after a large ingestion was tried and removed:
+it fired before the RSS peak, did not lower the measured RSS, and could
+drop Blink caches and pause the live editor.
 
 Paired medians, on the final build. There were three runs per mode and
 project, interleaved, at a load average of 10 to 22 with other lanes running,
