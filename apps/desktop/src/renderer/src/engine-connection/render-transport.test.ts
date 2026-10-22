@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, COMPAT_PREFETCH, COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, COMPAT_WARM_MS, COMPAT_PREFETCH, COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -577,7 +577,7 @@ describe('compatibility answers during playback', () => {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
       expect(pending).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
-      await vi.advanceTimersByTimeAsync(151);
+      await vi.advanceTimersByTimeAsync(COMPAT_WARM_MS + 1);
       pending.forEach(resolve => resolve());
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual([0]);
@@ -601,7 +601,7 @@ describe('compatibility answers during playback', () => {
       const layers = ['a', 'b', 'c'];
       t.receiveCompat({ compat: 'needs', needs: layers.map(layer => need(0, layer)) }, session);
       expect(asked).toEqual([]);
-      await vi.advanceTimersByTimeAsync(151);
+      await vi.advanceTimersByTimeAsync(COMPAT_WARM_MS + 1);
       expect(pending).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
       pending.shift()!(); pending.shift()!();
       await vi.advanceTimersByTimeAsync(0);
@@ -627,7 +627,7 @@ describe('compatibility answers during playback', () => {
       state.playing = false;
       t.receiveCompat({ compat: 'needs', needs: [need(0), need(0, 'last-layer')] }, session);
       expect(asked).toEqual([]);
-      await vi.advanceTimersByTimeAsync(151);
+      await vi.advanceTimersByTimeAsync(COMPAT_WARM_MS + 1);
       pending.shift()!(); pending.shift()!();
       await vi.advanceTimersByTimeAsync(0);
       // The playback job for frame zero is now explicitly required; the

@@ -216,8 +216,9 @@ export type CompatAnswerResult =
 /** Answers the engine's needs for one source (the raster override's producer). */
 /** Frames of compatibility answers kept ahead of the clock during playback. */
 export const COMPAT_LOOKAHEAD = 18;
-/** A bounded paused prefill; never an ongoing paused timer. */
-export const COMPAT_WARM_MS = 150;
+/** A bounded paused prefill; never an ongoing paused timer. A changing
+ *  base needs enough turns to fill the pipeline, including worker startup. */
+export const COMPAT_WARM_MS = 500;
 /** Main-thread time one lookahead call may take (ms); the rest waits for the next frame. */
 const LOOKAHEAD_BUDGET_MS = 6;
 const LOOKAHEAD_MAX_ANSWERS = 16;
