@@ -7,9 +7,10 @@
 //! (`shaders/source.wgsl`): chroma upsampling, matrix, transfer and
 //! primaries into the working encoding, and premultiplication.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use pm_color::alpha::{shader_code, source_plan};
 use pm_color::chroma::{Factors, Filter, filters, sample_origin};
@@ -31,6 +32,7 @@ use pm_protocol::color::{
     AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, Precision, Primaries, Transfer,
     WorkingEncoding,
 };
+use pm_protocol::frame::Representation;
 
 use crate::capability::Feature;
 use crate::footage::{Geometry, Orient, Pick, Timing};
@@ -855,6 +857,8 @@ struct ImageKey {
     /// Converted textures hold working values: linear light differs.
     linear: bool,
     compat: bool,
+    /// None is the exact original; a target edge is a preview thumbnail.
+    reduced_edge: Option<u32>,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -865,6 +869,7 @@ struct FrameKey {
     second: bool,
     precision: u8,
     export: bool,
+    purpose: DecodePurpose,
     /// The interpretation the frame was converted with (a digest).
     reading: u64,
     linear: bool,
@@ -885,6 +890,14 @@ pub struct MediaCache {
     /// Scrub frames: a video whose exact frame is not decoded yet shows
     /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
     pub scrub: bool,
+    /// Requested device-pixel size of the preview media representation.
+    preview_decode_size: Option<(u32, u32)>,
+    /// Set on each render, including retries. Exports force original pixels.
+    force_full: bool,
+    used_reduced: bool,
+    playing: bool,
+    decode_times: HashMap<PathBuf, VecDeque<f64>>,
+    slow_sources: BTreeSet<PathBuf>,
     /// The frame (presented index in its source) of each video layer drawn
     /// with a stand-in since the list was reset.
     pub stand_ins: Vec<usize>,
@@ -917,6 +930,15 @@ pub enum MediaFailure {
     Failed(String),
 }
 
+fn decode_p95(times: &VecDeque<f64>) -> Option<f64> {
+    if times.len() < 8 {
+        return None;
+    }
+    let mut ordered: Vec<_> = times.iter().copied().collect();
+    ordered.sort_by(f64::total_cmp);
+    Some(ordered[(ordered.len() * 95).div_ceil(100) - 1])
+}
+
 impl MediaCache {
     pub fn new(device: &wgpu::Device) -> MediaCache {
         // Every renderer starts with a small frame cache (export jobs and
@@ -932,6 +954,12 @@ impl MediaCache {
             viewer: ViewerDecode::new(service.clone()),
             service,
             scrub: false,
+            preview_decode_size: None,
+            force_full: false,
+            used_reduced: false,
+            playing: false,
+            decode_times: HashMap::new(),
+            slow_sources: BTreeSet::new(),
             stand_ins: Vec::new(),
             retired_frames: Vec::new(),
             free_frames: Vec::new(),
@@ -943,6 +971,108 @@ impl MediaCache {
             deinterlacer: None,
             orient: None,
             bytes: 0,
+        }
+    }
+
+    pub fn set_preview_decode_size(&mut self, size: Option<(u32, u32)>) {
+        self.preview_decode_size = size.filter(|(w, h)| *w > 0 && *h > 0);
+    }
+
+    pub fn preview_decode_size(&self) -> Option<(u32, u32)> {
+        self.preview_decode_size
+    }
+
+    pub fn begin_frame(&mut self, export: bool) {
+        self.force_full = export;
+        self.used_reduced = false;
+    }
+
+    pub fn representation(&self) -> Representation {
+        if self.used_reduced {
+            Representation::ReducedResolution
+        } else {
+            Representation::Original
+        }
+    }
+
+    pub fn set_playing(&mut self, playing: bool) {
+        self.playing = playing;
+    }
+
+    pub fn slow_media(&self) -> Vec<PathBuf> {
+        self.slow_sources.iter().cloned().collect()
+    }
+
+    /// Rolling p95 wall time for paths with at least eight fresh exact
+    /// original-size playback decodes. Reduced and export decodes are excluded.
+    pub fn decode_measurements(&self) -> Vec<(PathBuf, f64)> {
+        let mut measured: Vec<_> = self
+            .decode_times
+            .iter()
+            .filter_map(|(path, times)| decode_p95(times).map(|p95| (path.clone(), p95)))
+            .collect();
+        measured.sort_by(|a, b| a.0.cmp(&b.0));
+        measured
+    }
+
+    fn record_decode(&mut self, path: &Path, millis: f64, budget_millis: f64) {
+        let times = self.decode_times.entry(path.to_path_buf()).or_default();
+        times.push_back(millis);
+        if times.len() > 32 {
+            times.pop_front();
+        }
+        if decode_p95(times).is_some_and(|p95| p95 > budget_millis) {
+            self.slow_sources.insert(path.to_path_buf());
+        }
+    }
+
+    fn still_reduced_edge(&self, path: &Path, compat: bool) -> Option<u32> {
+        if compat || self.force_full {
+            return None;
+        }
+        let (width, height) = self.preview_decode_size?;
+        let edge = width.max(height);
+        let (source_width, source_height) = pm_media::image::dimensions(path).ok()?;
+        (source_width.max(source_height) > edge).then_some(edge)
+    }
+
+    fn video_purpose(
+        &self,
+        src: &MediaSource,
+        reading: &pm_media::interpret::VideoReading,
+        export: bool,
+    ) -> DecodePurpose {
+        if export || self.force_full {
+            return DecodePurpose::Export;
+        }
+        let Some((width, height)) = self.preview_decode_size else {
+            return DecodePurpose::Display;
+        };
+        if src.info.codec != "prores" {
+            return DecodePurpose::Display;
+        }
+        let coded = (src.info.width as u32, src.info.height as u32);
+        let display = reading.display_size(coded);
+        if width >= display.0 && height >= display.1 {
+            return DecodePurpose::Display;
+        }
+        // The request is in the visible coordinate space. Work backwards
+        // through clean aperture, pixel aspect and rotation to get a coded
+        // size for VideoToolbox. A frame's actual decoded size may be larger.
+        let factor = (f64::from(width) / f64::from(display.0))
+            .max(f64::from(height) / f64::from(display.1))
+            .min(1.0);
+        let requested = (
+            ((f64::from(coded.0) * factor).ceil() as u32).clamp(1, coded.0),
+            ((f64::from(coded.1) * factor).ceil() as u32).clamp(1, coded.1),
+        );
+        if requested == coded {
+            DecodePurpose::Display
+        } else {
+            DecodePurpose::DisplayReduced {
+                width: requested.0,
+                height: requested.1,
+            }
         }
     }
 
@@ -977,6 +1107,7 @@ impl MediaCache {
     ) -> Result<Target, MediaFailure> {
         let (len, modified) = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
+        let reduced_edge = self.still_reduced_edge(path, compat);
         let key = ImageKey {
             path: path.to_path_buf(),
             len,
@@ -985,8 +1116,10 @@ impl MediaCache {
             reading: interpret.map(|i| format!("{i:?}")).unwrap_or_default(),
             linear: working == WorkingEncoding::LinearLight,
             compat,
+            reduced_edge,
         };
         if let Some(t) = self.images.get(&key) {
+            self.used_reduced |= reduced_edge.is_some();
             return Ok(t.clone());
         }
         let issue = |i: ProbeIssue| match i {
@@ -998,8 +1131,11 @@ impl MediaCache {
             None => probe_still(path, still_reader(compat)),
         }
         .map_err(issue)?;
-        let mut still = image_source(path, &self.pool, compat && interpret.is_none())
-            .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        let mut still = match reduced_edge {
+            Some(edge) => pm_media::image::read_reduced(path, &self.pool, edge),
+            None => image_source(path, &self.pool, compat && interpret.is_none()),
+        }
+        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
         let mut bitmap = false;
         if compat && interpret.is_none() && pm_media::image::avif_compat::applies(&still) {
             still = pm_media::image::avif_compat::read(path, &still, &self.pool)
@@ -1020,7 +1156,11 @@ impl MediaCache {
             && let Some(target) = rgba8_bitmap(device, queue, &still)
         {
             self.images.retain(|k, _| {
-                k.path != key.path || k.precision != key.precision || k.linear != key.linear
+                k.path != key.path
+                    || k.precision != key.precision
+                    || k.linear != key.linear
+                    || (k.reduced_edge != key.reduced_edge
+                        && (k.reduced_edge.is_none() || key.reduced_edge.is_none()))
             });
             self.images.insert(key, target.clone());
             self.recount();
@@ -1085,10 +1225,15 @@ impl MediaCache {
         // Older versions of the same file are dropped.
         // (Dropped, not destroyed: a frame being recorded may still use it.)
         self.images.retain(|k, _| {
-            k.path != key.path || k.precision != key.precision || k.linear != key.linear
+            k.path != key.path
+                || k.precision != key.precision
+                || k.linear != key.linear
+                || (k.reduced_edge != key.reduced_edge
+                    && (k.reduced_edge.is_none() || key.reduced_edge.is_none()))
         });
         self.images.insert(key, target.clone());
         self.recount();
+        self.used_reduced |= reduced_edge.is_some();
         Ok(target)
     }
 
@@ -1104,6 +1249,8 @@ impl MediaCache {
                     self.service.release(None, Some(old.id));
                 }
                 self.frames.retain(|k, _| k.path != path);
+                self.decode_times.remove(path);
+                self.slow_sources.remove(path);
                 self.recount();
             }
             None => {}
@@ -1154,11 +1301,13 @@ impl MediaCache {
             .as_ref()
             .ok_or_else(|| MediaFailure::Failed("no video stream".into()))?;
         let reading = resolve_video(v, interp);
+        let purpose = self.video_purpose(&src, &reading, export);
         let timing = Timing::new(&src, &reading, composition);
         let ticks = (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64;
         let Some(Pick { frame: n, second }) = timing.pick(&src, ticks) else {
             return Ok(None);
         };
+        let requested_n = n;
         let reading_key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1175,23 +1324,26 @@ impl MediaCache {
             second,
             precision: precision as u8,
             export,
+            purpose,
             reading: reading_key,
             linear: working == WorkingEncoding::LinearLight,
         };
         // The newest converted frame of the source (a paused redraw).
         if let Some(t) = self.frames.get(&key_of(n)) {
+            self.used_reduced |= matches!(purpose, DecodePurpose::DisplayReduced { .. });
             return Ok(Some(t.clone()));
         }
         // Export frames, and deinterlaced frames (the current frame and its
         // neighbors: random access includes neighboring fields), decode on
         // this thread; other display frames come from the scrub workers.
         let deinterlaced = timing.deinterlaced();
+        let uncached = !self.service.cache().contains(&pm_media::cache::FrameKey {
+            source: src.id,
+            sample: src.index.frames[n].sample,
+            purpose,
+        });
+        let started = Instant::now();
         let (n, frame, fields) = if export || deinterlaced {
-            let purpose = if export {
-                DecodePurpose::Export
-            } else {
-                DecodePurpose::Display
-            };
             let mut session = self
                 .service
                 .session(&src, instance, purpose)
@@ -1211,16 +1363,28 @@ impl MediaCache {
             let want = if self.scrub { Want::Scrub } else { Want::Exact };
             let fetched = self
                 .viewer
-                .fetch(&src, instance, n, want)
+                .fetch_with_purpose(&src, instance, n, want, purpose)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?;
             if !fetched.exact {
                 self.stand_ins.push(fetched.shown);
             }
             (fetched.shown, fetched.frame, None)
         };
+        if self.playing
+            && !export
+            && !self.scrub
+            && uncached
+            && n == requested_n
+            && purpose == DecodePurpose::Display
+        {
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            let budget = composition.den() as f64 * 1000.0 / composition.num() as f64;
+            self.record_decode(path, elapsed, budget);
+        }
         // A stand-in may be the frame converted last.
         let key = key_of(n);
         if let Some(t) = self.frames.get(&key) {
+            self.used_reduced |= matches!(purpose, DecodePurpose::DisplayReduced { .. });
             return Ok(Some(t.clone()));
         }
         let bitmap = if sequence
@@ -1364,7 +1528,26 @@ impl MediaCache {
         for n in recycled {
             importer.recycle(n);
         }
-        let geometry = Geometry::of(&reading, (converted.width(), converted.height()));
+        let decoded_size = (converted.width(), converted.height());
+        let mut geometry = Geometry::of(&reading, (v.width, v.height));
+        if let Some((x, y, cw, ch)) = geometry.crop
+            && decoded_size != (v.width, v.height)
+        {
+            let sx = f64::from(decoded_size.0) / f64::from(v.width);
+            let sy = f64::from(decoded_size.1) / f64::from(v.height);
+            let left = (f64::from(x) * sx).round() as u32;
+            let top = (f64::from(y) * sy).round() as u32;
+            let right = (f64::from(x + cw) * sx).round() as u32;
+            let bottom = (f64::from(y + ch) * sy).round() as u32;
+            let left = left.min(decoded_size.0.saturating_sub(1));
+            let top = top.min(decoded_size.1.saturating_sub(1));
+            geometry.crop = Some((
+                left,
+                top,
+                right.saturating_sub(left).clamp(1, decoded_size.0 - left),
+                bottom.saturating_sub(top).clamp(1, decoded_size.1 - top),
+            ));
+        }
         let target = if geometry.is_identity() {
             converted
         } else {
@@ -1380,6 +1563,9 @@ impl MediaCache {
             let keep = k.path != key.path
                 || k.precision != key.precision
                 || k.export != key.export
+                || (k.purpose != key.purpose
+                    && !(matches!(k.purpose, DecodePurpose::DisplayReduced { .. })
+                        && matches!(key.purpose, DecodePurpose::DisplayReduced { .. })))
                 || k.linear != key.linear;
             if !keep {
                 retired.push(t.clone());
@@ -1389,6 +1575,7 @@ impl MediaCache {
         self.retired_frames.extend(retired);
         self.frames.insert(key, target.clone());
         self.recount();
+        self.used_reduced |= matches!(purpose, DecodePurpose::DisplayReduced { .. });
         Ok(Some(target))
     }
 

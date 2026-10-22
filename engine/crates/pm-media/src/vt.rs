@@ -26,10 +26,15 @@ use std::sync::{Arc, Mutex, Once};
 
 /// What a decoded frame is for: ProRes 422 decodes to 16-bit `v216` when it
 /// can reach an export (amendment 6), to `x422` for display only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DecodePurpose {
     Display,
+    /// A viewer-only representation; never accepted by the export path.
+    DisplayReduced {
+        width: u32,
+        height: u32,
+    },
     Export,
 }
 
@@ -52,6 +57,10 @@ pub struct VtConfig {
     pub annexb: bool,
     pub alpha_layer: bool,
     pub prores: bool,
+    /// Requested native partial decode, never a post-decode resize.
+    pub reduced: Option<(u32, u32)>,
+    pub source_width: i32,
+    pub source_height: i32,
     /// `VTIsHardwareDecodeSupported` for the codec type.
     pub hardware_supported: bool,
     /// How the format description was made.
@@ -188,7 +197,7 @@ impl VtConfig {
         let fmt = match &codec.to_be_bytes() {
             b"ap4h" | b"ap4x" => F_Y416,
             b"apch" | b"apcn" | b"apcs" | b"apco" => match purpose {
-                DecodePurpose::Display => F_X422,
+                DecodePurpose::Display | DecodePurpose::DisplayReduced { .. } => F_X422,
                 DecodePurpose::Export => F_V216,
             },
             _ if alpha_layer => F_V0A8,
@@ -216,6 +225,26 @@ impl VtConfig {
             annexb,
             alpha_layer,
             prores,
+            reduced: match purpose {
+                DecodePurpose::DisplayReduced { width, height } => {
+                    if !prores
+                        || width == 0
+                        || height == 0
+                        || width > i32::MAX as u32
+                        || height > i32::MAX as u32
+                        || (width as i64 >= info.width as i64
+                            && height as i64 >= info.height as i64)
+                    {
+                        return Err(MediaError::invalid(
+                            "reduced decode requires ProRes and a smaller positive size",
+                        ));
+                    }
+                    Some((width, height))
+                }
+                _ => None,
+            },
+            source_width: info.width,
+            source_height: info.height,
             hardware_supported,
             format_source,
             format: Some(format),
@@ -531,6 +560,8 @@ pub struct VtDecoder {
     hardware: bool,
     requested: u32,
     prores_header: bool,
+    reduced: Option<(u32, u32)>,
+    source_size: (usize, usize),
     /// Frames whose decode failed: (PTS, OSStatus).
     pub failures: Vec<(i64, OSStatus)>,
 }
@@ -613,7 +644,7 @@ impl VtDecoder {
                     .map(|c| (NalKind::Hevc, (c[21] & 3) as usize + 1)),
                 _ => None,
             };
-            Ok(VtDecoder {
+            let decoder = VtDecoder {
                 session,
                 format,
                 collector,
@@ -624,8 +655,30 @@ impl VtDecoder {
                 hardware,
                 requested: cfg.format_fcc,
                 prores_header: cfg.prores_header,
+                reduced: cfg.reduced,
+                source_size: (cfg.source_width as usize, cfg.source_height as usize),
                 failures: vec![],
-            })
+            };
+            if let Some((width, height)) = cfg.reduced {
+                let w = cf_i32(width as i32);
+                let h = cf_i32(height as i32);
+                let size = cf_dict(&[
+                    (kVTDecompressionResolutionKey_Width, w.as_ptr()),
+                    (kVTDecompressionResolutionKey_Height, h.as_ptr()),
+                ]);
+                let st = VTSessionSetProperty(
+                    decoder.session,
+                    kVTDecompressionPropertyKey_ReducedResolutionDecode,
+                    size.as_ptr(),
+                );
+                if st != 0 {
+                    return Err(MediaError::VideoToolbox {
+                        what: "set ProRes reduced-resolution decode".into(),
+                        status: st,
+                    });
+                }
+            }
+            Ok(decoder)
         }
     }
 
@@ -798,6 +851,22 @@ impl VtDecoder {
                         ));
                     }
                     let format = corevideo_format(&pb)?;
+                    if let Some((width, height)) = self.reduced
+                        && (format.width < width as usize || format.height < height as usize)
+                    {
+                        return Err(MediaError::decode(format!(
+                            "VideoToolbox reduced frame {}×{} is below requested {}×{}",
+                            format.width, format.height, width, height
+                        )));
+                    }
+                    if self.reduced.is_some()
+                        && (format.width >= self.source_size.0
+                            && format.height >= self.source_size.1)
+                    {
+                        return Err(MediaError::decode(
+                            "VideoToolbox ignored reduced-resolution decode request",
+                        ));
+                    }
                     out.push(DecodedFrame {
                         pts: pts.value / self.unit,
                         format: Arc::new(format),

@@ -49,6 +49,13 @@ unsafe extern "C" {
         index: usize,
         options: CFDictionaryRef,
     ) -> CGImageRef;
+    fn CGImageSourceCreateThumbnailAtIndex(
+        src: CGImageSourceRef,
+        index: usize,
+        options: CFDictionaryRef,
+    ) -> CGImageRef;
+    static kCGImageSourceCreateThumbnailFromImageAlways: CFStringRef;
+    static kCGImageSourceThumbnailMaxPixelSize: CFStringRef;
     fn CGImageSourceGetType(src: CGImageSourceRef) -> CFStringRef;
 }
 
@@ -338,6 +345,27 @@ fn source(path: &Path) -> Result<Cf> {
     src.ok_or_else(|| MediaError::Image(format!("ImageIO cannot open {}", path.display())))
 }
 
+/// Header dimensions without decoding the image pixels.
+pub fn dimensions(path: &Path) -> Result<(u32, u32)> {
+    let src = source(path)?;
+    let props = unsafe {
+        Cf::from_create(CGImageSourceCopyPropertiesAtIndex(
+            src.as_mut_ptr(),
+            0,
+            std::ptr::null(),
+        ))
+    }
+    .ok_or_else(|| MediaError::Image("ImageIO has no image properties".into()))?;
+    let width = unsafe { cf_i64(cf_dict_get(props.as_ptr(), "PixelWidth")) }
+        .ok_or_else(|| MediaError::Image("ImageIO has no width".into()))?;
+    let height = unsafe { cf_i64(cf_dict_get(props.as_ptr(), "PixelHeight")) }
+        .ok_or_else(|| MediaError::Image("ImageIO has no height".into()))?;
+    if width <= 0 || height <= 0 || width > u32::MAX as i64 || height > u32::MAX as i64 {
+        return Err(MediaError::invalid("invalid ImageIO dimensions"));
+    }
+    Ok((width as u32, height as u32))
+}
+
 /// Frame count and delays; None for a single image.
 pub fn animation(path: &Path) -> Result<Option<Animation>> {
     let src = source(path)?;
@@ -422,6 +450,31 @@ pub fn read_frame(
     pool: &FramePool,
     format: ImageFormat,
 ) -> Result<StillImage> {
+    read_frame_impl(path, index, pool, format, None)
+}
+
+/// ImageIO decodes a thumbnail at or below `max_dimension` without a
+/// generated file. The original reader remains the only export path.
+pub fn read_reduced(
+    path: &Path,
+    index: usize,
+    pool: &FramePool,
+    format: ImageFormat,
+    max_dimension: u32,
+) -> Result<StillImage> {
+    if max_dimension == 0 || max_dimension > i32::MAX as u32 {
+        return Err(MediaError::invalid("invalid ImageIO thumbnail dimension"));
+    }
+    read_frame_impl(path, index, pool, format, Some(max_dimension))
+}
+
+fn read_frame_impl(
+    path: &Path,
+    index: usize,
+    pool: &FramePool,
+    format: ImageFormat,
+    max_dimension: Option<u32>,
+) -> Result<StillImage> {
     let src = source(path)?;
     let count = unsafe { CGImageSourceGetCount(src.as_mut_ptr()) };
     if index >= count {
@@ -439,12 +492,18 @@ pub fn read_frame(
         .and_then(|p| unsafe { cf_i64(cf_dict_get(p.as_ptr(), "Orientation")) })
         .filter(|o| (1..=8).contains(o))
         .unwrap_or(1) as u8;
+    let max = max_dimension.map(|n| cf_i32(n as i32));
+    let options = max.as_ref().map(|n| unsafe {
+        cf_dict(&[
+            (kCGImageSourceCreateThumbnailFromImageAlways, cf_bool(true)),
+            (kCGImageSourceThumbnailMaxPixelSize, n.as_ptr()),
+        ])
+    });
     let img = unsafe {
-        Cf::from_create(CGImageSourceCreateImageAtIndex(
-            src.as_mut_ptr(),
-            index,
-            std::ptr::null(),
-        ))
+        Cf::from_create(match options.as_ref() {
+            Some(o) => CGImageSourceCreateThumbnailAtIndex(src.as_mut_ptr(), index, o.as_ptr()),
+            None => CGImageSourceCreateImageAtIndex(src.as_mut_ptr(), index, std::ptr::null()),
+        })
     }
     .ok_or_else(|| MediaError::Image(format!("ImageIO could not decode frame {index}")))?;
     let uti =

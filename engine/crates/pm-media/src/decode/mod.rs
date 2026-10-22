@@ -15,6 +15,7 @@
 //! | Everything else (DNxHD/DNxHR, CineForm, MJPEG, DV, MPEG-2, ...) | FFmpeg |
 
 pub mod arbiter;
+pub mod measure;
 pub mod scrub;
 pub mod service;
 pub mod session;
@@ -248,6 +249,13 @@ pub fn open(
     threads: i32,
     prefer: Option<Backend>,
 ) -> Result<(Decoder, Vec<String>)> {
+    if matches!(purpose, DecodePurpose::DisplayReduced { .. })
+        && backends(spec.info, spec.index) != [Backend::VideoToolbox]
+    {
+        return Err(MediaError::unsupported(
+            "native reduced decode requires VideoToolbox ProRes",
+        ));
+    }
     let mut order = backends(spec.info, spec.index);
     if let Some(p) = prefer {
         if !order.contains(&p) {

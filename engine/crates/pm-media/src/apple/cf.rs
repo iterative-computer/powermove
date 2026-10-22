@@ -257,6 +257,9 @@ unsafe extern "C" {
     pub static kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: CFStringRef;
     pub static kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: CFStringRef;
     pub static kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder: CFStringRef;
+    pub static kVTDecompressionPropertyKey_ReducedResolutionDecode: CFStringRef;
+    pub static kVTDecompressionResolutionKey_Width: CFStringRef;
+    pub static kVTDecompressionResolutionKey_Height: CFStringRef;
     pub fn VTDecompressionSessionCreate(
         alloc: CFAllocatorRef,
         format: CMFormatDescriptionRef,
@@ -284,6 +287,11 @@ unsafe extern "C" {
         key: CFStringRef,
         alloc: CFAllocatorRef,
         out: *mut c_void,
+    ) -> OSStatus;
+    pub fn VTSessionSetProperty(
+        session: *mut c_void,
+        key: CFStringRef,
+        value: CFTypeRef,
     ) -> OSStatus;
     pub fn VTIsHardwareDecodeSupported(codec_type: u32) -> u8;
     pub fn VTRegisterProfessionalVideoWorkflowVideoDecoders();

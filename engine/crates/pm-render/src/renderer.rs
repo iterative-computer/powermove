@@ -14,6 +14,7 @@ use pm_gpu::{Target, TargetPool, working_format};
 use pm_model::Document;
 use pm_protocol::color::Precision;
 use pm_protocol::common::Ticks;
+use pm_protocol::frame::Representation;
 
 use crate::assets::AssetResolver;
 use crate::capability::{self, Feature, Unsupported};
@@ -1068,6 +1069,40 @@ impl Renderer {
         self.media.scrub = on;
     }
 
+    /// Requests a smaller media decode for interactive frames. `None`
+    /// selects original pixels; export requests always select originals.
+    pub fn set_preview_decode_size(&mut self, size: Option<(u32, u32)>) {
+        let size = size.filter(|(width, height)| *width > 0 && *height > 0);
+        if self.media.preview_decode_size() != size {
+            self.clear_draw_reuse();
+        }
+        self.media.set_preview_decode_size(size);
+    }
+
+    /// The least detailed media representation actually used in the last
+    /// render, including cached converted frames.
+    pub fn media_representation(&self) -> Representation {
+        self.media.representation()
+    }
+
+    /// Marks interactive playback so fresh, exact video decodes can be
+    /// measured against the composition frame budget.
+    pub fn set_playing(&mut self, playing: bool) {
+        self.media.set_playing(playing);
+    }
+
+    /// Video paths with at least eight fresh exact decodes whose rolling
+    /// 95th percentile exceeds a frame budget.
+    pub fn slow_media(&self) -> Vec<std::path::PathBuf> {
+        self.media.slow_media()
+    }
+
+    /// Rolling p95 in milliseconds for each source with eight or more fresh
+    /// exact original-size playback decodes.
+    pub fn decode_measurements(&self) -> Vec<(std::path::PathBuf, f64)> {
+        self.media.decode_measurements()
+    }
+
     /// Changes whenever a frame a scrub render asked for has decoded: a
     /// frame drawn with stand-ins can be drawn again.
     pub fn media_landed(&self) -> u64 {
@@ -1389,7 +1424,8 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             blender,
-            self.reuse_enabled.then_some(&mut self.reuse),
+            (self.reuse_enabled && self.media.preview_decode_size().is_none())
+                .then_some(&mut self.reuse),
         );
         if !request.background {
             plan.background = Background::Transparent;
@@ -1399,6 +1435,7 @@ impl Renderer {
         // their bottom; never with the depth and id surface, exports, or
         // compositing nodes at the top level.
         let prefix = self.reuse_enabled
+            && self.media.preview_decode_size().is_none()
             && depth_id.is_none()
             && !request.export
             && !crate::composite::has_nodes(&plan);
@@ -1429,6 +1466,7 @@ impl Renderer {
         }
         // Exports never draw stand-ins (docs/engine/scrub.md).
         self.media.stand_ins.clear();
+        self.media.begin_frame(request.export);
         let scrub = self.media.scrub;
         self.media.scrub = scrub && !request.export;
         // Renderers drawing their own definitions time effects,
@@ -1951,7 +1989,8 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             blender,
-            self.reuse_enabled.then_some(&mut self.reuse),
+            (self.reuse_enabled && self.media.preview_decode_size().is_none())
+                .then_some(&mut self.reuse),
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

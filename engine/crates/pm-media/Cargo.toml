@@ -16,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["std"] }
 blake3 = "1.8"
+half = "2.7"
 md-5 = "0.10"
 libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "ico", "gif", "webp"] }
@@ -28,6 +29,7 @@ encoding_rs = "0.8"
 [dev-dependencies]
 proptest.workspace = true
 pm-color = { path = "../pm-color" }
+tempfile = "3"
 
 [build-dependencies]
 bindgen = "0.72"

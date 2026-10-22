@@ -2285,6 +2285,7 @@ dependencies = [
  "bindgen",
  "blake3",
  "encoding_rs",
+ "half",
  "image",
  "libc",
  "md-5",
@@ -2296,6 +2297,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -2320,6 +2322,7 @@ dependencies = [
  "pm-audio",
  "pm-blender",
  "pm-bridge",
+ "pm-cache",
  "pm-engine",
  "pm-eval",
  "pm-export",
@@ -2328,10 +2331,12 @@ dependencies = [
  "pm-model",
  "pm-node",
  "pm-protocol",
+ "pm-proxy",
  "pm-render",
  "pm-text",
  "serde",
  "serde_json",
+ "tempfile",
  "wgpu",
 ]
 
@@ -2362,6 +2367,16 @@ dependencies = [
 [[package]]
 name = "pm-proxy"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "pm-media",
+ "pm-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "pm-render"
@@ -2393,6 +2408,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
  "vello",
  "wgpu",

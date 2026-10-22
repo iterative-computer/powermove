@@ -49,6 +49,108 @@ fn slot(name: &str, gray: bool) -> Option<&'static [usize]> {
 }
 
 pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
+    read_mip(path, pool, 0)
+}
+
+/// Display window dimensions from the EXR header, without pixel decode.
+pub fn dimensions(path: &Path) -> Result<(u32, u32)> {
+    let cpath = CString::new(
+        path.to_str()
+            .ok_or_else(|| MediaError::invalid("path is not UTF-8"))?,
+    )
+    .map_err(|_| MediaError::invalid("path contains NUL"))?;
+    let init = exr_context_initializer_t {
+        size: std::mem::size_of::<exr_context_initializer_t>(),
+        flags: EXR_CONTEXT_FLAG_SILENT_HEADER_PARSE as c_int,
+        ..Default::default()
+    };
+    let mut raw: exr_context_t = std::ptr::null_mut();
+    check(
+        unsafe { exr_start_read(&mut raw, cpath.as_ptr(), &init) },
+        "open",
+    )?;
+    let ctx = Ctx(raw);
+    let mut window = exr_attr_box2i_t::default();
+    check(
+        unsafe { exr_get_display_window(ctx.0 as exr_const_context_t, 0, &mut window) },
+        "display window",
+    )?;
+    let w = window.max.x as i64 - window.min.x as i64 + 1;
+    let h = window.max.y as i64 - window.min.y as i64 + 1;
+    if w <= 0 || h <= 0 || w > u32::MAX as i64 || h > u32::MAX as i64 {
+        return Err(MediaError::invalid("invalid EXR display dimensions"));
+    }
+    Ok((w as u32, h as u32))
+}
+
+/// Chooses the finest stored mip whose longest edge fits the viewer target.
+/// A single-level EXR has no native reduced representation and reports that
+/// explicitly; callers can choose a separately cached image representation.
+pub fn read_reduced(path: &Path, pool: &FramePool, max_dimension: u32) -> Result<StillImage> {
+    if max_dimension == 0 {
+        return Err(MediaError::invalid("zero EXR mip target"));
+    }
+    let cpath = CString::new(
+        path.to_str()
+            .ok_or_else(|| MediaError::invalid("path is not UTF-8"))?,
+    )
+    .map_err(|_| MediaError::invalid("path contains NUL"))?;
+    let init = exr_context_initializer_t {
+        size: std::mem::size_of::<exr_context_initializer_t>(),
+        flags: EXR_CONTEXT_FLAG_SILENT_HEADER_PARSE as c_int,
+        ..Default::default()
+    };
+    let mut raw: exr_context_t = std::ptr::null_mut();
+    check(
+        unsafe { exr_start_read(&mut raw, cpath.as_ptr(), &init) },
+        "open",
+    )?;
+    let ctx = Ctx(raw);
+    let c = ctx.0 as exr_const_context_t;
+    let mut storage: exr_storage_t = 0;
+    check(unsafe { exr_get_storage(c, 0, &mut storage) }, "storage")?;
+    if storage != EXR_STORAGE_TILED {
+        return Err(MediaError::unsupported(
+            "OpenEXR has no stored tiled mipmap levels",
+        ));
+    }
+    let (mut tw, mut th) = (0u32, 0u32);
+    let (mut lm, mut rm) = (0, 0);
+    check(
+        unsafe { exr_get_tile_descriptor(c, 0, &mut tw, &mut th, &mut lm, &mut rm) },
+        "tile descriptor",
+    )?;
+    if lm != EXR_TILE_MIPMAP_LEVELS {
+        return Err(MediaError::unsupported(
+            "OpenEXR has no stored mipmap levels",
+        ));
+    }
+    let mut selected = None;
+    for level in 0..32 {
+        let (mut w, mut h) = (0, 0);
+        if unsafe { exr_get_level_sizes(c, 0, level, level, &mut w, &mut h) }
+            != EXR_ERR_SUCCESS as exr_result_t
+        {
+            break;
+        }
+        if w.max(h) as u32 <= max_dimension {
+            selected = Some(level as u32);
+            break;
+        }
+        if w <= 1 && h <= 1 {
+            break;
+        }
+    }
+    drop(ctx);
+    let level = selected
+        .ok_or_else(|| MediaError::unsupported("OpenEXR mip target is below its smallest level"))?;
+    read_mip(path, pool, level)
+}
+
+/// Reads a stored OpenEXR mip level directly from a tiled mipmap image.
+/// Level zero is the exact original reader. Other storage and windows with
+/// nonzero origins are rejected rather than silently decoding full size.
+pub fn read_mip(path: &Path, pool: &FramePool, level: u32) -> Result<StillImage> {
     let cpath = CString::new(
         path.to_str()
             .ok_or_else(|| MediaError::invalid("path is not UTF-8"))?,
@@ -83,8 +185,39 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         "display window",
     )?;
     let (dx0, dy0, dx1, dy1) = (dw.min.x, dw.min.y, dw.max.x, dw.max.y);
-    let w = (dx1 as i64 - dx0 as i64 + 1).max(0) as usize;
-    let h = (dy1 as i64 - dy0 as i64 + 1).max(0) as usize;
+    let mut w = (dx1 as i64 - dx0 as i64 + 1).max(0) as usize;
+    let mut h = (dy1 as i64 - dy0 as i64 + 1).max(0) as usize;
+    if level > 0 {
+        if storage != EXR_STORAGE_TILED
+            || (dx0, dy0) != (0, 0)
+            || disp.min.x != dw.min.x
+            || disp.min.y != dw.min.y
+            || disp.max.x != dw.max.x
+            || disp.max.y != dw.max.y
+        {
+            return Err(MediaError::unsupported(
+                "OpenEXR mip level requires a tiled zero-origin full display window",
+            ));
+        }
+        let (mut tw, mut th) = (0u32, 0u32);
+        let (mut lm, mut rm) = (0, 0);
+        check(
+            unsafe { exr_get_tile_descriptor(c, part, &mut tw, &mut th, &mut lm, &mut rm) },
+            "tile descriptor",
+        )?;
+        if lm != EXR_TILE_MIPMAP_LEVELS || level > i32::MAX as u32 {
+            return Err(MediaError::unsupported(
+                "OpenEXR image has no mipmap levels",
+            ));
+        }
+        let (mut lw, mut lh) = (0, 0);
+        check(
+            unsafe { exr_get_level_sizes(c, part, level as i32, level as i32, &mut lw, &mut lh) },
+            "mip level size",
+        )?;
+        w = lw as usize;
+        h = lh as usize;
+    }
     let mut chl: *const exr_attr_chlist_t = std::ptr::null();
     check(unsafe { exr_get_channels(c, part, &mut chl) }, "channels")?;
     let entries =
@@ -198,7 +331,7 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
     } else {
         let (mut tx, mut ty): (i32, i32) = (0, 0);
         check(
-            unsafe { exr_get_tile_counts(c, part, 0, 0, &mut tx, &mut ty) },
+            unsafe { exr_get_tile_counts(c, part, level as i32, level as i32, &mut tx, &mut ty) },
             "tile counts",
         )?;
         let (mut tw, mut th) = (0u32, 0u32);
@@ -211,7 +344,9 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
             for i in 0..tx {
                 let mut ci = exr_chunk_info_t::default();
                 check(
-                    unsafe { exr_read_tile_chunk_info(c, part, i, j, 0, 0, &mut ci) },
+                    unsafe {
+                        exr_read_tile_chunk_info(c, part, i, j, level as i32, level as i32, &mut ci)
+                    },
                     "tile chunk",
                 )?;
                 decode_chunk(
@@ -224,8 +359,16 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
     }
     // Place the data window in the display window.
     let (vx0, vy0) = (disp.min.x, disp.min.y);
-    let vw = (disp.max.x as i64 - vx0 as i64 + 1).max(0) as usize;
-    let vh = (disp.max.y as i64 - vy0 as i64 + 1).max(0) as usize;
+    let vw = if level > 0 {
+        w
+    } else {
+        (disp.max.x as i64 - vx0 as i64 + 1).max(0) as usize
+    };
+    let vh = if level > 0 {
+        h
+    } else {
+        (disp.max.y as i64 - vy0 as i64 + 1).max(0) as usize
+    };
     let (out, ow, oh) = if (vx0, vy0, vw, vh) == (dx0, dy0, w, h) {
         (buf, w, h)
     } else {

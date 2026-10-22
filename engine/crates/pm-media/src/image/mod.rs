@@ -19,6 +19,8 @@ pub mod exr;
 pub mod icc;
 pub mod imageio;
 pub mod jpeg;
+pub mod mip_cache;
+mod mips;
 pub mod png_gamma;
 pub mod raster;
 pub mod sequence;
@@ -187,6 +189,48 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
             raster::read(path, pool, format).or_else(|_| imageio::read_frame(path, 0, pool, format))
         }
         _ => raster::read(path, pool, format),
+    }
+}
+
+/// A viewer-sized still without generating a sidecar file. The original
+/// reader above is kept for export and analysis. OpenEXR uses stored mips;
+/// formats supported by ImageIO use its native thumbnail decoder.
+pub fn read_reduced(path: &Path, pool: &FramePool, max_dimension: u32) -> Result<StillImage> {
+    let mut head = [0u8; 512];
+    let n = {
+        use std::io::Read;
+        std::fs::File::open(path)?.read(&mut head)?
+    };
+    let format = sniff(&head[..n]);
+    match format {
+        ImageFormat::Exr => match exr::read_reduced(path, pool, max_dimension) {
+            Ok(image) => Ok(image),
+            Err(MediaError::Unsupported(_)) => {
+                mips::from_original(exr::read(path, pool)?, pool, max_dimension)
+            }
+            Err(error) => Err(error),
+        },
+        ImageFormat::Svg => Err(MediaError::unsupported(
+            "SVG has no ImageIO reduced representation",
+        )),
+        _ => imageio::read_reduced(path, 0, pool, format, max_dimension),
+    }
+}
+
+/// Display dimensions from headers, for deciding whether a reduced still
+/// representation actually saves pixels.
+pub fn dimensions(path: &Path) -> Result<(u32, u32)> {
+    let mut head = [0u8; 512];
+    let n = {
+        use std::io::Read;
+        std::fs::File::open(path)?.read(&mut head)?
+    };
+    match sniff(&head[..n]) {
+        ImageFormat::Exr => exr::dimensions(path),
+        ImageFormat::Svg => Err(MediaError::unsupported("SVG has no raster dimensions")),
+        ImageFormat::Heif | ImageFormat::Avif | ImageFormat::Other => imageio::dimensions(path),
+        _ => ::image::image_dimensions(path)
+            .map_err(|error| MediaError::Image(format!("image dimensions: {error}"))),
     }
 }
 

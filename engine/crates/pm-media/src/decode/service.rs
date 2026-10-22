@@ -435,6 +435,23 @@ impl DecodeService {
             instance,
             purpose,
         };
+        // Viewer size can change by a pixel at a time. Keep only the most
+        // recent idle reduced session for this source and instance, rather
+        // than accumulating one VideoToolbox session for every size.
+        if matches!(purpose, DecodePurpose::DisplayReduced { .. }) {
+            let mut idle = self.idle.lock().unwrap();
+            idle.retain(|other, sessions| {
+                let obsolete = other.source == source.id
+                    && other.instance == instance
+                    && other.purpose != purpose
+                    && matches!(other.purpose, DecodePurpose::DisplayReduced { .. });
+                if obsolete {
+                    self.open_sessions
+                        .fetch_sub(sessions.len() as u64, Ordering::Relaxed);
+                }
+                !obsolete
+            });
+        }
         let reused = self.idle.lock().unwrap().get_mut(&key).and_then(|l| {
             let at = l
                 .iter()

@@ -48,6 +48,7 @@ pm-text = { path = "../pm-text", features = ["system", "render", "coretext-refer
 flate2 = "1.1"
 read-fonts = "0.45"
 png = "0.18"
+tempfile = "3"
 
 [[test]]
 # Runs on the main thread: the CoreText font registry uses AppKit's font

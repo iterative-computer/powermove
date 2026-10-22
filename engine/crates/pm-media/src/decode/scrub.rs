@@ -96,7 +96,7 @@ pub const IDLE_EXIT: Duration = Duration::from_secs(30);
 /// The decode workers of one renderer's display frames.
 pub struct ViewerDecode {
     service: Arc<DecodeService>,
-    workers: Mutex<HashMap<(u64, InstanceId), Arc<Worker>>>,
+    workers: Mutex<HashMap<(u64, InstanceId, DecodePurpose), Arc<Worker>>>,
     landed: Arc<AtomicU64>,
     stats: Arc<Mutex<ScrubStats>>,
     idle_exit: Duration,
@@ -112,6 +112,7 @@ struct Worker {
 struct Shared {
     source: Arc<MediaSource>,
     instance: InstanceId,
+    purpose: DecodePurpose,
     service: Arc<DecodeService>,
     /// Presented position of each sample.
     shown_at: Vec<usize>,
@@ -224,6 +225,24 @@ impl ViewerDecode {
         n: usize,
         want: Want,
     ) -> Result<Fetched> {
+        self.fetch_with_purpose(source, instance, n, want, DecodePurpose::Display)
+    }
+
+    /// Fetches a viewer representation. The purpose is part of worker and
+    /// frame-cache identity, so reduced frames never stand in for originals.
+    pub fn fetch_with_purpose(
+        &self,
+        source: &Arc<MediaSource>,
+        instance: InstanceId,
+        n: usize,
+        want: Want,
+        purpose: DecodePurpose,
+    ) -> Result<Fetched> {
+        if purpose == DecodePurpose::Export {
+            return Err(MediaError::invalid(
+                "viewer fetch cannot use export purpose",
+            ));
+        }
         let sample = source
             .index
             .frames
@@ -233,11 +252,11 @@ impl ViewerDecode {
         let key = FrameKey {
             source: source.id,
             sample,
-            purpose: DecodePurpose::Display,
+            purpose,
         };
         self.stats.lock().unwrap().requests += 1;
         loop {
-            let worker = self.worker(source, instance);
+            let worker = self.worker(source, instance, purpose);
             if let Some(fetched) = self.fetch_on(&worker.shared, &key, n, want) {
                 return fetched;
             }
@@ -362,9 +381,27 @@ impl ViewerDecode {
         }
     }
 
-    fn worker(&self, source: &Arc<MediaSource>, instance: InstanceId) -> Arc<Worker> {
+    fn worker(
+        &self,
+        source: &Arc<MediaSource>,
+        instance: InstanceId,
+        purpose: DecodePurpose,
+    ) -> Arc<Worker> {
         let mut workers = self.workers.lock().unwrap();
-        let key = (source.id, instance);
+        let key = (source.id, instance, purpose);
+        // A representation switch supersedes this viewer's old decoder.
+        // Otherwise each resize could leave another worker and VT session
+        // alive until its idle timeout.
+        let old_keys: Vec<_> = workers
+            .keys()
+            .copied()
+            .filter(|other| other.0 == source.id && other.1 == instance && other.2 != purpose)
+            .collect();
+        for old_key in old_keys {
+            if let Some(old) = workers.remove(&old_key) {
+                old.stop();
+            }
+        }
         if let Some(w) = workers.get(&key)
             && w.shared.alive.load(Ordering::Acquire)
         {
@@ -380,6 +417,7 @@ impl ViewerDecode {
         let shared = Arc::new(Shared {
             source: source.clone(),
             instance,
+            purpose,
             service: self.service.clone(),
             shown_at,
             state: Mutex::new(State::default()),
@@ -440,7 +478,7 @@ impl Shared {
         FrameKey {
             source: self.source.id,
             sample: self.source.index.frames[n].sample,
-            purpose: DecodePurpose::Display,
+            purpose: self.purpose,
         }
     }
 
@@ -450,7 +488,7 @@ impl Shared {
     fn nearest(&self, n: usize, st: &State) -> Option<(usize, DecodedFrame)> {
         let cache = self.service.cache();
         let best = cache
-            .samples_of(self.source.id, DecodePurpose::Display)
+            .samples_of(self.source.id, self.purpose)
             .into_iter()
             .filter_map(|s| self.shown_at.get(s).copied().filter(|&m| m != usize::MAX))
             .min_by_key(|&m| (m.abs_diff(n), m > n));
@@ -469,9 +507,9 @@ impl Shared {
         while let Some(job) = self.next_job() {
             let n = job.frame();
             let result = (|| -> Result<Option<DecodedFrame>> {
-                let mut guard =
-                    self.service
-                        .session(&self.source, self.instance, DecodePurpose::Display)?;
+                let mut guard = self
+                    .service
+                    .session(&self.source, self.instance, self.purpose)?;
                 let (keep, stride) = {
                     let st = self.state.lock().unwrap();
                     if st.stride < 0 {
@@ -690,7 +728,7 @@ mod tests {
         let service = Arc::new(DecodeService::new(Default::default()));
         let viewer = ViewerDecode::new(service).with_idle_exit(Duration::ZERO);
         // The worker `fetch` took, exiting idle before it locked the state.
-        let worker = viewer.worker(&src, 1);
+        let worker = viewer.worker(&src, 1, DecodePurpose::Display);
         let t = std::time::Instant::now();
         while worker.shared.alive.load(Ordering::Acquire) {
             assert!(t.elapsed().as_secs() < 20, "the worker never exited");
