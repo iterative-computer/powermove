@@ -339,6 +339,12 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
 /// Today's canvas format.
 const CANVAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// The canvas is drawn, sampled for placement, and copied to and from the
+/// cached preview memory.
+const CANVAS_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
+    .union(wgpu::TextureUsages::TEXTURE_BINDING)
+    .union(wgpu::TextureUsages::COPY_SRC)
+    .union(wgpu::TextureUsages::COPY_DST);
 
 /// Renders documents for the presenter. One per GPU device.
 pub struct Composer {
@@ -822,7 +828,7 @@ impl Composer {
                 w,
                 h,
                 CANVAS_FORMAT,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                CANVAS_USAGE,
             ),
         };
         let source_view = source.texture.create_view(&Default::default());
@@ -852,6 +858,22 @@ impl Composer {
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
         }
+        Some(canvas)
+    }
+
+    /// A remembered canvas becomes this frame's canvas (an exact copy).
+    fn restore_canvas(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
+        hit: &Target,
+    ) -> Option<Target> {
+        let (w, h) = (hit.texture.width(), hit.texture.height());
+        let canvas = match self.canvas_scratch.take() {
+            Some(t) if t.texture.width() == w && t.texture.height() == h => t,
+            _ => Target::new(device, "viewer canvas", w, h, CANVAS_FORMAT, CANVAS_USAGE),
+        };
+        super::preview_cache::copy_into(encoder, hit, &canvas);
         Some(canvas)
     }
 
@@ -901,6 +923,11 @@ impl Composer {
         let mut scene3d_meta = Vec::new();
         let mut svg_misses = Vec::new();
         let mut cached = false;
+        // Today's 8-bit viewer canvas (decision V1) quantizes the region before
+        // placement, so a cached canvas is exactly what is presented, at half
+        // the memory of the working region. Its cache entry and pending store.
+        let mut cached_canvas: Option<Target> = None;
+        let mut pending_put: Option<(super::preview_cache::Key, Vec<pm_render::LayerQuad>, pm_protocol::frame::Representation)> = None;
         let mut representation = pm_protocol::frame::Representation::Original;
         if let Some(region) = place.region {
             let request = RenderRequest {
@@ -972,6 +999,7 @@ impl Composer {
                 && matches!(request.blender, pm_render::blender::BlenderRender::Native)
                 && !self.renderer.watchdog_holding()
                 && self.renderer.watchdog_stopped().is_none();
+            let canvas_entry = place.canvas;
             let cache_key = cacheable.then(|| {
                 self.preview_cache.key(
                     doc,
@@ -980,18 +1008,22 @@ impl Composer {
                     time,
                     &request,
                     map,
-                    &proxy_media.signature(),
+                    &format!("{}:canvas={canvas_entry}", proxy_media.signature()),
                 )
             });
             if let Some(hit) = cache_key
                 .as_ref()
                 .and_then(|key| self.preview_cache.get(key))
             {
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("reuse cached preview"),
-                });
-                super::preview_cache::copy_into(&mut encoder, &hit.color, scratch);
-                queue.submit([encoder.finish()]);
+                if hit.color.format() == CANVAS_FORMAT {
+                    cached_canvas = Some(hit.color);
+                } else {
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("reuse cached preview"),
+                    });
+                    super::preview_cache::copy_into(&mut encoder, &hit.color, scratch);
+                    queue.submit([encoder.finish()]);
+                }
                 quads = hit.quads;
                 representation = hit.representation;
                 cached = true;
@@ -1041,14 +1073,13 @@ impl Composer {
                 }
                 if cacheable && failures.is_empty() && stand_ins.is_empty() && svg_misses.is_empty()
                 {
-                    self.preview_cache.put(
-                        cache_key.expect("cacheable"),
-                        scratch,
-                        quads.clone(),
-                        representation,
-                        &device,
-                        &queue,
-                    );
+                    let key = cache_key.expect("cacheable");
+                    if canvas_entry {
+                        // Stored once the canvas is drawn, below.
+                        pending_put = Some((key, quads.clone(), representation));
+                    } else {
+                        self.preview_cache.put(key, scratch, quads.clone(), representation, &device, &queue);
+                    }
                 }
             }
         }
@@ -1057,7 +1088,10 @@ impl Composer {
             label: Some("viewer placement"),
         });
         let canvas = if place.canvas && place.region.is_some() {
-            self.store_canvas(&mut encoder, &device)
+            match cached_canvas.take() {
+                Some(hit) => self.restore_canvas(&mut encoder, &device, &hit),
+                None => self.store_canvas(&mut encoder, &device),
+            }
         } else {
             None
         };
@@ -1072,6 +1106,9 @@ impl Composer {
             false,
         );
         queue.submit([encoder.finish()]);
+        if let (Some((key, quads, representation)), Some(canvas)) = (pending_put.take(), canvas.as_ref()) {
+            self.preview_cache.put(key, canvas, quads, representation, &device, &queue);
+        }
         let slow = self.renderer.slow_media();
         if let Some(canvas) = canvas {
             self.canvas_scratch = Some(canvas);

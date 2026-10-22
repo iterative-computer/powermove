@@ -159,10 +159,10 @@ impl PreviewCache {
     ) {
         let bytes = source.width() as usize
             * source.height() as usize
-            * if source.format() == wgpu::TextureFormat::Rgba32Float {
-                16
-            } else {
-                8
+            * match source.format() {
+                wgpu::TextureFormat::Rgba32Float => 16,
+                wgpu::TextureFormat::Rgba8Unorm => 4,
+                _ => 8,
             };
         if bytes > self.frames.stats().budget || self.frames.stats().budget == 0 {
             return;
@@ -173,7 +173,8 @@ impl PreviewCache {
             source.width(),
             source.height(),
             source.format(),
-            pm_gpu::target::working_usage(),
+            // Only ever copied in and out (the working region or the canvas).
+            wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
         );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("cache preview"),

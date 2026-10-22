@@ -630,8 +630,12 @@ export class DocumentSession {
    *  the newest frame (its overlay viewport clipped to the stage) at the
    *  preview resolution, as the engine renders it. Before a frame arrives,
    *  the whole stage is a conservative upper bound. */
-  previewSize(): { width: number; height: number } | null {
+  previewSize(): { width: number; height: number; bytesPerPixel: number } | null {
     if (!this.lastState || this.headless) return null;
+    // Today's 8-bit viewer canvas (decision V1) is what the engine remembers:
+    // the same pixels and the same four bytes each as today's cached bitmaps.
+    const canvas = this.lastState.canvas;
+    if (canvas && canvas.width > 0 && canvas.height > 0) return { width: canvas.width, height: canvas.height, bytesPerPixel: 4 };
     const scale = this.lastState.resolution === 'quarter' ? .25 : this.lastState.resolution === 'half' ? .5 : 1;
     const stage = this.lastState.size;
     // Resolution changes do not move the viewport (it is in stage pixels).
@@ -642,7 +646,7 @@ export class DocumentSession {
       height = Math.min(stage.height, viewport.y + viewport.height) - Math.max(0, viewport.y);
     }
     return { width: Math.max(1, Math.ceil(Math.max(0, width) * scale)),
-      height: Math.max(1, Math.ceil(Math.max(0, height) * scale)) };
+      height: Math.max(1, Math.ceil(Math.max(0, height) * scale)), bytesPerPixel: 8 };
   }
 
   async cacheFrame(seconds: number): Promise<FrameDescriptor> {

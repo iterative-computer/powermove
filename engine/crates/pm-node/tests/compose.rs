@@ -398,3 +398,51 @@ fn a_crop_far_from_the_origin_is_drawn_at_todays_scale_in_todays_box() {
     assert_eq!(bgra(&bytes, bpr, 600, 500), bg);
     assert_eq!(bgra(&bytes, bpr, 10, 10), bg);
 }
+
+/// A remembered frame on today's 8-bit viewer canvas is that canvas: a hit
+/// presents exactly the bytes the uncached frame presented, and it holds four
+/// bytes per canvas pixel (not the eight of the float working region).
+#[test]
+fn a_cached_canvas_presents_the_uncached_bytes_at_canvas_memory() {
+    let gpu = pm_gpu::Gpu::new("cached canvas").unwrap();
+    let transform = DisplayTransform::new(&gpu.device, &gpu.queue);
+    let working = WorkingTexture::new(&gpu.device, Size::new(W, H));
+    let pool = SurfacePool::new(&gpu.device, 1, Size::new(W, H), SurfaceFormat::Bgra8Unorm, 4).unwrap();
+    let mut composer = Composer::new(&gpu.device, &gpu.queue);
+    composer.set_cache_budget(64 << 20);
+    composer.set_preview_limit(32 << 20);
+    let mut s = state(PreviewResolution::Automatic);
+    s.canvas = Some(ViewerCanvas {
+        width: 160,
+        height: 90,
+        crop: Rect { x: 0.0, y: 0.0, width: 160.0, height: 90.0 },
+        css: Rect { x: 90.0, y: 82.5, width: 240.0, height: 135.0 },
+    });
+    let document = doc("#3366CC");
+    let mut present = |composer: &mut Composer| {
+        let composed = composer
+            .compose(&document, "P-root", &MediaMap::default(), Ticks::ZERO, &s, &working)
+            .unwrap();
+        assert!(composed.failures.is_empty());
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        transform
+            .encode(&gpu.device, &gpu.queue, &mut encoder, &working, &pool.surfaces[0], DisplayParams {
+                working: WorkingEncoding::Standard,
+                canvas: ViewerColorSpace::Srgb,
+                noise_offset: [0, 0],
+            })
+            .unwrap();
+        let index = gpu.queue.submit([encoder.finish()]);
+        gpu.device
+            .poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: Some(std::time::Duration::from_secs(5)) })
+            .unwrap();
+        (composed.cached, pool.surfaces[0].iosurface.read())
+    };
+    let (first_cached, first) = present(&mut composer);
+    assert!(!first_cached);
+    assert_eq!(composer.preview_cache_stats().entries, 1);
+    assert_eq!(composer.preview_cache_stats().bytes, 160 * 90 * 4);
+    let (second_cached, second) = present(&mut composer);
+    assert!(second_cached, "the second frame is served from the cache");
+    assert!(first == second, "a cached canvas presents exactly the uncached bytes");
+}

@@ -56,7 +56,8 @@ export function installNativePreviewCache(PM: any, session: () => DocumentSessio
         const [start, end] = PM.proj.work ?? [0, PM.proj.dur];
         const frames = Math.max(1, Math.ceil((end - start) * fps));
         const limit = PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024;
-        const required = frames * size.width * size.height * 8;
+        const frameBytes = size.width * size.height * (size.bytesPerPixel ?? 8);
+        const required = frames * frameBytes;
         if (!Number.isFinite(required) || required > limit || limit <= 0) throw new Error(limit <= 0
           ? 'Preview memory is off. Enable it in Settings → General.'
           : 'This preview exceeds your memory limit. Shorten the work area or lower preview resolution.');
@@ -65,7 +66,7 @@ export function installNativePreviewCache(PM: any, session: () => DocumentSessio
         for (let i = 0; i < frames; i++) {
           if (generation !== own || signature() !== key) return;
           if (!await decodedFrame(start + i / fps)) return;
-          count = i + 1; bytes = count * size.width * size.height * 8; emit();
+          count = i + 1; bytes = count * frameBytes; emit();
         }
         // The lease may be smaller than the user's requested ceiling. Prove
         // the whole work area survived warming before offering cached play.
