@@ -26,6 +26,7 @@ import type {
   ClockSample,
   EngineFrameMessage,
   FrameDescriptor,
+  FrameQuality,
   FrameRelease,
   OverlayGeometry,
   SurfacePool,
@@ -60,6 +61,9 @@ export type PresentedFrame = {
   /** A scrub frame with stand-ins for video still decoding (the exact
    *  frame follows; docs/engine/scrub.md). */
   standIn: boolean;
+  /** What the frame shows (`FrameDescriptor.quality`): its resolved
+   *  resolution and representation, for the viewer's quality label. */
+  quality?: FrameQuality;
   /** Host µs at which this refresh is predicted to reach the display (the
    *  instant the frame was picked for: the A/V sync measurement compares
    *  it with the audio clock); null for frames drawn on arrival or before
@@ -561,6 +565,7 @@ export class EnginePresenter implements Presenter {
       rafMs,
       timed: desc.duration !== null,
       standIn: desc.quality.standIn === true,
+      quality: { ...desc.quality },
       displayUs,
       depthId: desc.depthId && desc.depthId.poolGeneration === this.depthGeneration ? { ...desc.depthId } : null,
       width,

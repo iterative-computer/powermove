@@ -11,7 +11,7 @@
  * renders the composition camera.
  */
 import type { ViewParams } from './presentation';
-import type { PreviewResolution, Shading3d } from './protocol';
+import type { MediaPreference, PreviewResolution, Shading3d } from './protocol';
 
 export type ViewerLayoutState = {
   /** The zoom on screen (fit or chosen). */
@@ -23,6 +23,8 @@ export type ViewerLayoutState = {
   /** The 3D viewport's state when the composition has a 3D scene. */
   scene3d?: { hasScene: boolean; shading: Shading3d; xray: boolean } | null;
   playEveryFrame?: boolean;
+  /** The viewer menu's Media section (Automatic, Originals, Proxies). */
+  media?: MediaPreference;
 };
 
 /** The preview resolution menu (Auto, Full, Half, Quarter) as contract 2's enum. */
@@ -40,7 +42,7 @@ export function viewParamsFor(state: ViewerLayoutState): ViewParams {
     zoom: state.shown > 0 && Number.isFinite(state.shown) ? state.shown : 1,
     pan: state.fit ? [0, 0] : [state.pan[0], state.pan[1]],
     resolution: previewResolution(state.previewResolution),
-    media: 'automatic',
+    media: state.media ?? 'automatic',
     playEveryFrame: !!state.playEveryFrame,
     ...(scene ? { camera: null, shading: scene.shading, xray: scene.xray } : {})
   };

@@ -27,6 +27,8 @@ import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, ty
 import { EngineFontClient, FONT_CLIENT_ID, installEngineFontService, JOB_FONT_CLIENT_ID } from '../engine-fonts';
 import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
+import { EngineProxyService } from './proxies';
+import { installProxyIpc } from './proxy-ipc';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
 import { askAboutOfflineMedia, offlineClips } from './offline-media';
@@ -98,6 +100,9 @@ export function engineClock(addon: { nowUs(): number } | null): () => number {
 }
 
 export type InstallNativeEngineOptions = {
+  resolveProxySource?: (asset: string, scope: { owner: number; project: string }) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
+  hashGeneratedFile?: (file: string) => Promise<string>;
+  proxyDraftScope?: (session: number, asset: string) => { projectId: string | null; hash: string | null } | null;
   enabled: boolean;
   ipc: IpcMain;
   isTrustedSender: (event: IpcMainInvokeEvent | Electron.IpcMainEvent) => boolean;
@@ -318,7 +323,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!options.isTrustedSender(event)) return;
     if (!compatFrames.answer(event.sender.id, answer)) log('warn', `window ${event.sender.id} sent a compatibility answer nobody asked for`);
   });
+  let proxies: EngineProxyService | null = null;
   engine = new NativeEngine({
+    generatedMediaDirectory: (context) => proxies?.generatedDirectory(context) ?? path.join(cacheDirectory, CACHE_DIRS.generatedMedia),
     compatFrame: (request) => compatFrames.serve(request),
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
@@ -338,7 +345,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           // GPU identity and native driver version are added by pm-render.
           POWERMOVE_ENGINE_PARITY_ENV: JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() }),
           // Translated shader programs, kept across launches (plan section 11).
-          POWERMOVE_ENGINE_SHADER_CACHE: path.join(cacheDirectory, CACHE_DIRS.shaderCache)
+          POWERMOVE_ENGINE_SHADER_CACHE: path.join(cacheDirectory, CACHE_DIRS.shaderCache),
+          POWERMOVE_PROXY_LOCATIONS: path.join(cacheDirectory, 'Proxy Locations.json')
         }
       });
       if (launch) {
@@ -357,8 +365,12 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     automaticOutputDirectory: options.automaticOutputDirectory ?? path.join(options.home, 'Powermove'),
     physicalMemory: os.totalmem(),
     hostNow: engineNowUs,
-    ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
-    ...(options.resolveProxy ? { resolveProxy: options.resolveProxy } : {}),
+    resolveAsset: async (asset, context) => await proxies?.resolveAlias(asset, context) ?? await options.resolveAsset?.(asset, context) ?? null,
+    resolveProxy: async (asset, context) => {
+      const scope = context ? options.proxyDraftScope?.(context.session, asset) : null;
+      return (scope?.projectId ? await proxies?.resolveDraft(asset, { project: scope.projectId, contentHash: scope.hash }) : null)
+        ?? await options.resolveProxy?.(asset) ?? null;
+    },
     // Blender jobs of the job engine (contract 11): the Blender the user
     // chose in Settings (`blender-path.json`, as the current engine's
     // Blender service reads it), else the first one discovered.
@@ -379,6 +391,48 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     },
     shaderFallback: (session, request, textures) => fallbackRelay.run(session, request, textures),
     log
+  });
+  proxies = new EngineProxyService({
+    cache: cacheDirectory,
+    request: (request) => engine!.request('job', request),
+    resolve: (asset, scope) => options.resolveProxySource?.(asset, scope) ?? Promise.resolve(null),
+    hashFile: (file) => {
+      if (!options.hashGeneratedFile) return Promise.reject(new Error('The media hashing service is not configured.'));
+      return options.hashGeneratedFile(file);
+    },
+    assess: async (_asset, source) => {
+      const facts = await engine!.probeSource(source);
+      const milliseconds = (label: string) => {
+        const value = facts.facts.find((f) => f.label === label)?.value;
+        return value && /^\d+(?:\.\d+)? ms$/.test(value) ? Number.parseFloat(value) : NaN;
+      };
+      const decode = milliseconds('Decode time (p95)');
+      const budget = milliseconds('Frame budget');
+      if (!Number.isFinite(decode) || !Number.isFinite(budget) || budget <= 0) throw new Error('The engine could not measure this source’s decode cost. Create its proxy manually if playback is slow.');
+      return decode > budget;
+    },
+    machine: `${os.platform()}:${os.arch()}:${os.cpus()[0]?.model ?? 'unknown'}`,
+    log,
+    changed: (owner, snapshot) => {
+      const contents = webContents.fromId(owner);
+      if (contents && !contents.isDestroyed()) contents.send(ENGINE_IPC.proxiesChanged, snapshot);
+    },
+  });
+  const offProxies = engine.listen({
+    jobStatus: (status) => proxies!.status(status),
+    playback: (playing) => proxies!.playback(playing),
+    crash: (report) => { if (report.process === 'job') proxies!.jobsLost(); },
+  });
+  const removeProxyIpc = installProxyIpc({
+    ipc: options.ipc,
+    trusted: options.isTrustedSender,
+    service: proxies,
+    chooseFolder: async (event) => {
+      const window = BrowserWindow.fromWebContents(event.sender);
+      const panel = { title: 'Generated Media Location', properties: ['openDirectory', 'createDirectory'] as ('openDirectory' | 'createDirectory')[] };
+      const result = await (window ? dialog.showOpenDialog(window, panel) : dialog.showOpenDialog(panel));
+      return result.canceled ? null : result.filePaths[0] ?? null;
+    },
   });
 
   const broadcast = (channel: string, payload: unknown): void => {
@@ -534,13 +588,18 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
    *  Resolves the options to export with, or the outcome to answer. */
   const checkOffline = async (window: BrowserWindow, sender: WebContents, project: Record<string, any>, request: EngineExportRequest): Promise<EngineExportRequest['options'] | EngineExportStart> => {
     if (!options.resolveAsset || request.options.draft) return request.options;
-    const clips = await offlineClips(project, (asset) => options.resolveAsset!(asset));
+    const clips = await offlineClips(project, (asset) => options.resolveProxySource
+      ? options.resolveProxySource(asset, { owner: sender.id, project: String(project.id) })
+      : options.resolveAsset!(asset));
     if (!clips.length) return request.options;
-    let proxies = !!options.resolveProxy;
-    if (proxies) {
-      for (const clip of clips) if (!await options.resolveProxy!(clip.asset).catch(() => null)) proxies = false;
+    let hasProxies = true;
+    for (const clip of clips) {
+      const meta = project.assets?.[clip.asset];
+      const proxy = await proxies?.resolveDraft(clip.asset, { project: String(project.id), contentHash: meta?.contentHash ?? meta?.link?.hash }).catch(() => null)
+        ?? await options.resolveProxy?.(clip.asset).catch(() => null);
+      if (!proxy) hasProxies = false;
     }
-    const choice = await askAboutOfflineMedia(window, clips, proxies);
+    const choice = await askAboutOfflineMedia(window, clips, hasProxies);
     if (choice === 'proxies') return { ...request.options, draft: true };
     if (choice === 'locate') {
       const assets = clips.map((c) => c.asset);
@@ -653,6 +712,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       attached = true;
     });
     window.once('closed', () => {
+      proxies?.release(id);
       fallbackRelay.forget(id);
       engine?.removeClient(id);
       windowSessions.forget(id);
@@ -678,6 +738,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     snapshots,
     attachWindow,
     dispose: async () => {
+      removeProxyIpc();
+      offProxies();
+      await proxies?.dispose();
       removeSnapshotIpc();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
       windowSessions.dispose();

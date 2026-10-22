@@ -39,6 +39,11 @@ function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
       projectColor: () => projectColorSettings(PM),
       applyProjectColor: (patch) => { applyProjectColor(PM, patch); }
     } : {}),
+    /* Proxies (section 14): with the new engine's proxy service only. */
+    ...(PM.Proxies ? {
+      proxies: () => PM.Proxies.intent(),
+      applyProxies: (patch) => PM.Proxies.setIntent(patch)
+    } : {}),
     exportDefaults: () => PM.exportDefaults.read(),
     applyExportDefaults: (patch) => PM.exportDefaults.write(patch),
     backgroundField: () => PM.fillField(

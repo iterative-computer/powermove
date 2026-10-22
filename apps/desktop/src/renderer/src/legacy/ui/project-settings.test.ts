@@ -339,3 +339,41 @@ describe('Settings › Project › Color (new engine)', () => {
     control.destroy();
   });
 });
+
+describe('project proxies (section 14, appendix D)', () => {
+  it('shows Create proxies, Proxy size and Proxy format under Media and applies each change', () => {
+    let proxies = { create: 'whenNeeded', size: 'automatic', format: 'proResProxy' } as const as { create: any; size: any; format: any };
+    const applyProxies = vi.fn((patch) => { proxies = { ...proxies, ...patch }; });
+    const control = createProjectSettingsControl(bridge({ proxies: () => proxies, applyProxies }).api);
+    try {
+      const media = [...control.element.querySelectorAll('.settings-section')].find((section) => section.textContent?.includes('Create proxies'));
+      expect(media?.textContent).toContain('Media');
+      control.refresh();
+      const create = field(control, 'Create proxies') as HTMLSelectElement;
+      const size = field(control, 'Proxy size') as HTMLSelectElement;
+      const format = field(control, 'Proxy format') as HTMLSelectElement;
+      expect([...create.options].map((o) => o.textContent)).toEqual(['When needed', 'For all video', 'Only when I ask']);
+      expect([...size.options].map((o) => o.textContent)).toEqual(['Automatic', 'Half', 'Quarter', '1080p', '720p']);
+      expect([...format.options].map((o) => o.textContent)).toEqual(['ProRes 422 Proxy', 'ProRes 422 LT', 'HEVC (smaller files)']);
+      expect([create.value, size.value, format.value]).toEqual(['whenNeeded', 'automatic', 'proResProxy']);
+      size.value = 'p720'; change(size);
+      format.value = 'hevc10'; change(format);
+      create.value = 'onlyWhenAsked'; change(create);
+      expect(applyProxies.mock.calls).toEqual([[{ size: 'p720' }], [{ format: 'hevc10' }], [{ create: 'onlyWhenAsked' }]]);
+      // Undo elsewhere: refresh shows the stored intent.
+      proxies = { create: 'allVideo', size: 'half', format: 'proResLt' };
+      control.refresh();
+      expect([create.value, size.value, format.value]).toEqual(['allVideo', 'half', 'proResLt']);
+    } finally {
+      control.destroy();
+    }
+  });
+  it('leaves the rows out without the proxy service', () => {
+    const control = createProjectSettingsControl(bridge().api);
+    try {
+      expect(control.element.querySelector('[aria-label="Create proxies"]')).toBeNull();
+    } finally {
+      control.destroy();
+    }
+  });
+});

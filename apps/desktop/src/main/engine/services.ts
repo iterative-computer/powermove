@@ -30,6 +30,7 @@ export const CACHE_DIRS: Readonly<Record<CacheKind, string>> = {
 };
 
 export type HostServicesOptions = {
+  generatedMediaDirectory?: (context?: { process: EngineProcess; session: number }) => string;
   cacheDirectory: string;
   automaticOutputDirectory: string;
   physicalMemory: number;
@@ -38,7 +39,7 @@ export type HostServicesOptions = {
   resolveAsset?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   /** A generated proxy of an asset whose original is offline (draft
    *  renders, section 14.8; Phase 4a generates proxies). */
-  resolveProxy?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
+  resolveProxy?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   now?: () => number;
 };
 
@@ -69,7 +70,8 @@ export class HostServicesCore {
     else this.draftSessions.delete(session);
   }
 
-  cacheDirectory(kind: CacheKind): string {
+  cacheDirectory(kind: CacheKind, context?: { process: EngineProcess; session: number }): string {
+    if (kind === 'generatedMedia' && this.options.generatedMediaDirectory) return this.options.generatedMediaDirectory(context);
     return path.join(this.options.cacheDirectory, CACHE_DIRS[kind]);
   }
 
@@ -133,14 +135,14 @@ export class HostServicesCore {
     switch (kind.kind) {
       case 'cache': {
         if (!CACHE_KINDS.includes(kind.cache)) throw new ProtocolError('invalidMessage', 'unknown cache kind');
-        const directory = this.cacheDirectory(kind.cache);
+        const directory = this.cacheDirectory(kind.cache, { process, session });
         await mkdir(directory, { recursive: true, mode: 0o700 });
         return { path: directory, contentHash: null };
       }
       case 'mediaRead': {
         if (!isId(kind.asset)) throw new ProtocolError('invalidMessage', 'invalid asset id');
         const resolved = await this.options.resolveAsset?.(kind.asset, { process, session })
-          ?? (this.draftSessions.has(session) ? await this.options.resolveProxy?.(kind.asset) : null);
+          ?? (this.draftSessions.has(session) ? await this.options.resolveProxy?.(kind.asset, { process, session }) : null);
         if (!resolved) throw new ProtocolError('mediaOffline', 'The asset\'s file is not available.');
         return resolved;
       }

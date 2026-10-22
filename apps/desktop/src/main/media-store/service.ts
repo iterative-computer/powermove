@@ -338,6 +338,28 @@ export class MediaStoreService {
     return this.resolveBindings([...this.bindings.values()].map((b) => b.assets.get(asset)));
   }
 
+  /** A proxy job may only read bindings of its owning project. A different
+   * window using the same asset id is not a relink candidate. */
+  async resolveForProject(projectId: string, asset: string, preferOwner?: number): Promise<{ path: string; contentHash: ContentHash | null } | null> {
+    const candidates = [...this.bindings.entries()]
+      .filter(([, binding]) => binding.projectId === projectId)
+      .sort(([a], [b]) => Number(b === preferOwner) - Number(a === preferOwner))
+      .map(([, binding]) => binding.assets.get(asset));
+    return this.resolveBindings(candidates);
+  }
+
+  /** The frozen identity an explicit draft job is allowed to substitute. */
+  jobSource(session: number, asset: string): { projectId: string | null; hash: string | null } | null {
+    const job = this.jobBindings.get(session);
+    const binding = job?.assets.get(asset);
+    return job ? { projectId: job.projectId, hash: binding?.link?.hash ?? binding?.hash ?? null } : null;
+  }
+
+  /** Generated-media integrity uses the same off-main-thread BLAKE3 worker pool as originals. */
+  async hashGeneratedFile(file: string): Promise<string> {
+    return (await hashFile(this.options.executor, file, { settleMs: 0 })).hash;
+  }
+
   private async resolveBindings(candidates: (MediaBinding | undefined)[]): Promise<{ path: string; contentHash: ContentHash | null } | null> {
     const bound = candidates.filter((b): b is MediaBinding => !!b);
     if (!bound.length) return null;

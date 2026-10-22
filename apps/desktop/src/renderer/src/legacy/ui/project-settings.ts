@@ -12,6 +12,15 @@ import { writableFormat } from '../../../../shared/delivery';
 import { createSettingsSection } from './settings-section';
 import { PRECISION_OPTIONS, type ProjectColorSettings } from '../../../../shared/project-color';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import {
+  PROXY_CREATE_OPTIONS,
+  PROXY_FORMAT_OPTIONS,
+  PROXY_SIZE_OPTIONS,
+  type ProjectProxyIntent,
+  type ProxyCreatePolicy,
+  type ProxyFormat,
+  type ProxySize
+} from '../../../../shared/proxies';
 
 /** Whether this launch runs the native engine, which writes every delivery
  *  format; the current exporter writes today's. */
@@ -67,7 +76,17 @@ export interface ProjectSettingsBridge {
    */
   projectColor?(): ProjectColorSettings;
   applyProjectColor?(patch: Partial<ProjectColorSettings>): void;
+  /**
+   * Settings › Project › Media, proxies (section 14, appendix D): when to
+   * create them, their size and format. The project stores this intent;
+   * present only with the new engine's proxy service. Each change is one
+   * Undo step.
+   */
+  proxies?(): ProjectProxySettings;
+  applyProxies?(patch: Partial<ProjectProxySettings>): void;
 }
+
+export type ProjectProxySettings = Pick<ProjectProxyIntent, 'create' | 'size' | 'format'>;
 
 /** "When importing": Copy into project (the default) or Link to files. */
 export type MediaImportMode = 'copy' | 'link';
@@ -344,8 +363,10 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   };
 
   let mediaImport: HTMLSelectElement | null = null;
-  const media = bridge.mediaImport && bridge.applyMediaImport ? createSettingsSection('Media') : null;
-  if (media) {
+  const hasImport = !!(bridge.mediaImport && bridge.applyMediaImport);
+  const hasProxies = !!(bridge.proxies && bridge.applyProxies);
+  const media = hasImport || hasProxies ? createSettingsSection('Media') : null;
+  if (media && hasImport) {
     mediaImport = select('When importing');
     fillOptions(mediaImport, MEDIA_IMPORT_OPTIONS);
     media.body.append(
@@ -356,8 +377,42 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
       syncMedia();
     });
   }
+  let proxyCreate: HTMLSelectElement | null = null;
+  let proxySize: HTMLSelectElement | null = null;
+  let proxyFormat: HTMLSelectElement | null = null;
+  if (media && hasProxies) {
+    proxyCreate = select('Create proxies');
+    fillOptions(proxyCreate, [...PROXY_CREATE_OPTIONS]);
+    proxySize = select('Proxy size');
+    fillOptions(proxySize, [...PROXY_SIZE_OPTIONS]);
+    proxyFormat = select('Proxy format');
+    fillOptions(proxyFormat, [...PROXY_FORMAT_OPTIONS]);
+    media.body.append(
+      row('Create proxies', 'Lighter copies of video that play smoothly as you edit. Exports always use the originals.', proxyCreate).element,
+      row('Proxy size', 'Automatic picks a size this Mac plays smoothly, never below 540p.', proxySize).element,
+      row('Proxy format', 'ProRes plays back most easily. HEVC takes less disk space.', proxyFormat).element
+    );
+    proxyCreate.addEventListener('change', () => {
+      bridge.applyProxies?.({ create: proxyCreate!.value as ProxyCreatePolicy });
+      syncMedia();
+    });
+    proxySize.addEventListener('change', () => {
+      bridge.applyProxies?.({ size: proxySize!.value as ProxySize });
+      syncMedia();
+    });
+    proxyFormat.addEventListener('change', () => {
+      bridge.applyProxies?.({ format: proxyFormat!.value as ProxyFormat });
+      syncMedia();
+    });
+  }
   const syncMedia = (): void => {
     if (mediaImport && bridge.mediaImport) mediaImport.value = bridge.mediaImport();
+    if (bridge.proxies && proxyCreate && proxySize && proxyFormat) {
+      const proxies = bridge.proxies();
+      proxyCreate.value = proxies.create;
+      proxySize.value = proxies.size;
+      proxyFormat.value = proxies.format;
+    }
   };
 
   const exports = createSettingsSection('Export');

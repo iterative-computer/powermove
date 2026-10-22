@@ -180,6 +180,8 @@ describe('MediaStoreService', () => {
     // The same asset id bound to different content in two windows is refused.
     svc.bind(2, 'project-2', { a1: { hash: blake3Hex(bytes(5)) } });
     expect(await svc.resolveAsset('a1')).toBeNull();
+    expect(await svc.resolveForProject('project-1', 'a1', 1)).not.toBeNull();
+    expect(await svc.resolveForProject('missing-project', 'a1', 1)).toBeNull();
     await svc.release(2);
     expect(await svc.resolveAsset('a1')).not.toBeNull();
   });
@@ -202,6 +204,8 @@ describe('MediaStoreService', () => {
     svc.bind(1, 'other-project', { copied: { hash: 'f'.repeat(64) } });
     await svc.release(1);
     await svc.bindJob(10, snapshot);
+    expect(svc.jobSource(10, 'linked')).toEqual({ projectId: project.id, hash: link.hash });
+    expect(svc.jobSource(10, 'copied')).toEqual({ projectId: project.id, hash: record.hash });
     expect(await svc.resolveAsset('copied', { process: 'job', session: 10 })).toMatchObject({ path: svc.store.objectPath(record.hash) });
     expect(await svc.resolveAsset('linked', { process: 'job', session: 10 })).toMatchObject({ path: file });
     const host = new HostServicesCore({ cacheDirectory: path.join(root, 'cache'), automaticOutputDirectory: path.join(root, 'out'),

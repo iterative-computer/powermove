@@ -63,3 +63,44 @@ describe('popover trigger toggling', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull();
   });
 });
+
+describe('popover sections and check items', () => {
+  function open(items: Parameters<typeof openPopoverMenu>[0]['items']) {
+    const anchor = document.createElement('button');
+    document.body.append(anchor);
+    return openPopoverMenu({ anchor, label: 'Preview quality', items });
+  }
+  it('groups each section under its heading, one radio group per section', () => {
+    const pick = vi.fn();
+    const menu = open([
+      { heading: 'Resolution' },
+      { label: 'Automatic', checked: true, run: pick },
+      { label: 'Full', checked: false, run: pick },
+      { heading: 'Media' },
+      { label: 'Automatic', checked: false, run: pick },
+      { label: 'Proxies', checked: true, run: pick },
+      '-',
+      { label: 'Play Every Frame', check: true, checked: true, run: pick }
+    ]);
+    const groups = [...menu.el.querySelectorAll<HTMLElement>('[role="group"]')];
+    expect(groups.map((group) => document.getElementById(group.getAttribute('aria-labelledby')!)?.textContent)).toEqual(['Resolution', 'Media']);
+    expect(groups.map((group) => [...group.querySelectorAll('[role="menuitemradio"]')].map((row) => row.getAttribute('aria-checked'))))
+      .toEqual([['true', 'false'], ['false', 'true']]);
+    // The check item stays out of both groups, after the separator.
+    const check = menu.el.querySelector<HTMLElement>('[role="menuitemcheckbox"]')!;
+    expect(check.parentElement).toBe(menu.el);
+    expect(check.getAttribute('aria-checked')).toBe('true');
+    expect(check.previousElementSibling?.getAttribute('role')).toBe('separator');
+    // Headings are not rows: arrow keys walk the five rows only.
+    expect(menu.el.querySelectorAll('.pm-menu-item')).toHaveLength(5);
+    for (let i = 0; i < 5; i++) menu.el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    menu.el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(pick).toHaveBeenCalledOnce();
+  });
+  it('registers the popover service for built-ins', async () => {
+    const { installPopoverMenuService, POPOVER_MENU_SERVICE } = await import('./popover-menu');
+    const register = vi.fn();
+    installPopoverMenuService({ Kernel: { services: { register } } });
+    expect(register).toHaveBeenCalledWith(POPOVER_MENU_SERVICE, expect.objectContaining({ open: openPopoverMenu }));
+  });
+});

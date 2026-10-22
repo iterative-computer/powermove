@@ -110,6 +110,7 @@ export type SessionOptions = {
   onAudio?: (message: AudioMessage) => void;
   /** The engine's presentation stats (`RenderStats`, at most 2 Hz). */
   onStats?: (stats: RenderStats) => void;
+  onProxyNeeded?: (assets: string[]) => void;
   /**
    * The window replaced its document (a `load` batch: another project, or
    * `PM.proj` assigned outright) and the engine has it now. The viewer's
@@ -390,6 +391,9 @@ export class DocumentSession {
     if (body.kind !== 'event') return;
     const event = body.body as { type: string } & Record<string, unknown>;
     switch (event.type) {
+      case 'proxyNeeded':
+        this.options.onProxyNeeded?.(Array.isArray(event['assets']) ? event['assets'].map(String) : []);
+        return;
       case 'frame': {
         const { type: _t, ...frame } = event;
         const revision = Number((frame as { revision?: unknown }).revision) || 0;
@@ -603,6 +607,34 @@ export class DocumentSession {
   /** A session owns the clock independently of any presentation channel. */
   headless = false;
   private lastState: ViewerState | null = null;
+
+  previewCache(bytes: number, preparing: boolean, clear = false): void {
+    if (this.id === null || this.closed) return;
+    this.options.connection.event({ type: 'previewCache', bytes: Math.max(0, Math.floor(bytes)), preparing, clear } as never, this.id);
+  }
+
+  previewSize(): { width: number; height: number } | null {
+    if (!this.lastState || this.headless) return null;
+    const scale = this.lastState.resolution === 'quarter' ? .25 : this.lastState.resolution === 'half' ? .5 : 1;
+    return { width: Math.max(1, Math.ceil(this.lastState.size.width * scale)),
+      height: Math.max(1, Math.ceil(this.lastState.size.height * scale)) };
+  }
+
+  async cacheFrame(seconds: number): Promise<FrameDescriptor> {
+    const state = this.lastState;
+    if (this.closed || this.id === null || !state || this.headless) throw new Error('Open the viewer before rendering the work area.');
+    const response = await this.options.connection.request({
+      type: 'renderFrame', composition: state.composition, time: Math.round(seconds * 705_600_000),
+      purpose: 'viewer', priority: 'interactive', outputSize: state.size,
+      region: null, scale: 1, resolution: state.resolution, media: state.media,
+      color: { kind: 'viewer', space: state.colorSpace }, precision: 'float16',
+      motionBlur: 'previewPlaying', view: state.view, draft3d: true,
+      draftRender: false, depthId: false, overlay: true,
+    } as Request, this.id, this.applied || null);
+    if (response.type !== 'frame') throw new Error('The engine did not return the cached preview frame.');
+    const { type: _, ...frame } = response;
+    return frame as FrameDescriptor;
+  }
 
   /** The composition of the newest viewer state sent (null before one). */
   get composition(): string | null {

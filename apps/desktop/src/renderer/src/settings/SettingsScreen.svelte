@@ -10,6 +10,8 @@
   import Avatar from '../cloud/Avatar.svelte';
   import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
   import TranscriptionSettings from '../transcription/TranscriptionSettings.svelte';
+  import { locationChoice, locationOptions } from '../media/proxies-location';
+  import type { GeneratedMediaLocation } from '../media/proxies-types';
 
   export type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'project';
 
@@ -72,6 +74,11 @@
   /* Audio scrub plays a short grain while scrubbing and stepping; the new
      engine's transport only (legacy/core/engine.ts `PM.setAudioScrub`). */
   let audioScrub = $state(false);
+  /* Generated media location (appendix D, a setting of this Mac): with the
+     new engine's proxy service only. */
+  let proxyLocation = $state<GeneratedMediaLocation | null>(null);
+  let proxyLocationBusy = $state(false);
+  let hasProxies = $state(false);
   const multiWindow = $derived(!!PM.windows?.supported);
   let controls = $state.raw<Controls | null>(null);
   let rootEl = $state<HTMLElement | null>(null);
@@ -146,6 +153,10 @@
     previewMemoryMiB = (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024) / (1024 * 1024);
     useNewEngine = PM.store?.get?.('useNewEngine', false) === true;
     audioScrub = PM.audioScrub?.() === true;
+    hasProxies = !!PM.Proxies;
+    proxyLocation = null;
+    void PM.Proxies?.location?.().then((location: GeneratedMediaLocation) => { proxyLocation = location; })
+      .catch(() => { proxyLocation = { kind: 'cache' }; });
     const wanted = target ?? (controls?.project ? 'project' : 'general');
     const destination = wanted === 'project' && !controls?.project ? 'general' : wanted;
     page = destination;
@@ -161,6 +172,27 @@
     /* Focus the screen itself, not a field: Tab then reaches the search first,
        and nothing opens already lit with a focus edge. */
     void tick().then(() => rootEl?.focus({ preventScroll: true }));
+  }
+
+  async function chooseProxyLocation(control: HTMLSelectElement): Promise<void> {
+    const proxies = PM.Proxies;
+    if (!proxies || !proxyLocation) return;
+    const previous = proxyLocation;
+    const choice = control.value;
+    proxyLocationBusy = true;
+    try {
+      const next: GeneratedMediaLocation | null = choice === 'choose' ? await proxies.chooseFolder()
+        : choice === 'cache' || choice === 'project' ? await proxies.setLocation({ kind: choice })
+        : previous;
+      proxyLocation = next ?? previous;
+    } catch (error) {
+      proxyLocation = previous;
+      PM.toast?.(`Couldn't change where proxies are kept · ${error instanceof Error ? error.message : 'Try again'}`, 6000, { error: true, kind: 'error' });
+    } finally {
+      proxyLocationBusy = false;
+      // A cancelled panel leaves the menu on "Choose Folder…": show the location in force.
+      control.value = locationChoice(proxyLocation ?? previous);
+    }
   }
 
   export function close(): void {
@@ -485,6 +517,7 @@
                         previewMemoryMiB = Number(event.currentTarget.value);
                         PM.Memory.setBudget('preview', previewMemoryMiB * 1024 * 1024);
                         PM.store?.set?.('previewMemoryMiB', previewMemoryMiB);
+                        PM.Proxies?.setPreviewMemory?.(previewMemoryMiB * 1024 * 1024);
                       }}>
                       <option value={0}>Off</option>
                       <option value={128}>128 MB</option>
@@ -526,6 +559,21 @@
               <section class="sg-section">
                 <h3 class="sg-section-title">Media</h3>
                 <div class="sg-group">
+                  {#if hasProxies}
+                    <div class="settings-row">
+                      <div class="settings-copy">
+                        <b>Generated media location</b>
+                        <span>Where proxies are kept on this Mac.</span>
+                      </div>
+                      <select class="settings-select" aria-label="Generated media location" disabled={!proxyLocation || proxyLocationBusy}
+                        value={proxyLocation ? locationChoice(proxyLocation) : 'cache'}
+                        onchange={(event) => void chooseProxyLocation(event.currentTarget)}>
+                        {#each locationOptions(proxyLocation) as option (option.v)}
+                          <option value={option.v}>{option.label}</option>
+                        {/each}
+                      </select>
+                    </div>
+                  {/if}
                   <div class="settings-row">
                     <div class="settings-copy">
                       <b>Automatically download cloud media</b>

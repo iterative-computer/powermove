@@ -53,6 +53,16 @@ export default function activate(api: PowermoveAPI): void {
   });
   api.keybindings.bind({ key: 'enter', command: 'text.editSelected' });
 
+  // The viewer menu's Media section from the keyboard (appendix D): Originals
+  // and Proxies in turn. Media applies to the new engine's frames only.
+  api.commands.register({
+    id: 'viewer.toggleProxies', label: 'Toggle Originals and Proxies', category: 'View', kb: '⌥⌘P',
+    when: () => !!api.services.get('engine.viewer'),
+    run: () => (runtime as any).toggleProxies?.() === true,
+  });
+  api.keybindings.bind({ key: 'cmd+alt+p', command: 'viewer.toggleProxies' });
+  api.keybindings.bind({ key: 'ctrl+alt+p', command: 'viewer.toggleProxies' });
+
   api.panels.register({
     id: 'viewer',
     icon: 'frame',

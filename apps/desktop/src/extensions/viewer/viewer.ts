@@ -25,6 +25,11 @@ import { ENGINE_SELF_PRESENTS_ATTRIBUTE, ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SE
 import { viewParamsFor } from './engine-present/view-params';
 import { rawDragMoves, supportsRawUpdates } from './engine-present/raw-gestures';
 import { GeometryAtRevision } from './engine-present/revision-geometry';
+import {
+  POPOVER_MENU_SERVICE, applyResolution, createPreviewButton, kernelMenuItems, loadMediaPrefs, resolutionChoice, saveMediaPrefs,
+  shownLabel, toggledMedia, viewerMenuItems, type PopoverMenuService
+} from './media-menu';
+import type { MediaPreference } from './engine-present/protocol';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
   title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false,
@@ -791,6 +796,33 @@ const eventOffs: Array<() => void> = [];
    kernel's engine connection registered `engine.viewer` (plan section 18). */
 let enginePresentation: ViewerPresentation | null = null;
 let engineService: EngineViewerService | null = null;
+/* The preview menu (appendix D; media-menu.ts): what the newest engine
+   frame shows, and the viewer's Media and Play Every Frame choices. */
+let shownQuality: import('./engine-present/protocol').FrameQuality | null = null;
+const mediaPrefs = loadMediaPrefs(api.storage);
+let previewButton: ReturnType<typeof createPreviewButton> | null = null;
+let previewMenu: { close(): void } | null = null;
+const syncPreviewLabel = () => { previewButton?.setLabel(shownLabel(enginePresentation?.presenting ? shownQuality : null, api.transport.quality)); };
+const setMedia = (media: MediaPreference) => {
+  if (mediaPrefs.media === media) return;
+  mediaPrefs.media = media; saveMediaPrefs(api.storage, mediaPrefs); syncEnginePresentation();
+};
+V.mediaPreference = () => mediaPrefs.media;
+V.setMediaPreference = setMedia;
+V.toggleProxies = () => { if (!api.services.get(ENGINE_VIEWER_SERVICE)) return false; setMedia(toggledMedia(mediaPrefs.media)); return true; };
+const openPreviewMenu = (anchor: HTMLElement) => {
+  const items = viewerMenuItems({
+    resolution: resolutionChoice(api.transport), media: mediaPrefs.media, playEveryFrame: mediaPrefs.playEveryFrame,
+    engine: !!api.services.get(ENGINE_VIEWER_SERVICE)
+  }, {
+    resolution: (choice) => { applyResolution(api.transport, choice); syncPreviewLabel(); V.layout(); },
+    media: setMedia,
+    playEveryFrame: (on) => { mediaPrefs.playEveryFrame = on; saveMediaPrefs(api.storage, mediaPrefs); syncEnginePresentation(); },
+  });
+  const popover = api.services.get<PopoverMenuService>(POPOVER_MENU_SERVICE);
+  if (popover) previewMenu = popover.open({ anchor, items, label: 'Preview quality', align: 'end', onClose: () => { previewMenu = null; } });
+  else api.ui.menu(anchor, kernelMenuItems(items));
+};
 let engineFrameTag = '';
 const syncEnginePresentation = (stage?: { width: number; height: number }) => {
   if (disposed || !V.stage || !V.ov) return;
@@ -799,6 +831,7 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // The service went away (engine off) or was replaced: detach; the
     // current engine's canvas underneath shows until a new one presents.
     enginePresentation.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = '';
+    shownQuality = null; syncPreviewLabel();
     if (V.el) V.el.style.visibility = '';
     // The WebGL canvas takes the size it skipped while the engine presented.
     commitPendingResize();
@@ -818,6 +851,8 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
       // Engine frames cover the composition; the WebGL canvas underneath
       // rests (and must not show around a frame that lags a pan).
       if (V.el && V.el.style.visibility !== 'hidden') V.el.style.visibility = 'hidden';
+      shownQuality = frame.quality ?? null;
+      syncPreviewLabel();
       const tag = `${frame.revision}:${frame.viewSeq}`;
       if (tag === engineFrameTag) return;
       engineFrameTag = tag;
@@ -842,6 +877,7 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
   const scene = api.scene3d?.viewport?.state?.();
   enginePresentation.update(viewParamsFor({
     shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution,
+    media: mediaPrefs.media, playEveryFrame: mediaPrefs.playEveryFrame,
     scene3d: scene ? { hasScene: scene.hasScene, shading: scene.shading, xray: scene.xray } : null,
   }), stage);
 };
@@ -857,7 +893,8 @@ const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powerm
 const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
-  enginePresentation?.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = ''; engineService = null;
+  enginePresentation?.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = ''; engineService = null; shownQuality = null;
+  previewMenu?.close(); previewMenu = null;
   ((V._boundStage ?? V.stage) as HTMLElement | null | undefined)?.removeAttribute?.(ENGINE_SELF_PRESENTS_ATTRIBUTE);
   viewport3d?.dispose();viewport3d=null;V.viewport3d=null;V.sceneGizmo=null;
   if(viewportHeader)void unmount(viewportHeader);viewportHeaderHost?.remove();for(const panel of viewportPanels.splice(0))void unmount(panel);
@@ -970,9 +1007,8 @@ V.attach = (stage: HTMLElement) => {
     if(!preview){preview=document.createElement('div');preview.id='preview-controls';zoomHost.append(preview);}
     preview.style.cssText='position:absolute;right:124px;top:7px;z-index:6;display:flex;align-items:center';
     preview.replaceChildren();
-    const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
-    for(const [value,label] of [['auto','Auto'],['1','Full'],['0.5','Half'],['0.25','Quarter']]){const option=document.createElement('option');option.value=value!;option.textContent=label!;quality.append(option);}
-    quality.value=api.transport.perf.auto?'auto':String(api.transport.quality);quality.onchange=()=>{api.transport.perf.auto=quality.value==='auto';api.transport.quality=quality.value==='auto'?1:Number(quality.value);api.transport.previewResolution=quality.value;V.layout();};preview.append(quality);
+    previewButton=createPreviewButton('width:auto;min-width:82px;max-width:160px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)');
+    const quality=previewButton.button;quality.onclick=()=>openPreviewMenu(quality);syncPreviewLabel();preview.append(quality);
     V.previewOff?.(); V.previewOff = undefined;
 
     zoomControl.onchange = () => { if (zoomControl.value === 'fit') V.returnToComposition(); else V.setZoom(Number(zoomControl.value)); };
@@ -1150,7 +1186,7 @@ if (viewportChange) eventOffs.push(() => viewportChange.dispose());
 listen('selection', () => { invalidate('render'); drawOverlay(); scheduleHover(); });
 let observedQuality = api.transport.quality;
 listen('time', () => {
-  if (observedQuality !== api.transport.quality) { observedQuality = api.transport.quality; V.layout(); }
+  if (observedQuality !== api.transport.quality) { observedQuality = api.transport.quality; syncPreviewLabel(); V.layout(); }
   schedulePresentation();
 });
 listen('transport', () => { if (api.transport.playing()) commitPendingResize(); schedulePresentation(); });

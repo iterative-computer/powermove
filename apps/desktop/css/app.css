@@ -1293,7 +1293,14 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 /* Button menus (controls/popover-menu.ts): the listbox sheet with actions
    instead of options, an optional header, and separators. */
 .pm-popover .pm-menu-item{padding:0 10px 0 8px}
-.pm-popover .pm-menu-item[role=menuitemradio]{padding-right:28px}
+.pm-popover .pm-menu-item[role=menuitemradio],.pm-popover .pm-menu-item[role=menuitemcheckbox]{padding-right:28px}
+/* Sections (the viewer menu): a quiet title over a group of radio rows. The
+   group draws no box, so rows measure against the menu as ungrouped rows do. */
+.pm-menu-group{display:contents}
+.pm-menu-heading{position:relative;z-index:1;padding:6px 8px 3px;color:var(--tx-3);font-size:var(--fs-xs);font-weight:var(--fw-medium)}
+.pm-menu-sep + .pm-menu-group > .pm-menu-heading{padding-top:4px}
+:has(> .pm-menu-group > [data-blink]) > .pm-menu-glider{transition:none}
+:has(> .pm-menu-group > [data-blink=off]) > .pm-menu-glider{opacity:0}
 .pm-menu-item[aria-checked=true] .pm-menu-check{opacity:1}
 .pm-menu-header{position:relative;z-index:1;padding:6px 8px 8px}
 .pm-menu-sep{height:1px;margin:4px 8px;background:var(--line)}

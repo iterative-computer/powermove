@@ -96,6 +96,19 @@
     };
   });
 
+  /* Proxy state comes from the engine's proxy service (media/proxies.ts),
+     which outlives any one controller: follow the current one. */
+  let proxyTick = $state(0);
+  $effect(() => {
+    let offChange: (() => void) | undefined = PM.Proxies?.onChange?.(() => { proxyTick += 1; });
+    const offProxies = PM.bus?.on?.('proxies', () => {
+      offChange?.();
+      offChange = PM.Proxies?.onChange?.(() => { proxyTick += 1; });
+      proxyTick += 1;
+    });
+    return () => { offChange?.(); if (typeof offProxies === 'function') offProxies(); };
+  });
+
   /* Re-render composition thumbnails once the project settles after any change. */
   $effect(() => {
     const { values, structure, project, assets: media, history } = doc.tick;
@@ -135,8 +148,21 @@
     return PM.HostMedia?.enabled === true && asset.playbackProxy === true;
   }
 
+  /* While a proxy is on its way or failed, the line says so; a ready proxy
+     needs no mention (the viewer says what is on screen). */
+  function proxyDetail(asset: Asset): string | null {
+    void proxyTick;
+    const state = PM.Proxies?.assetState?.(asset.id);
+    if (state?.state === 'creating') return `Creating proxy · ${Math.round(Math.max(0, Math.min(1, state.progress)) * 100)}%`;
+    if (state?.state === 'queued') return 'Proxy queued';
+    if (state?.state === 'failed') return `Couldn't create proxy · ${state.error}`;
+    return null;
+  }
+
   function mediaDetails(asset: Asset): string {
     if (convertedCopy(asset)) return 'Using a converted copy · Relink to the original for full quality';
+    const proxy = proxyDetail(asset);
+    if (proxy) return proxy;
     const parts: string[] = [];
     if (asset.format === 'svg' || /\.svg$/i.test(asset.name)) parts.push('SVG');
     // An animated image becomes a clip, so name the container it came from.
@@ -186,6 +212,27 @@
     return asset.sourcePath || asset.path || '';
   }
 
+  /* Appendix D: Create Proxy, or Rebuild and Delete Proxy once there is one
+     (Delete also stops one being made), then Always Play Original as a
+     check item. Making a proxy needs the original. */
+  function proxyMenuItems(asset: Asset, offline: boolean): any[] {
+    const proxies = PM.Proxies;
+    if (!proxies?.eligible?.(asset.id)) return [];
+    const state = proxies.assetState(asset.id).state;
+    const exists = state !== 'none' && state !== 'unsupported';
+    return [
+      '-',
+      ...(exists ? [
+        { label: 'Rebuild Proxy', disabled: offline, run: () => void proxies.rebuild(asset.id) },
+        { label: 'Delete Proxy', run: () => void proxies.remove(asset.id) }
+      ] : [
+        { label: 'Create Proxy', disabled: offline, run: () => void proxies.create(asset.id) }
+      ]),
+      { label: 'Always Play Original', on: proxies.alwaysPlayOriginal(asset.id), run: () => proxies.setAlwaysPlayOriginal(asset.id, !proxies.alwaysPlayOriginal(asset.id)) },
+      '-'
+    ];
+  }
+
   function showAssetMenu(event: MouseEvent, asset: Asset): void {
     event.preventDefault();
     event.stopPropagation();
@@ -207,6 +254,7 @@
         { label: 'Add to timeline', run: () => PM.cmd('addFromAsset', asset.id) },
         ...(asset.kind === 'audio' || asset.kind === 'model' ? [] : [{ label: 'New Comp from Selection', run: () => PM.cmd('newCompFromMedia', asset.id) }]),
       ]),
+      ...proxyMenuItems(asset, offline),
       ...(!offline && canInterpret(asset) ? [{ label: 'Interpret Footage…', run: () => openInterpretSheet(PM, asset.id) }] : []),
       { label: offline ? 'Locate File…' : convertedCopy(asset) ? 'Locate Original…' : 'Replace File…', run: () => PM.pickFiles(false, { replaceAssetId: asset.id }) },
       ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ assets: [asset.id] }, crumbs.at(-2)?.id ?? null) }] : []),

@@ -271,4 +271,84 @@ describe('viewer extension', () => {
     expect(replacement.viewer()?.stage).toBe(stage);
     expect(replacement.eventDisposers).toHaveLength(8);
   });
+
+  describe('preview menu (appendix D)', () => {
+    function build(engine: boolean) {
+      const services = serviceHarness();
+      const harness = apiHarness(services.services);
+      const store = new Map<string, unknown>();
+      Object.assign(harness.api, { log: vi.fn(), storage: { get: (k: string) => store.get(k), set: (k: string, v: unknown) => void store.set(k, v), delete: (k: string) => void store.delete(k) } });
+      const opened: any[] = [];
+      services.services.register('ui.popoverMenu', { open: (req: any) => { opened.push(req); return { close() {} }; } });
+      if (engine) services.services.register('engine.viewer', {
+        source: { videoFrame: () => null, onSurface: () => () => {}, retire: () => 0 },
+        composition: () => 'comp-1', open: () => null, onReady: () => () => {}
+      });
+      activateExtension(harness.api);
+      const body = document.createElement('div');
+      harness.panel?.build?.(body, { spec: {} });
+      const button = body.querySelector<HTMLButtonElement>('#preview-resolution')!;
+      const commands = (harness.api.commands.register as unknown as ReturnType<typeof vi.fn>).mock.calls.map(([def]) => def as any);
+      const bindings = (harness.api.keybindings.bind as unknown as ReturnType<typeof vi.fn>).mock.calls.map(([b]) => b as any);
+      return { harness, button, opened, store, commands, bindings, services };
+    }
+    const rows = (items: any[]) => items.map((item) => item === '-' ? '-' : 'heading' in item ? `# ${item.heading}` : `${item.label}${item.checked ? ' ✓' : ''}`);
+
+    it('replaces the select with a button that opens the popover menu and sets the transport', () => {
+      const { harness, button, opened } = build(false);
+      try {
+        expect(button.tagName).toBe('BUTTON');
+        expect(button.closest('#preview-controls')?.querySelector('select')).toBeNull();
+        expect(button.textContent).toBe('Full');
+        button.click();
+        expect(opened).toHaveLength(1);
+        expect(opened[0].anchor).toBe(button);
+        expect(rows(opened[0].items)).toEqual(['# Resolution', 'Automatic', 'Full ✓', 'Half', 'Quarter']);
+        opened[0].items.find((item: any) => item.label === 'Half').run();
+        expect(harness.api.transport).toMatchObject({ quality: 0.5, previewResolution: '0.5', perf: { auto: false } });
+        expect(button.textContent).toBe('Half');
+      } finally {
+        harness.dispose();
+      }
+    });
+
+    it('adds Media and Play Every Frame with the new engine, kept in the viewer storage', () => {
+      const { harness, button, opened, store, commands, bindings } = build(true);
+      try {
+        button.click();
+        expect(rows(opened[0].items)).toEqual([
+          '# Resolution', 'Automatic', 'Full ✓', 'Half', 'Quarter',
+          '# Media', 'Automatic ✓', 'Originals', 'Proxies', '-', 'Play Every Frame'
+        ]);
+        opened[0].items.find((item: any) => item.label === 'Proxies').run();
+        opened[0].items.find((item: any) => item.label === 'Play Every Frame').run();
+        expect(store.get('media')).toBe('proxies');
+        expect(store.get('playEveryFrame')).toBe(true);
+        expect((harness.viewer() as any).mediaPreference()).toBe('proxies');
+        button.click();
+        expect(rows(opened[1].items).slice(5)).toEqual(['# Media', 'Automatic', 'Originals', 'Proxies ✓', '-', 'Play Every Frame ✓']);
+        // The keymap command: Originals and Proxies in turn.
+        const toggle = commands.find((def) => def.id === 'viewer.toggleProxies');
+        expect(toggle.when()).toBe(true);
+        expect(bindings.filter((b) => b.command === 'viewer.toggleProxies').map((b) => b.key)).toEqual(['cmd+alt+p', 'ctrl+alt+p']);
+        expect(toggle.run()).toBe(true);
+        expect((harness.viewer() as any).mediaPreference()).toBe('originals');
+        toggle.run();
+        expect(store.get('media')).toBe('proxies');
+      } finally {
+        harness.dispose();
+      }
+    });
+
+    it('hides the toggle command with the current engine', () => {
+      const { harness, commands } = build(false);
+      try {
+        const toggle = commands.find((def) => def.id === 'viewer.toggleProxies');
+        expect(toggle.when()).toBe(false);
+        expect(toggle.run()).toBe(false);
+      } finally {
+        harness.dispose();
+      }
+    });
+  });
 });

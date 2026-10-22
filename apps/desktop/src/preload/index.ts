@@ -574,6 +574,22 @@ const bridge: PowermoveBridge = {
 
   /* ── native engine (behind "Use New Engine") ── */
   nativeEngine: {
+    proxies: {
+      slowDecodes: (project: string, assets: string[]) => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'slow', project, assets }),
+      snapshot: (project) => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'snapshot', project }),
+      subscribe: (listener) => {
+        const handler = (_event: Electron.IpcRendererEvent, snapshot: import('../shared/proxies').ProxySnapshot) => listener(snapshot);
+        ipcRenderer.on(ENGINE_IPC.proxiesChanged, handler);
+        return () => { ipcRenderer.removeListener(ENGINE_IPC.proxiesChanged, handler); };
+      },
+      setIntent: (project, intent, assets, projectPath) => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'setIntent', project, intent, assets, projectPath }),
+      create: (project, assets) => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'create', project, assets }),
+      rebuild: (project, assets) => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'rebuild', project, assets }),
+      remove: (project, assets) => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'remove', project, assets }),
+      location: () => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'location' }),
+      setLocation: (location) => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'setLocation', location }),
+      chooseFolder: () => ipcRenderer.invoke(ENGINE_IPC.proxies, { action: 'chooseFolder' }),
+    },
     status: () => ipcRenderer.invoke(ENGINE_IPC.getStatus) as Promise<EngineStatusMessage>,
     enabledSync: () => ipcRenderer.sendSync(ENGINE_IPC.enabledSync) === true,
     hostTime: () => ipcRenderer.invoke(ENGINE_IPC.hostTime) as Promise<number>,

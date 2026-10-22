@@ -36,6 +36,8 @@ import { install as installEditing } from './core/editing';
 import { install as installCapabilities } from './core/capabilities';
 import { install as installMedia } from './core/media';
 import { installHostMediaStore } from '../media/host-media-store';
+import { installMediaProxies } from '../media/proxies';
+import { installPopoverMenuService } from '../controls/popover-menu';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { installEngineDefinitions } from '../kernel/engine-definitions';
 import { install as installAudio } from './core/audio';
@@ -133,7 +135,12 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   /* The kernel's engine connection (behind "Use New Engine"): the viewer's
      engine frames, the patch stream, and the transport (section 18). */
   ['engine/connection', (PM) => void installEngineConnection(PM, hostBridge() as never)],
+  /* Proxies (section 14): PM.Proxies over the engine connection's
+     PM.EngineProxies; null with the current engine. */
+  ['media/proxies', (PM) => void installMediaProxies(PM)],
   ['ui/controls', installControls],
+  /* Button menus for built-in extensions (`ui.popoverMenu`). */
+  ['ui/popover-service', installPopoverMenuService],
   ['ui/layout', installLayout],
   ['ui/library', installLibraryUi],
   ['ui/shortcuts', installShortcuts],

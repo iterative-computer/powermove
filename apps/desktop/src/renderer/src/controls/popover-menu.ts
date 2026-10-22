@@ -7,17 +7,42 @@
 // A pick blinks its row before the menu closes, as the listbox's does. A row
 // may lead with an icon and carry a line of detail under its label; a
 // `warning` row tints both.
+//
+// A `{ heading }` starts a section: a quiet title over its rows, which form
+// one group up to the next heading or separator, so each section's checked
+// rows are their own radio group (the viewer's Resolution and Media). A row
+// with `check: true` is a check item instead (Play Every Frame): it shows
+// the same check while on and stays independent of any radio group.
 
 import { blink } from './menu-blink';
 
-export type PopoverMenuItem = '-' | {
+export type PopoverMenuAction = {
   label: string;
   run: () => void;
   checked?: boolean;
+  /** A check item (menuitemcheckbox) rather than a radio row. */
+  check?: boolean;
   detail?: string;
   icon?: Element;
   tone?: 'warning';
 };
+
+export type PopoverMenuItem = '-' | { heading: string } | PopoverMenuAction;
+
+/** The kernel service that opens this menu for built-in extensions, which
+ *  may import only `powermove` (scripts/check-boundaries.mjs). */
+export const POPOVER_MENU_SERVICE = 'ui.popoverMenu';
+export interface PopoverMenuService {
+  open(req: PopoverMenuRequest): PopoverMenuHandle;
+}
+
+/** Registers `ui.popoverMenu` with the kernel's services. */
+export function installPopoverMenuService(PM: { Kernel?: { services?: { register(name: string, service: unknown): unknown } } }): void {
+  const service: PopoverMenuService = { open: openPopoverMenu };
+  PM.Kernel?.services?.register(POPOVER_MENU_SERVICE, service);
+}
+
+let headingSeq = 0;
 
 export interface PopoverMenuRequest {
   anchor: HTMLElement;
@@ -73,18 +98,36 @@ export function openPopoverMenu(req: PopoverMenuRequest): PopoverMenuHandle {
   }
 
   const rows: Array<{ item: HTMLElement; run: () => void }> = [];
+  // Rows go into the open section's group, or straight into the menu.
+  let parent: HTMLElement = el;
   for (const entry of req.items) {
     if (entry === '-') {
+      parent = el;
       const sep = document.createElement('div');
       sep.className = 'pm-menu-sep';
       sep.setAttribute('role', 'separator');
       el.append(sep);
       continue;
     }
+    if ('heading' in entry) {
+      const group = document.createElement('div');
+      group.className = 'pm-menu-group';
+      group.setAttribute('role', 'group');
+      const heading = document.createElement('div');
+      heading.className = 'pm-menu-heading';
+      heading.id = `pm-menu-heading-${++headingSeq}`;
+      heading.setAttribute('role', 'presentation');
+      heading.textContent = entry.heading;
+      group.setAttribute('aria-labelledby', heading.id);
+      group.append(heading);
+      el.append(group);
+      parent = group;
+      continue;
+    }
     const index = rows.length;
     const item = document.createElement('div');
     item.className = 'pm-menu-item';
-    item.setAttribute('role', entry.checked === undefined ? 'menuitem' : 'menuitemradio');
+    item.setAttribute('role', entry.checked === undefined ? 'menuitem' : entry.check ? 'menuitemcheckbox' : 'menuitemradio');
     item.tabIndex = -1;
     const label = document.createElement('span');
     label.className = 'pm-menu-label';
@@ -115,7 +158,7 @@ export function openPopoverMenu(req: PopoverMenuRequest): PopoverMenuHandle {
     item.addEventListener('pointermove', () => { if (!picking) setActive(index); });
     item.addEventListener('click', (event) => { event.stopPropagation(); pick(index); });
     rows.push({ item, run: entry.run });
-    el.append(item);
+    parent.append(item);
   }
   let active = -1;
 

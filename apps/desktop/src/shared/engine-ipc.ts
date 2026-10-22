@@ -8,6 +8,8 @@ import { type DeliveryOptions, migrateFormat, normalizeTimecode } from './delive
 import type { CrashReport, EngineProcess, MediaFacts } from './engine-protocol';
 
 export const ENGINE_IPC = {
+  proxies: 'engine:proxies',
+  proxiesChanged: 'engine:proxies-changed',
   /** main → preload: a `MessagePort` to one engine (`EnginePortMessage`). */
   port: 'engine:port',
   /** main → preload: an engine crashed and is restarting (`CrashReport`). */
@@ -185,7 +187,7 @@ export type EngineExportStatus = {
   waiting?: string;
 };
 
-export type RenderQueueJobState = 'pending' | 'queued' | 'running' | 'waitingForMedia' | 'done' | 'failed' | 'cancelled';
+export type RenderQueueJobState = 'pending' | 'queued' | 'running' | 'waitingForMedia' | 'paused' | 'done' | 'failed' | 'cancelled';
 
 /** One render queue job as the panel shows it. */
 export type RenderQueueJob = {
@@ -321,6 +323,7 @@ export type EngineCompatAnswer =
  *  (`ENGINE_WINDOW_MESSAGE`) because a `MessagePort` cannot cross the
  *  context bridge. */
 export interface EngineBridge {
+  proxies?: import('./proxies').EngineProxiesBridge;
   status(): Promise<EngineStatusMessage>;
   /** Whether this launch runs the new engine (read once at launch). */
   enabledSync(): boolean;

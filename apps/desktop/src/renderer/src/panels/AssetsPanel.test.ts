@@ -67,6 +67,7 @@ function setup(
     removals?: Record<string, { removedLayers: number; removedLayerIds: string[] }>;
     offline?: string[];
     posters?: Record<string, string>;
+    proxies?: Record<string, any>;
   } = {}
 ) {
   const project = {
@@ -121,7 +122,8 @@ function setup(
     menu: vi.fn(),
     modal: vi.fn(),
     confirm: vi.fn(async () => true),
-    h: domHelper
+    h: domHelper,
+    ...(options.proxies ? { Proxies: options.proxies } : {})
   };
 
   const revealSource = vi.fn(async () => undefined);
@@ -427,6 +429,77 @@ describe('AssetsPanel', () => {
     items.find((item: any) => item?.label === 'Replace File…').run();
     expect(PM.pickFiles).toHaveBeenCalledExactlyOnceWith(false, { replaceAssetId: 'image-1' });
     expect(PM.assets.replace).not.toHaveBeenCalled();
+  });
+
+  it('offers the proxy actions of appendix D, in order, with Always Play Original as a check item', () => {
+    const { PM } = setup([VIDEO]);
+    let state: any = { state: 'none' };
+    const proxies = {
+      eligible: (id: string) => id === 'video-1',
+      assetState: () => state,
+      alwaysPlayOriginal: vi.fn(() => true),
+      setAlwaysPlayOriginal: vi.fn(),
+      create: vi.fn(async () => {}),
+      rebuild: vi.fn(async () => {}),
+      remove: vi.fn(async () => {}),
+      onChange: () => () => {}
+    };
+    PM.Proxies = proxies;
+    const open = () => {
+      PM.menu.mockClear();
+      rows()[0]!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 5, clientY: 5 }));
+      flushSync();
+      return PM.menu.mock.calls[0]![1] as any[];
+    };
+    let items = open();
+    const labels = (list: any[]) => list.filter((item) => item?.label).map((item) => item.label);
+    expect(labels(items)).toEqual([
+      'Add to timeline', 'New Comp from Selection', 'Create Proxy', 'Always Play Original', 'Replace File…', 'Delete media…'
+    ]);
+    expect(items.find((item) => item?.label === 'Always Play Original').on).toBe(true);
+    items.find((item) => item?.label === 'Create Proxy').run();
+    expect(proxies.create).toHaveBeenCalledWith('video-1');
+    items.find((item) => item?.label === 'Always Play Original').run();
+    expect(proxies.setAlwaysPlayOriginal).toHaveBeenCalledWith('video-1', false);
+
+    state = { state: 'ready', width: 1280, height: 720, codec: 'prores_proxy', bytes: 1 };
+    items = open();
+    expect(labels(items).slice(2, 5)).toEqual(['Rebuild Proxy', 'Delete Proxy', 'Always Play Original']);
+    items.find((item) => item?.label === 'Rebuild Proxy').run();
+    items.find((item) => item?.label === 'Delete Proxy').run();
+    expect(proxies.rebuild).toHaveBeenCalledWith('video-1');
+    expect(proxies.remove).toHaveBeenCalledWith('video-1');
+  });
+
+  it('says when a proxy is being made or failed, and leaves proxy actions off other media', () => {
+    let state: any = { state: 'queued' };
+    let changed = () => {};
+    const { PM } = setup([VIDEO, IMAGE], { proxies: {
+      eligible: (id: string) => id === 'video-1',
+      assetState: (id: string) => (id === 'video-1' ? state : { state: 'unsupported' }),
+      alwaysPlayOriginal: () => false,
+      onChange: (listener: () => void) => { changed = listener; return () => {}; }
+    } });
+    const video = () => rows().find((row) => row.textContent?.includes(VIDEO.name))!;
+    expect(video().textContent).toContain('Proxy queued');
+    state = { state: 'creating', progress: 0.42 };
+    changed();
+    flushSync();
+    expect(video().textContent).toContain('Creating proxy · 42%');
+    state = { state: 'failed', error: 'The disk is full' };
+    changed();
+    flushSync();
+    expect(video().textContent).toContain("Couldn't create proxy · The disk is full");
+    state = { state: 'ready', width: 1, height: 1, codec: 'prores_proxy', bytes: 1 };
+    changed();
+    flushSync();
+    expect(video().textContent).toContain('2560×1440');
+    const image = rows().find((row) => row.textContent?.includes(IMAGE.name))!;
+    image.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    flushSync();
+    const labels = (PM.menu.mock.calls.at(-1)![1] as any[]).filter((item) => item?.label).map((item) => item.label);
+    expect(labels).not.toContain('Create Proxy');
+    expect(labels).not.toContain('Always Play Original');
   });
 
   it('uses roving tabindex and supports arrows, Home, End, Space, and Enter', () => {

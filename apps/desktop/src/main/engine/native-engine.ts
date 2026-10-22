@@ -61,6 +61,7 @@ export const DEFAULT_SLICING_POLICY: SlicingPolicy = {
 const STAGED_PER_LAUNCH = 16;
 
 export type NativeEngineOptions = {
+  generatedMediaDirectory?: (context?: { process: EngineProcess; session: number }) => string;
   spawn: SpawnEngine;
   channel: ChannelFactory;
   /** Engine caches (one directory per cache kind). */
@@ -75,7 +76,7 @@ export type NativeEngineOptions = {
    *  lane provides it); `null` when the asset is offline. */
   resolveAsset?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   /** A generated proxy of an offline asset, for draft renders. */
-  resolveProxy?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
+  resolveProxy?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   now?: () => number;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
   /** Finds the user's Blender (contract 11 Blender jobs from the job
@@ -194,6 +195,7 @@ export class NativeEngine {
       cacheDirectory: options.cacheDirectory,
       automaticOutputDirectory: options.automaticOutputDirectory,
       physicalMemory: options.physicalMemory,
+      ...(options.generatedMediaDirectory ? { generatedMediaDirectory: options.generatedMediaDirectory } : {}),
       ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
       ...(options.resolveProxy ? { resolveProxy: options.resolveProxy } : {}),
       ...(options.now ? { now: options.now } : {})
@@ -440,10 +442,16 @@ export class NativeEngine {
   }
 
   private async probeOnce(asset: string, interpret: string | null): Promise<MediaFacts> {
-    const launch = this.supervisors.job.current;
-    if (!launch) throw new Error('the job engine is not running');
     const resolved = await this.options.resolveAsset?.(asset);
     if (!resolved) throw new Error('The asset’s file is not available.');
+    return this.probeSource(resolved, asset, interpret);
+  }
+
+  /** A machine-local source assessment already resolved by the owning
+   * project's media binding. Never accepts a renderer-supplied path. */
+  async probeSource(resolved: { path: string }, asset = 'source-analysis', interpret: string | null = null): Promise<MediaFacts> {
+    const launch = this.supervisors.job.current;
+    if (!launch) throw new Error('the job engine is not running');
     const handle = this.handles.mint({ kind: { kind: 'mediaRead', asset }, session: 0, port: launch.hostPort, path: resolved.path });
     try {
       const answer = await this.request('job', { type: 'probeMedia', handle, interpret });

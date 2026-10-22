@@ -42,6 +42,7 @@ import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallb
 import { SvgRasters } from './svg-rasters';
 import { EngineTransport } from './transport';
 import { followOpenComposition } from './composition-follow';
+import { installNativePreviewCache } from './preview-cache';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
 export const ENGINE_VIEWER_SERVICE = 'engine.viewer';
@@ -130,6 +131,22 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const ready = new Set<() => void>();
   const sessions = new Set<DocumentSession>();
   let current: DocumentSession | null = null;
+  if (native.proxies) {
+    (PM as any).EngineProxies = {
+      ...native.proxies,
+      subscribe: (listener: Parameters<typeof native.proxies.subscribe>[0]) => native.proxies!.subscribe((snapshot) => {
+        listener(snapshot);
+        // A newly available or deleted proxy changes the paused composition
+        // without editing the document. Playback keeps its boundary choice.
+        if (!PM.playing) PM.bus.emit('layout');
+      }),
+      setPreviewMemory: async (bytes: number) => {
+        current?.previewCache(PM.Preview?.count ? bytes : 0, false, bytes === 0);
+      },
+    };
+    target.dispatchEvent(new Event('powermove:engine-proxies-changed'));
+  }
+  const offPreviewCache = installNativePreviewCache(PM, () => current);
   let fallbackRunner: ShaderFallbackRunner | null = null;
   // The job engine's fallback requests (exports, agent stills) run in this
   // window's runner too: one WebGL2 context for the window (decision 19).
@@ -265,6 +282,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         for (const listener of clockListeners) listener(sample);
       },
       onAudio: (message) => audio.receive(message, session),
+      onProxyNeeded: (assets) => {
+        const proxies = (native.proxies as typeof native.proxies & { slowDecodes?(project: string, assets: string[]): Promise<void> });
+        void proxies?.slowDecodes?.(String(PM.proj.id), assets).catch((e: unknown) => log('warn', `proxy generation: ${String(e)}`));
+      },
       onStats: (message) => {
         stats.receive(message, performance.now());
         PM.invalidate?.('status');
@@ -526,6 +547,11 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       sessionReady = null;
       unrouteCaptures();
       renderTransport.dispose();
+      offPreviewCache();
+      if ((PM as any).EngineProxies) {
+        (PM as any).EngineProxies = null;
+        target.dispatchEvent(new Event('powermove:engine-proxies-changed'));
+      }
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;
       canvasBinding.unbind();

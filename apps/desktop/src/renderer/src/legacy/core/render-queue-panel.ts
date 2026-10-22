@@ -31,6 +31,7 @@ export function stateLine(job: RenderQueueJob): string {
   switch (job.state) {
     case 'pending': return 'Waiting to start';
     case 'queued': return 'Starting';
+    case 'paused': return `Paused${job.error ? ` · ${job.error.replace(/\.$/, '')}` : ''}`;
     case 'running': return `Rendering · ${Math.floor(job.progress * 100)}%`;
     case 'waitingForMedia': return `Waiting for media${job.error ? ` · ${job.error.replace(/\.$/, '')}` : ''}`;
     case 'done': return 'Done';
