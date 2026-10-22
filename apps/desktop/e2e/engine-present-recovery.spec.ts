@@ -16,8 +16,10 @@
  * Run serially, one Electron at a time:
  *   pm-electron-lock bunx playwright test e2e/engine-present-recovery.spec.ts --workers=1
  */
+import { writeFile } from 'node:fs/promises';
 import type { Page } from 'playwright';
 
+import { DEVICE_LOSS_WINDOW_MS, MAX_DEVICE_LOSSES } from '../src/extensions/viewer/engine-present/presentation';
 import { expect, test, type LaunchedApp } from './helpers/app';
 
 const ON = { POWERMOVE_NEW_ENGINE: '1' };
@@ -171,6 +173,105 @@ test.describe('Use New Engine: engine presentation recovery', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
     // The viewer still presents the engine's frames of the new pool.
     await expect.poll(() => presenting(page), { timeout: 20_000 }).toBe(true);
+  });
+});
+
+/*
+ * Repeated GPU process crashes while frames keep arriving. Electron 44's
+ * WebGPU importExternalTexture copied RGBA VideoFrames through Blink's
+ * WebGpuSharedImageWrapperCache; once the shared raster context was lost
+ * and recreated, the next import dereferenced a cached wrapper's null
+ * shared image (SIGSEGV at 0x1c in the presentation worker). Every reset
+ * here lands during playback, so imports race the loss.
+ * PM_GPU_RESET_ITERATIONS sets the count (stress runs use 200). Chromium's
+ * fallback to software compositing after three GPU crashes, and its
+ * blocking of WebGL/WebGPU for the app's origin after repeated resets
+ * (which also stops today's engine canvas), are turned off so every
+ * iteration exercises the hardware path. Resets are paced so no
+ * more than MAX_DEVICE_LOSSES land in DEVICE_LOSS_WINDOW_MS: beyond that
+ * the presentation deliberately stops (a GPU that keeps failing must not
+ * spin the viewer).
+ */
+const RESETS = Math.max(1, Number(process.env.PM_GPU_RESET_ITERATIONS || 3));
+
+test.describe('Use New Engine: repeated GPU resets during playback', () => {
+  test.use({ desktopLaunchOptions: { env: ON, chromiumSwitches: ['--disable-gpu-process-crash-limit', '--disable-domain-blocking-for-3d-apis'] } });
+
+  test('never crash the renderer and end in engine frames each time', async ({ session }) => {
+    test.setTimeout(120_000 + RESETS * 60_000);
+    const resets: number[] = [];
+    const { page } = session;
+    await session.app.evaluate(({ app }) => {
+      const gone: unknown[] = [];
+      (globalThis as any).__pmRendererGone = gone;
+      app.on('render-process-gone', (_event, _contents, details) => gone.push({ kind: 'renderer', ...details }));
+      app.on('child-process-gone', (_event, details) => { if (details.type !== 'GPU') gone.push({ kind: 'child', ...details }); });
+    });
+    const gone = (): Promise<unknown[]> => session.app.evaluate(() => (globalThis as any).__pmRendererGone);
+    await openEngineViewer(session);
+    const play = () => page.evaluate(() => {
+      const PM = (window as any).PM;
+      if (!PM.playing) { PM.setTime(0); PM.play(); }
+    });
+    for (let iteration = 0; iteration < RESETS; iteration++) {
+      await play();
+      const playing = await latestSeq(page);
+      await expect.poll(() => latestSeq(page), { timeout: 20_000 }).toBeGreaterThan(playing);
+      const window = resets.at(-MAX_DEVICE_LOSSES);
+      if (window !== undefined) await page.waitForTimeout(Math.max(0, window + DEVICE_LOSS_WINDOW_MS + 1_000 - Date.now()));
+      resets.push(Date.now());
+      const pid = await killGpuProcess(session);
+      await expect.poll(() => session.app.evaluate(({ app }) => app.getAppMetrics().find((m) => m.type === 'GPU')?.pid ?? 0), { timeout: 20_000 }).not.toBe(pid);
+      // A new pool after the loss, as a window change makes one.
+      await resizeViewer(session, iteration % 2 ? 1180 : 1240);
+      await play();
+      const after = await latestSeq(page);
+      try {
+        await expect.poll(() => latestSeq(page), { timeout: 30_000 }).toBeGreaterThan(after);
+      } catch (error) {
+        console.log('GPU RESET DIAGNOSTIC', iteration + 1, JSON.stringify(await page.evaluate(() => {
+          const PM = (window as any).PM, presentation = PM.Kernel.services.get('viewer')?.enginePresentation;
+          return { playing: PM.playing, time: PM.time, connection: PM.EngineConnection?.status?.(), presenting: presentation?.presenting,
+            stats: presentation?.stats?.(), state: presentation?.state, receiver: (window as any).__powermoveTestBridge?.frameBridge?.stats?.() };
+        }).catch((e: unknown) => ({ error: String(e) }))), JSON.stringify(await bridgeStatus(session).catch((e: unknown) => String(e))));
+        throw error;
+      }
+      await expect.poll(() => presenting(page), { timeout: 30_000 }).toBe(true);
+      expect(await gone(), `iteration ${iteration + 1}`).toEqual([]);
+      expect(session.diagnostics.pageErrors, `iteration ${iteration + 1}`).toEqual([]);
+      if ((iteration + 1) % 10 === 0 || iteration + 1 === RESETS) console.log(`GPU reset ${iteration + 1}/${RESETS} recovered`);
+    }
+    await page.evaluate(() => (window as any).PM.pause());
+    await expect.poll(() => page.evaluate(() => (window as any).PM.playing), { timeout: 10_000 }).toBe(false);
+    // An edit's frame is what the window shows: #FF3300 at 50% over #203040.
+    const before = await latestSeq(page);
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'opacity', value: 50 }, { label: 'Opacity', origin: 'inspector' });
+    });
+    await expect.poll(() => latestSeq(page), { timeout: 20_000 }).toBeGreaterThan(before);
+    await expect.poll(() => presenting(page), { timeout: 20_000 }).toBe(true);
+    const center = await boxCenter(page);
+    try {
+      await expect.poll(async () => {
+        const [r, g, b] = await stagePixel(session, center.x, center.y);
+        return Math.max(Math.abs(r! - 0x90), Math.abs(g! - 0x32), Math.abs(b! - 0x20));
+      }, { timeout: 10_000 }).toBeLessThanOrEqual(4);
+    } catch (error) {
+      const png = await session.app.evaluate(async ({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && w.webContents.getURL().startsWith('app:'))!;
+        return (await window.webContents.capturePage()).toPNG().toString('base64');
+      });
+      await writeFile(test.info().outputPath('window.png'), Buffer.from(png, 'base64'));
+      console.log('GPU RESET PIXEL', JSON.stringify(center), JSON.stringify(await stagePixel(session, center.x, center.y)));
+      throw error;
+    }
+    await expect.poll(async () => {
+      const status = await bridgeStatus(session);
+      return status.allReleased === status.retired;
+    }, { timeout: 15_000 }).toBe(true);
+    expect(await gone()).toEqual([]);
+    expect(session.diagnostics.pageErrors).toEqual([]);
   });
 });
 
