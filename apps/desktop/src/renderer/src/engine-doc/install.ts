@@ -133,7 +133,7 @@ export interface EngineDoc {
    */
   flushBeforeListeners(wanted: () => boolean): () => void;
   /** The flushed canonical document and its revision and hash (null until ready). */
-  snapshot(): ReturnType<DocumentBarrier['snapshot']> | null;
+  snapshot(options?: { checkpoint?: boolean }): ReturnType<DocumentBarrier['snapshot']> | null;
   resume(): ReturnType<DocumentBarrier['resume']> | null;
   stats(): Record<string, unknown>;
   summary(): void;
@@ -490,7 +490,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     subscribe(fn) { subscribers.add(fn); return () => { subscribers.delete(fn); }; },
     onPending(fn) { pendingListeners.add(fn); return () => { pendingListeners.delete(fn); }; },
     flushBeforeListeners(wanted) { eager.add(wanted); return () => { eager.delete(wanted); }; },
-    snapshot() { return state.ready && barrier ? barrier.snapshot() : null; },
+    snapshot(options) { return state.ready && barrier ? barrier.snapshot(options) : null; },
     resume() { return state.ready && barrier ? barrier.resume() : null; },
     stats() {
       return {

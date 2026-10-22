@@ -473,14 +473,18 @@ export class DocumentBarrier {
    * keys, its revision, and pm-wasm's canonical hash at that revision.
    * Batches with `baseRevision === revision` follow.
    */
-  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; bytes: Uint8Array; readonly json: string; hash: string } {
+  snapshot(options: { checkpoint?: boolean } = {}): { revision: number; encoding: 'canonicalJsonV1'; bytes: Uint8Array; readonly json: string; hash: string } {
     this.flush();
     // pm-wasm holds this revision (the shadow equals it): its canonical JSON
     // comes out as bytes, outside the JavaScript heap, for a large document
     // the difference between opening and running out of memory.
     const bytes = this.wasm.toJsonBytes();
     const hash = this.wasm.hash();
-    this.checkpoint = { revision: this.revision, hash }; this.journal = []; this.journalBytes = 0;
+    // Export/agent snapshots are independent consumers. Only a full viewer
+    // resync may advance its reconnect base and discard the earlier suffix.
+    if (options.checkpoint || !this.checkpoint) {
+      this.checkpoint = { revision: this.revision, hash }; this.journal = []; this.journalBytes = 0;
+    }
     return { revision: this.revision, encoding: 'canonicalJsonV1', bytes, get json() { return new TextDecoder().decode(bytes); }, hash };
   }
 

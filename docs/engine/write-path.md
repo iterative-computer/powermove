@@ -516,7 +516,8 @@ unchanged.
 The barrier keeps a reconnect checkpoint and at most 128 batches / 8 MiB of
 canonical patch bodies after it. A load discards the suffix. `resume()` provides
 the checkpoint and a contiguous copy of the suffix without serializing a whole
-document; a failed checkpoint probe takes a fresh `snapshot()` instead. Engine
+document; a failed checkpoint probe takes a fresh `snapshot({ checkpoint: true })`
+instead. Export/agent snapshots leave the viewer's replay base and suffix intact. Engine
 retention and expiry are described in `host-processes.md`.
 
 Regression coverage: `engine-doc/large-document.test.ts`, the session replay test

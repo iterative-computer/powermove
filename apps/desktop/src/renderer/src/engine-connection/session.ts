@@ -41,7 +41,7 @@ export interface DocumentStream {
   subscribe(fn: (batch: StreamBatch) => void): () => void;
   /** `bytes`: the canonical JSON as UTF-8 (pm-wasm's, kept out of the
    *  JavaScript heap); otherwise `json` is encoded. */
-  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; bytes?: Uint8Array; hash: string } | null;
+  snapshot(options?: { checkpoint?: boolean }): { revision: number; encoding: 'canonicalJsonV1'; json: string; bytes?: Uint8Array; hash: string } | null;
   resume?(): { revision: number; hash: string; batches: StreamBatch[] } | null;
 }
 
@@ -332,7 +332,7 @@ export class DocumentSession {
         if (this.closed) return;
       }
     }
-    const snapshot = this.options.stream.snapshot();
+    const snapshot = this.options.stream.snapshot({ checkpoint: true });
     if (!snapshot) throw new Error('the document mirror has no snapshot');
     this.document = documentId(this.options.documentId());
     const bytes = snapshot.bytes ?? encoder.encode(snapshot.json);

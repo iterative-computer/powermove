@@ -110,6 +110,22 @@ describe('incremental large-document synchronization', () => {
     console.info(JSON.stringify({ wholeDocumentDiffMs: wholeMs, runtimeNotifications73Ms: notificationsMs, bytes: batches[0]?.body.length }));
   });
 
+  it('keeps the viewer replay base when another consumer takes a snapshot', async () => {
+    const instance = await wasm();
+    const project = { id: 'shared-consumers', value: 0 };
+    const barrier = new DocumentBarrier(instance, () => project);
+    barrier.resync();
+    const base = barrier.resume();
+    project.value = 1; barrier.touched([['value']]); barrier.flush();
+    const exportSnapshot = barrier.snapshot();
+    expect(exportSnapshot.revision).toBe(base.revision + 1);
+    expect(barrier.resume().revision).toBe(base.revision);
+    expect(barrier.resume().batches).toHaveLength(1);
+    barrier.snapshot({ checkpoint: true });
+    expect(barrier.resume().revision).toBe(exportSnapshot.revision);
+    expect(barrier.resume().batches).toHaveLength(0);
+  });
+
   it('retains only a bounded contiguous patch suffix and resets it on replacement', async () => {
     const instance = await wasm();
     let project: any = { id: 'journal', value: 0 };
