@@ -18,6 +18,7 @@ export interface PmWasmExports {
   pm_in_release(): void;
   pm_out_ptr(): number;
   pm_out_len(): number;
+  pm_out_release(): void;
   pm_out_special(): number;
   pm_resync(len: number, rev: number): number;
   pm_apply(len: number, base: number, rev: number): number;
@@ -47,6 +48,8 @@ export interface PmWasmExports {
   pm_fonts_outlines(outlines: number): void;
   pm_heap_live(): number;
   pm_heap_peak(): number;
+  pm_heap_input(): number;
+  pm_heap_output(): number;
   pm_heap_reset_peak(): void;
   pm_stats(): number;
 }
@@ -59,6 +62,23 @@ export const KIND = { number: 0, other: 1, threw: 2 } as const;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+/** TextEncoder's byte count, including U+FFFD for each unpaired surrogate.
+ * Counting in place avoids a full temporary UTF-8 buffer for large documents. */
+function utf8Length(text: string): number {
+  let bytes = text.length;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0x80) continue;
+    if (code < 0x800) { bytes++; continue; }
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) { bytes += 2; i++; continue; }
+    }
+    bytes += 2;
+  }
+  return bytes;
+}
 
 /** Revives the markers pm-wasm writes for numbers JSON cannot carry. */
 export function revive(value: any): any {
@@ -136,10 +156,7 @@ export class PmWasm {
 
   /** Writes a string as UTF-8 into the input buffer; returns its byte length. */
   writeString(text: string): number {
-    // UTF-8 needs at most 3 bytes per UTF-16 code unit.
-    let need = text.length * 3;
-    if (need < 1024) need = 1024;
-    this.reserve(need);
+    this.reserve(Math.max(utf8Length(text), 1024));
     const target = this.memory().subarray(this.inPtr, this.inPtr + this.inCap);
     const { read, written } = encoder.encodeInto(text, target);
     if (read !== text.length) throw new Error('pm-wasm: input buffer too small');
@@ -158,6 +175,11 @@ export class PmWasm {
     this.call(() => this.x.pm_in_release());
     this.inPtr = 0;
     this.inCap = 0;
+  }
+
+  /** Frees the reply allocation after copying its contents. */
+  releaseOutput(): void {
+    this.call(() => this.x.pm_out_release());
   }
 
   /** The reply buffer as a string. */
@@ -200,14 +222,22 @@ export class PmWasm {
   revision(): number { return this.call(() => this.x.pm_revision()); }
   consistencyHash(): string { return this.call(() => this.readOut(this.x.pm_consistency_hash())); }
   hash(): string { return this.call(() => this.readOut(this.x.pm_hash())); }
-  toJson(): string { return this.call(() => this.readOut(this.x.pm_to_json())); }
+  toJson(): string {
+    return this.call(() => {
+      const len = this.x.pm_to_json();
+      try { return this.readOut(len); }
+      finally { this.x.pm_out_release(); }
+    });
+  }
   /** The mirror's canonical JSON as UTF-8 bytes, copied out of wasm memory:
    *  a large document never becomes a JavaScript string (C1: 170 MB). */
   toJsonBytes(): Uint8Array {
     return this.call(() => {
       const len = this.x.pm_to_json();
-      const ptr = this.x.pm_out_ptr();
-      return this.memory().slice(ptr, ptr + len);
+      try {
+        const ptr = this.x.pm_out_ptr();
+        return this.memory().slice(ptr, ptr + len);
+      } finally { this.x.pm_out_release(); }
     });
   }
 
@@ -365,8 +395,8 @@ export class PmWasm {
 
   stats(): Record<string, number> { return this.call(() => JSON.parse(this.readOut(this.x.pm_stats()))); }
 
-  heap(): { live: number; peak: number; memory: number } {
-    return this.call(() => ({ live: this.x.pm_heap_live(), peak: this.x.pm_heap_peak(), memory: this.x.memory.buffer.byteLength }));
+  heap(): { live: number; peak: number; memory: number; input: number; output: number } {
+    return this.call(() => ({ live: this.x.pm_heap_live(), peak: this.x.pm_heap_peak(), memory: this.x.memory.buffer.byteLength, input: this.x.pm_heap_input(), output: this.x.pm_heap_output() }));
   }
 }
 
