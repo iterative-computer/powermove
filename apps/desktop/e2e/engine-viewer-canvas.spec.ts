@@ -58,6 +58,7 @@ import { deflateSync } from 'node:zlib';
 import type { Page } from 'playwright';
 
 import { expect, test, launchApp, repoRoot, type LaunchedApp } from './helpers/app';
+import { choosePreviewResolution } from './helpers/viewer-menu';
 
 const ZOOMS = [0.25, 0.5, 0.61, 1] as const;
 const RESOLUTIONS = ['auto', '1', '0.5'] as const;
@@ -188,7 +189,7 @@ const content = (page: Page) => page.evaluate(() => {
 /** The viewer in a state, settled, and the stage's pixels as the window shows them. */
 async function capture(session: LaunchedApp, view: View, engine: boolean): Promise<Capture> {
   const { page } = session;
-  await page.locator('select[aria-label="Preview resolution"]').selectOption(view.resolution);
+  await choosePreviewResolution(page, view.resolution);
   const geometry = await page.evaluate(({ zoom, pan, engine }) => {
     const PM = (window as any).PM, V = PM.Kernel.services.get('viewer');
     PM.selectLayers?.([]);

@@ -1,6 +1,7 @@
 import {test,expect,chooseNativeMenu} from './helpers/app';
 import path from 'node:path';
 import {importFixture} from './helpers/media';
+import {choosePreviewResolution} from './helpers/viewer-menu';
 import {mkdir,readFile} from 'node:fs/promises';
 const evidence='/private/tmp/powermove-ae-implementation-visual';
 async function clean(page:any){await page.waitForFunction(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');return viewer?.ov&&PM.GL?.gl;});await page.evaluate(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');PM.replaceProject(PM.mkProject({name:'AE fundamentals QA',w:640,h:360,fps:30,dur:2,bg:'#000000'}));PM.setTime(0,{force:true});PM.selectLayers([]);viewer.fit=true;viewer.layout();});}
@@ -22,11 +23,11 @@ test('editable Pen, canvas text, graph and preview controls render coherently',a
  expect(await page.evaluate(()=>(window as any).PM.proj.layers[0].d.text)).toMatchObject({v:'Motion stays editable'});
  await chooseNativeMenu(session,'Rise',()=>page.getByRole('button',{name:'Add text animator',exact:true}).click());await expect(page.getByRole('button',{name:'Collapse Rise',exact:true})).toBeVisible();
  await page.screenshot({path:path.join(evidence,'text-animator.png')});
- await expect(page.getByRole('combobox',{name:'Preview resolution',exact:true})).toBeVisible();
+ await expect(page.getByRole('button',{name:'Preview quality',exact:true})).toBeVisible();
  await page.waitForFunction(()=>(window as any).PM.quality===1);
  const previewSize=()=>page.evaluate(()=>{const PM=(window as any).PM;if(PM.EngineConnection){const presentation=PM.Kernel.services.get('viewer').enginePresentation,frame=presentation?.latest,canvas=frame&&presentation.stateFor(frame.viewSeq)?.canvas;return canvas?[canvas.width,canvas.height]:null;}return [PM.GL.canvas.width,PM.GL.canvas.height];});
  await expect.poll(previewSize).not.toBeNull();const full=(await previewSize())!;
- await page.locator('#preview-controls select').selectOption('0.25');
+ await choosePreviewResolution(page,'0.25');
  await expect.poll(previewSize).toEqual(full.map(n=>Math.round(n*.25)));
  const geometry=await page.locator('#tl-head').evaluate(el=>{const r=el.getBoundingClientRect();return [...el.querySelectorAll('button,input,select')].filter((e:any)=>getComputedStyle(e).display!=='none').map(e=>({name:e.getAttribute('aria-label')||e.getAttribute('title'),right:e.getBoundingClientRect().right,bound:r.right}));});
  expect(geometry.every((r:any)=>r.right<=r.bound+1)).toBe(true);
@@ -63,7 +64,7 @@ test('multiple graph curves, velocity editing and a cached preview retain editab
  await page.screenshot({path:path.join(evidence,'multi-graph.png')});
  await page.evaluate(()=>(window as any).PM.theme.apply('dark'));await session.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1100,800));await page.screenshot({path:path.join(evidence,'multi-graph-dark-narrow.png')});
  const overflow=await page.locator('#tl-head').evaluate(el=>{const bounds=el.getBoundingClientRect();return [...el.querySelectorAll('button,select,input')].some(e=>{const b=e.getBoundingClientRect();return b.width>0&&b.right>bounds.right+1;});});expect(overflow).toBe(false);
- await page.locator('#preview-controls select').selectOption('0.25');
+ await choosePreviewResolution(page,'0.25');
  await page.evaluate(()=>(window as any).PM.Preview.cache());
  try { await page.waitForFunction(()=>(window as any).PM.Preview.active,undefined,{timeout:10_000}); }
  finally { const screenshot=test.info().outputPath('ram-preview.png');await page.screenshot({path:screenshot});await test.info().attach('RAM preview',{path:screenshot,contentType:'image/png'}); }

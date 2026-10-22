@@ -152,6 +152,9 @@ test('preview memory limit is available in Settings and survives restarting the 
 
 test('ordinary playback and backward scrubbing automatically reuse remembered frames', async ({ session }) => {
   await session.openEditor();
+  if (await session.page.evaluate(() => Boolean((window as any).PM.EngineConnection))) {
+    await expect.poll(() => session.page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+  }
   await session.page.evaluate(async () => {
     const PM = (window as any).PM;
     PM.pause(); PM.perf.auto = false; PM.quality = 1;
@@ -160,13 +163,21 @@ test('ordinary playback and backward scrubbing automatically reuse remembered fr
     PM.proj.work = [0, .3]; PM.loop = true;
     PM.proj.layers = [PM.mkLayer('shape', { d: { w: 48, h: 32, color: '#ed5b32' } }, PM.proj)];
     PM.touch(); PM.bus.emit('project');
-    const render = PM.GL.render;
     (window as any).__previewHits = [];
-    PM.GL.render = (time: number, opt: any) => {
-      const result = render(time, opt);
-      if (PM.GL.stats.previewHit) (window as any).__previewHits.push({ time, playing: PM.playing });
-      return result;
-    };
+    if (PM.EngineConnection?.status().route === 'engine') {
+      // The engine draws the viewer: each presented frame reports whether it
+      // came from the engine's remembered-frame memory cache.
+      PM.bus.on('preview:presented', (frame: any) => {
+        if (PM.EngineConnection.status().presentedCached) (window as any).__previewHits.push({ time: frame.time, playing: PM.playing });
+      });
+    } else {
+      const render = PM.GL.render;
+      PM.GL.render = (time: number, opt: any) => {
+        const result = render(time, opt);
+        if (PM.GL.stats.previewHit) (window as any).__previewHits.push({ time, playing: PM.playing });
+        return result;
+      };
+    }
     PM.setTime(0); PM.play();
   });
   await expect.poll(() => session.page.evaluate(() => (window as any).__previewHits.filter((hit: any) => hit.playing).length)).toBeGreaterThan(2);

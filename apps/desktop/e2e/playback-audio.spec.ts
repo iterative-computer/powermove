@@ -15,6 +15,61 @@ async function openAudioProject(page: any) {
 test('adaptive preview quality keeps the soundtrack playing', async ({ session }) => {
   const { page } = session;
   await openAudioProject(page);
+  if (await page.evaluate(() => Boolean((window as any).PM.EngineConnection))) {
+    test.setTimeout(120_000);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    // The engine draws, so the compositor cannot be slowed from the page.
+    // Apply real render pressure instead: add blurred full-frame layers until
+    // Full quality cannot present the 30 fps soundtrack project in real time.
+    const budget = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const budget = PM.Memory.budget('preview');
+      // Remembered frames would correctly be excluded as evidence.
+      PM.Memory.setBudget('preview', 0);
+      PM.loop = true; PM.proj.work = [0, PM.proj.dur];
+      PM.perf.auto = false; PM.quality = 1; PM.bus.emit('quality');
+      return budget;
+    });
+    const presentedRate = () => page.evaluate(async () => {
+      const PM = (window as any).PM;
+      PM.setTime(0); PM.play();
+      await new Promise(resolve => setTimeout(resolve, 500));
+      let frames = 0;
+      const off = PM.bus.on('preview:presented', () => { if (!PM.EngineConnection.status().presentedCached) frames++; });
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      off?.(); PM.pause();
+      return frames / 1.5;
+    });
+    try {
+      let layers = 0, rate = await presentedRate();
+      while (rate >= 24 && layers < 512) {
+        await page.evaluate(() => {
+          const PM = (window as any).PM;
+          for (let i = 0; i < 16; i++) {
+            const layer = PM.mkLayer('solid', { name: 'Pressure', d: { w: PM.proj.w, h: PM.proj.h, color: i % 2 ? '#3366ff' : '#ff6633' } }, PM.proj);
+            const blur = PM.mkEffect('blur'); blur.p.amount.v = 120; layer.fx.push(blur);
+            PM.proj.layers.push(layer);
+          }
+          PM.ProjectIndex?.invalidate?.(); PM.touch(); PM.bus.emit('layers');
+        });
+        layers += 16;
+        rate = await presentedRate();
+      }
+      expect(rate, `${layers} blurred layers`).toBeLessThan(24);
+      await page.evaluate(() => { const PM = (window as any).PM; PM.setTime(0); PM.perf.auto = true; PM.quality = 1; PM.play(); });
+      await page.waitForFunction(() => (window as any).PM.quality < 1, undefined, { timeout: 20_000 });
+      const playing = await page.evaluate(() => ({ playing: (window as any).PM.playing, previewActive: (window as any).PM.Preview.active }));
+      expect(playing.playing).toBe(true);
+      expect(playing.previewActive).toBe(false);
+      // The soundtrack keeps sounding after the step down.
+      const notBefore = await page.evaluate(() => performance.now() + 350);
+      await nativeSounding(page, 0, notBefore);
+    } finally {
+      await page.evaluate((budget) => { const PM = (window as any).PM; PM.pause(); PM.Memory.setBudget('preview', budget); }, budget);
+    }
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    return;
+  }
   await page.evaluate(() => {
     const PM = (window as any).PM;
     const render = PM.GL.render;
@@ -69,9 +124,53 @@ test('adaptive preview quality keeps the soundtrack playing', async ({ session }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
+/** Native audio is mixed by the engine: it sounds when fresh meter levels
+ * with a non-zero peak arrive while the engine drives the transport. */
+async function nativeSounding(page: any, after: number, notBefore = 0): Promise<number> {
+  const reading = await page.waitForFunction(({ after, notBefore }: { after: number; notBefore: number }) => {
+    const PM = (window as any).PM;
+    const audio = PM.EngineConnection.audio;
+    const latest = audio.latest();
+    if (performance.now() < notBefore || audio.levelsReceived <= after || !latest || PM.EngineConnection.status().driving !== true || !PM.Audio.meters.running()
+      || !latest.levels.master.peak.some((peak: number) => peak > 0)) return false;
+    return { sequence: audio.levelsReceived, voices: PM.Audio.inspect().voices.length };
+  }, { after, notBefore });
+  const result = await reading.jsonValue();
+  if (!result) throw new Error('Native audio wait resolved without a meter reading');
+  // The page's own Web Audio voices stay silent: the engine plays the mix.
+  expect(result.voices).toBe(0);
+  return result.sequence;
+}
+
 test('cached playback stops its own audio and hands back to normal playback', async ({ session }) => {
   const { page } = session;
   await openAudioProject(page);
+  if (await page.evaluate(() => Boolean((window as any).PM.EngineConnection))) {
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      PM.proj.work = [0, 1];
+      await PM.Preview.cache();
+    });
+    const cached = await page.evaluate(() => ({ active: (window as any).PM.Preview.active, frames: (window as any).PM.Preview.count }));
+    expect(cached.active).toBe(true);
+    expect(cached.frames).toBe(30);
+    // The cached preview presents remembered frames with its soundtrack.
+    await page.waitForFunction(() => (window as any).PM.EngineConnection.status().presentedCached);
+    const cachedAudio = await nativeSounding(page, 0);
+    await page.evaluate(() => (window as any).PM.Preview.stop());
+    expect(await page.evaluate(() => (window as any).PM.Preview.active)).toBe(false);
+    await page.waitForFunction(() => !(window as any).PM.Audio.meters.running());
+    const notBefore = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.setTime(0); PM.play(); PM.bus.emit('quality');
+      return performance.now() + 350;
+    });
+    await nativeSounding(page, cachedAudio, notBefore);
+    await page.evaluate(() => (window as any).PM.pause());
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    return;
+  }
   await page.evaluate(async () => {
     const PM = (window as any).PM;
     PM.proj.work = [0, 1];
