@@ -33,6 +33,8 @@ const ffmpegDir = [process.env.PM_FFMPEG_DIR, path.join(os.homedir(), 'Library/C
 const ffmpeg = process.env.POWERMOVE_FFMPEG || (ffmpegDir ? path.join(ffmpegDir, 'bin/ffmpeg') : 'ffmpeg');
 const ffprobe = ffmpegDir ? path.join(ffmpegDir, 'bin/ffprobe') : 'ffprobe';
 const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-mcp-video-'));
+let app = null, child, appLog = '', diagnostics = '';
+try {
 const profile = path.join(root, 'profile'), exportsDir = path.join(root, 'exports');
 const audio = path.join(root, 'tone.wav');
 const sourceVideo = path.join(root, 'source.mov');
@@ -47,8 +49,6 @@ bytes.write('data', 36); bytes.writeUInt32LE(frames * 2, 40);
 for (let i = 0; i < frames; i++) bytes.writeInt16LE(Math.round(5000 * Math.sin(i * Math.PI * 2 * 440 / 48000)), 44 + i * 2);
 await writeFile(audio, bytes);
 const desktopDir = path.join(repository, 'apps/desktop');
-let app = null, appLog = '';
-let child;
 if (desktop) {
   const electron = createRequire(path.join(desktopDir, 'package.json'))('electron');
   assert(existsSync(path.join(desktopDir, 'out/main/index.js')), 'Build the desktop app first (bun run build).');
@@ -73,7 +73,7 @@ if (desktop) {
   const cli = process.env.POWERMOVE_TEST_CLI || path.join(repository, 'packages/cli/bin/powermove.mjs');
   child = spawn(process.execPath, [cli, 'mcp', '--user-data', profile, '--exports', exportsDir], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...(native ? { POWERMOVE_NEW_ENGINE: '1', POWERMOVE_ENGINE_SHADER_CACHE: path.join(profile, 'Engine Cache', 'Shader Cache') } : {}), ...(missingBrowser ? { POWERMOVE_CHROMIUM: path.join(root, 'missing-chromium') } : {}) } });
 }
-let diagnostics = '', output = '', nextId = 0;
+let output = '', nextId = 0;
 const pending = new Map();
 child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk.toString()).slice(-20000); });
 child.stdout.on('data', chunk => {
@@ -139,6 +139,8 @@ async function desktopSmoke() {
     await tool('get_project_state');
     assert.equal((await tool('render_frames', { times: [0], width: 160 })).content.filter(item => item.type === 'image').length, 1);
     assert(!diagnostics.includes('Chromium started on demand'), 'plain native edits and frames must not start Chromium');
+    await tool('open_panel', { panelId: 'timeline' });
+    assert(diagnostics.includes('Chromium started on demand'), 'the first panel call starts Chromium on demand');
   }
   const videoAsset = text(await tool('import_media', { path: sourceVideo }));
   assert.equal(videoAsset.persisted, true);
@@ -156,7 +158,7 @@ async function desktopSmoke() {
     // Imports are today's editor import in the project tab: it decodes the media and writes its record.
     assert(diagnostics.includes('Chromium started on demand'), 'imports run today\'s editor import in the project-pinned tab');
     const listed = text(await tool('list_media'));
-    assert(listed.assets.every(asset => asset.status === 'available'), 'host-store imports are available to the worker');
+    assert(listed.assets.every(asset => asset.status === 'available'), `host-store imports are available to the worker: ${JSON.stringify(listed)}`);
     await tool('check_project');
     await tool('replace_media', { assetId: imported.assetId, path: audio });
     await tool('open_panel', { panelId: 'timeline' });
@@ -262,6 +264,7 @@ export default function activate(api: PowermoveAPI) {
   const headerLength = packed.readUInt32LE(5);
   const header = JSON.parse(packed.subarray(9, 9 + headerLength));
   assert(header.media.some(record => record.id === imported.assetId && record.length > 0), 'self-contained save embeds original audio');
+  assert.equal(header.media.find(record => record.id === imported.assetId).type, 'audio/wav', 'save keeps today’s media MIME fallback');
   const document = header.document;
   assert(document.proj && document.history && document.proj.layers.some(layer => layer.name === 'Title'), 'save keeps project and Undo history');
   assert.equal((await stat(saved.path)).mode & 0o777, 0o600);
@@ -274,7 +277,6 @@ export default function activate(api: PowermoveAPI) {
   console.log(`MCP ${native ? 'native hidden' : 'desktop'} smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, native text, published shader plus frames, and a self-contained PMV3 (today's agent save) with Undo history; ${left.length} verified exports.`);
 }
 
-try {
   if (missingBrowser) {
     await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'missing-browser', version: '1' } });
     await tool('create_project', { name: 'Missing Chromium', width: 320, height: 180, fps: 24, duration: 1 });
