@@ -3544,3 +3544,31 @@ decode taking a queued block is identified separately. Events use the bounded
 diagnostic writer. Profile-only map entries, thread-name copies and clock
 reads add probe overhead under the cache lock; ordinary decoding keeps its
 existing order and priority.
+
+The V36 diagnostic on AirPods Pro at 48 kHz/256 frames remained unqualified.
+Its 12 profiled speed starts measured 181.821/191.455/191.455 ms
+(p50/p95/max); 30 unprofiled distinct seek starts measured
+183.545/189.445/191.112 ms. All 42 timed starts reported zero program
+underruns, omitted prefix, start spread, A3 fires and RT overruns. These are
+native-only observations: the queued Today half was stopped before it ran,
+so they establish no paired latency pass. The seek part also failed the
+harness's outdated two-slot ownership check after the machine gained a third
+slot. The external harness now reads the official configured slot list and
+requires every slot for an exclusive reservation. Separately, the profiled
+seek warm Play was paused 125 microseconds after producer Play; no timed
+samples followed. Opt-in presenter traces now identify explicit, pending-route
+and fallback Pause origins and deferred replay, without changing transport.
+
+For the 12 profiled speed starts, median UI-to-control receipt fell to
+1.880 ms, with UI-to-send 0.871 ms and send-to-receive 0.113 ms; tail delivery
+still reached 11.284 ms. One truncated diagnostic line retains its timestamp
+fields but has unknown dirty/opened flags. The cold source block took
+78.723 ms from enqueue to publication: queue 2.292 ms, decoder-lock scope
+11.878 ms and read scope 64.171 ms, versus 0.669 ms of decoder thread CPU.
+During that wait, 1,913 fully enclosed missing-input preparation attempts
+consumed 829.610 ms of aggregate CPU across concurrent workers. The seek
+comparator published its first block in 4.850 ms. These data support retry
+work starving ordinary decoding; off-CPU wall time can also include I/O and
+page faults, so the trace does not attribute all of it to scheduling.
+Both receipt regression tests and the node control/shutdown regression passed
+under ordinary leases, with their owned temporary trees empty and removed.
