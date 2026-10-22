@@ -217,6 +217,8 @@ export type CompatAnswerResult =
 /** Answers the engine's needs for one source (the raster override's producer). */
 /** Frames of compatibility answers kept ahead of the clock during playback. */
 export const COMPAT_LOOKAHEAD = 6;
+/** Frames behind the playback clock past which an engine need is skipped. */
+export const STALE_FRAMES = 12;
 /** Main-thread time one lookahead call may take (ms); the rest waits for the next frame. */
 const LOOKAHEAD_BUDGET_MS = 6;
 /** Preparations (engine base rasters) started per turn; answers the
@@ -428,10 +430,14 @@ export class EngineRenderTransport {
     const clock = playing ? this.options.playhead?.() : null;
     const frame = this.options.frameTicks?.() ?? 0;
     for (const need of needs) {
-      // A delayed request is no longer the frame the engine can present.
-      // Answer the clock's frame instead of filling an obsolete FIFO.
+      // A request far behind the clock is no longer a frame the engine can
+      // present: answer the clock's frame instead of filling an obsolete
+      // FIFO. One a few frames behind is answered: the engine holds that
+      // frame for it (its schedule skips frames that turn late), and a
+      // window whose turns run longer than a frame would otherwise skip
+      // every need the engine waits for.
       const stale = !!clock && need.composition === this.options.composition() && frame > 0
-        && Math.sign(clock.rate) * (clock.time - need.time) > frame;
+        && Math.sign(clock.rate) * (clock.time - need.time) > STALE_FRAMES * frame;
       const asynchronous = playing && this.prepares(need);
       const answered = !stale && !asynchronous && this.answerNeed(need, session);
       if (asynchronous && !stale) this.ahead.get(this.aheadTag(need))?.sent.delete(need.time);

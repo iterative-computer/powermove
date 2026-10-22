@@ -582,6 +582,19 @@ describe('compatibility answers during playback', () => {
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 
+  it('answers an engine need a few frames behind the clock, which the engine holds its frame for', () => {
+    const { t, session, asked, state } = rig(true);
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      const before = asked.length;
+      // The window's turn ran long: the clock is three frames past the need.
+      state.time = 4 * frame;
+      t.receiveCompat({ compat: 'needs', needs: [need(frame)] }, session);
+      expect(asked.slice(before)).toContain(frame);
+      expect(t.lookaheadStats.skipped).toBe(0);
+    } finally { t.dispose(); }
+  });
+
   it('warms a bounded horizon from paused needs before Play without a continuing paused timer', async () => {
     vi.useFakeTimers();
     const { t, session, asked, state } = rig(false);
