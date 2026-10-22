@@ -49,8 +49,22 @@ type NavigatorGpu = {
  */
 export class DeviceLostError extends Error {
   constructor(message: string) {
-    super(`the WebGPU device was lost: ${message}`);
+    super(`the presentation graphics resource was lost: ${message}`);
     this.name = 'DeviceLostError';
+  }
+}
+
+/**
+ * Thrown by `FramePainter.draw` when this frame cannot be read but the
+ * painter's context is fine: during a GPU process restart a VideoFrame of
+ * an earlier import can name a shared image the new GPU process does not
+ * have. The frame is not drawn and goes back to the engine; the painter
+ * keeps drawing (a real loss still arrives through `lost`).
+ */
+export class FrameUnusableError extends Error {
+  constructor(message: string) {
+    super(`the presented frame could not be read: ${message}`);
+    this.name = 'FrameUnusableError';
   }
 }
 

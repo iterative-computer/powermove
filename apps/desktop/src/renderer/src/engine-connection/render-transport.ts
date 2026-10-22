@@ -207,7 +207,7 @@ export interface TransportSvgRasters {
 /** The key a snapshot's `uploaded` names for a posted SVG raster
  *  (pm_protocol `SvgRasterKey::upload_key`). */
 export function svgUploadKey(key: SvgRasterKey): string {
-  return `svg:${key.content}:${key.width}x${key.height}`;
+  return `svg:${key.content}:${key.width}x${key.height}${key.texture ? ":texture" : ""}`;
 }
 
 export type TransportStats = { sync: number; async: number; idle: number; failed: number; rounds: number; lastFailure: string | null; slowestSyncMs: number; documentSync: number };

@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><body><script>
+const mode = new URLSearchParams(location.search).get('mode');
+const worker = new Worker('worker.js');
+let last = { draws: 0 };
+worker.onmessage = (e) => { last = e.data; };
+window.stats = () => last;
+worker.postMessage({ mode });
+</script></body>

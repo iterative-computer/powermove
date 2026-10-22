@@ -36,7 +36,7 @@ async function setup() {
       reads.push(`sync ${asset.url!}`);
       return (asset as { bytes: Uint8Array }).bytes;
     },
-    canvas: { draw } as unknown as SvgRasterCanvas
+    canvas: { draw, drawTexture: (image: CanvasImageSource, w: number, h: number) => draw(image, w, h).fill(17) } as unknown as SvgRasterCanvas
   });
   const posted: Record<string, any>[] = [];
   const target = { post: (e: Record<string, unknown>) => { posted.push(e); return true; } };
@@ -56,6 +56,19 @@ describe('SvgRasters', () => {
     expect(posted).toHaveLength(1);
     expect(posted[0]).toMatchObject({ type: 'compat', compat: 'svgPixels', key: { content: contentA, width: 6, height: 3 }, row: 0, rows: 3 });
     expect((posted[0]!['data'] as Uint8Array).byteLength).toBe(6 * 3 * 4);
+  });
+
+  it('keeps a material-map upload distinct from a canvas bucket at the same size', async () => {
+    const { rasters, posted, target, contentA } = await setup();
+    const bucket = request(contentA), map = { ...bucket, key: { ...bucket.key, texture: true } };
+    await Promise.all([rasters.answer(target, [bucket]), rasters.answer(target, [map])]);
+    expect(posted).toHaveLength(2);
+    expect(posted.find(p => p['key'].texture)?.['data'][0]).toBe(17);
+    expect(posted.find(p => !p['key'].texture)?.['data'][0]).toBe(4);
+    const produced = await rasters.produce({ svg: map } as any);
+    expect(produced.key).toBe(`${contentA}:4x2:texture`);
+    expect(produced.format).toBe('rgba8Straight');
+    expect(rasters.drawSync(map)[0]).toBe(17);
   });
 
   it('never draws another version of the file under the engine’s content', async () => {

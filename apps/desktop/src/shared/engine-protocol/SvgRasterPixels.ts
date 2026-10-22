@@ -3,7 +3,8 @@ import type { Bytes } from "./Bytes";
 import type { SvgRasterKey } from "./SvgRasterKey";
 
 /**
- * Rows `row .. row + rows` of a raster: premultiplied RGBA8, top-down
- * (the bytes today's `texImage2D` of the canvas stores, read back).
+ * Rows `row .. row + rows` of a raster, in upload-storage order: canvas
+ * buckets are top-down premultiplied RGBA8, texture maps are straight
+ * RGBA8 after flipY (bottom row first), as the key specifies.
  */
 export type SvgRasterPixels = { key: SvgRasterKey, row: number, rows: number, data: Bytes, };

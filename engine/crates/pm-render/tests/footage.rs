@@ -526,19 +526,50 @@ fn interpret_overrides_change_the_reading() {
     let n = src.select(ticks(0.1).get()).unwrap();
     let f = decode(&path, n);
     // As tagged: BT.601. Overridden: BT.709 — the document's `interpret`.
+    // A colour interpretation reads the file natively (section 9's siting
+    // and filters, unclipped floats). Restating the file's own primaries
+    // leaves the tagged matrix to the file; an uninterpreted level 1 layer
+    // keeps today's RGBA8 upload, checked below.
     for (interp, matrix) in [
-        (None, MatrixCoefficients::Bt601),
         (
-            Some(json!({ "matrix": "bt709" })),
-            MatrixCoefficients::Bt709,
+            json!({ "primaries": "bt601_625" }),
+            MatrixCoefficients::Bt601,
         ),
+        (json!({ "matrix": "bt709" }), MatrixCoefficients::Bt709),
     ] {
-        let (doc, res) = document(&path, (w, h), 25.0, interp.clone());
+        let (doc, res) = document(&path, (w, h), 25.0, Some(interp.clone()));
         let ours = render(&mut r, &doc, (w, h), 0.1, &res);
         let want = frame_rgb(&f, ChromaSiting::Left, matrix);
         let d = max_diff(&ours, &want);
         eprintln!("color-601-625.mov read with {matrix:?}: max |Δ| {d:.2e}");
-        assert!(d < 1e-5, "{interp:?}: {d}");
+        assert!(d < 1e-5, "{interp}: {d}");
+    }
+    // Uninterpreted level 1: today's `texImage2D(RGBA, UNSIGNED_BYTE)`
+    // upload — Chromium's centered bilinear chroma, the matrix, then each
+    // channel clipped and rounded to 8 bits before the layer samples it.
+    let (doc, res) = document(&path, (w, h), 25.0, None);
+    let level1 = render(&mut r, &doc, (w, h), 0.1, &res);
+    let bitmap: Vec<[f64; 3]> = frame_rgb(&f, ChromaSiting::Center, MatrixCoefficients::Bt601)
+        .into_iter()
+        .map(|rgb| rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0))
+        .collect();
+    let d = max_diff(&level1, &bitmap);
+    eprintln!("color-601-625.mov at level 1 against the RGBA8 upload: max |Δ| {d:.2e}");
+    assert!(d < 1e-5, "level 1 upload: {d}");
+    // Members that only choose or place frames leave the level 1 upload
+    // as it is: restating the file's rate, square pixels, full aperture,
+    // progressive scan, or an alpha choice on an opaque file.
+    for interp in [
+        json!({ "frameRate": 25 }),
+        json!({ "pixelAspect": [1, 1] }),
+        json!({ "cleanAperture": false }),
+        json!({ "fieldOrder": "progressive" }),
+        json!({ "alpha": "ignore" }),
+        json!({ "frameRate": 25, "pixelAspect": [1, 1], "cleanAperture": false }),
+    ] {
+        let (doc, res) = document(&path, (w, h), 25.0, Some(interp.clone()));
+        let ours = render(&mut r, &doc, (w, h), 0.1, &res);
+        assert!(ours == level1, "{interp}: changed the level 1 colours");
     }
     // Ignoring alpha makes an alpha source opaque.
     let alpha = formats("video/prores-4444-alpha.mov").unwrap();

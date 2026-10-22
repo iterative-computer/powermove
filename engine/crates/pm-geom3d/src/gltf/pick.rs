@@ -71,7 +71,7 @@ impl Ray {
         }
     }
 
-    fn at(&self, t: f64) -> Vec3 {
+    pub fn at(&self, t: f64) -> Vec3 {
         add(self.origin, scale(self.direction, t))
     }
 
@@ -153,7 +153,7 @@ pub fn intersect_triangle(r: &Ray, a: Vec3, b: Vec3, c: Vec3, cull: bool) -> Opt
 
 /// A triangle BVH (binned SAH, leaves of 4), refit for new positions.
 #[derive(Debug, Clone, Default)]
-struct Bvh {
+pub(crate) struct Bvh {
     /// Node bounds and links: leaf `(first, count > 0)`, interior
     /// `(left child, 0)` with the right child after it.
     nodes: Vec<([f64; 3], [f64; 3], u32, u32)>,
@@ -163,8 +163,12 @@ struct Bvh {
 const LEAF: usize = 4;
 const BINS: usize = 12;
 
-fn tri_box(p: &[Vec3], t: &[u32; 3]) -> (Vec3, Vec3) {
-    let (a, b, c) = (p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]);
+fn tri_box_from_positions(position: &impl Fn(usize) -> Vec3, t: &[u32; 3]) -> (Vec3, Vec3) {
+    let (a, b, c) = (
+        position(t[0] as usize),
+        position(t[1] as usize),
+        position(t[2] as usize),
+    );
     (
         [
             a[0].min(b[0]).min(c[0]),
@@ -179,6 +183,10 @@ fn tri_box(p: &[Vec3], t: &[u32; 3]) -> (Vec3, Vec3) {
     )
 }
 
+fn tri_box(p: &[Vec3], t: &[u32; 3]) -> (Vec3, Vec3) {
+    tri_box_from_positions(&|i| p[i], t)
+}
+
 fn area(lo: Vec3, hi: Vec3) -> f64 {
     let e = sub(hi, lo);
     if e[0] < 0.0 {
@@ -188,8 +196,23 @@ fn area(lo: Vec3, hi: Vec3) -> f64 {
 }
 
 impl Bvh {
-    fn build(p: &[Vec3], tris: &[[u32; 3]]) -> Bvh {
-        let n = tris.len();
+    pub(crate) fn build(p: &[Vec3], tris: &[[u32; 3]]) -> Bvh {
+        Self::build_from_positions(tris, |i| p[i])
+    }
+
+    /// Build from rest-pose positions without materializing a second f64
+    /// array. The getter yields exactly the f64 values `build` would read.
+    fn build_from_positions(tris: &[[u32; 3]], position: impl Fn(usize) -> Vec3) -> Bvh {
+        Self::build_from_triangles(tris.len(), |i| tris[i], position)
+    }
+
+    /// Indexed primitives use stored valid triangles; for an unindexed
+    /// primitive the triples can be read from their ordinal without a copy.
+    fn build_from_triangles(
+        n: usize,
+        triangle: impl Fn(usize) -> [u32; 3],
+        position: impl Fn(usize) -> Vec3,
+    ) -> Bvh {
         let mut order: Vec<u32> = (0..n as u32).collect();
         let empty = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], 0, 0);
         if n == 0 {
@@ -198,7 +221,9 @@ impl Bvh {
                 order,
             };
         }
-        let boxes: Vec<(Vec3, Vec3)> = tris.iter().map(|t| tri_box(p, t)).collect();
+        let boxes: Vec<(Vec3, Vec3)> = (0..n)
+            .map(|i| tri_box_from_positions(&position, &triangle(i)))
+            .collect();
         let centers: Vec<Vec3> = boxes.iter().map(|(a, b)| scale(add(*a, *b), 0.5)).collect();
         let mut nodes = vec![([0.0; 3], [0.0; 3], 0u32, n as u32)];
         let mut stack = vec![0usize];
@@ -305,13 +330,13 @@ impl Bvh {
         Bvh { nodes, order }
     }
 
-    fn refit(&mut self, p: &[Vec3], tris: &[[u32; 3]]) {
+    fn refit_from_triangles(&mut self, p: &[Vec3], triangle: impl Fn(usize) -> [u32; 3]) {
         for i in (0..self.nodes.len()).rev() {
             let (_, _, first, count) = self.nodes[i];
             let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
             if count > 0 {
                 for &t in &self.order[first as usize..(first + count) as usize] {
-                    let (a, b) = tri_box(p, &tris[t as usize]);
+                    let (a, b) = tri_box(p, &triangle(t as usize));
                     for k in 0..3 {
                         lo[k] = lo[k].min(a[k]);
                         hi[k] = hi[k].max(b[k]);
@@ -352,7 +377,11 @@ impl Bvh {
 
     /// Every triangle the ray may hit, nearest boxes first, with `test`
     /// returning a ray parameter; the closest accepted hit.
-    fn closest(&self, r: &Ray, mut test: impl FnMut(u32) -> Option<f64>) -> Option<(f64, u32)> {
+    pub(crate) fn closest(
+        &self,
+        r: &Ray,
+        mut test: impl FnMut(u32) -> Option<f64>,
+    ) -> Option<(f64, u32)> {
         let inv = [
             1.0 / r.direction[0],
             1.0 / r.direction[1],
@@ -421,13 +450,53 @@ struct Deformed {
     bounds: (Vec3, f64, Option<(Vec3, Vec3)>),
 }
 
+/// The triangle order seen by three.js. An unindexed primitive's triples
+/// are implicit in POSITION, so retaining them would duplicate its index
+/// sequence in the picker.
+enum TriangleSource {
+    /// Share the source index buffer when every complete triple is valid.
+    Indexed(Arc<Vec<u32>>),
+    /// Preserve the previous filtering order for malformed indices.
+    Filtered(Vec<[u32; 3]>),
+    Unindexed(u32),
+}
+
+impl TriangleSource {
+    fn len(&self) -> usize {
+        match self {
+            Self::Indexed(indices) => indices.len() / 3,
+            Self::Filtered(tris) => tris.len(),
+            Self::Unindexed(count) => *count as usize,
+        }
+    }
+
+    fn get(&self, i: usize) -> [u32; 3] {
+        match self {
+            Self::Indexed(indices) => {
+                let at = i * 3;
+                [indices[at], indices[at + 1], indices[at + 2]]
+            }
+            Self::Filtered(tris) => tris[i],
+            Self::Unindexed(count) => {
+                debug_assert!(i < *count as usize);
+                let at = i as u32 * 3;
+                [at, at + 1, at + 2]
+            }
+        }
+    }
+}
+
 /// Rest-pose triangles and BVHs of a model's geometries, shared by every
 /// layer using it.
 pub struct Picker {
     pub model: Arc<Model>,
-    tris: Vec<Option<(Vec<[u32; 3]>, Bvh)>>,
+    tris: Vec<Option<(TriangleSource, Bvh)>>,
     /// `geometry.boundingSphere` per geometry.
     spheres: Vec<(Vec3, f64)>,
+    /// Per object: a skinned mesh's `boundingBox` as the importer leaves it
+    /// (`loadGltf`'s `Box3.setFromObject(scene)` computes it at the loaded
+    /// pose; every runtime clone copies it and never recomputes it).
+    loaded_boxes: Vec<Option<(Vec3, Vec3)>>,
 }
 
 /// A model posed under a layer at a time (re-posed vertices for skinned
@@ -450,17 +519,33 @@ impl Picker {
                     return None;
                 }
                 let n = g.vertex_count() as u32;
-                let t: Vec<[u32; 3]> = match &g.index {
-                    Some(ix) => ix.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
-                    None => (0..n / 3).map(|i| [3 * i, 3 * i + 1, 3 * i + 2]).collect(),
+                // A triangle with an index past the last vertex reads
+                // `undefined` positions in `Mesh.raycast`: never a hit.
+                let t = match &g.index {
+                    Some(ix) if ix.chunks_exact(3).all(|c| c.iter().all(|&v| v < n)) => {
+                        TriangleSource::Indexed(ix.clone())
+                    }
+                    Some(ix) => TriangleSource::Filtered(
+                        ix.chunks_exact(3)
+                            .map(|c| [c[0], c[1], c[2]])
+                            .filter(|c| c.iter().all(|&v| v < n))
+                            .collect(),
+                    ),
+                    None => TriangleSource::Unindexed(n / 3),
                 };
-                let p: Vec<Vec3> = g
-                    .position
-                    .data
-                    .chunks_exact(3)
-                    .map(|v| [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])])
-                    .collect();
-                let bvh = Bvh::build(&p, &t);
+                let position = &g.position.data;
+                let bvh = Bvh::build_from_triangles(
+                    t.len(),
+                    |i| t.get(i),
+                    |i| {
+                        let at = i * 3;
+                        [
+                            f64::from(position[at]),
+                            f64::from(position[at + 1]),
+                            f64::from(position[at + 2]),
+                        ]
+                    },
+                );
                 Some((t, bvh))
             })
             .collect();
@@ -469,11 +554,32 @@ impl Picker {
             .iter()
             .map(|g| g.bounding_sphere())
             .collect();
+        // The loaded pose: `scene.updateMatrixWorld()` from the glTF scene.
+        let rest = Pose::rest(&model);
+        let rest_world = pose::world(&model, &rest, None);
+        let loaded_boxes = model
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| match &o.kind {
+                ObjectKind::Drawable(d) if d.skin.is_some() => {
+                    pose::local_box(&model, i, d, &rest, &rest_world)
+                }
+                _ => None,
+            })
+            .collect();
         Picker {
             model,
             tris,
             spheres,
+            loaded_boxes,
         }
+    }
+
+    /// A skinned drawable's `boundingBox` as every runtime clone of the
+    /// imported model holds it (the loaded pose), in its local space.
+    pub fn loaded_box(&self, object: usize) -> Option<(Vec3, Vec3)> {
+        self.loaded_boxes.get(object).copied().flatten()
     }
 
     /// Poses the model under the layer matrix `layer` at mixer time `time`.
@@ -502,7 +608,7 @@ impl Picker {
             let n = model.geometries[d.geometry].vertex_count();
             let p: Vec<Vec3> = (0..n).map(|v| poser.vertex(v)).collect();
             let mut b = bvh.clone();
-            b.refit(&p, tris);
+            b.refit_from_triangles(&p, |i| tris.get(i));
             let bounds = if d.skin.is_some() {
                 let mut lo = [f64::INFINITY; 3];
                 let mut hi = [f64::NEG_INFINITY; 3];
@@ -539,7 +645,8 @@ impl Picker {
 
     /// The closest hit along the world ray within `[near, far]`; `side`
     /// gives each drawable's material side, `skip` drawables to ignore
-    /// (materials all at opacity 0, hidden).
+    /// (materials all at opacity 0, hidden). Skinned bounding volumes are
+    /// those of the current pose.
     pub fn pick(
         &self,
         posed: &Posed,
@@ -548,6 +655,35 @@ impl Picker {
         far: f64,
         side: &dyn Fn(usize) -> Side,
         skip: &dyn Fn(usize) -> bool,
+    ) -> Option<Hit> {
+        self.pick_with(posed, ray, near, far, side, skip, false)
+    }
+
+    /// [`Picker::pick`] as today's runtime raycasts a clone of the imported
+    /// model: a skinned mesh's box pre-test uses the box the importer
+    /// computed at the loaded pose ([`Picker::loaded_box`]).
+    pub fn pick_as_runtime(
+        &self,
+        posed: &Posed,
+        ray: &Ray,
+        near: f64,
+        far: f64,
+        side: &dyn Fn(usize) -> Side,
+        skip: &dyn Fn(usize) -> bool,
+    ) -> Option<Hit> {
+        self.pick_with(posed, ray, near, far, side, skip, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pick_with(
+        &self,
+        posed: &Posed,
+        ray: &Ray,
+        near: f64,
+        far: f64,
+        side: &dyn Fn(usize) -> Side,
+        skip: &dyn Fn(usize) -> bool,
+        loaded_boxes: bool,
     ) -> Option<Hit> {
         let model = &self.model;
         let mut best: Option<Hit> = None;
@@ -575,7 +711,7 @@ impl Picker {
                     let Some((tris, rest_bvh)) = &self.tris[d.geometry] else {
                         continue;
                     };
-                    let (positions, bvh, (center, radius, bbox)): (Option<&[Vec3]>, &Bvh, _) =
+                    let (positions, bvh, (center, radius, mut bbox)): (Option<&[Vec3]>, &Bvh, _) =
                         match &posed.deformed[i] {
                             Some(x) => (Some(&x.positions), &x.bvh, x.bounds),
                             None => {
@@ -583,6 +719,9 @@ impl Picker {
                                 (None, rest_bvh, (c, r, g.bounding_box))
                             }
                         };
+                    if loaded_boxes && d.skin.is_some() {
+                        bbox = self.loaded_box(i);
+                    }
                     let vertex = |k: u32| -> Vec3 {
                         match positions {
                             Some(p) => p[k as usize],
@@ -617,7 +756,7 @@ impl Picker {
                             continue;
                         }
                         let found = bvh.closest(&local, |t| {
-                            let tri = tris[t as usize];
+                            let tri = tris.get(t as usize);
                             let (a, b, c) = (vertex(tri[0]), vertex(tri[1]), vertex(tri[2]));
                             if s == Side::Back {
                                 intersect_triangle(&local, c, b, a, true)
@@ -647,16 +786,11 @@ impl Picker {
                         continue;
                     }
                     let local = ray.apply(&math::invert(world));
-                    let positions: Vec<Vec3> = g
-                        .position
-                        .data
-                        .chunks_exact(3)
-                        .map(|v| [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])])
-                        .collect();
+                    let positions = StaticPositions(&g.position.data);
                     let found = if mode == super::Mode::Points {
                         points_hit(
-                            &positions,
-                            g.index.as_deref(),
+                            positions,
+                            g.index.as_ref().map(|index| index.as_slice()),
                             &local,
                             threshold * threshold,
                             world,
@@ -664,8 +798,8 @@ impl Picker {
                         )
                     } else {
                         line_hit(
-                            &positions,
-                            g.index.as_deref(),
+                            positions,
+                            g.index.as_ref().map(|index| index.as_slice()),
                             mode,
                             &local,
                             threshold * threshold,
@@ -690,9 +824,30 @@ impl Picker {
     }
 }
 
+/// Rest-pose f32 POSITION, read as the f64 tuples three.js raycasts. The
+/// former temporary used `chunks_exact(3)` even if a hand-edited accessor
+/// declared another item size.
+#[derive(Clone, Copy)]
+struct StaticPositions<'a>(&'a [f32]);
+
+impl StaticPositions<'_> {
+    fn len(&self) -> usize {
+        self.0.len() / 3
+    }
+
+    fn get(&self, i: usize) -> Option<Vec3> {
+        if i >= self.len() {
+            return None;
+        }
+        let at = i * 3;
+        let p = &self.0[at..at + 3];
+        Some([f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
+    }
+}
+
 /// `Points.raycast`'s per-point test: the closest point on the ray.
 fn points_hit(
-    pos: &[Vec3],
+    positions: StaticPositions<'_>,
     indices: Option<&[u32]>,
     r: &Ray,
     threshold_sq: f64,
@@ -700,10 +855,13 @@ fn points_hit(
     world_ray: &Ray,
 ) -> Option<(Vec3, u32)> {
     let mut best: Option<(f64, Vec3, u32)> = None;
-    let count = indices.map_or(pos.len(), <[u32]>::len);
+    let count = indices.map_or(positions.len(), <[u32]>::len);
     for i in 0..count {
         let vi = indices.map_or(i, |ix| ix[i] as usize);
-        let p = pos[vi];
+        // An index past the last vertex reads NaN: never within range.
+        let Some(p) = positions.get(vi) else {
+            continue;
+        };
         let along = dot(sub(p, r.origin), r.direction);
         let closest = if along < 0.0 { r.origin } else { r.at(along) };
         if distance_sq(closest, p) < threshold_sq {
@@ -718,7 +876,7 @@ fn points_hit(
 
 /// `Line.raycast` for segments, strips, and loops.
 fn line_hit(
-    pos: &[Vec3],
+    positions: StaticPositions<'_>,
     indices: Option<&[u32]>,
     mode: super::Mode,
     r: &Ray,
@@ -726,8 +884,13 @@ fn line_hit(
     world: &Mat4,
     world_ray: &Ray,
 ) -> Option<(Vec3, u32)> {
-    let v = |i: usize| pos[indices.map_or(i, |ix| ix[i] as usize)];
-    let count = indices.map_or(pos.len(), <[u32]>::len);
+    // An index past the last vertex reads `undefined`: NaN coordinates.
+    let v = |i: usize| {
+        positions
+            .get(indices.map_or(i, |ix| ix[i] as usize))
+            .unwrap_or([f64::NAN; 3])
+    };
+    let count = indices.map_or(positions.len(), <[u32]>::len);
     if count < 2 {
         return None;
     }
@@ -736,11 +899,10 @@ fn line_hit(
     } else {
         1
     };
-    let mut segments: Vec<(usize, usize)> =
-        (0..count - 1).step_by(step).map(|i| (i, i + 1)).collect();
-    if mode == super::Mode::LineLoop {
-        segments.push((count - 1, 0));
-    }
+    let segments = (0..count - 1)
+        .step_by(step)
+        .map(|i| (i, i + 1))
+        .chain((mode == super::Mode::LineLoop).then_some((count - 1, 0)));
     let mut best: Option<(f64, Vec3, u32)> = None;
     for (a, b) in segments {
         let (d2, on_ray) = distance_sq_to_segment(r, v(a), v(b));
@@ -840,6 +1002,200 @@ mod tests {
     }
 
     #[test]
+    fn f32_position_reader_builds_bit_identical_bvh() {
+        let positions: Vec<f32> = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [2.0, 2.0, 2.0],
+            [2.0, 2.0, 2.0],
+            [2.0, 2.0, 2.0],
+            [-0.0, f32::from_bits(0x7fc0_0001), f32::INFINITY],
+            [f32::NEG_INFINITY, 3.0, 0.5],
+            [4.0, 3.0, 0.5],
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let f64_positions: Vec<Vec3> = positions
+            .chunks_exact(3)
+            .map(|p| [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
+            .collect();
+        let triangles = [
+            [0, 1, 2],
+            [3, 4, 5],
+            [6, 7, 8],
+            [0, 3, 6],
+            [1, 4, 7],
+            [2, 5, 8],
+            [0, 4, 8],
+        ];
+        let from_slice = Bvh::build(&f64_positions, &triangles);
+        let from_f32 = Bvh::build_from_positions(&triangles, |i| {
+            let at = i * 3;
+            [
+                f64::from(positions[at]),
+                f64::from(positions[at + 1]),
+                f64::from(positions[at + 2]),
+            ]
+        });
+        assert_eq!(from_slice.order, from_f32.order);
+        assert_eq!(from_slice.nodes.len(), from_f32.nodes.len());
+        for (a, b) in from_slice.nodes.iter().zip(&from_f32.nodes) {
+            assert_eq!(
+                (a.0.map(f64::to_bits), a.1.map(f64::to_bits), a.2, a.3),
+                (b.0.map(f64::to_bits), b.1.map(f64::to_bits), b.2, b.3)
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_unindexed_triangles_preserve_bvh_and_refit_order() {
+        let seed: [Vec3; 9] = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [2.0, 2.0, 2.0],
+            [2.0, 2.0, 2.0],
+            [2.0, 2.0, 2.0],
+            [-0.0, f64::NAN, f64::INFINITY],
+            [f64::NEG_INFINITY, 3.0, 0.5],
+            [4.0, 3.0, 0.5],
+        ];
+        let positions: Vec<Vec3> = (0..21).map(|i| seed[i % seed.len()]).collect();
+        let old_triangles: Vec<[u32; 3]> = (0..7).map(|i| [i * 3, i * 3 + 1, i * 3 + 2]).collect();
+        let implicit = TriangleSource::Unindexed(7);
+        let mut old = Bvh::build(&positions, &old_triangles);
+        let mut new =
+            Bvh::build_from_triangles(implicit.len(), |i| implicit.get(i), |i| positions[i]);
+        let same = |a: &Bvh, b: &Bvh| {
+            assert_eq!(a.order, b.order);
+            assert_eq!(a.nodes.len(), b.nodes.len());
+            for (left, right) in a.nodes.iter().zip(&b.nodes) {
+                assert_eq!(
+                    (
+                        left.0.map(f64::to_bits),
+                        left.1.map(f64::to_bits),
+                        left.2,
+                        left.3,
+                    ),
+                    (
+                        right.0.map(f64::to_bits),
+                        right.1.map(f64::to_bits),
+                        right.2,
+                        right.3,
+                    )
+                );
+            }
+        };
+        same(&old, &new);
+        let posed: Vec<Vec3> = positions
+            .iter()
+            .map(|p| [p[0] + 0.25, p[1], p[2]])
+            .collect();
+        old.refit_from_triangles(&posed, |i| old_triangles[i]);
+        new.refit_from_triangles(&posed, |i| implicit.get(i));
+        same(&old, &new);
+        let ray = Ray {
+            origin: [0.5, 0.25, 1.0],
+            direction: [0.0, 0.0, -1.0],
+        };
+        assert_eq!(
+            old.closest(&ray, |i| {
+                let t = old_triangles[i as usize];
+                intersect_triangle(
+                    &ray,
+                    posed[t[0] as usize],
+                    posed[t[1] as usize],
+                    posed[t[2] as usize],
+                    false,
+                )
+            }),
+            new.closest(&ray, |i| {
+                let t = implicit.get(i as usize);
+                intersect_triangle(
+                    &ray,
+                    posed[t[0] as usize],
+                    posed[t[1] as usize],
+                    posed[t[2] as usize],
+                    false,
+                )
+            })
+        );
+    }
+
+    #[test]
+    fn shared_indices_and_filtered_indices_preserve_complete_triangle_order() {
+        let indices = Arc::new(vec![0, 1, 2, 2, 3, 0, 99]);
+        let shared = TriangleSource::Indexed(indices.clone());
+        assert_eq!(shared.len(), 2);
+        assert_eq!(shared.get(0), [0, 1, 2]);
+        assert_eq!(shared.get(1), [2, 3, 0]);
+        assert!(Arc::ptr_eq(
+            &indices,
+            match &shared {
+                TriangleSource::Indexed(ix) => ix,
+                _ => unreachable!(),
+            }
+        ));
+
+        let malformed = [0, 1, 2, u32::MAX, 3, 0, 2, 3, 0, 99];
+        let filtered = TriangleSource::Filtered(
+            malformed
+                .chunks_exact(3)
+                .map(|c| [c[0], c[1], c[2]])
+                .filter(|c| c.iter().all(|&v| v < 4))
+                .collect(),
+        );
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered.get(0), [0, 1, 2]);
+        assert_eq!(filtered.get(1), [2, 3, 0]);
+    }
+
+    #[test]
+    fn static_point_and_loop_readers_preserve_index_order() {
+        let points = [-1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 99.0];
+        // The trailing scalar is discarded by the former `chunks_exact(3)`.
+        let ray = Ray {
+            origin: [0.0, 0.0, 1.0],
+            direction: [0.0, 0.0, -1.0],
+        };
+        assert_eq!(
+            points_hit(
+                StaticPositions(&points),
+                Some(&[u32::MAX, 1, 0]),
+                &ray,
+                2.0,
+                &math::IDENTITY,
+                &ray,
+            )
+            .map(|(_, index)| index),
+            Some(1),
+        );
+
+        let square = [
+            -1.0f32, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0,
+        ];
+        let ray = Ray {
+            origin: [-1.0, 0.0, 1.0],
+            direction: [0.0, 0.0, -1.0],
+        };
+        assert_eq!(
+            line_hit(
+                StaticPositions(&square),
+                None,
+                super::super::Mode::LineLoop,
+                &ray,
+                0.01,
+                &math::IDENTITY,
+                &ray,
+            )
+            .map(|(_, index)| index),
+            Some(3),
+        );
+    }
+
+    #[test]
     fn bvh_matches_brute_force_and_refits() {
         let n = 30;
         let mut p = Vec::new();
@@ -890,7 +1246,7 @@ mod tests {
                 v[2] += (v[0] * 3.0).sin() * 0.2;
                 v[1] += v[0] * 0.3;
             }
-            bvh.refit(&p, &t);
+            bvh.refit_from_triangles(&p, |i| t[i]);
         }
     }
 
