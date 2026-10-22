@@ -1,17 +1,30 @@
 # Proxy generation and representation policy (Phase 4a)
 
-## Decision PROXY-1 (beta)
+## Decision PROXY-1 (orchestrator, beta)
 
-Paused and settled-seek Automatic frames use original pixels through today's
-source conversion, bilinear preview-canvas minification and browser upscale.
-Normal exports and analysis use originals. Reduced decode is not used for
-paused originals unless the corpus proves it pixel-exact within the existing
-bound. During playback, measured sources that cannot meet the frame budget
-may use a proxy or reduced decode. Pausing restores the original on the first
-completed frame. Always Play Original forces this path throughout playback.
-The explicit Proxies viewer choice is a draft choice; draft exports require
-their own explicit choice. This decision does not relax existing-project
-parity or permit changing a reference to accept a visible difference.
+- **Still pixels are today's pixels.** Paused frames, settled seeks and
+  exports show exactly today's pixels: the original through today's source
+  conversion, bilinear preview-canvas minification and browser upscale, at
+  Full, Half and Quarter. No proxy or reduced-decode pixels appear there
+  unless the user explicitly picks a draft (the viewer's Proxies choice, or a
+  draft export). Analysis always reads originals.
+- **Playback may degrade, measured.** While playing, a source that this Mac
+  measurably cannot decode in real time may show a ready proxy or a reduced
+  decode. This is a beta decision. The engine returns to the exact original
+  within one frame of pausing (the first non-stand-in paused frame).
+- **Always Play Original** gives today's behaviour throughout playback: it
+  forbids proxies and partial-resolution decode for that asset.
+- **Reduced decode on stills** is allowed only where it is pixel-exact
+  against today's path. None is enabled: every paused representation is the
+  full original.
+
+Today's viewer substitutes a disposable editing copy (at most 1280 pixels,
+VP9) when preview quality is below Full or Auto quality is adapting. Under
+PROXY-1 the engine draws the original there instead; the paired test
+`engine-proxy-viewer-parity.spec.ts` records the editing-copy difference as
+evidence and gates on today's original path. Sources Chromium cannot decode
+(ProRes, most HEVC) play through today's playback conversion; like section
+25's video class, those are not compared pixel-for-pixel with today.
 
 ## Generation and intent
 

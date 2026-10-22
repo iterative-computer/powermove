@@ -172,45 +172,55 @@ function assertStaticFrames(source: string) {
   expect(new Set(lines.map(line => line.split(',').at(-1)!.trim())).size).toBe(1);
 }
 
-test('video at Half viewer resolution matches the current editing preview', async () => {
+/** Decision PROXY-1 (docs/engine/proxy.md): a paused or settled frame shows
+ * the original through today's scaling path. Today's viewer substitutes a
+ * disposable editing copy (at most 1280 pixels) at reduced preview quality;
+ * the engine draws the original there instead. The source is VP9 so that
+ * today's "original" really is the original file (a ProRes or HEVC source
+ * plays through today's playback conversion, which section 25 never
+ * compares). The editing-copy difference is recorded as evidence. */
+test('PROXY-1: paused Half shows the original through today\'s scaling path, not the editing copy', async () => {
   test.setTimeout(240_000);
   const root = await mkdtemp(path.join(os.tmpdir(), 'pm-half-video-'));
   const evidence = process.env.PM_PHASE4A_EVIDENCE;
-  const frames: Bitmap[] = [];
-  let currentOriginal: Bitmap | undefined;
+  let editingCopy: Bitmap | undefined, currentOriginal: Bitmap | undefined, native: Bitmap | undefined;
   let editingSelection: Awaited<ReturnType<typeof videoSelection>> | undefined;
   let originalSelection: Awaited<ReturnType<typeof videoSelection>> | undefined;
   try {
-    const source = path.join(root, 'pattern.mov');
+    const source = path.join(root, 'pattern.webm');
     execFileSync(ffmpegBinary, ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=24',
-      '-vf', 'loop=loop=-1:size=1:start=0', '-frames:v', '24', '-c:v', 'prores_videotoolbox', '-profile:v', '2', '-pix_fmt', 'yuv422p10le', source], { timeout: 60_000 });
+      '-vf', 'loop=loop=-1:size=1:start=0', '-frames:v', '24', '-c:v', 'libvpx-vp9',
+      '-pix_fmt', 'yuv420p', '-b:v', '0', '-crf', '18', '-g', '1', '-threads', '4', source], { timeout: 60_000 });
     assertStaticFrames(source);
-    for (const native of [false, true]) {
+    for (const engine of [false, true]) {
       let session: Awaited<ReturnType<typeof launchApp>> | null = null;
       try {
-        session = await launchApp({ userData: path.join(root, native ? 'native' : 'current'), env: { POWERMOVE_NEW_ENGINE: native ? '1' : '0' }, args: colorProfileArgs });
+        session = await launchApp({ userData: path.join(root, engine ? 'native' : 'current'), env: { POWERMOVE_NEW_ENGINE: engine ? '1' : '0' }, args: colorProfileArgs });
         await importVideo(session, source, .5, '0.5');
-        if (native) await session.page.waitForFunction(() => (window as any).PM.EngineConnection?.session()?.lastFrame?.quality?.resolution === 'half', undefined, { timeout: 30_000 });
-        if (!native) editingSelection = await videoSelection(session);
-        frames.push(await captureBitmap(session, evidence, native ? 'native-half' : 'current-half'));
-        if (!native) {
+        if (engine) {
+          await session.page.waitForFunction(() => {
+            const quality = (window as any).PM.EngineConnection?.session()?.lastFrame?.quality;
+            return quality?.resolution === 'half' && quality?.representation === 'original';
+          }, undefined, { timeout: 30_000 });
+          native = await captureBitmap(session, evidence, 'proxy1-native-half');
+        } else {
+          editingSelection = await videoSelection(session);
+          editingCopy = await captureBitmap(session, evidence, 'proxy1-current-editing-half');
           await useOriginal(session);
           originalSelection = await videoSelection(session);
-          currentOriginal = await captureBitmap(session, evidence, 'current-original-half');
+          currentOriginal = await captureBitmap(session, evidence, 'proxy1-current-original-half');
         }
       } finally { await session?.close(); }
     }
-    const metrics = compare(frames[0]!, frames[1]!);
-    const originalControl = compare(currentOriginal!, frames[1]!);
-    const originalSwitch = compare(frames[0]!, currentOriginal!);
-    if (evidence) await writeFile(path.join(evidence, 'half-video-metrics.json'), JSON.stringify({ editingCopy: metrics, originalControl, originalSwitch, editingSelection, originalSelection }));
+    const original = compare(currentOriginal!, native!);
+    const editing = compare(editingCopy!, native!);
+    const todaySwitch = compare(editingCopy!, currentOriginal!);
+    if (evidence) await writeFile(path.join(evidence, 'proxy1-half-metrics.json'), JSON.stringify({ original, editing, todaySwitch, editingSelection, originalSelection }));
     expect(editingSelection?.selectedEditing).toBe(true);
     expect(originalSelection?.selectedEditing).toBe(false);
     expect(editingSelection?.sourceSize).not.toEqual(editingSelection?.editingSize);
-    expect(originalSwitch.max).toBeGreaterThan(1);
-    // The original control diagnoses the stage at which pixels diverge. It
-    // cannot replace the editing-copy baseline that existing projects show.
-    assertViewerParity(metrics);
+    expect(todaySwitch.max).toBeGreaterThan(1);
+    assertViewerParity(original);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
