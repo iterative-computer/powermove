@@ -20,7 +20,7 @@
     "types": "wrangler types --env-interface CloudflareBindings",
     "typecheck": "bun run types && tsc --noEmit",
     "test": "bun test",
-    "types:emit": "tsc -p tsconfig.types.json"
+    "types:emit": "bun run types && tsc -p tsconfig.types.json"
   },
   "dependencies": {
     "@hono/zod-validator": "0.9.1",
