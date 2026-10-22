@@ -516,6 +516,30 @@ export class EngineRenderTransport {
     this.presentedWhilePlaying();
   }
 
+  /**
+   * A paused seek to `time` (seconds) is about to reach the session: the
+   * layers this window answered before (the lookahead's entries in the open
+   * composition) are answered at the new frame first, on the same port, so
+   * the engine plans it with them instead of asking and waiting a round
+   * trip (today's compositor called the chain in the seek's own frame).
+   * Only answers the producer can give at once; a layer the new frame adds
+   * is asked for as before.
+   */
+  seeking(time: number): void {
+    if (this.options.playing?.() || !this.ahead.size) return;
+    const open = this.options.composition();
+    const at = ticks(time);
+    let moved = false;
+    for (const entry of this.ahead.values()) {
+      if (entry.session.closed || entry.need.composition !== open) continue;
+      entry.cursor = at;
+      entry.clockCursor = null;
+      entry.sent.clear();
+      moved = true;
+    }
+    if (moved) this.presentedWhilePlaying(true, performance.now() + 50);
+  }
+
   /** Whether `need` waits for an asynchronous preparation before its
    *  producer answers it (while playing, and in the paused warm-up). */
   private prepares(need: CompatNeed, revision = this.options.revision() ?? 0): boolean {

@@ -163,7 +163,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const follower = followOpenComposition({ session: () => current, open: openComposition, bus: PM.bus });
   const transport = new EngineTransport(() => current, hostClock, {
     exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); }),
-    prepare: follower.follow
+    prepare: follower.follow,
+    beforeSeek: (time) => (PM.EngineRender as EngineRenderTransport | undefined)?.seeking?.(time)
   });
   /** animVersion per revision sent, for `frame:rendered.version`. */
   const versions = new RevisionVersions();

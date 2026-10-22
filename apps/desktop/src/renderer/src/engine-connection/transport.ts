@@ -83,6 +83,9 @@ export class EngineTransport implements TransportDriver {
       /** Before each command reaches the session (a viewerless session
        *  follows the open composition first). */
       prepare?: () => void;
+      /** Before a paused seek reaches the session: the window's compatibility
+       *  producers answer the new frame first (render-transport.ts). */
+      beforeSeek?: (time: number) => void;
     } = {}
   ) {}
 
@@ -210,6 +213,7 @@ export class EngineTransport implements TransportDriver {
     if (this.hold({ time })) return;
     if (scrub) this.syncScrub();
     if (this.run) this.run = { before: this.session()?.clock?.epoch ?? null, played: false };
+    if (!this.run) this.options.beforeSeek?.(time);
     this.send({ command: 'seek', time: ticks(time), mode: scrub ? 'scrub' : 'exact' });
   }
 

@@ -709,6 +709,27 @@ describe('compatibility answers during playback', () => {
     } finally { t.dispose(); now.mockRestore(); vi.useRealTimers(); }
   });
 
+  it('answers the layers it knows at a paused seek\'s frame before the seek reaches the engine', () => {
+    const { t, session, asked, posted } = rig(false);
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0, 'a'), need(0, 'b')] }, session);
+      asked.length = 0; posted.length = 0;
+      t.seeking(2);
+      const at = 2 * 705_600_000;
+      expect(asked.filter((time) => time === at)).toHaveLength(2);
+      expect(posted.filter((e) => e.compat === 'native' && e.time === at).map((e) => e.layer).sort()).toEqual(['a', 'b']);
+      // Not while playing (the clock drives the horizon then).
+      asked.length = 0;
+    } finally { t.dispose(); }
+    const playing = rig(true);
+    try {
+      playing.t.receiveCompat({ compat: 'needs', needs: [need(0, 'a')] }, playing.session);
+      playing.asked.length = 0;
+      playing.t.seeking(3);
+      expect(playing.asked).toEqual([]);
+    } finally { playing.t.dispose(); }
+  });
+
   it('answers only the paused need, then starts from the actual playhead at Play', () => {
     const { t, session, asked, state } = rig(false);
     try {
