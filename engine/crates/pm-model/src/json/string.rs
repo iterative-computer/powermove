@@ -24,7 +24,8 @@ pub struct JsString(Repr);
 
 const INLINE_CAP: usize = 2 * core::mem::size_of::<usize>() - 1;
 
-/// An inline length, `0..=INLINE_CAP`. Its unused values are the niche.
+/// An inline length, `0..=INLINE_CAP` (15 on 64-bit targets, 7 on wasm32).
+/// The byte's other values are the niche.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 #[rustfmt::skip]
@@ -32,12 +33,14 @@ enum InlineLen { L0, L1, L2, L3, L4, L5, L6, L7, L8, L9, L10, L11, L12, L13, L14
 
 impl InlineLen {
     #[rustfmt::skip]
-    const ALL: [InlineLen; INLINE_CAP + 1] = [
+    // Every variant on every target; 32-bit targets use the first eight.
+    const ALL: [InlineLen; 16] = [
         InlineLen::L0, InlineLen::L1, InlineLen::L2, InlineLen::L3, InlineLen::L4, InlineLen::L5,
         InlineLen::L6, InlineLen::L7, InlineLen::L8, InlineLen::L9, InlineLen::L10, InlineLen::L11,
         InlineLen::L12, InlineLen::L13, InlineLen::L14, InlineLen::L15,
     ];
     fn new(len: usize) -> InlineLen {
+        debug_assert!(len <= INLINE_CAP);
         InlineLen::ALL[len]
     }
     fn get(self) -> usize {
