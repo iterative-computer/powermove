@@ -72,6 +72,16 @@ impl JsString {
         }
     }
 
+    /// Owned text allocation, excluding the inline representation and allocator
+    /// rounding. Used for retained document storage estimates.
+    pub fn heap_bytes(&self) -> usize {
+        match &self.0 {
+            Repr::Inline { .. } => 0,
+            Repr::Utf8(text) => text.len(),
+            Repr::Wtf8(bytes) => bytes.len(),
+        }
+    }
+
     /// Whether the string contains unpaired surrogates.
     pub fn has_lone_surrogates(&self) -> bool {
         matches!(self.0, Repr::Wtf8(_))
