@@ -12,6 +12,8 @@
  * wrapper marks itself dead and the owner re-instantiates and resyncs.
  */
 
+import { decodeModelPacket } from './model-transfer';
+
 export interface PmWasmExports {
   memory: WebAssembly.Memory;
   pm_in(len: number): number;
@@ -19,6 +21,7 @@ export interface PmWasmExports {
   pm_out_ptr(): number;
   pm_out_len(): number;
   pm_out_special(): number;
+  pm_out_release?(): void;
   pm_resync(len: number, rev: number): number;
   pm_apply(len: number, base: number, rev: number): number;
   pm_revision(): number;
@@ -46,6 +49,7 @@ export interface PmWasmExports {
   pm_fonts_outlines(outlines: number): void;
   pm_model_set?(len: number): number;
   pm_model_import?(len: number): number;
+  pm_model_import_packed?(len: number): number;
   pm_prepare_model_import?(len: number): number;
   pm_model_forget?(len: number): void;
   pm_models_clear?(): void;
@@ -204,13 +208,22 @@ export class PmWasm {
   revision(): number { return this.call(() => this.x.pm_revision()); }
   hash(): string { return this.call(() => this.readOut(this.x.pm_hash())); }
 
-  /** Parse an imported model using the engine's glTF importer. */
-  importModel(bytes: Uint8Array): any {
+  /** Parse an imported model using the engine's glTF importer. JSON remains
+   * the default for direct callers; the production compatibility view asks
+   * for a packed mesh payload. */
+  importModel(bytes: Uint8Array, packed = false): any {
     return this.call(() => {
-      if (!this.x.pm_model_import) throw new Error('The engine model importer is unavailable');
-      const status = this.x.pm_model_import(this.writeBytes(bytes));
+      const importer = packed ? this.x.pm_model_import_packed : this.x.pm_model_import;
+      if (!importer) throw new Error('The engine model importer is unavailable');
+      const status = importer(this.writeBytes(bytes));
       if (status !== 0) throw new Error(this.readOut());
-      return this.readJson();
+      if (!packed) return this.readJson();
+      // One copy moves the whole packet out of growable WASM memory. Its
+      // scalar views then share this stable JS buffer without further copies.
+      const packet = this.bytes(this.x.pm_out_ptr(), this.x.pm_out_len()).slice();
+      this.x.pm_out_release?.();
+      this.releaseInput();
+      return decodeModelPacket(packet);
     });
   }
 
@@ -373,14 +386,18 @@ export class PmWasm {
     return this.call(() => {
       if (!this.x.pm_model_set) throw new Error('pm-wasm: this module has no 3D models');
       const key = encoder.encode(id);
-      const bytes = new Uint8Array(5 + key.length + data.length);
-      new DataView(bytes.buffer).setUint32(0, key.length, true);
-      bytes.set(key, 4);
-      bytes[4 + key.length] = kind === 'obj' ? 1 : kind === 'gltf' ? 2 : kind === 'unloadable' ? 3 : 0;
-      bytes.set(data, 5 + key.length);
-      const status = this.x.pm_model_set(this.writeBytes(bytes));
+      const length = 5 + key.length + data.length;
+      this.reserve(length);
+      const input = this.bytes(this.inPtr, length);
+      new DataView(input.buffer, input.byteOffset, 4).setUint32(0, key.length, true);
+      input.set(key, 4);
+      input[4 + key.length] = kind === 'obj' ? 1 : kind === 'gltf' ? 2 : kind === 'unloadable' ? 3 : 0;
+      input.set(data, 5 + key.length);
+      const status = this.x.pm_model_set(length);
       if (status === 1) throw new Error('pm-wasm: malformed model');
-      return status === 2 ? this.readOut() : null;
+      const message = status === 2 ? this.readOut() : null;
+      if (data.length > 1 << 20) this.releaseInput();
+      return message;
     });
   }
 

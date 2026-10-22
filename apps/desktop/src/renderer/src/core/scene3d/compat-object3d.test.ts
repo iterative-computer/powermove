@@ -64,3 +64,40 @@ it('plays engine cubic-spline clips with glTF tangents after cloning', async () 
   mixer.setTime(.5);
   expect(clone.getObjectByName('Animated')?.position.x).toBeCloseTo(.75);
 });
+
+it('shares packed float buffers and preserves narrowed colors, joints, indices and morph zeros', async () => {
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const storage = new ArrayBuffer(9 * 4 + 9 * 4 + 12 * 4);
+  const positions = new Float32Array(storage, 0, 9);
+  positions.set([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+  const morph = new Float32Array(storage, 9 * 4, 9);
+  morph.set([0, 0, .25, 0, 0, 0, 0, 0, 0]);
+  const colors = new Float32Array(storage, 18 * 4, 12);
+  colors.set([1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1]);
+  const data = {
+    objects: [{kind:'Group',name:'Scene',parent:null,matrix:identity},
+      {kind:'Mesh',name:'Packed',parent:0,matrix:identity,primitive:[0,0]}],
+    nodeObjects:[], meshes:[{weights:[],primitives:[{
+      topology:'Triangles',positions,colors,colorComponents:3,
+      joints:new Uint32Array([1,2,3,4, 4,3,2,1, 65535,0,0,0]),
+      indices:new Uint32Array([0,1,2]), material:null,
+      targets:[{position:morph,normal:null},{position:null,normal:new Float32Array([0,0,1, 0,0,1, 0,0,1])}],
+    }]}],
+    materials:[],images:[],textures:[],skins:[],instances:[],lights:[],cameras:[],clips:[],
+    facts:{vertices:3,triangles:1,center:[.5,.5,0],radius:1},
+  };
+  const imported = await object3dFromEngine(data);
+  const geometry = (imported.object3d.getObjectByName('Packed') as THREE.Mesh).geometry;
+  expect(geometry.getAttribute('position').array).toBe(positions);
+  expect(geometry.morphAttributes.position![0]!.array).toBe(morph);
+  expect(Array.from(geometry.morphAttributes.position![1]!.array)).toEqual(Array(9).fill(0));
+  expect(Array.from(geometry.getAttribute('color').array)).toEqual([1,0,0, 0,1,0, 0,0,1]);
+  expect(geometry.getAttribute('skinIndex').array).toBeInstanceOf(Uint16Array);
+  expect(Array.from(geometry.getAttribute('skinIndex').array).slice(8, 12)).toEqual([65535,0,0,0]);
+  expect(geometry.index!.array).toBeInstanceOf(Uint16Array);
+  expect(Array.from(geometry.index!.array)).toEqual([0,1,2]);
+  const wideIndices = new Uint32Array([0, 1, 65535]);
+  data.meshes[0]!.primitives[0]!.indices = wideIndices;
+  const wide = await object3dFromEngine(data);
+  expect((wide.object3d.getObjectByName('Packed') as THREE.Mesh).geometry.index!.array).toBe(wideIndices);
+});
