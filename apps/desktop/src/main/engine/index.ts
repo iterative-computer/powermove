@@ -208,6 +208,9 @@ function savePanel(format: ReturnType<typeof migrateFormat>, delivery: ReturnTyp
   return { extension, options: { defaultPath: `${safe}.${extension}`, filters: [{ name: kind, extensions: [extension] }], properties: ['createDirectory', 'showOverwriteConfirmation'] } };
 }
 
+/** This Mac's decode hardware, naming whose machine-local assessments apply. */
+const proxyMachine = `${os.platform()}:${os.arch()}:${os.cpus()[0]?.model ?? 'unknown'}`;
+
 export function installNativeEngine(options: InstallNativeEngineOptions): InstalledNativeEngine {
   const log = options.log ?? defaultLog;
   const env = options.env ?? process.env;
@@ -349,6 +352,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           // Translated shader programs, kept across launches (plan section 11).
           POWERMOVE_ENGINE_SHADER_CACHE: path.join(cacheDirectory, CACHE_DIRS.shaderCache),
           POWERMOVE_PROXY_LOCATIONS: path.join(cacheDirectory, 'Proxy Locations.json'),
+          // Decode assessments beside it are kept only for this machine.
+          POWERMOVE_PROXY_MACHINE: proxyMachine,
           PM_FFMPEG_DIR: proxyCodecs.root
         }
       });
@@ -414,7 +419,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       if (!Number.isFinite(decode) || !Number.isFinite(budget) || budget <= 0) throw new Error('The engine could not measure this source’s decode cost. Create its proxy manually if playback is slow.');
       return decode > budget;
     },
-    machine: `${os.platform()}:${os.arch()}:${os.cpus()[0]?.model ?? 'unknown'}`,
+    machine: proxyMachine,
     log,
     changed: (owner, snapshot) => {
       const contents = webContents.fromId(owner);

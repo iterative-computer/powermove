@@ -40,6 +40,9 @@ pub(super) struct ProxyMedia {
     intent: String,
     choices: HashMap<(String, Option<String>, String), PlaybackChoice>,
     deletions: Option<(Option<(SystemTime, u64)>, serde_json::Value)>,
+    /// Originals this machine measured as unable to play in real time (main's
+    /// cold decode assessments, `Proxy Assessments.json`), by content hash.
+    assessed_slow: Option<(Option<(SystemTime, u64)>, std::collections::HashSet<String>)>,
 }
 
 #[derive(Clone)]
@@ -70,6 +73,7 @@ impl Default for ProxyMedia {
             intent: String::new(),
             choices: HashMap::new(),
             deletions: None,
+            assessed_slow: None,
         }
     }
 }
@@ -633,6 +637,36 @@ impl ProxyMedia {
         self.choices.clear();
     }
 
+    /// Main's machine-local cold decode assessments. Entries from another
+    /// machine (a restored profile) are ignored, as main ignores them.
+    fn refresh_assessments(&mut self) {
+        let Some(file) = self.locations_file() else {
+            return;
+        };
+        let Some(parent) = file.parent() else {
+            return;
+        };
+        let file = parent.join("Proxy Assessments.json");
+        let stamp = std::fs::metadata(&file)
+            .ok()
+            .and_then(|m| Some((m.modified().ok()?, m.len())));
+        if self
+            .assessed_slow
+            .as_ref()
+            .is_some_and(|(old, _)| *old == stamp)
+        {
+            return;
+        }
+        let machine = std::env::var("POWERMOVE_PROXY_MACHINE").ok();
+        let slow = std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .map(|value| assessed_slow_hashes(&value, machine.as_deref()))
+            .unwrap_or_default();
+        self.assessed_slow = Some((stamp, slow));
+        self.choices.clear();
+    }
+
     fn roots(&self) -> Vec<PathBuf> {
         let Some(file) = self.locations_file() else {
             return Vec::new();
@@ -670,6 +704,7 @@ impl ProxyMedia {
         let mut forced = Vec::new();
         let mut reduced = BTreeMap::new();
         self.refresh_deletions();
+        self.refresh_assessments();
         self.probe_state.playing.store(playing, Ordering::Release);
         self.poll_updates();
         let tick = playhead.get();
@@ -771,9 +806,15 @@ impl ProxyMedia {
                     }
                     self.choices.remove(&choice_key);
                 }
+                let assessed = hash.as_ref().is_some_and(|h| {
+                    self.assessed_slow
+                        .as_ref()
+                        .is_some_and(|(_, slow)| slow.contains(h))
+                });
+                let known_slow = original.as_ref().is_some_and(|p| slow.contains(p)) || assessed;
                 let needed = preference == MediaPreference::Proxies
                     || original.as_ref().is_none_or(|p| !p.exists())
-                    || playing && original.as_ref().is_some_and(|p| slow.contains(p))
+                    || playing && known_slow
                     || profile.is_some_and(|machine| {
                         original.as_ref().is_some_and(|path| {
                             decode
@@ -884,12 +925,10 @@ impl ProxyMedia {
                         decision
                             .representation
                             .unwrap_or(PolicyRepresentation::Original)
+                    } else if known_slow {
+                        PolicyRepresentation::Proxy
                     } else {
-                        if original.as_ref().is_some_and(|p| slow.contains(p)) {
-                            PolicyRepresentation::Proxy
-                        } else {
-                            PolicyRepresentation::Original
-                        }
+                        PolicyRepresentation::Original
                     };
                 let choice = PlaybackChoice {
                     proxy: if representation == PolicyRepresentation::Proxy {
@@ -1266,5 +1305,50 @@ impl AssetResolver for ProxyResolver<'_> {
         source: &std::path::Path,
     ) -> Result<Option<std::sync::Arc<Vec<u8>>>, String> {
         self.original.blender_png(asset, source)
+    }
+}
+
+/// Content hashes main assessed as unable to play in real time on this
+/// machine (`{"version":1,"machine":…,"results":{hash:{"needsProxy":…}}}`).
+fn assessed_slow_hashes(
+    value: &serde_json::Value,
+    machine: Option<&str>,
+) -> std::collections::HashSet<String> {
+    if value["version"] != 1 || value["machine"].as_str() != machine {
+        return Default::default();
+    }
+    value["results"]
+        .as_object()
+        .map(|results| {
+            results
+                .iter()
+                .filter(|(hash, row)| {
+                    hash.len() == 64
+                        && hash.bytes().all(|c| c.is_ascii_hexdigit())
+                        && row["needsProxy"].as_bool() == Some(true)
+                })
+                .map(|(hash, _)| hash.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod assessment_tests {
+    use super::assessed_slow_hashes;
+
+    #[test]
+    fn only_this_machines_slow_assessments_select_playback_proxies() {
+        let slow = "a".repeat(64);
+        let fast = "b".repeat(64);
+        let value = serde_json::json!({"version":1,"machine":"darwin:arm64:M","results":{
+            slow.clone(): {"needsProxy": true, "at": 1}, fast.clone(): {"needsProxy": false, "at": 1}, "bad": {"needsProxy": true}
+        }});
+        let hashes = assessed_slow_hashes(&value, Some("darwin:arm64:M"));
+        assert!(hashes.contains(&slow));
+        assert!(!hashes.contains(&fast));
+        assert_eq!(hashes.len(), 1);
+        assert!(assessed_slow_hashes(&value, Some("darwin:x64:Intel")).is_empty());
+        assert!(assessed_slow_hashes(&serde_json::json!({"version":2,"machine":"darwin:arm64:M","results":{}}), Some("darwin:arm64:M")).is_empty());
     }
 }

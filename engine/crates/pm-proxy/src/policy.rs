@@ -222,7 +222,9 @@ pub fn choose_representation(input: AutomaticInput) -> RepresentationChoice {
         Representation::ReducedQuarter
     } else if reduced_half {
         Representation::ReducedHalf
-    } else if input.proxy_ready && input.decode.proxy_p95_ms.is_some_and(fits) {
+    } else if input.proxy_ready && input.decode.proxy_p95_ms.is_none_or(fits) {
+        // A ready proxy is a real-time recipe: it is used for an original
+        // measured too slow unless its own measured cost also misses.
         Representation::Proxy
     } else {
         Representation::Original

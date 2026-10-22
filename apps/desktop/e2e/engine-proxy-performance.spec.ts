@@ -269,8 +269,9 @@ test('paired 60-second Automatic 4K long-GOP playback uses measured presentation
 test('paused ProRes and HEVC upgrade to original on the first presented frame', async ({}, testInfo) => {
   test.setTimeout(600_000);
   const root = await mkdtemp(path.join(os.tmpdir(), 'pm-phase4a-upgrade-'));
-  const rows = [];
+  const rows: Array<Record<string, unknown>> = [];
   try {
+    // The plan's bars: 4K ProRes <= 150 ms, 4K long-GOP HEVC <= 300 ms.
     for (const file of [PRORES, SOURCES[0].file]) {
       let session: LaunchedApp | undefined;
       try {
@@ -279,36 +280,32 @@ test('paused ProRes and HEVC upgrade to original on the first presented frame', 
         await session.page.waitForFunction(() => (window as any).PM.EngineConnection?.status?.().route === 'engine');
         await settleAutomatic(session);
         const automatic = await pauseFirstFrame(session, 'automatic');
-        const row: { source: string; automatic: typeof automatic; fromProxy?: typeof automatic } = { source: file, automatic };
-        rows.push(row);
+        rows.push({ source: file, automatic });
         expect(automatic.first, `No Automatic paused frame presented for ${file}`).not.toBeNull();
         expect(automatic.first?.representation).toBe('original');
         expect(automatic.first?.ms).toBeGreaterThanOrEqual(0);
         expect(automatic.first?.ms).toBeLessThanOrEqual(file === PRORES ? 150 : 300);
-        const asset = await session.page.evaluate(async (folder) => {
-          const PM = (window as any).PM;
-          const id = String(PM.proj.layers.find((layer: any) => layer.type === 'video').d.asset);
-          PM.Proxies.setIntent({ create: 'onlyWhenAsked', size: 'half' });
-          await PM.Proxies.flush();
-          await PM.Proxies.setLocation({ kind: 'folder', path: folder });
-          await PM.Proxies.create(id);
-          return id;
-        }, path.join(root, `${file}-proxies`));
-        await session.page.waitForFunction((id) =>
-          ['ready', 'failed'].includes((window as any).PM.Proxies.assetState(id).state),
-        asset, { timeout: 180_000 });
-        expect(await session.page.evaluate((id) => (window as any).PM.Proxies.assetState(id), asset))
-          .toMatchObject({ state: 'ready' });
-        const result = await pauseFirstFrame(session, 'proxies');
-        row.fromProxy = result;
-        expect(result.playing).toBe('proxy');
-        expect(result.first, `No paused frame presented for ${file}`).not.toBeNull();
-        expect(result.first?.representation).toBe('original');
-        expect(result.first?.ms).toBeGreaterThanOrEqual(0);
-        expect(result.first?.ms).toBeLessThanOrEqual(file === PRORES ? 150 : 300);
-        expect(result.frames.filter(frame => !frame.standIn)).toHaveLength(1);
       } finally { await session?.close(); }
     }
+    // PROXY-1: a source this Mac cannot decode in real time plays its
+    // automatically generated proxy, and the first paused frame is the
+    // original (long-GOP bar), with no proxy frame shown while paused.
+    let session: LaunchedApp | undefined;
+    try {
+      const file = SOURCES[1].file;
+      session = await launchApp({ userData: path.join(root, file), env: { POWERMOVE_NEW_ENGINE: '1' } });
+      await importClip(session, source(file));
+      await session.page.waitForFunction(() => (window as any).PM.EngineConnection?.status?.().route === 'engine');
+      expect(await settleAutomatic(session), `${file} must need a proxy on this Mac`).toBe(true);
+      const transition = await pauseFirstFrame(session, 'automatic');
+      rows.push({ source: file, transition });
+      expect(transition.playing).toBe('proxy');
+      expect(transition.first, `No paused frame presented for ${file}`).not.toBeNull();
+      expect(transition.first?.representation).toBe('original');
+      expect(transition.first?.ms).toBeGreaterThanOrEqual(0);
+      expect(transition.first?.ms).toBeLessThanOrEqual(300);
+      expect(transition.frames.filter(frame => !frame.standIn)).toHaveLength(1);
+    } finally { await session?.close(); }
   } finally {
     await testInfo.attach('phase4a-paused-upgrade.json', { body: Buffer.from(JSON.stringify(rows)), contentType: 'application/json' });
     if (process.env.PM_PHASE4A_EVIDENCE) await writeFile(path.join(process.env.PM_PHASE4A_EVIDENCE, 'paused-upgrade.json'), JSON.stringify(rows)).catch(() => undefined);
