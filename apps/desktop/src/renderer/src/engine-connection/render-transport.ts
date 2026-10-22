@@ -36,6 +36,7 @@
 import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, PixelRect, SnapshotPixels, SnapshotRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
 import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAsk, type EngineCompatEvent, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
+import { SnapshotSlots } from './snapshot-slots';
 
 /** Repetitions of the same unresolved dependency set before a snapshot fails. */
 export const MAX_ROUNDS = 3;
@@ -922,6 +923,24 @@ export class EngineRenderTransport {
     return this.snapshotAsyncAt(options, cls);
   }
 
+  /** This window's asynchronous snapshots, queued to what main admits (snapshot-slots.ts). */
+  private readonly slots = new SnapshotSlots();
+
+  /**
+   * One snapshot request through the window's slots. Main can still refuse
+   * one for the bytes every window has outstanding: that is a wait as well
+   * (today's capture waits for the GPU), retried as slots free up, within
+   * the class's own wait.
+   */
+  private async admitted(cls: SnapshotClass, ask: () => Promise<EngineSnapshotReply>): Promise<EngineSnapshotReply> {
+    const until = performance.now() + (cls === 'idle' ? IDLE_WAIT_MS : ASYNC_WAIT_MS);
+    for (let attempt = 0; ; attempt++) {
+      const reply = await this.slots.run(cls, ask);
+      if (reply.status !== 'failed' || reply.code !== 'refused' || performance.now() >= until) return reply;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(250, 10 * 2 ** attempt)));
+    }
+  }
+
   private async snapshotAsyncAt(options: EngineSnapshotOptions, cls: SnapshotClass): Promise<EngineSnapshot> {
     const native = this.options.native;
     if (!native.snapshot) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no engine snapshots.'), 'snapshot');
@@ -935,7 +954,7 @@ export class EngineRenderTransport {
         if (!this.ready) await this.options.wake?.();
       }
       for (let round = 0; round < MAX_DEPENDENCY_PHASES; round++) {
-        const reply = await native.snapshot(this.request(options, cls, uploaded));
+        const reply = await this.admitted(cls, () => native.snapshot!(this.request(options, cls, uploaded)));
         if (reply.status === 'rendered') {
           if (cls === 'idle') this.stats.idle++;
           else this.stats.async++;

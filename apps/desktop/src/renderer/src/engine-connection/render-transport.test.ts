@@ -72,6 +72,30 @@ describe('EngineRenderTransport', () => {
     expect(snap.data).toBeInstanceOf(Uint8ClampedArray);
   });
 
+  it('never sends main more asynchronous snapshots than it admits, and waits out a refusal instead of failing', async () => {
+    // A large project's idle thumbnails and compatibility rasters filled
+    // main's eight slots and an extension's renderFrameToAsync failed with
+    // "Too many snapshots are in flight" (C1); today's never fails for that.
+    const { transport, asked } = setup([]);
+    let inFlight = 0, most = 0, refusals = 1;
+    (transport as any).options.native.snapshot = async (request: EngineSnapshotRequest) => {
+      asked.push(request);
+      inFlight++; most = Math.max(most, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      if (refusals-- > 0) return { status: 'failed', code: 'refused', message: 'Too many snapshots are in flight; try again when they finish.' } as EngineSnapshotReply;
+      return rendered(4, 2);
+    };
+    const all = await Promise.all([
+      ...Array.from({ length: 12 }, () => transport.snapshot({ time: 0, width: 4, height: 2 }, 'idle')),
+      ...Array.from({ length: 6 }, () => transport.snapshot({ time: 1, width: 4, height: 2 })),
+    ]);
+    expect(all).toHaveLength(18);
+    expect(all.every((snap) => snap.width === 4)).toBe(true);
+    expect(most).toBeLessThanOrEqual(8);
+    expect(asked).toHaveLength(19);
+  });
+
   it('prepares playback base pixels over async IPC at dependency priority, without changing ordinary async snapshots', async () => {
     const { transport, asked } = setup([rendered(2, 2), rendered(2, 2)]);
     const sync = vi.spyOn(transport, 'snapshotSync');
