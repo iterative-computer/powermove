@@ -231,7 +231,7 @@ export const COMPAT_PREFETCH = 24;
 /** Speculative base preparations in flight at once (beyond the answer horizon's). */
 export const COMPAT_PREFETCH_IN_FLIGHT = 1;
 
-type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null };
+type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; required: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null };
 
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
 
@@ -427,9 +427,11 @@ export class EngineRenderTransport {
       // Answer the clock's frame instead of filling an obsolete FIFO.
       const stale = !!clock && need.composition === this.options.composition() && frame > 0
         && Math.sign(clock.rate) * (clock.time - need.time) > frame;
-      const asynchronous = playing && this.preparers.has(need.source);
+      // Compositor needs stay asynchronous across Play/Stop boundaries too.
+      // The engine's stopped clock can arrive before its final frame is
+      // presented; answering that need synchronously would block playback.
+      const asynchronous = this.preparers.has(need.source);
       const answered = !stale && !asynchronous && this.answerNeed(need, session);
-      if (asynchronous && !stale) this.ahead.get(this.aheadTag(need))?.sent.delete(need.time);
       if (stale) this.lookaheadStats.skipped++;
       if (playing) {
         this.lookaheadStats.asked++;
@@ -439,13 +441,19 @@ export class EngineRenderTransport {
         if (this.lookaheadStats.recent.length > 12) this.lookaheadStats.recent.shift();
       }
       this.lookahead(need, session, answered);
+      if (asynchronous && !stale) {
+        const entry = this.ahead.get(this.aheadTag(need));
+        entry?.sent.delete(need.time);
+        if (!playing) entry?.required.add(need.time);
+      }
     }
     if (playing || this.preparers.size) this.presentedWhilePlaying(!playing);
   }
 
   /** Clock-driven replenishment also runs when no frame was presented. */
   presentedWhilePlaying(warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
-    if (warm && !this.options.playing?.() && performance.now() >= warmUntil) return;
+    if (warm && !this.options.playing?.() && performance.now() >= warmUntil
+      && ![...this.ahead.values()].some(entry => entry.required.size > 0)) return;
     if ((!this.options.playing?.() && !warm) || this.pumpingAhead) return;
     this.pumpingAhead = true;
     try {
@@ -477,6 +485,10 @@ export class EngineRenderTransport {
           const distance = Math.sign(step) * (time - cursor);
           if (distance < -Math.abs(step) || distance > COMPAT_PREFETCH * Math.abs(step)) entry.prefetched.delete(time);
         }
+        for (const time of entry.required) {
+          const distance = Math.sign(step) * (time - cursor);
+          if (distance < -Math.abs(step) || distance > COMPAT_LOOKAHEAD * Math.abs(step)) entry.required.delete(time);
+        }
         return step !== 0;
       });
       // Breadth first: every layer's current frame precedes speculative
@@ -487,6 +499,7 @@ export class EngineRenderTransport {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
           const time = entry.cursor + offset * entry.step;
           if (time < 0 || entry.sent.has(time) || entry.pending.has(time)) continue;
+          if (warm && performance.now() >= warmUntil && !entry.required.has(time)) continue;
           pending++;
           if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
           const prepare = this.preparers.get(entry.need.source);
@@ -543,7 +556,7 @@ export class EngineRenderTransport {
     });
   }
 
-  private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>, warm = false, warmUntil = Infinity): void {
+  private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>, warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
     const need = { ...entry.need, time };
     entry.pending.add(time);
     this.aheadInFlight++;
@@ -554,7 +567,7 @@ export class EngineRenderTransport {
       const cursor = clock && need.composition === this.options.composition()
         ? Math.floor(clock.time / Math.abs(entry.step)) * Math.abs(entry.step) : entry.cursor;
       const distance = Math.sign(entry.step) * (time - cursor);
-      if ((!this.options.playing?.() && (!warm || performance.now() >= warmUntil)) || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
+      if ((!this.options.playing?.() && !entry.required.has(time) && (!warm || performance.now() >= warmUntil)) || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
         || this.preparers.get(need.source) !== prepare || revision !== this.options.revision() || distance < -Math.abs(entry.step) || distance > COMPAT_LOOKAHEAD * Math.abs(entry.step)) {
         this.lookaheadStats.obsolete++;
         return;
@@ -573,11 +586,12 @@ export class EngineRenderTransport {
       else this.options.log('warn', `Preparing a compatibility raster failed: ${String(error)}`);
     }).finally(() => {
       entry.pending.delete(time);
+      entry.required.delete(time);
       this.aheadInFlight--;
       this.lookaheadStats.inFlight = this.aheadInFlight;
       // Each completed answer is independent: a slower sibling does not
       // hold its ready pixels behind a Promise.all barrier.
-      this.presentedWhilePlaying(warm, warmUntil);
+      this.presentedWhilePlaying(warm || [...this.ahead.values()].some(e => e.required.size > 0), warmUntil);
     });
   }
 
@@ -606,7 +620,7 @@ export class EngineRenderTransport {
     const step = frame * (clock && clock.rate < 0 ? -1 : 1);
     const entry: AheadEntry = same ? previous : {
       need, session, step, cursor: need.time, posted: need.time,
-      sent: new Set<number>(), pending: new Set<number>(), prefetched: new Set<number>(), revision: this.options.revision(), clockCursor: null
+      sent: new Set<number>(), pending: new Set<number>(), required: new Set<number>(), prefetched: new Set<number>(), revision: this.options.revision(), clockCursor: null
     };
     entry.need = need;
     // Never infer reverse playback from a late need. Only the transport's

@@ -587,6 +587,61 @@ describe('compatibility answers during playback', () => {
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 
+  it('prepares stopped compositor needs without blocking, including required layers queued beyond the warm deadline', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked } = rig(false);
+    const pending: Array<() => void> = [];
+    const calls: Array<{ layer: string; prepared: boolean | undefined }> = [];
+    t.answerCompat('rasterOverride', (n, _revision, options) => {
+      calls.push({ layer: n.layer, prepared: options?.prepared });
+      asked.push(n.time);
+      return { kind: 'native' };
+    }, () => new Promise(resolve => pending.push(resolve)));
+    try {
+      const layers = ['a', 'b', 'c'];
+      t.receiveCompat({ compat: 'needs', needs: layers.map(layer => need(0, layer)) }, session);
+      expect(asked).toEqual([]);
+      await vi.advanceTimersByTimeAsync(151);
+      expect(pending).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
+      pending.shift()!(); pending.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending).toHaveLength(1);
+      pending.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls.map(c => c.layer).sort()).toEqual(layers);
+      expect(calls.every(c => c.prepared)).toBe(true);
+      expect(t.lookaheadStats.maxInFlight).toBe(COMPAT_PREPARE_IN_FLIGHT);
+      expect(t.lookaheadStats.inFlight).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('finishes an in-flight playback need asynchronously when its stopped clock arrives first', async () => {
+    vi.useFakeTimers();
+    const { t, session, state, asked } = rig(true);
+    const pending: Array<() => void> = [];
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, () => new Promise(resolve => pending.push(resolve)));
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      state.playing = false;
+      t.receiveCompat({ compat: 'needs', needs: [need(0), need(0, 'last-layer')] }, session);
+      expect(asked).toEqual([]);
+      await vi.advanceTimersByTimeAsync(151);
+      pending.shift()!(); pending.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+      // The playback job for frame zero is now explicitly required; the
+      // unrelated future frame expires and the queued paused layer starts.
+      expect(asked).toEqual([0]);
+      expect(pending).toHaveLength(1);
+      pending.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([0, 0]);
+      expect(t.lookaheadStats.inFlight).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
   it('bounds async preparations, presents ready answers independently, and drops obsolete completions', async () => {
     vi.useFakeTimers();
     const { t, session, asked, state } = rig(true);

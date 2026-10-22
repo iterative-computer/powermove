@@ -3961,9 +3961,8 @@ impl Thread {
         pressure
     }
 
-    /// Runs the snapshots that may run now: every `sync` and `async` job
-    /// that is ready, then at most one `idle` job (so a gesture that starts
-    /// is served after one).
+    /// Runs ready snapshots. During playback, return to view scheduling
+    /// after each job; otherwise drain sync/async and at most one idle job.
     fn work_snapshots(&mut self) {
         if self.snapshots.is_empty() {
             return;
@@ -4033,6 +4032,15 @@ impl Thread {
             }
             idle_done |= idle;
             self.run_snapshot(job);
+            // Compatibility bases use sync priority to unblock a view that
+            // needs them. Draining a burst of future bases at that priority
+            // can instead run past the next frame's deadline. Keep their
+            // admission priority, but give views and commands a turn between
+            // snapshots. The queue's 4 ms wake keeps dependencies progressing
+            // even while a view waits for its first compatibility answer.
+            if pressure.playing {
+                return;
+            }
         }
     }
 
