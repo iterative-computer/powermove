@@ -42,11 +42,15 @@ const MAX_BATCH: usize = 512;
 /// window's compatibility frames at a time (`compat-frames.ts` `MAX_ASKS`)
 /// and refuses more; a batch goes in turns of this many. Main posts the
 /// asks it has at once to the window together, which answers them in one
-/// task: a large project's frame asks for hundreds of layers.
-const HOST_ASKS: usize = 96;
+/// task: a large project's frame asks for hundreds of layers. A frame asks
+/// only for what the background fetch did not get ahead of it.
+const HOST_ASKS: usize = 32;
 /// Most requests the background fetch has at the host at once: with a
-/// frame's own turn ([`HOST_ASKS`]) never above main's bound of 128.
-const AHEAD_ASKS: usize = 32;
+/// frame's own turn ([`HOST_ASKS`]) never above main's bound of 128. Each
+/// turn is a round trip through main and the window, so the fetch keeps
+/// ahead of the export only with large turns (PMV3: about 350 layers a
+/// frame waited a quarter of the export's time in turns of 8).
+const AHEAD_ASKS: usize = 96;
 /// Frames past the one drawn whose answers a pipelined export keeps asked
 /// for, and how close the drawn frame may come to the last one asked for
 /// before more are asked.
@@ -939,7 +943,8 @@ mod tests {
         // Most frames found their answers fetched ahead.
         assert!(fetched < 20, "{fetched} frames waited for a fetch of their own");
         // Never more at the host than main accepts, and never asked far ahead.
-        assert!(host.most.load(Ordering::SeqCst) <= 32);
+        assert!(host.most.load(Ordering::SeqCst) <= HOST_ASKS + AHEAD_ASKS);
+        assert!(HOST_ASKS + AHEAD_ASKS <= 128, "main's MAX_ASKS");
         let newest = ticks_of(step * 59.0).get();
         let furthest = *host.asked.lock().unwrap().iter().max().unwrap();
         assert!(furthest <= newest + (AHEAD_FRAMES + 1) * ticks_of(step).get());
