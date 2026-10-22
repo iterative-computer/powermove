@@ -286,6 +286,8 @@ pub struct Build<'r> {
     pub compat_missing: Vec<crate::compat::CompatNeed>,
     /// [`BuildOptions::preview`].
     preview: Option<crate::compat_crop::PreviewWindow>,
+    /// [`BuildOptions::shape_window`].
+    shape_window: Option<crate::compat_crop::PreviewWindow>,
     /// Layer draws kept from the last frame (`crate::reuse`): the
     /// interactive viewer's renders only.
     pub(crate) reuse: Option<&'r mut crate::reuse::DrawReuse>,
@@ -324,6 +326,12 @@ pub struct BuildOptions {
     /// root composition (today's preview source clipping, which a `raster`
     /// override sees as its `crop` argument: `crate::compat_crop`).
     pub preview: Option<crate::compat_crop::PreviewWindow>,
+    /// The output window the engine's own level 1 shape rasters are
+    /// clipped to (`crate::compat_crop`, without the plain-fill shortcut):
+    /// the viewer's window, or the whole output of an export or snapshot.
+    /// A clipped raster's pixels are the whole raster's wherever the frame
+    /// samples it, so only the cost changes; a producer never sees it.
+    pub shape_window: Option<crate::compat_crop::PreviewWindow>,
     /// The top level's output origin
     /// ([`RenderRequest::origin`](crate::RenderRequest::origin)).
     pub origin: Option<(f64, f64)>,
@@ -484,6 +492,7 @@ pub(crate) fn build_blender<'r>(
         compat,
         compat_missing: Vec::new(),
         preview: options.preview,
+        shape_window: options.shape_window,
         reuse,
     };
     let mut scope = Scope::new(ev, root_comp, project);
@@ -1283,7 +1292,14 @@ fn native_content_quad<'d>(
             // inside a plain rectangle's fill only the window over the
             // viewport is (its pixels there are the fill, as the whole
             // raster's are).
-            let crop = if crate::vector::level2(layer) {
+            // A group with effects draws its children into a pass grown by
+            // the effects' padding, past the window: those children keep
+            // their whole raster.
+            let mut padded = false;
+            for group in scope.group_ancestors(layer)? {
+                padded |= scope.has_renderable_effects(group, time)?;
+            }
+            let crop = if crate::vector::level2(layer) || padded {
                 None
             } else {
                 let raster_scale = crate::vector::continuous_raster_scale(&world);
@@ -1825,7 +1841,9 @@ fn preview_crop<'d>(
     solid: bool,
 ) -> JsResult<crate::compat_crop::CropPlan> {
     use crate::compat_crop::{CropPlan, ShapeFacts, TextGeometry};
-    let Some(window) = b.preview else {
+    // Today's decision (`solid`, the window a producer sees) in a viewer
+    // frame; the engine's own shape rasters in any frame.
+    let Some(window) = (if solid { b.preview } else { b.shape_window }) else {
         return Ok(CropPlan::Full);
     };
     if !matches!(ty, "text" | "shape")

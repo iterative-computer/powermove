@@ -542,3 +542,50 @@ fn a_viewer_frame_rasterizes_only_today_s_window_of_a_large_shape() {
     let cached = viewer.memory().vector_cache;
     assert!(cached > 0 && cached < 8 << 20, "{cached}");
 }
+
+/// Exports and snapshots never clip what a producer sees, but the engine's
+/// own shape rasters are clipped to the frame's whole output: the frame is
+/// the same pixels as with every whole raster, and a large background's
+/// raster no longer has to fit the raster budget. A shape inside a group
+/// with effects (drawn into a pass grown past the frame) keeps its whole
+/// raster.
+#[test]
+fn an_export_frame_clips_the_engine_s_shapes_to_its_output_with_the_same_pixels() {
+    let mut big = layer(
+        "plate",
+        "shape",
+        json!({ "shape": "rect", "w": 1600, "h": 1200, "color": "#202830", "stroke": 4, "strokeColor": "#E0E0E0", "radius": 24 }),
+        128.0,
+        128.0,
+        2.0,
+    );
+    set(&mut big, "rotation", json!(3));
+    let mut ring = layer(
+        "ring",
+        "shape",
+        json!({ "shape": "ellipse", "w": 900, "h": 700, "color": "#FF660080", "stroke": 0 }),
+        40.0,
+        200.0,
+        2.0,
+    );
+    set(&mut ring, "scale.x", json!(140));
+    let doc = load(&project(W, H, 2.0, no_fill(), vec![ring, big]));
+    for export in [true, false] {
+        let mut request = RenderRequest::at_scale(Size::new(W, H), 1.5, Precision::Float32);
+        request.export = export;
+        let render = |r: &mut Renderer| {
+            let frame = r
+                .render(&doc, "Ptest-root", ticks(0.5), &request, &MapResolver::default())
+                .unwrap();
+            (r.read_rgba(&frame).unwrap(), r.memory().vector_cache)
+        };
+        let mut clipped = Renderer::headless().unwrap();
+        let (a, clipped_bytes) = render(&mut clipped);
+        let mut whole = Renderer::headless().unwrap();
+        whole.set_shape_clipping(false);
+        let (b, whole_bytes) = render(&mut whole);
+        let max = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+        assert_eq!(max, 0.0, "export {export}");
+        assert!(clipped_bytes * 4 < whole_bytes, "export {export}: {clipped_bytes} vs {whole_bytes} bytes");
+    }
+}

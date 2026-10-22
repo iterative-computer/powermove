@@ -260,6 +260,7 @@ fn build_options(
     comp: &Comp<'_>,
     request: &RenderRequest,
     shader_fallback: bool,
+    shape_clipping: bool,
 ) -> plan::BuildOptions {
     plan::BuildOptions {
         blur: crate::motion::resolve(comp, request.motion_blur),
@@ -267,8 +268,36 @@ fn build_options(
         shader_fallback,
         video_end: request.video_end,
         preview: preview_window(comp, request),
+        shape_window: shape_clipping.then(|| shape_window(comp, request)).flatten(),
         origin: request.origin,
     }
+}
+
+/// [`plan::BuildOptions::shape_window`]: the viewer's window, else the
+/// frame's whole output (its region of interest when it has one), for the
+/// open root composition.
+fn shape_window(
+    comp: &Comp<'_>,
+    request: &RenderRequest,
+) -> Option<crate::compat_crop::PreviewWindow> {
+    if !(comp.at_root() || comp.is_open_canonical()) {
+        return None;
+    }
+    if let Some(window) = preview_window(comp, request) {
+        return Some(window);
+    }
+    let r = request.region.unwrap_or(pm_protocol::common::PixelRect {
+        x: 0,
+        y: 0,
+        width: request.output_size.width,
+        height: request.output_size.height,
+    });
+    Some(crate::compat_crop::PreviewWindow {
+        x: f64::from(r.x),
+        y: f64::from(r.y),
+        width: f64::from(r.width),
+        height: f64::from(r.height),
+    })
 }
 
 /// The viewer's visible window when `request` is a viewer frame (not an
@@ -338,6 +367,8 @@ pub struct Renderer {
     last_precision: pm_protocol::color::Precision,
     /// [`RendererMemory::pooled_peak`].
     last_pool_peak: u64,
+    /// [`Renderer::set_shape_clipping`].
+    shape_clipping: bool,
     /// Whether level 1 shape and path rasters are drawn ahead on worker
     /// threads ([`Renderer::set_vector_prefetch`]).
     vector_prefetch: bool,
@@ -402,6 +433,7 @@ impl Renderer {
             last_stages: FrameStages::default(),
             last_precision: pm_protocol::color::Precision::Float16,
             last_pool_peak: 0,
+            shape_clipping: true,
             vector_prefetch: true,
             prefix: Default::default(),
             svg_wait: false,
@@ -454,6 +486,14 @@ impl Renderer {
             keyframe_track_hits: hits,
             pooled_peak: self.last_pool_peak,
         }
+    }
+
+    /// Whether the engine's own level 1 shape rasters are clipped to the
+    /// frame's window (`plan::BuildOptions::shape_window`; on by default).
+    /// Off draws every shape's whole raster: the reference the clipped
+    /// frames are tested against.
+    pub fn set_shape_clipping(&mut self, on: bool) {
+        self.shape_clipping = on;
     }
 
     /// Queues the programs `document` uses, then every other user program,
@@ -1551,7 +1591,7 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             options3d,
             Some(&mut self.text),
-            build_options(&comp, request, self.shaders.fallback_runner),
+            build_options(&comp, request, self.shaders.fallback_runner, self.shape_clipping),
             blender,
             self.compat.as_deref(),
             None,
@@ -1637,7 +1677,7 @@ impl Renderer {
                 effect_host(&self.effect_host, &self.effects),
                 options3d,
                 Some(&mut self.text),
-                build_options(&comp, request, self.shaders.fallback_runner),
+                build_options(&comp, request, self.shaders.fallback_runner, self.shape_clipping),
                 blender,
                 self.compat.as_deref(),
                 self.reuse_enabled.then_some(&mut self.reuse),
@@ -2205,7 +2245,7 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             self.options3d.for_request(request),
             Some(&mut self.text),
-            build_options(&comp, request, self.shaders.fallback_runner),
+            build_options(&comp, request, self.shaders.fallback_runner, self.shape_clipping),
             crate::blender::PlanState::collecting(preview, options),
             self.compat.as_deref(),
             None,
@@ -2250,7 +2290,7 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             options3d,
             Some(&mut self.text),
-            build_options(&comp, request, self.shaders.fallback_runner),
+            build_options(&comp, request, self.shaders.fallback_runner, self.shape_clipping),
             blender,
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
