@@ -497,8 +497,8 @@ Local consistency checks compare the live JSON form to the shadow, including
 retained mutable aliases and custom non-enumerable `toJSON`. A missed write still
 fails, records its paths, and forces a full resync. When they agree, independently
 implemented JS and Rust integrity digests compare the shadow and pm-wasm mirror:
-containers above depth eight hash their kind, keys/order, and child digests; deeper
-values and scalar leaves hash `v` followed by their canonical JSON. Array and
+containers above depth six hash their kind, keys/order, and child digests; deeper
+values, bulk non-id arrays (over 64 entries), and scalar leaves hash `v` followed by their canonical JSON. Array and
 object branch encodings are canonical JSON `['a', hashes]` and
 `['o', [[key, hash], ...]]`. These digests are local, not the RFC 05 wire hash.
 

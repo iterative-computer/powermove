@@ -43,6 +43,18 @@ describe('incremental large-document synchronization', () => {
     expect(barrier.check('custom toJSON repaired').ok).toBe(true);
   });
 
+  it('batches baked keyframes instead of issuing a tiny hash for each key', () => {
+    const tree = canonicalProject(large());
+    const hash = new ConsistencyHash();
+    const start = performance.now();
+    hash.digest(tree);
+    // Hash work follows the layer/channel count, never the keyframe count.
+    expect(hash.hashed).toBeLessThan(96 * 40);
+    hash.digest(tree);
+    expect(hash.hashed).toBe(0);
+    expect(performance.now() - start).toBeLessThan(5000);
+  });
+
   it('does not rehash unchanged branches, including siblings after an order operation', () => {
     const tree = { layers: [{ id: 'a', p: { v: 1 } }, { id: 'b', p: { v: 2 } }] };
     const hash = new ConsistencyHash();

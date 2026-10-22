@@ -33,7 +33,8 @@ export class ConsistencyHash {
     if (cached !== undefined) { this.reused++; return cached; }
     this.hashed++;
     let digest: string;
-    if (depth >= 8 || !container) digest = canonicalHash(value, 'v');
+    const bulk = Array.isArray(value) && value.length > 64 && !value.every(item => item && typeof item === 'object' && typeof item.id === 'string');
+    if (depth >= 6 || !container || bulk) digest = canonicalHash(value, 'v');
     else if (Array.isArray(value)) digest = canonicalHash(['a', value.map(child => this.visit(child, depth + 1))]);
     else digest = canonicalHash(['o', Object.keys(value).sort().map(key => [key, this.visit(value[key], depth + 1)])]);
     if (container) {

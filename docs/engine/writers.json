@@ -60,8 +60,8 @@
     "history.transaction": 12,
     "history.external": 5,
     "project-replace": 9,
-    "touch": 59,
-    "touch.paths": 2,
+    "touch": 55,
+    "touch.paths": 6,
     "doc.write": 17,
     "doc.touched": 7,
     "anim.touch": 24,
@@ -1720,9 +1720,9 @@
     },
     {
       "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1121",
-      "class": "touch",
+      "class": "touch.paths",
       "scope": "install > recoverSourceAsset",
-      "code": "PM.touch()"
+      "code": "PM.touch([['assets', meta.id]])"
     },
     {
       "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1157",
@@ -1749,25 +1749,25 @@
       "code": "PM.hist.external( `Replace ${currentMeta.name || 'media'}`, () => applyVersion(previousMeta, previousRuntime, previousPoster), () => appl..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1412",
-      "class": "touch",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1414",
+      "class": "touch.paths",
       "scope": "install > restoreProject",
-      "code": "PM.touch()"
+      "code": "PM.touch(metadataPaths)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1424",
-      "class": "touch",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1426",
+      "class": "touch.paths",
       "scope": "install > restoreProject",
-      "code": "PM.touch?.()"
+      "code": "PM.touch?.(metadataPaths)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1452",
-      "class": "touch",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1454",
+      "class": "touch.paths",
       "scope": "install > restoreProject > setTimeout(callback) > (anonymous)",
-      "code": "PM.touch()"
+      "code": "PM.touch(available.map(({ id }: any) => ['assets', id, 'poster']))"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1472",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1474",
       "class": "doc.write",
       "scope": "install > gradient",
       "code": "writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = { id, name, kind: 'image', w: 1280, h: 720 }; })"

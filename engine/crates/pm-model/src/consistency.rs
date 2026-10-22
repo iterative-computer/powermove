@@ -1,5 +1,5 @@
 //! Incremental integrity digest for local mirrors. This is deliberately distinct
-//! from the RFC 05 canonical SHA-256 used on the wire. Containers above depth 8
+//! from the RFC 05 canonical SHA-256 used on the wire. Containers above depth 6
 //! hash their keys and child digests; deep values hash canonical JSON. Unchanged
 //! shared subtrees reuse their digest without serializing or hashing them.
 use crate::{JsString, Node, NodeKind, Value, json::ObjectMap};
@@ -70,7 +70,14 @@ impl ConsistencyHash {
             }
         }
         self.hashed += 1;
-        let digest = if path.len() >= 8 {
+        let bulk = match node.kind() {
+            NodeKind::Array(items) if items.len() > 64 => !items.iter().all(|item| {
+                matches!(item.kind(), NodeKind::Object(map)
+                    if matches!(map.get(b"id".as_slice()).map(Node::kind), Some(NodeKind::String(_))))
+            }),
+            _ => false,
+        };
+        let digest = if path.len() >= 6 || bulk {
             leaf(node)
         } else {
             match node.kind() {
@@ -108,6 +115,13 @@ impl ConsistencyHash {
                 _ => leaf(node),
             }
         };
+        // Keep the root and composition containers cacheable even when a
+        // customized document fills the leaf-entry budget.
+        if self.entries.len() >= 16384 && path.len() < 4 && !self.entries.contains_key(path) {
+            if let Some(victim) = self.entries.keys().max_by_key(|key| key.len()).cloned() {
+                self.entries.remove(&victim);
+            }
+        }
         if (self.entries.len() < 16384 || self.entries.contains_key(path))
             && let Some(identity) = Identity::of(node)
         {
