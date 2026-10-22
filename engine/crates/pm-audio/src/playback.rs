@@ -3286,7 +3286,7 @@ mod tests {
         ));
         assert!(
             playback
-                .set_project(doc, "C", &|_| None)
+                .set_project(doc, "C", &|_: &str| None)
                 .unwrap()
                 .is_empty()
         );
