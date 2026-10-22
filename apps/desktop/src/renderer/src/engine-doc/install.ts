@@ -314,6 +314,11 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   // `project:changed`, and the viewer asks from there (inside an Edit's scoped
   // transaction too, where the held paths must be marked again first).
   const announcing = new Set(['layers', 'project', 'assets', 'comps']);
+  // `assets` marked runtimeOnly (restore progress, decoder previews) reports
+  // runtime media readiness, not a document write: writers of asset metadata
+  // touch() or announce without the mark (main's 9c935e8b3).
+  const announces = (event: unknown, change: unknown) => announcing.has(event as string)
+    && !(event === 'assets' && (change as { runtimeOnly?: unknown } | null | undefined)?.runtimeOnly === true);
   const bus = PM.bus;
   if (bus && typeof bus.emit === 'function') {
     // One wrapper per bus; a later install (a replaced registry in tests)
@@ -326,7 +331,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     if (!bus.emit.__engineDoc) {
       const emit = bus.emit;
       const wrapped = function (this: unknown, event: unknown, ...args: unknown[]) {
-        if (announcing.has(event as string)) {
+        if (announces(event, args[0])) {
           bus.__engineDocAnnounce?.();
           bus.__engineDocEager?.();
         }
