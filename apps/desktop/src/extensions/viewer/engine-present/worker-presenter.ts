@@ -76,9 +76,10 @@ export class PresentWorker {
   /** Opens a session for `link`; the worker's presenter starts at once. */
   open(options: Omit<WorkerPresenterOptions, 'host' | 'session'>): WorkerPresenter {
     const session = this.nextSession++;
+    // Opened before the presenter offers its release port (which names the session).
+    this.post({ type: 'open', session, displayHz: options.displayHz ?? null, trace: !!options.trace, generation: options.generation ?? 0 });
     const presenter = new WorkerPresenter({ ...options, host: this, session });
     this.sessions.set(session, presenter);
-    this.post({ type: 'open', session, displayHz: options.displayHz ?? null, trace: !!options.trace, generation: options.generation ?? 0 });
     return presenter;
   }
 
@@ -208,12 +209,28 @@ export class WorkerPresenter implements Presenter {
    */
   private readonly inWorker = new Map<string, { release: FrameRelease; frame: VideoFrame }>();
   private remote: PresenterStats | null = null;
+  /**
+   * The worker hands frames back to the engine itself (`releasePort`): this
+   * thread hears of no release, so it keeps one reference per pool slot (the
+   * frame the slot last showed) and closes it when the slot's next frame
+   * arrives (the engine reuses a slot only after the worker closed its clone
+   * and released it) or when the session ends.
+   */
+  private readonly direct: boolean;
 
   constructor(private readonly options: WorkerPresenterOptions) {
     this.generation = options.generation ?? 0;
     this.now = options.now ?? (() => performance.now());
     this.timers = options.timers ?? { set: (fn, ms) => setTimeout(fn, ms) as unknown as number, clear: (id) => clearTimeout(id) };
     this.unsubscribe = options.source.onSurface((generation, poolIndex) => this.unpark(generation, poolIndex));
+    let offered: { port: MessagePort; session: number } | null = null;
+    try {
+      offered = options.link.releasePort?.() ?? null;
+    } catch {
+      offered = null;
+    }
+    this.direct = offered !== null;
+    if (offered) options.host.post({ type: 'releasePort', session: options.session, port: offered.port, engineSession: offered.session }, [offered.port as unknown as Transferable]);
   }
 
   get isDisposed(): boolean {
@@ -228,7 +245,7 @@ export class WorkerPresenter implements Presenter {
       received: this.local.received,
       drawn: r?.drawn ?? 0,
       dropped,
-      released: this.local.released,
+      released: this.direct ? (r?.released ?? 0) : this.local.released,
       parked: this.local.parked,
       parkTimeouts: this.local.parkTimeouts,
       staleGeneration: this.local.staleGeneration,
@@ -261,9 +278,14 @@ export class WorkerPresenter implements Presenter {
 
   private readonly doneListeners = new Set<(seq: number) => void>();
 
+  /** The worker sends `done` only while someone listens (a reveal). */
   onDone(listener: (seq: number) => void): () => void {
     this.doneListeners.add(listener);
-    return () => this.doneListeners.delete(listener);
+    if (this.doneListeners.size === 1 && !this.disposed) this.options.host.post({ type: 'watchDone', session: this.options.session, on: true });
+    return () => {
+      if (!this.doneListeners.delete(listener) || this.doneListeners.size || this.disposed) return;
+      this.options.host.post({ type: 'watchDone', session: this.options.session, on: false });
+    };
   }
 
   receive(message: EngineFrameMessage, arrivedMs = this.now()): void {
@@ -318,7 +340,7 @@ export class WorkerPresenter implements Presenter {
   }
 
   private send(desc: FrameDescriptor, frame: VideoFrame, arrivedMs: number): void {
-    const k = `${desc.poolIndex}:${desc.seq}`;
+    const k = this.direct ? `${desc.poolGeneration}:${desc.poolIndex}` : `${desc.poolIndex}:${desc.seq}`;
     this.inWorker.get(k)?.frame.close();
     let clone: VideoFrame;
     try {
@@ -377,7 +399,12 @@ export class WorkerPresenter implements Presenter {
         // thread presenter releases its queue on dispose). A frame already
         // handed back for a crashed worker (`abandon`) is not released twice.
         {
-          const k = `${message.release.poolIndex}:${message.release.seq}`;
+          let k = `${message.release.poolIndex}:${message.release.seq}`;
+          if (this.direct) {
+            // A frame for a session the worker no longer had (its release
+            // port went with it): this thread hands it back.
+            for (const [key, entry] of this.inWorker) if (entry.release.poolIndex === message.release.poolIndex && entry.release.seq === message.release.seq) k = key;
+          }
           const held = this.inWorker.get(k);
           if (!held) return;
           this.inWorker.delete(k);
@@ -425,6 +452,8 @@ export class WorkerPresenter implements Presenter {
    * will never release them), and the session ends.
    */
   abandon(): void {
+    // With a release port the worker may have handed some of these back
+    // already: the engine ignores a release of a slot that moved on.
     for (const { release, frame } of this.inWorker.values()) {
       frame.close();
       this.local.released++;
@@ -434,10 +463,13 @@ export class WorkerPresenter implements Presenter {
     this.dispose();
   }
 
-  /** The worker closed this session: frames it never handed back go back to the engine. */
+  /** The worker closed this session: frames it never handed back go back to
+   *  the engine (with a release port it handed every one back itself; the
+   *  page's references close). */
   releaseHeld(): void {
     for (const { release, frame } of this.inWorker.values()) {
       frame.close();
+      if (this.direct) continue;
       this.local.released++;
       this.options.link.release(release);
     }

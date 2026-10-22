@@ -28,6 +28,8 @@
  * worker script.
  */
 import { createWebGpuPainter, type FramePainter, type PaintTarget } from './gpu';
+import { encodeEnvelope, envelope, eventMessage } from '../../../main/engine/protocol';
+import type { Event } from '../../../shared/engine-protocol';
 import { EnginePresenter, type PresentedFrame, type PresenterStats, type TraceRecord } from './presenter';
 import type { ClockSample, FrameDescriptor, FrameRelease, SurfacePool, VsyncHint } from './protocol';
 
@@ -41,12 +43,19 @@ export type ToWorker =
     }
   | { type: 'open'; session: number; displayHz: number | null; trace: boolean; generation: number }
   | { type: 'close'; session: number }
+  /** Hand this session's frames back to the engine on `port` (the engine
+   *  reads it as the window's port; `engineSession` is the engine's id of
+   *  the session) instead of through the page. */
+  | { type: 'releasePort'; session: number; port: MessagePort; engineSession: number }
   | { type: 'clock'; session: number; sample: ClockSample; arrivedMs: number }
   | { type: 'pool'; session: number; pool: SurfacePool }
   | { type: 'frame'; session: number; desc: FrameDescriptor; frame: VideoFrame; arrivedMs: number }
   | { type: 'hostOffset'; session: number; us: number | null }
   | { type: 'display'; session: number; displayHz: number | null }
   | { type: 'resize'; session: number }
+  /** Whether the page waits on `done` (a canvas being revealed); while it
+   *  does not, the worker sends none (one page task per frame saved). */
+  | { type: 'watchDone'; session: number; on: boolean }
   | { type: 'takeTrace'; session: number; id: number }
   | { type: 'dispose' };
 
@@ -57,6 +66,8 @@ export type FromWorker =
   /** The painter's device was lost: this worker draws nothing more (its
    *  session's frames went back to the engine); the page replaces it. */
   | { type: 'lost'; message: string }
+  /** A frame handed back through the page (no release port), or, with one,
+   *  only when the page must hand it back itself (never sent then). */
   | { type: 'release'; session: number; release: FrameRelease }
   /** A frame drawn, with the session's stats after it. */
   | { type: 'presented'; session: number; frame: PresentedFrame; stats: PresenterStats }
@@ -118,7 +129,19 @@ export const STATS_INTERVAL_MS = 250;
 /** A frame source for a presenter that only gets `present()`ed frames. */
 const NO_SOURCE = { videoFrame: () => null, onSurface: () => () => {}, retire: () => 0 };
 
-type Session = { id: number; presenter: EnginePresenter; hostOffsetUs: number | null; statsSentMs: number };
+type Session = {
+  id: number;
+  presenter: EnginePresenter;
+  hostOffsetUs: number | null;
+  statsSentMs: number;
+  /** Hands a frame straight back to the engine (`releasePort`), when set. */
+  direct: ((release: FrameRelease) => void) | null;
+  /** Frames received and not handed back yet (by `poolIndex:seq`). */
+  outstanding: Map<string, FrameRelease>;
+  /** The page waits on `done` (`watchDone`), and the newest frame done. */
+  watchDone: boolean;
+  lastDone: number;
+};
 
 export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): void {
   let painter: FramePainter | null = null;
@@ -136,7 +159,11 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
   /** A frame this worker will never draw: closed, and its surface handed back to the engine. */
   const giveBack = (message: Extract<ToWorker, { type: 'frame' }>): void => {
     message.frame.close();
-    post({ type: 'release', session: message.session, release: { poolIndex: message.desc.poolIndex, seq: message.desc.seq } });
+    const release = { poolIndex: message.desc.poolIndex, seq: message.desc.seq };
+    const s = session && session.id === message.session ? session : null;
+    s?.outstanding.delete(`${release.poolIndex}:${release.seq}`);
+    if (s?.direct) s.direct(release);
+    else post({ type: 'release', session: message.session, release });
   };
 
   const sendStats = (s: Session, force = false): void => {
@@ -152,6 +179,11 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
     // Its queued frames go back to the engine first; the final stats tell
     // the page the session is done.
     session.presenter.dispose(cancelFrame);
+    // With a release port, so do frames still on the GPU (the page hands
+    // those back itself otherwise, once it hears the session closed).
+    const direct = session.direct;
+    if (direct) for (const release of session.outstanding.values()) direct(release);
+    session.outstanding.clear();
     sendStats(session, true);
     post({ type: 'closed', session: session.id });
     session = null;
@@ -164,11 +196,20 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       id,
       hostOffsetUs: null,
       statsSentMs: -Infinity,
+      direct: null,
+      outstanding: new Map(),
+      watchDone: false,
+      lastDone: 0,
       presenter: new EnginePresenter({
         link: {
-          // The page sends viewer states itself; the worker only releases.
+          // The page sends viewer states itself; the worker only releases:
+          // straight to the engine once it has the session's release port.
           sendViewerState: () => {},
-          release: (release) => post({ type: 'release', session: id, release })
+          release: (release) => {
+            s.outstanding.delete(`${release.poolIndex}:${release.seq}`);
+            if (s.direct) s.direct(release);
+            else post({ type: 'release', session: id, release });
+          }
         },
         source: NO_SOURCE,
         painter: painter!,
@@ -199,7 +240,10 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       s.statsSentMs = now();
       post({ type: 'presented', session: id, frame, stats: { ...stats, dropped: { ...stats.dropped } } });
     });
-    s.presenter.onDone((seq) => post({ type: 'done', session: id, seq }));
+    s.presenter.onDone((seq) => {
+      s.lastDone = Math.max(s.lastDone, seq);
+      if (s.watchDone) post({ type: 'done', session: id, seq });
+    });
     s.presenter.start(requestFrame, cancelFrame);
     session = s;
   };
@@ -238,6 +282,22 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       case 'close':
         if (s) close();
         return;
+      case 'releasePort': {
+        if (!s) {
+          message.port.close();
+          return;
+        }
+        const port = message.port;
+        const engineSession = message.engineSession;
+        s.direct = (release) => {
+          try {
+            port.postMessage(encodeEnvelope(envelope(eventMessage({ type: 'releaseFrame', ...release } as unknown as Event), engineSession)));
+          } catch {
+            // The engine's port is gone (a restart): the session ends with it.
+          }
+        };
+        return;
+      }
       case 'clock':
         s?.presenter.receive({ type: 'clock', sample: message.sample }, message.arrivedMs);
         return;
@@ -249,6 +309,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
           giveBack(message);
           return;
         }
+        s.outstanding.set(`${message.desc.poolIndex}:${message.desc.seq}`, { poolIndex: message.desc.poolIndex, seq: message.desc.seq });
         s.presenter.present(message.desc, message.frame, message.arrivedMs);
         sendStats(s);
         return;
@@ -260,6 +321,12 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         return;
       case 'resize':
         s?.presenter.noteResize();
+        return;
+      case 'watchDone':
+        if (!s) return;
+        s.watchDone = message.on;
+        // A frame may have finished before the page asked.
+        if (message.on && s.lastDone > 0) post({ type: 'done', session: s.id, seq: s.lastDone });
         return;
       case 'takeTrace': {
         const trace = s?.presenter.trace ?? null;

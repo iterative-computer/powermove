@@ -12,10 +12,11 @@ import { PROTOCOL_BUILD, type Envelope, type Event, type Request, type Response 
 import { MAX_MESSAGE_BYTES } from '../../../main/engine/msgpack';
 import { completeWelcome, decodeEnvelope, encodeEnvelope, engineRole, envelope, eventMessage, localRanges, Outstanding, requestMessage } from '../../../main/engine/protocol';
 import { coalesce, type ApplyPatches } from './patch-coalesce';
+import { RELEASE_PORT_OFFER } from '../../../shared/release-port';
 
 /** The part of a `MessagePort` the connection uses (a fake in tests). */
 export interface PortLike {
-  postMessage(message: unknown): void;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
   addEventListener(type: 'message', listener: (event: { data: unknown }) => void): void;
   addEventListener(type: 'close', listener: () => void): void;
   start(): void;
@@ -61,6 +62,23 @@ export class EngineConnection {
     return answered.then(() => {
       this.ready = true;
     });
+  }
+
+  /**
+   * A port the engine reads as this one (`RELEASE_PORT_OFFER`): a
+   * presentation worker hands its frames back on it without this thread.
+   * Null when closed or when the platform has no `MessageChannel`.
+   */
+  releasePort(): MessagePort | null {
+    if (this.closed || !this.ready || typeof MessageChannel !== 'function') return null;
+    try {
+      const channel = new MessageChannel();
+      this.port.postMessage({ type: RELEASE_PORT_OFFER }, [channel.port2]);
+      return channel.port1;
+    } catch (error) {
+      this.log('warn', `no release port for the presentation worker: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
   }
 
   request(body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {

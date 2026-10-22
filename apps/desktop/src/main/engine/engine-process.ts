@@ -13,6 +13,7 @@
 import type { MessagePortMain } from 'electron';
 
 import type { EngineBootstrap, EngineControl, EngineNotice } from './ports';
+import { isReleasePortOffer } from '../../shared/release-port';
 
 type EngineAction = { kind: 'send' | 'close' | 'log'; port: number; bytes?: Uint8Array | null; level?: string | null; message?: string | null };
 
@@ -100,21 +101,48 @@ function main(): void {
     process.exit(0);
   };
 
+  /**
+   * A window's presentation worker hands frames back to the engine itself
+   * (`RELEASE_PORT_OFFER`, shared/release-port.ts): the port the window sends over its own port
+   * carries the same session-bound envelopes (frame releases) and is read
+   * as that port, so a release never waits for the window's main thread.
+   * It lives as long as the window's port.
+   */
+  const releasePorts = new Map<number, Set<MessagePortMain>>();
+  function acceptReleasePort(owner: number, port: MessagePortMain): void {
+    let set = releasePorts.get(owner);
+    if (!set) releasePorts.set(owner, (set = new Set()));
+    set.add(port);
+    port.on('message', (incoming) => {
+      const data = incoming.data as unknown;
+      if (data instanceof Uint8Array && ports.has(owner)) run(engine.receive(owner, data));
+    });
+    port.on('close', () => releasePorts.get(owner)?.delete(port));
+    port.start();
+  }
+  function closeReleasePorts(owner: number): void {
+    for (const port of releasePorts.get(owner) ?? []) port.close();
+    releasePorts.delete(owner);
+  }
+
   const onControl = (event: Electron.MessageEvent): void => {
     const message = event.data as EngineControl;
     if (message?.type === 'connect') {
       const port = event.ports[0];
       if (!port || !Number.isSafeInteger(message.port)) return;
       ports.get(message.port)?.close();
+      closeReleasePorts(message.port);
       ports.set(message.port, port);
       port.on('message', (incoming) => {
         const data = incoming.data as unknown;
         if (data instanceof Uint8Array) run(engine.receive(message.port, data));
+        else if (isReleasePortOffer(data) && incoming.ports[0]) acceptReleasePort(message.port, incoming.ports[0]);
         else run(engine.detach(message.port).concat([{ kind: 'close', port: message.port }]));
       });
       port.on('close', () => {
         if (ports.get(message.port) !== port) return;
         ports.delete(message.port);
+        closeReleasePorts(message.port);
         run(engine.detach(message.port));
       });
       try {
@@ -129,6 +157,7 @@ function main(): void {
     } else if (message?.type === 'disconnect') {
       const port = ports.get(message.port);
       ports.delete(message.port);
+      closeReleasePorts(message.port);
       run(engine.detach(message.port));
       port?.close();
     } else if (message?.type === 'simulateGpuLoss') {

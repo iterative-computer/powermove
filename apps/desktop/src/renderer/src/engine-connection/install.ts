@@ -536,6 +536,13 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           if (lease === viewerLease) opened.sendViewerState({ ...state, headless: false } as never);
         },
         release: (release) => opened.release(release),
+        // The presentation worker hands frames back on its own port.
+        releasePort: () => {
+          const c = connection;
+          if (lease !== viewerLease || !c || c.closed || opened.closed || opened.id === null) return null;
+          const port = c.releasePort();
+          return port ? { port, session: opened.id } : null;
+        },
         close: () => {
           if (lease !== viewerLease || opened.closed) return;
           viewerHandlers = null;

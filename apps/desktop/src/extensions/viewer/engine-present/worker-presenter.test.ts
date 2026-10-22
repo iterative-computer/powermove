@@ -256,6 +256,78 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(presenter.stats.released).toBe(1);
   });
 
+  it('with a release port, the worker hands frames back to the engine itself and the page closes a slot\'s frame when the slot comes back', async () => {
+    const pair = new Pair();
+    const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0 });
+    const source = new Source();
+    const releasedOnPort: Uint8Array[] = [];
+    const port = { postMessage: (bytes: Uint8Array) => releasedOnPort.push(bytes), close: () => {} };
+    class DirectLink extends Link {
+      releasePort() {
+        return { port: port as unknown as MessagePort, session: 77 };
+      }
+    }
+    const link = new DirectLink();
+    const presenter = host.open({ link, source, displayHz: 120 });
+    source.imports.add('1:1');
+    presenter.receive({ type: 'surfacePool', pool: { generation: 1, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8 } } as never, 0);
+    presenter.receive({ type: 'frame', frame: desc(1) }, 5);
+    await settle();
+    expect(pair.painter.draws).toHaveLength(1);
+    pair.painter.finishGpu();
+    await settle();
+    // Straight to the engine, as the session's own event; nothing through the page.
+    const { decodeEnvelope } = await import('../../../main/engine/protocol');
+    const sent = releasedOnPort.map((bytes) => decodeEnvelope(bytes));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ session: 77, message: { kind: 'event', body: { type: 'releaseFrame', poolIndex: 1, seq: 1 } } });
+    expect(link.releases).toEqual([]);
+    expect(pair.fromWorker.some((m) => m.type === 'release')).toBe(false);
+    // The page keeps its reference (the last one) until the slot's next frame.
+    expect(source.frames[0]!.closed).toBe(false);
+    presenter.receive({ type: 'frame', frame: desc(7) }, 6);
+    expect(source.frames[0]!.closed).toBe(true);
+    expect(source.frames[0]!.closedLast).toBe(true);
+    await settle();
+    // The session ends: the worker hands back what it held; the page only closes.
+    presenter.dispose();
+    await settle();
+    expect(source.frames[1]!.closed).toBe(true);
+    expect(link.releases).toEqual([]);
+    expect(releasedOnPort.map((bytes) => decodeEnvelope(bytes).message)).toContainEqual({ kind: 'event', body: { type: 'releaseFrame', poolIndex: 1, seq: 7 } });
+  });
+
+  it('sends a frame\'s GPU completion only while the page waits on it, and the newest one when it starts waiting', async () => {
+    const { pair, source, presenter } = setup();
+    source.imports.add('1:1');
+    source.imports.add('1:2');
+    presenter.receive({ type: 'surfacePool', pool: { generation: 1, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8 } } as never, 0);
+    presenter.receive({ type: 'frame', frame: desc(1) }, 5);
+    await settle();
+    pair.painter.finishGpu();
+    await settle();
+    // Nobody waits: no page task per frame.
+    expect(pair.fromWorker.filter((m) => m.type === 'done')).toEqual([]);
+    const done: number[] = [];
+    const off = presenter.onDone!((seq) => done.push(seq));
+    await settle();
+    // It finished before the page asked: the newest completion comes at once.
+    expect(done).toEqual([1]);
+    presenter.receive({ type: 'frame', frame: desc(2) }, 6);
+    await settle();
+    pair.painter.finishGpu();
+    await settle();
+    expect(done).toEqual([1, 2]);
+    off();
+    await settle();
+    const before = pair.fromWorker.filter((m) => m.type === 'done').length;
+    presenter.receive({ type: 'frame', frame: desc(8) }, 7);
+    await settle();
+    pair.painter.finishGpu();
+    await settle();
+    expect(pair.fromWorker.filter((m) => m.type === 'done')).toHaveLength(before);
+  });
+
   it('parks a descriptor on the page until its import arrives, and releases it undrawn after the park timeout', async () => {
     const pair = new Pair();
     const timers: (() => void)[] = [];

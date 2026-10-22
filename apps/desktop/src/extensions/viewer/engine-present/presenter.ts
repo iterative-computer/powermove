@@ -37,6 +37,13 @@ import type {
 export interface FrameLink {
   sendViewerState(state: ViewerState): void;
   release(release: FrameRelease): void;
+  /**
+   * A port the engine reads as this session's own, for a presentation
+   * worker to hand frames back on directly (`RELEASE_PORT_OFFER`), with the
+   * engine session id its envelopes carry. Null when the connection cannot
+   * offer one: releases then go through the page.
+   */
+  releasePort?(): { port: MessagePort; session: number } | null;
 }
 
 /** The preload's frame bridge: the imports it holds for this window. */
