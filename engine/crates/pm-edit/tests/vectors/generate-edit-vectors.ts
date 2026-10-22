@@ -426,7 +426,7 @@ function alignCommands(layers: any[], mode: AlignMode, time: number): any[] {
       .map(([x, y]) => ({ x: m[0] * x! + m[2] * y! + m[4], y: m[1] * x! + m[3] * y! + m[5] }));
     return { x0: Math.min(...corners.map(p => p.x)), y0: Math.min(...corners.map(p => p.y)), x1: Math.max(...corners.map(p => p.x)), y1: Math.max(...corners.map(p => p.y)) };
   };
-  const targets = layers.filter(layer => layer && !layer.lock && layer.type !== 'audio');
+  const targets = layers.filter(layer => layer && !layer.lock && !PM.groupAncestors(layer).some((group: any) => group.lock) && layer.type !== 'audio');
   const boxed = targets.map(layer => ({ layer, box: worldBox(layer) })).filter((item): item is { layer: any; box: any } => !!item.box);
   const bounds = unionBox(boxed.map(item => item.box));
   if (!bounds) return [];
@@ -452,6 +452,16 @@ function alignCases(doc: string, T: number, out: Case[]): void {
     const mode = pick(['left', 'hcenter', 'right', 'top', 'vcenter', 'bottom'] as const);
     out.push({ kind: 'align', t: hex(T), layers: chosen, mode, out: run(() => alignCommands(chosen.map(i => L[i]), mode, T)) });
   }
+  // A locked group keeps its members in place (`isInspectorLayerEditable`).
+  const groups = L.filter((layer: any) => layer.type === 'group');
+  if (!groups.length) return;
+  const L2 = open(doc, T);
+  L2[L.indexOf(pick(groups))].lock = true;
+  PM.touch();
+  const locked = JSON.stringify(settle(PM.proj));
+  const chosen = L2.map((_: any, i: number) => i);
+  const mode = pick(['left', 'hcenter', 'right', 'top', 'vcenter', 'bottom'] as const);
+  out.push({ kind: 'align', doc: locked, t: hex(T), layers: chosen, mode, out: run(() => alignCommands(chosen.map((i: number) => L2[i]), mode, T)) });
 }
 
 function sizeAnchorCases(doc: string, T: number, out: Case[]): void {
