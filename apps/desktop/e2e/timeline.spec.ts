@@ -117,7 +117,9 @@ test('the easing grid applies a curve to both Scale dimensions and preserves lin
   expect(boxes[4]!.x).toBe(boxes[0]!.x);
   await testInfo.attach('easing-grid', { body: await grid.screenshot(), contentType: 'image/png' });
   await grid.getByRole('menuitem', { name: 'Ease out', exact: true }).click();
-  expect(await page.evaluate((id) => {
+  // The menu runs its item after it closes, so read the keys once it has.
+  await expect(grid).toHaveCount(0);
+  await expect.poll(() => page.evaluate((id) => {
     const L = (window as any).PM.L(id);
     return [L.p['scale.x'].kf[0].ei, L.p['scale.y'].kf[0].ei];
   }, id)).toEqual([[.58, 1], [.58, 1]]);
