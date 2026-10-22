@@ -3522,3 +3522,25 @@ separately. The deadline uses the earlier of the producer's post-release
 timestamp and the observer's post-acquire timestamp, both valid upper
 bounds on actual publication. The final thirty-plus-thirty campaign remains
 required.
+
+Simple transport controls now enqueue Pause, SetLoop and Exact Seek without
+separate control-thread acknowledgement waits. The producer still applies
+every command in FIFO order. Play keeps its synchronous batch acknowledgement
+as a barrier; each earlier command retains its own result. Receipts expire
+five seconds after enqueue and the pending queue is capped at 64. Scrub and
+PlayAround remain synchronous. A pending Pause suppresses running meter
+updates, and repeated identical transport errors do not displace other
+problems. Device latency improvement remains unmeasured on this revision.
+An opt-in send stamp separates frontend delivery from time waiting in the
+audio control queue; it is logged after enqueue on the ordinary presenter
+thread.
+
+With `PM_AUDIO_PROFILE`, source-block events record source/block IDs, enqueue
+and decode thread names, original request urgency, last duplicate request,
+worker claim, decoder-lock acquisition, seek/read completion, cache publication
+and thread CPU time. The publication stamp follows cache-lock release and is
+an upper bound. Synchronous wait duplicates count once per caller; an inline
+decode taking a queued block is identified separately. Events use the bounded
+diagnostic writer. Profile-only map entries, thread-name copies and clock
+reads add probe overhead under the cache lock; ordinary decoding keeps its
+existing order and priority.
