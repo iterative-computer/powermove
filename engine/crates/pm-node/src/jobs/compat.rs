@@ -38,6 +38,10 @@ pub(crate) trait CompatHost: Send + Sync {
 const FETCH_AHEAD: i64 = 4;
 /// Most requests in one batch.
 const MAX_BATCH: usize = 512;
+/// Most requests sent to the host at once: main draws at most 32 of a
+/// window's compatibility frames at a time (`compat-frames.ts` `MAX_ASKS`)
+/// and refuses more; a batch goes in turns of this many.
+const HOST_ASKS: usize = 24;
 
 type AnswerKey = (String, String, i64, CompatSource, u64);
 
@@ -341,7 +345,7 @@ impl CompatRasters for JobCompat {
                 .unwrap_or_else(|e| e.into_inner())
                 .retain(|k, _| k.2 >= floor);
         }
-        let requests = asks
+        let requests: Vec<Request> = asks
             .iter()
             .map(|((composition, layer, time, source, scale), _)| {
                 Request::CompatFrame(CompatFrameRequest {
@@ -359,7 +363,12 @@ impl CompatRasters for JobCompat {
                 })
             })
             .collect();
-        let results = self.host.call_many(requests, self.session);
+        let mut results = Vec::with_capacity(asks.len());
+        let mut requests = requests.into_iter().peekable();
+        while requests.peek().is_some() {
+            let turn: Vec<Request> = requests.by_ref().take(HOST_ASKS).collect();
+            results.extend(self.host.call_many(turn, self.session));
+        }
         let mut answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
         for ((key, needed), result) in asks.into_iter().zip(results) {
             match answer_of(result) {
@@ -592,6 +601,29 @@ mod tests {
             ), "frame {k} ahead");
         }
         assert_eq!(host.calls.lock().unwrap().len(), asked);
+    }
+
+    #[test]
+    fn a_large_frame_is_fetched_in_turns_the_host_accepts() {
+        struct Turns {
+            sizes: Mutex<Vec<usize>>,
+        }
+        impl CompatHost for Turns {
+            fn call(&self, _request: Request, _session: SessionId) -> Result<Response, String> {
+                unreachable!("batched")
+            }
+            fn call_many(&self, requests: Vec<Request>, _session: SessionId) -> Vec<Result<Response, String>> {
+                self.sizes.lock().unwrap().push(requests.len());
+                assert!(requests.len() <= HOST_ASKS, "main refuses more than its in-flight bound");
+                requests.iter().map(|_| Ok(frame(true))).collect()
+            }
+        }
+        let host = Arc::new(Turns { sizes: Mutex::new(Vec::new()) });
+        let compat = JobCompat::new(host.clone(), SessionId::new(4).unwrap(), "P".into(), Revision::new(9).unwrap(), vec![CompatSource::RasterOverride]);
+        let needs: Vec<_> = (0..60).map(|i| need(&format!("L{i}"), 0.0, 1.0)).collect();
+        assert!(compat.fetch(&needs));
+        assert_eq!(host.sizes.lock().unwrap().iter().sum::<usize>(), 60);
+        assert!(needs.iter().all(|n| !matches!(compat.answer("root", n.layer.as_str(), 0.0, 1.0, CompatSource::RasterOverride, None), CompatAnswer::Missing)));
     }
 
     #[test]
