@@ -213,7 +213,16 @@ impl Schedule {
         if let Some(next) = self.next_redo(clock, now, k, until, ready, phase) {
             return next;
         }
-        if until < now as f64 || until < ready {
+        // The estimate alone skips a frame only while a frame rendered at its
+        // due time could still reach the display. An estimate beyond the
+        // whole lead window (one render stalled by a GPU or CPU hiccup) would
+        // otherwise skip every frame for good: nothing renders, so nothing
+        // corrects the estimate. Such frames render, and their measured cost
+        // brings the estimate back.
+        let showable = self
+            .cost_us
+            .is_none_or(|c| c + delivery <= f64::from(lead + 1) * Self::frame_us(clock));
+        if until < now as f64 || (until < ready && showable) {
             self.next_k = Some(k + Self::step(clock));
             return Next::Skip { k };
         }
@@ -421,6 +430,45 @@ mod tests {
             schedule.next(&clock, 0, 4),
             Next::Render { k: 600, .. }
         ));
+    }
+
+    #[test]
+    fn one_stalled_render_does_not_skip_every_later_frame() {
+        // 60 fps with a lead of 4: a frame rendered at its due time has
+        // 83.3 ms to reach the display. One 500 ms render (a GPU stall) puts
+        // the estimate past that window for every frame; skipping on it
+        // would never render again, so nothing would correct it.
+        let clock = playing(0, PlaybackRate::NORMAL);
+        let mut schedule = Schedule::default();
+        schedule.observe(500_000.0);
+        let mut rendered = Vec::new();
+        let mut now = 0;
+        while rendered.len() < 12 && now < 1_000_000 {
+            match schedule.next(&clock, now, 4) {
+                Next::Render { k, .. } => {
+                    rendered.push(k);
+                    schedule.rendered(&clock, k);
+                    // The renders after the stall cost 5 ms.
+                    schedule.observe(5_000.0);
+                }
+                Next::Skip { k } => panic!("frame {k} skipped on the stalled estimate"),
+                Next::WaitUntil(at) => now = at.ceil() as i64,
+                Next::Idle => panic!("idle while playing"),
+            }
+        }
+        assert_eq!(rendered, (600..612).collect::<Vec<_>>());
+        // The estimate came back below the window, where it skips again
+        // only frames that cannot be shown.
+        assert!(schedule.cost_us().unwrap() < 58_000.0);
+        // A frame whose interval passed during the stall is still skipped.
+        let mut stalled = Schedule::default();
+        stalled.observe(500_000.0);
+        assert!(matches!(
+            stalled.next(&clock, 0, 4),
+            Next::Render { k: 600, .. }
+        ));
+        stalled.rendered(&clock, 600);
+        assert_eq!(stalled.next(&clock, 101_000, 4), Next::Skip { k: 601 });
     }
 
     #[test]
