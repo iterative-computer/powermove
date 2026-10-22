@@ -629,8 +629,11 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
     crate::angle::configure_probes(&mut renderer).map_err(Failure::Failed)?;
     renderer.require_shader_reference();
-    if let Some(host) = crate::angle::AngleHost::from_environment().map_err(Failure::Failed)? {
-        renderer.set_fallback_host(Some(Arc::new(host)));
+    let angle_host = crate::angle::AngleHost::from_environment()
+        .map_err(Failure::Failed)?
+        .map(Arc::new);
+    if let Some(host) = &angle_host {
+        renderer.set_fallback_host(Some(host.clone()));
     }
     crate::fonts::install(
         &mut renderer,
@@ -694,7 +697,18 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         .map_err(|e| match e {
             JobError::Unsupported(list) => Failure::Unsupported(list),
             JobError::Cancelled => Failure::Failed("interrupted; nothing was written".into()),
-            other => Failure::Failed(other.to_string()),
+            other => Failure::Failed(
+                angle_host
+                    .as_ref()
+                    .and_then(|host| host.last_failure())
+                    .map(|failure| {
+                        format!(
+                            "GLSL fallback runner failed ({}: {})",
+                            failure.reason, failure.message
+                        )
+                    })
+                    .unwrap_or_else(|| other.to_string()),
+            ),
         })?;
     let r = &delivered.report;
     let seconds = started.elapsed().as_secs_f64();

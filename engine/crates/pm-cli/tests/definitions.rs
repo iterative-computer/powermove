@@ -3,8 +3,8 @@
 //! `--definitions` set (the app's winning registrations) replaces them, so
 //! an override by id draws the fork's GLSL; an effect with no snapshot that
 //! is not marked missing fails naming it (exit 3), one marked missing is
-//! skipped as in the app; a program only the app's WebGL fallback runner
-//! draws fails as not headless-renderable, named, on every run (exit 4).
+//! skipped as in the app. User overrides draw through the production ANGLE
+//! helper; without that helper an unverified program fails by name.
 #![cfg(target_os = "macos")]
 
 use std::path::{Path, PathBuf};
@@ -12,11 +12,30 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 
-fn scratch(name: &str) -> PathBuf {
+// Remove fixtures even when an assertion panics.
+struct Scratch(PathBuf);
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!("pm-cli-defs-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch(dir)
 }
 
 fn ch(v: Value) -> Value {
@@ -61,6 +80,23 @@ fn cli(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_pm-cli"))
         .arg("render")
         .args(args)
+        .env_remove("POWERMOVE_ANGLE_HELPER")
+        .env_remove("POWERMOVE_ANGLE_ENDPOINT")
+        .env_remove("POWERMOVE_ANGLE_TOKEN")
+        .output()
+        .unwrap()
+}
+
+// This positive override gate uses the production Node/Chromium helper. Set
+// POWERMOVE_ANGLE_HELPER to a prebuilt CLI dist/native-angle-child.cjs; run
+// this integration binary under pm-electron-lock, never build under the lock.
+fn cli_with_angle(args: &[&str]) -> std::process::Output {
+    let helper = std::env::var("POWERMOVE_ANGLE_HELPER")
+        .expect("build the CLI host and set POWERMOVE_ANGLE_HELPER for the override pixel gate");
+    Command::new(env!("CARGO_BIN_EXE_pm-cli"))
+        .arg("render")
+        .args(args)
+        .env("POWERMOVE_ANGLE_HELPER", helper)
         .output()
         .unwrap()
 }
@@ -186,7 +222,7 @@ fn rendering_with_the_built_in_set_warns_when_the_project_draws_definitions() {
 }
 
 #[test]
-fn an_unverified_override_requires_an_angle_reference_instead_of_drawing_natively() {
+fn a_definitions_snapshot_overrides_built_ins_by_id() {
     let dir = scratch("override");
     let file = dir.join("p.json");
     std::fs::write(&file, project(invert()).to_string()).unwrap();
@@ -199,7 +235,7 @@ fn an_unverified_override_requires_an_angle_reference_instead_of_drawing_nativel
         )
     });
     let out = dir.join("still.png");
-    let result = cli(&[
+    let s = ok(&cli_with_angle(&[
         file.to_str().unwrap(),
         "-o",
         out.to_str().unwrap(),
@@ -207,14 +243,12 @@ fn an_unverified_override_requires_an_angle_reference_instead_of_drawing_nativel
         "still",
         "--definitions",
         defs.to_str().unwrap(),
-    ]);
-    assert_eq!(result.status.code(), Some(3));
-    let message = String::from_utf8_lossy(&result.stderr);
-    assert!(message.contains("GLSL fallback runner"), "{message}");
-    assert!(message.contains("invert"), "{message}");
+    ]));
+    assert_eq!(s["definitions"], json!(defs.to_str().unwrap()));
     assert!(
-        !out.exists(),
-        "an unverified native frame must never be delivered"
+        near(corner(&out), [0, 0, 255]),
+        "the fork draws: {:?}",
+        corner(&out)
     );
     std::fs::remove_dir_all(dir).unwrap();
 }

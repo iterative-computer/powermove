@@ -27,6 +27,7 @@ pub struct AngleHost {
     endpoint: SocketAddr,
     token: String,
     child: Option<Mutex<Child>>,
+    last_failure: Mutex<Option<FallbackFailure>>,
 }
 impl AngleHost {
     pub fn from_environment() -> Result<Option<Self>, String> {
@@ -109,6 +110,7 @@ impl AngleHost {
             endpoint,
             token,
             child,
+            last_failure: Mutex::new(None),
         }))
     }
     fn request(&self, job: &FallbackJob) -> Result<FallbackPixels, RunnerFailure> {
@@ -186,7 +188,21 @@ impl Drop for AngleHost {
 }
 impl FallbackHost for AngleHost {
     fn run(&self, job: &FallbackJob) -> Result<FallbackPixels, FallbackFailure> {
-        self.request(job).map_err(|failure| failure.0)
+        let result = self.request(job).map_err(|failure| failure.0);
+        *self.last_failure.lock().unwrap_or_else(|e| e.into_inner()) =
+            result.as_ref().err().cloned();
+        result
+    }
+}
+
+impl AngleHost {
+    /// Keep the runner's named cause when the renderer stops making progress
+    /// after a transient failure (for example a missing Chromium installation).
+    pub fn last_failure(&self) -> Option<FallbackFailure> {
+        self.last_failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 fn decode(
