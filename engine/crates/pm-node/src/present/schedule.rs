@@ -98,7 +98,18 @@ pub struct Schedule {
     redo_pending: bool,
     /// The first frame of this run (nothing before it was rendered).
     start_k: Option<i64>,
+    /// When the last frame of this run was rendered (host µs), or the run
+    /// started: past [`STARVE_US`] without one, a frame whose interval has
+    /// not ended is drawn even though it will be late.
+    last_rendered_at: Option<i64>,
 }
+
+/// How long a playing view may go without a rendered frame before the
+/// schedule draws one late rather than skip it: a project whose frames
+/// cost more than their interval (or wait on a window's answers) keeps
+/// moving, at a lower rate, as today's does, instead of skipping every
+/// frame its cost estimate says it cannot reach in time.
+pub const STARVE_US: i64 = 250_000;
 
 impl Schedule {
     /// Forgets the position (play, seek, loop change: a clock discontinuity).
@@ -187,6 +198,9 @@ impl Schedule {
         }
         let f = clock.frame_ticks();
         let fresh = self.next_k.is_none();
+        if fresh {
+            self.last_rendered_at = Some(now);
+        }
         let k = *self.next_k.get_or_insert_with(|| {
             // The first frame due after the margin, but never one before the
             // line's start: during the preroll the line extrapolates
@@ -213,7 +227,10 @@ impl Schedule {
         if let Some(next) = self.next_redo(clock, now, k, until, ready, phase) {
             return next;
         }
-        if until < now as f64 || until < ready {
+        let starving = self
+            .last_rendered_at
+            .is_some_and(|at| now - at > STARVE_US);
+        if until < now as f64 || (until < ready && !starving) {
             self.next_k = Some(k + Self::step(clock));
             return Next::Skip { k };
         }
@@ -243,6 +260,11 @@ impl Schedule {
     }
 
     /// The frame `k` was rendered; move on.
+    pub fn rendered_at(&mut self, clock: &TransportClock, k: i64, now: i64) {
+        self.last_rendered_at = Some(now);
+        self.rendered(clock, k);
+    }
+
     pub fn rendered(&mut self, clock: &TransportClock, k: i64) {
         if self.redo == Some(k) {
             self.redo = Some(k + Self::step(clock));
@@ -421,6 +443,37 @@ mod tests {
             schedule.next(&clock, 0, 4),
             Next::Render { k: 600, .. }
         ));
+    }
+
+    #[test]
+    fn a_view_that_drew_nothing_for_a_while_draws_a_late_frame_rather_than_skip_it() {
+        // A render cost far above the frame (and its answers' waits) makes
+        // every frame near the clock look unreachable; after `STARVE_US`
+        // without a rendered frame, the next frame whose interval has not
+        // ended is drawn, then the schedule skips again until the next
+        // starve.
+        let clock = playing(0, PlaybackRate::NORMAL);
+        let mut schedule = Schedule::default();
+        schedule.observe(600_000.0);
+        // Within the bound nothing near the clock is drawn.
+        let mut now = 60_000;
+        assert!(matches!(schedule.next(&clock, now, 4), Next::Skip { .. }));
+        let draw = |schedule: &mut Schedule, now: i64| loop {
+            match schedule.next(&clock, now, 4) {
+                Next::Skip { .. } => {}
+                Next::Render { k, .. } => break k,
+                other => panic!("{other:?}"),
+            }
+        };
+        for _ in 0..3 {
+            // Past it: the next frame still on display is drawn, late.
+            now += STARVE_US + 1_000;
+            let k = draw(&mut schedule, now);
+            let until = clock.host_at(k * FRAME + FRAME).unwrap();
+            assert!(until >= now as f64 && until < now as f64 + 600_000.0, "frame {k} at {now}");
+            schedule.rendered_at(&clock, k, now);
+            assert!(matches!(schedule.next(&clock, now + 20_000, 4), Next::Skip { .. }));
+        }
     }
 
     #[test]

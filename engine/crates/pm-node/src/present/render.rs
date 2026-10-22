@@ -3460,7 +3460,11 @@ impl Thread {
                     {
                         return;
                     }
-                    view.schedule.rendered(&view.clock, k);
+                    if rendered.is_some() {
+                        view.schedule.rendered_at(&view.clock, k, now());
+                    } else {
+                        view.schedule.rendered(&view.clock, k);
+                    }
                     if rendered.is_some() {
                         // What the next frames will cost (deadline-aware skips).
                         view.schedule.observe((now() - started) as f64);
