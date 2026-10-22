@@ -9,6 +9,7 @@ export type PreviewStatus = {
 export type PreviewFrame = { seq: number; revision: number; pts: number };
 export type PreviewSession = {
   id: number | null; generation: number; closed: boolean; route: string; headless?: boolean;
+  documentAccepted: boolean;
   post(event: Record<string, unknown> & { type: string }): boolean;
 };
 export type PreviewState = { busy: boolean; error: string | null };
@@ -26,18 +27,17 @@ export type CachePreviewOptions = {
 
 /**
  * A cache preview's wake: opens the standby session, then requires the
- * engine to have accepted its document. A refused first resync leaves the
- * session open (a later gap or load resync recovers it), so the preview
- * fails by name instead of rendering an empty engine document.
+ * engine to have accepted its current document. A refused resync leaves the
+ * session open for recovery, but must not render against the previous one.
  */
 export function documentWake(
   wake: () => Promise<void>,
-  session: () => { closed: boolean; resyncs: number } | null,
+  session: () => { closed: boolean; documentAccepted: boolean } | null,
 ): () => Promise<void> {
   return async () => {
     await wake();
     const current = session();
-    if (current && !current.closed && current.resyncs === 0) {
+    if (current && !current.closed && !current.documentAccepted) {
       const error = new Error('The engine has not accepted this document yet');
       error.name = 'EnginePreviewUnavailable';
       throw error;
@@ -137,18 +137,32 @@ export class EnginePreview {
   private postRender(options?: CachePreviewOptions): Promise<void> {
     let session: PreviewSession;
     try { session = this.validSession(options?.cacheOnly); } catch (error) { return Promise.reject(error); }
-    this.abort('The preview was replaced by a newer render');
-    const control = {
-      type: 'previewControl', generation: ++this.generation,
-      revision: Math.max(0, Math.trunc(this.revision())),
-      composition: this.composition(), time: ticks(this.time()), shading: this.shading(), action: 'render' as const,
-      ...(options?.cacheOnly ? { cacheOnly: true, size: options.size, camera: options.camera ?? null } : {}),
+    let control: Omit<PreviewStatus, 'automatic' | 'phase' | 'frameSeq' | 'error'> & {
+      type: 'previewControl'; action: 'render'; shading: 'material' | 'rendered';
+      size?: CachePreviewOptions['size']; camera?: CachePreviewOptions['camera'];
     };
-    if (!control.composition || !session.post(control)) {
-      const error = new Error('The native viewer could not accept the preview request');
-      error.name = 'EnginePreviewUnavailable';
-      return Promise.reject(error);
-    }
+    try {
+      // revision() flushes pending document changes. A load may start a new
+      // full resync here, after documentWake observed the previous document.
+      const revision = Math.max(0, Math.trunc(this.revision()));
+      if (options?.cacheOnly && !session.documentAccepted) {
+        const error = new Error('The engine has not accepted this document yet');
+        error.name = 'EnginePreviewUnavailable';
+        throw error;
+      }
+      this.abort('The preview was replaced by a newer render');
+      control = {
+        type: 'previewControl', generation: ++this.generation,
+        revision,
+        composition: this.composition(), time: ticks(this.time()), shading: this.shading(), action: 'render' as const,
+        ...(options?.cacheOnly ? { cacheOnly: true, size: options.size, camera: options.camera ?? null } : {}),
+      };
+      if (!control.composition || !session.post(control)) {
+        const error = new Error('The native viewer could not accept the preview request');
+        error.name = 'EnginePreviewUnavailable';
+        throw error;
+      }
+    } catch (error) { return Promise.reject(error); }
     this.emit(true, null);
     return new Promise<void>((resolve, reject) => {
       this.pending = { session, status: { ...control, automatic: false, phase: 'queued', frameSeq: null, error: null }, resolve, reject };

@@ -165,6 +165,8 @@ export class DocumentSession {
   routeReason: string | null = null;
   /** The revision the engine has (acknowledged or resynced). */
   applied = 0;
+  /** Whether the latest full document resync was accepted by this session. */
+  documentAccepted = false;
   /** The latest clock sample. */
   clock: ClockSample | null = null;
   /** Frames received since the session opened, and the newest. */
@@ -304,6 +306,7 @@ export class DocumentSession {
   private async doResync(reason: string): Promise<void> {
     const id = this.id;
     if (id === null || this.closed) return;
+    this.documentAccepted = false;
     const snapshot = this.options.stream.snapshot();
     if (!snapshot) throw new Error('the document mirror has no snapshot');
     this.document = documentId(this.options.documentId());
@@ -322,8 +325,10 @@ export class DocumentSession {
     const request = { type: 'resync', document: this.document, revision: snapshot.revision, encoding: 'canonicalJsonV1', source, hash: hexBytes(snapshot.hash) } as Request;
     try {
       await this.options.connection.request(request, id);
+      if (this.closed) return;
       this.applied = snapshot.revision;
       this.resyncs++;
+      this.documentAccepted = true;
     } catch (error) {
       if (this.closed) return;
       const text = error instanceof Error ? error.message : String(error);
@@ -671,6 +676,7 @@ export class DocumentSession {
 
   private dispose(): void {
     this.closed = true;
+    this.documentAccepted = false;
     this.definitions?.dispose();
     this.definitions = null;
     if (this.definitionRetry) clearTimeout(this.definitionRetry);

@@ -4,7 +4,7 @@ import { EnginePreview, documentWake, type PreviewSession, type PreviewStatus } 
 function rig() {
   const sent: Array<Record<string, unknown>> = [];
   const session: PreviewSession = {
-    id: 5, generation: 2, closed: false, route: 'engine',
+    id: 5, generation: 2, closed: false, route: 'engine', documentAccepted: true,
     post(event) { sent.push(event); return true; },
   };
   let current: PreviewSession | null = session;
@@ -99,7 +99,7 @@ describe('native paused preview control', () => {
   it('cannot start a cache job after cancel wins the session wake', async () => {
     let awake!: () => void;
     const sent: Array<Record<string, unknown>> = [];
-    const session: PreviewSession = { id: 3, generation: 1, closed: false, route: 'pending', headless: true, post(event) { sent.push(event); return true; } };
+    const session: PreviewSession = { id: 3, generation: 1, closed: false, route: 'pending', headless: true, documentAccepted: true, post(event) { sent.push(event); return true; } };
     const preview = new EnginePreview(() => session, () => 'comp', () => 0, () => 1, undefined, () => new Promise<void>(resolve => { awake = resolve; }));
     const rendering = preview.render({ cacheOnly: true, size: { width: 10, height: 10 } });
     await Promise.resolve();
@@ -136,15 +136,54 @@ describe('native paused preview control', () => {
   });
 
   it('names an unaccepted document instead of rendering an empty engine document', async () => {
-    let session: { closed: boolean; resyncs: number } | null = { closed: false, resyncs: 0 };
+    let session: { closed: boolean; documentAccepted: boolean } | null = { closed: false, documentAccepted: false };
     const wake = documentWake(async () => {}, () => session);
     await expect(wake()).rejects.toMatchObject({ name: 'EnginePreviewUnavailable' });
-    session = { closed: false, resyncs: 1 };
+    session = { closed: false, documentAccepted: true };
     await expect(wake()).resolves.toBeUndefined();
     // A session that closed while starting settles through the closed path.
-    session = { closed: true, resyncs: 0 };
+    session = { closed: true, documentAccepted: false };
     await expect(wake()).resolves.toBeUndefined();
     session = null;
     await expect(wake()).resolves.toBeUndefined();
+  });
+
+  it('does not post a cache render after a document load invalidates the accepted document', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const session: PreviewSession = {
+      id: 5, generation: 2, closed: false, route: 'pending', headless: true,
+      documentAccepted: true, post(event) { sent.push(event); return true; },
+    };
+    let flushLoad = true;
+    const preview = new EnginePreview(
+      () => session, () => 'new-project', () => 0, () => {
+        if (flushLoad) session.documentAccepted = false;
+        return 9;
+      },
+      undefined, documentWake(async () => {}, () => session),
+    );
+    await expect(preview.render({ cacheOnly: true, size: { width: 64, height: 64 } }))
+      .rejects.toMatchObject({ name: 'EnginePreviewUnavailable' });
+    expect(sent).toHaveLength(0);
+    expect(preview.state()).toEqual({ busy: false, error: null });
+
+    // A successful later resync of this same session permits a fresh request.
+    flushLoad = false;
+    session.documentAccepted = true;
+    const render = preview.render({ cacheOnly: true, size: { width: 64, height: 64 } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ type: 'previewControl', action: 'render', cacheOnly: true, revision: 9, composition: 'new-project' });
+    preview.receiveStatus(session, { generation: 1, automatic: false, revision: 9, composition: 'new-project', time: 0, phase: 'ready', frameSeq: null, error: null, cacheOnly: true });
+    await render;
+  });
+
+  it('rejects a cache render with the original document flush error', async () => {
+    const r = rig();
+    const error = Object.assign(new Error('invalid scene'), { name: 'ZodError', issues: [{ path: ['scene'], message: 'invalid' }] });
+    const preview = new EnginePreview(() => r.session, () => 'comp', () => 0, () => { throw error; });
+    await expect(preview.render({ cacheOnly: true, size: { width: 10, height: 10 } })).rejects.toBe(error);
+    expect(r.sent).toHaveLength(0);
   });
 });
