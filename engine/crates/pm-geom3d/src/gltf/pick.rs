@@ -734,21 +734,10 @@ impl Picker {
                         continue;
                     }
                     let local = ray.apply(&math::invert(world));
-                    // The old temporary used `chunks_exact(3)`, regardless
-                    // of a hand-edited POSITION accessor's declared size.
-                    let position_count = g.position.data.len() / 3;
-                    let position = |i: usize| -> Option<Vec3> {
-                        if i >= position_count {
-                            return None;
-                        }
-                        let at = i * 3;
-                        let p = &g.position.data[at..at + 3];
-                        Some([f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
-                    };
+                    let positions = StaticPositions(&g.position.data);
                     let found = if mode == super::Mode::Points {
                         points_hit(
-                            position_count,
-                            position,
+                            positions,
                             g.index.as_ref().map(|index| index.as_slice()),
                             &local,
                             threshold * threshold,
@@ -757,8 +746,7 @@ impl Picker {
                         )
                     } else {
                         line_hit(
-                            position_count,
-                            position,
+                            positions,
                             g.index.as_ref().map(|index| index.as_slice()),
                             mode,
                             &local,
@@ -784,10 +772,30 @@ impl Picker {
     }
 }
 
+/// Rest-pose f32 POSITION, read as the f64 tuples three.js raycasts. The
+/// former temporary used `chunks_exact(3)` even if a hand-edited accessor
+/// declared another item size.
+#[derive(Clone, Copy)]
+struct StaticPositions<'a>(&'a [f32]);
+
+impl StaticPositions<'_> {
+    fn len(&self) -> usize {
+        self.0.len() / 3
+    }
+
+    fn get(&self, i: usize) -> Option<Vec3> {
+        if i >= self.len() {
+            return None;
+        }
+        let at = i * 3;
+        let p = &self.0[at..at + 3];
+        Some([f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
+    }
+}
+
 /// `Points.raycast`'s per-point test: the closest point on the ray.
 fn points_hit(
-    position_count: usize,
-    position: impl Fn(usize) -> Option<Vec3>,
+    positions: StaticPositions<'_>,
     indices: Option<&[u32]>,
     r: &Ray,
     threshold_sq: f64,
@@ -795,11 +803,11 @@ fn points_hit(
     world_ray: &Ray,
 ) -> Option<(Vec3, u32)> {
     let mut best: Option<(f64, Vec3, u32)> = None;
-    let count = indices.map_or(position_count, <[u32]>::len);
+    let count = indices.map_or(positions.len(), <[u32]>::len);
     for i in 0..count {
         let vi = indices.map_or(i, |ix| ix[i] as usize);
         // An index past the last vertex reads NaN: never within range.
-        let Some(p) = position(vi) else {
+        let Some(p) = positions.get(vi) else {
             continue;
         };
         let along = dot(sub(p, r.origin), r.direction);
@@ -816,8 +824,7 @@ fn points_hit(
 
 /// `Line.raycast` for segments, strips, and loops.
 fn line_hit(
-    position_count: usize,
-    position: impl Fn(usize) -> Option<Vec3>,
+    positions: StaticPositions<'_>,
     indices: Option<&[u32]>,
     mode: super::Mode,
     r: &Ray,
@@ -826,8 +833,12 @@ fn line_hit(
     world_ray: &Ray,
 ) -> Option<(Vec3, u32)> {
     // An index past the last vertex reads `undefined`: NaN coordinates.
-    let v = |i: usize| position(indices.map_or(i, |ix| ix[i] as usize)).unwrap_or([f64::NAN; 3]);
-    let count = indices.map_or(position_count, <[u32]>::len);
+    let v = |i: usize| {
+        positions
+            .get(indices.map_or(i, |ix| ix[i] as usize))
+            .unwrap_or([f64::NAN; 3])
+    };
+    let count = indices.map_or(positions.len(), <[u32]>::len);
     if count < 2 {
         return None;
     }
@@ -990,25 +1001,13 @@ mod tests {
     fn static_point_and_loop_readers_preserve_index_order() {
         let points = [-1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 99.0];
         // The trailing scalar is discarded by the former `chunks_exact(3)`.
-        let count = points.len() / 3;
-        let get = |i: usize| {
-            (i < count).then(|| {
-                let at = i * 3;
-                [
-                    f64::from(points[at]),
-                    f64::from(points[at + 1]),
-                    f64::from(points[at + 2]),
-                ]
-            })
-        };
         let ray = Ray {
             origin: [0.0, 0.0, 1.0],
             direction: [0.0, 0.0, -1.0],
         };
         assert_eq!(
             points_hit(
-                count,
-                get,
+                StaticPositions(&points),
                 Some(&[u32::MAX, 1, 0]),
                 &ray,
                 2.0,
@@ -1020,10 +1019,7 @@ mod tests {
         );
 
         let square = [
-            [-1.0, -1.0, 0.0],
-            [1.0, -1.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [-1.0, 1.0, 0.0],
+            -1.0f32, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0,
         ];
         let ray = Ray {
             origin: [-1.0, 0.0, 1.0],
@@ -1031,8 +1027,7 @@ mod tests {
         };
         assert_eq!(
             line_hit(
-                square.len(),
-                |i| square.get(i).copied(),
+                StaticPositions(&square),
                 None,
                 super::super::Mode::LineLoop,
                 &ray,
