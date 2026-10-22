@@ -372,6 +372,35 @@ describe('legacy app install', () => {
     expect(put).toHaveBeenCalledTimes(2);
   });
 
+  it('counts the playback hold of an autosave from when its write first met playback, not from the edit', async () => {
+    const { PM, timers } = appRegistry();
+    const put = vi.spyOn(PM.Projects, PM.Projects.recover ? 'recover' : 'put');
+    const now = vi.spyOn(Date, 'now');
+    try {
+      let clock = 1_000_000;
+      now.mockImplementation(() => clock);
+      PM.engineTransport = () => true;
+      PM.playing = false;
+      PM.proj.name = 'Edited before playing';
+      PM.autosave();
+      // The debounce ends long after the edit (the last write was slow),
+      // and playback started meanwhile: the write still waits.
+      clock += 60_000;
+      PM.playing = true;
+      await timers.get(PM.app.saveTimer)();
+      expect(put).not.toHaveBeenCalled();
+      clock += 14_000;
+      await timers.get(PM.app.saveTimer)();
+      expect(put).not.toHaveBeenCalled();
+      // Past the bound of continuous playback: written.
+      clock += 2_000;
+      await timers.get(PM.app.saveTimer)();
+      expect(put).toHaveBeenCalledOnce();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('does not treat overlapping unchanged comparisons as edits', async () => {
     const { PM } = appRegistry();
     const confirmProjectClose = vi.fn(async () => 'cancel');

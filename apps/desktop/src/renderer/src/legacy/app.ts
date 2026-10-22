@@ -751,18 +751,24 @@ PM.autosave = () => {
   fileUI();
   const generation = ++saveGeneration, projectId = PM.proj.id;
   window.clearTimeout(APP.saveTimer);
-  const deferredSince = Date.now();
+  let deferredSince: number | null = null;
   const write = async () => {
     if (discardedProjects.has(projectId)) return;
     // While the engine plays, the write (the whole project cloned, stored
     // and checked against the engine's copy: seconds of this window's main
     // thread for a large project) waits for it to stop, up to
-    // AUTOSAVE_PLAYING_DEFER_MS: the engine's frames wait on this thread's
-    // turns. Today's app draws on this thread and is not held up the same
-    // way, so it writes at once.
-    if (PM.playing && PM.engineTransport?.() && Date.now() - deferredSince < AUTOSAVE_PLAYING_DEFER_MS) {
-      APP.saveTimer = window.setTimeout(write, 1000);
-      return;
+    // AUTOSAVE_PLAYING_DEFER_MS of playback: the engine's frames wait on
+    // this thread's turns. Today's app draws on this thread and is not held
+    // up the same way, so it writes at once. The wait counts from the first
+    // time the write found playback, not from the edit: a write whose
+    // debounce ended during playback (it waits as long as the last write
+    // took) still waits.
+    if (PM.playing && PM.engineTransport?.()) {
+      deferredSince ??= Date.now();
+      if (Date.now() - deferredSince < AUTOSAVE_PLAYING_DEFER_MS) {
+        APP.saveTimer = window.setTimeout(write, 1000);
+        return;
+      }
     }
     try {
       // A read-only project only tracks whether it differs from its file.

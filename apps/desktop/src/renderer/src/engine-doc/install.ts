@@ -622,11 +622,19 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const reviveTimer = setInterval(revive, 1000);
   (reviveTimer as any)?.unref?.();
 
-  // The consistency check on idle: at most every 30 s, after writes.
+  // The consistency check on idle: at most every 30 s, after writes. While
+  // the engine plays, the window is never idle and the idle callback runs at
+  // its timeout: the check (hashing the whole document, seconds for a large
+  // project) waits for playback to stop instead of taking the turns the
+  // engine's frames wait on. Saves and exports still check at once.
   let lastCheckedRevision = -1;
   function scheduleIdleCheck() {
     const idle = (globalThis as any).requestIdleCallback as ((cb: () => void, o?: object) => number) | undefined;
     const run = () => {
+      if ((PM as any).playing && (PM as any).engineTransport?.()) {
+        setTimeout(run, 2_000);
+        return;
+      }
       if (state.ready && barrier && barrier.revision !== lastCheckedRevision) {
         state.check('idle');
         lastCheckedRevision = barrier.revision;
