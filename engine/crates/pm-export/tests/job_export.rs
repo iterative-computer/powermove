@@ -567,7 +567,7 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
 }
 
 #[test]
-fn unsupported_projects_and_offline_media_are_routed_before_writing() {
+fn unsupported_projects_route_and_offline_media_plans_before_writing() {
     let dir = scratch("routing");
     let dur = 1.0;
     let (mut doc, media) = generated(dur);
@@ -594,6 +594,10 @@ fn unsupported_projects_and_offline_media_are_routed_before_writing() {
         }
         other => panic!("expected routing, got {:?}", other.err()),
     }
+    // Offline media is not routed (decision OFFLINE-1): an unattended export
+    // draws the missing clip as nothing, like today's exporter, and reports
+    // it. `offline_export_matches_the_same_project_with_missing_layers_hidden`
+    // checks the rendered frames; planning here still writes nothing.
     let (doc, mut media) = generated(dur);
     media.paths.remove("clip");
     let j = job(
@@ -602,24 +606,14 @@ fn unsupported_projects_and_offline_media_are_routed_before_writing() {
         settings(ExportFormat::H264, WireAlpha::None, dur),
         destination.clone(),
     );
-    let mut renderer = Renderer::headless().unwrap();
-    match run_export(
-        &mut renderer,
-        &j,
-        &Unrestricted,
-        &AtomicBool::new(false),
-        &mut no_progress(),
-    ) {
-        Err(JobError::Unsupported(list)) => {
-            assert!(
-                list.iter()
-                    .any(|u| u.contains("offline") || u.contains("missing")),
-                "{list:?}"
-            )
-        }
-        Err(e) => panic!("expected routing, got {e}"),
-        Ok(_) => panic!("expected routing, got a file"),
-    }
+    let plan = plan_export(&j).expect("an offline clip does not route the export");
+    assert_eq!(
+        plan.offline
+            .iter()
+            .map(|clip| clip.asset.as_str())
+            .collect::<Vec<_>>(),
+        vec!["clip"]
+    );
     let (doc, media) = generated(dur);
     let mut s = settings(ExportFormat::H264, WireAlpha::None, dur);
     s.format = ExportFormat::Webm {
