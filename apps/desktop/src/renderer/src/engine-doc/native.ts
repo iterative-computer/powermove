@@ -251,6 +251,8 @@ interface Context {
   first: boolean;
   /** The live layers (as `PM.curComp().layers` reads, proxies in tracking mode). */
   live: any[];
+  /** The raw layers array `layer` indexes (the composition's own `layers`). */
+  list: any[];
 }
 
 interface Indexed { layers: any[]; revision: number; index: Map<any, number>; firstById: Map<string, number>; rebuilt?: boolean }
@@ -289,11 +291,11 @@ export class NativeApi {
   private depth = 0;
   private answeredNatively = false;
   /** Live channel object → interned id (validated on every use). */
-  private props = new WeakMap<object, { layer: object; layerId: unknown; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; shape: number; project: unknown; cur: unknown; wasm: PmWasm; time?: number; number?: number; frame?: ExpressionFrameSlot }>();
+  private props = new WeakMap<object, { layer: object; layerId: unknown; list: any[]; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; shape: number; project: unknown; cur: unknown; wasm: PmWasm; time?: number; number?: number; frame?: ExpressionFrameSlot }>();
   /** A detached property's validated address; its inputs are rechecked by DetachedScopes. */
   private detachedProps = new WeakMap<object, { layer: object; cur: unknown; key: unknown; path: PathPart[]; request: Record<string, unknown> }>();
   /** Live layer → interned transform channels, valid at the current revision and scope. */
-  private channels = new WeakMap<object, { layer: object; layerId: unknown; comp: string; ids: Map<string, number>; revision: number; shape: number; project: unknown; cur: unknown }>();
+  private channels = new WeakMap<object, { layer: object; layerId: unknown; list: any[]; comp: string; ids: Map<string, number>; revision: number; shape: number; project: unknown; cur: unknown }>();
   private refs = new Map<number, number>();
   private expressionFrames = new ExpressionFrames();
   /**
@@ -387,6 +389,17 @@ export class NativeApi {
     again.rebuilt = true;
     const j = again.index.get(raw);
     return j !== undefined && list[j] === raw ? j : undefined;
+  }
+
+  /**
+   * Whether `layer` is still the document's: an element of `list`, and
+   * `list` still some composition's own `layers` (the open one's, or one in
+   * `comps`). False is always safe (the caller asks the slow path).
+   */
+  private holds(list: any[] | undefined, layer: object): boolean {
+    if (!Array.isArray(list) || this.positionOf(list, layer) === undefined) return false;
+    const proj = this.unwrap(this.PM.proj);
+    return proj?.layers === list || this.ownerOf(list) !== null;
   }
 
   /**
@@ -558,7 +571,7 @@ export class NativeApi {
     const idx = this.index(layers);
     let i = idx.index.get(raw);
     if (i !== undefined && layers[i] !== raw) { this.indexed.delete(layers); i = this.index(layers).index.get(raw); }
-    if (i === undefined) return { comp: c.comp, open: c.open, layer: JSON.parse(JSON.stringify(raw)), raw, first: false, live };
+    if (i === undefined) return { comp: c.comp, open: c.open, layer: JSON.parse(JSON.stringify(raw)), raw, first: false, live, list: layers };
     // The mirror must hold this layer at this index (the shadow is exactly
     // what it holds). If not, a structural write bypassed the barrier: repair
     // before answering rather than answer for another layer.
@@ -570,7 +583,7 @@ export class NativeApi {
       if (missed.length) this.onStale?.('context', missed);
     }
     const first = !c.comp.startsWith('@scope:') && typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
-    return { comp: c.comp, open: c.open, layer: i, raw, first, live };
+    return { comp: c.comp, open: c.open, layer: i, raw, first, live, list: layers };
   }
 
   private query<T>(op: string, request: Record<string, unknown>, map?: (v: any) => T): Native<T> {
@@ -849,7 +862,7 @@ export class NativeApi {
    * rootComp: checked on every call, since the scope object can change
    * without the barrier seeing it.
    */
-  private current(entry: { revision: number; shape: number; project: unknown; cur: unknown; comp: string; layer: object; layerId: unknown; path?: PathPart[]; time?: number; number?: number }, raw: any): boolean {
+  private current(entry: { revision: number; shape: number; project: unknown; cur: unknown; comp: string; layer: object; layerId: unknown; list: any[]; path?: PathPart[]; time?: number; number?: number }, raw: any): boolean {
     const barrier = this.barrier();
     if (!barrier) return false;
     barrier.flush();
@@ -862,6 +875,14 @@ export class NativeApi {
       const project = this.unwrap(this.PM.proj);
       if (entry.project !== project || entry.layerId !== (entry.layer as any)?.id
         || entry.path && at(entry.layer, entry.path) !== raw) return false;
+      // The id names the document's layer with this id. Undo, redo, and a
+      // scoped rollback restore a layer by replacing its object with a clone
+      // (the composition's shape, and so `shapeRevision`, unchanged): the
+      // replaced object is no longer the document's, and the legacy code
+      // answers it from its own members. The slow path does the same
+      // (`context` sends it as JSON), so a caller holding it never gets one
+      // layer's channels from two states.
+      if (!this.holds(entry.list, entry.layer)) return false;
       if (entry.shape !== barrier.shapeRevision) {
         // An added, removed, or reordered layer need not discard every ID.
         // Check the open composition's membership and first-ID rule once per
@@ -959,10 +980,11 @@ export class NativeApi {
       const stamp = this.stamp()!;
       let entry = this.channels.get(ctx.raw);
       if (!entry || entry.comp !== ctx.comp || entry.project !== this.unwrap(this.PM.proj)
-        || entry.layerId !== ctx.raw.id || entry.cur !== stamp.cur) { entry = { layer: ctx.raw, layerId: ctx.raw.id, comp: ctx.comp, ids: new Map(), revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur }; this.channels.set(ctx.raw, entry); }
+        || entry.layerId !== ctx.raw.id || entry.cur !== stamp.cur) { entry = { layer: ctx.raw, layerId: ctx.raw.id, list: ctx.list, comp: ctx.comp, ids: new Map(), revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur }; this.channels.set(ctx.raw, entry); }
       entry.revision = stamp.revision;
       entry.shape = this.barrier()!.shapeRevision;
       entry.cur = stamp.cur;
+      entry.list = ctx.list;
       let id = entry.ids.get(key);
       if (id === undefined) {
         id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: 'channel' }, ctx.raw);
@@ -1064,12 +1086,13 @@ export class NativeApi {
         }
         const id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: path }, rawProp);
         if (id < 0) return this.query('evP', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, key, t: T });
-        entry = { layer: ctx.raw, layerId: ctx.raw.id, path, comp: ctx.comp, id, key, revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur, wasm };
+        entry = { layer: ctx.raw, layerId: ctx.raw.id, list: ctx.list, path, comp: ctx.comp, id, key, revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur, wasm };
         this.props.set(rawProp, entry);
       }
       entry!.revision = stamp.revision;
       entry!.shape = this.barrier()!.shapeRevision;
       entry!.cur = stamp.cur;
+      entry!.list = ctx.list;
       const got = this.evById(wasm, entry!.id, T);
       entry!.time = 'value' in got && typeof got.value === 'number' ? T : undefined;
       if ('value' in got && typeof got.value === 'number') entry!.number = got.value;

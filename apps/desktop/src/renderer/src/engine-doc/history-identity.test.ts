@@ -197,4 +197,39 @@ describe.skipIf(!built)('native answers after history replaces layer objects', (
     }
     expect(api.transformRoots(members).every((L: any) => L === PM.L(L.id))).toBe(true);
   });
+
+  it('answers a layer object history replaced from that object, as the legacy evaluator does', async () => {
+    const { PM, api } = await editor();
+    const { ids } = scene(PM);
+    const held = { child: PM.L(ids.Child), free: PM.L(ids.Free) };
+    // Interned before the edit, so the fast path has ids for the held objects.
+    for (const L of Object.values(held)) for (const key of CHANNELS) api.ev(L, key, T);
+    gesture(PM, api, [ids.Child!, ids.Free!], 'Resize selection', (_L, step) => ({ 'scale.x': 100 + step * 3.827 }));
+    expect(PM.hist.undo()).toBe(true);
+    // `held` objects carry the gesture's values and were replaced by the
+    // undo: no longer the document's. Every native answer reads them as the
+    // legacy code does, so one press never mixes two states of a layer.
+    const check = () => {
+      for (const L of Object.values(held)) {
+        expect(L).not.toBe(PM.L(L.id));
+        expect(CHANNELS.map(key => api.ev(L, key, T))).toEqual(CHANNELS.map(key => PM.ev(L, key, T)));
+        expect(CHANNELS.map(key => api.evP(L, L.p[key], T, key))).toEqual(CHANNELS.map(key => PM.evP(L, L.p[key], T, key)));
+        close(api.worldMatrix(L, T), PM.worldMatrix(L, T));
+      }
+      // And the live layers answer from the document.
+      for (const id of [ids.Child!, ids.Free!]) {
+        const L = PM.L(id);
+        expect(CHANNELS.map(key => api.ev(L, key, T))).toEqual(CHANNELS.map(key => PM.ev(L, key, T)));
+        expect(CHANNELS.map(key => api.evP(L, L.p[key], T, key))).toEqual(CHANNELS.map(key => PM.evP(L, L.p[key], T, key)));
+        close(api.worldMatrix(L, T), PM.worldMatrix(L, T));
+      }
+    };
+    expect(PM.ev(held.free, 'scale.x', T)).not.toBe(PM.ev(PM.L(ids.Free), 'scale.x', T));
+    check();
+    // Asked again at the same revision (the fast path's stamp is current now).
+    check();
+    // A later edit elsewhere moves the revision without touching these layers.
+    expect(PM.Edit.apply({ type: 'set_property', target: ids.Parent, path: 'opacity', value: 50 }).ok).toBe(true);
+    check();
+  });
 });
