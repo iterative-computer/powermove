@@ -550,7 +550,7 @@ test.describe('Use New Engine: existing extensions', () => {
       const results: any[] = [];
       for (const colorSpace of ['srgb', 'display-p3']) {
         const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64;
-        const ctx = cv.getContext('2d', { colorSpace } as any)!;
+        const ctx = cv.getContext('2d', { colorSpace } as CanvasRenderingContext2DSettings) as CanvasRenderingContext2D;
         for (let x = 0; x < 256; x++) { ctx.fillStyle = `rgba(${x * 37 % 256},${x * 11 % 256},${x * 19 % 256},${x / 255})`; ctx.fillRect(x, 0, 1, 64); }
         ctx.fillStyle = '#E8202A80'; ctx.beginPath(); ctx.arc(128, 32, 24.5, 0, Math.PI * 2); ctx.fill();
         const surface = { cv, w: 256, h: 64, anchorX: 20, anchorY: 30, key: `readback:${colorSpace}` };
@@ -586,7 +586,7 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
-    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads).toBe(0);
+    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
   });
 
   test('playback with a raster override over a shape whose size animates keeps today\'s cadence', async ({ session }) => {
@@ -595,7 +595,7 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
-    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads).toBe(0);
+    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
   });
 
   test('playback with a raster override over a path whose vertices animate keeps today\'s cadence', async ({ session }) => {
@@ -604,7 +604,7 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
-    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads).toBe(0);
+    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
   });
 
   test('an export of a project with a raster override draws the override, frame by frame', async ({ session }, testInfo) => {

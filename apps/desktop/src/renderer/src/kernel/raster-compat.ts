@@ -120,6 +120,8 @@ export interface RasterCompatStats {
   prepareCpuMs: number;
   prepareCpuMsMax: number;
   slowPreparations: { time: number; ms: number }[];
+  /** Where the most recent synchronous base loads were called from. */
+  syncLoadSites: string[];
 }
 
 /** Content-identical base surfaces kept per revision (today's raster cache
@@ -276,7 +278,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   let baseBytes = 0;
   let pending = 0, generation = 0, readyRevision: number | null = null;
   let serial = 0;
-  const stats: RasterCompatStats = { prepared: 0, syncLoads: 0, asyncLoads: 0, cacheHits: 0, passThroughSkips: 0, asyncMs: 0, asyncMsMax: 0, prepareCpuMs: 0, prepareCpuMsMax: 0, slowPreparations: [] };
+  const stats: RasterCompatStats = { prepared: 0, syncLoads: 0, asyncLoads: 0, cacheHits: 0, passThroughSkips: 0, asyncMs: 0, asyncMsMax: 0, prepareCpuMs: 0, prepareCpuMsMax: 0, slowPreparations: [], syncLoadSites: [] };
   const log = options.log ?? ((message: string) => console.warn(`[raster-compat] ${message}`));
   const readPixels = options.readPixels ?? compositorPixels;
   const readback = createRasterReadback();
@@ -356,6 +358,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
           throw suspended;
         }
         stats.syncLoads++;
+        stats.syncLoadSites.push(String(new Error().stack ?? '').split('\n').slice(2, 9).map(line => line.trim()).join(' < '));
+        if (stats.syncLoadSites.length > 4) stats.syncLoadSites.shift();
         const surface = options.engineRaster(layer, s, t, crop ?? undefined);
         rememberBase(key, layer, surface);
         return surface;
