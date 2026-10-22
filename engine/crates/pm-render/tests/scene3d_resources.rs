@@ -193,6 +193,33 @@ fn render_plan(
 }
 
 #[test]
+fn equivalent_rebuilt_scene_reuses_depth_prepass_but_camera_change_records_again() {
+    let mut planner = Renderer::headless().unwrap();
+    let plan = object_plans(&mut planner, &textured(false), &MapResolver::default())
+        .pop()
+        .unwrap();
+    let mut rebuilt = plan.clone();
+    rebuilt.scene = Arc::new(plan.scene.as_ref().clone());
+    assert!(!Arc::ptr_eq(&plan.scene, &rebuilt.scene));
+
+    let gpu = pm_gpu::Gpu::new("pm-render prepass reuse test").expect("a Metal device");
+    let mut renderer = Scene3dRenderer::default();
+    renderer.begin_frame();
+    let first = render_plan(&gpu, &mut renderer, &plan).unwrap();
+    assert_eq!(renderer.prepass_recordings(), 1);
+    renderer.begin_frame();
+    let second = render_plan(&gpu, &mut renderer, &rebuilt).unwrap();
+    assert_eq!(second, first);
+    assert_eq!(renderer.prepass_recordings(), 1);
+
+    let mut moved = rebuilt;
+    Arc::make_mut(&mut moved.scene).camera.world[12] += 0.25;
+    renderer.begin_frame();
+    let _ = render_plan(&gpu, &mut renderer, &moved).unwrap();
+    assert_eq!(renderer.prepass_recordings(), 2);
+}
+
+#[test]
 fn maps_that_change_after_planning_route_or_drop() {
     let dir = Dir::new("3d-maps-late");
     let path = dir.0.join("tex.png");
