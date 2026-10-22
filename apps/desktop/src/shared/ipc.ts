@@ -315,7 +315,7 @@ export interface MediaProxyRequest {
   name: string;
 }
 export type MediaProxyResult =
-  | { ok: true; token: string; type: 'video/webm' | 'image/png'; size: number }
+  | { ok: true; token: string; type: 'video/webm' | 'image/png'; size: number; originalSequenceHash?: string }
   | { ok: false; error: string };
 export interface MediaProxyReadRequest {
   token: string;

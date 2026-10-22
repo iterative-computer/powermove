@@ -143,7 +143,8 @@ export class MediaProxyService {
     private readonly convert: Convert,
     private readonly convertSequence?: ConvertSequence,
     private readonly convertPreview?: Convert,
-    private readonly convertStill?: ConvertStill
+    private readonly convertStill?: ConvertStill,
+    private readonly registerSequence?: (sources: string[], fps: number) => Promise<string | undefined>
   ) {}
 
   async beginPreview(total: number): Promise<string> {
@@ -211,7 +212,7 @@ export class MediaProxyService {
     }
   }
 
-  async createSequence(sourcePaths: string[], fps: number, onProgress?: (completed: number) => void): Promise<{ token: string; size: number }> {
+  async createSequence(sourcePaths: string[], fps: number, onProgress?: (completed: number) => void): Promise<{ token: string; size: number; originalSequenceHash?: string }> {
     if (!validSequenceFps(fps)) throw new Error('Frame rate must be between 1 and 240 fps');
     if (!Array.isArray(sourcePaths) || sourcePaths.length < 2
       || sourcePaths.some(source => typeof source !== 'string' || source.length > 16_384 || !path.isAbsolute(source))) {
@@ -231,12 +232,13 @@ export class MediaProxyService {
         if (!info.isFile() || info.size <= 0) throw new Error(`Could not read ${frames[index]!.name}`);
         await symlink(source, path.join(directory, `frame-${String(index).padStart(8, '0')}${extension}`));
       }
+      const originalSequenceHash = await this.registerSequence?.(frames.map(frame => frame.source), fps);
       await this.convertSequence(path.join(directory, `frame-%08d${extension}`), fps, frames.length, output, onProgress);
       const converted = await stat(output);
       if (!converted.isFile() || converted.size <= 0) throw new Error('The image sequence was empty');
       const token = randomUUID().replaceAll('-', '');
       this.#entries.set(token, { directory, file: output, size: converted.size });
-      return { token, size: converted.size };
+      return { token, size: converted.size, ...(originalSequenceHash ? { originalSequenceHash } : {}) };
     } catch (error) {
       await rm(directory, { recursive: true, force: true });
       throw error;

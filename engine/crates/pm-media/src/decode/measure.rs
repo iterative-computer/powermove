@@ -48,8 +48,22 @@ pub fn measure_source(path: &Path) -> Result<Option<DecodeMeasurement>> {
 /// higher-priority work there, without holding a media or GPU lock.
 pub fn measure_source_with_pause(
     path: &Path,
+    wait_until_idle: impl FnMut() -> Result<()>,
+) -> Result<Option<DecodeMeasurement>> {
+    measure_source_purpose_with_pause(path, DecodePurpose::Display, wait_until_idle)
+}
+
+/// Measures a requested display representation on the same bounded, fresh
+/// sequential windows as the original probe. Pauses are excluded from cost.
+/// Callers keep these measurements machine-local and off the render thread.
+pub fn measure_source_purpose_with_pause(
+    path: &Path,
+    purpose: DecodePurpose,
     mut wait_until_idle: impl FnMut() -> Result<()>,
 ) -> Result<Option<DecodeMeasurement>> {
+    if !matches!(purpose, DecodePurpose::Display | DecodePurpose::DisplayReduced { .. }) {
+        return Err(MediaError::invalid("display decode measurement requires a display purpose"));
+    }
     wait_until_idle()?;
     let mut head = [0u8; 512];
     let read = {
@@ -73,7 +87,7 @@ pub fn measure_source_with_pause(
         session_window: 1,
         ..ServiceConfig::default()
     });
-    measure_video(&source, &service, &mut wait_until_idle).map(Some)
+    measure_video(&source, &service, purpose, &mut wait_until_idle).map(Some)
 }
 
 fn percentile95(times: &[f64]) -> Option<f64> {
@@ -138,6 +152,7 @@ fn timed_frame(
 fn measure_video(
     source: &Arc<MediaSource>,
     service: &DecodeService,
+    purpose: DecodePurpose,
     wait_until_idle: &mut impl FnMut() -> Result<()>,
 ) -> Result<DecodeMeasurement> {
     let video = source
@@ -146,7 +161,7 @@ fn measure_video(
         .as_ref()
         .ok_or_else(|| MediaError::invalid("no video stream"))?;
     wait_until_idle()?;
-    let mut session = service.session(source, 0, DecodePurpose::Display)?;
+    let mut session = service.session(source, 0, purpose)?;
     let mut sequential = Vec::with_capacity(MAX_FRESH_FRAMES);
     let mut seeks = Vec::with_capacity(2);
     for (warmup, candidates, cap) in windows(source.index.frames.len()) {
@@ -234,7 +249,7 @@ mod tests {
             ..ServiceConfig::default()
         });
         let mut pause_checks = 0;
-        let measured = measure_video(&source, &service, &mut || {
+        let measured = measure_video(&source, &service, DecodePurpose::Display, &mut || {
             pause_checks += 1;
             Ok(())
         })

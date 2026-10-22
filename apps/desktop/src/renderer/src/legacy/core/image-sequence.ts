@@ -4,7 +4,7 @@ import type { ImportProgress } from './import-progress';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { cloudSourcePaths } from './cloud-media';
 
-export const importedSequences = new WeakMap<File, { fps: number; frames: number }>();
+export const importedSequences = new WeakMap<File, { fps: number; frames: number; originalHash?: string }>();
 
 export function chooseSequence(PM: PMRegistry, files: File[], required: boolean, note?: string): Promise<{ files: File[]; fps: number | null } | null> {
   return new Promise(resolve => {
@@ -123,7 +123,7 @@ export async function convertImageSequence(files: File[], fps: number, assertCur
     const frame = sequenceFrame(frames[0]!.name)!;
     const name = frame.prefix.replace(/[-_. ]+$/, '') || 'Image';
     const file = new File(parts, `${name} sequence.webm`, { type: result.type });
-    importedSequences.set(file, { fps, frames: frames.length });
+    importedSequences.set(file, { fps, frames: frames.length, ...(result.originalSequenceHash ? { originalHash: result.originalSequenceHash } : {}) });
     return file;
   } finally { await media.releasePlaybackProxy(result.token).catch(() => undefined); }
 }

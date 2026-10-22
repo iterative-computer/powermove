@@ -2370,8 +2370,10 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "libc",
+ "pm-color",
  "pm-media",
  "pm-protocol",
+ "png",
  "serde",
  "serde_json",
  "tempfile",

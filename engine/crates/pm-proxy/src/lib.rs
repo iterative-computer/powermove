@@ -6,14 +6,19 @@
 
 mod generate;
 mod policy;
+mod sequence;
 mod store;
 
-pub use generate::{GeneratedProxy, GenerationControl, GenerationRequest, PauseReason, generate};
+pub use generate::{
+    GeneratedProxy, GenerationControl, GenerationRequest, PauseReason, generate,
+    generate_with_disk_probe,
+};
 pub use policy::{
     AutomaticInput, DecodeMeasurement, MachineProfile, MediaAvailability, MediaUse, PlaybackMoment,
     Representation, RepresentationChoice, RepresentationIntent, ResolutionIntent,
     choose_representation, probe_machine_profile, source_for,
 };
+pub use sequence::{SequenceFrame, SequenceManifest, SequenceRate};
 pub use store::{ProxyKey, ProxyRecipe, ProxyStore, StoredProxy, disk_guard, free_bytes};
 
 #[derive(Debug, thiserror::Error)]

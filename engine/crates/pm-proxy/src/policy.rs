@@ -123,7 +123,7 @@ pub struct RepresentationChoice {
 }
 
 /// Chooses once at playback start or clip boundaries. A paused Automatic
-/// viewer upgrades in place when the original decodes. No choice waits for
+/// viewer uses the original at every preview resolution. No choice waits for
 /// generation; if Proxy Only is selected before it exists, the source has a
 /// named pending state rather than silently showing an original.
 pub fn choose_representation(input: AutomaticInput) -> RepresentationChoice {
@@ -144,9 +144,27 @@ pub fn choose_representation(input: AutomaticInput) -> RepresentationChoice {
         MediaAvailability::OriginalOfflineProxyAvailable
             | MediaAvailability::OriginalOfflineNoProxy
     );
-    if missing_original {
+    if input.intent == RepresentationIntent::Proxies {
         return RepresentationChoice {
             representation: input.proxy_ready.then_some(Representation::Proxy),
+            offline: if missing_original {
+                if input.proxy_ready {
+                    MediaAvailability::OriginalOfflineProxyAvailable
+                } else {
+                    MediaAvailability::OriginalOfflineNoProxy
+                }
+            } else if input.proxy_ready {
+                MediaAvailability::Online
+            } else {
+                MediaAvailability::ProxyPending
+            },
+            generate_proxy: !input.proxy_ready && !missing_original,
+        };
+    }
+    if missing_original {
+        return RepresentationChoice {
+            representation: (input.moment != PlaybackMoment::Paused && input.proxy_ready)
+                .then_some(Representation::Proxy),
             offline: if input.proxy_ready {
                 MediaAvailability::OriginalOfflineProxyAvailable
             } else {
@@ -155,18 +173,7 @@ pub fn choose_representation(input: AutomaticInput) -> RepresentationChoice {
             generate_proxy: false,
         };
     }
-    if input.intent == RepresentationIntent::Proxies {
-        return RepresentationChoice {
-            representation: input.proxy_ready.then_some(Representation::Proxy),
-            offline: if input.proxy_ready {
-                MediaAvailability::Online
-            } else {
-                MediaAvailability::ProxyPending
-            },
-            generate_proxy: !input.proxy_ready,
-        };
-    }
-    if input.moment == PlaybackMoment::Paused && input.resolution == ResolutionIntent::Automatic {
+    if input.moment == PlaybackMoment::Paused {
         return RepresentationChoice {
             representation: Some(Representation::Original),
             offline: MediaAvailability::Online,
@@ -209,14 +216,12 @@ pub fn choose_representation(input: AutomaticInput) -> RepresentationChoice {
     let reduced_quarter = input.reduced_quarter_available
         && target_scale <= 0.25
         && input.decode.reduced_quarter_p95_ms.is_some_and(fits);
-    let choice = if fits(original_cost) && target_scale > 0.5 {
+    let choice = if fits(original_cost) {
         Representation::Original
     } else if reduced_quarter {
         Representation::ReducedQuarter
     } else if reduced_half {
         Representation::ReducedHalf
-    } else if fits(original_cost) {
-        Representation::Original
     } else if input.proxy_ready && input.decode.proxy_p95_ms.is_some_and(fits) {
         Representation::Proxy
     } else {

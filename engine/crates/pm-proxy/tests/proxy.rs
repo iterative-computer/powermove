@@ -134,6 +134,14 @@ fn policy_respects_boundaries_offline_originals_and_export_safety() {
         choose_representation(input).representation,
         Some(Representation::ReducedQuarter)
     );
+    // A measured original that fits is the exact source even on a small
+    // canvas; the decoder's reduced picture has different texels.
+    input.decode.original_p95_ms = 5.0;
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::Original)
+    );
+    input.decode.original_p95_ms = 60.0;
     input.reduced_half_available = false;
     input.reduced_quarter_available = false;
     input.moment = PlaybackMoment::Continuing;
@@ -147,9 +155,23 @@ fn policy_respects_boundaries_offline_originals_and_export_safety() {
         choose_representation(input).representation,
         Some(Representation::Original)
     );
+    input.resolution = ResolutionIntent::Half;
+    input.current = Representation::ReducedQuarter;
+    assert_eq!(
+        choose_representation(input).representation,
+        Some(Representation::Original)
+    );
     input.intent = RepresentationIntent::Originals;
     input.availability = MediaAvailability::OriginalOfflineProxyAvailable;
     assert_eq!(choose_representation(input).representation, None);
+    input.intent = RepresentationIntent::Automatic;
+    assert_eq!(choose_representation(input).representation, None);
+    assert_eq!(choose_representation(input).offline, MediaAvailability::OriginalOfflineProxyAvailable);
+    input.moment = PlaybackMoment::Start;
+    assert_eq!(choose_representation(input).representation, Some(Representation::Proxy));
+    input.moment = PlaybackMoment::Paused;
+    input.intent = RepresentationIntent::Proxies;
+    assert_eq!(choose_representation(input).representation, Some(Representation::Proxy));
     assert!(source_for(MediaUse::Export, Representation::Proxy, false).is_err());
     assert_eq!(
         source_for(MediaUse::Analysis, Representation::Proxy, true).unwrap(),

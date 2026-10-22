@@ -156,6 +156,15 @@ impl ProxyStore {
     /// Returns only a complete, verified object. A crash between writing
     /// media and metadata is a miss; changed/corrupt bytes are never played.
     pub fn lookup(&self, source_hash: &str, recipe: &ProxyRecipe) -> Result<Option<StoredProxy>> {
+        self.lookup_cancel(source_hash, recipe, &|| false)
+    }
+
+    fn lookup_cancel(
+        &self,
+        source_hash: &str,
+        recipe: &ProxyRecipe,
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<Option<StoredProxy>> {
         let key = ProxyKey::new(source_hash, recipe)?;
         let (media, info) = self.paths(&key);
         let bytes = match fs::read(&info) {
@@ -173,7 +182,9 @@ impl ProxyStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        if file.metadata()?.len() != record.byte_size || hash_reader(&mut file)? != record.blake3 {
+        if file.metadata()?.len() != record.byte_size
+            || hash_reader_cancel(&mut file, cancelled)? != record.blake3
+        {
             return Err(ProxyError::CorruptStore(
                 "generated media checksum mismatch".into(),
             ));
@@ -196,6 +207,19 @@ impl ProxyStore {
         format: Option<ProxyFormat>,
         size: Option<ProxySize>,
     ) -> Result<Option<StoredProxy>> {
+        self.find_for_source_cancel(source_hash, format, size, || false)
+    }
+
+    /// As `find_for_source`, but interruption is checked during directory
+    /// scanning and after each hash chunk. Viewer-owned workers use this to
+    /// stop promptly when their view closes.
+    pub fn find_for_source_cancel(
+        &self,
+        source_hash: &str,
+        format: Option<ProxyFormat>,
+        size: Option<ProxySize>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Option<StoredProxy>> {
         if source_hash.len() != 64 || !source_hash.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err(ProxyError::InvalidMedia(
                 "source hash must be BLAKE3 hex".into(),
@@ -203,11 +227,17 @@ impl ProxyStore {
         }
         let mut matches = Vec::new();
         for shard in fs::read_dir(&self.root)? {
+            if cancelled() {
+                return Err(ProxyError::Cancelled);
+            }
             let shard = shard?;
             if !shard.file_type()?.is_dir() {
                 continue;
             }
             for entry in fs::read_dir(shard.path())? {
+                if cancelled() {
+                    return Err(ProxyError::Cancelled);
+                }
                 let entry = entry?;
                 if entry.path().extension().is_none_or(|ext| ext != "json") {
                     continue;
@@ -231,8 +261,13 @@ impl ProxyStore {
         }
         matches.sort_by(|a, b| b.0.cmp(&a.0));
         for (_, recipe) in matches {
-            if let Ok(Some(stored)) = self.lookup(source_hash, &recipe) {
-                return Ok(Some(stored));
+            if cancelled() {
+                return Err(ProxyError::Cancelled);
+            }
+            match self.lookup_cancel(source_hash, &recipe, &cancelled) {
+                Ok(Some(stored)) => return Ok(Some(stored)),
+                Err(ProxyError::Cancelled) => return Err(ProxyError::Cancelled),
+                _ => {}
             }
         }
         Ok(None)
@@ -293,9 +328,42 @@ impl ProxyStore {
 }
 
 pub(crate) fn hash_reader(reader: &mut impl Read) -> Result<String> {
+    hash_reader_cancel(reader, &|| false)
+}
+
+fn hash_reader_cancel(reader: &mut impl Read, cancelled: &impl Fn() -> bool) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
-    std::io::copy(reader, &mut hasher)?;
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        if cancelled() {
+            return Err(ProxyError::Cancelled);
+        }
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn checksum_can_stop_between_chunks() {
+        let bytes = vec![7_u8; 3 * 1024 * 1024];
+        let mut input = std::io::Cursor::new(bytes);
+        let checks = Cell::new(0);
+        let result = hash_reader_cancel(&mut input, &|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        });
+        assert!(matches!(result, Err(ProxyError::Cancelled)));
+        assert!(input.position() < 3 * 1024 * 1024);
+    }
 }
 
 /// (available, capacity) on the volume containing `path`.

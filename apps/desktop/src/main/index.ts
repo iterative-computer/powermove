@@ -69,6 +69,7 @@ import { cloudFileState } from '@powermove/macos-haptics';
 import { registerConfirmIpc } from './native-confirm';
 import { registerClipboardIpc } from './clipboard';
 import { userInput } from './user-input';
+import { OriginalSequenceStore } from './original-sequences';
 import { MediaProxyService, playbackConverter, previewConverter, imageSequenceConverter, stillImageConverter, registerMediaProxyIpc } from './media-proxy';
 import { registerNativeEditIpc } from './native-edit';
 import { registerMediaPasteIpc } from './media-paste';
@@ -897,7 +898,9 @@ if (!hasSingleInstanceLock) {
     const ffmpegTools = resolveFfmpeg({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() });
     if (!app.isPackaged && !existsSync(ffmpegTools.ffmpeg)) console.warn(`[ffmpeg] ${ffmpegMissingMessage(ffmpegTools)}`);
     const proxyEncoder = ffmpegTools.ffmpeg;
-    const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(proxyEncoder), imageSequenceConverter(proxyEncoder), previewConverter(proxyEncoder), stillImageConverter(proxyEncoder));
+    let originalSequences: OriginalSequenceStore | undefined;
+    const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(proxyEncoder), imageSequenceConverter(proxyEncoder), previewConverter(proxyEncoder), stillImageConverter(proxyEncoder),
+      async (sources, fps) => originalSequences?.register(sources, fps));
     registerAppProtocol();
     installPermissionHandlers(session.defaultSession, isAppMainFrame);
 
@@ -956,13 +959,16 @@ if (!hasSingleInstanceLock) {
         ? readProjectRangeFor(projects, sender, token, offset, length)
         : Promise.reject(new Error('Project files are unavailable.'))
     });
+    if (useNewEngine) originalSequences = new OriginalSequenceStore(path.join(app.getPath('userData'), 'engine', 'Original Sequences'), file => mediaStore.service.hashGeneratedFile(file));
     if (isBackgroundTest) (globalThis as { __powermoveMediaStore?: unknown }).__powermoveMediaStore = mediaStore.service;
     app.once('will-quit', () => { void mediaStore.dispose(); });
     const nativeEngine = installNativeEngine({
       enabled: useNewEngine,
       automaticOutputDirectory: agentExportDirectory,
       resolveAsset: (asset, context) => mediaStore.service.resolveAsset(asset, context),
-      resolveProxySource: (asset, scope) => mediaStore.service.resolveForProject(scope.project, asset, scope.owner),
+      resolveProxySource: (asset, scope) => scope.sequenceHash
+        ? originalSequences?.resolve(scope.sequenceHash) ?? Promise.resolve(null)
+        : mediaStore.service.resolveForProject(scope.project, asset, scope.owner),
       proxyDraftScope: (session, asset) => mediaStore.service.jobSource(session, asset),
       hashGeneratedFile: (file) => mediaStore.service.hashGeneratedFile(file),
       snapshotMedia: (project) => mediaStore.service.snapshotProject(project),
@@ -1120,7 +1126,7 @@ if (!hasSingleInstanceLock) {
     });
     registerMediaPathIpc(ipcMain, mediaPaths, ctx);
     app.once('will-quit', () => { void mediaPaths.dispose(); });
-    registerRenderEncoder(ipcMain,{...ctx,ffmpeg:proxyEncoder});
+    registerRenderEncoder(ipcMain,{...ctx,ffmpeg:proxyEncoder,onActivity:(token,active)=>nativeEngine.engine?.legacyExportActivity(token,active)});
     /* ── transcription: models download on request into userData; inference
        runs in a utility process so neither main nor a window ever blocks. ── */
     const transcription = installTranscription({

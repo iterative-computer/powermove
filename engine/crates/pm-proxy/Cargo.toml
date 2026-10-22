@@ -10,9 +10,11 @@ publish.workspace = true
 [dependencies]
 pm-protocol = { path = "../pm-protocol", default-features = false }
 pm-media = { path = "../pm-media" }
+pm-color = { path = "../pm-color" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 blake3 = "1.8"
 tempfile = "3"
 libc = "0.2"
+png = "0.18"

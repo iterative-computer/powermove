@@ -48,8 +48,20 @@ pub struct GeneratedProxy {
 /// before and after encoding so a linked file changed underfoot cannot
 /// poison a content-addressed entry.
 pub fn generate(request: GenerationRequest<'_>) -> Result<GeneratedProxy> {
+    generate_with_disk_probe(request, &free_bytes)
+}
+
+/// Uses the host's available/capacity measurement (for example a volume
+/// quota). The same guard is enforced before allocation and while encoding.
+pub fn generate_with_disk_probe(
+    request: GenerationRequest<'_>,
+    disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>,
+) -> Result<GeneratedProxy> {
     if request.control.cancel.load(Ordering::Relaxed) {
         return Err(ProxyError::Cancelled);
+    }
+    if let Some(manifest) = crate::sequence::read_manifest(request.source)? {
+        return crate::sequence::generate_sequence(request, disk_space, manifest);
     }
     let input = probe(request.ffprobe, request.source)?;
     let native_source = pm_media::probe::probe(request.source)
@@ -86,7 +98,7 @@ pub fn generate(request: GenerationRequest<'_>) -> Result<GeneratedProxy> {
         Err(e) => return Err(e),
     }
     let mut low_disk_reported = false;
-    while !disk_guard_pair(request.store.root())? {
+    while !disk_guard_pair(request.store.root(), disk_space)? {
         if request.control.cancel.load(Ordering::Relaxed) {
             return Err(ProxyError::Cancelled);
         }
@@ -100,7 +112,7 @@ pub fn generate(request: GenerationRequest<'_>) -> Result<GeneratedProxy> {
         (request.control.on_pause)(None);
     }
     let temp = NamedTempFile::new_in(request.store.root())?;
-    transcode(&request, &input, &recipe, temp.path())?;
+    transcode(&request, &input, &recipe, temp.path(), disk_space)?;
     if request.control.cancel.load(Ordering::Relaxed) {
         return Err(ProxyError::Cancelled);
     }
@@ -266,6 +278,7 @@ fn transcode(
     input: &Value,
     recipe: &ProxyRecipe,
     destination: &Path,
+    disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>,
 ) -> Result<()> {
     let source_video = video(input)?;
     let mut cmd = Command::new(request.ffmpeg);
@@ -418,7 +431,7 @@ fn transcode(
                 .collect::<String>();
             return Err(ProxyError::Codec(format!("{status}: {tail}")));
         }
-        let disk_low = !disk_guard_pair(request.store.root())?;
+        let disk_low = !disk_guard_pair(request.store.root(), disk_space)?;
         let reason = if disk_low {
             Some(PauseReason::LowDisk)
         } else if (request.control.pause)() {
@@ -442,8 +455,8 @@ fn transcode(
     }
 }
 
-fn disk_guard_pair(root: &Path) -> Result<bool> {
-    let (free, capacity) = free_bytes(root)?;
+fn disk_guard_pair(root: &Path, disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>) -> Result<bool> {
+    let (free, capacity) = disk_space(root)?;
     Ok(disk_guard(free, capacity))
 }
 
