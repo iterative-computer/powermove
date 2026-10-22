@@ -481,3 +481,44 @@ used it, and copies run results by index into its own arrays. Tests: in-order
 runs `[4, 8, 16, 32, 60]` for 120 channels, a 10-of-100-layer sliding window
 evaluating at most 1.25x the reads, deleted layers no longer evaluated, and
 motion-blur sampling at most 2x.
+
+
+## Large-document synchronization (2026-10-21)
+
+Built-in media restoration announces runtime cache changes through
+`notifyDocument(PM, event, paths)`. An empty path list announces no document
+write; actual poster/format/relink metadata uses exact asset paths. The bus
+consumes this declaration before calling listeners, so a customized listener's
+nested event or `touch()` still gets the structural safety net. Unknown extension
+writes retain their existing raw object identities and structural diff behavior;
+production never enables the development Proxy to gain speed.
+
+Local consistency checks compare the live JSON form to the shadow, including
+retained mutable aliases and custom non-enumerable `toJSON`. A missed write still
+fails, records its paths, and forces a full resync. When they agree, independently
+implemented JS and Rust integrity digests compare the shadow and pm-wasm mirror:
+containers above depth eight hash their kind, keys/order, and child digests; deeper
+values and scalar leaves hash `v` followed by their canonical JSON. Array and
+object branch encodings are canonical JSON `['a', hashes]` and
+`['o', [[key, hash], ...]]`. These digests are local, not the RFC 05 wire hash.
+
+The JS cache is weak and invalidated on every operation's ancestor path, in
+operation order (a reorder followed by a leaf patch must invalidate the moved
+object). The Rust cache uses node revisions plus weak container identity, keeps
+no obsolete trees alive, and caps its path entries at 16,384. Unchanged subtrees
+are neither serialized nor hashed again. The live comparison still walks mutable
+content: arbitrary old extensions may mutate a held raw reference without a
+writer announcement. Removing that check would weaken the production integrity
+contract. Canonical wire SHA-256, snapshot JSON, history, and saved bytes are
+unchanged.
+
+The barrier keeps a reconnect checkpoint and at most 128 batches / 8 MiB of
+canonical patch bodies after it. A load discards the suffix. `resume()` provides
+the checkpoint and a contiguous copy of the suffix without serializing a whole
+document; a failed checkpoint probe takes a fresh `snapshot()` instead. Engine
+retention and expiry are described in `host-processes.md`.
+
+Regression coverage: `engine-doc/large-document.test.ts`, the session replay test
+in `engine-connection/engine-connection.test.ts`, and the Rust engine/document
+tests. Private production measurements remain outside Git and are reported by
+the lane report, without private project or extension identifiers.

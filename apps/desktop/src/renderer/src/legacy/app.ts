@@ -22,7 +22,7 @@ import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requiredReaderVersion } from '../../../shared/reader-version';
-import { touchedDocument, writeDocument } from '../engine-doc/write';
+import { notifyDocument, touchedDocument, writeDocument } from '../engine-doc/write';
 import { documentPending, waitForDocumentReady } from '../engine-doc/readiness';
 import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../../shared/engine-stamp';
 
@@ -483,14 +483,14 @@ async function restoreProjectAssets(project: any, warn: any = true) {
      panel shows loading, not offline: only a finished restore can say a
      file is missing. */
   PM.assetsRestoring = (PM.assetsRestoring || 0) + 1;
-  PM.bus.emit('assets');
+  notifyDocument(PM, 'assets');
   let result: any;
   const pass = Promise.resolve().then(() => PM.assets.restoreProject(project));
   assetRestores.add(pass);
   try { result = await pass; }
-  finally { assetRestores.delete(pass); PM.assetsRestoring = Math.max(0, (PM.assetsRestoring || 1) - 1); PM.bus.emit('assets'); }
+  finally { assetRestores.delete(pass); PM.assetsRestoring = Math.max(0, (PM.assetsRestoring || 1) - 1); notifyDocument(PM, 'assets'); }
   if (result.stale || PM.proj !== project) return result;
-  PM.bus.emit('assets');
+  notifyDocument(PM, 'assets');
   inspectorService(PM)?.refresh();
   PM.invalidate('all');
   if (warn && result.missing.length) {

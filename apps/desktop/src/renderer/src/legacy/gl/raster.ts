@@ -29,7 +29,7 @@ import { parseSvg } from '../core/svg-import';
 import { inspectorService, viewerService } from '../core/services';
 import { capturePoster } from '../core/poster';
 import { bridge as hostBridge } from '../../kernel/bridge';
-import { writeDocument } from '../../engine-doc/write';
+import { notifyDocument, writeDocument } from '../../engine-doc/write';
 
 const posterUrls = new Map<string, string>();
 
@@ -1118,7 +1118,7 @@ async function recoverSourceAsset(meta: any, file: File, current: () => boolean)
   Object.assign(imported.prepared, meta);
   PM.assets.map.set(meta.id, imported.prepared);
   PM.assets.errors.delete(meta.id);
-  PM.touch();
+  PM.touch([['assets', meta.id]]);
   checkpointAssetMetadata(PM.proj);
   PM.Audio?.rebalanceCache?.();
 }
@@ -1328,7 +1328,7 @@ PM.assets = {
     const restored: any[] = [], missing: any[] = [];
     const loading = new Set(metas.map(meta => String(meta.id)));
     PM.assets.loading = loading;
-    PM.bus?.emit?.('assets');
+    notifyDocument(PM, 'assets');
     const results = await PM.MediaImport.mapBounded(metas, 3, async (meta: any) => {
       const current = () => epoch === assetEpoch && PM.proj === project && project.assets?.[meta.id] === meta;
       if (!current()) return { stale: true };
@@ -1382,7 +1382,7 @@ PM.assets = {
       finally {
         loading.delete(String(meta.id));
         if (epoch === assetEpoch && PM.proj === project) {
-          PM.bus?.emit?.('assets');
+          notifyDocument(PM, 'assets');
           PM.invalidate?.('render');
         }
       }
@@ -1399,17 +1399,19 @@ PM.assets = {
       });
       return { restored: [], missing: [], stale: true };
     }
+    const metadataPaths: any[][] = [];
     let repairedPosterMetadata = false;
     results.forEach((result: any) => {
       if (!result.posterBlob || !result.meta?.id || project.assets?.[result.meta.id] !== result.meta) return;
       setPoster(result.meta.id, result.posterBlob);
       if (result.meta.poster !== true) {
         result.meta.poster = true;
+        metadataPaths.push(['assets', result.meta.id, 'poster']);
         repairedPosterMetadata = true;
       }
     });
     if (repairedPosterMetadata) {
-      PM.touch();
+      PM.touch(metadataPaths);
       checkpointAssetMetadata(project);
     }
     let hydratedFormat = false;
@@ -1418,10 +1420,10 @@ PM.assets = {
          predate the explicit vector marker. Hydrate that marker in place so
          the editor UI and subsequent web exports also identify the asset. */
       const meta: any = project.assets?.[a.id];
-      if (a.format && meta && meta.format !== a.format) { meta.format = a.format; hydratedFormat = true; }
+      if (a.format && meta && meta.format !== a.format) { meta.format = a.format; hydratedFormat = true; metadataPaths.push(['assets', a.id, 'format']); }
     });
     /* A document write like any other: the write barrier must hear of it. */
-    if (hydratedFormat) PM.touch?.();
+    if (hydratedFormat) PM.touch?.(metadataPaths);
     const backfill = results.filter((result: any) => result.asset && !result.posterBlob && !result.kept);
     if (backfill.length) setTimeout(() => {
       void (async () => {
@@ -1449,9 +1451,9 @@ PM.assets = {
           applied++;
         });
         if (applied) {
-          PM.touch();
+          PM.touch(available.map(({ id }: any) => ['assets', id, 'poster']));
           checkpointAssetMetadata(project);
-          PM.bus?.emit?.('assets');
+          notifyDocument(PM, 'assets');
         }
       })();
     }, 0);

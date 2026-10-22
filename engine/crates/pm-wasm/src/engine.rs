@@ -237,6 +237,7 @@ pub struct Stats {
 }
 
 pub struct Engine {
+    consistency: pm_model::consistency::ConsistencyHash,
     doc: Document,
     ev: Evaluator,
     // A bounded resident scope cache. Each entry has its own evaluator so an
@@ -392,6 +393,7 @@ impl Engine {
     pub fn new() -> Engine {
         let labels = Arc::new(Labels::default());
         Engine {
+            consistency: Default::default(),
             doc: Document::new(None, 0),
             ev: evaluator(&labels),
             detached: HashMap::new(),
@@ -419,6 +421,7 @@ impl Engine {
     /// any value: a resync starts a new history (the evaluator notices a
     /// lower revision and drops its caches).
     pub fn resync(&mut self, json: &[u8], revision: u64) -> Result<(), String> {
+        self.consistency.clear();
         // Parsed straight into the revisioned tree: wasm memory never shrinks,
         // so an intermediate `Value` of a large document stays as a peak.
         let root = if json.is_empty() {
@@ -458,8 +461,12 @@ impl Engine {
         Ok(ops.len())
     }
 
-    /// The canonical hash (contract 5, "Canonical hash"), or `None` for an
-    /// undefined document.
+    /// Incremental local integrity digest; the canonical wire hash is separate.
+    pub fn consistency_hash(&mut self) -> String {
+        self.consistency.digest(self.doc.root())
+    }
+
+    /// The canonical hash (contract 5), or `None` for an undefined document.
     pub fn hash(&self) -> Option<String> {
         self.doc.canonical_hash()
     }

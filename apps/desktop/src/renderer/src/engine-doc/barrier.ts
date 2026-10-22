@@ -25,9 +25,10 @@
  */
 import type { PathPart } from '../../../shared/patch';
 import { applyOps, type PatchOp } from '../../../shared/patch-ids';
-import { diffJsonOps as diffOps } from './json-diff';
+import { diffJsonOps as diffOps, sameJson } from './json-diff';
+import { ConsistencyHash } from './consistency-hash';
 import { encodePatchOps } from '../../../shared/patch-binary';
-import { canonicalHash, canonicalProject, canonicalStringify, jsonClone } from '../../../shared/canonical-json';
+import { canonicalProject, canonicalStringify, jsonClone } from '../../../shared/canonical-json';
 import { canonicalPath } from '../legacy/core/compositions';
 import { APPLY, type PmWasm } from './wasm';
 
@@ -55,7 +56,7 @@ export interface ConsistencyResult {
   ok: boolean;
   reason: string;
   revision: number;
-  /** The live document's canonical hash and the mirror's. */
+  /** The local integrity digests (wire snapshots keep their canonical hash). */
   live: string;
   mirror: string;
   /** Paths where the live document and the shadow differed (missed writes). */
@@ -182,6 +183,10 @@ export class DocumentBarrier {
   shadow: any = undefined;
   private dirty = new Map<string, PathPart[]>();
   private structural = false;
+  private integrity = new ConsistencyHash();
+  private checkpoint: { revision: number; hash: string } | null = null;
+  private journal: PatchBatch[] = [];
+  private journalBytes = 0;
   private resyncPending = false;
   private origin: IncrementalOrigin = 'metadata';
   private subscribers = new Set<(batch: PatchBatch) => void>();
@@ -277,6 +282,7 @@ export class DocumentBarrier {
 
   /** Replaces the mirror with the live document. */
   resync(): void {
+    this.checkpoint = null; this.journal = []; this.journalBytes = 0;
     const canonical = canonicalProject(this.project());
     const json = JSON.stringify(canonical);
     this.revision += 1;
@@ -376,7 +382,10 @@ export class DocumentBarrier {
     let body: Uint8Array;
     try {
       body = encodePatchOps(ops);
-      this.shadow = applyOps(this.shadow, ops);
+      for (const op of ops) {
+        this.integrity.invalidate(this.shadow, [op]);
+        this.shadow = applyOps(this.shadow, [op]);
+      }
     } catch (error) {
       // A value the format cannot carry (a lone surrogate in a key is fine;
       // a cycle is not) or a shadow that disagrees with its own ops: resync.
@@ -402,6 +411,12 @@ export class DocumentBarrier {
   }
 
   private emit(batch: PatchBatch): void {
+    if (batch.origin !== 'load' && this.checkpoint) {
+      this.journalBytes += batch.body.length;
+      if (this.journalBytes > 8 * 1024 * 1024 || this.journal.length >= 128) {
+        this.checkpoint = null; this.journal = []; this.journalBytes = 0;
+      } else this.journal.push(batch);
+    }
     for (const fn of this.subscribers) {
       try { fn(batch); } catch (error) { console.error('[engine-doc] patch subscriber failed', error); }
     }
@@ -423,7 +438,7 @@ export class DocumentBarrier {
 
   /**
    * The production consistency check (section 6, item 7): flushes, compares
-   * the canonical hash of the live document with pm-wasm's at this revision,
+   * local integrity digests of the live document and pm-wasm at this revision,
    * and on a mismatch resyncs and reports. Also lists writes the barrier
    * missed (paths where the live document differs from what was sent).
    */
@@ -432,9 +447,13 @@ export class DocumentBarrier {
     this.stats.checks += 1;
     this.flush();
     const live = canonicalProject(this.project());
-    const liveHash = live === undefined ? '' : canonicalHash(live);
-    const mirror = this.wasm.hash();
-    const ok = liveHash === mirror;
+    // Equality is checked independently against mutable live aliases. Hash
+    // only changed shadow subtrees; pm-wasm independently hashes its tree
+    // using node revisions and weak shared-container identities.
+    const equal = sameJson(this.shadow, live);
+    const liveHash = equal ? this.integrity.digest(this.shadow) : (live === undefined ? '' : new ConsistencyHash().digest(jsonClone(live)));
+    const mirror = this.wasm.consistencyHash();
+    const ok = equal && liveHash === mirror;
     // Only on a mismatch: where the live document left the shadow (values JSON
     // cannot carry, such as NaN, differ from their stored form every time).
     const missed = ok ? [] : diffOps(this.shadow, live).map(op => op.path.map(String).join('.'));
@@ -460,7 +479,20 @@ export class DocumentBarrier {
     // comes out as bytes, outside the JavaScript heap, for a large document
     // the difference between opening and running out of memory.
     const bytes = this.wasm.toJsonBytes();
-    return { revision: this.revision, encoding: 'canonicalJsonV1', bytes, get json() { return new TextDecoder().decode(bytes); }, hash: this.wasm.hash() };
+    const hash = this.wasm.hash();
+    this.checkpoint = { revision: this.revision, hash }; this.journal = []; this.journalBytes = 0;
+    return { revision: this.revision, encoding: 'canonicalJsonV1', bytes, get json() { return new TextDecoder().decode(bytes); }, hash };
+  }
+
+  /** A checked base and the bounded patch suffix for a short reconnect.
+   * No JSON serialization or staging is needed when the engine kept it. */
+  resume(): { revision: number; hash: string; batches: PatchBatch[] } {
+    this.flush();
+    if (!this.checkpoint) {
+      this.checkpoint = { revision: this.revision, hash: this.wasm.hash() };
+      this.journal = []; this.journalBytes = 0;
+    }
+    return { ...this.checkpoint, batches: [...this.journal] };
   }
 
   /** Whether the shadow equals the live document (the auditor's comparison). */

@@ -85,6 +85,8 @@ export interface DocApi {
   /** Records a write to `object`, wherever it is in the document (its path
    *  is searched for; an object outside the document is not a document write). */
   wroteObject(object: unknown): void;
+  /** Built-in notification with exact paths (empty for runtime-only changes). */
+  notify(event: string, paths: readonly PathPart[][]): void;
   /** Flushes pending writes into the mirror now. */
   flush(): void;
 }
@@ -132,6 +134,7 @@ export interface EngineDoc {
   flushBeforeListeners(wanted: () => boolean): () => void;
   /** The flushed canonical document and its revision and hash (null until ready). */
   snapshot(): ReturnType<DocumentBarrier['snapshot']> | null;
+  resume(): ReturnType<DocumentBarrier['resume']> | null;
   stats(): Record<string, unknown>;
   summary(): void;
   /** Named failures so far (strict mode), newest last. */
@@ -160,17 +163,18 @@ const noopDoc: DocApi = {
   touched: () => {},
   track: () => {},
   wroteObject: () => {},
+  notify: () => {},
   flush: () => {},
 };
 
 export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {}): EngineDoc {
   const mode = options.mode ?? safeMode();
   if (!mode.evaluator) {
-    PM.doc = noopDoc;
+    PM.doc = { ...noopDoc, notify: (event: string) => PM.bus?.emit?.(event) };
     const off: EngineDoc = {
       mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false), strict: false, settled: () => Promise.resolve(false),
-      check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
+      check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, resume: () => null, stats: () => ({ enabled: false }), summary: () => {},
       failures: () => [], showFailure: () => {}, retry: () => Promise.resolve(false), onReady: () => () => {}, warmFonts: () => Promise.resolve(),
     };
     PM.EngineDoc = off;
@@ -263,6 +267,16 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       const path = findPath(current, unwrap(object), 16);
       if (path) barrier.touched([path]);
     },
+    notify(event, paths) {
+      record(paths);
+      // Consume the exemption before listeners run: an extension's touch()
+      // or nested announcement must still be observed as an unknown write.
+      const bus = PM.bus;
+      if (!bus) return;
+      const previous = bus.__engineDocKnownEvent;
+      bus.__engineDocKnownEvent = event;
+      try { bus.emit(event); } finally { bus.__engineDocKnownEvent = previous; }
+    },
     flush: () => barrier?.flush(),
   };
   PM.doc = doc;
@@ -326,8 +340,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     if (!bus.emit.__engineDoc) {
       const emit = bus.emit;
       const wrapped = function (this: unknown, event: unknown, ...args: unknown[]) {
+        const known = bus.__engineDocKnownEvent === event;
+        bus.__engineDocKnownEvent = undefined;
         if (announcing.has(event as string)) {
-          bus.__engineDocAnnounce?.();
+          if (!known) bus.__engineDocAnnounce?.();
           bus.__engineDocEager?.();
         }
         return emit.call(this ?? bus, event, ...args);
@@ -475,6 +491,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     onPending(fn) { pendingListeners.add(fn); return () => { pendingListeners.delete(fn); }; },
     flushBeforeListeners(wanted) { eager.add(wanted); return () => { eager.delete(wanted); }; },
     snapshot() { return state.ready && barrier ? barrier.snapshot() : null; },
+    resume() { return state.ready && barrier ? barrier.resume() : null; },
     stats() {
       return {
         mode: mode.name, ready: state.ready,

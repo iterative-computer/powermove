@@ -46,9 +46,9 @@
 //! documents"). A tree that is never cloned (pm-wasm) never copies.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use crate::hash::{canonical_digest, canonical_hash};
+use crate::hash::canonical_digest;
 use crate::json::write::{JsonTree, View};
 use crate::json::{JsString, Map, ObjectMap, Value};
 use crate::ops::{self, Op};
@@ -563,10 +563,17 @@ pub struct ApplyOutcome {
 
 /// The engine's mirror of the document: an optional root (an `undefined`
 /// document is `None`) and its revision.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct Document {
     root: Option<Node>,
     revision: u64,
+    digest: OnceLock<Option<[u8; 32]>>,
+}
+
+impl PartialEq for Document {
+    fn eq(&self, other: &Self) -> bool {
+        self.revision == other.revision && self.root == other.root
+    }
 }
 
 impl Document {
@@ -575,13 +582,27 @@ impl Document {
         Document {
             root: root.map(|v| Node::from_value(v, revision)),
             revision,
+            digest: OnceLock::new(),
         }
     }
 
     /// A document at revision `revision` holding an existing tree (shared
     /// with wherever it came from until either changes it).
     pub fn from_root(root: Option<Node>, revision: u64) -> Document {
-        Document { root, revision }
+        Document {
+            root,
+            revision,
+            digest: OnceLock::new(),
+        }
+    }
+
+    /// The same checked content at a later receiver revision. Shared nodes
+    /// retain their original stamps and the canonical digest remains valid.
+    pub fn shared_at_revision(&self, revision: u64) -> Document {
+        assert!(revision >= self.revision);
+        let mut document = self.clone();
+        document.revision = revision;
+        document
     }
 
     pub fn revision(&self) -> u64 {
@@ -626,6 +647,8 @@ impl Document {
             self.revision
         );
         self.revision = revision;
+        // A failed batch may have applied an earlier operation.
+        self.digest.take();
         let mut changed = false;
         for (index, patch) in patches.iter().enumerate() {
             changed |= patch::apply_one(&mut self.root, patch, index, revision)?;
@@ -652,6 +675,8 @@ impl Document {
             self.revision
         );
         self.revision = revision;
+        // A failed batch may have applied an earlier operation.
+        self.digest.take();
         let mut changed = false;
         for (index, op) in ops.iter().enumerate() {
             changed |= ops::apply_op(&mut self.root, op, index, revision)?;
@@ -672,6 +697,7 @@ impl Document {
         );
         let mut document = base.clone();
         document.revision = revision;
+        document.digest.take();
         match (document.root.as_mut(), root) {
             (Some(node), Some(value)) => {
                 node.reconcile(value, revision);
@@ -691,6 +717,7 @@ impl Document {
         );
         let mut document = base.clone();
         document.revision = revision;
+        document.digest.take();
         match (document.root.as_mut(), root) {
             (Some(node), Some(new)) => {
                 node.reconcile_node(new, revision);
@@ -708,6 +735,7 @@ impl Document {
             self.revision
         );
         self.revision = revision;
+        self.digest.take();
         let changed = match (self.root.as_mut(), root) {
             (Some(node), Some(new)) => node.reconcile_node(new, revision),
             (None, Some(new)) => {
@@ -732,6 +760,7 @@ impl Document {
             self.revision
         );
         self.revision = revision;
+        self.digest.take();
         let changed = match (self.root.as_mut(), root) {
             (Some(node), Some(value)) => node.reconcile(value, revision),
             (None, Some(value)) => {
@@ -750,12 +779,14 @@ impl Document {
     /// The canonical hash (section 6, item 7). An `undefined` document has no
     /// hash.
     pub fn canonical_hash(&self) -> Option<String> {
-        self.root.as_ref().map(canonical_hash)
+        self.canonical_digest().as_ref().map(crate::hash::hex)
     }
 
     /// The canonical digest as bytes.
     pub fn canonical_digest(&self) -> Option<[u8; 32]> {
-        self.root.as_ref().map(canonical_digest)
+        *self
+            .digest
+            .get_or_init(|| self.root.as_ref().map(canonical_digest))
     }
 }
 

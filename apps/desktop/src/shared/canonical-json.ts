@@ -167,11 +167,12 @@ function stream(value: any, stack: Set<object>, emit: (text: string) => void): v
  * a surrogate pair), so a large project (C1: 180 MB) never becomes one
  * string: the save-time consistency check used to build two of them.
  */
-export function canonicalHash(value: unknown): string {
+export function canonicalHash(value: unknown, prefix = ''): string {
   const root = prepared('', value);
   if (!root.written) throw new TypeError('The value has no JSON representation');
   const hash = new Sha256();
   const encoder = new TextEncoder();
+  if (prefix) hash.update(encoder.encode(prefix));
   let pending: string[] = [];
   let size = 0;
   const flush = () => {

@@ -489,3 +489,40 @@ fn parsing_straight_into_a_tree_and_reconciling_trees_match_the_value_path() {
     }
     assert!(Node::parse_bytes(b"{\"a\":", 1).is_err());
 }
+
+#[test]
+fn cached_canonical_digest_survives_clones_and_invalidates_on_partial_failure() {
+    let mut d = doc(r#"{"a":1,"items":[{"id":"a"},{"id":"b"}]}"#);
+    let initial = d.canonical_digest();
+    let clone = d.clone();
+    assert_eq!(clone.canonical_digest(), initial);
+    d.apply(&[Patch::set(path!["a"].to_vec(), Value::from(2))])
+        .unwrap();
+    assert_ne!(d.canonical_digest(), initial);
+    assert_eq!(clone.canonical_digest(), initial);
+    // The first patch remains applied when a later patch fails.
+    let result = d.apply_ops(&[
+        pm_model::Op::Leaf(Patch::set(path!["a"].to_vec(), Value::from(3))),
+        pm_model::Op::Order {
+            path: path!["items"].to_vec(),
+            ids: vec!["missing".into()],
+        },
+    ]);
+    assert!(result.is_err());
+    assert_eq!(
+        d.canonical_digest(),
+        Some(hash::canonical_digest(&d.to_value().unwrap()))
+    );
+    let mut hasher = pm_model::consistency::ConsistencyHash::default();
+    let first = hasher.digest(d.root());
+    assert_eq!(first, hasher.digest(d.root()));
+    assert_eq!(hasher.hashed, 0);
+    d.apply(&[Patch::set(path!["a"].to_vec(), Value::from(4))])
+        .unwrap();
+    let incremental = hasher.digest(d.root());
+    assert_eq!(
+        incremental,
+        pm_model::consistency::ConsistencyHash::default().digest(d.root())
+    );
+    assert!(hasher.reused > 0);
+}

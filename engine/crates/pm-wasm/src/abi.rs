@@ -213,6 +213,15 @@ pub extern "C" fn pm_hash() -> usize {
     })
 }
 
+/// Incremental local consistency digest (separate from the canonical wire hash).
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_consistency_hash() -> usize {
+    with(|s| {
+        let hash = s.engine.consistency_hash();
+        reply(s, &hash, false)
+    })
+}
+
 /// The canonical serialization of the mirror into the reply buffer.
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_to_json() -> usize {

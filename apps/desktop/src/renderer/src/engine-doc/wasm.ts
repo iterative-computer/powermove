@@ -23,6 +23,7 @@ export interface PmWasmExports {
   pm_apply(len: number, base: number, rev: number): number;
   pm_revision(): number;
   pm_hash(): number;
+  pm_consistency_hash(): number;
   pm_to_json(): number;
   pm_intern(len: number): number;
   pm_release(id: number): void;
@@ -197,6 +198,7 @@ export class PmWasm {
   }
 
   revision(): number { return this.call(() => this.x.pm_revision()); }
+  consistencyHash(): string { return this.call(() => this.readOut(this.x.pm_consistency_hash())); }
   hash(): string { return this.call(() => this.readOut(this.x.pm_hash())); }
   toJson(): string { return this.call(() => this.readOut(this.x.pm_to_json())); }
   /** The mirror's canonical JSON as UTF-8 bytes, copied out of wasm memory:
