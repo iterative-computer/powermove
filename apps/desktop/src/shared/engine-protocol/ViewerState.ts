@@ -5,6 +5,7 @@ import type { PreviewResolution } from "./PreviewResolution";
 import type { Seq } from "./Seq";
 import type { Size } from "./Size";
 import type { ViewOverride } from "./ViewOverride";
+import type { ViewerCanvas } from "./ViewerCanvas";
 import type { ViewerColorSpace } from "./ViewerColorSpace";
 import type { VsyncHint } from "./VsyncHint";
 
@@ -50,4 +51,14 @@ vsync?: VsyncHint | null,
  * surface (plan section 8; the Phase 3c render transport). Absent or
  * false: no depth pool. A change of it is a new view.
  */
-depthId?: boolean | null, };
+depthId?: boolean | null, 
+/**
+ * The canvas today's viewer draws this view into (decision V1,
+ * docs/engine/bridge.md "Today's viewer canvas"). With it, the engine
+ * renders the frame at that canvas's size and scales it into its CSS
+ * box as Chromium scales today's WebGL canvas; without it, the
+ * composition is drawn at zoom × DPR × the preview resolution. Added
+ * as an optional field (RFC 02 version notes); a change of it is a
+ * new view.
+ */
+canvas?: ViewerCanvas | null, };

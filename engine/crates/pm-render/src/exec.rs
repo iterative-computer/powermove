@@ -753,7 +753,19 @@ impl Exec<'_> {
                     g.angle_degrees as f32,
                     th as f32,
                 ];
-                u.view = [ox as f32, oy as f32, plan.width as f32, plan.height as f32];
+                // `backgroundView` with a preview viewport: the gradient
+                // spans the composition at today's scale, from the level's
+                // output origin (its y from the top, as today's `u_view`
+                // adds it to GL's bottom-up `v_st`).
+                u.view = match plan.view {
+                    Some(v) => [
+                        (v.origin[0] + ox) as f32,
+                        (v.resolution[1] - v.origin[1] - f64::from(plan.height) + oy) as f32,
+                        v.resolution[0] as f32,
+                        v.resolution[1] as f32,
+                    ],
+                    None => [ox as f32, oy as f32, plan.width as f32, plan.height as f32],
+                };
                 u.flags = [
                     if self.working == WorkingEncoding::LinearLight {
                         1.0

@@ -465,7 +465,7 @@ function makeRender(PM: LegacyPM): RenderAPI {
         // A viewer that called `init` before the engine connection was up
         // (frozen viewers call it once, at mount) is bound now.
         bindLate(PM, initCanvas.current);
-        PM?.EngineCanvas?.resize?.();
+        PM?.EngineCanvas?.resize?.(width, height, viewport);
         return legacy || !!PM?.EngineCanvas?.bound;
       },
       compileError: (key) => PM?.GL?.compileError?.(key) ?? null,

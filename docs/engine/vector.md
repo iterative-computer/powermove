@@ -460,7 +460,8 @@ M4 Max), the machine shared with other lanes.
   state (stage 748 × 452 CSS px, DPR 2, quality 1, checked equal in both
   launches). At fit (114.4%: 1160 × 653, 600 × 338, 400 × 225) and at 237%
   with a cropped preview viewport and a pan (2360 × 1328, 1200 × 675, 760
-  × 428) the buckets are today's. **At 61% they are not**: today 520 × 293,
+  × 428) the buckets are today's. **At 61% they were not** (fixed
+  2026-10-19, "Viewer buckets at today's scale" below): today 520 × 293,
   280 × 158, 160 × 90; the engine 600 × 338, 320 × 180, 200 × 113. Not the
   rasters: today's viewer draws at most one output pixel per composition
   pixel when it does not crop (`previewRenderSize` in
@@ -513,7 +514,9 @@ M4 Max), the machine shared with other lanes.
   `previewRenderViewport` rules (the cap at one pixel per composition pixel,
   the crop's safety plan, the quality and explicit resolution settings),
   and the browser's upscale of the smaller frame. Until then the viewer
-  differs from today there for every layer kind.
+  differs from today there for every layer kind. Done 2026-10-19 (decision
+  V1, bridge.md "Today's viewer canvas"): the engine renders at today's
+  canvas and scales it as Chromium does.
 - Preview stand-ins during playback (above: 17 of 62 frames of a scale
   animation): prefetching the buckets of the frames ahead would remove
   them; a decision for the orchestrator.
@@ -622,3 +625,76 @@ The regression identifies an edited frame by its document revision, so a
 previously cached bucket also completes without requiring another upload.
 This is functional/pixel evidence; no paired performance pass is claimed while
 the display is asleep. The final release addon built successfully.
+
+### Viewer buckets at today's scale (2026-10-19)
+
+The perf3 review found the engine's viewer asking for sharper level 1 SVG
+buckets than today at 61% on a 2x display (600 × 338, 320 × 180, 200 × 113
+against today's 520 × 293, 280 × 158, 160 × 90). Today's viewer sizes its
+canvas itself and the compositor picks each bucket at that canvas's
+`outputScale`: below fit the canvas is at most one pixel per composition
+pixel (`previewRenderSize`: `min(1, zoom × min(2, DPR)) × quality`), with
+an explicit preview resolution it is `round(comp × quality)`, and above
+100% in a crop-safe project it is the cropped `previewRenderViewport`
+(`round(cssWidth × density)` over the crop's composition width). The
+engine's viewer draws at zoom × DPR (`placement`), so its buckets followed
+that scale.
+
+The first fix (an SVG-only `ViewerState.svgScale`) was replaced the same
+day by decision V1 (docs/engine/bridge.md, "Today's viewer canvas"): the
+viewer sends today's canvas (`ViewerState.canvas`: backing size, crop, CSS
+box), the engine renders every layer of the viewer frame at that canvas and
+today's `outputScale`, and scales it into the box as Chromium scales today's
+WebGL canvas. Level 1 SVG buckets follow without an override:
+
+- `svgRasterDimensions(…, scaledWorld)` runs at today's scale because the
+  whole frame does, and a level 1 precomp's child target is today's
+  `round(w × sx)` for the same reason.
+- Snapshots and exports are unchanged: their scale is `W / comp.w`, which is
+  today's (`renderToPixels`, `renderInto` after `GL.resize(W, H)` with no
+  viewport). Level 2 is unchanged (native vectors at output resolution).
+- Perf3's exact-raster policy is untouched: the bucket is computed in the
+  plan of the frame that draws it, so the frame still waits for exactly
+  that raster.
+
+Measured:
+
+- `svg-buckets.test.ts` computes today's buckets with today's functions
+  over zoom 0.1 to 8 × DPR 1, 2, 3 × four layer scales (one anisotropic) ×
+  Auto and Half × crop safe and unsafe, plus an SVG in a precomp: 918
+  views, 216 of them cropped. `svg_level1.rs`
+  (`viewer_frames_pick_todays_buckets_at_todays_viewer_scale`) plans the
+  engine's viewer frame of each at the sent canvas's output scale: 918 of
+  918 buckets are today's; at zoom × DPR 491 differ.
+- e2e (`engine-svg.spec.ts`, Electron lock, one worker; run again after V1
+  with the same results): the viewer asks
+  for today's buckets at fit, at 237% cropped and panned, and at 61%
+  (160 × 90, 280 × 158, 520 × 293), with zero stand-ins; ten bucket edits
+  and the 63-frame scale animation (17 asks) present no stand-in; 6 of 7
+  pass. The seventh is the exported still (E1, unchanged): SVG 56,037
+  channel values and the PNG control 59,892 off by 1 CV, the job engine's
+  32-bit still pipeline, not the rasters.
+- `svg_corpus`: 34 projects, 105 frames, 9,640,652 SVG pixels, 0 failed.
+
+Round 2 (2026-10-19): the 237% cropped views were captured against
+today's: the buckets are today's, but the frame's hard edges, SVG edges
+included, move by a fraction of a device pixel because the crop's pixel
+grid starts at the nearest output pixel (F4; bridge.md, "Today's viewer
+canvas", measured table). `svg-buckets.test.ts` now sizes today's canvas
+with the viewer's own `viewerCanvasSize` instead of a copy of its rule;
+today's `outputScale` is still copied (it is private to the compositor).
+
+Round 3 (decision V1b, 2026-10-21): pm-render has an output origin
+(`RenderRequest::origin`, bridge.md "The output origin"), and the viewer
+renders today's cropped canvas from the crop's unrounded origin at today's
+full scale. The 237% views' edges, SVG edges included, now land on
+today's (whole stage max 1 to 2 CV, was up to 59), and a crop far from the
+composition's origin is no longer drawn from a smaller canvas, so its
+buckets are today's too. The bucket grid gained 32 far-crop views (500%
+and 800% at a 1920 composition's right edge, 213% and 250% of a 4K one,
+Auto and Half, four layer scales; every row records its crop): 950 of 950
+buckets are today's, and 12 of the far views had taken a smaller bucket at
+the reduced scale before.
+
+Remaining: a level 1 SVG inside a level 2 precomp keeps the engine's
+continuous density (today has no level 2).
