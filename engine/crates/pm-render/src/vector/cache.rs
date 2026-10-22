@@ -71,6 +71,9 @@ pub struct PrefetchStats {
     pub drawn: u32,
     /// Wall time of the parallel rasterization (µs).
     pub raster_us: u64,
+    /// The slowest raster: its time (µs) and pixels.
+    pub slowest_us: u64,
+    pub slowest_px: u64,
 }
 
 /// Worker threads for [`VectorCache::prefetch`]: half the cores, at most 4.
@@ -392,6 +395,7 @@ impl VectorCache {
         let mut drawn: Vec<Option<(u32, u32, Vec<u8>)>> = Vec::new();
         drawn.resize_with(misses.len(), || None);
         let started = std::time::Instant::now();
+        let mut slowest = (0u64, 0u64);
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..workers)
                 .map(|_| {
@@ -402,7 +406,9 @@ impl VectorCache {
                             let Some((_, source)) = misses.get(i) else {
                                 break;
                             };
-                            out.push((i, raster_level1(source)));
+                            let began = std::time::Instant::now();
+                            let raster = raster_level1(source);
+                            out.push((i, raster, began.elapsed().as_micros() as u64));
                         }
                         out
                     })
@@ -410,13 +416,18 @@ impl VectorCache {
                 .collect();
             for handle in handles {
                 if let Ok(results) = handle.join() {
-                    for (i, result) in results {
+                    for (i, result, us) in results {
+                        if us > slowest.0 {
+                            let px = result.as_ref().map_or(0, |(w, h, _)| u64::from(*w) * u64::from(*h));
+                            slowest = (us, px);
+                        }
                         drawn[i] = result.ok();
                     }
                 }
             }
         });
         stats.raster_us = started.elapsed().as_micros() as u64;
+        (stats.slowest_us, stats.slowest_px) = slowest;
         for ((key, _), result) in misses.into_iter().zip(drawn) {
             let Some((width, height, rgba)) = result else {
                 continue;

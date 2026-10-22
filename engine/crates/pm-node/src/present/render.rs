@@ -507,6 +507,9 @@ pub struct StageTotals {
     /// The longest frame's stages (µs).
     pub plan_max_us: u64,
     pub prefetch_max_us: u64,
+    /// The slowest single shape raster drawn ahead: its time and pixels.
+    pub prefetch_slowest_us: u64,
+    pub prefetch_slowest_px: u64,
     pub record_max_us: u64,
     pub programs_max_us: u64,
     pub compose_max_us: u64,
@@ -3728,6 +3731,10 @@ impl Thread {
                     totals.probe_us += stages.probe_us;
                     totals.plan_max_us = totals.plan_max_us.max(stages.plan_us);
                     totals.prefetch_max_us = totals.prefetch_max_us.max(stages.prefetch_us);
+                    if stages.prefetch_slowest_us > totals.prefetch_slowest_us {
+                        totals.prefetch_slowest_us = stages.prefetch_slowest_us;
+                        totals.prefetch_slowest_px = stages.prefetch_slowest_px;
+                    }
                     totals.record_max_us = totals.record_max_us.max(stages.record_us);
                     totals.programs_max_us = totals.programs_max_us.max(stages.programs_us);
                     totals.compose_max_us =

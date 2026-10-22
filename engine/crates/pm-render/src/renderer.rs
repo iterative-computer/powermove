@@ -173,8 +173,11 @@ pub struct FrameStages {
     pub plan_us: u64,
     /// Level 1 shape and path rasters drawn ahead on worker threads.
     pub prefetch_us: u64,
-    /// How many rasters that drew.
+    /// How many rasters that drew, and the slowest one's time (µs) and
+    /// pixels.
     pub prefetched: u32,
+    pub prefetch_slowest_us: u64,
+    pub prefetch_slowest_px: u64,
     /// Recording the frame: resolving sources (media, text, the remaining
     /// vector rasters, effect programs) and encoding the passes.
     pub record_us: u64,
@@ -1699,6 +1702,8 @@ impl Renderer {
                 .prefetch(&self.device, &self.queue, &sources, precision);
             stages.prefetch_us = started.elapsed().as_micros() as u64;
             stages.prefetched = prefetched.drawn;
+            stages.prefetch_slowest_us = prefetched.slowest_us;
+            stages.prefetch_slowest_px = prefetched.slowest_px;
         }
         let recording = std::time::Instant::now();
         self.scene3d.begin_frame();
