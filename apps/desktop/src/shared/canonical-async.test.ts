@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { canonicalStringify, jsonClone } from './canonical-json';
 import { canonicalChunks, jsonCloneAsync } from './canonical-async';
 
@@ -25,6 +25,25 @@ function samples(): any[] {
 }
 
 describe('cooperative JSON', () => {
+  it('shares one task channel across concurrent traversals and services other tasks', async () => {
+    const NativeChannel = globalThis.MessageChannel;
+    let channels = 0, serviced = false;
+    vi.stubGlobal('MessageChannel', class extends NativeChannel { constructor() { super(); channels++; } });
+    try {
+      vi.resetModules();
+      const fresh = await import('./canonical-async');
+      const values = Array.from({ length: 20_000 }, (_, i) => ({ value: i }));
+      const queued = new Promise<void>(resolve => setTimeout(() => { serviced = true; resolve(); }, 0));
+      const [a, b] = await Promise.all([fresh.jsonCloneAsync(values), fresh.jsonCloneAsync(values)]);
+      expect(a).toEqual(values);
+      expect(b).toEqual(values);
+      expect(a).not.toBe(b);
+      expect(serviced).toBe(true);
+      expect(channels).toBe(1);
+      await queued;
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('matches the existing clone, canonical form and JSON round trip', async () => {
     for (const value of samples()) {
       const copy = await jsonCloneAsync(value);

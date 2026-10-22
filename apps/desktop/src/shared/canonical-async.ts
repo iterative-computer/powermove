@@ -5,14 +5,42 @@
 export interface JsonAsyncOptions { yieldTask?: () => Promise<void> }
 export interface CanonicalChunksOptions extends JsonAsyncOptions { chunkBytes?: number }
 
+type TaskPort = MessagePort & { ref?(): void; unref?(): void };
+let tasks: { channel: MessageChannel; queue: Array<(() => void) | undefined>; head: number } | undefined;
+
 function yieldJsonTask(): Promise<void> {
   if (typeof MessageChannel !== 'function') return new Promise(resolve => setTimeout(resolve, 0));
-  // A timer chain is clamped in browsers; a posted message remains a real
-  // task boundary without adding a minimum four milliseconds to every slice.
-  return new Promise(resolve => {
+  if (!tasks) {
     const channel = new MessageChannel();
-    channel.port1.onmessage = () => { channel.port1.close(); channel.port2.close(); resolve(); };
-    channel.port2.postMessage(null);
+    const state = { channel, queue: [] as Array<(() => void) | undefined>, head: 0 };
+    channel.port1.onmessage = () => {
+      const resolve = state.queue[state.head];
+      state.queue[state.head++] = undefined; // Never retain a completed task's closures.
+      if (state.head === state.queue.length) {
+        state.queue = []; state.head = 0;
+        (channel.port1 as TaskPort).unref?.();
+        (channel.port2 as TaskPort).unref?.();
+      } else if (state.head >= 1024 && state.head * 2 >= state.queue.length) {
+        state.queue = state.queue.slice(state.head); state.head = 0;
+      }
+      resolve?.();
+    };
+    // Browsers keep the shared task source. Node must stay alive while work
+    // is pending, and may exit normally once the FIFO has drained.
+    (channel.port1 as TaskPort).unref?.();
+    (channel.port2 as TaskPort).unref?.();
+    tasks = state;
+  }
+  const state = tasks;
+  return new Promise(resolve => {
+    if (state.head === state.queue.length) {
+      (state.channel.port1 as TaskPort).ref?.();
+      (state.channel.port2 as TaskPort).ref?.();
+    }
+    state.queue.push(resolve);
+    // One callback per posted message: concurrent traversals take turns at
+    // real task boundaries without the browser's nested timer clamp.
+    state.channel.port2.postMessage(null);
   });
 }
 
@@ -134,14 +162,16 @@ function* cloneWork(value: unknown, sorted: boolean, budget: JsonBudget): Genera
     if (budget.due()) yield budget.yield();
     const object = next !== null && typeof next === 'object';
     const array = object && Array.isArray(next);
-    const copy = object ? array ? [] : {} : next;
+    const length = array ? next.length : 0;
+    const copy = object ? array ? new Array(length) : {} : next;
     if (!destination) root = copy;
-    else Object.defineProperty(destination, key, { value: copy, enumerable: true, configurable: true, writable: true });
+    else if (key === '__proto__') Object.defineProperty(destination, key, { value: copy, enumerable: true, configurable: true, writable: true });
+    else destination[key] = copy;
     if (object) {
       if (ancestors.has(next)) throw new TypeError('Converting circular structure to JSON');
       ancestors.add(next);
       const keys = array ? undefined : yield* objectKeys(next, sorted, budget);
-      frames.push({ source: next, target: copy, array, index: 0, length: array ? next.length : keys!.length, keys, count: 0 });
+      frames.push({ source: next, target: copy, array, index: 0, length: array ? length : keys!.length, keys, count: 0 });
     }
     let found = false;
     while (frames.length) {
