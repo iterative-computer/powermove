@@ -518,14 +518,60 @@ mod child {
             .unwrap()
             .expect("the layer has ink");
         assert_eq!((raster.width, raster.height), painted.canvas);
-        assert_eq!(raster.origin, [painted.anchor.0, painted.anchor.1]);
+        // The origin is today's `RasterSurface` `anchorX`, `anchorY`: the
+        // anchor in the whole canvas the snapshot carries (legacy
+        // gl/raster.ts `textGeometry`), not in its inked crop. It is the
+        // layer raster's, and the crop's anchor moved by the crop's corner
+        // in layer pixels.
+        let whole = direct
+            .layer_raster(
+                &document,
+                "Pfonts-root",
+                "title",
+                None,
+                0.0,
+                1.0,
+                Precision::Float16,
+            )
+            .unwrap()
+            .expect("the layer has ink");
+        assert_eq!(whole.canvas, painted.canvas);
+        assert_eq!(raster.origin, [whole.anchor.0, whole.anchor.1]);
+        let [x0, y0, x1, y1] = painted.plan.crop.map(f64::from);
+        let (sx, sy) = (
+            painted.box_size.0 / (x1 - x0),
+            painted.box_size.1 / (y1 - y0),
+        );
+        assert!(
+            (whole.anchor.0 - (painted.anchor.0 + x0 * sx)).abs() < 1e-9
+                && (whole.anchor.1 - (painted.anchor.1 + y0 * sy)).abs() < 1e-9,
+            "whole-canvas anchor {:?}, crop anchor {:?}, crop {:?}",
+            whole.anchor,
+            painted.anchor,
+            painted.plan.crop
+        );
+        assert!(
+            (whole.box_size.0 - f64::from(painted.canvas.0) * sx).abs() < 1e-9
+                && (whole.box_size.1 - f64::from(painted.canvas.1) * sy).abs() < 1e-9,
+            "the box is the whole canvas's: {:?}",
+            whole.box_size
+        );
         let rgba = pm_node::present::snapshot::encode_rgba8_f32(
             &painted.pixels,
             SnapshotPixels::Premultiplied,
         );
+        // The text plan's crop is `[x0, y0, x1, y1]`; `place_raster` takes
+        // `[x, y, w, h]`. The ink starts away from the canvas's corner here,
+        // so a stride mixed up between the two would streak the rows.
+        let [px0, py0, px1, py1] = painted.plan.crop;
+        assert!(
+            px0 > 0 || py0 > 0,
+            "an ink crop at the corner: {:?}",
+            painted.plan.crop
+        );
         let placed = pm_node::present::snapshot::place_raster(
             &rgba,
-            painted.plan.crop,
+            [px0, py0, px1 - px0, py1 - py0],
             painted.canvas,
             None,
         )
@@ -536,6 +582,47 @@ mod child {
             "the raster is the registry's raster"
         );
         println!("layer raster: {}x{}", raster.width, raster.height);
+        // Any scale, as today's `PM.raster` (`textRasterGeometry`): the
+        // density is `min(scale, 8192 / w, 8192 / h)` of the same box, so
+        // past the cap the canvas stops at the 8192-pixel edge, and a
+        // vanishing scale is one pixel with no ink. Geometry is unchanged.
+        let [bw, bh] = raster.layer_box.expect("a raster box");
+        for (id, scale) in [(30u64, 40.0), (31, 1_000.0), (32, f64::MAX), (33, 1e-9)] {
+            let at_scale = rendered(c.snapshot(
+                id,
+                SnapshotTarget::Layer {
+                    layer: "title".into(),
+                    scale,
+                    crop: None,
+                    content: None,
+                },
+                Size::new(8192, 8192),
+                SnapshotPixels::Premultiplied,
+            ));
+            let density = scale.min(8192.0 / bw).min(8192.0 / bh);
+            let canvas = (
+                (bw * density).ceil().max(1.0) as u32,
+                (bh * density).ceil().max(1.0) as u32,
+            );
+            assert_eq!(
+                (at_scale.width, at_scale.height),
+                canvas,
+                "scale {scale}: today's canvas"
+            );
+            assert_eq!(at_scale.layer_box, raster.layer_box, "scale {scale}");
+            assert_eq!(at_scale.origin, raster.origin, "scale {scale}");
+            // At a vanishing density the text rasterizer can leave a faint
+            // pixel (alpha 82 measured): the renderer's raster surface clears
+            // it for today's non-positive scales (`withoutInk`).
+            if scale >= 1.0 {
+                let inked = pixels(&at_scale).chunks_exact(4).any(|p| p[3] > 0);
+                assert!(inked, "scale {scale}: ink");
+            }
+            println!(
+                "layer raster at scale {scale}: {}x{}",
+                at_scale.width, at_scale.height
+            );
+        }
         // Today's placement: the selection of the text geometry; with
         // typography anchoring, the shift as `fontOffset` and in the anchor.
         let geometry = raster.raster.clone().expect("raster geometry");

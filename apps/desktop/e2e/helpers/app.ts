@@ -154,6 +154,32 @@ async function startElectron(
   return { app, page };
 }
 
+/** Cleanup of an isolated test process must finish even when OS shutdown work hangs. */
+async function closeDisposableApp(app: ElectronApplication): Promise<void> {
+  const process = app.process();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      (async () => {
+        await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
+        await app.close();
+      })(),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('disposable app shutdown exceeded 5 s')), 5_000); })
+    ]);
+  } catch (error) {
+    console.warn(`E2E process cleanup: ${String(error)}`);
+  } finally {
+    clearTimeout(timer);
+    if (process.exitCode === null && process.signalCode === null) {
+      const exited = new Promise<void>(resolve => process.once('exit', () => resolve()));
+      process.kill('SIGKILL');
+      let exitTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([exited, new Promise<void>(resolve => { exitTimer = setTimeout(resolve, 2_000); })]);
+      clearTimeout(exitTimer);
+    }
+  }
+}
+
 export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedApp> {
   const ownsUserData = options.userData === undefined;
   const userData = options.userData
@@ -173,7 +199,12 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     await writeFile(path.join(userData, 'onboarding-v1.json'), '{"version":1}\n', { mode: 0o600 });
   }
   const diagnostics: RendererDiagnostics = { console: [], pageErrors: [] };
-  let active = await startElectron(userData, env, diagnostics, options.normalWindow);
+  let active: Awaited<ReturnType<typeof startElectron>>;
+  try { active = await startElectron(userData, env, diagnostics, options.normalWindow); }
+  catch (error) {
+    if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    throw error;
+  }
   let closed = false;
 
   const session: LaunchedApp = {
@@ -182,7 +213,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     userData,
     diagnostics,
     async relaunch() {
-      await active.app.close();
+      await closeDisposableApp(active.app);
       active = await startElectron(userData, env, diagnostics, options.normalWindow);
       session.app = active.app;
       session.page = active.page;
@@ -217,8 +248,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       closed = true;
       // A failed close-decision assertion must not leave its Cancel mock
       // preventing cleanup of this disposable test process.
-      await active.app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
-      await active.app.close().catch(() => undefined);
+      await closeDisposableApp(active.app);
       if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   };

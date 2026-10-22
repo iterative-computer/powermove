@@ -312,7 +312,7 @@ fn path_of(root: &Node, target: &Node, path: &mut Vec<Value>) -> bool {
     }
     match root.kind() {
         pm_model::NodeKind::Object(map) => {
-            for (k, child) in map {
+            for (k, child) in map.iter() {
                 path.push(Value::String(k.clone()));
                 if path_of(child, target, path) {
                     return true;
@@ -419,15 +419,17 @@ impl Engine {
     /// any value: a resync starts a new history (the evaluator notices a
     /// lower revision and drops its caches).
     pub fn resync(&mut self, json: &[u8], revision: u64) -> Result<(), String> {
+        // Parsed straight into the revisioned tree: wasm memory never shrinks,
+        // so an intermediate `Value` of a large document stays as a peak.
         let root = if json.is_empty() {
             None
         } else {
-            Some(parse_bytes(json).map_err(|e| e.to_string())?)
+            Some(pm_model::Node::parse_bytes(json, revision).map_err(|e| e.to_string())?)
         };
         if revision > self.doc.revision() {
-            self.doc.resync(root, revision);
+            self.doc.resync_node(root, revision);
         } else {
-            self.doc = Document::new(root, revision);
+            self.doc = Document::from_root(root, revision);
             self.ev.reset();
         }
         self.detached.clear();

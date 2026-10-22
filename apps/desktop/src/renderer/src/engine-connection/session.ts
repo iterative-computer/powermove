@@ -17,6 +17,7 @@
  * it.
  */
 import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import { limitUtf8 } from '../../../shared/protocol-strings';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
 
@@ -38,7 +39,9 @@ export interface DocumentStream {
   readonly ready: boolean;
   whenReady: Promise<boolean>;
   subscribe(fn: (batch: StreamBatch) => void): () => void;
-  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; hash: string } | null;
+  /** `bytes`: the canonical JSON as UTF-8 (pm-wasm's, kept out of the
+   *  JavaScript heap); otherwise `json` is encoded. */
+  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; bytes?: Uint8Array; hash: string } | null;
 }
 
 export type StreamBatch = { baseRevision: number; revision: number; origin: PatchOrigin; count: number; body: Uint8Array };
@@ -61,7 +64,8 @@ export type ViewerMessage =
   | { type: 'frame'; frame: FrameDescriptor }
   | { type: 'surfacePool'; pool: SurfacePool }
   | { type: 'clock'; sample: ClockSample }
-  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number };
+  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number }
+  | { type: 'failure'; reason: string };
 
 /** The kernel's definition stream (`PM.EngineDefinitions`, kernel/engine-definitions.ts; contract 10). */
 export interface DefinitionsSource {
@@ -110,6 +114,9 @@ export type SessionOptions = {
   onAudio?: (message: AudioMessage) => void;
   /** The engine's presentation stats (`RenderStats`, at most 2 Hz). */
   onStats?: (stats: RenderStats) => void;
+  /** The engine's asks for compatibility answers (`CompatMessage` `needs`:
+   *  the `raster` override's layers a viewer frame waits for). */
+  onCompat?: (message: Record<string, unknown>) => void;
   /**
    * The window replaced its document (a `load` batch: another project, or
    * `PM.proj` assigned outright) and the engine has it now. The viewer's
@@ -304,7 +311,7 @@ export class DocumentSession {
     const snapshot = this.options.stream.snapshot();
     if (!snapshot) throw new Error('the document mirror has no snapshot');
     this.document = documentId(this.options.documentId());
-    const bytes = encoder.encode(snapshot.json);
+    const bytes = snapshot.bytes ?? encoder.encode(snapshot.json);
     const limit = this.options.inlineLimit ?? INLINE_RESYNC_LIMIT;
     let source: { kind: 'inline'; body: Uint8Array } | { kind: 'cacheFile'; handle: string; length: number };
     if (bytes.length > limit && this.options.stage) {
@@ -470,6 +477,7 @@ export class DocumentSession {
         return;
       }
       case 'compat': {
+        if (event['compat'] === 'needs') { this.options.onCompat?.(event); return; }
         // Level 1 SVG rasters a frame drew without (decision S1).
         if (event['compat'] !== 'svgRequests') return;
         const requests = (event['requests'] as SvgRasterRequest[]) ?? [];
@@ -493,8 +501,7 @@ export class DocumentSession {
           this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision, seq }, arrivedMs);
           return;
         }
-        this.failures.push(`${error.code}: ${error.message}`);
-        if (this.failures.length > 32) this.failures.shift();
+        this.reportFailure(error.code, error.message, arrivedMs);
         // Shader meta and compile errors at the report's revision.
         this.options.definitions?.()?.failure(event as unknown as FailureReport, this.definitions);
         if (error.retry.kind === 'afterResync' || error.code === 'staleRevision') {
@@ -563,6 +570,22 @@ export class DocumentSession {
     }
   }
 
+  /**
+   * Local compatibility failures and engine reports share one diagnostic
+   * surface. A failure of the viewer's own frame (`frame`: the engine's
+   * report on the session, a raster producer answering the compositor) that
+   * is an invalid request also names itself on the stage. A failure of a
+   * snapshot an extension asked for (`render.raster`, `render.snapshot`,
+   * `renderFrameTo`) is the caller's: it is recorded and logged, and the
+   * viewer keeps its frame, as today's viewer never hears of it.
+   */
+  reportFailure(code: string, message: string, arrivedMs = performance.now(), frame = true): void {
+    const reason = `${code}: ${message}`;
+    if (this.failures.at(-1) !== reason) this.failures.push(reason);
+    if (this.failures.length > 32) this.failures.shift();
+    if (frame && code === 'invalidMessage') this.options.handlers.message({ type: 'failure', reason }, arrivedMs);
+  }
+
   /** Posts an event on the session's port (compatibility uploads). */
   post(event: Record<string, unknown> & { type: string }): boolean {
     if (this.id === null || this.closed) return false;
@@ -593,7 +616,7 @@ export class DocumentSession {
       const reason = error instanceof ShaderFallbackError ? error.reason : 'unavailable';
       const message = error instanceof Error ? error.message : String(error);
       this.options.log('warn', `engine: the shader fallback runner could not draw a program of layer ${request.layer} (${reason}: ${message})`);
-      send({ fallback: 'failed', key: request.key, reason, message: message.slice(0, 1024) });
+      send({ fallback: 'failed', key: request.key, reason, message: limitUtf8(message, 1024) });
     }
   }
 

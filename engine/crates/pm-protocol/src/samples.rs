@@ -534,6 +534,7 @@ pub fn export_settings() -> ExportSettings {
             hide_captions: false,
             preview: true,
             sequence_name: None,
+            compat: vec![crate::snapshot::CompatSource::RasterOverride],
         },
     }
 }
@@ -828,6 +829,7 @@ pub fn requests() -> Vec<Envelope> {
                 scale: 1.0,
                 revision: rev(42),
                 svg: None,
+                frame: None,
             }),
         ),
         request(
@@ -1201,6 +1203,9 @@ pub fn responses() -> Vec<Envelope> {
                     name: "/pm.0123456789abcdef01234567".into(),
                     length: bytes(1024 * 512 * 4),
                 },
+                native: false,
+                size: Some([256.0, 128.0]),
+                uv: None,
             })),
         ),
     ]
@@ -1375,11 +1380,51 @@ pub fn events() -> Vec<Envelope> {
                 row: 1,
                 rows: 1,
                 data: crate::common::Bytes(vec![255, 0, 0, 255, 0, 0, 0, 0]),
+                size: None,
+                uv: None,
+                crop: None,
             },
         ))),
         event(Event::Compat(crate::snapshot::CompatMessage::Forget {
             composition: "comp-1".into(),
             layer: "L7".into(),
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::Producers {
+            sources: vec![crate::snapshot::CompatSource::RasterOverride],
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::Native(
+            crate::snapshot::CompatNative {
+                composition: "comp-1".into(),
+                layer: "title".into(),
+                time: ticks(705_600_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                scale: 2.0,
+                revision: rev(42),
+                crop: None,
+            },
+        ))),
+        event(Event::Compat(crate::snapshot::CompatMessage::Reuse {
+            id: crate::snapshot::CompatKey {
+                composition: "comp-1".into(),
+                layer: "title".into(),
+                time: ticks(705_600_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                key: "[\"typewriter-3\",\"title\",7]".into(),
+            },
+            scale: 2.0,
+            revision: rev(43),
+            crop: Some(crate::common::PixelRect { x: 256, y: 0, width: 512, height: 256 }),
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::Needs {
+            revision: rev(43),
+            needs: vec![crate::snapshot::CompatNeed {
+                composition: "comp-1".into(),
+                layer: "title".into(),
+                time: ticks(705_600_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                scale: 2.0,
+                crop: Some(crate::common::PixelRect { x: 256, y: 0, width: 512, height: 256 }),
+            }],
         })),
         event(Event::Compat(crate::snapshot::CompatMessage::SvgRequests {
             requests: vec![svg_request()],

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { canonicalHash, canonicalProject } from '../../shared/canonical-json';
 import type { EngineError, EngineProcess, JobStatus, Request, Response } from '../../shared/engine-protocol';
-import { AgentJobError, AgentJobs, exportSettingsFor, suggestedName, userExportSettings, type AgentJobsEngine, type UserExportStatus } from './agent-jobs';
+import { AgentJobError, AgentJobs, exportSettingsFor, snapshotLayer, suggestedName, userExportSettings, type AgentJobsEngine, type UserExportStatus } from './agent-jobs';
 import { DefinitionRelay } from './definitions';
 import { RemoteError } from './protocol';
 
@@ -115,6 +115,20 @@ describe('export settings', () => {
     expect(prores.range).toEqual({ start: 0, end: 4 * 705_600_000 });
     expect(() => exportSettingsFor(project(), { format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: true })).toThrow('ProRes');
     expect(() => exportSettingsFor({ name: 'x' }, { format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false })).toThrow(AgentJobError);
+  });
+
+  it('name the window\'s compatibility producers, so the job asks it for those layers', () => {
+    const settings = exportSettingsFor(project(), { format: 'mp4', range: 'all', audio: false, motionBlur: false, alpha: false }, ['rasterOverride', 'bogus' as never, 'rasterOverride']);
+    expect(settings.delivery?.compat).toEqual(['rasterOverride']);
+    expect(exportSettingsFor(project(), { format: 'mp4', range: 'all', audio: false, motionBlur: false, alpha: false }).delivery?.compat).toBeUndefined();
+  });
+
+  it('find a snapshot\'s layer in its root or a nested composition', () => {
+    const p = { id: 'P', compId: 'root', layers: [{ id: 'a', d: 1 }], comps: { inner: { layers: [{ id: 'b', d: 2 }] } } };
+    expect(snapshotLayer(p, 'root', 'a')).toEqual({ id: 'a', d: 1 });
+    expect(snapshotLayer(p, 'inner', 'b')).toEqual({ id: 'b', d: 2 });
+    expect(snapshotLayer(p, 'inner', 'a')).toBeNull();
+    expect(snapshotLayer(p, 'gone', 'a')).toBeNull();
   });
 
   it('suggest bare file names', () => {

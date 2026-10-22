@@ -99,7 +99,7 @@ fixtures).
   receive a file descriptor over a `MessagePort`.
 - **Cache areas**: `<userData>/Engine Cache/<area>`, created 0700. Scratch
   is wiped at launch; staged resync documents (`engine:stage-document`,
-  at most 256 MiB, 16 per launch) live there and go with their launch.
+  at most 512 MiB, 16 per launch) live there and go with their launch.
 - **Outputs**: `outputDestination` creates `.powermove-<16 hex>.part` in
   the destination folder with `open(wx, 0600)` and answers with a write
   handle. `commitOutput` removes empty and unverified files (the verified
@@ -190,6 +190,148 @@ fixtures).
   engine keeps its sessions throughout.
 - Electron reports a signal death and an exit status in the same number
   (`exit status 9 (SIGKILL if signalled)`).
+- A window's connection can also close while its launch lives: the engine
+  closes a connection whose message breaks a contract bound (every
+  envelope is validated in `codec::decode`; RFC 09), and a port can be
+  lost. Main hands out ports only with a launch, so such a window used to
+  stay disconnected for good (C1: `connected: false`, `sessions: 0`,
+  generation 1, the open never finished). The window now asks main for
+  fresh ports itself (`engine:request-ports`, `PortReconnector` in
+  `renderer/src/engine-connection/reconnect.ts`) with the supervisor's
+  backoff (250 ms doubling to 30 s, reset after a minute connected),
+  asking again every 2 s plus the backoff until a port connects; its
+  sessions reopen and resync as after a restart. Main's
+  `NativeEngine.refreshPorts` replaces the window's ports on every running
+  launch and keeps its definitions (a reload still forgets them).
+- Strings the renderer puts in protocol messages are bounded in UTF-8
+  bytes, never in UTF-16 units (`shared/protocol-strings.ts`). A
+  compatibility raster key over 512 bytes, or with a lone surrogate,
+  becomes `powermove:key-sha256:<digest of its code units>`; a cut would
+  merge two frames' keys and `reuse` the wrong pixels. Failure messages
+  are cut at a code point.
+
+## Large documents (C1, 2026-10-19)
+
+A real user's production project from the private setup corpus (PMV4,
+238 MB: a 180 MB document of 258 layers baked to a keyframe per frame on
+seven properties, 1.2 million keyframes, plus 50 PNGs and an MP4) did not
+open with the engine on. Three faults, each enough on its own:
+
+1. A raster wrapper's own cache key carries the layer's text. Cut at 512 UTF-16 units, non-ASCII text made it up to 1,536 bytes;
+   the engine refused the `compat` event and closed the window's connection
+   (`the engine closed the connection: contract 2 (Frame): compatibility key
+   length`), and nothing reconnected (see Crash handling).
+2. The interactive engine held the document many times over. A pm-model
+   tree was about 10 times its JSON (1.8 GB here), and the engine kept a
+   session mirror, a cloned JSON value queued for the presenter, the
+   presenter's and the audio thread's own trees, a full clone per snapshot
+   job revision, and all of it again for main's snapshot session for the
+   window: 13.3 GB RSS during the open.
+3. The renderer passed V8's 4 GB heap (`V8 javascript OOM
+   (CALL_AND_RETRY_LAST)`, "Target crashed"). Today's open of this project
+   already peaks near 2.9 GB on its own whole-document strings (the file
+   fingerprint, `stringifyAsync`, the autosave's clone); the engine path
+   added a sorted-key canonical string of the shadow per resync and per
+   document sent with a synchronous snapshot, two more in the save-time
+   consistency check, and an encoded `load` batch nobody reads.
+
+What changed:
+
+- **pm-model** (`doc.rs`, `json/object_map.rs`). Arrays and objects hold
+  their children behind an `Arc`: cloning a node or a `Document` is O(1),
+  a patch copies only the containers on its path, and reconciling copies a
+  shared container only when its content differs. Object members are a
+  sorted vector (`ObjectMap`) instead of a `BTreeMap`, whose every object,
+  even a two-member ease value, took a full eleven-slot leaf. The private
+  document's tree went from 2,398 MB to 1,039 MB footprint, and pm-wasm's
+  copy in wasm memory shrinks the same way.
+- **pm-engine**. A resync parses once; the presenter and audio threads get
+  the same tree (`DocumentUpdate::Replace` carries a shared `Node`), as do
+  snapshot jobs. A resync reconciles against a mirror the engine already
+  holds for the document (the session's own, or another session's), so
+  consecutive resyncs and main's window session share unchanged subtrees,
+  and a resync to a hash another session was checked at, with nothing
+  applied since, takes that mirror without reading or parsing its body.
+- **Renderer** (`engine-doc/barrier.ts`, `shared/canonical-json.ts`).
+  `snapshot()` hands receivers pm-wasm's canonical JSON as bytes copied out
+  of wasm memory (pm-wasm holds the same revision; its hash already went
+  with it), so a resync or a document sent with a synchronous snapshot is
+  never a JavaScript string. A `load` batch's body is encoded only if read.
+  `canonicalHash` feeds SHA-256 in pieces of whole JSON tokens instead of
+  building the string (same digest for every value shape).
+
+Measured on the private project and on its public stand-in
+(`e2e/engine-large-project.spec.ts`): see "Large documents, measured"
+below.
+
+Later rounds found more, each fixed on the same branch: the window kept a
+clone of every autosaved project slot (now lazy with the engine on); each
+asset a restore read scheduled its own whole-project autosave (now one,
+after the restore); the dirty check held two whole-project strings (now
+two fingerprints); the font prewarm laid each text layer out at every
+baked transform key (about 50,000 layouts; now its text's own keys); the
+shadow was a `JSON.parse` of the resync JSON (now `jsonClone`, which
+shares strings: 249 MB instead of 601 MB); the tree used one `BTreeMap`
+leaf per object (now `ObjectMap`, 1.0 GB instead of 2.4 GB); level 1 text
+put a fallback font's run after the text that follows it ("⌘K" drew as
+"K⌘"); and a busy window's async snapshots were refused by main instead
+of queued (`snapshot-slots.ts`).
+
+### Large documents, measured (2026-10-21)
+
+Release LTO build, M4 Max, other lanes running, one Electron per run,
+fresh isolated profiles with the corpus's 39 extensions. Today is the same
+build with the setting off. The private harness is outside the repository;
+it reads the setup directory from `PM_PRIVATE_SETUP_DIR`.
+
+The failing project (PMV4, 180 MB live document, 258 layers):
+
+| | Today | Engine |
+|---|---|---|
+| Open (choose file → open resolves) | 325 s | 447 s |
+| JS heap after the open, after GC | 1,209 MB | 1,334 MB |
+| Sampled JS heap peak during the open | 3.36 GB | 3.38 GB |
+| Interactive engine RSS peak | none | 1.7 GB (13.3 GB before) |
+| Connection | n/a | one connection throughout; a closed one is back in 3.7 s |
+| 18 corpus frames at the corpus bound | reference | 16 pass; 2 at max 6 CV (99.994 % and 99.981 % within 2 CV) |
+| Playback, presented frames in 8 s | 230 (p50 40 ms, p95 60 ms) | 33 (p50 50 ms, p95 439 ms, max 1.8 s) |
+| Scrub, 24 seeks to a presented frame | p50 21 ms, p95 48 ms | p50 39 ms, p95 353 ms |
+| Export, MP4 at half size | 21.7 s | refused: one offline clip (section 14.8 message; today exports without it) |
+
+Both opens spend about 170 s in three synchronous whole-project store
+writes (`PM.store.set` of the 180 MB slot: structured clone plus IPC, 50 to
+60 s each), a cost today already has. The engine's extra 120 s is the
+barrier (73 structural diffs of the whole document, 53 s; the longest
+13 s), two resyncs, and the save-time consistency hashes.
+
+The intermediate project (PMV3, 12 MB live document, 867 layers, 114 MB of
+undo history in the file):
+
+| | Today | Engine |
+|---|---|---|
+| Open | 125 s | 122 to 130 s |
+| JS heap after the open, after GC | 171 MB | 177 to 179 MB |
+| Sent to the engine | n/a | 10.7 MB (the canonical document only) |
+| Undo history | 100.7 MB of JSON in the renderer | the same, never sent or re-serialised for the engine |
+| Frames (`renderFrameToAsync`, 16 motion blur samples, 1080p) | 0.7 to 1.8 s each | 6 to 56 s each; one over the 40 s answer bound |
+| Playback, presented frames in 8 s | 135 (p50 53 ms, p95 173 ms) | 1 (the clock ran to 9.4 s; the viewer kept its first frame) |
+| Scrub, 24 seeks to a presented frame | p50 72 ms, p95 145 ms | p50 576 ms, p95 3.5 s |
+| Export, MP4 at half size | 159 s | not measured (frames above) |
+
+Both projects now open with the engine on and keep their connection, and
+the renderer heap is within 10 % of today's. Rendering them is not yet as
+fast as today: with 867 layers the engine draws a frame in seconds, so
+playback stalls and scrubbing is 8 to 25 times slower; the failing
+project plays at about 6 frames a second. Leads from the logs: the
+compatibility rasters a frame waits for (about 1,000 needs answered per
+minute of use, 251 async raster snapshots), effects routed to the shader
+fallback runner until the first-use ANGLE parity probe pins them (a fresh
+profile, as here), and shared-texture transfers that time out while a
+6.7 s synchronous snapshot blocks the renderer.
+
+Open with the public stand-in (17 MB of document): today 9.5 to 14.2 s,
+engine 15.7 to 20.4 s; heap after GC today 354 to 367 MB, engine 317 to
+325 MB; interactive engine RSS 919 to 925 MB; four frames within 2 CV.
 
 ## Resync
 
@@ -201,13 +343,18 @@ until the model lane's binary decoder is installed, a batch is reported as
 `unsupported` once per session and the mirror keeps the resynced revision.
 
 Known limit: a resync from a staged file is read (`std::fs::read`, up to
-256 MiB) and parsed on the utility process's JavaScript thread, as an
+512 MiB) and parsed on the utility process's JavaScript thread, as an
 inline resync is parsed there; while it runs that engine's ticks and port
-traffic wait. Before large documents take this path, the read, parse, and
-hash check move to an engine thread (`spawn_engine_thread`), with the
-mirror installed when the thread finishes.
+traffic wait. Large documents do take this path now: for C1's 170 MB
+document (release build, M4 Max) the parse is 0.76 s, building the tree
+0.49 s (0.24 s reconciled against the session's previous tree), and the
+hash check 0.53 s, so the engine's JavaScript thread (and the frames and
+clock samples it posts) waits about 1.8 s per resync. A resync to a hash
+another session was just checked at skips all three. Still open: move the
+read, parse, and hash check to an engine thread (`spawn_engine_thread`),
+with the mirror installed when the thread finishes.
 
-Disk: a window may stage at most 16 documents of at most 256 MiB per
+Disk: a window may stage at most 16 documents of at most 512 MiB per
 engine launch in `Engine Cache/Scratch`; they are removed when the launch
 ends and the folder is wiped at the next engine start. Temporary
 `.powermove-*.part` outputs are removed when their launch ends; after main
@@ -248,6 +395,10 @@ would be created, so that lane builds on them.
 | Main's codec, host services, supervision with fake engines, shared contract | `vitest run src/main/engine` |
 | Both engines in Electron: negotiate, resync, SIGKILL each, restart, resync, reconnects racing a dying engine, clean stop, restart, stop while an engine crashes | `bun run test:engine-host` |
 | The flag in the real app (hidden window) | `playwright test e2e/native-engine.spec.ts --workers=1` |
+| Shared document trees, reconciled resyncs, `ObjectMap` | `cargo test -p pm-model -p pm-engine` |
+| Renderer protocol strings, the raster override's keys, reconnecting a window, `jsonClone`, the font prewarm's key times | `vitest run src/shared src/renderer/src/kernel src/renderer/src/engine-connection src/renderer/src/engine-doc` |
+| Level 1 fallback runs in text order (macOS CoreText) | `cargo test -p pm-text --test blink_sizes` |
+| A large synthetic project (16 embedded PNGs, text a `raster` wrapper redraws under keys over the protocol bound, a key per frame on seven properties of 64 layers, 17 MB of document): today's and the engine's open, heap, engine RSS, frames, playback, and a connection the engine closes coming back | `pm-electron-lock bunx playwright test e2e/engine-large-project.spec.ts --workers=1 --global-timeout=0` |
 
 Measured on the reference machine (M4 Max, shared with other lanes), 20
 consecutive runs of `bun run test:engine-host`, 20 passed: both engines

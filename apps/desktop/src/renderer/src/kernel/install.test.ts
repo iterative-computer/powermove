@@ -42,6 +42,25 @@ describe('installKernel', () => {
     expect(PM.raster).toBe(native);
   });
 
+  it('preserves a wrapper’s geometry instead of placing it using the original text', async () => {
+    const PM = fakePM();
+    PM.raster = vi.fn(() => ({ cv: document.createElement('canvas'), w: 80, h: 30, anchorX: 40, anchorY: 10 }));
+    const rasterSurface = vi.fn((surface: any) => ({ ...surface, anchorX: 93 }));
+    PM.EngineDoc = { enabled: true, api: { rasterSurface } };
+    installed = installKernel(PM);
+    const api = installed.api('dynamic-label');
+    const layer = { id: 'label', type: 'text', d: { text: 'Original' } } as any;
+    expect(api.render.raster(layer, 1, .5)?.anchorX).toBe(93);
+    rasterSurface.mockClear();
+    const previous = api.services.get<(...args: any[]) => any>('raster')!;
+    const registration = api.services.register('raster', (...args: any[]) => ({ ...previous(...args), w: 32, anchorX: 16 }));
+    expect(api.render.raster(layer, 1, .5)).toMatchObject({ w: 32, anchorX: 16 });
+    expect(await (api.render as any).rasterAsync(layer, 1, .5)).toMatchObject({ w: 32, anchorX: 16 });
+    expect(rasterSurface).not.toHaveBeenCalled();
+    registration.dispose();
+    expect(api.render.raster(layer, 1, .5)?.anchorX).toBe(93);
+  });
+
   it('rasterAsync has raster’s shape and passes the crop as raster’s fifth argument (engine off)', async () => {
     const PM = fakePM();
     const native = vi.fn(() => ({ cv: document.createElement('canvas'), w: 20, h: 10, anchorX: 1, anchorY: 2 }));
@@ -95,6 +114,50 @@ describe('installKernel', () => {
     // The compositor's and editing helpers' own calls keep today's rasterizer.
     PM.raster(layer, 1, 0.25);
     expect(native).toHaveBeenCalledTimes(1);
+  });
+
+  it('with the engine on, a PM.raster assignment through host.pm wraps the engine producer\'s chain, outside the services wrappers, until it is restored', () => {
+    const PM = fakePM();
+    PM.raster = vi.fn(() => null);
+    const layer = { id: 'T1', type: 'text', d: { text: 'Hi' }, fx: [] } as any;
+    PM.proj = { ...(PM.proj ?? {}), id: 'P', compId: 'P-root', layers: [layer], comps: {} };
+    const snapshot = { width: 40, height: 20, data: new Uint8ClampedArray(40 * 20 * 4), pixels: 'premultiplied', revision: 3, viewSeq: null,
+      origin: [4, 15], layerBox: [40, 20], raster: { canvas: [40, 20], window: [0, 0], cropped: false, selection: [-4, -15, 36, 5] },
+      quality: {}, waitedUs: 0, renderUs: 0, mainMs: 0 };
+    PM.EngineRender = { rasterSync: vi.fn(() => snapshot), answerCompat: vi.fn(() => () => {}), toCanvas: (s: any) => Object.assign(document.createElement('canvas'), { width: s.width, height: s.height }) };
+    installed = installKernel(PM);
+    const api = installed.api('raster-assignment-probe');
+    const compat = PM.RasterCompat;
+    const need = { composition: 'P-root', layer: 'T1', time: 0, source: 'rasterOverride' as const, scale: 1 };
+    expect(compat.wrapped()).toBe(false);
+    // A services wrapper beneath, as an override by id would add.
+    const order: string[] = [];
+    const original = api.services.get<(...args: any[]) => any>('raster')!;
+    const service = api.services.register('raster', (...args: any[]) => { order.push('service'); return original(...args); });
+    // The public compatibility pattern: capture, then assign.
+    const host = (api as any).host.pm;
+    const raster = host.raster;
+    const anchored = (L: any, scale = 1, time = 0) => {
+      order.push('assigned');
+      const result = raster(L, scale, time);
+      return { ...result, anchorX: result.anchorX - 3 };
+    };
+    host.raster = anchored;
+    expect(PM.raster).toBe(anchored);
+    expect(compat.wrapped()).toBe(true);
+    const answer = compat.answer(need, 3);
+    expect(order).toEqual(['assigned', 'service']);
+    // The assigned wrapper's result is the layer's raster, never the plain
+    // layer (pixel reads need a real canvas: raster-compat.test.ts).
+    expect(answer?.kind).toBe('raster');
+    // render.raster sees it too, as today.
+    expect((api.render.raster(layer, 1, 0) as any).anchorX).toBe(1);
+    // Restored (the extension's dispose): the services chain alone again.
+    host.raster = raster;
+    expect(PM.raster).toBe(raster);
+    service.dispose();
+    expect(compat.wrapped()).toBe(false);
+    expect(compat.answer(need, 4)).toEqual({ kind: 'native' });
   });
 
   it('with the engine on, snapshots keep today’s contracts: snapshotAsync goes through PM.Export (Blender prepared there), project.snapshot rejects an unprepared Blender frame', async () => {

@@ -21,7 +21,7 @@ function playerBundlePlugin() {
 }
 
 // electron.vite.config.ts
-var __electron_vite_injected_dirname = "/Users/chike/Documents/Work 2/Apps/Powermove/apps/desktop";
+var __electron_vite_injected_dirname = process.cwd();
 var electron_vite_config_default = defineConfig({
   // A sandboxed preload must be CommonJS; pin the format so a future
   // `"type": "module"` in package.json cannot silently flip it to .mjs.

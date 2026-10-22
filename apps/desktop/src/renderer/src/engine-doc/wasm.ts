@@ -199,6 +199,15 @@ export class PmWasm {
   revision(): number { return this.call(() => this.x.pm_revision()); }
   hash(): string { return this.call(() => this.readOut(this.x.pm_hash())); }
   toJson(): string { return this.call(() => this.readOut(this.x.pm_to_json())); }
+  /** The mirror's canonical JSON as UTF-8 bytes, copied out of wasm memory:
+   *  a large document never becomes a JavaScript string (C1: 170 MB). */
+  toJsonBytes(): Uint8Array {
+    return this.call(() => {
+      const len = this.x.pm_to_json();
+      const ptr = this.x.pm_out_ptr();
+      return this.memory().slice(ptr, ptr + len);
+    });
+  }
 
   // ── the fast path ─────────────────────────────────────────────────────
 

@@ -9,7 +9,7 @@ import { pasteMedia } from './core/media-paste';
 import { isFieldTarget, selectableTextRoot } from '../kernel/keychord';
 import { canAnimateContent, isProperty } from './core/content-properties';
 /* Ported from js/app.js — behavior-preserving. */
-import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
+import { normalizeExportDefaults, storedExportDefaults, type ExportDefaults } from '../core/export-defaults';
 import { compactEditLog } from '../core/edit-log';
 import { normalizeCaptionsContent } from '../captions/model';
 import type { PMRegistry } from './registry';
@@ -77,13 +77,15 @@ function fileUI() {
 }
 async function refreshFileDirty(project = PM.proj): Promise<boolean> {
   const state = fileState(project.id);
-  const json = await stringifyAsync(project);
+  // Fingerprints, not the JSON, are held across the awaits: a large
+  // project's JSON is hundreds of megabytes of string (C1), and holding one
+  // while building another pushed the window past V8's heap limit.
+  const hash = await projectFingerprint(await stringifyAsync(project));
   const version = (comparisonVersions.get(project.id) || 0) + 1;
   comparisonVersions.set(project.id, version);
   await state.baselineReady;
-  const hash = await projectFingerprint(json);
   // A newer edit wins over an in-flight comparison.
-  if (await stringifyAsync(project) !== json) return true;
+  if (await projectFingerprint(await stringifyAsync(project)) !== hash) return true;
   const baseline = state.savedHash || state.baselineHash;
   const dirty = !baseline || baseline !== hash;
   // Concurrent comparisons of the same content are not edits. Only the
@@ -237,7 +239,7 @@ function hydrate(p: any) {
   };
   base.params = sanitizeParams(p.params);
   base.shutter = p.shutter == null ? .5 : p.shutter;
-  base.exportDefaults = normalizeExportDefaults(p.exportDefaults, base.fps);
+  base.exportDefaults = storedExportDefaults(normalizeExportDefaults(p.exportDefaults, base.fps), p.exportDefaults);
   /* Production rule: a saved project must never poison the renderer. Every channel,
      keyframe, effect and layer field is normalized here so malformed data degrades
      to a static value instead of NaN transforms or a broken keyframe search.
@@ -618,7 +620,7 @@ function readExportDefaults(): ExportDefaults {
 function writeExportDefaults(patch: Partial<ExportDefaults>) {
   if (!PM.proj) return;
   const next = normalizeExportDefaults({ ...readExportDefaults(), ...patch }, PM.proj.fps);
-  PM.hist.do('Export settings', () => { PM.proj.exportDefaults = next; });
+  PM.hist.do('Export settings', () => { PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults); });
 }
 PM.exportDefaults = { read: readExportDefaults, write: writeExportDefaults };
 
@@ -734,6 +736,11 @@ function closeProjectTransients() {
   PM.closeMenus?.();
   if (PM.WS.editing) PM.WS.cancelEdit();
 }
+/** How long the last autosave's write took: the next one waits at least
+ *  that long for quiet (up to a minute), so a project whose write takes
+ *  tens of seconds (C1: about 50 s for a 180 MB project) is not written
+ *  again after every half-second pause. Small projects keep 550 ms. */
+let lastAutosaveMs = 0;
 PM.autosave = () => {
   if (PM.proj.id === homeProjectId || discardedProjects.has(PM.proj.id)) return;
   APP.dirty = true;
@@ -748,9 +755,11 @@ PM.autosave = () => {
       // A read-only project only tracks whether it differs from its file.
       const readOnly = isReadOnlyProject(PM.proj);
       if (!readOnly) {
+        const began = performance.now();
         PM.EngineDoc?.beforeSave?.('autosave');
         if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
         PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
+        lastAutosaveMs = performance.now() - began;
         await PM.store.flush?.();
       }
       if (generation !== saveGeneration || projectId !== PM.proj.id) return;
@@ -763,10 +772,17 @@ PM.autosave = () => {
       console.warn('Project save failed', error);
     }
     PM.invalidate('status'); PM.bus.emit('projects:open');
-  }, 550);
+  }, Math.max(550, Math.min(60_000, lastAutosaveMs)));
 };
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
-['layers','project','assets','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
+['layers','project','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
+// A project's media being read for display (restoreProjectAssets) is not an
+// edit. Each asset it finishes announces 'assets' for the UI; when those
+// arrived further apart than the autosave debounce (media read through main
+// with the new engine), each one wrote the whole project again (C1: a 50 s
+// write each for a 180 MB project, over and over during the open). The
+// restore's last announcement, after it ends, still autosaves once.
+PM.bus.on('assets', () => { if (!PM.assetsRestoring) PM.autosave(); });
 
 async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {}): Promise<boolean> {
   APP.saving = true; PM.invalidate('status');
@@ -1019,7 +1035,7 @@ async function openFiles(files: File[]) {
     switchProject(PM.mkProject({
       name: media[0]!.name.replace(/\.[^.]+$/, '') || 'Untitled',
       w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur, bg: PM.proj.bg,
-      exportDefaults: { ...readExportDefaults(), fps: PM.proj.fps },
+      exportDefaults: storedExportDefaults({ ...readExportDefaults(), fps: PM.proj.fps }, PM.proj.exportDefaults),
     }));
     PM.ProjectsScreen?.hide?.();
   }
@@ -1047,7 +1063,7 @@ PM.newProject = () => {
       const values = form.values();
       switchProject(PM.mkProject({
         ...values,
-        exportDefaults: { ...(PM.proj ? readExportDefaults() : {}), fps: values.fps },
+        exportDefaults: PM.proj ? storedExportDefaults({ ...readExportDefaults(), fps: values.fps }, PM.proj.exportDefaults) : { fps: values.fps },
       }));
       PM.ProjectsScreen?.hide?.();
     } },
@@ -1489,7 +1505,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
         if (rate?.ok) {
           targetProject.fps = rate.fps;
           targetProject.fpsRational = rate.fpsRational;
-          targetProject.exportDefaults = { ...readExportDefaults(), fps: rate.fps };
+          targetProject.exportDefaults = storedExportDefaults({ ...readExportDefaults(), fps: rate.fps }, PM.proj?.exportDefaults);
         }
         if (Number.isFinite(source.dur) && source.dur > 0) {
           targetProject.dur = source.dur;

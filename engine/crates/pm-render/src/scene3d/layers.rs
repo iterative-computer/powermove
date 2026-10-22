@@ -729,7 +729,7 @@ pub(crate) fn legacy_scene<'d>(
     let mut channels: HashMap<String, &'d Node> = HashMap::new();
     let mut collect = |p: Option<&'d Node>, prefix: String| {
         if let Some(NodeKind::Object(map)) = p.map(Node::kind) {
-            for (k, v) in map {
+            for (k, v) in map.iter() {
                 channels.insert(format!("{prefix}.{}", k.to_string_lossy()), v);
             }
         }

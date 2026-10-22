@@ -462,6 +462,12 @@ pub struct Stats {
     pub depth_frames: u64,
     pub compat_rasters: BTreeMap<String, usize>,
     pub compat_bytes: u64,
+    /// Producer answers held and asks outstanding (the `raster`
+    /// override's pass-throughs, reuses, and rasters).
+    pub compat_answers: u64,
+    pub compat_asked: u64,
+    /// Viewer frames that waited for producer answers.
+    pub compat_waits: u64,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -627,8 +633,9 @@ struct Thread {
     last_interactive: Option<i64>,
     /// Snapshots served per session, and the slowest (µs).
     snapshot_costs: BTreeMap<Key, (u64, i64)>,
-    /// Compatibility rasters the renderers uploaded.
-    compat: super::compat::CompatStore,
+    /// Compatibility rasters the renderers uploaded, and their producers'
+    /// answers (shared with the renderer for the frame being drawn).
+    compat: std::sync::Arc<std::sync::Mutex<super::compat::CompatStore>>,
     /// Waveform requests waiting for the host's media answer.
     peaks_waiting: BTreeSet<(Key, String)>,
     /// With the per-frame trace on: each session's revisions not shown yet
@@ -717,7 +724,7 @@ pub fn run(
         segments: pm_bridge::shm::Segments::default(),
         last_interactive: None,
         snapshot_costs: BTreeMap::new(),
-        compat: super::compat::CompatStore::default(),
+        compat: Default::default(),
         peaks_waiting: BTreeSet::new(),
         doc_trace: BTreeMap::new(),
         work_start: 0,
@@ -795,6 +802,10 @@ fn command_name(command: &Command) -> &'static str {
 impl Thread {
     fn log(&self, level: LogLevel, message: String) {
         (self.sink)(vec![Action::Log { level, message }]);
+    }
+
+    fn compat_store(&self) -> std::sync::MutexGuard<'_, super::compat::CompatStore> {
+        self.compat.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn stats(&self) -> std::sync::MutexGuard<'_, Stats> {
@@ -1186,14 +1197,29 @@ impl Thread {
                     | pm_protocol::snapshot::CompatMessage::SvgRequests { .. }),
             } => self.svg_message(key, message),
             Command::Compat { key, message } => {
-                let applied = self.compat.apply(key, message);
-                let (rasters, bytes) = self.compat.usage();
-                let mut stats = self.stats();
-                if applied == super::compat::Applied::Complete {
-                    stats.compat_rasters_received += 1;
+                let (applied, rasters, bytes, answers) = {
+                    let mut store = self.compat_store();
+                    let applied = store.apply(key, message);
+                    let (rasters, bytes) = store.usage();
+                    (applied, rasters, bytes, store.answer_counts())
+                };
+                {
+                    let mut stats = self.stats();
+                    if applied == super::compat::Applied::Complete {
+                        stats.compat_rasters_received += 1;
+                    }
+                    stats.compat_rasters = rasters;
+                    stats.compat_bytes = bytes;
+                    stats.compat_answers = answers.0 as u64;
+                    stats.compat_asked = answers.1 as u64;
                 }
-                stats.compat_rasters = rasters;
-                stats.compat_bytes = bytes;
+                // A frame waiting on the producer's answers draws now (and
+                // a changed producer list redraws what it decides).
+                if applied.unblocks()
+                    && let Some(view) = self.views.get_mut(&key)
+                {
+                    view.dirty = true;
+                }
             }
             Command::LoseDevice => {
                 if let Some(gpu) = &self.gpu {
@@ -1481,7 +1507,7 @@ impl Thread {
             blender.forget(key);
         }
         self.snapshot_costs.remove(&key);
-        self.compat.forget_session(key);
+        self.compat_store().forget_session(key);
         self.peaks_waiting.retain(|(k, _)| *k != key);
         for job in self.snapshots.take_session(key) {
             self.stats().snapshot_failures += 1;
@@ -3334,6 +3360,11 @@ impl Thread {
                     )
                 })
             });
+            // Layers the session's compatibility producers draw (the
+            // `raster` override; `super::compat`).
+            let doc_revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+            let compat_view = compat_view(&self.compat, key, doc_revision);
+            composer.renderer().set_compat_rasters(compat_view);
             let composed = composer.compose_with_depth(
                 doc.document(),
                 &composition,
@@ -3343,6 +3374,7 @@ impl Thread {
                 &live.working,
                 depth_slot.as_ref().map(|(_, _, v)| v),
             );
+            composer.renderer().set_compat_rasters(None);
             depth_surface = depth_slot.map(|(index, generation, _)| (index, generation));
             composer.set_blender(pm_render::blender::BlenderRender::Native);
             // What the paused frame lacked (nothing in a draft shading); a
@@ -3448,6 +3480,23 @@ impl Thread {
                             (self.sink)(vec![Action::Send { port: key.0, bytes }]);
                         }
                     }
+                }
+                Err(pm_render::RenderError::CompatPending(needs)) => {
+                    // Layers a compatibility producer draws (the `raster`
+                    // override): ask the view's renderer, and render the
+                    // frame again when every answer arrived.
+                    let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                    let fresh =
+                        self.compat_store()
+                            .to_ask(key, revision, needs, std::time::Instant::now());
+                    for chunk in fresh.chunks(pm_protocol::snapshot::MAX_COMPAT_NEEDS) {
+                        let envelope = super::compat::needs_event(key.1, revision, chunk.to_vec());
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
+                    self.stats().compat_waits += 1;
+                    return None;
                 }
                 Err(pm_render::RenderError::SvgRastersPending(needs)) => {
                     // Buckets this thread already knows failed but this
@@ -3962,8 +4011,18 @@ impl Thread {
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
+            let compat = &self.compat;
             let svg = &self.svg;
-            let outstanding = |k: &str| asked.contains_key(k) || svg.outstanding(k);
+            let outstanding = |k: &str| {
+                if k.starts_with("compat:") {
+                    compat
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .outstanding(k)
+                } else {
+                    asked.contains_key(k) || svg.outstanding(k)
+                }
+            };
             let Some(job) = self.snapshots.next(revision, outstanding, pressure, now) else {
                 return;
             };
@@ -4097,6 +4156,8 @@ impl Thread {
             }
         }
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        // The session's compatibility producers (the `raster` override).
+        renderer.set_compat_rasters(compat_view(&self.compat, job.key, revision));
         // A snapshot never draws an SVG bucket's stand-in: it waits for the
         // renderer's raster (decision S1). The renderer is the viewer's
         // too: the guard gives the viewer its policy back however this
@@ -4121,6 +4182,7 @@ impl Thread {
                     Ok((frame.color.width(), frame.color.height(), raw))
                 })
         };
+        renderer.set_compat_rasters(None);
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
@@ -4132,6 +4194,42 @@ impl Thread {
         }
         let (width, height, raw) = match rendered {
             Ok(done) => done,
+            Err(pm_render::RenderError::CompatPending(needs)) => {
+                // The renderer draws them on its blocked thread and posts
+                // them on the session's port, then asks again: needs it
+                // was just sent are on their way (the two ports race), so
+                // the job waits for them; the rest are named.
+                let tags: Vec<String> = needs
+                    .iter()
+                    .map(|n| super::compat::CompatStore::tag(job.key, n))
+                    .collect();
+                let fresh =
+                    self.compat_store()
+                        .to_ask(job.key, revision, needs, std::time::Instant::now());
+                if fresh.is_empty() {
+                    let mut job = job;
+                    job.waiting_for = tags;
+                    self.snapshots.requeue(job);
+                    return;
+                }
+                self.stats().snapshot_needs += 1;
+                let outcome = SnapshotOutcome::NeedsRenderer {
+                    revision,
+                    fallback: Vec::new(),
+                    compat: fresh
+                        .into_iter()
+                        .take(pm_protocol::snapshot::MAX_COMPAT_NEEDS)
+                        .collect(),
+                    svg: Vec::new(),
+                };
+                let mut envelope = Envelope::new(Message::Response {
+                    id: job.id,
+                    body: Response::Snapshot(Box::new(outcome)),
+                });
+                envelope.revision = Some(revision);
+                self.send(job.host, envelope);
+                return;
+            }
             Err(pm_render::RenderError::SvgRastersPending(needs)) => {
                 // As for fallback pixels: what the renderer posted is on
                 // its way (wait for it); the rest is named for it to draw.
@@ -4531,11 +4629,7 @@ impl Thread {
         match pm_bridge::shm::publish(&pixels) {
             Ok(name) => {
                 self.segments.add(name.clone());
-                self.snapshots.published(
-                    now(),
-                    length as u64,
-                    pm_bridge::shm::ORPHAN_AFTER.as_micros() as i64,
-                );
+                self.snapshots.published(name.clone(), length as u64);
                 self.stats().snapshot_shared += 1;
                 Some(PixelPayload::SharedMemory {
                     name,
@@ -4792,4 +4886,24 @@ mod tests {
         assert_eq!(wrap.next(), u32::MAX);
         assert_eq!(wrap.next(), 1);
     }
+}
+
+/// The renderer's view of session `key`'s compatibility producers for one
+/// render at `revision`; `None` without a producer.
+fn compat_view(
+    store: &std::sync::Arc<std::sync::Mutex<super::compat::CompatStore>>,
+    key: Key,
+    revision: Revision,
+) -> Option<std::sync::Arc<dyn pm_render::compat::CompatRasters>> {
+    let has = store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .has_producers(key);
+    has.then(|| {
+        std::sync::Arc::new(super::compat::CompatView {
+            store: store.clone(),
+            key,
+            revision,
+        }) as std::sync::Arc<dyn pm_render::compat::CompatRasters>
+    })
 }

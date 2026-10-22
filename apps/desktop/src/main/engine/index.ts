@@ -151,8 +151,12 @@ function statusMessage(enabled: boolean, status: NativeEngineStatus | null): Eng
   return { enabled, processes: { interactive: one('interactive'), job: one('job') } };
 }
 
-/** Largest staged resync document (the largest corpus history is 60 MB). */
-const MAX_STAGED_BYTES = 256 * 1024 ** 2;
+/** Largest staged resync document: the same bound as a document sent with
+ *  a synchronous snapshot (snapshots.ts MAX_DOCUMENT_BYTES). The renderer
+ *  now hands over pm-wasm's bytes, not a JavaScript string, so V8's string
+ *  ceiling (about 512 MiB, which bounds today's own save) no longer stops
+ *  it first; a real project's document is 180 MB (C1). */
+const MAX_STAGED_BYTES = 512 * 1024 ** 2;
 
 function validStageRequest(value: unknown): value is StageDocumentRequest {
   if (typeof value !== 'object' || value === null) return false;
@@ -304,6 +308,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   });
 
   const engineNowUs = engineClock(bridgeAddon);
+  /** The job records' snapshots (set once the job engine's client exists below). */
+  let agentJobsRef: { compatLayer(session: number | null, request: import('../../shared/engine-protocol').CompatFrameRequest): string | null } | null = null;
   const cacheDirectory = path.join(options.userData, 'Engine Cache');
   // Exports of layers only a window draws (a `raster` override, a
   // compatibility WebGL2 context): the job engine asks, the windows answer.
@@ -312,14 +318,16 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       .filter((w) => !w.isDestroyed())
       .map((w) => ({ id: w.webContents.id, ask: (ask) => w.webContents.send(ENGINE_IPC.compatAsk, ask) })),
     publishPixels: bridgeAddon?.publishPixels ? (bytes) => bridgeAddon.publishPixels!(bytes) : null,
-    unlinkPixels: bridgeAddon?.unlinkPixels ? (name) => bridgeAddon.unlinkPixels!(name) : null
+    unlinkPixels: bridgeAddon?.unlinkPixels ? (name) => bridgeAddon.unlinkPixels!(name) : null,
+    takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null
   });
   options.ipc.on(ENGINE_IPC.compatAnswer, (event, answer: unknown) => {
     if (!options.isTrustedSender(event)) return;
     if (!compatFrames.answer(event.sender.id, answer)) log('warn', `window ${event.sender.id} sent a compatibility answer nobody asked for`);
   });
   engine = new NativeEngine({
-    compatFrame: (request) => compatFrames.serve(request),
+    // The export's own snapshot of the layer goes with the ask (agent-jobs.ts).
+    compatFrame: (request, session) => compatFrames.serve(request, agentJobsRef?.compatLayer(session, request) ?? null),
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
       const child = utilityProcess.fork(script, [], {
@@ -422,7 +430,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // viewer's presentation) from the round trip with the least delay.
   options.ipc.on(ENGINE_IPC.requestPorts, (event) => {
     if (!options.isTrustedSender(event)) return;
-    engine!.reconnectClient(event.sender.id);
+    engine!.refreshPorts(event.sender.id);
   });
   options.ipc.handle(ENGINE_IPC.hostTime, (event) => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -485,7 +493,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     }
   };
   let renderQueue: RenderQueue | null = null;
-  const agentJobs = new AgentJobs({
+  const agentJobs = agentJobsRef = new AgentJobs({
     engine,
     ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}),
     log,

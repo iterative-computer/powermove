@@ -86,7 +86,7 @@ export type NativeEngineOptions = {
   /** The job engine's `compatFrame` requests: a layer's compatibility
    *  pixels drawn by the document's window (compat-frames.ts). Without it
    *  they answer `notHeadlessRenderable`. */
-  compatFrame?: (request: import('../../shared/engine-protocol').CompatFrameRequest) => Promise<Response>;
+  compatFrame?: (request: import('../../shared/engine-protocol').CompatFrameRequest, session: number | null) => Promise<Response>;
   /** Runs a job engine fallback request in a window's runner
    *  (`shader-fallback-relay.ts`); without it such requests answer
    *  `unsupported` and the job fails naming the program. */
@@ -295,6 +295,21 @@ export class NativeEngine {
   reconnectClient(id: number): void {
     const client = this.clients.get(id);
     if (client) this.addClient(id, client.deliver, client.kind);
+  }
+
+  /**
+   * The same page asks for fresh ports (it booted after main posted them,
+   * or its connection to a running engine closed while that launch lives):
+   * new ports to every running launch, replacing the old ones. Unlike a
+   * reload, the page keeps its state, so main keeps its definitions.
+   */
+  refreshPorts(id: number): void {
+    const client = this.clients.get(id);
+    if (!client) return;
+    for (const process of client.kind.processes) {
+      const launch = this.supervisors[process].current;
+      if (launch) this.connectClient(client, launch);
+    }
   }
 
   removeClient(id: number): void {
@@ -599,7 +614,7 @@ export class NativeEngine {
           if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks for compatibility frames.'));
           if (!this.options.compatFrame) return Promise.reject(new ProtocolError('notHeadlessRenderable', 'This host draws no compatibility frames.'));
           const { type: _type, ...request } = body;
-          return this.options.compatFrame(request);
+          return this.options.compatFrame(request, session ?? null);
         }
         return this.services.serve(process, current.hostPort, body, session);
       },

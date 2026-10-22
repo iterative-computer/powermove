@@ -288,7 +288,7 @@ pub fn video_assets(document: &Document) -> Vec<(String, bool)> {
         return out;
     };
     if let pm_model::NodeKind::Object(map) = assets.kind() {
-        for (id, record) in map {
+        for (id, record) in map.iter() {
             let kind = record.get("kind").and_then(|k| match k.kind() {
                 pm_model::NodeKind::String(s) => Some(s.to_string_lossy()),
                 _ => None,

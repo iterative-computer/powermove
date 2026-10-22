@@ -229,6 +229,7 @@ mod tests {
             scale: 1.0,
             revision: crate::common::Revision::ZERO,
             svg,
+            frame: None,
         };
         let request = SvgRasterRequest {
             key: key(),

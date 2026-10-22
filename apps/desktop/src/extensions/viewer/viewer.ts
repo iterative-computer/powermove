@@ -701,7 +701,7 @@ if (existing?._runtimeToken === VIEWER_RUNTIME_TOKEN) return existing;
 // Extension reload removes the service before activation, and a hot module
 // update also clears module-local retention. The renderer still owns its live
 // canvas: recover that surface instead of displaying a new, unrendered one.
-const renderingCanvas = api.render.gl.context?.canvas;
+const renderingCanvas = api.render.gl.canvas;
 const existingStage = (existing?.stage ??
   (renderingCanvas && 'closest' in renderingCanvas ? renderingCanvas.closest('#stage') : null)) as HTMLElement | undefined;
 existing?._disposeRuntime?.();
@@ -980,7 +980,7 @@ V.attach = (stage: HTMLElement) => {
     // This viewer presents engine frames by itself: a render.gl.init
     // binding must not present over its canvas (canvas-binding.ts).
     stage.setAttribute(ENGINE_SELF_PRESENTS_ATTRIBUTE, '');
-    if (!api.render.gl.context) api.render.gl.init(gl);
+    if (!api.render.gl.canvas) api.render.gl.init(gl);
     unbindStage?.();
     resizeObserver?.disconnect();
     unbindStage = bindStage(stage, inner);

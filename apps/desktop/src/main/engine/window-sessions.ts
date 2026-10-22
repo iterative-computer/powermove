@@ -110,9 +110,9 @@ export class WindowSnapshotSessions {
   /** The window's session at `document`, ready for a snapshot: `{ port,
    *  session }`, or `needsDocument` when main lacks the revision and the
    *  request carried no document. Serialized per window. */
-  prepare(windowId: number, document: WindowDocument, fallback: FallbackPixels[] = [], svg: SvgPixels[] = []): Promise<{ port: number; session: number } | 'needsDocument'> {
+  prepare(windowId: number, document: WindowDocument, fallback: FallbackPixels[] = [], svg: SvgPixels[] = [], compat: readonly { [key: string]: unknown }[] = []): Promise<{ port: number; session: number } | 'needsDocument'> {
     const previous = this.chains.get(windowId) ?? Promise.resolve();
-    const next = previous.catch(() => {}).then(() => this.run(windowId, document, fallback, svg));
+    const next = previous.catch(() => {}).then(() => this.run(windowId, document, fallback, svg, compat));
     this.chains.set(windowId, next);
     void next.finally(() => {
       if (this.chains.get(windowId) === next) this.chains.delete(windowId);
@@ -120,7 +120,7 @@ export class WindowSnapshotSessions {
     return next;
   }
 
-  private async run(windowId: number, document: WindowDocument, fallback: FallbackPixels[], svg: SvgPixels[]): Promise<{ port: number; session: number } | 'needsDocument'> {
+  private async run(windowId: number, document: WindowDocument, fallback: FallbackPixels[], svg: SvgPixels[], compat: readonly { [key: string]: unknown }[] = []): Promise<{ port: number; session: number } | 'needsDocument'> {
     const host = this.engine.hostPort('interactive');
     if (!host) throw new Error('the new engine is not running');
     // Session ids may be reused after a restart. Clear every old binding
@@ -183,6 +183,10 @@ export class WindowSnapshotSessions {
     }
     for (const pixels of fallback) this.postFallback(record.session, pixels);
     for (const pixels of svg) this.postSvg(record.session, pixels);
+    // The window's compatibility producers and answers (a `raster`
+    // override): this session asks for, and draws, the window's layers as
+    // the window's own session would.
+    for (const event of compat) this.engine.event('interactive', event as unknown as Event, record.session);
     return { port: record.port, session: record.session };
   }
 

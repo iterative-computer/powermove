@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, EngineRenderTransport, EngineSnapshotError, type TransportSession, type TransportSvgRasters, svgUploadKey, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -70,6 +70,41 @@ describe('EngineRenderTransport', () => {
     expect(asked[0]).toMatchObject({ generation: 2, session: 5, revision: 12, snapshot: { composition: 'comp-1', time: 352_800_000, outputSize: { width: 4, height: 2 }, class: 'sync', viewSeq: 4, pixels: 'opaque', uploaded: [] } });
     expect(snap).toMatchObject({ width: 4, height: 2, revision: 12, viewSeq: 4 });
     expect(snap.data).toBeInstanceOf(Uint8ClampedArray);
+  });
+
+  it('never sends main more asynchronous snapshots than it admits, and waits out a refusal instead of failing', async () => {
+    // A large project's idle thumbnails and compatibility rasters filled
+    // main's eight slots and an extension's renderFrameToAsync failed with
+    // "Too many snapshots are in flight" (C1); today's never fails for that.
+    const { transport, asked } = setup([]);
+    let inFlight = 0, most = 0, refusals = 1;
+    (transport as any).options.native.snapshot = async (request: EngineSnapshotRequest) => {
+      asked.push(request);
+      inFlight++; most = Math.max(most, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      if (refusals-- > 0) return { status: 'failed', code: 'refused', message: 'Too many snapshots are in flight; try again when they finish.' } as EngineSnapshotReply;
+      return rendered(4, 2);
+    };
+    const all = await Promise.all([
+      ...Array.from({ length: 12 }, () => transport.snapshot({ time: 0, width: 4, height: 2 }, 'idle')),
+      ...Array.from({ length: 6 }, () => transport.snapshot({ time: 1, width: 4, height: 2 })),
+    ]);
+    expect(all).toHaveLength(18);
+    expect(all.every((snap) => snap.width === 4)).toBe(true);
+    expect(most).toBeLessThanOrEqual(8);
+    expect(asked).toHaveLength(19);
+  });
+
+  it('prepares playback base pixels over async IPC at dependency priority, without changing ordinary async snapshots', async () => {
+    const { transport, asked } = setup([rendered(2, 2), rendered(2, 2)]);
+    const sync = vi.spyOn(transport, 'snapshotSync');
+    await transport.rasterForCompat('shape', 2, .5);
+    expect(sync).not.toHaveBeenCalled();
+    expect(asked[0]!.snapshot.class).toBe('sync');
+    await transport.raster('shape', 2, .6);
+    expect(asked[1]!.snapshot.class).toBe('async');
+    expect(transport.stats.async).toBe(2);
   });
 
   it('draws what the engine needs on this thread and asks again, never waiting on a task', () => {
@@ -143,6 +178,36 @@ describe('EngineRenderTransport', () => {
     const { transport } = setup([needs, needs]);
     expect(() => transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(/asked again/);
     expect(transport.stats.failed).toBe(1);
+  });
+
+  it('finishes successive raster and dependent program phases synchronously and asynchronously', async () => {
+    const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
+    const replies = (): EngineSnapshotReply[] => [
+      { status: 'needsRenderer', revision: 12, fallback: [], compat: [need] },
+      ...['a', 'b', 'c', 'd'].map((key): EngineSnapshotReply => ({ status: 'needsRenderer', revision: 12, fallback: [fallbackRequest(key.repeat(64))], compat: [] })),
+      rendered(2, 2)
+    ];
+    for (const async of [false, true]) {
+      const { transport, asked, runner } = setup(replies());
+      transport.answerCompat('rasterOverride', () => ({ kind: 'native' }));
+      const result = async ? await transport.snapshot({ time: 0, width: 2, height: 2 }) : transport.snapshotSync({ time: 0, width: 2, height: 2 });
+      expect(result.width).toBe(2);
+      expect(asked).toHaveLength(6);
+      expect(asked[5]!.snapshot.uploaded).toHaveLength(4);
+      expect(async ? runner.render : runner.renderSync).toHaveBeenCalledTimes(4);
+    }
+  });
+
+  it('still stops a repeated unresolved raster dependency after three replies', async () => {
+    const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
+    const needs: EngineSnapshotReply = { status: 'needsRenderer', revision: 12, fallback: [], compat: [need] };
+    for (const async of [false, true]) {
+      const { transport, asked } = setup([needs, needs, needs, rendered(2, 2)]);
+      transport.answerCompat('rasterOverride', () => ({ kind: 'native' }));
+      if (async) await expect(transport.snapshot({ time: 0, width: 2, height: 2 })).rejects.toThrow(/same unresolved snapshot dependencies 3 times/);
+      else expect(() => transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(/same unresolved snapshot dependencies 3 times/);
+      expect(asked).toHaveLength(3);
+    }
   });
 
   it("returns today's shapes: a canvas, a JPEG data URL at 0.74, '' only on failure", () => {
@@ -271,16 +336,46 @@ describe('EngineRenderTransport', () => {
     expect(byAsk(3)).toMatchObject({ status: 'unavailable' });
   });
 
+  it('an export ask carrying the snapshot\'s layer is drawn from it, in any window with the producer', async () => {
+    const { transport, ask, answers } = setup([]);
+    const seen: unknown[] = [];
+    transport.answerCompat('rasterOverride', (_need, _revision, options) => {
+      seen.push(options);
+      return { kind: 'raster', key: 'k', width: 1, height: 1, format: 'rgba8Premultiplied', data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] };
+    });
+    const request = { document: 'queued-project', composition: 'comp-1', layer: 'L7', time: 0, source: 'rasterOverride' as const, scale: 1, revision: 1 };
+    ask({ ask: 7, request, layer: '{"id":"L7","type":"text"}' });
+    ask({ ask: 8, request });
+    await new Promise((r) => setTimeout(r, 0));
+    const byAsk = (n: number) => answers.find((a) => (a as { ask: number }).ask === n);
+    expect(byAsk(7)).toMatchObject({ status: 'pixels' });
+    expect(seen).toEqual([{ fresh: true, layer: '{"id":"L7","type":"text"}' }]);
+    // Without the snapshot's layer, only the document's window answers.
+    expect(byAsk(8)).toMatchObject({ status: 'unavailable', message: 'This window has another document open.' });
+  });
+
   it('layer rasters: pixels with anchor and box, null when the layer draws nothing', () => {
     const raster: EngineSnapshotReply = { ...rendered(3, 2), pixels: 'premultiplied', origin: [4, 5], layerBox: [3, 2] } as EngineSnapshotReply;
     const { transport, asked } = setup([raster, { status: 'empty', revision: 12 }, { status: 'failed', code: 'unsupported', message: 'not text' }]);
     const surface = transport.rasterSync('T1', 2, 0.5, { x: 0, y: 0, width: 3, height: 2 });
     expect(surface).toMatchObject({ width: 3, height: 2, origin: [4, 5], layerBox: [3, 2] });
-    expect(asked[0]!.snapshot).toMatchObject({ target: { kind: 'layer', layer: 'T1', scale: 2, crop: { x: 0, y: 0, width: 3, height: 2 } }, pixels: 'premultiplied', outputSize: { width: 6000, height: 6000 } });
+    expect(asked[0]!.snapshot).toMatchObject({ target: { kind: 'layer', layer: 'T1', scale: 2, crop: { x: 0, y: 0, width: 3, height: 2 } }, pixels: 'premultiplied', outputSize: { width: 8192, height: 8192 } });
     expect(transport.rasterSync('T1', 1, 0.5)).toBeNull();
     expect(() => transport.rasterSync('S1', 1, 0.5)).toThrow(EngineSnapshotError);
     // An empty raster is not a failure.
     expect(transport.stats.failed).toBe(1);
+  });
+
+  it('layer rasters take any scale, as today\'s PM.raster: the engine caps the density at the 8192-pixel edge', () => {
+    expect([33, 40, 50, 1000, 0.005, 1e-7].map(layerRasterScale)).toEqual([33, 40, 50, 1000, 0.005, 1e-7]);
+    // Above 2^53 every number is an integer the MessagePack encoder refuses.
+    for (const s of [Infinity, Number.MAX_VALUE, 1e300, 2 ** 53 + 2]) expect(layerRasterScale(s)).toBe(Number.MAX_SAFE_INTEGER);
+    for (const s of [0, -1, -Infinity, NaN]) expect(layerRasterScale(s)).toBe(VANISHING_RASTER_SCALE);
+    const raster = { ...rendered(3, 2), pixels: 'premultiplied', origin: [4, 5], layerBox: [3, 2] } as EngineSnapshotReply;
+    const { transport, asked } = setup([raster, raster, raster, raster, raster]);
+    for (const scale of [40, 1000, Infinity, -2, NaN]) expect(transport.rasterSync('T1', scale, 0)).toMatchObject({ width: 3, height: 2 });
+    expect(asked.map((a) => (a.snapshot.target as { scale: number }).scale)).toEqual([40, 1000, Number.MAX_SAFE_INTEGER, VANISHING_RASTER_SCALE, VANISHING_RASTER_SCALE]);
+    expect(transport.stats.failed).toBe(0);
   });
 
   it('a Blender composition without its prepared frame throws today’s error, never an empty snapshot', () => {
@@ -346,6 +441,41 @@ describe('EngineRenderTransport', () => {
       expect((asked[1] as any).fallbackPixels[0]).toMatchObject({ key: 'c'.repeat(64), width: 2, height: 2 });
     });
 
+    it('main-owned snapshots finish a chain of distinct dependent programs', () => {
+      const d = doc();
+      const { transport, asked, runner } = setup([
+        ...['a', 'b', 'c', 'd'].map((key): EngineSnapshotReply => ({ status: 'needsRenderer', revision: 12, fallback: [fallbackRequest(key.repeat(64))], compat: [] })),
+        rendered(2, 2)
+      ], { session: null, windowDocument: d.windowDocument });
+      expect(transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+      expect(runner.renderSync).toHaveBeenCalledTimes(4);
+      expect(asked).toHaveLength(5);
+      expect(asked[4]!.snapshot.uploaded).toHaveLength(4);
+      expect((asked[4] as any).fallbackPixels[0].key).toBe('d'.repeat(64));
+    });
+
+    it('a raster override: main\'s session learns the producers, and the needs\' answers go along with the next round', () => {
+      const d = doc();
+      const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
+      const { transport, asked } = setup([
+        { status: 'needsRenderer', revision: 12, fallback: [], compat: [need] },
+        rendered(2, 2)
+      ], { session: null, windowDocument: d.windowDocument });
+      transport.answerCompat('rasterOverride', () => ({ kind: 'raster', key: 'k', width: 1, height: 1, format: 'rgba8Premultiplied', data: new Uint8Array(4).fill(7), anchor: [0, 0], size: [1, 1] }));
+      transport.snapshotSync({ time: 0, width: 2, height: 2 });
+      expect((asked[0] as any).compatEvents).toEqual([{ type: 'compat', compat: 'producers', sources: ['rasterOverride'] }]);
+      const events = (asked[1] as any).compatEvents as any[];
+      expect(events.map((e) => e.compat)).toEqual(['producers', 'pixels']);
+      expect(events[1]).toMatchObject({ id: { layer: 'title', key: 'k' }, revision: 12, width: 1, height: 1 });
+    });
+
+    it('a document snapshot whose need no producer answers fails by name, never draws without it', () => {
+      const d = doc();
+      const need = { composition: 'comp-1', layer: 'title', time: 0, source: 'rasterOverride' as const, scale: 1 };
+      const { transport } = setup([{ status: 'needsRenderer', revision: 12, fallback: [], compat: [need] }], { session: null, windowDocument: d.windowDocument });
+      expect(() => transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(/No raster override in this window answered for layer title/);
+    });
+
     it('level 1 SVG rasters go along with the next round, with no session of the window\'s (boot)', () => {
       const d = doc();
       const svg = { key: { content: 'c'.repeat(64), width: 3, height: 2 }, asset: 'art' };
@@ -375,5 +505,196 @@ describe('EngineRenderTransport', () => {
 
   it('unpremultiplies like a canvas', () => {
     expect([...unpremultiply(new Uint8ClampedArray([128, 0, 0, 128, 9, 9, 9, 0]))]).toEqual([255, 0, 0, 128, 0, 0, 0, 0]);
+  });
+});
+
+describe('compatibility answers during playback', () => {
+  const frame = 23_520_000;
+  function rig(playing: boolean) {
+    const posted: any[] = [];
+    const session: TransportSession = { id: 3, closed: false, generation: 2, resyncPending: false, applied: 5, uploadFallback: () => {}, post: (e) => { posted.push(e); return true; } };
+    const state = { playing, time: 0, rate: 1, revision: 5 };
+    const t = new EngineRenderTransport({
+      native: {}, session: () => session, revision: () => state.revision, composition: () => 'P-root', document: () => 'P', viewSeq: () => null, fallbackRunner: () => null, log: () => {},
+      playing: () => state.playing, frameTicks: () => frame, playhead: () => ({ time: state.time, rate: state.rate })
+    } as any);
+    const asked: number[] = [];
+    t.answerCompat('rasterOverride', (need) => { asked.push(need.time); return { kind: 'native' }; });
+    return { t, session, posted, asked, state };
+  }
+  const need = (time: number, layer = 'title') => ({ composition: 'P-root', layer, time, source: 'rasterOverride' as const, scale: 1 });
+
+  it('keeps a bounded horizon ahead of the clock without repeating work on duplicate presentation callbacks', () => {
+    const { t, session, asked, state } = rig(true);
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => i * frame));
+      state.time = frame;
+      t.presentedWhilePlaying();
+      expect(asked.at(-1)).toBe(7 * frame);
+      const count = asked.length;
+      for (let i = 0; i < 20; i++) t.presentedWhilePlaying();
+      expect(asked).toHaveLength(count);
+      state.time = 3 * frame;
+      t.receiveCompat({ compat: 'needs', needs: [need(3 * frame)] }, session);
+      expect(asked.slice(count)).toEqual([3, 8, 9].map(n => n * frame));
+    } finally { t.dispose(); }
+  });
+
+  it('recovers from a missed horizon without any presented frame or reversal inferred from a delayed need', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked, state } = rig(true);
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      const before = asked.length;
+      state.time = 30 * frame;
+      // The old engine request can arrive after the audio clock moved on.
+      t.receiveCompat({ compat: 'needs', needs: [need(frame)] }, session);
+      expect(asked.slice(before)).toEqual(Array.from({ length: 7 }, (_, i) => (30 + i) * frame));
+      expect(t.lookaheadStats.skipped).toBe(1);
+      state.time = 40 * frame;
+      await vi.advanceTimersByTimeAsync(4);
+      expect(asked.at(-1)).toBe(46 * frame);
+      expect(t.lookaheadStats.recoveries).toBeGreaterThan(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('warms a bounded horizon from paused needs before Play without a continuing paused timer', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked, state } = rig(false);
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, async () => {});
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => i * frame));
+      expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(2);
+      expect(vi.getTimerCount()).toBe(0);
+      state.playing = true;
+      t.playbackStarted();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toHaveLength(7);
+    } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('warms reverse playback from the paused need rather than a stale clock position', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked, state } = rig(false);
+    state.rate = -1; state.time = 100 * frame;
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, async () => {});
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(20 * frame)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => (20 - i) * frame));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('retires a paused warm-up whose slow preparations outlive its deadline', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked } = rig(false);
+    const pending: Array<() => void> = [];
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, () => new Promise(resolve => pending.push(resolve)));
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(51);
+      pending.forEach(resolve => resolve());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([0]);
+      expect(pending).toHaveLength(2);
+      expect(t.lookaheadStats.inFlight).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('bounds async preparations, presents ready answers independently, and drops obsolete completions', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked, state } = rig(true);
+    const pending: Array<{ time: number; done: () => void }> = [];
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, n => new Promise(resolve => pending.push({ time: n.time, done: resolve })));
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending.map(p => p.time)).toEqual([0, frame]);
+      expect(asked).toEqual([]);
+      // The second result lands while the first remains slow.
+      pending[1]!.done();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([frame]);
+      expect(t.lookaheadStats.maxInFlight).toBe(2);
+      state.time = 30 * frame;
+      pending[0]!.done();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([frame]);
+      expect(t.lookaheadStats.obsolete).toBe(1);
+      expect(pending.at(-1)!.time).toBe(30 * frame);
+    } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('keeps a nested composition time offset while following the open clock', () => {
+    const { t, session, asked, state } = rig(true);
+    try {
+      state.time = 20 * frame;
+      t.receiveCompat({ compat: 'needs', needs: [{ ...need(5 * frame), composition: 'nested' }] }, session);
+      expect(asked.at(-1)).toBe(11 * frame);
+      state.time = 30 * frame;
+      t.presentedWhilePlaying();
+      expect(asked.at(-1)).toBe(21 * frame);
+    } finally { t.dispose(); }
+  });
+
+  it('uses the explicit reverse rate and resets its horizon on a seek or revision change', () => {
+    const { t, session, asked, state } = rig(true);
+    try {
+      state.time = 20 * frame; state.rate = -1;
+      t.receiveCompat({ compat: 'needs', needs: [need(state.time)] }, session);
+      expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => (20 - i) * frame));
+      state.time = 40 * frame;
+      t.presentedWhilePlaying();
+      expect(asked.at(-1)).toBe(34 * frame);
+      const before = asked.length;
+      state.revision++;
+      t.presentedWhilePlaying();
+      expect(asked.length - before).toBe(7);
+    } finally { t.dispose(); }
+  });
+
+  it('bounds producer work per turn even when one answer consumes the budget, and retires the timer', async () => {
+    vi.useFakeTimers();
+    const now = vi.spyOn(performance, 'now');
+    const { t, session, asked, state } = rig(false);
+    let spent = 0;
+    now.mockImplementation(() => spent);
+    try {
+      t.receiveCompat({ compat: 'needs', needs: Array.from({ length: 40 }, (_, i) => need(0, `layer-${i}`)) }, session);
+      asked.length = 0;
+      t.answerCompat('rasterOverride', n => { asked.push(n.time); spent += 20; return { kind: 'native' }; });
+      t.receiveCompat({ compat: 'needs', needs: Array.from({ length: 40 }, (_, i) => need(0, `layer-${i}`)) }, session);
+      asked.length = 0;
+      state.playing = true;
+      t.playbackStarted();
+      expect(asked).toHaveLength(1);
+      expect(t.lookaheadStats.pending).toBeLessThanOrEqual(40 * 7);
+      state.time = 20 * frame;
+      await vi.advanceTimersByTimeAsync(4);
+      expect(asked.at(-1)).toBe(state.time);
+      expect(asked).toHaveLength(2);
+      t.dispose();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(asked).toHaveLength(2);
+    } finally { t.dispose(); now.mockRestore(); vi.useRealTimers(); }
+  });
+
+  it('answers only the paused need, then starts from the actual playhead at Play', () => {
+    const { t, session, asked, state } = rig(false);
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      t.presentedWhilePlaying();
+      expect(asked).toEqual([0]);
+      state.time = 12 * frame; state.playing = true;
+      t.playbackStarted();
+      expect(asked.slice(1)).toEqual(Array.from({ length: 7 }, (_, i) => (12 + i) * frame));
+    } finally { t.dispose(); }
   });
 });

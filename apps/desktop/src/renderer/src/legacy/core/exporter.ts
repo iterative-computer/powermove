@@ -28,6 +28,7 @@ import {
   migrateFormat,
   normalizeDelivery,
   normalizeTimecode,
+  storedFormatId,
   supportsAlpha,
   type ExportPreset,
   type ExportPresetOptions,
@@ -370,7 +371,9 @@ X.dialog = () => {
     if (BUILT_IN_PRESETS.some((preset) => preset.name === name)) { PM.toast('Built-in presets keep their name; choose another.'); return; }
     const stored = (PM.store.get('renderPresets', []) as any[]).filter((preset: any) => preset?.name !== name);
     const id = PM.uid('preset');
-    stored.push({ id, name, options: presetOptionsOf(opts) });
+    // Saved with today's format id where one exists (issue P1); read back through migratePreset.
+    const options = presetOptionsOf(opts);
+    stored.push({ id, name, options: { ...options, format: storedFormatId(options.format) } });
     PM.store.set('renderPresets', stored);
     presets = allPresets(stored).filter((preset) => engine || !formatInfo(preset.options.format).engine);
     chosenPreset = id;
@@ -631,6 +634,13 @@ async function run(opts: any) {
   }
 }
 
+/** The compatibility producers an export in `format` names. */
+function compatSources(format: unknown): { compat?: string[] } {
+  const render: any = PM.EngineRender;
+  const sources: string[] = typeof render?.exportSources === 'function' ? render.exportSources(format) : (render?.producing ?? []);
+  return sources.length ? { compat: [...sources] } : {};
+}
+
 /** The job engine's view of the sheet's settings (shared/engine-ipc.ts). */
 function sheetOptions(opts: any): any {
   const p: any = PM.proj;
@@ -639,7 +649,10 @@ function sheetOptions(opts: any): any {
     format: opts.format, alpha: !!opts.alpha && supportsAlpha(opts.format, opts.delivery), fps: Number(opts.fps), scale: Number(opts.scale) || 1,
     start: opts.format === 'still' ? PM.time : t0, end: opts.format === 'still' ? PM.time + 1 / Math.max(1, Number(opts.fps) || p.fps || 30) : t1,
     audio: opts.audio !== false, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
-    delivery: normalizeDelivery(opts.delivery), hideCaptions: opts.captionsBurn === false
+    delivery: normalizeDelivery(opts.delivery), hideCaptions: opts.captionsBurn === false,
+    // A raster override's layers are drawn by this window (kernel/raster-compat.ts),
+    // and a WebM export's frames go through its compatibility context (compat-context.ts).
+    ...compatSources(opts.format)
   };
 }
 
@@ -716,6 +729,10 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
       X.cancel = cancelled;
     }
     if (final.routed) {
+      // Never silent: the reason the engine refused goes to the console and
+      // stays readable (`PM.Export.lastRouted`) until the routing is retired.
+      X.lastRouted = { format: opts.format, reason: String(final.error ?? '') };
+      console.warn(`[engine] the export went to the current exporter: ${final.error}`);
       if (legacyFormatId(opts.format)) return null;
       throw new Error(`The new engine can’t export this project yet (${final.error}), and the current exporter doesn’t write ${formatInfo(opts.format).label}.`);
     }

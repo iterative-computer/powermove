@@ -46,12 +46,14 @@ The migration now requires a capability handshake from both native storage and p
 
 The maximum input gaps above are still measurable; this is not a zero-latency guarantee. GPU timing and parallel compilation depend on driver support. A synchronous extension callback can consume its first frame before it can be measured and warned about; arbitrary extension JavaScript is not preempted. Slow provider responses and outages surface as recoverable errors, but cannot be eliminated by the editor.
 
-Reproduce performance against a local saved file without modifying it:
+Reproduce performance against a local saved file without modifying it. An optional
+extension directory supplies `compat-manifest.json` with its `effectId`; no local
+extension identifier is built into the probe:
 
 ```sh
 cd apps/desktop
 PM_PERF_FILE='/path/to/project.pmv' \
-PM_PERF_EXTENSION='/path/to/progressive-image-pixels' \
+PM_PERF_EXTENSION='/path/to/extension' \
 bun run test:e2e e2e/editor-responsiveness.spec.ts
 ```
 

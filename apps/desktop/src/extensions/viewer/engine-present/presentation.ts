@@ -803,6 +803,13 @@ export class ViewerPresentation {
     const channel = this.options.service.open({
       message: (message, arrivedMs) => {
         if (this.channel !== opened) return;
+        if (message.type === 'failure') {
+          this.routedSeq = this.deliveredSeq;
+          this.latestFrame = null;
+          this.setStatus(`The preview could not be rendered: ${message.reason}`);
+          this.hide(this.canvasElement, false);
+          return;
+        }
         if (message.type === 'routed') {
           // The engine cannot draw this composition at this revision: its
           // frames (older ones still in flight too) leave the stage.

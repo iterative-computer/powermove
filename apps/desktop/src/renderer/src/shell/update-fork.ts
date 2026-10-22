@@ -57,7 +57,11 @@ export function createForkUpdater(PM: PMRegistry, startAgent: (id: string) => Pr
         if (!record || ['build-error', 'manifest-error', 'activation-error', 'runtime-error', 'needs-update'].includes(record.health.state)) {
           throw new Error('The updated extension could not load.');
         }
-        if (PM.Kernel?.deps) {
+        // Only an extension that runs in the sandbox (a Store install the
+        // user has not trusted: the loader's `trust === 'store'`) is checked
+        // there; a local fork of a built-in runs in the editor with the
+        // trusted API, so the sandbox's refusals would turn every update down.
+        if (PM.Kernel?.deps && record.trust === 'store') {
           const report = await checkInSandbox(PM as any, id);
           if (!report.skipped && !report.ok) throw new Error('The updated extension did not pass its sandbox check.');
         }

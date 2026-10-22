@@ -699,97 +699,97 @@
       "code": "pm: deps.pm"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:250",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:253",
       "class": "touch",
       "scope": "makeAnim > touch",
       "code": "PM?.touch?.()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:335",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:338",
       "class": "hist.do",
       "scope": "makeHistory > (anonymous)",
       "code": "PM?.hist?.do?.(label, fn)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:336",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:339",
       "class": "history.transaction",
       "scope": "makeHistory > begin",
       "code": "PM?.hist?.begin?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:341",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:344",
       "class": "history.external",
       "scope": "makeHistory > external",
       "code": "PM?.hist?.external?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:354",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:357",
       "class": "edit.mutate",
       "scope": "makeEdit > (anonymous)",
       "code": "PM?.Edit?.mutate?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:511",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:547",
       "class": "doc.touched",
       "scope": "makeUIState > setLayerCollapsed",
       "code": "touchedDocument(PM, [['layers', index, 'collapsed']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:957",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:1110",
       "class": "extension-layer-refresh",
       "scope": "installKernel > kernel.layerTypes.onChange(callback)",
       "code": "writeDocument(PM, [['layers'], ['comps']], () => { for (const container of containers) for (const layer of container?.layers ?? []) { if ..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:380",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:382",
       "class": "shader-uniforms",
       "scope": "install > hydrate > sanitizeLayers > layers.forEach(callback)",
       "code": "shaderHooks(PM)?.syncShaderUniforms(L)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:506",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:508",
       "class": "project-swap",
       "scope": "install",
       "code": "PM.proj = loadBootProject()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:527",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:529",
       "class": "doc.write",
       "scope": "install > revalidateContributionPlaceholders",
       "code": "writeDocument(PM, paths, revalidateContributions)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:621",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:623",
       "class": "hist.do",
       "scope": "install > writeExportDefaults",
-      "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = next; })"
+      "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1138",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1154",
       "class": "project-swap",
       "scope": "install > switchProject",
       "code": "PM.proj = live ? live.project : hydrate(p)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1142",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1158",
       "class": "doc.write",
       "scope": "install > switchProject",
       "code": "writeDocument(PM, [['name']], () => { PM.proj.name = name; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1472",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1488",
       "class": "asset-metadata",
       "scope": "install > importFiles",
       "code": "meta.folder = target"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1473",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1489",
       "class": "doc.touched",
       "scope": "install > importFiles",
       "code": "touchedDocument(PM, [['assets', result.asset.id, 'folder']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1484",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1500",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () ..."
@@ -1611,13 +1611,13 @@
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/projects.ts:163",
+      "site": "apps/desktop/src/renderer/src/legacy/core/projects.ts:167",
       "class": "doc.write",
       "scope": "install > R.rename",
       "code": "writeDocument(PM, [['name']], () => { active.name = next; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/projects.ts:165",
+      "site": "apps/desktop/src/renderer/src/legacy/core/projects.ts:169",
       "class": "touch",
       "scope": "install > R.rename",
       "code": "PM.touch?.()"
@@ -1809,97 +1809,97 @@
       "code": "once(set, name, opt, opt.label || 'Change font')"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:410",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:418",
       "class": "hist.do",
       "scope": "install > def(callback)",
       "code": "PM.hist.do('Easy Ease', () => { PM.applyEaseTo(easeTargets(), 'easeInOut'); PM.invalidate(); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:413",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:421",
       "class": "hist.do",
       "scope": "install > def(callback)",
       "code": "PM.hist.do('Easy Ease In', () => { PM.applyEaseTo(easeTargets(), 'easeIn'); PM.invalidate(); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:416",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:424",
       "class": "hist.do",
       "scope": "install > def(callback)",
       "code": "PM.hist.do('Easy Ease Out', () => { PM.applyEaseTo(easeTargets(), 'easeOut'); PM.invalidate(); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:535",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:543",
       "class": "edit.mutate",
       "scope": "runAtomic",
       "code": "PM.Edit.mutate(label, action, { origin: 'command' })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:537",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:545",
       "class": "hist.do",
       "scope": "runAtomic",
       "code": "PM.hist.do(label, action)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:656",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:664",
       "class": "edit.mutate",
       "scope": "splitLayers",
       "code": "runAtomic(PM, 'Split', () => { const selectedTails: any[] = []; const used = new Set(layers.map((layer: any) => layer.id)); for (const { ..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:772",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:780",
       "class": "edit.mutate",
       "scope": "cutLayers",
       "code": "runAtomic(PM, 'Cut layers', () => { const comp = typeof PM.curComp === 'function' ? PM.curComp() : PM.proj; if (comp === PM.proj && typeo..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:809",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:817",
       "class": "edit.mutate",
       "scope": "pasteLayers",
       "code": "runAtomic(PM, 'Paste layers', () => { const pairs = clipboard.map((source: any) => [source, cloneForCommand(PM, JSON.parse(JSON.stringify..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:852",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:860",
       "class": "edit.mutate",
       "scope": "toggleVisibility",
       "code": "runAtomic(PM, show ? 'Show layers' : 'Hide layers', () => { editable.forEach((layer: any) => { layer.on = show; }); finishLayerMutation(P..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1061",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1069",
       "class": "hist.do",
       "scope": "nudgeKeyframes",
       "code": "PM.hist.do('Move keyframes', () => { for (const [prop, destinations] of destinationFrames) { prop.kf = prop.kf.filter((key: any) => selec..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1069",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1077",
       "class": "touch",
       "scope": "nudgeKeyframes > PM.hist.do(callback)",
       "code": "PM.touch?.()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1205",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1213",
       "class": "hist.do",
       "scope": "pasteKeyframes",
       "code": "PM.hist.do(pasted.length === 1 ? 'Paste keyframe' : 'Paste keyframes', () => { /* Only effects that actually receive keys are added. */ f..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1221",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1229",
       "class": "touch",
       "scope": "pasteKeyframes > PM.hist.do(callback)",
       "code": "PM.touch?.()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1268",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1276",
       "class": "edit.mutate",
       "scope": "orderLayers",
       "code": "runAtomic(PM, labels[mode], () => { let changed = false; if (mode === 'forward' || mode === 'backward') { changed = stepLayerOrder(layers..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1413",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1421",
       "class": "hist.do",
       "scope": "deleteSelection",
       "code": "PM.hist.do('Delete keyframes', () => { PM.proj.layers.forEach((layer: any) => PM.allProps(layer).forEach(({ prop, key: path }: any) => { ..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1421",
+      "site": "apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts:1429",
       "class": "touch",
       "scope": "deleteSelection > PM.hist.do(callback)",
       "code": "PM.touch()"

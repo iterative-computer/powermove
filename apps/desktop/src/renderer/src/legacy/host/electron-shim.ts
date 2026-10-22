@@ -334,6 +334,13 @@ export function install(PM: PMRegistry): void {
      access rather than pushed, which keeps a neighbour's multi-megabyte history
      write off this window's IPC channel. */
   const stale = new Set<string>();
+  /* With the new engine on, a written project slot is not kept here: main
+     boots project slots lazy (storage.ts LAZY_KEY), and keeping the clone of
+     the last write held a whole second copy of the open project in this
+     window's heap next to the engine's shadow of it (a 180 MB project:
+     about 257 MB). Reading it again refills from main. */
+  const engineOn = (() => { try { return bridge.nativeEngine?.enabledSync?.() === true; } catch { return false; } })();
+  const lazyAfterWrite = (service: string) => engineOn && /^project\./.test(service);
   const refill = (service: string) => {
     const get = bridge.store.getEncodedSync || bridge.store.getSync;
     if (!get) return;
@@ -351,6 +358,12 @@ export function install(PM: PMRegistry): void {
     // A development renderer may reload before its native process. Keep using
     // the legacy envelope until the native process advertises the new write API.
     separateHistory: (snapshot as any).__powermoveAsyncStore === true && typeof bridge.store.setSerialized === 'function',
+    /** Whether the key holds a value, without reading or cloning it. */
+    has(key: any) {
+      const service = serviceKey(key);
+      if (stale.has(service)) refill(service);
+      return lazy.has(service) || cached.has(legacyKey(service));
+    },
     get(key: any, fallback: any, options: { omitHistory?: boolean } = {}) {
       const stored = legacyKey(key);
       if (stale.has(serviceKey(key)) || lazy.has(serviceKey(key))) refill(serviceKey(key));
@@ -393,7 +406,8 @@ export function install(PM: PMRegistry): void {
         const copy = packStoredHistory(service, cloneValue(value), historyRecords);
         saveErrors.delete(service);
         bridge.store.set(service, copy);
-        cached.set(legacyKey(service), copy);
+        if (lazyAfterWrite(service)) { cached.delete(legacyKey(service)); lazy.add(service); }
+        else cached.set(legacyKey(service), copy);
         return true;
       } catch (error) {
         window.console.warn('store', error);

@@ -88,7 +88,7 @@ function extensionEffectProjects(): CorpusProject[] {
     project(typewriter, {
       group: 'Effects and transitions', title: 'Extension effect (Typewriter fixture extension)',
       covers: ['extension effects', 'extension raster hooks', 'extension effect stacked with a built-in'], samples: [0, .8, 1.6, 2.5],
-      extensions: ['typewriter-effect'], alpha: true,
+      extensions: ['compat-typewriter'], alpha: true,
     }),
     project(missing, {
       group: 'Effects and transitions', title: 'Missing effect definitions',

@@ -33,6 +33,7 @@
  * (`decodeSvg`, `SvgRasterCanvas`).
  */
 import type { CompatFrameRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
+import { limitUtf8 } from '../../../shared/protocol-strings';
 
 /** Largest band of one message (pm_protocol MAX_SVG_BAND_BYTES). */
 export const MAX_SVG_BAND_BYTES = 8 * 1024 * 1024;
@@ -381,7 +382,8 @@ export class SvgRasters {
 
   private fail(target: SvgPostTarget, key: SvgRasterKey, error: unknown): void {
     const reason: SvgFailureReason = error instanceof SvgRasterError ? error.reason : 'unavailable';
-    const message = (error instanceof Error ? error.message : String(error)).slice(0, 1024);
+    // pm_protocol svg_raster::MAX_SVG_MESSAGE bounds it in UTF-8 bytes.
+    const message = limitUtf8(error instanceof Error ? error.message : String(error), 1024);
     this.stats.failed++;
     if (reason === 'stale') this.stats.stale++;
     this.options.log?.('warn', `engine: an SVG raster ${key.width}×${key.height} was not drawn (${reason}: ${message})`);

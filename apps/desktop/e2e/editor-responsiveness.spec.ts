@@ -10,7 +10,11 @@ test('random scrubbing stays responsive across a copied production composition',
     ? decodeProjectContainer(readFileSync(process.env.PM_PERF_FILE)).document
     : JSON.parse(readFileSync(process.env.PM_PERF_PROJECT!, 'utf8'));
   const project = source.proj || source;
+  const effectId = process.env.PM_PERF_EXTENSION
+    ? JSON.parse(readFileSync(path.join(process.env.PM_PERF_EXTENSION, 'compat-manifest.json'), 'utf8')).effectId as string
+    : null;
   if (process.env.PM_PERF_EXTENSION) {
+    expect(effectId).toBeTruthy();
     cpSync(process.env.PM_PERF_EXTENSION, path.join(session.userData, 'extensions', path.basename(process.env.PM_PERF_EXTENSION)), { recursive: true });
   }
   if (process.env.PM_PERF_HISTORY) {
@@ -21,7 +25,7 @@ test('random scrubbing stays responsive across a copied production composition',
     await session.relaunch();
   }
   if (process.env.PM_PERF_EXTENSION) {
-    await expect.poll(() => session.page.evaluate(() => !!(window as any).PM.Kernel?.effects?.get('progressive-image-pixels'))).toBe(true);
+    await expect.poll(() => session.page.evaluate(id => !!(window as any).PM.Kernel?.effects?.get(id), effectId)).toBe(true);
   }
   if (process.env.PM_PERF_FILE) {
     await session.app.evaluate(({ dialog }, filePath) => {
@@ -56,8 +60,8 @@ test('random scrubbing stays responsive across a copied production composition',
   expect(result.renders.sort((a, b) => a - b)[Math.floor(result.renders.length * .95)]).toBeLessThan(16.7);
   expect(Math.max(...result.renders)).toBeLessThan(100);
   if (process.env.PM_PERF_EXTENSION) {
-    await expect.poll(() => session.page.evaluate(() => !!(window as any).PM.GL.progs.get('fx:progressive-image-pixels')?.pr)).toBe(true);
-    expect(await session.page.evaluate(() => (window as any).PM.GL.compileError('fx:progressive-image-pixels'))).toBeNull();
+    await expect.poll(() => session.page.evaluate(id => !!(window as any).PM.GL.progs.get(`fx:${id}`)?.pr, effectId)).toBe(true);
+    expect(await session.page.evaluate(id => (window as any).PM.GL.compileError(`fx:${id}`), effectId)).toBeNull();
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

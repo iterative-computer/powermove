@@ -138,7 +138,7 @@ export function shaderPresets(): Record<string, string> {
  */
 export const EXTENSION_EFFECTS: Record<string, { extension: string; params: string[] }> = {
   typewriter: {
-    extension: 'typewriter-effect',
+    extension: 'compat-typewriter',
     params: ['progress', 'cursor', 'cursorWidth', 'cursorHeight', 'cursorOffsetX', 'cursorOffsetY', 'cursorRound', 'blinkRate',
       'gradStart', 'gradMid', 'gradEnd', 'gradMidPos', 'gradAngle', 'gradOffset', 'gradCycle'],
   },
