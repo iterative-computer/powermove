@@ -47,6 +47,7 @@ import { serveHostFallback, type ShaderFallbackResult } from './shader-fallback-
 import { CACHE_DIRS, HostServicesCore } from './services';
 import { EngineBlender, type BlenderLocator } from './blender';
 import { EngineSupervisor, type Launch, type SupervisorState } from './supervisor';
+import { retryResync } from '../../shared/resync-retry';
 
 export const DEFAULT_SLICING_POLICY: SlicingPolicy = {
   maxCommandBufferUs: 2000,
@@ -403,7 +404,12 @@ export class NativeEngine {
    *  exports and agent snapshots; tests). `revision` is the envelope
    *  revision (an agent frame request's read-your-writes revision). */
   request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
-    return this.supervisors[process].request(body, session, revision);
+    if (body.type !== 'resync') return this.supervisors[process].request(body, session, revision);
+    const launch = this.supervisors[process].current;
+    return retryResync(() => {
+      if (!launch || launch.exiting || this.stopping || this.supervisors[process].current !== launch) throw new Error('The resync engine launch ended.');
+      return this.supervisors[process].request(body, session, revision);
+    });
   }
 
   /** A destination the user chose for a job, as a write handle bound to the

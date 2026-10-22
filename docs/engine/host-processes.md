@@ -431,3 +431,10 @@ initial responses; a refused open closes its newly opened token.
 The private opening harness must check that the document identity changed and
 that the production document loaded, since `PM.openProject()` also resolves after
 a handled import failure. An empty project is never an opening-time sample.
+
+The ingestion reader admits one active document and two queued documents. A
+full queue answers `budgetExceeded` with `Retry::After(250 ms)`. Renderer and main
+resync callers honor that admission retry using the same snapshot and staged
+file, without serializing another document. A connection close cancels renderer
+retry timers; main retries remain fenced to the same engine launch. Permanent
+parse/hash errors remain failures.

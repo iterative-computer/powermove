@@ -69,6 +69,7 @@ class FakeEngine implements ChildLike {
   readonly pid = FakeEngine.nextPid++;
   ports = new Map<number, { port: FakePort; peer: string }>();
   received: Envelope[] = [];
+  resyncRefusals = 0;
   private exitListeners: Array<(code: number) => void> = [];
   private messageListeners: Array<(message: unknown) => void> = [];
   dead = false;
@@ -180,6 +181,10 @@ class FakeEngine implements ChildLike {
         categories: { frameCache: 0, renderCache: 0, blenderSurfaces: 0, geometry3d: 0, surfacePool: 0, decoders: 0, pipelines: 0, other: 0 }
       };
       this.send(port, envelope(responseMessage(body.id, response)));
+    } else if (body.kind === 'request' && body.body.type === 'resync') {
+      this.send(port, this.resyncRefusals-- > 0
+        ? envelope({ kind: 'error', id: body.id, error: { code: 'budgetExceeded', scope: { kind: 'request', id: body.id }, message: 'reader busy', retry: { kind: 'after', ms: 1 }, detail: null } })
+        : envelope(responseMessage(body.id, { type: 'patchesApplied', document: body.body.document, revision: body.body.revision })));
     } else if (body.kind === 'request' && body.body.type === 'probeMedia') {
       // A job engine resolves the handle through the host, then answers.
       const id = body.id;
@@ -249,6 +254,14 @@ describe('NativeEngine with fake engines', () => {
   });
 
   const live = (process: EngineProcess) => engines.filter((e) => e.process === process && !e.dead).at(-1)!;
+
+  it('retries document-reader backpressure on the same engine launch', async () => {
+    const engine = live('job');
+    engine.resyncRefusals = 2;
+    const response = await host.request('job', { type: 'resync', document: 'doc', revision: 1, encoding: 'canonicalJsonV1', source: { kind: 'inline', body: new Uint8Array([123, 125]) }, hash: new Uint8Array(32) }, 1);
+    expect(response).toMatchObject({ type: 'patchesApplied', revision: 1 });
+    expect(engine.received.filter(e => e.message.kind === 'request' && e.message.body.type === 'resync')).toHaveLength(3);
+  });
 
   it('negotiates both engines, grants leases, sends the slicing policy, and links them', () => {
     expect(host.status().interactive.state).toBe('ready');

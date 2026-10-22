@@ -51,7 +51,8 @@ class FakePort implements PortLike {
 }
 
 /** An engine that welcomes, opens session 5, and acknowledges resyncs. */
-function engine(options: { refuseResync?: boolean } = {}): FakePort {
+function engine(options: { refuseResync?: boolean; busyResyncs?: number } = {}): FakePort {
+  let busy = options.busyResyncs ?? 0;
   return new FakePort((message, port) => {
     const m = message.message;
     if (m.kind === 'hello') {
@@ -64,7 +65,9 @@ function engine(options: { refuseResync?: boolean } = {}): FakePort {
       else if (body.type === 'resync') {
         queueMicrotask(() =>
           port.deliver(
-            options.refuseResync
+            busy-- > 0
+              ? envelope({ kind: 'error', id: m.id, error: { code: 'budgetExceeded', scope: { kind: 'request', id: m.id }, message: 'reader busy', retry: { kind: 'after', ms: 1 }, detail: null } } as never)
+              : options.refuseResync
               ? envelope({ kind: 'error', id: m.id, error: { code: 'invalidMessage', scope: { kind: 'request', id: m.id }, message: 'no', retry: { kind: 'never' }, detail: null } } as never)
               : envelope({ kind: 'response', id: m.id, body: { type: 'patchesApplied', document: body.document, revision: body.revision } } as never, 5, body.revision)
           )
@@ -672,4 +675,21 @@ it('resumes a checkpoint and replays only the bounded patch suffix without takin
   const patches = port.events('applyPatches').map(e => (e.message as any).body);
   expect(patches.at(-1).revision).toBe(5);
   session.close(); connection.close('test complete');
+});
+
+it('waits out a busy document reader without snapshotting or staging again', async () => {
+  const { connection, port } = await connected(engine({ busyResyncs: 2 }));
+  const doc = stream();
+  const snapshot = vi.fn(doc.snapshot);
+  const stage = vi.fn(async (_session: number, bytes: Uint8Array) => ({ handle: 'f'.repeat(32), length: bytes.length }));
+  const session = new DocumentSession({ connection, stream: { ...doc, snapshot }, documentId: () => 'P', log: () => {}, stage, inlineLimit: 4, handlers: { message: () => {}, closed: () => {} } });
+  try {
+    await session.start();
+    expect(snapshot).toHaveBeenCalledOnce();
+    expect(stage).toHaveBeenCalledOnce();
+    expect(port.requests('resync')).toHaveLength(3);
+    expect(session.resyncs).toBe(1);
+    expect(session.applied).toBe(3);
+    expect(session.failures).toEqual([]);
+  } finally { session.close(); connection.close('test complete'); }
 });

@@ -1551,7 +1551,10 @@ impl Engine {
                 out,
             ),
             Err((code, message)) => {
-                let error = request_error(id, code, &message);
+                let mut error = request_error(id, code, &message);
+                if code == ErrorCode::BudgetExceeded {
+                    error = error.with_retry(Retry::After { ms: 250 });
+                }
                 self.send_error(port, id, error, out)
             }
         }

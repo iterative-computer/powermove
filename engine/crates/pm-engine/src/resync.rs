@@ -60,7 +60,7 @@ impl Reader {
             .try_send(work)
             .map_err(|error| match error {
                 TrySendError::Full(_) => (
-                    ErrorCode::Internal,
+                    ErrorCode::BudgetExceeded,
                     "The document reader is busy; retry the resync.".into(),
                 ),
                 TrySendError::Disconnected(_) => {
@@ -163,4 +163,39 @@ fn read(work: Work) -> Result<pm_model::Document, Failure> {
         }
     };
     parse(&work.resync, work.base.as_ref(), &bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_protocol::common::{Bytes, Revision};
+
+    #[test]
+    fn a_full_reader_queue_reports_backpressure_without_accepting_more_bytes() {
+        let (input, jobs) = mpsc::sync_channel(1);
+        let (_answers, output) = mpsc::channel();
+        let reader = Reader {
+            input: Some(input),
+            output,
+            thread: None,
+        };
+        let work = || Work {
+            token: 1,
+            resync: Resync {
+                document: "doc".into(),
+                revision: Revision::new(1).unwrap(),
+                encoding: DocumentEncoding::CanonicalJsonV1,
+                source: ResyncSource::Inline {
+                    body: Bytes(vec![]),
+                },
+                hash: ContentHash([0; 32]),
+            },
+            base: None,
+            source: Source::Inline(vec![]),
+        };
+        reader.submit(work()).unwrap();
+        let (code, _) = reader.submit(work()).unwrap_err();
+        assert_eq!(code, ErrorCode::BudgetExceeded);
+        assert_eq!(jobs.try_iter().count(), 1);
+    }
 }
