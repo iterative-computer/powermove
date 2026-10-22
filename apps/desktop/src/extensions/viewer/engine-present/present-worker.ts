@@ -126,6 +126,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
   let shift = 0;
   let disposed = false;
   let failed = false;
+  const closing = new Set<Promise<void>>();
   /** Messages that arrived before the painter was ready, in order. */
   let pending: ToWorker[] | null = [];
   const now = (): number => scope.performance.now() + shift;
@@ -151,10 +152,17 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
     if (!session) return;
     // Its queued frames go back to the engine first; the final stats tell
     // the page the session is done.
-    session.presenter.dispose(cancelFrame);
-    sendStats(session, true);
-    post({ type: 'closed', session: session.id });
+    const ended = session;
+    ended.presenter.dispose(cancelFrame);
     session = null;
+    // The page retains the last VideoFrame reference. Acknowledging before
+    // the queue fence lets it return an IOSurface still read by the GPU.
+    const drained = ended.presenter.drained().then(() => {
+      sendStats(ended, true);
+      post({ type: 'closed', session: ended.id });
+    });
+    closing.add(drained);
+    void drained.then(() => closing.delete(drained));
   };
 
   const open = (message: Extract<ToWorker, { type: 'open' }>): void => {
@@ -219,9 +227,11 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       for (const queued of pending ?? []) if (queued.type === 'frame') giveBack(queued);
       pending = null;
       close();
-      painter?.dispose();
-      painter = null;
-      post({ type: 'disposed' });
+      void Promise.all(closing).then(() => {
+        painter?.dispose();
+        painter = null;
+        post({ type: 'disposed' });
+      });
       return;
     }
     if (pending) {

@@ -3,7 +3,8 @@
 //!
 //! [`BridgePresenter`] is the [`FramePresenter`] the engine routes viewer
 //! traffic to. On the engine's JavaScript thread it sizes each viewer's
-//! surface pool (viewer device pixels; ring + jitter buffer + 2 surfaces;
+//! surface pool (viewer device pixels; four paused slots or the playback
+//! ring + jitter buffer + 2 surfaces;
 //! `rgbaf16` on EDR displays when the lease allows, `bgra` otherwise) and
 //! charges it to the lease; everything else happens on its render thread
 //! ([`render`]): the check-in with main, pool creation and hand-off,
@@ -35,7 +36,7 @@ pub mod svg;
 pub mod view;
 pub mod wait;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -48,7 +49,7 @@ use pm_protocol::common::{RequestId, Revision, SessionId, Size};
 use pm_protocol::error::{EngineError, EngineProcess, ErrorCode, ErrorScope};
 use pm_protocol::frame::{FrameRelease, FrameRequest, ViewerState};
 use pm_protocol::host::PortId;
-use pm_protocol::interop::SurfaceFormat;
+use pm_protocol::interop::{MIN_POOL_SURFACES, SurfaceFormat};
 use pm_protocol::preview::PreviewControl;
 
 use render::{Command, Key};
@@ -221,6 +222,9 @@ struct Meta {
     pool: Option<(PoolSpec, u64)>,
     /// The depth and object-id pool (`ViewerState::depth_id`), and its bytes.
     depth: Option<(PoolSpec, u64)>,
+    /// The last viewer state, needed to resize its pools on a transport
+    /// transition without waiting for a layout change.
+    state: ViewerState,
 }
 
 pub struct BridgePresenter {
@@ -229,6 +233,8 @@ pub struct BridgePresenter {
     thread: Option<JoinHandle<()>>,
     stats: Arc<Mutex<Stats>>,
     views: BTreeMap<Key, Meta>,
+    /// Transport intent survives a detached or not-yet-mounted viewer.
+    playing: BTreeSet<Key>,
     generations: Generations,
     told_no_source: bool,
     /// The paused viewer's Blender jobs: host calls made from its worker
@@ -350,6 +356,7 @@ impl BridgePresenter {
             thread: Some(thread),
             stats,
             views: BTreeMap::new(),
+            playing: BTreeSet::new(),
             generations,
             told_no_source: false,
             link,
@@ -394,7 +401,12 @@ impl BridgePresenter {
         key: Key,
         state: &ViewerState,
     ) -> Option<PoolSpec> {
-        let count = pool_size(RING, self.config.thread.lead);
+        let playing = self.playing.contains(&key);
+        let count = if playing {
+            pool_size(RING, self.config.thread.lead)
+        } else {
+            MIN_POOL_SURFACES as u32
+        };
         let size = Size::new(state.size.width, state.size.height);
         let want_f16 = choose_format(state.edr, true) == SurfaceFormat::Rgba16Float;
         let current = self.views.get(&key).and_then(|m| m.pool);
@@ -440,6 +452,7 @@ impl BridgePresenter {
             Meta {
                 pool: Some((spec, bytes)),
                 depth,
+                state: state.clone(),
             },
         );
         Some(spec)
@@ -461,8 +474,10 @@ impl BridgePresenter {
             && state.depth_id == Some(true)
             && self.config.source == Some(FrameSource::Document);
         let size = Size::new(state.size.width, state.size.height);
-        let count = pool_size(RING, self.config.thread.lead) * 2;
         let meta = self.views.get_mut(&key)?;
+        // Every color slot owns one depth/ID and one coverage surface.
+        // Using its planned count also keeps a transport resize atomic.
+        let count = meta.pool.map_or(0, |(spec, _)| spec.count * 2);
         let current = meta.depth;
         if let Some((spec, _)) = current
             && wanted
@@ -526,6 +541,32 @@ impl BridgePresenter {
             }
         }
     }
+
+    /// Replan after a transport transition. A pool generation is replaced
+    /// before timed playback starts and after the pause has reached the
+    /// render thread, so a playing jitter queue never sees the smaller ring.
+    fn replan_transport_pool(&mut self, ctx: &mut PresentContext<'_>, key: Key) {
+        let Some(state) = self.views.get(&key).map(|meta| meta.state.clone()) else {
+            return;
+        };
+        if state.headless == Some(true) {
+            return;
+        }
+        ctx.release_frame_cache(self.frame_cache_reserved);
+        self.frame_cache_reserved = 0;
+        let pool = self.plan_pool(ctx, key, &state);
+        let depth = self.plan_depth(ctx, key, &state);
+        self.sync_frame_cache(ctx);
+        if pool.is_some() || depth.is_some() {
+            self.send(Command::Configure {
+                key,
+                state: Box::new(state),
+                revision: None,
+                pool,
+                depth,
+            });
+        }
+    }
 }
 
 impl FramePresenter for BridgePresenter {
@@ -572,6 +613,7 @@ impl FramePresenter for BridgePresenter {
                 Meta {
                     pool: None,
                     depth: None,
+                    state: state.clone(),
                 },
             );
             None
@@ -579,6 +621,9 @@ impl FramePresenter for BridgePresenter {
             self.plan_pool(ctx, key, &state)
         };
         let depth = self.plan_depth(ctx, key, &state);
+        if let Some(meta) = self.views.get_mut(&key) {
+            meta.state = state.clone();
+        }
         self.sync_frame_cache(ctx);
         self.send(Command::Configure {
             key,
@@ -598,16 +643,35 @@ impl FramePresenter for BridgePresenter {
 
     fn transport(
         &mut self,
-        _ctx: &mut PresentContext<'_>,
+        ctx: &mut PresentContext<'_>,
         port: PortId,
         session: SessionId,
         command: TransportCommand,
     ) {
+        let key = (port, session);
+        let next_playing = match command {
+            TransportCommand::Play { .. } | TransportCommand::PlayAround { .. } => Some(true),
+            TransportCommand::Pause => Some(false),
+            _ => None,
+        };
+        let transition = next_playing.filter(|playing| {
+            if *playing {
+                self.playing.insert(key)
+            } else {
+                self.playing.remove(&key)
+            }
+        });
+        if transition == Some(true) {
+            self.replan_transport_pool(ctx, key);
+        }
         self.send(Command::Transport {
-            key: (port, session),
+            key,
             command,
             at: pm_bridge::now_us(),
         });
+        if transition == Some(false) {
+            self.replan_transport_pool(ctx, key);
+        }
     }
 
     fn audio(
@@ -710,6 +774,7 @@ impl FramePresenter for BridgePresenter {
     fn session_closed(&mut self, ctx: &mut PresentContext<'_>, port: PortId, session: SessionId) {
         let key = (port, session);
         self.forget(ctx, key);
+        self.playing.remove(&key);
         self.send(Command::Close { key });
     }
 
@@ -718,6 +783,7 @@ impl FramePresenter for BridgePresenter {
         for key in keys {
             self.forget(ctx, key);
         }
+        self.playing.retain(|key| key.0 != port);
         self.send(Command::ClosePort { port });
     }
 
@@ -810,7 +876,9 @@ impl Drop for BridgePresenter {
 mod tests {
     use super::*;
     use pm_engine::lease::{Category, LeaseBudget, NoEviction};
-    use pm_protocol::common::{ByteSize, HostMicros, Seq};
+    use pm_protocol::color::ViewerColorSpace;
+    use pm_protocol::common::{ByteSize, HostMicros, PlaybackRate, Seq};
+    use pm_protocol::frame::{MediaPreference, PreviewResolution};
     use pm_protocol::lease::{Lease, LeaseReason};
     use std::sync::mpsc::Receiver;
 
@@ -864,6 +932,7 @@ mod tests {
             thread: None,
             stats: Arc::default(),
             views: BTreeMap::new(),
+            playing: BTreeSet::new(),
             generations: Generations::default(),
             told_no_source: false,
             link: None,
@@ -896,6 +965,191 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn viewer_state() -> ViewerState {
+        ViewerState {
+            headless: None,
+            composition: "main".into(),
+            size: Size::new(1496, 792),
+            device_pixel_ratio: 2.0,
+            zoom: 1.0,
+            pan: [0.0, 0.0],
+            resolution: PreviewResolution::Automatic,
+            media: MediaPreference::Automatic,
+            color_space: ViewerColorSpace::DisplayP3,
+            view: None,
+            play_every_frame: false,
+            edr: true,
+            view_seq: Seq::new(1).unwrap(),
+            vsync: None,
+            depth_id: Some(true),
+            chrome_selection: None,
+        }
+    }
+
+    #[test]
+    fn paused_pools_expand_before_play_and_shrink_after_pause() {
+        let (mut p, rx) = presenter();
+        let mut budget = LeaseBudget::new(EngineProcess::Interactive);
+        let mut evict = NoEviction;
+        assert!(grant(&mut budget, 1, 4096 * MIB));
+        let port = PortId(7);
+        let session = SessionId::new(1).unwrap();
+        let key = (port, session);
+        let state = viewer_state();
+        let size = state.size;
+        let bytes = |count| estimated_bytes(size, SurfaceFormat::Rgba16Float, count);
+
+        p.viewer(
+            &mut PresentContext::new(&mut budget, &mut evict),
+            port,
+            session,
+            state.clone(),
+            None,
+        );
+        assert_eq!(p.views[&key].pool.unwrap().0.count, 4);
+        assert_eq!(p.views[&key].depth.unwrap().0.count, 8);
+        assert_eq!(budget.used_in(Category::SurfacePool), bytes(12));
+        let commands: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(
+            commands
+                .iter()
+                .find(|c| matches!(c, Command::Configure { .. })),
+            Some(Command::Configure {
+                pool: Some(PoolSpec { count: 4, .. }),
+                depth: Some(Some(PoolSpec { count: 8, .. })),
+                ..
+            })
+        ));
+
+        p.transport(
+            &mut PresentContext::new(&mut budget, &mut evict),
+            port,
+            session,
+            TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            },
+        );
+        assert_eq!(p.views[&key].pool.unwrap().0.count, 8);
+        assert_eq!(p.views[&key].depth.unwrap().0.count, 16);
+        assert_eq!(budget.used_in(Category::SurfacePool), bytes(24));
+        let commands: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(
+            commands
+                .iter()
+                .find(|c| matches!(c, Command::Configure { .. })),
+            Some(Command::Configure {
+                pool: Some(PoolSpec { count: 8, .. }),
+                depth: Some(Some(PoolSpec { count: 16, .. })),
+                ..
+            })
+        ));
+        let config_at = commands
+            .iter()
+            .position(|c| matches!(c, Command::Configure { .. }))
+            .unwrap();
+        let play_at = commands
+            .iter()
+            .position(|c| matches!(c, Command::Transport { .. }))
+            .unwrap();
+        assert!(config_at < play_at);
+        assert!(matches!(
+            &commands[play_at],
+            Command::Transport {
+                command: TransportCommand::Play { .. },
+                ..
+            }
+        ));
+
+        p.transport(
+            &mut PresentContext::new(&mut budget, &mut evict),
+            port,
+            session,
+            TransportCommand::Pause,
+        );
+        assert_eq!(p.views[&key].pool.unwrap().0.count, 4);
+        assert_eq!(p.views[&key].depth.unwrap().0.count, 8);
+        assert_eq!(budget.used_in(Category::SurfacePool), bytes(12));
+        let commands: Vec<_> = rx.try_iter().collect();
+        let pause_at = commands
+            .iter()
+            .position(|c| matches!(c, Command::Transport { .. }))
+            .unwrap();
+        let config_at = commands
+            .iter()
+            .position(|c| matches!(c, Command::Configure { .. }))
+            .unwrap();
+        assert!(pause_at < config_at);
+        assert!(matches!(
+            &commands[pause_at],
+            Command::Transport {
+                command: TransportCommand::Pause,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &commands[config_at],
+            Command::Configure {
+                pool: Some(PoolSpec { count: 4, .. }),
+                depth: Some(Some(PoolSpec { count: 8, .. })),
+                ..
+            }
+        ));
+
+        // A view-only update uses the paused pool; no extra generation.
+        let mut changed = state;
+        changed.view_seq = Seq::new(2).unwrap();
+        p.viewer(
+            &mut PresentContext::new(&mut budget, &mut evict),
+            port,
+            session,
+            changed,
+            None,
+        );
+        assert_eq!(p.views[&key].pool.unwrap().0.count, 4);
+        assert_eq!(budget.used_in(Category::SurfacePool), bytes(12));
+        assert!(matches!(
+            rx.try_iter()
+                .find(|c| matches!(c, Command::Configure { .. })),
+            Some(Command::Configure {
+                pool: None,
+                depth: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn play_before_viewer_attachment_reserves_the_full_playback_ring() {
+        let (mut p, _rx) = presenter();
+        let mut budget = LeaseBudget::new(EngineProcess::Interactive);
+        let mut evict = NoEviction;
+        assert!(grant(&mut budget, 1, 4096 * MIB));
+        let port = PortId(7);
+        let session = SessionId::new(1).unwrap();
+        p.transport(
+            &mut PresentContext::new(&mut budget, &mut evict),
+            port,
+            session,
+            TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            },
+        );
+        p.viewer(
+            &mut PresentContext::new(&mut budget, &mut evict),
+            port,
+            session,
+            viewer_state(),
+            None,
+        );
+        assert_eq!(p.views[&(port, session)].pool.unwrap().0.count, 8);
+        p.session_closed(
+            &mut PresentContext::new(&mut budget, &mut evict),
+            port,
+            session,
+        );
+        assert!(p.playing.is_empty());
     }
 
     #[test]

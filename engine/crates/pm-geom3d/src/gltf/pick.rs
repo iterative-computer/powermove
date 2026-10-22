@@ -203,7 +203,16 @@ impl Bvh {
     /// Build from rest-pose positions without materializing a second f64
     /// array. The getter yields exactly the f64 values `build` would read.
     fn build_from_positions(tris: &[[u32; 3]], position: impl Fn(usize) -> Vec3) -> Bvh {
-        let n = tris.len();
+        Self::build_from_triangles(tris.len(), |i| tris[i], position)
+    }
+
+    /// Indexed primitives use stored valid triangles; for an unindexed
+    /// primitive the triples can be read from their ordinal without a copy.
+    fn build_from_triangles(
+        n: usize,
+        triangle: impl Fn(usize) -> [u32; 3],
+        position: impl Fn(usize) -> Vec3,
+    ) -> Bvh {
         let mut order: Vec<u32> = (0..n as u32).collect();
         let empty = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], 0, 0);
         if n == 0 {
@@ -212,9 +221,8 @@ impl Bvh {
                 order,
             };
         }
-        let boxes: Vec<(Vec3, Vec3)> = tris
-            .iter()
-            .map(|t| tri_box_from_positions(&position, t))
+        let boxes: Vec<(Vec3, Vec3)> = (0..n)
+            .map(|i| tri_box_from_positions(&position, &triangle(i)))
             .collect();
         let centers: Vec<Vec3> = boxes.iter().map(|(a, b)| scale(add(*a, *b), 0.5)).collect();
         let mut nodes = vec![([0.0; 3], [0.0; 3], 0u32, n as u32)];
@@ -322,13 +330,13 @@ impl Bvh {
         Bvh { nodes, order }
     }
 
-    fn refit(&mut self, p: &[Vec3], tris: &[[u32; 3]]) {
+    fn refit_from_triangles(&mut self, p: &[Vec3], triangle: impl Fn(usize) -> [u32; 3]) {
         for i in (0..self.nodes.len()).rev() {
             let (_, _, first, count) = self.nodes[i];
             let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
             if count > 0 {
                 for &t in &self.order[first as usize..(first + count) as usize] {
-                    let (a, b) = tri_box(p, &tris[t as usize]);
+                    let (a, b) = tri_box(p, &triangle(t as usize));
                     for k in 0..3 {
                         lo[k] = lo[k].min(a[k]);
                         hi[k] = hi[k].max(b[k]);
@@ -442,11 +450,47 @@ struct Deformed {
     bounds: (Vec3, f64, Option<(Vec3, Vec3)>),
 }
 
+/// The triangle order seen by three.js. An unindexed primitive's triples
+/// are implicit in POSITION, so retaining them would duplicate its index
+/// sequence in the picker.
+enum TriangleSource {
+    /// Share the source index buffer when every complete triple is valid.
+    Indexed(Arc<Vec<u32>>),
+    /// Preserve the previous filtering order for malformed indices.
+    Filtered(Vec<[u32; 3]>),
+    Unindexed(u32),
+}
+
+impl TriangleSource {
+    fn len(&self) -> usize {
+        match self {
+            Self::Indexed(indices) => indices.len() / 3,
+            Self::Filtered(tris) => tris.len(),
+            Self::Unindexed(count) => *count as usize,
+        }
+    }
+
+    fn get(&self, i: usize) -> [u32; 3] {
+        match self {
+            Self::Indexed(indices) => {
+                let at = i * 3;
+                [indices[at], indices[at + 1], indices[at + 2]]
+            }
+            Self::Filtered(tris) => tris[i],
+            Self::Unindexed(count) => {
+                debug_assert!(i < *count as usize);
+                let at = i as u32 * 3;
+                [at, at + 1, at + 2]
+            }
+        }
+    }
+}
+
 /// Rest-pose triangles and BVHs of a model's geometries, shared by every
 /// layer using it.
 pub struct Picker {
     pub model: Arc<Model>,
-    tris: Vec<Option<(Vec<[u32; 3]>, Bvh)>>,
+    tris: Vec<Option<(TriangleSource, Bvh)>>,
     /// `geometry.boundingSphere` per geometry.
     spheres: Vec<(Vec3, f64)>,
     /// Per object: a skinned mesh's `boundingBox` as the importer leaves it
@@ -477,23 +521,31 @@ impl Picker {
                 let n = g.vertex_count() as u32;
                 // A triangle with an index past the last vertex reads
                 // `undefined` positions in `Mesh.raycast`: never a hit.
-                let t: Vec<[u32; 3]> = match &g.index {
-                    Some(ix) => ix
-                        .chunks_exact(3)
-                        .map(|c| [c[0], c[1], c[2]])
-                        .filter(|c| c.iter().all(|&v| v < n))
-                        .collect(),
-                    None => (0..n / 3).map(|i| [3 * i, 3 * i + 1, 3 * i + 2]).collect(),
+                let t = match &g.index {
+                    Some(ix) if ix.chunks_exact(3).all(|c| c.iter().all(|&v| v < n)) => {
+                        TriangleSource::Indexed(ix.clone())
+                    }
+                    Some(ix) => TriangleSource::Filtered(
+                        ix.chunks_exact(3)
+                            .map(|c| [c[0], c[1], c[2]])
+                            .filter(|c| c.iter().all(|&v| v < n))
+                            .collect(),
+                    ),
+                    None => TriangleSource::Unindexed(n / 3),
                 };
                 let position = &g.position.data;
-                let bvh = Bvh::build_from_positions(&t, |i| {
-                    let at = i * 3;
-                    [
-                        f64::from(position[at]),
-                        f64::from(position[at + 1]),
-                        f64::from(position[at + 2]),
-                    ]
-                });
+                let bvh = Bvh::build_from_triangles(
+                    t.len(),
+                    |i| t.get(i),
+                    |i| {
+                        let at = i * 3;
+                        [
+                            f64::from(position[at]),
+                            f64::from(position[at + 1]),
+                            f64::from(position[at + 2]),
+                        ]
+                    },
+                );
                 Some((t, bvh))
             })
             .collect();
@@ -556,7 +608,7 @@ impl Picker {
             let n = model.geometries[d.geometry].vertex_count();
             let p: Vec<Vec3> = (0..n).map(|v| poser.vertex(v)).collect();
             let mut b = bvh.clone();
-            b.refit(&p, tris);
+            b.refit_from_triangles(&p, |i| tris.get(i));
             let bounds = if d.skin.is_some() {
                 let mut lo = [f64::INFINITY; 3];
                 let mut hi = [f64::NEG_INFINITY; 3];
@@ -704,7 +756,7 @@ impl Picker {
                             continue;
                         }
                         let found = bvh.closest(&local, |t| {
-                            let tri = tris[t as usize];
+                            let tri = tris.get(t as usize);
                             let (a, b, c) = (vertex(tri[0]), vertex(tri[1]), vertex(tri[2]));
                             if s == Side::Back {
                                 intersect_triangle(&local, c, b, a, true)
@@ -998,6 +1050,109 @@ mod tests {
     }
 
     #[test]
+    fn implicit_unindexed_triangles_preserve_bvh_and_refit_order() {
+        let seed: [Vec3; 9] = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [2.0, 2.0, 2.0],
+            [2.0, 2.0, 2.0],
+            [2.0, 2.0, 2.0],
+            [-0.0, f64::NAN, f64::INFINITY],
+            [f64::NEG_INFINITY, 3.0, 0.5],
+            [4.0, 3.0, 0.5],
+        ];
+        let positions: Vec<Vec3> = (0..21).map(|i| seed[i % seed.len()]).collect();
+        let old_triangles: Vec<[u32; 3]> = (0..7).map(|i| [i * 3, i * 3 + 1, i * 3 + 2]).collect();
+        let implicit = TriangleSource::Unindexed(7);
+        let mut old = Bvh::build(&positions, &old_triangles);
+        let mut new =
+            Bvh::build_from_triangles(implicit.len(), |i| implicit.get(i), |i| positions[i]);
+        let same = |a: &Bvh, b: &Bvh| {
+            assert_eq!(a.order, b.order);
+            assert_eq!(a.nodes.len(), b.nodes.len());
+            for (left, right) in a.nodes.iter().zip(&b.nodes) {
+                assert_eq!(
+                    (
+                        left.0.map(f64::to_bits),
+                        left.1.map(f64::to_bits),
+                        left.2,
+                        left.3,
+                    ),
+                    (
+                        right.0.map(f64::to_bits),
+                        right.1.map(f64::to_bits),
+                        right.2,
+                        right.3,
+                    )
+                );
+            }
+        };
+        same(&old, &new);
+        let posed: Vec<Vec3> = positions
+            .iter()
+            .map(|p| [p[0] + 0.25, p[1], p[2]])
+            .collect();
+        old.refit_from_triangles(&posed, |i| old_triangles[i]);
+        new.refit_from_triangles(&posed, |i| implicit.get(i));
+        same(&old, &new);
+        let ray = Ray {
+            origin: [0.5, 0.25, 1.0],
+            direction: [0.0, 0.0, -1.0],
+        };
+        assert_eq!(
+            old.closest(&ray, |i| {
+                let t = old_triangles[i as usize];
+                intersect_triangle(
+                    &ray,
+                    posed[t[0] as usize],
+                    posed[t[1] as usize],
+                    posed[t[2] as usize],
+                    false,
+                )
+            }),
+            new.closest(&ray, |i| {
+                let t = implicit.get(i as usize);
+                intersect_triangle(
+                    &ray,
+                    posed[t[0] as usize],
+                    posed[t[1] as usize],
+                    posed[t[2] as usize],
+                    false,
+                )
+            })
+        );
+    }
+
+    #[test]
+    fn shared_indices_and_filtered_indices_preserve_complete_triangle_order() {
+        let indices = Arc::new(vec![0, 1, 2, 2, 3, 0, 99]);
+        let shared = TriangleSource::Indexed(indices.clone());
+        assert_eq!(shared.len(), 2);
+        assert_eq!(shared.get(0), [0, 1, 2]);
+        assert_eq!(shared.get(1), [2, 3, 0]);
+        assert!(Arc::ptr_eq(
+            &indices,
+            match &shared {
+                TriangleSource::Indexed(ix) => ix,
+                _ => unreachable!(),
+            }
+        ));
+
+        let malformed = [0, 1, 2, u32::MAX, 3, 0, 2, 3, 0, 99];
+        let filtered = TriangleSource::Filtered(
+            malformed
+                .chunks_exact(3)
+                .map(|c| [c[0], c[1], c[2]])
+                .filter(|c| c.iter().all(|&v| v < 4))
+                .collect(),
+        );
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered.get(0), [0, 1, 2]);
+        assert_eq!(filtered.get(1), [2, 3, 0]);
+    }
+
+    #[test]
     fn static_point_and_loop_readers_preserve_index_order() {
         let points = [-1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 99.0];
         // The trailing scalar is discarded by the former `chunks_exact(3)`.
@@ -1091,7 +1246,7 @@ mod tests {
                 v[2] += (v[0] * 3.0).sin() * 0.2;
                 v[1] += v[0] * 0.3;
             }
-            bvh.refit(&p, &t);
+            bvh.refit_from_triangles(&p, |i| t[i]);
         }
     }
 

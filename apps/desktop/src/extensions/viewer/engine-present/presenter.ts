@@ -208,6 +208,7 @@ export class EnginePresenter implements Presenter {
   /** The last timed frame's duration (ticks), for the decision phase. */
   private lastFrameTicks: number | null = null;
   private listeners = new Set<(frame: PresentedFrame) => void>();
+  private readonly submitted = new Set<Promise<void>>();
   private hint: VsyncHint | null = null;
   private hintSentMs = -Infinity;
   private raf = 0;
@@ -543,20 +544,26 @@ export class EnginePresenter implements Presenter {
     }
     const submitMs = this.now();
     const width = frame.codedWidth, height = frame.codedHeight;
-    frame.close();
     this.stats.drawn++;
     this.trace?.draws.push([rafMs, desc.seq, desc.revision, desc.pts, item.arrivedMs, submitMs, desc.viewSeq, desc.duration === null ? 0 : 1]);
-    this.options.painter.workDone().then(
+    // Keep the external texture's source alive through GPU completion.
+    // Closing it expires Blink's external-texture lease and can return its
+    // shared-image wrapper to the cache while the submitted draw still reads.
+    const completed = this.options.painter.workDone().then(
       () => {
+        frame.close();
         this.trace?.releases.push([desc.seq, submitMs, this.now()]);
         this.release(desc);
         this.done(desc.seq);
       },
       () => {
+        frame.close();
         this.release(desc);
         this.done(desc.seq);
       }
     );
+    this.submitted.add(completed);
+    void completed.then(() => this.submitted.delete(completed));
     const presented: PresentedFrame = {
       seq: desc.seq,
       revision: desc.revision,
@@ -603,6 +610,11 @@ export class EnginePresenter implements Presenter {
       this.stats.parkTimeouts++;
       this.releaseDesc(desc, 'no-import');
     }
+  }
+
+  /** After dispose, resolves only when every submitted surface was released. */
+  async drained(): Promise<void> {
+    await Promise.all(this.submitted);
   }
 
   dispose(cancelFrame: (id: number) => void = this.cancelFrame): void {

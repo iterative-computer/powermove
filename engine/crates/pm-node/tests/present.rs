@@ -119,19 +119,30 @@ fn present(extra_env: &[(&str, &str)]) -> Vec<HostEvent> {
             _ => None,
         })
         .collect();
-    assert_eq!(surfaces.len(), 12, "{events:?}");
-    for info in &surfaces[..6] {
+    assert_eq!(surfaces.len(), 18, "{events:?}");
+    for info in &surfaces[..4] {
         assert_eq!(
             (info.client_port, info.generation, info.pool_size),
-            (WINDOW.0, 1, 6)
+            (WINDOW.0, 1, 4)
         );
         assert_eq!(
             (info.width, info.height, info.format),
             (1280, 720, PixelFormat::Bgra8)
         );
     }
-    for info in &surfaces[6..] {
-        assert_eq!((info.generation, info.format), (2, PixelFormat::Rgba16F));
+    for (range, generation, count) in [(4..10, 2, 6), (10..14, 3, 4)] {
+        for info in &surfaces[range] {
+            assert_eq!(
+                (info.generation, info.pool_size, info.format),
+                (generation, count, PixelFormat::Bgra8)
+            );
+        }
+    }
+    for info in &surfaces[14..] {
+        assert_eq!(
+            (info.generation, info.pool_size, info.format),
+            (4, 4, PixelFormat::Rgba16F)
+        );
     }
     let retired: Vec<u32> = events
         .iter()
@@ -143,12 +154,12 @@ fn present(extra_env: &[(&str, &str)]) -> Vec<HostEvent> {
             _ => None,
         })
         .collect();
-    assert_eq!(retired, vec![1, 2]);
+    assert_eq!(retired, vec![1, 2, 3, 4]);
     assert!(events.contains(&HostEvent::Goodbye));
     assert_eq!(events.last(), Some(&HostEvent::Gone));
     assert_eq!(
         table.lock().unwrap().len(),
-        12,
+        18,
         "main holds surfaces until Chromium releases them"
     );
     events
@@ -307,7 +318,7 @@ fn child_engine() {
         send(host, event(body, None));
     };
 
-    // Viewer state: a bgra pool of ring 2 + lead 2 + 2, then a paused frame.
+    // Viewer state: the four-slot paused pool, then a paused frame.
     send(
         &mut host,
         event(Event::Viewer(state(1, false, [0.0, 0.0])), Some(5)),
@@ -319,7 +330,7 @@ fn child_engine() {
         _ => None,
     });
     assert_eq!(pool.generation.get(), 1);
-    assert_eq!(pool.surfaces.len(), 6);
+    assert_eq!(pool.surfaces.len(), 4);
     assert_eq!(pool.surfaces[0].format, SurfaceFormat::Bgra8Unorm);
     let (first, _) = inbox.wait(Duration::from_secs(5), frame);
     assert_eq!(
@@ -425,12 +436,13 @@ fn child_engine() {
     let (pool2, _) = inbox.wait(Duration::from_secs(10), |m| match &m.message {
         Message::Event {
             body: Event::SurfacePool(p),
-        } if p.generation.get() == 2 => Some(p.clone()),
+        } if p.generation.get() == 4 => Some(p.clone()),
         _ => None,
     });
     assert_eq!(pool2.surfaces[0].format, SurfaceFormat::Rgba16Float);
+    assert_eq!(pool2.surfaces.len(), 4);
     let (hdr, _) = inbox.wait(Duration::from_secs(5), |m| {
-        frame(m).filter(|d| d.pool_generation.get() == 2)
+        frame(m).filter(|d| d.pool_generation == pool2.generation)
     });
     assert_eq!(
         (hdr.view_seq.get(), hdr.format, hdr.duration),
@@ -479,7 +491,7 @@ fn child_engine() {
         (30 * frame_ticks, 6, None)
     );
 
-    // Closing the session retires generation 2; dropping the engine says goodbye.
+    // Closing the session retires generation 4; dropping the engine says goodbye.
     let close = Envelope::new(Message::Request {
         id: RequestId::new(10).unwrap(),
         body: Request::CloseSession,
@@ -489,7 +501,7 @@ fn child_engine() {
     let status: serde_json::Value = serde_json::from_str(&host.status_json()).unwrap();
     let presenter = &status["presenter"];
     assert_eq!(presenter["checkedIn"], true);
-    assert_eq!(presenter["pools"], 2);
+    assert_eq!(presenter["pools"], 4);
     assert!(
         presenter["releaseMismatches"].as_u64().unwrap() == 0,
         "{presenter}"

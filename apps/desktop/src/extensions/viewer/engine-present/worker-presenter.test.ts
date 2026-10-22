@@ -60,6 +60,8 @@ class Painter implements FramePainter {
   /** The device goes away (the GPU process restarted). */
   lose(reason: string): void {
     this.loseDevice(reason);
+    // A real lost queue settles all outstanding onSubmittedWorkDone calls.
+    this.finishGpu();
   }
   configure(): void {}
   draw(frame: VideoFrame): void {
@@ -343,6 +345,27 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(pair.terminated).toBe(true);
   });
 
+  it('keeps submitted surfaces until their GPU fence before acknowledging close or destroying the painter', async () => {
+    const { pair, host, source, link, presenter } = setup();
+    source.imports.add('1:1');
+    presenter.receive({ type: 'frame', frame: desc(1) }, 0);
+    await settle();
+    expect(pair.painter.draws).toHaveLength(1);
+    host.dispose();
+    await settle();
+    expect(link.releases).toEqual([]);
+    expect(source.frames[0]!.closed).toBe(false);
+    expect(pair.fromWorker.some(m => m.type === 'closed' || m.type === 'disposed')).toBe(false);
+    expect(pair.painter.disposed).toBe(false);
+    pair.painter.finishGpu();
+    await settle();
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+    expect(source.frames[0]!.closedLast).toBe(true);
+    expect(pair.fromWorker.filter(m => m.type === 'closed' || m.type === 'disposed').map(m => m.type)).toEqual(['closed', 'disposed']);
+    expect(pair.painter.disposed).toBe(true);
+    expect(pair.terminated).toBe(true);
+  });
+
   it('returns held slots when a disposed worker must be terminated', () => {
     const pair = new Pair(), source = new Source(), link = new Link();
     // A stuck realm receives transfers but never responds to Close/Dispose.
@@ -427,7 +450,8 @@ describe('WorkerPresenter and the presentation worker', () => {
     pair.painter.lose('A valid external Instance reference no longer exists.');
     await settle();
     expect(losses).toEqual(['A valid external Instance reference no longer exists.']);
-    // Both came back: the queued one from the worker, the drawn one when the worker closed the session.
+    // Both came back: the queued one immediately, the submitted one when
+    // its lost queue settled (before the worker acknowledged closure).
     expect(link.releases.map((r) => r.seq).sort()).toEqual([1, 2]);
     expect(source.frames.every((f) => f.closed)).toBe(true);
     // A frame that arrives afterwards is handed back undrawn.
