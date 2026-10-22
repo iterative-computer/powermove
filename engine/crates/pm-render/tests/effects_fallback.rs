@@ -1465,3 +1465,184 @@ fn a_layer_and_a_transition_whose_parity_reference_fails_follow_the_runner() {
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].code, ErrorCode::ShaderCompile);
 }
+
+/// Decision PROBE-1: a viewer frame (background probes) presents an
+/// unknown user program's native result at once and sends its probe; the
+/// answer is judged when it lands. A match verifies the program; a
+/// mismatch pins it (the pin count grows, so the host draws its views
+/// again) and later frames take the runner's path. Effects, transitions,
+/// shader layers and extension fragment layers alike; a held frame (the
+/// default: exports, snapshots) still waits.
+#[test]
+fn a_viewer_frame_presents_an_unknown_program_natively_and_probes_it_in_the_background() {
+    use pm_render::effects::parity::Verdict;
+    let _gpu = gpu();
+    for (kind, matching) in [
+        ("effect", true),
+        ("effect", false),
+        ("transition", true),
+        ("shader", true),
+        ("extension", false),
+    ] {
+        let mut set = builtin_definitions();
+        let source = |body: &str| body.to_owned();
+        let doc;
+        let code;
+        if kind == "effect" {
+            let mut def = set
+                .definitions
+                .iter()
+                .find(|d| d.id.as_str() == "invert")
+                .unwrap()
+                .clone();
+            def.id = "probe.identity".into();
+            def.origin = DefinitionOrigin::Local;
+            let g = def.glsl.as_mut().unwrap();
+            let start = g.source.find("void main()").unwrap();
+            g.source.truncate(start);
+            g.source.push_str(&source("void main(){o=texture(u_tex,v_st);}"));
+            code = g.source.clone();
+            set.definitions.push(def);
+            doc = stack(
+                json!([{ "id": "fx", "type": "probe.identity", "on": true, "p": {} }]),
+                Value::Null,
+            );
+        } else {
+            let mut def = set
+                .definitions
+                .iter()
+                .find(|d| d.id.as_str() == "crossfade")
+                .unwrap()
+                .clone();
+            def.id = "probe.constant".into();
+            def.origin = DefinitionOrigin::Local;
+            let g = def.glsl.as_mut().unwrap();
+            let start = g.source.find("void main()").unwrap();
+            g.source.truncate(start);
+            g.source.push_str("void main(){o=vec4(0.25,0.5,0.75,1.0);}");
+            let mut c = g.source.clone();
+            let body = "void main(){fragColor=vec4(0.25,0.5,0.75,1.0);}";
+            if kind == "extension" {
+                def.kind = DefinitionKind::Layer;
+                def.renderer = Some(pm_protocol::definitions::LayerRenderer::Fragment {
+                    fragment: body.into(),
+                });
+                def.glsl = Some(pm_protocol::definitions::WrappedGlsl {
+                    source: format!("{}\n{body}", pm_render::shader_layers::header()),
+                    body_line_offset: pm_render::shader_layers::header().lines().count() as u32,
+                    body_utf16_len: body.len() as u32,
+                    body_utf8_len: body.len() as u32,
+                });
+                c = def.glsl.as_ref().unwrap().source.clone();
+            }
+            if kind == "shader" {
+                c = format!("{}\n{body}", pm_render::shader_layers::header());
+            } else {
+                set.definitions.push(def);
+            }
+            code = c;
+            doc = if kind == "transition" {
+                stack(json!([]), json!({"type":"probe.constant","dur":1,"p":{}}))
+            } else {
+                let mut l = layer("fragment", "#000000", json!([]), Value::Null);
+                l["type"] = json!(if kind == "shader" { "shader" } else { "extension" });
+                l["d"] = if kind == "shader" {
+                    json!({"code": body,"uniforms":{},"w":64,"h":32})
+                } else {
+                    json!({"definition":"probe.constant","params":{},"w":64,"h":32})
+                };
+                document(vec![l])
+            };
+        }
+        let mut r = Renderer::headless().unwrap();
+        r.set_definitions(&set).unwrap();
+        r.set_shader_fallback_runner(true);
+        r.effects_mut()
+            .parity
+            .configure(Some(format!("background-{kind}-{matching}")), None);
+        // A held frame (the default) still waits for the runner.
+        assert!(
+            matches!(render(&mut r, &doc), Err(RenderError::ShaderFallbackPending(_))),
+            "{kind}: a held frame waits"
+        );
+        let mut r = Renderer::headless().unwrap();
+        r.set_definitions(&set).unwrap();
+        r.set_shader_fallback_runner(true);
+        r.effects_mut()
+            .parity
+            .configure(Some(format!("background2-{kind}-{matching}")), None);
+        r.set_probe_background(true);
+        let native = render(&mut r, &doc).unwrap_or_else(|e| panic!("{kind}: presents at once ({e:?})"));
+        let probes = r.take_probes();
+        assert_eq!(probes.len(), 1, "{kind}: one probe sent");
+        assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Unknown);
+        // While it is on its way, frames present natively and probe nothing more.
+        assert_eq!(render(&mut r, &doc).unwrap(), native, "{kind}");
+        assert!(r.take_probes().is_empty(), "{kind}: probed once");
+        let probe = &probes[0];
+        // The identity effect draws its input; the others a constant.
+        let mut angle = match r.fallback_textures(&probe.key).filter(|_| kind == "effect") {
+            Some(textures) => textures[0].as_ref().clone(),
+            None => FallbackPixels {
+                width: probe.width,
+                height: probe.height,
+                rgba16f: (0..probe.width * probe.height)
+                    .flat_map(|_| [0x3400, 0x3800, 0x3a00, 0x3c00])
+                    .collect(),
+            },
+        };
+        if !matching {
+            for p in angle.rgba16f.chunks_exact_mut(4) {
+                p[0] = 0x3800;
+            }
+        }
+        let pins = r.parity_pins();
+        r.put_fallback_pixels(probe.key.clone(), angle);
+        if matching {
+            assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::NativeVerified, "{kind}");
+            assert_eq!(r.parity_pins(), pins, "{kind}");
+            assert_eq!(render(&mut r, &doc).unwrap(), native, "{kind}: verified, still native");
+            assert!(r.take_probes().is_empty());
+        } else {
+            assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Runner, "{kind}");
+            assert_eq!(r.parity_pins(), pins + 1, "{kind}: the host redraws its views");
+            // Pinned: the runner's path (which waits for its pixels).
+            assert!(
+                matches!(render(&mut r, &doc), Err(RenderError::ShaderFallbackPending(_))),
+                "{kind}: pinned programs draw through the runner"
+            );
+        }
+    }
+}
+
+/// Decision PROBE-1: programs queued ahead are built off the frame thread
+/// and the frame that uses them draws the same pixels as one that built
+/// them itself.
+#[test]
+fn programs_built_ahead_draw_the_same_frame() {
+    let _gpu = gpu();
+    let (set, _) = probe_swap();
+    let doc = stack(
+        json!([{ "id": "fx", "type": "probe.swap", "on": true, "p": {} }]),
+        Value::Null,
+    );
+    let make = || {
+        let mut r = Renderer::headless().unwrap();
+        r.set_definitions(&set).unwrap();
+        r
+    };
+    let mut cold = make();
+    let expected = render(&mut cold, &doc).unwrap();
+    let mut warm = make();
+    let queued = warm.prewarm_programs(Some(&doc));
+    assert!(queued >= 1, "the document's user program is queued ({queued})");
+    assert_eq!(warm.prewarm_programs(Some(&doc)), 0, "already in flight");
+    // The worker builds it meanwhile (a frame reaching it first would wait
+    // for it, or take it back if it had not started).
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert_eq!(render(&mut warm, &doc).unwrap(), expected);
+    let (built, _, waited, _, pending) = warm.effects().prewarm_stats();
+    assert!(built + waited >= 1, "the frame used the build from the worker");
+    assert_eq!(pending, 0);
+    assert_eq!(warm.prewarm_programs(Some(&doc)), 0, "nothing left to build");
+}

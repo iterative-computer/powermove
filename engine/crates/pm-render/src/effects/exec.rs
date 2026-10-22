@@ -205,6 +205,9 @@ pub(crate) struct Gpu<'c> {
     timer: Option<&'c mut FrameTimer>,
     linear: &'c wgpu::Sampler,
     unsupported: &'c mut Vec<Unsupported>,
+    /// The runner step being made is a background parity probe (decision
+    /// PROBE-1): its request is queued and nothing waits for it.
+    probe_only: bool,
 }
 
 impl<'c> Gpu<'c> {
@@ -221,6 +224,7 @@ impl<'c> Gpu<'c> {
             timer: native.timer.as_deref_mut(),
             linear: native.linear,
             unsupported: &mut *native.unsupported,
+            probe_only: false,
         })
     }
 
@@ -345,8 +349,12 @@ impl<'c> Gpu<'c> {
         let pending = source
             .as_ref()
             .is_some_and(|source| self.effects.parity.pending(source));
+        // Decision PROBE-1: in a viewer frame an unknown program draws
+        // natively while its probe is in flight (a held frame waits for
+        // the runner instead).
+        let background = self.effects.parity.background();
         if probe == Some(super::parity::Verdict::Runner)
-            || (probe == Some(super::parity::Verdict::Unknown) && pending)
+            || (probe == Some(super::parity::Verdict::Unknown) && pending && !background)
         {
             let mut result = self.runner_effect(
                 layer,
@@ -456,7 +464,24 @@ impl<'c> Gpu<'c> {
         }
         let mut result = outputs.pop().expect("at least one pass");
         self.taken.extend(outputs);
-        if probe == Some(super::parity::Verdict::Unknown) || present {
+        if background && probe == Some(super::parity::Verdict::Unknown) {
+            // Probed in the background: this frame presents the native
+            // result; the answer is judged when it lands.
+            if !pending {
+                self.probe_only = true;
+                let _ = self.runner_effect(
+                    layer,
+                    step,
+                    input,
+                    backdrop,
+                    time,
+                    parity_failure(),
+                    (uv, origin, resolution),
+                    Some(&result),
+                );
+                self.probe_only = false;
+            }
+        } else if probe == Some(super::parity::Verdict::Unknown) || present {
             let answer = self.runner_effect(
                 layer,
                 step,
@@ -506,8 +531,9 @@ impl<'c> Gpu<'c> {
         let pending = source
             .as_ref()
             .is_some_and(|source| self.effects.parity.pending(source));
+        let background = self.effects.parity.background();
         if probe == Some(super::parity::Verdict::Runner)
-            || (probe == Some(super::parity::Verdict::Unknown) && pending)
+            || (probe == Some(super::parity::Verdict::Unknown) && pending && !background)
         {
             return self.runner_transition(
                 layer,
@@ -578,6 +604,22 @@ impl<'c> Gpu<'c> {
         );
         if let (Some(timer), Some((_, e))) = (self.timer.as_deref(), span) {
             timer.mark(device, self.encoder, &out.view, e);
+        }
+        if background && probe == Some(super::parity::Verdict::Unknown) {
+            if !pending {
+                self.probe_only = true;
+                let _ = self.runner_transition(
+                    layer,
+                    step,
+                    before,
+                    with_layer,
+                    time,
+                    parity_failure(),
+                    Some(&out),
+                );
+                self.probe_only = false;
+            }
+            return Some(out);
         }
         if probe == Some(super::parity::Verdict::Unknown) || present {
             let answer = self.runner_transition(
@@ -764,7 +806,11 @@ impl<'c> Gpu<'c> {
             {
                 self.effects.parity.pin(&source);
             }
-            self.runner_failed(&span, &program, &why);
+            // A background probe's frame presents the native result; the
+            // frames after the pin take the runner's path and report it.
+            if !self.probe_only {
+                self.runner_failed(&span, &program, &why);
+            }
             return None;
         }
         // Its last request failed for a transient reason (the runner's
@@ -782,7 +828,8 @@ impl<'c> Gpu<'c> {
         if let Some(super::fallback::RetryState::Wait { failure, report }) =
             self.effects.fallback.retries.state(&program, now)
         {
-            if report {
+            // A background probe waits out the runner's backoff too.
+            if report && !self.probe_only {
                 let name = span_name(&span);
                 self.effects.watchdog.report(EngineError::new(
                     ErrorCode::NotHeadlessRenderable,
@@ -797,9 +844,11 @@ impl<'c> Gpu<'c> {
         }
         // A request already waits in this frame: what this step reads may
         // depend on it, so it is asked for once that one is answered.
-        if self.effects.fallback.blocked {
+        // (A background probe waits for nothing.)
+        if self.effects.fallback.blocked && !self.probe_only {
             return None;
         }
+        let probing = std::time::Instant::now();
         // The frame so far runs now, so the textures hold this frame's
         // pixels when they are read.
         let device = self.device;
@@ -835,6 +884,30 @@ impl<'c> Gpu<'c> {
             &pixels.iter().map(|p| p.as_ref()).collect::<Vec<_>>(),
             &failure,
         );
+        if self.probe_only {
+            // Decision PROBE-1: the request goes to the runner in the
+            // background with the native result it is judged against.
+            if let Some(native) = native
+                && self.effects.parity.verdict(&request.fragment) == super::parity::Verdict::Unknown
+                && !self.effects.parity.pending(&request.fragment)
+            {
+                match read_half(device, queue, native) {
+                    Ok(native) => {
+                        self.effects
+                            .parity
+                            .start(&request.key, &request.fragment, native);
+                        self.effects.fallback.probe(Arc::new(request), pixels);
+                    }
+                    Err(error) => self.effects.watchdog.report(EngineError::new(
+                        ErrorCode::Internal,
+                        span_scope(&span),
+                        format!("{id}: shader parity readback failed ({error})"),
+                    )),
+                }
+            }
+            self.effects.frame_probe_us += probing.elapsed().as_micros() as u64;
+            return None;
+        }
         if let Some(native) = native {
             if let Some(probed_frame) = self.effects.parity.take_present(&request.fragment) {
                 if probed_frame != request.key {

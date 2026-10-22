@@ -474,9 +474,12 @@ impl crate::exec::Exec<'_> {
             }
             Some((verdict, request))
         });
+        // Decision PROBE-1: in a viewer frame an unknown program draws
+        // natively while its probe is in flight.
+        let background = self.effects.parity.background();
         if let Some((verdict, request)) = &probe
             && (*verdict != crate::effects::parity::Verdict::Unknown
-                || self.effects.parity.pending(&request.fragment))
+                || (self.effects.parity.pending(&request.fragment) && !background))
         {
             // The runner's outcome, with its retry, backoff and failure
             // handling (a program it cannot draw draws nothing, as today).
@@ -582,7 +585,40 @@ impl crate::exec::Exec<'_> {
         if let (Some(timer), Some((_, e))) = (self.timer.as_ref(), queries) {
             timer.mark(device, encoder, &out.view, e);
         }
-        if let Some((_, request)) = probe {
+        if let Some((verdict, request)) = probe {
+            if background && verdict == crate::effects::parity::Verdict::Unknown {
+                // Probed in the background: the native result is presented
+                // and the answer judged when it lands.
+                if !self.effects.parity.pending(&request.fragment) {
+                    let probing = std::time::Instant::now();
+                    let done = std::mem::replace(
+                        encoder,
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("pm frame after shader parity probe"),
+                        }),
+                    );
+                    queue.submit([done.finish()]);
+                    match crate::effects::exec::read_half(device, queue, &out) {
+                        Ok(native) => {
+                            self.effects
+                                .parity
+                                .start(&request.key, &request.fragment, native);
+                            self.effects.fallback.probe(request, Vec::new());
+                        }
+                        Err(error) => self.effects.watchdog.report(
+                            pm_protocol::error::EngineError::new(
+                                pm_protocol::error::ErrorCode::Internal,
+                                pm_protocol::error::ErrorScope::Layer {
+                                    layer: source.layer.as_str().into(),
+                                },
+                                format!("shader parity readback failed ({error})"),
+                            ),
+                        ),
+                    }
+                    self.effects.frame_probe_us += probing.elapsed().as_micros() as u64;
+                }
+                return Ok((out, true));
+            }
             let done = std::mem::replace(
                 encoder,
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor {

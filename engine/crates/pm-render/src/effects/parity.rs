@@ -40,6 +40,15 @@ pub struct Parity {
     present: HashMap<String, String>,
     /// When each cached native verification last looked for a pin on disk.
     checked: HashMap<String, Instant>,
+    /// Decision PROBE-1: the frame being drawn presents an unknown
+    /// program's native result and probes it in the background (viewer
+    /// frames); otherwise it holds for the runner's result (exports,
+    /// snapshots, renderers without the policy).
+    background: bool,
+    /// Programs pinned to the runner so far (by any decision, here or read
+    /// from another process's marker): a host compares it around answers
+    /// and frames and draws its views again when it grows.
+    pins: u64,
 }
 
 impl Parity {
@@ -64,6 +73,20 @@ impl Parity {
 
     pub fn enabled(&self) -> bool {
         self.environment.is_some()
+    }
+
+    /// Decision PROBE-1 for the frames drawn from now on (see `background`).
+    pub fn set_background(&mut self, background: bool) {
+        self.background = background;
+    }
+
+    pub fn background(&self) -> bool {
+        self.background
+    }
+
+    /// How many programs have been pinned to the runner (monotonic).
+    pub fn pins(&self) -> u64 {
+        self.pins
     }
 
     fn key(&self, source: &str) -> String {
@@ -109,6 +132,7 @@ impl Parity {
                 self.checked.insert(key.clone(), now);
                 if self.marker(&key, "runner", b"runner\n") {
                     self.decisions.insert(key, Verdict::Runner);
+                    self.pins += 1;
                     return Verdict::Runner;
                 }
                 return Verdict::NativeVerified;
@@ -195,13 +219,17 @@ impl Parity {
 
     /// Judge the actual first frame when its answer lands, rather than
     /// waiting for playback to request that exact time/input a second time.
-    pub fn answer(&mut self, request: &str, angle: &FallbackPixels) {
-        if let Some((source, native)) = self.pending.remove(request) {
-            self.pending_order.retain(|key| key != request);
-            if self.judge(&source, &native, angle) == Verdict::NativeVerified {
-                self.present.insert(self.key(&source), request.to_owned());
-            }
+    /// Returns the verdict when `request` was a probe. A frame that held
+    /// for the probe presents ANGLE's pixels for it; a background probe's
+    /// frame already presented the native result, so nothing is kept.
+    pub fn answer(&mut self, request: &str, angle: &FallbackPixels) -> Option<Verdict> {
+        let (source, native) = self.pending.remove(request)?;
+        self.pending_order.retain(|key| key != request);
+        let verdict = self.judge(&source, &native, angle);
+        if verdict == Verdict::NativeVerified && !self.background {
+            self.present.insert(self.key(&source), request.to_owned());
         }
+        Some(verdict)
     }
 
     /// Any channel over one code value pins the whole program. This is an
@@ -225,7 +253,10 @@ impl Parity {
 
     fn decide(&mut self, source: &str, verdict: Verdict) {
         let key = self.key(source);
-        self.decisions.insert(key.clone(), verdict);
+        let before = self.decisions.insert(key.clone(), verdict);
+        if verdict == Verdict::Runner && before != Some(Verdict::Runner) {
+            self.pins += 1;
+        }
         // The next verdict looks for a concurrent pin on disk at once.
         self.checked.remove(&key);
         if verdict == Verdict::Runner {

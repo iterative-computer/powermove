@@ -92,9 +92,18 @@ pub struct ViewDocument {
     /// The renderer has fonts (`crate::fonts::render`): text and captions
     /// layers are drawn, not routed.
     fonts: bool,
+    /// The whole document arrived (a project opened or was resynced) since
+    /// the renderer last built its programs ahead (decision PROBE-1).
+    prewarm_due: bool,
 }
 
 impl ViewDocument {
+    /// Whether programs are due to be built ahead for this document
+    /// (decision PROBE-1); clears the mark.
+    pub fn take_prewarm_due(&mut self) -> bool {
+        std::mem::take(&mut self.prewarm_due)
+    }
+
     /// Whether the host answered for every asset the document names (a
     /// frame never shows media missing that is only on its way).
     pub fn media_ready(&self) -> bool {
@@ -191,6 +200,7 @@ impl ViewDocument {
             Ok(()) => {
                 self.has_document = true;
                 self.broken = None;
+                self.prewarm_due |= replace;
                 Ok(())
             }
             Err(error) => {

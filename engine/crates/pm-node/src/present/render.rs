@@ -497,6 +497,24 @@ pub struct StageTotals {
     /// answers, SVG rasters, fallback pixels), and their planning time.
     pub waits: u64,
     pub wait_plan_us: u64,
+    /// Within `record_us`: program builds or waits for builds in flight,
+    /// and first-use parity probes (decision PROBE-1).
+    pub programs_us: u64,
+    pub probe_us: u64,
+    /// The longest frame's stages (µs).
+    pub plan_max_us: u64,
+    pub prefetch_max_us: u64,
+    pub record_max_us: u64,
+    pub programs_max_us: u64,
+    pub compose_max_us: u64,
+    /// Programs built ahead off the render thread (decision PROBE-1): how
+    /// many, their build time, frames that waited for one in flight and
+    /// how long, and builds still queued.
+    pub prewarm_built: u64,
+    pub prewarm_built_us: u64,
+    pub prewarm_waited: u64,
+    pub prewarm_waited_us: u64,
+    pub prewarm_pending: u64,
 }
 
 const TRACE_CAP: usize = 200_000;
@@ -1184,6 +1202,12 @@ impl Thread {
                     failures = composer
                         .use_definitions(key, definitions.as_ref(), &registered)
                         .unwrap_or_default();
+                    // Decision PROBE-1: an installed, updated or reloaded
+                    // extension's programs are built off the render thread
+                    // now, the document's first.
+                    composer
+                        .renderer()
+                        .prewarm_programs(self.docs.get(&key).map(|d| d.document()));
                 } else if let Some(doc) = self.docs.get_mut(&key) {
                     // Applied with the view's next frame.
                     doc.keep_registered(registered);
@@ -1395,6 +1419,7 @@ impl Thread {
                     return;
                 };
                 self.fallback.asked.remove(&request);
+                let mut pinned = false;
                 if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
                     // Effects' requests/results belong to their session's
                     // definition set. Another viewer/snapshot may have
@@ -1402,11 +1427,19 @@ impl Thread {
                     if let Some(doc) = self.docs.get(&key) {
                         let _ = composer.use_definitions(key, doc.definitions(), &[]);
                     }
+                    let pins = composer.renderer().parity_pins();
                     composer.renderer().put_fallback_pixels(request, pixels);
+                    pinned = composer.renderer().parity_pins() != pins;
                 }
                 if let Some(view) = self.views.get_mut(&key) {
                     view.external_wait = None;
                     view.dirty = true;
+                    // A background probe pinned its program (decision
+                    // PROBE-1): frames drawn before it showed the native
+                    // result, so those rendered ahead are drawn again.
+                    if pinned {
+                        view.schedule.invalidate();
+                    }
                 }
             }
             M::Failed {
@@ -1421,6 +1454,93 @@ impl Thread {
             }
             // Requests and their textures travel the other way.
             M::Requests { .. } | M::Input(_) => {}
+        }
+    }
+
+    /// Sends runner requests `key`'s view needs (the frame waits for them)
+    /// or made in the background (decision PROBE-1 parity probes), with the
+    /// textures they sample, and records who asked. `log`: tell the view
+    /// once per layer that it draws through the runner.
+    #[allow(clippy::too_many_arguments)]
+    fn send_fallback(
+        sink: &Sink,
+        fallback: &mut Fallback,
+        renderer: &pm_render::Renderer,
+        key: Key,
+        revision: Option<Revision>,
+        requests: Vec<pm_render::shader_layers::FallbackRequest>,
+        t: i64,
+        log: bool,
+    ) {
+        let fresh: Vec<_> = requests
+            .into_iter()
+            .filter(|r| !fallback.asked.contains_key(&r.key))
+            .collect();
+        for chunk in fresh.chunks(pm_protocol::shader_fallback::MAX_REQUESTS) {
+            for r in chunk {
+                fallback.asked.insert(r.key.clone(), (key, t));
+                // The Shader panel hears it as the layer's
+                // `NotHeadlessRenderable` report (reports.rs).
+                if !log || !fallback.logged.insert((key, r.layer.clone())) {
+                    continue;
+                }
+                (sink)(vec![Action::Log {
+                    level: LogLevel::Info,
+                    message: format!(
+                        "layer {} draws through the shader fallback runner \
+                         ({}x{}; native pipeline stopped at {}: {}); \
+                         not headless-renderable",
+                        r.layer,
+                        r.width,
+                        r.height,
+                        r.stage,
+                        r.message.lines().next().unwrap_or_default()
+                    ),
+                }]);
+            }
+            let body = Event::ShaderFallback(
+                pm_protocol::shader_fallback::ShaderFallbackMessage::Requests {
+                    requests: chunk.to_vec(),
+                },
+            );
+            let mut envelope =
+                Envelope::new(Message::Event { body }).with_session(key.1);
+            envelope.revision = revision;
+            if let Ok(bytes) = codec::encode(&envelope) {
+                (sink)(vec![Action::Send { port: key.0, bytes }]);
+            }
+            // The textures an effect or transition samples, in
+            // row bands after its request.
+            for r in chunk.iter().filter(|r| r.textures > 0) {
+                let textures = renderer
+                    .fallback_textures(&r.key)
+                    .unwrap_or_default();
+                for (texture, pixels) in textures.iter().enumerate() {
+                    for (row, rows, bytes) in pm_render::shader_layers::fallback::bands(
+                        pixels,
+                        pm_protocol::shader_fallback::MAX_BAND_BYTES,
+                    ) {
+                        let body = Event::ShaderFallback(
+                            pm_protocol::shader_fallback::ShaderFallbackMessage::Input(
+                                pm_protocol::shader_fallback::ShaderFallbackInput {
+                                    key: r.key.clone(),
+                                    texture: texture as u32,
+                                    width: pixels.width,
+                                    height: pixels.height,
+                                    row,
+                                    rows,
+                                    rgba16f: pm_protocol::common::Bytes(bytes),
+                                },
+                            ),
+                        );
+                        let envelope =
+                            Envelope::new(Message::Event { body }).with_session(key.1);
+                        if let Ok(bytes) = codec::encode(&envelope) {
+                            (sink)(vec![Action::Send { port: key.0, bytes }]);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1440,6 +1560,7 @@ impl Thread {
         }]);
         // A transient failure (a lost context) is asked for again
         // after a backoff: the view is drawn again then.
+        let mut pinned = false;
         let retry = self
             .gpu
             .as_mut()
@@ -1450,10 +1571,13 @@ impl Thread {
                 if let Some(doc) = self.docs.get(&key) {
                     let _ = composer.use_definitions(key, doc.definitions(), &[]);
                 }
-                composer.renderer().put_fallback_failure(
+                let pins = composer.renderer().parity_pins();
+                let retry = composer.renderer().put_fallback_failure(
                     request,
                     pm_render::shader_layers::FallbackFailure { reason, message },
-                )
+                );
+                pinned = composer.renderer().parity_pins() != pins;
+                retry
             });
         if let Some(delay) = retry.filter(|d| !d.is_zero()) {
             let at = now() + delay.as_micros() as i64;
@@ -1465,6 +1589,11 @@ impl Thread {
                 view.external_wait = None;
             }
             view.dirty = true;
+            // A background probe's reference failed for good: pinned
+            // (decision PROBE-1), frames rendered ahead are drawn again.
+            if pinned {
+                view.schedule.invalidate();
+            }
         }
     }
 
@@ -3410,7 +3539,14 @@ impl Thread {
             // The renderer draws with this view's definitions (one renderer
             // serves every view on the device).
             let registered = doc.take_registered();
-            let _ = composer.use_definitions(key, doc.definitions(), &registered);
+            let loaded = composer.use_definitions(key, doc.definitions(), &registered);
+            // Decision PROBE-1: when the definitions changed (session start,
+            // an extension installed, updated or reloaded) or a project
+            // opened, the programs the document uses, then every other user
+            // program, are built off this thread.
+            if loaded.is_some() | doc.take_prewarm_due() {
+                composer.renderer().prewarm_programs(Some(doc.document()));
+            }
             // A preceding capture's hide-captions option is scoped to it.
             composer.renderer().set_captions_hidden(false);
             // Text measures with the font cache seeds of the window the view
@@ -3457,6 +3593,10 @@ impl Thread {
             let doc_revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
             let compat_view = compat_view(&self.compat, key, doc_revision);
             composer.renderer().set_compat_rasters(compat_view);
+            // Decision PROBE-1: a viewer frame never waits for a first-use
+            // parity probe; unknown programs present their native result
+            // and are probed in the background.
+            composer.renderer().set_probe_background(true);
             let composed = composer.compose_with_depth(
                 doc.document(),
                 &composition,
@@ -3467,7 +3607,22 @@ impl Thread {
                 depth_slot.as_ref().map(|(_, _, v)| v),
             );
             composer.renderer().set_compat_rasters(None);
+            composer.renderer().set_probe_background(false);
+            let probes = composer.renderer().take_probes();
+            if !probes.is_empty() {
+                Self::send_fallback(
+                    &self.sink,
+                    &mut self.fallback,
+                    composer.renderer(),
+                    key,
+                    Revision::new(doc.revision()).ok(),
+                    probes.iter().map(|r| (**r).clone()).collect(),
+                    now(),
+                    false,
+                );
+            }
             let stages = composer.renderer().last_stages();
+            let prewarm = composer.renderer().effects().prewarm_stats();
             let memory = composer.renderer().memory();
             let gpu_ms: BTreeMap<String, f64> = composer
                 .renderer()
@@ -3513,6 +3668,8 @@ impl Thread {
                 let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
                 stats.stages.waits += 1;
                 stats.stages.wait_plan_us += stages.plan_us;
+                stats.stages.programs_us += stages.programs_us;
+                stats.stages.probe_us += stages.probe_us;
             }
             match composed {
                 Ok(composed) => {
@@ -3559,6 +3716,21 @@ impl Thread {
                     totals.record_us += stages.record_us;
                     totals.submit_us += stages.submit_us;
                     totals.compose_us += composed.cpu_us.max(0) as u64;
+                    totals.programs_us += stages.programs_us;
+                    totals.probe_us += stages.probe_us;
+                    totals.plan_max_us = totals.plan_max_us.max(stages.plan_us);
+                    totals.prefetch_max_us = totals.prefetch_max_us.max(stages.prefetch_us);
+                    totals.record_max_us = totals.record_max_us.max(stages.record_us);
+                    totals.programs_max_us = totals.programs_max_us.max(stages.programs_us);
+                    totals.compose_max_us =
+                        totals.compose_max_us.max(composed.cpu_us.max(0) as u64);
+                    (
+                        totals.prewarm_built,
+                        totals.prewarm_built_us,
+                        totals.prewarm_waited,
+                        totals.prewarm_waited_us,
+                    ) = (prewarm.0, prewarm.1, prewarm.2, prewarm.3);
+                    totals.prewarm_pending = prewarm.4 as u64;
                     stats.layer_failures += composed.failures.len() as u64;
                     stats.stand_in_frames += u64::from(stand_in);
                     stats.scrub = Some(scrub_stats);
@@ -3685,77 +3857,16 @@ impl Thread {
                     // when the pixels arrive.
                     let t = now();
                     let waiting: Vec<String> = requests.iter().map(|r| r.key.clone()).collect();
-                    let fresh: Vec<_> = requests
-                        .into_iter()
-                        .filter(|r| !self.fallback.asked.contains_key(&r.key))
-                        .collect();
-                    for chunk in fresh.chunks(pm_protocol::shader_fallback::MAX_REQUESTS) {
-                        for r in chunk {
-                            self.fallback.asked.insert(r.key.clone(), (key, t));
-                            // The Shader panel hears it as the layer's
-                            // `NotHeadlessRenderable` report (reports.rs).
-                            if !self.fallback.logged.insert((key, r.layer.clone())) {
-                                continue;
-                            }
-                            (self.sink)(vec![Action::Log {
-                                level: LogLevel::Info,
-                                message: format!(
-                                    "layer {} draws through the shader fallback runner \
-                                     ({}x{}; native pipeline stopped at {}: {}); \
-                                     not headless-renderable",
-                                    r.layer,
-                                    r.width,
-                                    r.height,
-                                    r.stage,
-                                    r.message.lines().next().unwrap_or_default()
-                                ),
-                            }]);
-                        }
-                        let body = Event::ShaderFallback(
-                            pm_protocol::shader_fallback::ShaderFallbackMessage::Requests {
-                                requests: chunk.to_vec(),
-                            },
-                        );
-                        let mut envelope =
-                            Envelope::new(Message::Event { body }).with_session(key.1);
-                        envelope.revision = Revision::new(doc.revision()).ok();
-                        if let Ok(bytes) = codec::encode(&envelope) {
-                            (self.sink)(vec![Action::Send { port: key.0, bytes }]);
-                        }
-                        // The textures an effect or transition samples, in
-                        // row bands after its request.
-                        for r in chunk.iter().filter(|r| r.textures > 0) {
-                            let textures = composer
-                                .renderer()
-                                .fallback_textures(&r.key)
-                                .unwrap_or_default();
-                            for (texture, pixels) in textures.iter().enumerate() {
-                                for (row, rows, bytes) in pm_render::shader_layers::fallback::bands(
-                                    pixels,
-                                    pm_protocol::shader_fallback::MAX_BAND_BYTES,
-                                ) {
-                                    let body = Event::ShaderFallback(
-                                        pm_protocol::shader_fallback::ShaderFallbackMessage::Input(
-                                            pm_protocol::shader_fallback::ShaderFallbackInput {
-                                                key: r.key.clone(),
-                                                texture: texture as u32,
-                                                width: pixels.width,
-                                                height: pixels.height,
-                                                row,
-                                                rows,
-                                                rgba16f: pm_protocol::common::Bytes(bytes),
-                                            },
-                                        ),
-                                    );
-                                    let envelope =
-                                        Envelope::new(Message::Event { body }).with_session(key.1);
-                                    if let Ok(bytes) = codec::encode(&envelope) {
-                                        (self.sink)(vec![Action::Send { port: key.0, bytes }]);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Self::send_fallback(
+                        &self.sink,
+                        &mut self.fallback,
+                        composer.renderer(),
+                        key,
+                        Revision::new(doc.revision()).ok(),
+                        requests,
+                        t,
+                        true,
+                    );
                     let bound = super::wait::Bounds::new(self.config.external_wait_cap_us).fallback;
                     // Counted from this view's own asks; a request another
                     // job asked for (a snapshot) gets the full bound from

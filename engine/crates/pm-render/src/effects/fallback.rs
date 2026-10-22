@@ -92,6 +92,13 @@ pub struct EffectFallback {
     /// Job policy: why the frame cannot be delivered (the runner could not
     /// draw a program WebGL draws today).
     pub(crate) fatal: Option<String>,
+    /// Background parity probes (decision PROBE-1) asked for and not
+    /// answered, with their textures: the frame that made them presented
+    /// the native result, and nothing waits for them.
+    probing: HashMap<String, (Arc<FallbackRequest>, Vec<Arc<FallbackPixels>>)>,
+    probing_order: VecDeque<String>,
+    /// Background probes made since the host last took them.
+    probes: Vec<Arc<FallbackRequest>>,
 }
 
 impl Default for EffectFallback {
@@ -107,6 +114,9 @@ impl Default for EffectFallback {
             pending: Vec::new(),
             fatal: None,
             blocked: false,
+            probing: HashMap::new(),
+            probing_order: VecDeque::new(),
+            probes: Vec::new(),
         }
     }
 }
@@ -120,7 +130,40 @@ impl EffectFallback {
     /// The textures of a request that waits (their pixels go to the runner
     /// with it).
     pub fn textures(&self, key: &str) -> Option<Vec<Arc<FallbackPixels>>> {
-        self.waiting.get(key).map(|(_, t)| t.clone())
+        self.waiting
+            .get(key)
+            .or_else(|| self.probing.get(key))
+            .map(|(_, t)| t.clone())
+    }
+
+    /// A background parity probe (decision PROBE-1): sent to the runner by
+    /// the host ([`EffectFallback::take_probes`]) and judged when its answer
+    /// lands; the frame does not wait for it. At most [`WAITING`] are kept.
+    pub(crate) fn probe(&mut self, request: Arc<FallbackRequest>, textures: Vec<Arc<FallbackPixels>>) {
+        if self.probing.contains_key(&request.key) {
+            return;
+        }
+        while self.probing_order.len() >= WAITING {
+            if let Some(old) = self.probing_order.pop_front() {
+                self.probing.remove(&old);
+            }
+        }
+        self.probing_order.push_back(request.key.clone());
+        self.probing
+            .insert(request.key.clone(), (request.clone(), textures));
+        self.probes.push(request);
+    }
+
+    /// The background probes made since the last call, to be sent.
+    pub fn take_probes(&mut self) -> Vec<Arc<FallbackRequest>> {
+        std::mem::take(&mut self.probes)
+    }
+
+    /// Ends a background probe: its request, when `key` was one.
+    pub(crate) fn end_probe(&mut self, key: &str) -> Option<Arc<FallbackRequest>> {
+        let (request, _) = self.probing.remove(key)?;
+        self.probing_order.retain(|k| k != key);
+        Some(request)
     }
 
     /// The runner's pixels for a request: its program drew, so an earlier

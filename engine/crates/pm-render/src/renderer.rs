@@ -177,6 +177,13 @@ pub struct FrameStages {
     pub record_us: u64,
     /// Handing the commands to the GPU.
     pub submit_us: u64,
+    /// Within `record_us`: building effect, transition and layer programs
+    /// (the Metal compiler) or waiting for a build in flight
+    /// (`effects::prewarm`).
+    pub programs_us: u64,
+    /// Within `record_us`: first-use parity probes (the readbacks of a
+    /// probed step's inputs and native result).
+    pub probe_us: u64,
 }
 
 /// One drawn quad of a top-level layer ([`Rendered::quads`]).
@@ -320,6 +327,9 @@ pub struct Renderer {
     /// The stages of the last frame this renderer planned, finished or not
     /// (a frame that waits for compatibility answers stops after planning).
     last_stages: FrameStages,
+    /// The working precision of the last frame: what programs are built
+    /// ahead for ([`Renderer::prewarm_programs`]).
+    last_precision: pm_protocol::color::Precision,
     /// Whether level 1 shape and path rasters are drawn ahead on worker
     /// threads ([`Renderer::set_vector_prefetch`]).
     vector_prefetch: bool,
@@ -382,6 +392,7 @@ impl Renderer {
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
             last_stages: FrameStages::default(),
+            last_precision: pm_protocol::color::Precision::Float16,
             vector_prefetch: true,
             prefix: Default::default(),
             svg_wait: false,
@@ -436,6 +447,22 @@ impl Renderer {
     }
 
     /// The stages of the last frame planned (finished or not).
+    /// Queues the programs `document` uses, then every other user program,
+    /// to be built off the frame thread (decision PROBE-1,
+    /// `effects::prewarm`): at project open and when the definition set
+    /// changes. Returns how many were queued. A renderer drawing another
+    /// host's definitions builds nothing.
+    pub fn prewarm_programs(&mut self, document: Option<&pm_model::Document>) -> usize {
+        if self.effect_host.is_some() {
+            return 0;
+        }
+        let first = document
+            .map(crate::effects::prewarm::document_definitions)
+            .unwrap_or_default();
+        let format = pm_gpu::target::working_format(self.last_precision);
+        self.effects.prewarm(&self.device, format, &first)
+    }
+
     pub fn last_stages(&self) -> FrameStages {
         self.last_stages
     }
@@ -641,6 +668,13 @@ impl Renderer {
         pixels: crate::shader_layers::FallbackPixels,
     ) {
         self.effects.parity.answer(&key, &pixels);
+        // A background probe (decision PROBE-1): judged above; its frame
+        // presented the native result, so the pixels are not kept.
+        if let Some(request) = self.effects.fallback.end_probe(&key) {
+            let program = crate::shader_layers::fallback::program_id(&request);
+            self.effects.fallback.retries.succeeded(&program);
+            return;
+        }
         if self.effects.fallback.expects(&key) {
             self.effects.fallback.put_pixels(key, pixels);
         } else {
@@ -675,6 +709,16 @@ impl Renderer {
         // the runner, whose failure handling below reproduces today's
         // outcome; a transient one is probed again when its retry is due.
         self.effects.parity.failed(key, &failure);
+        // A background probe (decision PROBE-1): a lasting failure pinned
+        // the program above; a transient one is probed again by a frame
+        // after the runner's backoff.
+        if let Some(request) = self.effects.fallback.end_probe(key) {
+            let program = crate::shader_layers::fallback::program_id(&request);
+            if !failure.is_final() {
+                self.effects.fallback.retries.failed(&program, failure, now);
+            }
+            return None;
+        }
         if self.effects.fallback.expects(key) {
             self.effects.fallback.put_failure(key, failure, now)
         } else if let Some(program) = self.shaders.waiting.remove(key) {
@@ -688,6 +732,29 @@ impl Renderer {
         } else {
             None
         }
+    }
+
+    /// Decision PROBE-1 for the frames rendered from now on: a viewer frame
+    /// presents an unknown user program's native result and probes it in
+    /// the background ([`Renderer::take_probes`]); otherwise (the default:
+    /// exports, snapshots) the frame holds for the runner's result.
+    pub fn set_probe_background(&mut self, background: bool) {
+        self.effects.parity.set_background(background);
+    }
+
+    /// The background parity probes the frames made since the last call:
+    /// the host sends them to the runner like waiting requests (their
+    /// textures from [`Renderer::fallback_textures`]) and hands the answers
+    /// to [`Renderer::put_fallback_pixels`].
+    pub fn take_probes(&mut self) -> Vec<Arc<crate::shader_layers::FallbackRequest>> {
+        self.effects.fallback.take_probes()
+    }
+
+    /// Programs pinned to the runner so far (monotonic): a host draws its
+    /// views again when it grows, since frames before the pin presented
+    /// the native result (decision PROBE-1).
+    pub fn parity_pins(&self) -> u64 {
+        self.effects.parity.pins()
     }
 
     /// When the earliest program whose request failed transiently is asked
@@ -1446,6 +1513,7 @@ impl Renderer {
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
         let precision = effective_precision(request.precision, color.precision);
+        self.last_precision = precision;
         if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
                 "32-bit precision on a device without rgba32float filtering and blending",
@@ -1589,6 +1657,8 @@ impl Renderer {
             .is_none()
             .then(|| self.effects.watchdog.frame_timer(&self.device));
         self.effects.watchdog.take_held();
+        self.effects.frame_build_us = 0;
+        self.effects.frame_probe_us = 0;
         self.effects.fallback.pending.clear();
         self.effects.fallback.fatal = None;
         self.effects.fallback.blocked = false;
@@ -1722,6 +1792,8 @@ impl Renderer {
             bracket.end(&mut encoder, &target.view);
         }
         stages.record_us = recording.elapsed().as_micros() as u64;
+        stages.programs_us = self.effects.frame_build_us;
+        stages.probe_us = self.effects.frame_probe_us;
         let submitting = std::time::Instant::now();
         self.queue.submit([encoder.finish()]);
         stages.submit_us = submitting.elapsed().as_micros() as u64;
