@@ -57,7 +57,9 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
     session: request?.session ?? null,
     revision: request?.revision ?? null,
     snapshot: request?.snapshot ? { ...request.snapshot, target: target ? { ...target, content: undefined } : target } : request?.snapshot,
-    document: request?.document ? { id: request.document.id, revision: request.document.revision, hash: request.document.hash ?? null } : undefined
+    // A native kernel reference carries no body or hash; main adopts the
+    // owner's shared tree (main/engine/window-sessions.ts).
+    document: request?.document ? { id: request.document.id, revision: request.document.revision, hash: request.document.hash ?? null, ...(request.document.nativeKernel === true ? { nativeKernel: true as const } : {}) } : undefined
   })) as EngineSnapshotRequest;
   if (target?.kind === 'layer' && plain.snapshot?.target?.kind === 'layer') (plain.snapshot.target as { content?: Uint8Array | null }).content = bytes(target.content);
   if (plain.document) {
