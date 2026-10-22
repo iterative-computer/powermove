@@ -1024,6 +1024,36 @@ impl Renderer {
         self.pool.bytes() + self.pyramids.bytes()
     }
 
+    /// Nominal texel bytes retained by reusable intermediate targets.
+    pub fn target_pool_bytes(&self) -> u64 {
+        self.pool.bytes()
+    }
+
+    /// Reusable targets currently idle in the pool.
+    pub fn target_pool_idle(&self) -> usize {
+        self.pool.idle()
+    }
+
+    /// Targets allocated since this renderer was created.
+    pub fn target_pool_created(&self) -> u64 {
+        self.pool.created()
+    }
+
+    /// Nominal texel bytes retained by image mip pyramids.
+    pub fn pyramid_bytes(&self) -> u64 {
+        self.pyramids.bytes()
+    }
+
+    /// Nominal texel bytes of still and converted-video textures.
+    pub fn media_texture_bytes(&self) -> u64 {
+        self.media.bytes
+    }
+
+    /// Nominal texel bytes of cached text rasters.
+    pub fn text_cache_bytes(&self) -> u64 {
+        self.text_gpu.cached_bytes()
+    }
+
     /// Keeps translated 3D programs (amendment 11's disk program cache) and
     /// translated GLSL (`dir/glsl`, plan section 11) in `dir` across
     /// processes; the engine host passes its shader cache folder.

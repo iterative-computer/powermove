@@ -335,6 +335,8 @@ pub struct ThreadConfig {
     pub trace: bool,
     /// Keep [`Stats::stand_in_log`] (measurements only).
     pub stand_in_log: bool,
+    /// Sample live resource sizes for allocation probes (off in normal use).
+    pub allocation_inventory: bool,
     /// Fraction of a refresh after the viewer's BeginFrame at which timed
     /// frames start rendering, once the viewer sent its vsync hint; `None`
     /// renders at the due time.
@@ -539,8 +541,80 @@ pub struct Stats {
     pub depth_frames: u64,
     pub compat_rasters: BTreeMap<String, usize>,
     pub compat_bytes: u64,
+    /// A render-thread snapshot of live allocations. Surface bytes are the
+    /// IOSurface allocation sizes; target and cache bytes are nominal texel
+    /// counts. Lease reservations are not included.
+    pub allocations: AllocationInventory,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
+}
+
+/// Live resource inventory copied into status without touching render-thread
+/// state from the utility process's JavaScript thread.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AllocationInventory {
+    pub sampled_at_us: i64,
+    pub gpu_created: bool,
+    pub composer_created: bool,
+    pub views: Vec<ViewAllocation>,
+    pub color_surface_bytes: u64,
+    pub depth_surface_bytes: u64,
+    pub working_target_bytes: u64,
+    pub snapshot_target_bytes: u64,
+    pub snapshot_readback_bytes: u64,
+    pub renderer: Option<RendererAllocation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewAllocation {
+    pub port: u32,
+    pub session: u64,
+    pub color: Option<SurfaceAllocation>,
+    pub depth: Option<SurfaceAllocation>,
+    pub working_target_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SurfaceAllocation {
+    pub generation: u32,
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+    pub count: usize,
+    pub iosurface_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RendererAllocation {
+    pub target_pool_bytes: u64,
+    pub target_pool_idle: usize,
+    pub target_pool_created: u64,
+    pub pyramid_bytes: u64,
+    pub media_texture_bytes: u64,
+    pub media: pm_media::decode::service::MediaUsage,
+    pub text_cache_bytes: u64,
+    pub vector_cache_bytes: u64,
+    pub scene3d_meshes: usize,
+    pub scene3d_mesh_bytes: u64,
+    pub scene3d_maps: usize,
+    pub scene3d_map_bytes: u64,
+}
+
+impl SurfaceAllocation {
+    fn of(spec: PoolSpec, pool: &SurfacePool) -> Self {
+        Self {
+            generation: spec.generation,
+            width: spec.size.width,
+            height: spec.size.height,
+            format: format!("{:?}", spec.format),
+            count: pool.len(),
+            iosurface_bytes: pool.bytes(),
+        }
+    }
 }
 
 const TRACE_CAP: usize = 200_000;
@@ -875,6 +949,7 @@ pub fn run(
         svg: super::svg::SvgState::default(),
     };
     thread.check_in();
+    let mut last_inventory_us = 0;
     loop {
         let timeout = thread.next_wake();
         match rx.recv_timeout(timeout) {
@@ -901,6 +976,13 @@ pub fn run(
         let started = now();
         thread.work();
         thread.note_turn("work", started);
+        let sampled_at_us = now();
+        if thread.config.allocation_inventory
+            && sampled_at_us.saturating_sub(last_inventory_us) >= 50_000
+        {
+            thread.snapshot_allocations(sampled_at_us);
+            last_inventory_us = sampled_at_us;
+        }
     }
     thread.shutdown();
 }
@@ -943,6 +1025,74 @@ fn command_name(command: &Command) -> &'static str {
 }
 
 impl Thread {
+    /// Copies the render thread's live resource sizes into shared status.
+    /// Sampling follows completed work so the first frame's caches and a
+    /// retired pool are reflected without reading mutable state off-thread.
+    fn snapshot_allocations(&mut self, sampled_at_us: i64) {
+        let mut inventory = AllocationInventory {
+            sampled_at_us,
+            gpu_created: self.gpu.is_some(),
+            composer_created: self.gpu.as_ref().is_some_and(|g| g.composer.is_some()),
+            snapshot_target_bytes: self
+                .gpu
+                .as_ref()
+                .and_then(|g| g.snapshot_target.as_ref())
+                .map_or(0, pm_gpu::Target::bytes),
+            snapshot_readback_bytes: self
+                .gpu
+                .as_ref()
+                .map_or(0, |g| g.snapshot_readback.capacity_bytes()),
+            ..AllocationInventory::default()
+        };
+        for (&(port, session), view) in &self.views {
+            let color = view
+                .pool
+                .as_ref()
+                .map(|live| SurfaceAllocation::of(live.spec, &live.pool));
+            let depth = view
+                .depth
+                .as_ref()
+                .map(|live| SurfaceAllocation::of(live.spec, &live.pool));
+            let working_target_bytes = view.pool.as_ref().map_or(0, |live| {
+                u64::from(live.working.size.width)
+                    * u64::from(live.working.size.height)
+                    * u64::from(
+                        pm_gpu::bridge_out::display::WORKING_FORMAT
+                            .block_copy_size(None)
+                            .unwrap_or(8),
+                    )
+            });
+            inventory.color_surface_bytes += color.as_ref().map_or(0, |pool| pool.iosurface_bytes);
+            inventory.depth_surface_bytes += depth.as_ref().map_or(0, |pool| pool.iosurface_bytes);
+            inventory.working_target_bytes += working_target_bytes;
+            inventory.views.push(ViewAllocation {
+                port: port.0,
+                session: session.get(),
+                color,
+                depth,
+                working_target_bytes,
+            });
+        }
+        if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+            let renderer = composer.renderer();
+            let scene3d = renderer.scene3d_resident();
+            inventory.renderer = Some(RendererAllocation {
+                target_pool_bytes: renderer.target_pool_bytes(),
+                target_pool_idle: renderer.target_pool_idle(),
+                target_pool_created: renderer.target_pool_created(),
+                pyramid_bytes: renderer.pyramid_bytes(),
+                media_texture_bytes: renderer.media_texture_bytes(),
+                media: renderer.media_usage(),
+                text_cache_bytes: renderer.text_cache_bytes(),
+                vector_cache_bytes: renderer.vector_cache_bytes(),
+                scene3d_meshes: scene3d.meshes,
+                scene3d_mesh_bytes: scene3d.mesh_bytes,
+                scene3d_maps: scene3d.maps,
+                scene3d_map_bytes: scene3d.map_bytes,
+            });
+        }
+        self.stats().allocations = inventory;
+    }
     fn log(&self, level: LogLevel, message: String) {
         (self.sink)(vec![Action::Log { level, message }]);
     }
@@ -3950,7 +4100,7 @@ impl Thread {
             composer.renderer().set_scrub(scrub);
             let landed_before = composer.renderer().media_landed();
             // The depth and object-id surface of this frame, when the
-            // viewer asks for it: slot `seq % count` of the depth pool.
+            // viewer asks for it: the pair owned by this color slot.
             let depth_slot = view.depth.as_ref().and_then(|d| {
                 // Color slot ownership also owns its depth and coverage pair.
                 // Sequence modulo can overwrite an older held slot when the
@@ -5749,6 +5899,7 @@ mod tests {
                 extra_passes: 0,
                 trace: false,
                 stand_in_log: false,
+                allocation_inventory: false,
                 phase: None,
                 remote_layer: false,
                 remote_trace: None,
