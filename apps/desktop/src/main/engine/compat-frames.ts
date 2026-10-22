@@ -24,7 +24,8 @@ import { ProtocolError } from './protocol';
 /** Largest answer inline (pm_protocol INLINE_PIXEL_BYTES). */
 export const INLINE_PIXEL_BYTES = 1024 * 1024;
 export const ASK_TIMEOUT_MS = 30_000;
-export const MAX_ASKS = 32;
+/** Asks in flight (pm-node jobs/compat.rs keeps its turns within it). */
+export const MAX_ASKS = 128;
 export const SEGMENT_ORPHAN_MS = 60_000;
 const MAX_EDGE = 16384;
 
@@ -33,6 +34,9 @@ export interface CompatWindow {
   id: number;
   /** Posts an ask to the window's renderer. */
   ask(ask: EngineCompatAsk): void;
+  /** Posts several asks in one message (the window answers them in one
+   *  task); without it each goes by `ask`. */
+  askMany?(asks: EngineCompatAsk[]): void;
 }
 
 export type CompatFramesOptions = {
@@ -43,6 +47,9 @@ export type CompatFramesOptions = {
   /** pm-bridge's shared-memory reader (an export frame the engine shared). */
   takePixels?: ((name: string, length: number) => Uint8Array) | null;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
+  /** Runs `fn` once the current burst of requests was served (default
+   *  `setImmediate`): the asks made meanwhile go to each window together. */
+  soon?: (fn: () => void) => void;
 };
 
 type Pending = { windows: Set<number>; last: string; resolve: (answer: EngineCompatAnswer) => void; timer: { cancel(): void } };
@@ -75,8 +82,32 @@ export function validCompatAnswer(value: unknown): value is EngineCompatAnswer {
 export class CompatFrames {
   private next = 1;
   private readonly pending = new Map<number, Pending>();
+  /** Asks per window not posted yet (`askMany`), and whether a flush is due. */
+  private readonly outbox = new Map<number, { window: CompatWindow; asks: EngineCompatAsk[] }>();
+  private flushing = false;
 
   constructor(private readonly options: CompatFramesOptions) {}
+
+  /** Posts `ask` to `window`, with the other asks of this burst when it takes several. */
+  private post(window: CompatWindow, ask: EngineCompatAsk): void {
+    if (!window.askMany) return window.ask(ask);
+    let box = this.outbox.get(window.id);
+    if (!box) this.outbox.set(window.id, (box = { window, asks: [] }));
+    box.asks.push(ask);
+    if (this.flushing) return;
+    this.flushing = true;
+    (this.options.soon ?? ((fn) => setImmediate(fn)))(() => this.flush());
+  }
+
+  private flush(): void {
+    this.flushing = false;
+    const boxes = [...this.outbox.values()];
+    this.outbox.clear();
+    for (const { window, asks } of boxes) {
+      if (asks.length === 1) window.ask(asks[0]!);
+      else window.askMany!(asks);
+    }
+  }
 
   /** The job engine's `compatFrame` request; `layer`: the layer as the
    *  export's snapshot holds it (JSON), when main has the snapshot. */
@@ -103,7 +134,7 @@ export class CompatFrames {
         resolve({ ask, status: 'unavailable', message: `The editor did not draw the layer within ${ASK_TIMEOUT_MS / 1000} s.` });
       }, ASK_TIMEOUT_MS);
       this.pending.set(ask, { windows: new Set(windows.map((w) => w.id)), last: closed, resolve, timer });
-      for (const window of windows) window.ask({ ask, request, ...(layer !== null ? { layer } : {}) });
+      for (const window of windows) this.post(window, { ask, request, ...(layer !== null ? { layer } : {}) });
     });
     if (answer.status === 'native') {
       return { type: 'compatFrame', key: 'native', width: 1, height: 1, format: 'rgba8Premultiplied', origin: [0, 0], scale: request.scale, payload: { kind: 'inline', bytes: new Uint8Array(0) }, native: true } as Response;

@@ -316,7 +316,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const compatFrames = new CompatFrames({
     windows: () => options.windows()
       .filter((w) => !w.isDestroyed())
-      .map((w) => ({ id: w.webContents.id, ask: (ask) => w.webContents.send(ENGINE_IPC.compatAsk, ask) })),
+      .map((w) => ({ id: w.webContents.id, ask: (ask) => w.webContents.send(ENGINE_IPC.compatAsk, ask), askMany: (asks) => w.webContents.send(ENGINE_IPC.compatAsks, asks) })),
     publishPixels: bridgeAddon?.publishPixels ? (bytes) => bridgeAddon.publishPixels!(bytes) : null,
     unlinkPixels: bridgeAddon?.unlinkPixels ? (name) => bridgeAddon.unlinkPixels!(name) : null,
     takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null
@@ -324,6 +324,12 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   options.ipc.on(ENGINE_IPC.compatAnswer, (event, answer: unknown) => {
     if (!options.isTrustedSender(event)) return;
     if (!compatFrames.answer(event.sender.id, answer)) log('warn', `window ${event.sender.id} sent a compatibility answer nobody asked for`);
+  });
+  options.ipc.on(ENGINE_IPC.compatAnswers, (event, answers: unknown) => {
+    if (!options.isTrustedSender(event) || !Array.isArray(answers)) return;
+    let stray = 0;
+    for (const answer of answers) if (!compatFrames.answer(event.sender.id, answer)) stray++;
+    if (stray) log('warn', `window ${event.sender.id} sent ${stray} compatibility answers nobody asked for`);
   });
   engine = new NativeEngine({
     // The export's own snapshot of the layer goes with the ask (agent-jobs.ts).
@@ -688,6 +694,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     dispose: async () => {
       removeSnapshotIpc();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
+      options.ipc.removeAllListeners(ENGINE_IPC.compatAnswers);
       windowSessions.dispose();
       snapshots = null;
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);

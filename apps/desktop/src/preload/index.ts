@@ -40,7 +40,7 @@ import { MEDIA_PATH_IPC } from '../shared/media-tools';
 import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/cloud-ipc';
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
-import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineCompatAsk, type EngineExportStart, type EngineExportStatus, type EngineProbeResult, type EngineSnapshotReply, type EngineSnapshotRequest, type EngineStatusMessage, type RenderQueueState, type StageDocumentResult } from '../shared/engine-ipc';
+import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineCompatAnswer, type EngineCompatAsk, type EngineExportStart, type EngineExportStatus, type EngineProbeResult, type EngineSnapshotReply, type EngineSnapshotRequest, type EngineStatusMessage, type RenderQueueState, type StageDocumentResult } from '../shared/engine-ipc';
 import { ENGINE_FONTS_EVENTS, ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
 import { MEDIA_STORE_IPC, type MediaStoreConfig } from '../shared/media-store';
 import { installFrameBridgeReceiver, RELEASE_NOTICE_CHANNEL, type ReceiverModule } from './frame-bridge';
@@ -100,6 +100,21 @@ const frameBridge = sharedTexture
   : undefined;
 
 let nextMediaRequest = 0;
+
+/** Compatibility answers for main, sent together when the task that gave
+ *  them ends (an export frame asks for hundreds of layers at once). */
+const compatAnswers = {
+  held: [] as EngineCompatAnswer[],
+  push(answer: EngineCompatAnswer): void {
+    this.held.push(answer);
+    if (this.held.length > 1) return;
+    queueMicrotask(() => {
+      const answers = this.held.splice(0);
+      if (answers.length === 1) ipcRenderer.send(ENGINE_IPC.compatAnswer, answers[0]);
+      else if (answers.length) ipcRenderer.send(ENGINE_IPC.compatAnswers, answers);
+    });
+  }
+};
 
 /** The font registry's channels, arguments passed field by field. */
 function engineFontsBridge(): EngineFontsBridge {
@@ -633,10 +648,19 @@ const bridge: PowermoveBridge = {
       .catch((error: unknown): EngineSnapshotReply => ({ status: 'failed', code: 'internal', message: error instanceof Error ? error.message : String(error) })),
     onCompatAsk: (listener) => {
       const handler = (_event: Electron.IpcRendererEvent, ask: EngineCompatAsk) => listener(ask);
+      // Several asks main had at once: answered in this one task.
+      const many = (_event: Electron.IpcRendererEvent, asks: EngineCompatAsk[]) => {
+        if (Array.isArray(asks)) for (const ask of asks) listener(ask);
+      };
       ipcRenderer.on(ENGINE_IPC.compatAsk, handler);
-      return () => { ipcRenderer.removeListener(ENGINE_IPC.compatAsk, handler); };
+      ipcRenderer.on(ENGINE_IPC.compatAsks, many);
+      return () => {
+        ipcRenderer.removeListener(ENGINE_IPC.compatAsk, handler);
+        ipcRenderer.removeListener(ENGINE_IPC.compatAsks, many);
+      };
     },
-    answerCompat: (answer) => ipcRenderer.send(ENGINE_IPC.compatAnswer, answer),
+    // The answers one task gives go back in one message.
+    answerCompat: (answer) => compatAnswers.push(answer),
     // The job engine's fallback requests, run in this window's runner
     // (main/engine/shader-fallback-relay.ts).
     onShaderFallback: (run) => {

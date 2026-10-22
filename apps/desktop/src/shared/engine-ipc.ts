@@ -66,6 +66,13 @@ export const ENGINE_IPC = {
   /** renderer → main (send): the pixels for a `compatAsk`, or why not
    *  (`EngineCompatAnswer`). */
   compatAnswer: 'engine:compat-answer',
+  /** main → renderer: several `compatAsk`s main had at once
+   *  (`EngineCompatAsk[]`): an export frame asks for every layer an
+   *  override draws, hundreds a frame on a large project. */
+  compatAsks: 'engine:compat-asks',
+  /** renderer → main (send): the answers one task of the window gave
+   *  (`EngineCompatAnswer[]`). */
+  compatAnswers: 'engine:compat-answers',
   /** main → renderer: run a job engine request in the window's shader
    *  fallback runner (`ShaderFallbackJob`, main/engine/shader-fallback-relay.ts). */
   shaderFallback: 'engine:shader-fallback',

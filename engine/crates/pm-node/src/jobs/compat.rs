@@ -38,13 +38,15 @@ pub(crate) trait CompatHost: Send + Sync {
 const FETCH_AHEAD: i64 = 4;
 /// Most requests in one batch.
 const MAX_BATCH: usize = 512;
-/// Most requests sent to the host at once: main draws at most 32 of a
+/// Most requests sent to the host at once: main draws at most 128 of a
 /// window's compatibility frames at a time (`compat-frames.ts` `MAX_ASKS`)
-/// and refuses more; a batch goes in turns of this many.
-const HOST_ASKS: usize = 24;
+/// and refuses more; a batch goes in turns of this many. Main posts the
+/// asks it has at once to the window together, which answers them in one
+/// task: a large project's frame asks for hundreds of layers.
+const HOST_ASKS: usize = 96;
 /// Most requests the background fetch has at the host at once: with a
-/// frame's own turn ([`HOST_ASKS`]) never above main's bound of 32.
-const AHEAD_ASKS: usize = 8;
+/// frame's own turn ([`HOST_ASKS`]) never above main's bound of 128.
+const AHEAD_ASKS: usize = 32;
 /// Frames past the one drawn whose answers a pipelined export keeps asked
 /// for, and how close the drawn frame may come to the last one asked for
 /// before more are asked.

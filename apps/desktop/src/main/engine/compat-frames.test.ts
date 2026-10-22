@@ -33,6 +33,33 @@ describe('CompatFrames', () => {
     }
   });
 
+  it('posts a burst of asks to each window as one message, and answers each', async () => {
+    const singles: EngineCompatAsk[] = [];
+    const batches: EngineCompatAsk[][] = [];
+    const soon: Array<() => void> = [];
+    const frames = new CompatFrames({
+      windows: () => [{ id: 1, ask: (a: EngineCompatAsk) => singles.push(a), askMany: (asks: EngineCompatAsk[]) => batches.push(asks) }],
+      publishPixels: null, unlinkPixels: null,
+      soon: (fn) => soon.push(fn)
+    });
+    // An export frame's layers, asked back to back.
+    const answers = Array.from({ length: 40 }, (_, i) => frames.serve({ ...request, layer: `L${i}` }));
+    expect(batches).toEqual([]);
+    expect(soon).toHaveLength(1);
+    soon.shift()!();
+    expect(singles).toEqual([]);
+    expect(batches).toHaveLength(1);
+    expect(batches[0]!.map((a) => a.request.layer)).toEqual(Array.from({ length: 40 }, (_, i) => `L${i}`));
+    for (const ask of batches[0]!) frames.answer(1, { ask: ask.ask, status: 'native' });
+    expect((await Promise.all(answers)).every((r) => (r as { native?: boolean }).native === true)).toBe(true);
+    // A lone ask goes on its own.
+    const one = frames.serve(request);
+    soon.shift()!();
+    expect(singles).toHaveLength(1);
+    frames.answer(1, { ask: singles[0]!.ask, status: 'native' });
+    await one;
+  });
+
   it('sends the export snapshot\'s layer with the ask when main has it', async () => {
     const { frames, asks } = setup([1]);
     const answer = frames.serve(request, '{"id":"L7"}');
