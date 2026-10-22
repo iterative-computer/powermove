@@ -40,6 +40,85 @@ const gain = (page: Page, id: string) => page.evaluate((id) => {
   return typeof value === 'number' ? value : value.v;
 }, id);
 
+type NativeReading = { sequence: number; strip: number; master: number; other: number };
+
+/** A fresh native levels message, with legacy playback still entirely idle. */
+async function nativeReading(page: Page, strip: string, after: number, kind: 'sound' | 'silence', other?: string): Promise<NativeReading> {
+  const handle = await page.waitForFunction(({ strip, after, kind, other }) => {
+    const PM = (window as any).PM;
+    const audio = PM.EngineConnection?.audio;
+    const latest = audio?.latest();
+    if (!latest || audio.levelsReceived <= after || PM.EngineConnection.status().driving !== true) return false;
+    const levels = latest.levels;
+    const peak = (id: string) => Math.max(0, ...(levels.strips.find((s: any) => s.id === id)?.levels.peak ?? []));
+    const stripPeak = peak(strip);
+    if (kind === 'sound' ? stripPeak <= 0 : stripPeak !== 0) return false;
+    if (kind === 'silence' && other && peak(other) <= 0) return false;
+    if (PM.Audio.inspect().voices.length !== 0 || Number(document.documentElement.dataset.audioVoices || 0) !== 0) return false;
+    return {
+      sequence: audio.levelsReceived,
+      strip: stripPeak,
+      master: Math.max(0, ...levels.master.peak),
+      other: other ? peak(other) : 0
+    };
+  }, { strip, after, kind, other });
+  return handle.jsonValue() as Promise<NativeReading>;
+}
+
+async function nativeTransport(page: Page): Promise<boolean> {
+  const native = await page.evaluate(() => Boolean((window as any).PM.EngineConnection));
+  if (native) await page.waitForFunction(() => {
+    const status = (window as any).PM.EngineConnection.status();
+    return status.route === 'engine' && status.driving === true;
+  });
+  if (native) await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const evidence = { violations: 0 };
+    const check = () => {
+      if (PM.Audio.inspect().voices.length !== 0 || Number(document.documentElement.dataset.audioVoices || 0) !== 0) evidence.violations++;
+    };
+    check();
+    const observer = new MutationObserver(check);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-audio-voices'] });
+    PM.EngineConnection.audio.onLevels(check);
+    (window as any).__mixerNativeEvidence = evidence;
+  });
+  return native;
+}
+
+/** With one strip monitored, Rust's post-master peak / pre-master peak is the fader coefficient. */
+async function nativeRatio(page: Page, strip: string, after: number, expected: number): Promise<NativeReading> {
+  const handle = await page.waitForFunction(({ strip, after, expected }) => {
+    const PM = (window as any).PM;
+    const audio = PM.EngineConnection?.audio;
+    const latest = audio?.latest();
+    if (!latest || audio.levelsReceived <= after || PM.EngineConnection.status().driving !== true) return false;
+    const levels = latest.levels;
+    const tone = levels.strips.find((s: any) => s.id === strip);
+    const stripPeak = Math.max(0, ...(tone?.levels.peak ?? []));
+    const masterPeak = Math.max(0, ...levels.master.peak);
+    if (stripPeak <= 0 || Math.abs(masterPeak / stripPeak - expected) >= 1e-6) return false;
+    if (PM.Audio.inspect().voices.length !== 0 || Number(document.documentElement.dataset.audioVoices || 0) !== 0) return false;
+    return { sequence: audio.levelsReceived, strip: stripPeak, master: masterPeak, other: 0 };
+  }, { strip, after, expected });
+  return handle.jsonValue() as Promise<NativeReading>;
+}
+
+async function nativeStripRatio(page: Page, strip: string, after: number, baseline: number, expected: number): Promise<NativeReading> {
+  const handle = await page.waitForFunction(({ strip, after, baseline, expected }) => {
+    const PM = (window as any).PM;
+    const audio = PM.EngineConnection?.audio;
+    const latest = audio?.latest();
+    if (!latest || audio.levelsReceived <= after || PM.EngineConnection.status().driving !== true) return false;
+    const levels = latest.levels;
+    const stripPeak = Math.max(0, ...(levels.strips.find((s: any) => s.id === strip)?.levels.peak ?? []));
+    if (stripPeak <= 0 || Math.abs(stripPeak / baseline - expected) >= 0.002) return false;
+    if (PM.Audio.inspect().voices.length !== 0 || Number(document.documentElement.dataset.audioVoices || 0) !== 0) return false;
+    return { sequence: audio.levelsReceived, strip: stripPeak, master: Math.max(0, ...levels.master.peak), other: 0 };
+  }, { strip, after, baseline, expected });
+  return handle.jsonValue() as Promise<NativeReading>;
+}
+
 test('the agent opens the mixer, which shows a strip per audible layer and an undoable fader', async ({ session }) => {
   const { page } = session;
   const ids = await openMixerProject(session);
@@ -119,20 +198,60 @@ test('the agent opens the mixer, which shows a strip per audible layer and an un
     const PM = (window as any).PM;
     return { project: PM.proj.audioGain ?? 1, engine: PM.Audio.inspect().master };
   });
+  // Isolate Tone so the native master/strip meter ratio measures the master
+  // coefficient even while the imported video has its own audio.
+  await page.evaluate((id) => (window as any).PM.Audio.setMonitorSolo([id]), ids.tone);
+  const native = await nativeTransport(page);
   await page.evaluate(() => { const PM = (window as any).PM; PM.setTime(0); PM.play(); });
-  await page.waitForFunction(() => (window as any).PM.Audio.inspect().voices.length > 0);
+  let nativeBefore = 0;
+  if (native) {
+    // The existing Tone fader must retune the running Rust mix, then Undo it.
+    const baseline = await nativeReading(page, ids.tone, 0, 'sound');
+    nativeBefore = baseline.sequence;
+    const beforeGain = await gain(page, ids.tone);
+    await fader.focus();
+    await page.keyboard.press('PageDown');
+    const afterGain = await gain(page, ids.tone);
+    expect(afterGain).toBeLessThan(beforeGain);
+    const retuned = await nativeStripRatio(page, ids.tone, nativeBefore, baseline.strip, afterGain / beforeGain);
+    nativeBefore = retuned.sequence;
+    await page.evaluate(() => (window as any).PM.hist.undo());
+    expect(await gain(page, ids.tone)).toBeCloseTo(beforeGain, 6);
+    const restored = await nativeStripRatio(page, ids.tone, nativeBefore, baseline.strip, 1);
+    nativeBefore = restored.sequence;
+  } else {
+    await page.waitForFunction(() => (window as any).PM.Audio.inspect().voices.length > 0);
+  }
   await panel.getByRole('slider', { name: 'Master level' }).focus();
   await page.keyboard.press('PageDown');
-  await page.waitForFunction(() => {
-    const PM = (window as any).PM;
-    return Math.abs(PM.Audio.inspect().master - PM.proj.audioGain) < 1e-6;
-  });
-  const lowered = await masterLevels();
-  expect(lowered.project).toBeCloseTo(10 ** (-6 / 20), 4);
-  expect(lowered.engine).toBeCloseTo(lowered.project, 6);
+  if (native) {
+    const project = await page.evaluate(() => (window as any).PM.proj.audioGain);
+    expect(project).toBeCloseTo(10 ** (-6 / 20), 4);
+    await page.evaluate(() => (window as any).PM.setTime(0));
+    const lowered = await nativeRatio(page, ids.tone, nativeBefore, project);
+    expect(lowered.master / lowered.strip).toBeCloseTo(project, 6);
+    nativeBefore = lowered.sequence;
+  } else {
+    await page.waitForFunction(() => {
+      const PM = (window as any).PM;
+      return Math.abs(PM.Audio.inspect().master - PM.proj.audioGain) < 1e-6;
+    });
+    const lowered = await masterLevels();
+    expect(lowered.project).toBeCloseTo(10 ** (-6 / 20), 4);
+    expect(lowered.engine).toBeCloseTo(lowered.project, 6);
+  }
   await page.evaluate(() => (window as any).PM.hist.undo());
-  await page.waitForFunction(() => (window as any).PM.Audio.inspect().master === 1);
-  expect(await masterLevels()).toEqual({ project: 1, engine: 1 });
+  if (native) {
+    await page.evaluate(() => (window as any).PM.setTime(0));
+    const restored = await nativeRatio(page, ids.tone, nativeBefore, 1);
+    expect(restored.master / restored.strip).toBeCloseTo(1, 6);
+    nativeBefore = restored.sequence;
+    expect(await page.evaluate(() => (window as any).PM.proj.audioGain ?? 1)).toBe(1);
+  } else {
+    await page.waitForFunction(() => (window as any).PM.Audio.inspect().master === 1);
+    expect(await masterLevels()).toEqual({ project: 1, engine: 1 });
+  }
+  await page.evaluate(() => (window as any).PM.Audio.setMonitorSolo([]));
 
   // Each composition keeps its own output level: opening a precomp plays it at
   // unity, and the parent's level is still there when you come back.
@@ -149,8 +268,13 @@ test('the agent opens the mixer, which shows a strip per audible layer and an un
     return { root, comp: precomp.d.comp, made: !!comp, level: PM.proj.audioGain ?? null };
   }, ids.tone);
   expect(nested).toMatchObject({ made: true, level: null });
-  await page.waitForFunction(() => (window as any).PM.Audio.inspect().voices.length > 0);
-  await page.waitForFunction(() => (window as any).PM.Audio.inspect().master === 1);
+  if (native) {
+    const nestedLevels = await nativeRatio(page, ids.tone, nativeBefore, 1);
+    expect(nestedLevels.master / nestedLevels.strip).toBeCloseTo(1, 6);
+  } else {
+    await page.waitForFunction(() => (window as any).PM.Audio.inspect().voices.length > 0);
+    await page.waitForFunction(() => (window as any).PM.Audio.inspect().master === 1);
+  }
   await expect(panel.getByRole('slider', { name: 'Master level' })).toHaveAttribute('aria-valuenow', /^0(\.0+)?$/);
   const back = await page.evaluate(({ root, comp }) => {
     const PM = (window as any).PM;
@@ -159,6 +283,7 @@ test('the agent opens the mixer, which shows a strip per audible layer and an un
   }, nested);
   expect(back).toEqual({ level: parent, child: false });
   await page.evaluate(() => (window as any).PM.pause());
+  if (native) expect(await page.evaluate(() => (window as any).__mixerNativeEvidence.violations)).toBe(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
@@ -169,32 +294,66 @@ test('mute and solo change what plays, and meters run only while sound plays', a
   const panel = page.locator('#panel-mixer');
   await expect(panel.locator('[data-mixer-strip]')).toHaveCount(3);
 
+  const native = await nativeTransport(page);
   await page.evaluate(() => { const PM = (window as any).PM; PM.setTime(0); PM.play(); });
-  await page.waitForFunction((id) => (window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
-  // Meters tap the strip while it is visible and playing.
-  await page.waitForFunction((id) => (window as any).PM.Audio.inspect().taps.includes(id), ids.tone);
+  let nativeBefore = 0;
+  if (native) {
+    const tone = await nativeReading(page, ids.tone, 0, 'sound');
+    expect(tone.strip).toBeGreaterThan(0);
+    nativeBefore = tone.sequence;
+  } else {
+    await page.waitForFunction((id) => (window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
+    // Meters tap the strip while it is visible and playing.
+    await page.waitForFunction((id) => (window as any).PM.Audio.inspect().taps.includes(id), ids.tone);
+  }
 
   // Mute writes the layer's own switch; its voice stops. Undo brings it back.
   const mute = panel.getByRole('button', { name: 'Mute Tone' });
   await mute.click();
-  await page.waitForFunction((id) => !(window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
+  if (native) {
+    await page.evaluate(() => (window as any).PM.setTime(0));
+    nativeBefore = (await nativeReading(page, ids.tone, nativeBefore, 'silence', ids.video)).sequence;
+  }
+  else await page.waitForFunction((id) => !(window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
   expect(await page.evaluate((id) => (window as any).PM.L(id).on, ids.tone)).toBe(false);
   await expect(mute).toHaveAttribute('aria-pressed', 'true');
   await page.evaluate(() => (window as any).PM.hist.undo());
-  await page.waitForFunction((id) => (window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
+  if (native) {
+    await page.evaluate(() => (window as any).PM.setTime(0));
+    nativeBefore = (await nativeReading(page, ids.tone, nativeBefore, 'sound')).sequence;
+  } else await page.waitForFunction((id) => (window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
   expect(await page.evaluate((id) => (window as any).PM.L(id).on, ids.tone)).toBe(true);
   await expect(mute).toHaveAttribute('aria-pressed', 'false');
   // And the button toggles it back the same way.
   await mute.click();
-  await page.waitForFunction((id) => !(window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
+  if (native) {
+    await page.evaluate(() => (window as any).PM.setTime(0));
+    nativeBefore = (await nativeReading(page, ids.tone, nativeBefore, 'silence', ids.video)).sequence;
+  }
+  else await page.waitForFunction((id) => !(window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
   await mute.click();
-  await page.waitForFunction((id) => (window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
+  if (native) {
+    await page.evaluate(() => (window as any).PM.setTime(0));
+    nativeBefore = (await nativeReading(page, ids.tone, nativeBefore, 'sound')).sequence;
+  } else await page.waitForFunction((id) => (window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
 
   // Solo is a listening aid: the other strips go quiet, the project does not change.
   const revision = await page.evaluate(() => (window as any).PM.proj.revision);
   await panel.getByRole('button', { name: 'Solo Interview' }).click();
-  // The solo gain glides (a few ms), so wait for it to settle rather than racing it.
-  await page.waitForFunction((id) => ((window as any).PM.Audio.inspect().strips.find((s: any) => s.id === id)?.solo ?? 0) < 0.5, ids.tone);
+  if (native) {
+    await page.evaluate(() => (window as any).PM.setTime(0));
+    // Strip taps are before monitor solo. With Interview alone monitored,
+    // the post-solo master must equal its strip, while Tone still meters.
+    const video = await nativeRatio(page, ids.video, nativeBefore, 1);
+    expect(video.master / video.strip).toBeCloseTo(1, 6);
+    nativeBefore = video.sequence;
+    const tone = await nativeReading(page, ids.tone, nativeBefore, 'sound');
+    expect(tone.strip).toBeGreaterThan(0);
+    nativeBefore = tone.sequence;
+  } else {
+    // The solo gain glides (a few ms), so wait for it to settle rather than racing it.
+    await page.waitForFunction((id) => ((window as any).PM.Audio.inspect().strips.find((s: any) => s.id === id)?.solo ?? 0) < 0.5, ids.tone);
+  }
   const soloed = await page.evaluate(() => (window as any).PM.Audio.inspect());
   expect(soloed.monitorSolo).toEqual([ids.video]);
   await expect(panel.locator(`[data-mixer-strip="${ids.tone}"]`)).toHaveClass(/quiet/);
@@ -212,6 +371,10 @@ test('mute and solo change what plays, and meters run only while sound plays', a
   });
   await panel.getByRole('button', { name: 'Solo Interview' }).click();
   await page.waitForFunction(() => (window as any).PM.Audio.inspect().monitorSolo.length === 0);
+  if (native) {
+    await page.evaluate(() => (window as any).PM.setTime(0));
+    nativeBefore = (await nativeReading(page, ids.tone, nativeBefore, 'sound')).sequence;
+  }
 
   // The keyframe toggle names the property it animates in History.
   await page.evaluate(() => (window as any).PM.pause());
@@ -221,7 +384,19 @@ test('mute and solo change what plays, and meters run only while sound plays', a
   expect(await page.evaluate(() => (window as any).PM.hist.label())).toBe('Remove keyframe for Audio gain');
 
   // After a stop the meters fall, then the taps are released.
-  await page.waitForFunction(() => (window as any).PM.Audio.inspect().taps.length === 0, null, { timeout: 15_000 });
+  if (native) {
+    await page.waitForFunction(() => {
+      const PM = (window as any).PM;
+      const meters = PM.Audio.meters;
+      const out = { peak: [1, 1], rms: [1, 1] };
+      meters.read(meters.MASTER, out);
+      const tone = { peak: [1, 1], rms: [1, 1] };
+      meters.read(PM.proj.layers.find((l: any) => l.name === 'Tone')?.id, tone);
+      return !meters.running() && out.peak.every((peak: number) => peak === 0) && tone.peak.every((peak: number) => peak === 0)
+        && PM.Audio.inspect().voices.length === 0 && Number(document.documentElement.dataset.audioVoices || 0) === 0;
+    }, null, { timeout: 15_000 });
+  } else await page.waitForFunction(() => (window as any).PM.Audio.inspect().taps.length === 0, null, { timeout: 15_000 });
+  if (native) expect(await page.evaluate(() => (window as any).__mixerNativeEvidence.violations)).toBe(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 

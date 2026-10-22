@@ -36,7 +36,7 @@ it('decodes only explicit mesh fields as shared typed views', () => {
   expect(primitive.uv.buffer).toBe(bytes.buffer);
   expect(primitive.targets[0].position.buffer).toBe(bytes.buffer);
   expect(primitive.indices.buffer).toBe(bytes.buffer);
-  expect(primitive.extras.foreign).toEqual(scene.meshes[0].primitives[0].extras.foreign);
+  expect(primitive.extras.foreign).toEqual(scene.meshes[0]!.primitives[0]!.extras.foreign);
 });
 
 it('rejects a marker outside the payload', () => {

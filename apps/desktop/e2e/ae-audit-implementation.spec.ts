@@ -20,13 +20,14 @@ test('editable Pen, canvas text, graph and preview controls render coherently',a
  const text=page.getByRole('textbox',{name:'Edit text on canvas'});await expect(text).toBeFocused();await text.fill('Motion stays editable');await page.keyboard.press('Meta+Enter');
  await page.evaluate(()=>{const PM=(window as any).PM;PM.Edit.apply({type:'set_property',target:PM.proj.layers[0].id,path:'c.size',value:36,preserveHandEdits:false});});
  expect(await page.evaluate(()=>(window as any).PM.proj.layers[0].d.text)).toMatchObject({v:'Motion stays editable'});
- await page.getByRole('group',{name:'Text animator presets'}).getByRole('button',{name:'Rise',exact:true}).click();await expect(page.getByRole('button',{name:'Collapse Rise',exact:true})).toBeVisible();
+ await chooseNativeMenu(session,'Rise',()=>page.getByRole('button',{name:'Add text animator',exact:true}).click());await expect(page.getByRole('button',{name:'Collapse Rise',exact:true})).toBeVisible();
  await page.screenshot({path:path.join(evidence,'text-animator.png')});
  await expect(page.getByRole('combobox',{name:'Preview resolution',exact:true})).toBeVisible();
  await page.waitForFunction(()=>(window as any).PM.quality===1);
- const full=await page.evaluate(()=>[(window as any).PM.GL.canvas.width,(window as any).PM.GL.canvas.height]);
+ const previewSize=()=>page.evaluate(()=>{const PM=(window as any).PM;if(PM.EngineConnection){const presentation=PM.Kernel.services.get('viewer').enginePresentation,frame=presentation?.latest,canvas=frame&&presentation.stateFor(frame.viewSeq)?.canvas;return canvas?[canvas.width,canvas.height]:null;}return [PM.GL.canvas.width,PM.GL.canvas.height];});
+ await expect.poll(previewSize).not.toBeNull();const full=(await previewSize())!;
  await page.locator('#preview-controls select').selectOption('0.25');
- await expect.poll(()=>page.evaluate(()=>[(window as any).PM.GL.canvas.width,(window as any).PM.GL.canvas.height])).toEqual(full.map(n=>Math.round(n*.25)));
+ await expect.poll(previewSize).toEqual(full.map(n=>Math.round(n*.25)));
  const geometry=await page.locator('#tl-head').evaluate(el=>{const r=el.getBoundingClientRect();return [...el.querySelectorAll('button,input,select')].filter((e:any)=>getComputedStyle(e).display!=='none').map(e=>({name:e.getAttribute('aria-label')||e.getAttribute('title'),right:e.getBoundingClientRect().right,bound:r.right}));});
  expect(geometry.every((r:any)=>r.right<=r.bound+1)).toBe(true);
  expect(session.diagnostics.pageErrors).toEqual([]);
@@ -63,7 +64,9 @@ test('multiple graph curves, velocity editing and a cached preview retain editab
  await page.evaluate(()=>(window as any).PM.theme.apply('dark'));await session.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1100,800));await page.screenshot({path:path.join(evidence,'multi-graph-dark-narrow.png')});
  const overflow=await page.locator('#tl-head').evaluate(el=>{const bounds=el.getBoundingClientRect();return [...el.querySelectorAll('button,select,input')].some(e=>{const b=e.getBoundingClientRect();return b.width>0&&b.right>bounds.right+1;});});expect(overflow).toBe(false);
  await page.locator('#preview-controls select').selectOption('0.25');
- await page.evaluate(()=>(window as any).PM.Preview.cache());await page.waitForFunction(()=>(window as any).PM.Preview.active);
+ await page.evaluate(()=>(window as any).PM.Preview.cache());
+ try { await page.waitForFunction(()=>(window as any).PM.Preview.active,undefined,{timeout:10_000}); }
+ finally { const screenshot=test.info().outputPath('ram-preview.png');await page.screenshot({path:screenshot});await test.info().attach('RAM preview',{path:screenshot,contentType:'image/png'}); }
  expect(await page.evaluate(()=>(window as any).PM.Preview.count)).toBe(60);
  await page.evaluate(()=>(window as any).PM.Preview.stop());
  expect(await page.evaluate(()=>(window as any).PM.Preview.active)).toBe(false);

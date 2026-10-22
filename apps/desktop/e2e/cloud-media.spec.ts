@@ -1,4 +1,6 @@
 import { expect, test } from './helpers/app';
+import { rm } from 'node:fs/promises';
+import path from 'node:path';
 import { importFixture } from './helpers/media';
 
 test.describe.configure({ timeout: 120_000 });
@@ -21,6 +23,18 @@ test('cloud media can be deferred, downloaded in place, and automatically restor
       return { response: 1, checkboxChecked: true };
     }) as any;
   });
+  // Removing a store key does not remove its content-addressed original.
+  // An offloaded source has neither that local copy nor the browser cache.
+  const evictCopiedOriginal = async () => {
+    const hash = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      return (Object.values(PM.proj.assets) as any[]).find(asset => asset.name === 'tone.wav')?.contentHash;
+    });
+    if (typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash)) {
+      await rm(path.join(session.userData, 'Media Store', 'objects', hash.slice(0, 2), hash), { force: true });
+    }
+  };
+  await evictCopiedOriginal();
   const before = await page.evaluate(async () => {
     const PM = (window as any).PM;
     const meta = Object.values(PM.proj.assets).find((asset: any) => asset.name === 'tone.wav') as any;
@@ -44,6 +58,7 @@ test('cloud media can be deferred, downloaded in place, and automatically restor
     const PM = (window as any).PM;
     return { layers: JSON.stringify(PM.proj.layers), cached: !!await PM.MediaStore.get(PM.proj.assets[id]), automatic: PM.store.get('autoDownloadCloudMedia') };
   }, before.id)).toEqual({ layers: before.layers, cached: true, automatic: true });
+  await evictCopiedOriginal();
   await page.evaluate(async id => {
     const PM = (window as any).PM;
     await PM.MediaStore.remove(PM.proj.assets[id]);
