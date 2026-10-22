@@ -44,6 +44,7 @@ import { mountSquircles, SQUIRCLE_SELECTOR } from '../../settings/squircle';
 import { deliveryEngineOn, row as settingsRow, select as settingsSelect, numberInput as settingsNumberInput, type SettingsRow } from '../ui/project-settings';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { captionSidecars } from '../../captions/sidecar';
+import { referencedClips } from '../../../../shared/offline-clips';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -587,6 +588,21 @@ async function run(opts: any) {
     if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.nativeEngine?.exportVideo) {
       const engine = await exportThroughEngine(opts);
       if (engine) return engine;
+    }
+    if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.offlineExport) {
+      await PM.projectAssetsReady;
+      if (PM.proj !== p) return { cancelled: true };
+      const referenced = referencedClips(p);
+      if (referenced.some((clip) => PM.assets?.loading?.has(clip.asset))) {
+        PM.toast('Media is still loading. Try the export again.', 4000);
+        return { cancelled: true };
+      }
+      const clips = referenced.filter((clip) => !PM.assets?.get(clip.asset));
+      if (clips.length) {
+        const choice = await bridge.offlineExport(clips);
+        if (choice === 'locate') locateMedia(clips.map((clip) => clip.asset));
+        if (choice !== 'without') return { cancelled: true };
+      }
     }
     const legacy = legacyFormatId(opts.format);
     if (!legacy) {

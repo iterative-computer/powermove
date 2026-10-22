@@ -752,8 +752,8 @@ export class PowermoveAgentToolBridge {
       return null;
     }
     const value = result.status === 'done'
-      ? { path: result.path, projectId: context.projectId, width: result.width, height: result.height, fps: result.fps, jobId: result.jobId }
-      : { status: 'queued', jobId: result.jobId, projectId: context.projectId };
+      ? { path: result.path, projectId: context.projectId, width: result.width, height: result.height, fps: result.fps, jobId: result.jobId, missingMedia: result.missingMedia }
+      : { status: 'queued', jobId: result.jobId, projectId: context.projectId, missingMedia: result.missingMedia };
     return { runId: session.runId, callId: `main-${randomUUID()}`, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }] };
   }
 

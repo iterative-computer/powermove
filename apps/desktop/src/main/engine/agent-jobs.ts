@@ -27,9 +27,9 @@
  * since. Render queue jobs carry the set captured when they were queued.
  *
  * Capability routing (section 26, Phase 2): a project the engine cannot
- * render yet (`unsupported`), or whose media the host media store cannot
- * hand it (`mediaOffline`), comes back as `routed`, and the caller runs the
- * legacy exporter or capture instead.
+ * render yet (`unsupported`) comes back as `routed`, and the caller runs the
+ * legacy exporter or capture instead. Offline clips render absent in the
+ * native exporter; unexpected `mediaOffline` failures remain named errors.
  */
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -73,6 +73,7 @@ import { type SheetExportOptions, validSheetExportOptions } from '../../shared/e
 import { resolveFrameRate, TICKS_PER_SECOND } from '../../shared/frame-rate';
 import type { WindowDefinitions } from './definitions';
 import { RemoteError } from './protocol';
+import { offlineClips, type OfflineClip } from './offline-media';
 
 /** What the agent jobs need from the engine host (NativeEngine). */
 export interface AgentJobsEngine {
@@ -101,7 +102,7 @@ const FINISHED_KEPT = 64;
 export const QUEUE_OWNER = -1;
 
 /** Error codes that send work to the legacy engine instead of failing it. */
-const ROUTED_CODES = new Set<EngineError['code']>(['unsupported', 'mediaOffline']);
+const ROUTED_CODES = new Set<EngineError['code']>(['unsupported']);
 
 export type ExportVideoInput = {
   name?: string;
@@ -119,11 +120,11 @@ export type ExportVideoInput = {
 };
 
 export type ExportVideoResult =
-  | { status: 'done'; jobId: string; path: string; width: number; height: number; fps: number }
-  | { status: 'queued'; jobId: string }
+  | { status: 'done'; jobId: string; path: string; width: number; height: number; fps: number; missingMedia?: OfflineClip[] }
+  | { status: 'queued'; jobId: string; missingMedia?: OfflineClip[] }
   | { status: 'routed'; reason: string };
 
-export type RenderStatus = { jobId: string; state: JobState; progress: number; path?: string; error?: string };
+export type RenderStatus = { jobId: string; state: JobState; progress: number; path?: string; error?: string; missingMedia?: OfflineClip[] };
 
 /** An export from the export sheet or the render queue, as the renderer asks
  *  for it (shared/engine-ipc.ts `SheetExportOptions`). */
@@ -364,6 +365,7 @@ type JobRecord = {
   size: { width: number; height: number };
   fps: number;
   changed: Array<() => void>;
+  missingMedia?: OfflineClip[];
   /** The project as the job's snapshot holds it (compatibility frames name its layers). */
   project?: Project;
 };
@@ -376,6 +378,8 @@ type FrameSession = {
 
 export type AgentJobsOptions = {
   engine: AgentJobsEngine;
+  /** Resolves a clip in the pinned job session for agent export reports. */
+  resolveAsset?(asset: string, context: { process: EngineProcess; session: number }): Promise<unknown>;
   /** Pins media for each export snapshot until its session closes. */
   bindMediaSession?(session: number, project: Project | null): Promise<void>;
   /** Status of an export sheet job, for its window. */
@@ -468,6 +472,9 @@ export class AgentJobs {
     const extension = extensionOf(format, delivery) ?? 'png';
     const jobId = `agent-export-${randomUUID()}`;
     const session = await this.openSnapshot(project, `agent-export-${jobId}`, owner, this.windowUpdates(owner));
+    const missingMedia = this.options.resolveAsset
+      ? await offlineClips(project, (asset) => this.options.resolveAsset!(asset, { process: 'job', session }))
+      : [];
     const record: JobRecord = {
       jobId, owner, run, session,
       status: { job: jobId, class: 'agentExport', state: 'queued', progress: 0, path: null, error: null },
@@ -475,7 +482,7 @@ export class AgentJobs {
       name: suggestedName(project, input.name),
       size: settings.size,
       fps: Number(project['fps']) || settings.frameRate.num / settings.frameRate.den,
-      changed: [],
+      changed: [], missingMedia,
       ...(settings.delivery?.compat?.length ? { project } : {})
     };
     this.jobs.set(jobId, record);
@@ -506,7 +513,7 @@ export class AgentJobs {
       switch (status.state) {
         case 'done':
           if (!status.path) throw new AgentJobError('The export finished without a path.', 'internal');
-          return { status: 'done', jobId: record.jobId, path: status.path, width: record.size.width, height: record.size.height, fps: record.fps };
+          return { status: 'done', jobId: record.jobId, path: status.path, width: record.size.width, height: record.size.height, fps: record.fps, missingMedia: record.missingMedia ?? [] };
         case 'failed':
           if (status.error && ROUTED_CODES.has(status.error.code)) return { status: 'routed', reason: status.error.message };
           throw new AgentJobError(errorText(status.error), status.error?.code ?? 'exportFailed');
@@ -515,9 +522,9 @@ export class AgentJobs {
         default:
           break;
       }
-      if (mode === 'async') return { status: 'queued', jobId: record.jobId };
+      if (mode === 'async') return { status: 'queued', jobId: record.jobId, missingMedia: record.missingMedia ?? [] };
       const waiting = status.state === 'queued' || status.state === 'waitingForMedia';
-      if (waiting && this.now() - record.queuedAt > this.queueBoundMs) return { status: 'queued', jobId: record.jobId };
+      if (waiting && this.now() - record.queuedAt > this.queueBoundMs) return { status: 'queued', jobId: record.jobId, missingMedia: record.missingMedia ?? [] };
       await new Promise<void>((resolve) => {
         record.changed.push(resolve);
         // Re-check the queue bound while nothing changes.
@@ -538,6 +545,7 @@ export class AgentJobs {
       jobId,
       state: status.state,
       progress: Math.max(0, Math.min(1, status.progress)),
+      ...(record.missingMedia ? { missingMedia: record.missingMedia } : {}),
       ...(status.state === 'done' && status.path ? { path: status.path } : {}),
       ...(status.state === 'failed' ? { error: errorText(status.error) } : {})
     };
@@ -630,7 +638,7 @@ export class AgentJobs {
   /** Starts an export the user asked for in the export sheet, to the file
    *  (or, for PNG sequences, folder) they chose, replaced if it exists (the
    *  save panel confirmed that). Statuses go to `onUserStatus` with previews;
-   *  an `unsupported` or `mediaOffline` failure arrives as `routed`, and the
+   *  an `unsupported` failure arrives as `routed`, and the
    *  window runs the current exporter to the same file. */
   async exportUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, extra: { draft?: boolean } = {}): Promise<{ jobId: string; frames: number }> {
     return this.submitUser(owner, projectValue, { ...options, ...(extra.draft ? { draft: true } : {}) }, destination, 'replace', false, this.windowUpdates(owner));

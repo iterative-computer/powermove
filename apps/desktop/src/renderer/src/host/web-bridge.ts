@@ -296,6 +296,8 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       const detail = request.detail ? `\n\n${request.detail}` : '';
       return window.confirm(`${request.message}${detail}`);
     },
+    // Browser and headless exports retain their unattended missing-media behavior.
+    offlineExport: async () => 'without',
     clipboardWriteText: (text) => navigator.clipboard.writeText(text),
 
     render: {

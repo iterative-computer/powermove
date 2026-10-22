@@ -134,6 +134,36 @@ fn summary(out: &std::process::Output) -> Value {
 }
 
 #[test]
+fn missing_media_exports_unattended_and_reports_clips() {
+    struct Clean(PathBuf);
+    impl Drop for Clean {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = Clean(scratch("missing-media"));
+    let project_file = dir.0.join("p.json");
+    std::fs::write(&project_file, project(false, false).to_string()).unwrap();
+    let output = dir.0.join("without.mp4");
+    let result = summary(&cli(&[
+        project_file.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--preset",
+        "web",
+        "--no-audio",
+    ]));
+    assert_eq!(
+        result["missingMedia"],
+        json!([
+            { "asset": "still", "name": "still-alpha.png" },
+            { "asset": "tone", "name": "tone.wav" }
+        ])
+    );
+    assert!(output.is_file());
+}
+
+#[test]
 fn json_projects_with_linked_media_render_to_verified_files() {
     let dir = scratch("json");
     let project_file = dir.join("p.json");

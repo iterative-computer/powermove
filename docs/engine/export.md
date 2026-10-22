@@ -455,6 +455,20 @@ default falls back to its legacy equivalent).
 
 ## The export sheet and the Render Queue
 
+### Beta decision OFFLINE-1 (2026-10-21)
+
+An interactive export in either engine asks before writing when a referenced
+clip is offline: Locate Media…, Export Without Missing Media, or Cancel.
+The native sheet also offers Export with Proxies when all offline clips have
+proxies. Export Without Missing Media keeps the layer and asset records in the
+snapshot, with their missing picture omitted and missing audio silent. This
+preserves parenting and matte references. The job engine renders it; it does not route the export to the
+legacy renderer. Agent and CLI exports continue unattended with missing
+layers omitted and include the missing asset ids and names in their results.
+Queued user jobs continue waiting for relinked media. The phase 3b routing
+description below records the earlier implementation and is superseded for
+offline media by this decision.
+
 - The sheet is a Settings sheet: Output, Rendering, Delivery, File,
   Captions, and Presets cards; rows appear only for settings the format
   reads (`fieldSupport`). Actions: Cancel, Add to Queue, Export.

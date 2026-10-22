@@ -43,6 +43,7 @@ export const IPC = {
   projectReadClose: 'project:read-close',
   projectConfirmClose: 'project:confirm-close',
   dialogConfirm: 'dialog:confirm',
+  dialogOfflineExport: 'dialog:offline-export',
   clipboardWriteText: 'clipboard:write-text',
   mediaPaste: 'media:paste',
 
@@ -757,6 +758,8 @@ export interface PowermoveBridge {
   confirmProjectClose(name: string): Promise<CloseDecision>;
   /** Native NSAlert-style confirmation sheet. Resolves true when the primary button is chosen. */
   confirm(request: ConfirmRequest): Promise<boolean>;
+  /** Native Locate / Export Without Missing Media / Cancel decision. */
+  offlineExport(clips: import('./offline-clips').OfflineClip[]): Promise<'locate' | 'without' | 'cancel'>;
   /** Writes plain text to the system clipboard while the window has focus; nothing is ever read back. */
   clipboardWriteText?(text: string): Promise<void>;
   /** Native user-initiated media paste. Returns false when there is no media; exposes no clipboard data. */

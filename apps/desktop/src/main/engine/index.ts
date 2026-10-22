@@ -29,7 +29,7 @@ import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
-import { askAboutOfflineMedia, offlineClips } from './offline-media';
+import { askAboutOfflineMedia, offlineClips, offlineExportOptions } from './offline-media';
 import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
 import { SnapshotService } from './snapshots';
@@ -495,6 +495,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   let renderQueue: RenderQueue | null = null;
   const agentJobs = agentJobsRef = new AgentJobs({
     engine,
+    ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
     ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}),
     log,
     // Each job renders its window's winning registrations (contract 10).
@@ -541,7 +542,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   /** The offline message before an interactive export (section 14.8).
    *  Resolves the options to export with, or the outcome to answer. */
   const checkOffline = async (window: BrowserWindow, sender: WebContents, project: Record<string, any>, request: EngineExportRequest): Promise<EngineExportRequest['options'] | EngineExportStart> => {
-    if (!options.resolveAsset || request.options.draft) return request.options;
+    if (!options.resolveAsset) return request.options;
     const clips = await offlineClips(project, (asset) => options.resolveAsset!(asset));
     if (!clips.length) return request.options;
     let proxies = !!options.resolveProxy;
@@ -549,7 +550,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       for (const clip of clips) if (!await options.resolveProxy!(clip.asset).catch(() => null)) proxies = false;
     }
     const choice = await askAboutOfflineMedia(window, clips, proxies);
-    if (choice === 'proxies') return { ...request.options, draft: true };
+    if (choice === 'proxies' || choice === 'without') return offlineExportOptions(request.options, choice);
     if (choice === 'locate') {
       const assets = clips.map((c) => c.asset);
       if (!sender.isDestroyed()) sender.send(ENGINE_IPC.locateMedia, assets);

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ dialog: { showMessageBox: vi.fn() } }));
 
-import { askAboutOfflineMedia, needsBlender, offlineClips, offlineMessage, offlineTitle, referencedClips } from './offline-media';
+import { askAboutOfflineMedia, needsBlender, offlineClips, offlineExportOptions, offlineMessage, offlineTitle, referencedClips } from './offline-media';
 
 const layer = (id: string, type: string, d: Record<string, unknown>) => ({ id, type, d });
 
@@ -33,31 +33,41 @@ describe('offline media at export', () => {
     ]);
   });
 
+  it('reads legacy root compositions without a compId', () => {
+    const p: any = project();
+    p.id = p.compId; delete p.compId;
+    expect(referencedClips(p).map(clip => clip.asset)).toEqual(['a1', 'a2', 'a3']);
+  });
+
   it('finds the offline ones through the media store', async () => {
     const online = new Set(['a1']);
     const clips = await offlineClips(project(), async (asset) => (online.has(asset) ? { path: '/x' } : null));
     expect(clips.map((c) => c.asset)).toEqual(['a2', 'a3']);
   });
 
-  it('asks with the native three-button message, or two without proxies', async () => {
+  it('offers Locate, Export Without Missing Media, and Cancel', async () => {
     const clips = [{ asset: 'a', name: 'A.mov' }, { asset: 'b', name: 'B.mov' }];
     expect(offlineTitle(2)).toBe('2 clips are offline');
     expect(offlineTitle(1)).toBe('1 clip is offline');
-    const three = offlineMessage(clips, true);
-    expect(three).toMatchObject({
+    const four = offlineMessage(clips, true);
+    expect(four).toMatchObject({
       message: '2 clips are offline',
-      buttons: ['Locate Media…', 'Export with Proxies', 'Cancel'],
+      buttons: ['Locate Media…', 'Export with Proxies', 'Export Without Missing Media', 'Cancel'],
       defaultId: 0,
-      cancelId: 2
+      cancelId: 3
     });
-    expect(three.detail).toContain('Locate them to export at full quality, or export these clips from their proxies at lower resolution.');
-    expect(offlineMessage(clips, false)).toMatchObject({ buttons: ['Locate Media…', 'Cancel'], cancelId: 1 });
+    expect(four.detail).toContain('export without the missing clips');
+    expect(offlineMessage(clips, false)).toMatchObject({ buttons: ['Locate Media…', 'Export Without Missing Media', 'Cancel'], cancelId: 2 });
     const window = {} as never;
     const show = (response: number) => vi.fn(async () => ({ response, checkboxChecked: false }));
     expect(await askAboutOfflineMedia(window, clips, true, show(0))).toBe('locate');
     expect(await askAboutOfflineMedia(window, clips, true, show(1))).toBe('proxies');
-    expect(await askAboutOfflineMedia(window, clips, true, show(2))).toBe('cancel');
-    expect(await askAboutOfflineMedia(window, clips, false, show(1))).toBe('cancel');
+    expect(await askAboutOfflineMedia(window, clips, true, show(2))).toBe('without');
+    expect(await askAboutOfflineMedia(window, clips, true, show(3))).toBe('cancel');
+    expect(await askAboutOfflineMedia(window, clips, false, show(1))).toBe('without');
+    expect(await askAboutOfflineMedia(window, clips, false, show(2))).toBe('cancel');
+    expect(offlineExportOptions({ format: 'png', draft: true }, 'without')).toEqual({ format: 'png', draft: false });
+    expect(offlineExportOptions({ format: 'png', draft: false }, 'proxies')).toEqual({ format: 'png', draft: true });
   });
 
   it('knows when a composition renders with Blender', () => {

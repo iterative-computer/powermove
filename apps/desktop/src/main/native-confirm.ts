@@ -1,6 +1,8 @@
 import { BrowserWindow, dialog, type IpcMain, type IpcMainInvokeEvent } from 'electron';
 
 import { IPC, type ConfirmRequest } from '../shared/ipc';
+import { offlineMessage } from './engine/offline-media';
+import type { OfflineClip } from '../shared/offline-clips';
 
 export interface ConfirmIpcContext {
   isTrustedSender(event: IpcMainInvokeEvent): boolean;
@@ -48,5 +50,16 @@ export function registerConfirmIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: Confir
     const input = request as ConfirmRequest;
     const result = await show(window, confirmOptions({ ...input, message }));
     return result.response === 0;
+  });
+  ipcMain.handle(IPC.dialogOfflineExport, async (event: IpcMainInvokeEvent, request: unknown): Promise<'locate' | 'without' | 'cancel'> => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!Array.isArray(request) || request.length < 1 || request.length > 1000 || !request.every((clip) =>
+      clip && typeof clip === 'object' && text(clip.asset, 256) && text(clip.name, 256))) {
+      throw new Error('dialog:offline-export needs named clips');
+    }
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) return 'cancel';
+    const result = await show(window, offlineMessage(request as OfflineClip[], false));
+    return result.response === 0 ? 'locate' : result.response === 1 ? 'without' : 'cancel';
   });
 }

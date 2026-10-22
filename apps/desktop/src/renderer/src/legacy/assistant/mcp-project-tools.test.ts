@@ -16,3 +16,19 @@ it('acknowledges media bindings before handing an agent export its project snaps
   acknowledge();
   expect(await context).toMatchObject({ projectId: 'P1', projectJSON: JSON.stringify(original) });
 });
+
+it('reports missing clips after an unattended legacy agent export', async () => {
+  const PM: any = {
+    proj: { id: 'P1', compId: 'root', name: 'test', w: 320, h: 180, fps: 24,
+      layers: [{ type: 'video', d: { asset: 'gone' } }],
+      assets: { gone: { name: 'Missing.mov' } } },
+    projectAssetsReady: Promise.resolve(),
+    assets: { get: () => null },
+    Export: { busy: false, run: vi.fn(async () => ({ path: '/exports/test.mp4' })) },
+    Projects: { put: vi.fn() }
+  };
+  await expect(mcpProjectTool(PM, '__mcp_export_video', {})).resolves.toMatchObject({
+    path: '/exports/test.mp4',
+    missingMedia: [{ asset: 'gone', name: 'Missing.mov' }]
+  });
+});

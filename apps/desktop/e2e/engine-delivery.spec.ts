@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -178,11 +178,11 @@ test('an export with offline media asks first with the native message', async ()
     await stubSavePanels(app, []);
     const options = { format: 'prores-hq', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false };
     // Cancel: nothing is asked or written.
-    await app.evaluate(() => { (globalThis as { __answer?: number }).__answer = 1; });
+    await app.evaluate(() => { (globalThis as { __answer?: number }).__answer = 2; });
     expect(await page.evaluate((o) => (window as any).PM.Export.run(o), options)).toEqual({ cancelled: true });
     const messages = await app.evaluate(() => (globalThis as { __messages?: Array<Record<string, unknown>> }).__messages);
     expect(messages).toHaveLength(1);
-    expect(messages![0]).toMatchObject({ message: '1 clip is offline', buttons: ['Locate Media…', 'Cancel'] });
+    expect(messages![0]).toMatchObject({ message: '1 clip is offline', buttons: ['Locate Media…', 'Export Without Missing Media', 'Cancel'] });
     expect(String(messages![0]!['detail'])).toContain('A001_C003.mov');
     expect(await asked(app)).toEqual([]);
     // Locate Media…: the Media panel's locate flow for the clip.
@@ -195,6 +195,65 @@ test('an export with offline media asks first with the native message', async ()
     await session.close();
   }
 });
+
+for (const setting of ['0', '1'] as const) {
+  test(`offline export choices preserve the missing-media picture with new engine ${setting}`, async () => {
+    test.setTimeout(180_000);
+    const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-offline-export-'));
+    let session: Awaited<ReturnType<typeof launchApp>> | undefined;
+    try {
+      session = await launchApp({ userData: path.join(root, 'profile'), env: { POWERMOVE_NEW_ENGINE: setting } });
+      if (setting === '1') await engineReady(session.app);
+      await session.openEditor();
+      await solidProject(session.page, 'Offline choices');
+      await session.page.evaluate(() => {
+        const PM = (window as any).PM;
+        PM.proj.assets = { ...PM.proj.assets, gone: { id: 'gone', name: 'Missing.mov', kind: 'video', format: 'mov', w: 320, h: 180, dur: 1, fps: 24 } };
+        PM.proj.layers.push({ ...PM.mkLayer('video', { d: { asset: 'gone', w: 320, h: 180 } }), id: 'offline-clip', from: 0, dur: 1 });
+        PM.touch();
+        (window as any).__located = [];
+        PM.pickFiles = (_sequence: boolean, options: { replaceAssetId?: string }) => (window as any).__located.push(options?.replaceAssetId);
+      });
+      await session.app.evaluate(({ dialog }) => {
+        const g = globalThis as { __answer?: number; __messages?: Array<Record<string, unknown>> };
+        g.__messages = [];
+        dialog.showMessageBox = (async (...args: unknown[]) => {
+          g.__messages!.push((args.length > 1 ? args[1] : args[0]) as Record<string, unknown>);
+          return { response: g.__answer ?? 2, checkboxChecked: false };
+        }) as typeof dialog.showMessageBox;
+      });
+      await stubSavePanels(session.app, []);
+      const options = { format: 'prores', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false };
+      await session.app.evaluate(() => { (globalThis as { __answer?: number }).__answer = 2; });
+      expect(await session.page.evaluate((o) => (window as any).PM.Export.run(o), options)).toEqual({ cancelled: true });
+      expect(await asked(session.app)).toEqual([]);
+      await session.app.evaluate(() => { (globalThis as { __answer?: number }).__answer = 0; });
+      expect(await session.page.evaluate((o) => (window as any).PM.Export.run(o), options)).toEqual({ cancelled: true });
+      expect(await session.page.evaluate(() => (window as any).__located)).toEqual(['gone']);
+      const missing = path.join(root, 'missing.mov');
+      await stubSavePanels(session.app, [missing]);
+      await session.app.evaluate(() => { (globalThis as { __answer?: number }).__answer = 1; });
+      expect(await session.page.evaluate((o) => (window as any).PM.Export.run(o), options)).toEqual({ cancelled: false });
+      expect((await stat(missing)).size).toBeGreaterThan(1000);
+      const prompts = await session.app.evaluate(() => (globalThis as { __messages?: Array<Record<string, unknown>> }).__messages ?? []);
+      expect(prompts).toHaveLength(3);
+      expect(prompts[0]).toMatchObject({ buttons: ['Locate Media…', 'Export Without Missing Media', 'Cancel'] });
+      await session.page.evaluate(() => {
+        const PM = (window as any).PM;
+        PM.proj.layers = PM.proj.layers.filter((layer: { id: string }) => layer.id !== 'offline-clip');
+        PM.touch();
+      });
+      const omitted = path.join(root, 'omitted.mov');
+      await stubSavePanels(session.app, [omitted]);
+      expect(await session.page.evaluate((o) => (window as any).PM.Export.run(o), options)).toEqual({ cancelled: false });
+      const decoded = (file: string) => execFileSync(ffmpegBinary, ['-v', 'error', '-i', file, '-f', 'rawvideo', '-pix_fmt', 'rgba', 'pipe:1'], { maxBuffer: 16 * 1024 * 1024 });
+      expect(decoded(missing).equals(decoded(omitted))).toBe(true);
+      expect(session.diagnostics.pageErrors).toEqual([]);
+    } finally {
+      try { await session?.close(); } finally { await rm(root, { recursive: true, force: true }); }
+    }
+  });
+}
 
 test('the render queue runs jobs unattended, keeps going past a failure, and keeps user jobs across a relaunch', async () => {
   test.setTimeout(240_000);
