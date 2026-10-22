@@ -499,7 +499,7 @@ function range(opts: any) {
   return opts.range === 'work' && p.work && p.work[1] > p.work[0] ? [p.work[0], p.work[1]] : [0, p.dur];
 }
 
-function progressUI(total: any) {
+function progressUI(total: any, preparingMedia = false) {
   const bar: any = h('i', { style: { width: '0%' } });
   const label: any = h('span', 'Preparing…');
   const eta: any = h('span');
@@ -513,7 +513,8 @@ function progressUI(total: any) {
     dismissible: false,
     onClose: () => { if (X.busy) X.cancel = true; stopPreview(); },
     actions: [{ label: 'Cancel', run: () => {
-      X.cancel = true;void hostBridge()?.blender?.cancel();
+      X.cancel = true;
+      if (!preparingMedia) void hostBridge()?.blender?.cancel();
       label.textContent = 'Cancelling…'; eta.textContent = '';
       const button = mod.el.querySelector('.mf button');
       if (button) { button.disabled = true; button.textContent = 'Cancelling…'; }
@@ -541,6 +542,14 @@ function progressUI(total: any) {
         eta.textContent = 'Finishing…';
       }
     },
+    preparing(done: number, total: number) {
+      if (X.cancel) return;
+      const percent = Math.max(0, Math.min(100, done / total * 100));
+      bar.parentElement.setAttribute('aria-valuenow', String(Math.round(percent)));
+      bar.style.width = `${percent}%`;
+      label.textContent = 'Preparing media…';
+      eta.textContent = `${Math.floor(done)} / ${total}`;
+    },
     /** "Waiting for media · 2 clips offline" (section 14.8). */
     waiting(message: string) {
       if (X.cancel) return;
@@ -559,6 +568,27 @@ function progressUI(total: any) {
       }).catch(() => undefined).finally(() => { decoding = false; });
     },
   };
+}
+
+/** Reuses the export sheet while old media is copied into the engine store.
+ * The host calls back only when there is migration work, so already-bound
+ * projects proceed straight to the destination dialog. */
+async function prepareMedia(project: any): Promise<boolean> {
+  let ui: ReturnType<typeof progressUI> | null = null;
+  try {
+    await PM.HostMedia?.flushBindings(project, (done: number, total: number) => {
+      if (!(total > 0)) return;
+      ui ??= progressUI(1, true);
+      ui.preparing(done, total);
+    });
+    return !X.cancel;
+  } finally {
+    if (ui) {
+      const cancelled = X.cancel;
+      (ui as ReturnType<typeof progressUI>).mod.close();
+      X.cancel = cancelled;
+    }
+  }
 }
 
 let destinationToken: string | null = null;
@@ -677,7 +707,7 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
   const off = engine.onExportStatus((s: any) => { if (listener) listener(s); else early.push(s); });
   try {
     const request = { project: JSON.stringify(p), name: outputName(opts), options: sheetOptions(opts) };
-    await PM.HostMedia?.flushBindings(p);
+    if (!await prepareMedia(p)) return { cancelled: true };
     // Main captures this window's definitions for the job (contract 10):
     // pending registrations and extension reloads reach it first.
     await PM.EngineDefinitions?.settle?.();
@@ -740,6 +770,7 @@ X.addToQueue = async (rawOpts: any) => {
     if (!legacy) { PM.toast('The render queue needs the new engine for this format.', 4000); return null; }
     return X.enqueue({ ...opts, format: legacy, name: opts.name || PM.proj.name });
   }
+  if (X.busy) { PM.toast('Export already running'); return null; }
   const [t0, t1]: any = range(opts);
   const sidecarFormat = opts.captionsSidecar;
   const sidecars = (sidecarFormat === 'srt' || sidecarFormat === 'vtt') && isRenderFormat(opts.format) && opts.format !== 'png' && opts.format !== 'still'
@@ -753,8 +784,10 @@ X.addToQueue = async (rawOpts: any) => {
     ...(sidecars.length ? { sidecars } : {}),
     ...(opts.preset ? { preset: String(opts.preset) } : {})
   };
+  X.busy = true;
+  X.cancel = false;
   try {
-    await PM.HostMedia?.flushBindings(project);
+    if (!await prepareMedia(project)) return { status: 'cancelled' };
     // The queued job keeps this window's definitions as they are now.
     await PM.EngineDefinitions?.settle?.();
     const result = await engine.queueAdd(request);
@@ -763,7 +796,7 @@ X.addToQueue = async (rawOpts: any) => {
   } catch (error) {
     PM.toast('Could not add to the render queue: ' + (error instanceof Error ? error.message : String(error)), 5000);
     return null;
-  }
+  } finally { X.busy = false; }
 };
 
 async function deliver(blob: Blob, name: string): Promise<boolean> {
