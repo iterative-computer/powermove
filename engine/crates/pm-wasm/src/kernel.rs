@@ -389,13 +389,14 @@ mod tests {
             PreparedDocument::parse(br#""0123456789abcdef0123456789abcdef""#, 1)
                 .unwrap()
                 .tree_bytes_estimate,
-            base + 32
+            // Heap text is the bytes plus the box behind JsString's thin pointer.
+            base + std::mem::size_of::<Box<str>>() + 32
         );
         assert_eq!(
             PreparedDocument::parse(br#""\ud800""#, 1)
                 .unwrap()
                 .tree_bytes_estimate,
-            base + 3
+            base + std::mem::size_of::<Box<[u8]>>() + 3
         );
         let prepared =
             PreparedDocument::parse(br#"[{"a":"b","c":"d"},{"a":"e","c":"f"}]"#, 1).unwrap();
