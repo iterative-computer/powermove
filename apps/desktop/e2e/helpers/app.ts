@@ -241,7 +241,9 @@ async function attachDiagnostics(testInfo: TestInfo, diagnostics: RendererDiagno
 
 export const test = base.extend<{ session: LaunchedApp; desktopLaunchOptions: LaunchOptions }>({
   desktopLaunchOptions: [{}, { option: true }],
-  session: async ({ desktopLaunchOptions }, use, testInfo) => {
+  // Native process shutdown and disposable-profile cleanup have their own
+  // lifecycle budget; they must not consume a text interaction's deadline.
+  session: [async ({ desktopLaunchOptions }, use, testInfo) => {
     const session = await launchApp(desktopLaunchOptions);
     try {
       await use(session);
@@ -249,7 +251,7 @@ export const test = base.extend<{ session: LaunchedApp; desktopLaunchOptions: La
       await session.close();
       await attachDiagnostics(testInfo, session.diagnostics);
     }
-  }
+  }, { timeout: 60_000 }]
 });
 
 export { expect };
