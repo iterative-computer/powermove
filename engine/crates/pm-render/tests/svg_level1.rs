@@ -656,3 +656,264 @@ fn a_viewer_frame_draws_without_a_bucket_the_window_could_not_draw() {
     renderer.forget_svg_rasters(Some(&b.content));
     assert!(!renderer.svg_raster_failed(&b));
 }
+
+/// The SVG buckets of a plan, in draw order (precomps and placed content
+/// included).
+fn planned_buckets(plan: &pm_render::plan::CompPlan, out: &mut Vec<(u32, u32)>) {
+    fn content(c: &pm_render::plan::Content, out: &mut Vec<(u32, u32)>) {
+        match c {
+            pm_render::plan::Content::Texture { source, .. } => match source {
+                pm_render::plan::Source::Vector(v) => {
+                    if let pm_render::vector::VectorSource::SvgImage { key, .. } = &**v {
+                        out.push((key.width, key.height));
+                    }
+                }
+                pm_render::plan::Source::Comp(p) | pm_render::plan::Source::Accumulate(p) => {
+                    planned_buckets(p, out)
+                }
+                _ => {}
+            },
+            pm_render::plan::Content::Placed(p) => content(&p.content, out),
+            other => panic!("unexpected content in the bucket grid: {other:?}"),
+        }
+    }
+    for draw in &plan.draws {
+        content(&draw.content, out);
+    }
+}
+
+/// The engine's viewer request for a view. On today's canvas (decisions V1
+/// and V1b, `pm_node::present::compose::canvas_placement`): the canvas
+/// itself at today's output scale (the canvas over the composition part it
+/// holds), starting at the crop's unrounded origin. Without it, the
+/// composition at zoom × DPR (capped at 2 by the presentation) × the
+/// preview resolution, as the engine drew before V1.
+fn viewer_request(cw: u32, ch: u32, row: &Value, todays_canvas: bool) -> RenderRequest {
+    let f = |k: &str| row[k].as_f64().unwrap();
+    if todays_canvas {
+        let a = row["outputScale"].as_array().unwrap();
+        let (sx, sy) = (a[0].as_f64().unwrap(), a[1].as_f64().unwrap());
+        let c = row["canvas"].as_array().unwrap();
+        let canvas = Size::new(c[0].as_u64().unwrap() as u32, c[1].as_u64().unwrap() as u32);
+        let origin = row["crop"]
+            .as_array()
+            .map(|r| (r[0].as_f64().unwrap() * sx, r[1].as_f64().unwrap() * sy));
+        return RenderRequest {
+            scale: Some((sx, sy)),
+            origin,
+            ..RenderRequest::sized(canvas, Precision::Float16)
+        };
+    }
+    let res = if row["resolution"] == "auto" {
+        1.0
+    } else {
+        0.5
+    };
+    let s = f("zoom") * f("dpr").min(2.0) * res;
+    let px = |v: u32| ((f64::from(v) * s).round()).clamp(1.0, 16384.0) as u32;
+    RenderRequest::sized(Size::new(px(cw), px(ch)), Precision::Float16)
+}
+
+/// Today's viewer buckets over zoom 0.1 to 8 × DPR 1, 2, 3 × layer scale
+/// (also Auto and Half, crop safe and unsafe projects, and an SVG inside a
+/// precomp), computed with today's functions (`svgRasterDimensions`,
+/// `previewRenderSize`, `previewRenderViewport`, `outputScale`;
+/// apps/desktop/src/extensions/viewer/svg-buckets.test.ts keeps the
+/// fixture equal to them): the engine's viewer frames plan exactly those
+/// buckets when they render at today's canvas (`ViewerState::canvas`).
+#[test]
+fn viewer_frames_pick_todays_buckets_at_todays_viewer_scale() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/svg-viewer-buckets.json")).expect("fixture");
+    let n = |v: &Value, k: &str| v[k].as_u64().unwrap() as u32;
+    let (cw, ch) = (n(&fixture["comp"], "w"), n(&fixture["comp"], "h"));
+    let (sub_w, sub_h) = (n(&fixture["sub"], "w"), n(&fixture["sub"], "h"));
+    let (sw, sh) = (n(&fixture["source"], "w"), n(&fixture["source"], "h"));
+    let (bw, bh) = (
+        fixture["box"]["w"].as_f64().unwrap(),
+        fixture["box"]["h"].as_f64().unwrap(),
+    );
+    let path = dir().join("grid.svg");
+    std::fs::write(&path, ART.as_bytes()).unwrap();
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("art".into(), path);
+    let mut renderer = Renderer::headless().unwrap();
+    let rows = fixture["rows"].as_array().unwrap();
+    assert!(rows.len() > 800, "{} rows", rows.len());
+    let (mut wrong, mut own_differs, mut cropped) = (Vec::new(), 0, 0);
+    let (mut far, mut reduced_differs) = (0, 0);
+    for row in rows {
+        // The far-crop rows bring their own composition.
+        let (cw, ch) = row["comp"].as_array().map_or((cw, ch), |c| {
+            (c[0].as_u64().unwrap() as u32, c[1].as_u64().unwrap() as u32)
+        });
+        let scale = row["layerScale"].as_array().unwrap();
+        let nested = row["nested"].as_bool().unwrap();
+        let mut svg = layer(
+            "svg",
+            "image",
+            json!({ "asset": "art", "fit": "contain", "w": bw, "h": bh }),
+            if nested {
+                f64::from(sub_w) / 2.0
+            } else {
+                f64::from(cw) / 2.0
+            },
+            if nested {
+                f64::from(sub_h) / 2.0
+            } else {
+                f64::from(ch) / 2.0
+            },
+            2.0,
+        );
+        set(
+            &mut svg,
+            "scale.x",
+            json!(scale[0].as_f64().unwrap() * 100.0),
+        );
+        set(
+            &mut svg,
+            "scale.y",
+            json!(scale[1].as_f64().unwrap() * 100.0),
+        );
+        let mut doc = if nested {
+            let pre = layer(
+                "pre",
+                "precomp",
+                json!({ "comp": "inner", "w": cw, "h": ch }),
+                0.0,
+                0.0,
+                2.0,
+            );
+            let mut doc = project(cw, ch, 2.0, no_fill(), vec![pre]);
+            composition(&mut doc, "inner", sub_w, sub_h, 2.0, vec![svg]);
+            doc
+        } else {
+            project(cw, ch, 2.0, no_fill(), vec![svg])
+        };
+        asset(&mut doc, "art", "image", "svg", sw, sh, 0.0);
+        let doc = load(&doc);
+        let bucket = |renderer: &mut Renderer, todays_canvas: bool| {
+            let (plan, failures) = renderer
+                .plan(
+                    &doc,
+                    "Ptest-root",
+                    ticks(0.0),
+                    &viewer_request(cw, ch, row, todays_canvas),
+                    &resolver,
+                )
+                .unwrap();
+            assert!(failures.is_empty(), "{failures:?}");
+            let mut out = Vec::new();
+            planned_buckets(&plan, &mut out);
+            assert_eq!(out.len(), 1, "{row}");
+            out[0]
+        };
+        let today = row["today"].as_array().unwrap();
+        let today = (
+            today[0].as_u64().unwrap() as u32,
+            today[1].as_u64().unwrap() as u32,
+        );
+        let engine = bucket(&mut renderer, true);
+        if engine != today {
+            wrong.push(format!("{row}: engine {engine:?}"));
+        }
+        // Without today's scale the engine's own (zoom × DPR) picks
+        // another bucket in many of these views (the perf3 finding).
+        if bucket(&mut renderer, false) != today {
+            own_differs += 1;
+        }
+        cropped += usize::from(row["cropped"].as_bool().unwrap());
+        // Before V1b a crop whose far edge passed the largest output was
+        // drawn from a canvas reduced by about 16384 / (far edge): its
+        // buckets were picked at that lower scale.
+        if let Some(crop) = row["crop"].as_array().filter(|_| row["comp"].is_array()) {
+            far += 1;
+            let a = row["outputScale"].as_array().unwrap();
+            let (sx, sy) = (a[0].as_f64().unwrap(), a[1].as_f64().unwrap());
+            let edge =
+                |o: &Value, w: &Value, s: f64| (o.as_f64().unwrap() + w.as_f64().unwrap()) * s;
+            let k = (16384.0 / edge(&crop[0], &crop[2], sx))
+                .min(16384.0 / edge(&crop[1], &crop[3], sy))
+                .min(1.0);
+            if k < 1.0 {
+                let reduced = RenderRequest {
+                    scale: Some((sx * k, sy * k)),
+                    ..viewer_request(cw, ch, row, true)
+                };
+                let (plan, _) = renderer
+                    .plan(&doc, "Ptest-root", ticks(0.0), &reduced, &resolver)
+                    .unwrap();
+                let mut out = Vec::new();
+                planned_buckets(&plan, &mut out);
+                if out.first() != Some(&today) {
+                    reduced_differs += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "svg viewer buckets: {} views ({cropped} cropped, {far} far from the origin), {} differ from today, {own_differs} would at the engine's own scale, {reduced_differs} far ones at the reduced scale before V1b",
+        rows.len(),
+        wrong.len()
+    );
+    assert!(
+        wrong.is_empty(),
+        "{} of {} views:\n{}",
+        wrong.len(),
+        rows.len(),
+        wrong.join("\n")
+    );
+    assert!(own_differs > 0, "the grid exercises the cap below fit");
+    assert!(cropped > 0, "the grid exercises the cropped viewport");
+    assert!(far >= 32, "the grid exercises crops far from the origin");
+    assert!(reduced_differs > 0, "the far crops would have been reduced");
+}
+
+/// The perf3 review's case (e2e, stage 748 × 452 at DPR 2, zoom 61%): the
+/// engine drew at 1.22 device pixels per composition pixel and asked for
+/// the 1.25 bucket; today's viewer draws at most one pixel per composition
+/// pixel there. Snapshots and exports keep their own scale (`W / comp.w`),
+/// which is today's.
+#[test]
+fn below_fit_the_viewer_bucket_is_capped_as_today_and_exports_keep_their_scale() {
+    let mut renderer = Renderer::headless().unwrap();
+    // The 40 × 20 SVG stretched over a 40 × 20 box at 100% (128 × 96 project).
+    let (doc, resolver) = svg_doc(
+        "cap.svg",
+        ART.as_bytes(),
+        "stretch",
+        40.0,
+        20.0,
+        100.0,
+        vec![],
+    );
+    let doc = load(&doc);
+    let key = |renderer: &mut Renderer, request: &RenderRequest| {
+        let (plan, _) = renderer
+            .plan(&doc, "Ptest-root", ticks(0.0), request, &resolver)
+            .unwrap();
+        let mut out = Vec::new();
+        planned_buckets(&plan, &mut out);
+        out[0]
+    };
+    // The engine's viewer at 61% × DPR 2: 156 × 117 output.
+    let viewer = RenderRequest::sized(Size::new(156, 117), Precision::Float16);
+    assert_eq!(
+        key(&mut renderer, &viewer),
+        (50, 25),
+        "ceil4(1.22) = 1.25 at the engine's scale"
+    );
+    // Today's canvas (decision V1): the composition's size.
+    let viewer = RenderRequest::sized(Size::new(128, 96), Precision::Float16);
+    assert_eq!(
+        key(&mut renderer, &viewer),
+        (40, 20),
+        "today's canvas is the composition's size"
+    );
+    // An export at 2× (`W = round(p.w × 2 / 2) × 2`): `W / comp.w`.
+    let export = RenderRequest {
+        export: true,
+        ..RenderRequest::sized(Size::new(256, 192), Precision::Float16)
+    };
+    assert_eq!(key(&mut renderer, &export), (80, 40));
+}
