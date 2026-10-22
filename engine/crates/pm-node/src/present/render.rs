@@ -607,6 +607,10 @@ pub struct Stats {
     /// IOSurface allocation sizes; target and cache bytes are nominal texel
     /// counts. Lease reservations are not included.
     pub allocations: AllocationInventory,
+    /// Rests at which idle GPU memory was released, and the bytes freed
+    /// in all (`Thread::release_at_rest`).
+    pub rest_releases: u64,
+    pub rest_released_bytes: u64,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -625,6 +629,10 @@ pub struct AllocationInventory {
     pub working_target_bytes: u64,
     pub snapshot_target_bytes: u64,
     pub snapshot_readback_bytes: u64,
+    /// `MTLDevice.currentAllocatedSize` of the viewer's device: every
+    /// buffer, texture and heap the driver holds for it, measured rather
+    /// than nominal (`pm_gpu::device::allocated_bytes`).
+    pub metal_allocated_bytes: Option<u64>,
     pub renderer: Option<RendererAllocation>,
 }
 
@@ -1001,7 +1009,27 @@ struct Thread {
     completer: Option<super::complete::Completer>,
     /// Level 1 SVG rasters asked of the renderers (decision S1).
     svg: super::svg::SvgState,
+    /// GPU work seen last (frames and snapshots) and when; the idle
+    /// targets and staging go once the viewer has rested ([`REST_RELEASE_US`]).
+    rest: Rest,
 }
+
+/// The presenter's last GPU work, for releasing idle GPU memory at rest.
+#[derive(Debug, Default)]
+struct Rest {
+    /// (frames, snapshots) when last looked at.
+    seen: (u64, u64),
+    /// Host µs that count last changed.
+    since: i64,
+    /// Idle memory was released since then.
+    released: bool,
+}
+
+/// How long the presenter must have drawn nothing (no frame, snapshot, or
+/// playback) before it frees its idle intermediate targets, its cached
+/// snapshot attachment and its staging buffers. They are recreated by the
+/// next frame (docs/engine/memory.md, "At rest").
+pub const REST_RELEASE_US: i64 = 2_000_000;
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -1105,6 +1133,7 @@ pub fn run(
         work_start: 0,
         completer,
         svg: super::svg::SvgState::default(),
+        rest: Rest::default(),
     };
     thread.check_in();
     let mut last_inventory_us = 0;
@@ -1135,6 +1164,7 @@ pub fn run(
         thread.work();
         thread.note_turn("work", started);
         let sampled_at_us = now();
+        thread.release_at_rest(sampled_at_us);
         if thread.config.allocation_inventory
             && sampled_at_us.saturating_sub(last_inventory_us) >= 50_000
         {
@@ -1185,6 +1215,50 @@ fn command_name(command: &Command) -> &'static str {
 }
 
 impl Thread {
+    /// Frees idle GPU memory once nothing was drawn for [`REST_RELEASE_US`]:
+    /// the renderer's idle intermediate targets, the cached snapshot
+    /// attachment and the snapshot staging buffers. Surfaces on screen,
+    /// working targets, the kept bottom of the last frame and every content
+    /// cache stay. Done once per rest; any frame or snapshot starts a new one.
+    fn release_at_rest(&mut self, now_us: i64) {
+        let seen = {
+            let stats = self.stats();
+            (stats.frames, stats.snapshots)
+        };
+        if seen != self.rest.seen || self.rest.since == 0 {
+            self.rest = Rest { seen, since: now_us, released: false };
+            return;
+        }
+        if self.rest.released || now_us - self.rest.since < REST_RELEASE_US {
+            return;
+        }
+        let busy = !self.pending_snapshots.is_empty()
+            || self.snapshots.waiting()
+            || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
+            || self
+                .views
+                .values()
+                .any(|v| v.clock.is_playing() || v.dirty || v.awaiting.is_some() || !v.requests.is_empty());
+        let Some(gpu) = self.gpu.as_mut() else {
+            self.rest.released = true;
+            return;
+        };
+        if busy || gpu.snapshot_readback.in_flight() {
+            return;
+        }
+        let mut freed = gpu.snapshot_target.take().map_or(0, |t| t.bytes());
+        freed += gpu.snapshot_readback.capacity_bytes();
+        gpu.snapshot_readback.release_idle();
+        freed -= gpu.snapshot_readback.capacity_bytes();
+        if let Some(composer) = gpu.composer.as_mut() {
+            freed += composer.renderer().release_idle_targets();
+        }
+        self.rest.released = true;
+        let mut stats = self.stats();
+        stats.rest_releases += 1;
+        stats.rest_released_bytes += freed;
+    }
+
     /// Copies the render thread's live resource sizes into shared status.
     /// Sampling follows completed work so the first frame's caches and a
     /// retired pool are reflected without reading mutable state off-thread.
@@ -1202,6 +1276,10 @@ impl Thread {
                 .gpu
                 .as_ref()
                 .map_or(0, |g| g.snapshot_readback.capacity_bytes()),
+            metal_allocated_bytes: self
+                .gpu
+                .as_ref()
+                .and_then(|g| pm_gpu::device::allocated_bytes(&g.device)),
             ..AllocationInventory::default()
         };
         for (&(port, session), view) in &self.views {
@@ -6343,12 +6421,58 @@ mod tests {
             work_start: 0,
             completer: None,
             svg: super::super::svg::SvgState::default(),
+            rest: Rest::default(),
         };
         (thread, statuses)
     }
 
     fn preview_key() -> Key {
         (PortId(1), SessionId::new(2).unwrap())
+    }
+
+    #[test]
+    fn idle_gpu_memory_goes_once_the_viewer_rests() {
+        let (mut thread, _) = preview_thread();
+        let gpu = thread.gpu.insert({
+            let g = pm_gpu::Gpu::new("rest release test").expect("a Metal device");
+            Gpu {
+                display: DisplayTransform::new(&g.device, &g.queue),
+                snapshot_readback: pm_gpu::readback::ReadbackRing::default(),
+                snapshot_target: None,
+                composer: None,
+                fonts_installed: None,
+                lost: Arc::new(AtomicBool::new(false)),
+                device: g.device,
+                queue: g.queue,
+            }
+        });
+        let target = snapshot_output_target(
+            &mut gpu.snapshot_target,
+            &gpu.device,
+            320,
+            180,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        drop(target);
+        assert!(gpu.snapshot_target.is_some());
+        let t0 = 1_000_000;
+        thread.release_at_rest(t0);
+        thread.release_at_rest(t0 + REST_RELEASE_US - 1);
+        assert!(thread.gpu.as_ref().unwrap().snapshot_target.is_some(), "too early");
+        // A frame starts a new rest.
+        thread.stats().frames += 1;
+        thread.release_at_rest(t0 + REST_RELEASE_US + 1);
+        assert!(thread.gpu.as_ref().unwrap().snapshot_target.is_some());
+        thread.release_at_rest(t0 + 2 * REST_RELEASE_US);
+        assert!(thread.gpu.as_ref().unwrap().snapshot_target.is_some());
+        thread.release_at_rest(t0 + 2 * REST_RELEASE_US + 2);
+        assert!(thread.gpu.as_ref().unwrap().snapshot_target.is_none());
+        let stats = thread.stats().clone();
+        assert_eq!(stats.rest_releases, 1);
+        assert_eq!(stats.rest_released_bytes, 320 * 180 * 4);
+        // Once per rest.
+        thread.release_at_rest(t0 + 4 * REST_RELEASE_US);
+        assert_eq!(thread.stats().rest_releases, 1);
     }
 
     #[test]

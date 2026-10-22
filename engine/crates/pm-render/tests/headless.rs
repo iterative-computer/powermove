@@ -201,6 +201,25 @@ fn every_feature_is_supported_and_frames_are_deterministic() {
 }
 
 #[test]
+fn idle_targets_are_released_and_the_next_frame_is_identical() {
+    let (doc, resolver) = everything();
+    let doc = load(&doc);
+    let mut r = Renderer::headless().unwrap();
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let before = render_bytes(&mut r, &doc, 0.73, &request, &resolver);
+    let _ = r.device().poll(wgpu::PollType::wait_indefinitely());
+    assert!(r.target_pool_idle() > 0, "a frame leaves idle targets in the pool");
+    let pooled = r.target_pool_bytes();
+    let freed = r.release_idle_targets();
+    assert!(freed > 0 && freed <= pooled);
+    assert_eq!(r.target_pool_idle(), 0);
+    assert_eq!(r.target_pool_bytes(), pooled - freed);
+    // Drawing again takes fresh targets and gives the same pixels.
+    let after = render_bytes(&mut r, &doc, 0.73, &request, &resolver);
+    assert!(before.0 == after.0, "the frame after a release differs");
+}
+
+#[test]
 fn regions_equal_the_same_pixels_of_the_full_frame() {
     let (doc, resolver) = everything();
     let doc = load(&doc);

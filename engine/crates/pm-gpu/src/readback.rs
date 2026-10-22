@@ -240,6 +240,17 @@ impl ReadbackRing {
         self.slots.iter().map(|s| s.capacity).sum()
     }
 
+    /// Frees the staging buffers of free slots (a viewer at rest); the
+    /// next copy allocates again. Slots with a copy in flight keep theirs.
+    pub fn release_idle(&mut self) {
+        for slot in &mut self.slots {
+            if matches!(slot.state, SlotState::Free) {
+                slot.buffer = None;
+                slot.capacity = 0;
+            }
+        }
+    }
+
     pub fn in_flight(&self) -> bool {
         self.slots
             .iter()

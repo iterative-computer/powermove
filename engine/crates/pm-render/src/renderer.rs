@@ -1154,6 +1154,16 @@ impl Renderer {
         self.text_gpu.trim(bytes);
     }
 
+    /// Frees every idle intermediate target (a viewer at rest) and returns
+    /// the bytes freed. Targets in use, such as the kept bottom of the last
+    /// frame (`crate::frame_prefix`), and every content cache stay; the
+    /// next frame takes fresh targets from the device.
+    pub fn release_idle_targets(&mut self) -> u64 {
+        let before = self.pool.bytes();
+        self.pool.trim(0);
+        before - self.pool.bytes()
+    }
+
     /// The vector cache's standing bound, enforced while frames render
     /// (default: today's raster cache, 192 MiB and 4096 entries).
     pub fn set_vector_cache_budget(&mut self, max_bytes: u64, max_entries: usize) {

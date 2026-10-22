@@ -135,3 +135,23 @@ fn metal_registry_id(device: &wgpu::Device) -> Option<u64> {
 fn metal_registry_id(_device: &wgpu::Device) -> Option<u64> {
     None
 }
+
+/// The bytes the Metal device has allocated for this process's buffers,
+/// textures and heaps (`MTLDevice.currentAllocatedSize`): the driver
+/// memory that `footprint` charges as owned graphics. Imported IOSurfaces
+/// count where they are allocated. `None` off Metal.
+#[cfg(target_os = "macos")]
+pub fn allocated_bytes(device: &wgpu::Device) -> Option<u64> {
+    use objc2_metal::MTLDevice;
+    // SAFETY: a read-only property of the raw device.
+    unsafe {
+        device
+            .as_hal::<wgpu_hal::api::Metal>()
+            .map(|hal| hal.raw_device().currentAllocatedSize() as u64)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn allocated_bytes(_device: &wgpu::Device) -> Option<u64> {
+    None
+}
