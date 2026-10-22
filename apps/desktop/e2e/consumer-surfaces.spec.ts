@@ -166,7 +166,11 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
       if (readback.png) await testInfo.attach('Native canvas copy', { body: Buffer.from(readback.png.split(',')[1]!, 'base64'), contentType: 'image/png' });
       else await testInfo.attach('Native canvas copy error', { body: readback.error ?? 'No readback', contentType: 'text/plain' });
     }
+    // The overlay's own pixels, kept beside any difference the hashes report.
+    const overlayPng = () => page.evaluate(() => ((window as any).PM.panelInst.viewer.el as HTMLElement).querySelector<HTMLCanvasElement>('#overlay')!.toDataURL());
+    const attachOverlay = async (name: string) => testInfo.attach(name, { body: Buffer.from((await overlayPng()).split(',')[1]!, 'base64'), contentType: 'image/png' });
     const before = await live();
+    await attachOverlay('Live overlay before the Library');
     expect(before.zoom).toBe(ZOOM);
     expect(before.inner[2]).toBe(`${COMP.w * ZOOM}px`);
     expect(before.inner[3]).toBe(`${COMP.h * ZOOM}px`);
@@ -183,6 +187,7 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
     await expect.poll(stableViewer, { timeout: 10_000 }).toBe(true);
     // The live viewer kept its zoom, pan and overlay while the Library opened.
     const after = await live();
+    await attachOverlay('Live overlay with the Library open');
     expect(after).toEqual(before);
 
     const clone = await card.evaluate((cardElement, { layer, zoom }) => {
