@@ -31,6 +31,34 @@ pub trait Host {
 
     /// An own property of a (non-array) object.
     fn property(&self, object: &Self::Obj, key: &JsStr) -> Option<Value<Self::Obj>>;
+
+    /// `sample(layerId, channel, localTime)` (`anim.ts`): the raw value of
+    /// another layer's channel at a local time, never running expressions.
+    /// `None` when the host has no such hook: the helper is then
+    /// `undefined`, as `context.sample?.(…)` is without one. `Err` is a thrown
+    /// `Error` with that message.
+    fn sample(
+        &self,
+        _layer: &JsStr,
+        _channel: &JsStr,
+        _local_time: f64,
+    ) -> Option<Result<Value<Self::Obj>, String>> {
+        None
+    }
+
+    /// `motionPath(layerId, channel, progress, start, end)` (`anim.ts`): a
+    /// position axis at an arc-length fraction of the layer's original path
+    /// between two local times. `None` and `Err` as for [`Host::sample`].
+    fn motion_path(
+        &self,
+        _layer: &JsStr,
+        _channel: &JsStr,
+        _progress: f64,
+        _start: f64,
+        _end: f64,
+    ) -> Option<Result<f64, String>> {
+        None
+    }
 }
 
 /// A [`Host`] over [`pm_model::Value`] trees, with identity by address.

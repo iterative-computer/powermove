@@ -18,7 +18,8 @@ JavaScript engine. It reproduces what a project can observe of
   problem reported is the same;
 - identifiers `time`, `T`, `t`, `fps`, `value`, `layer`, `comp`, `ch`, `idx`,
   `PI`, `Math`, and `Math.*` constants and functions; helpers `clamp`, `lerp`,
-  `linear`, `ease`, `random`, `wiggle`, `bounce`, `loop`, `pingpong`, `param`;
+  `linear`, `ease`, `random`, `wiggle`, `bounce`, `loop`, `pingpong`, `param`,
+  `sample`, `motionPath` (the last two ask the host, below);
 - member and index access into raw project values (own properties only, array
   indexes through `Number.isSafeInteger(Number(key))`, `length`, forbidden
   `__proto__`/`prototype`/`constructor`);
@@ -42,6 +43,30 @@ Public API, in short:
 | `Context` | `t`, `time`, `fps`, `frame`, `value`, `layer`, `comp`, `channel`, `idx` |
 | `Dialect::{Legacy, Native}` | `Native` (default) adds `frame`; `Legacy` is exactly `expression.ts` |
 | `expression_diagnostic`, `expression_names`, `to_js_string`, `jsmath` | editor helpers and V8-identical `Math` |
+
+## `sample` and `motionPath` (main 2b1fa379a)
+
+`sample(layerId, channel, localTime)` reads another layer's raw channel
+(`PM.findProp`, keys evaluated without expressions, `localTime` defaulting to
+`t`); `motionPath(layerId, channel, progress, start, end)` gives a position
+axis at an arc-length fraction of a layer's original position curves
+(`core/anim/motion-path.ts` `createPathTiming`). `expression.ts` converts the
+arguments (`String(args[0] ?? '')`, `Number(...)`) and calls the context's
+hooks, which `anim.ts` provides. Here the arguments are converted the same
+way and handed to `Host::sample` / `Host::motion_path`; a host without hooks
+answers `undefined`, as `context.sample?.()` does without one. pm-eval
+implements both on `ExprContext` (`sample`, `motion_path`, and
+`motion_path::PathTiming` with V8's scaled Kahan `Math.hypot`), and the
+pm-wasm and pm-render adapters pass the context through. Both helpers read the
+whole document (`Dependencies::document`), so neither the numeric plan nor a
+general binding ever folds them. A sampled object value (a path) is
+`undefined` through the adapters, which hand over primitives only. Unlike
+`anim.ts`, the timing table is not cached across evaluations.
+
+`pm-eval/tests/expression_helpers.rs` replays 3,480 cases written by
+`tests/vectors/generate-expression-helper-vectors.ts` under Electron's V8
+(JavaScriptCore's `Math.hypot` differs in the last bit): every result
+bit-identical, every expression error message equal.
 
 ## Quirks kept on purpose
 
