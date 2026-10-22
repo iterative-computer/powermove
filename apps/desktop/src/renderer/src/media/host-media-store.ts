@@ -464,9 +464,9 @@ export function bindingsFor(project: any, records: (key: string) => MediaStoreRe
  * Installs the wrapper over `PM.MediaStore` (after `core/media`), the
  * import decisions for `gl/raster`, and the engine bindings.
  */
-export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: MediaStoreBridge; media?: { sourcePath?(file: File): string | null }; remote?: unknown } | null | undefined): void {
+export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: MediaStoreBridge; media?: { sourcePath?(file: File): string | null }; remote?: unknown; nativeHidden?: boolean } | null | undefined): void {
   const host = bridge?.mediaStore;
-  if (!host || bridge?.remote || !PM.MediaStore) return;
+  if (!host || (bridge?.remote && !bridge.nativeHidden) || !PM.MediaStore) return;
   let enabled = false;
   try { enabled = host.configSync().enabled === true; } catch { enabled = false; }
   const relinked = (meta: any, link: MediaLink) => {
