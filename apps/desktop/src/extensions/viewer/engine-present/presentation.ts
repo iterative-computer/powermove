@@ -135,6 +135,7 @@ export const PRESENTATION_STATUS = {
   starting: 'Starting the engine…',
   reconnecting: 'Reconnecting to the engine…',
   gpuFailed: 'The viewer cannot draw: the GPU keeps failing. Restart Powermove.',
+  unreadable: 'The viewer cannot read the engine’s frames. Restart Powermove.',
   unavailable: 'The viewer cannot draw engine frames:',
   unsupported: 'The new engine cannot draw this composition yet.'
 } as const;
@@ -200,6 +201,15 @@ export const SIZE_SETTLE_MS = 150;
 export const MAX_DEVICE_LOSSES = 3;
 export const DEVICE_LOSS_WINDOW_MS = 30_000;
 
+/**
+ * Surface renewals (`renewSurfaces`) allowed within `DEVICE_LOSS_WINDOW_MS`:
+ * up to two per tolerated device loss (one when the drawing is replaced,
+ * one more if the first pool was imported while the GPU process was still
+ * coming back). Beyond it the stage says the frames cannot be read, until
+ * the window passes or a frame draws.
+ */
+export const MAX_SURFACE_RENEWALS = 2 * MAX_DEVICE_LOSSES;
+
 export class ViewerPresentation {
   private canvasElement: HTMLCanvasElement;
   /** Draws on this thread (`painter`) or in a presentation worker (`worker`). */
@@ -257,6 +267,11 @@ export class ViewerPresentation {
   private vsync: VsyncHint | null = null;
   /** When the drawing's device was lost recently (performance.now ms). */
   private losses: number[] = [];
+  /** When the surfaces were renewed recently (performance.now ms). */
+  private renewals: number[] = [];
+  /** The newest pool generation a renewal replaces: frames of it and older
+   *  pools that cannot be read are the failure already being handled. */
+  private renewedFrom = 0;
 
   /** The visible state while an exclusive presentation has no frame. */
   private statusElement: HTMLElement | null = null;
@@ -722,7 +737,39 @@ export class ViewerPresentation {
     }
     if (this.exclusive) this.setStatus(PRESENTATION_STATUS.reconnecting);
     this.options.log?.('warn', `engine presentation lost its graphics context (${message}); drawing again on a new one`);
-    void this.replaceDrawing();
+    // The GPU process that held this window's surface imports may be gone
+    // with the context: frames of those imports no longer upload, so the
+    // new drawing starts on new surfaces.
+    void this.replaceDrawing(`the graphics context was lost (${message})`);
+  }
+
+  /**
+   * The imports of the current pool cannot be read (after a GPU process
+   * restart a `VideoFrame` of an earlier import names a shared image the
+   * new process does not have): asks the engine for new surfaces with the
+   * next surface epoch, which is a new view, so a paused view draws again
+   * too. One renewal per pool generation; at most `MAX_SURFACE_RENEWALS`
+   * within `DEVICE_LOSS_WINDOW_MS`, after which the stage says so.
+   */
+  private renewSurfaces(generation: number, why: string): void {
+    if (this.disposed || !this.presenter || generation <= this.renewedFrom) return;
+    const now = performance.now();
+    this.renewals = this.renewals.filter((t) => now - t < DEVICE_LOSS_WINDOW_MS);
+    if (this.renewals.length >= MAX_SURFACE_RENEWALS) {
+      // Frames of this pool keep failing: once per pool, a visible failure.
+      this.renewedFrom = Math.max(this.renewedFrom, generation);
+      this.options.log?.('error', `engine presentation cannot read its surfaces: ${this.renewals.length} renewals in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${why})`);
+      if (this.exclusive) this.setStatus(PRESENTATION_STATUS.unreadable);
+      return;
+    }
+    const state = this.sequencer.renewSurfaces();
+    if (!state) return;
+    this.renewals.push(now);
+    this.renewedFrom = Math.max(this.renewedFrom, generation, this.presenter.stats.generation);
+    this.options.log?.('warn', `engine presentation asks for new surfaces: ${why}`);
+    this.states.push(state);
+    if (this.states.length > STATE_HISTORY) this.states.shift();
+    this.presenter.setViewerState(this.withHint(state));
   }
 
   private workerFailed(token: number, message: string): void {
@@ -744,9 +791,10 @@ export class ViewerPresentation {
 
   /**
    * Replaces the canvas and its drawing (worker moved windows, or failed)
-   * and carries the open session over to a new presenter.
+   * and carries the open session over to a new presenter. `renew` (why):
+   * the new presenter starts on new surfaces (`renewSurfaces`).
    */
-  private async replaceDrawing(): Promise<void> {
+  private async replaceDrawing(renew: string | null = null): Promise<void> {
     const token = ++this.backendToken;
     const generation = this.presenter?.stats.generation ?? 0;
     this.chromeLeases?.clear();
@@ -760,7 +808,9 @@ export class ViewerPresentation {
     this.replaceCanvas();
     if (!(await this.makeDrawing()) || token !== this.backendToken || this.disposed) return;
     const channel = this.channel;
-    if (channel) this.startPresenter(channel, generation);
+    if (!channel) return;
+    this.startPresenter(channel, generation);
+    if (renew !== null) this.renewSurfaces(Math.max(generation, 1), renew);
   }
 
   /** A presenter for `channel` on the current drawing, sent the current state. */
@@ -780,7 +830,10 @@ export class ViewerPresentation {
       trace: this.options.trace,
       generation,
       hostOffsetUs: this.options.service.hostOffsetUs ? () => this.options.service.hostOffsetUs!() : undefined,
-      onVsync: (hint: VsyncHint) => this.onVsync(hint)
+      onVsync: (hint: VsyncHint) => this.onVsync(hint),
+      onUnusable: (generation: number, message: string) => {
+        if (this.presenter === presenter) this.renewSurfaces(generation, message);
+      }
     };
     const presenter: Presenter = this.worker
       ? this.worker.open({ ...common, displayHz: view ? (this.options.service.displayHz?.(view) ?? null) : null })
@@ -866,8 +919,10 @@ export class ViewerPresentation {
     opened = channel;
     this.channel = channel;
     this.chromeLeases = new ChromeLeases(release => channel.release(release));
-    // A new session numbers its frames from 1.
+    // A new session numbers its frames from 1, and a restarted engine its
+    // pool generations.
     this.deliveredSeq = 0;
+    this.renewedFrom = 0;
     this.routedSeq = null;
     this.sessions++;
     this.startPresenter(channel);

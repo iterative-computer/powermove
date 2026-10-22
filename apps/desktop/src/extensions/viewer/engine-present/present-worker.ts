@@ -65,6 +65,8 @@ export type FromWorker =
   | { type: 'done'; session: number; seq: number }
   | { type: 'vsync'; session: number; hint: VsyncHint }
   | { type: 'stats'; session: number; stats: PresenterStats }
+  /** A frame of pool `generation` could not be read (`onUnusable`). */
+  | { type: 'unusable'; session: number; generation: number; message: string }
   | { type: 'trace'; session: number; id: number; trace: TraceRecord | null }
   /** The session's presenter is gone: nothing more comes for it. */
   | { type: 'closed'; session: number }
@@ -199,7 +201,8 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         now,
         trace: message.trace,
         hostOffsetUs: () => s.hostOffsetUs,
-        onVsync: (hint) => post({ type: 'vsync', session: id, hint })
+        onVsync: (hint) => post({ type: 'vsync', session: id, hint }),
+        onUnusable: (generation, message) => post({ type: 'unusable', session: id, generation, message })
       })
     };
     s.presenter.onPresented((frame) => {

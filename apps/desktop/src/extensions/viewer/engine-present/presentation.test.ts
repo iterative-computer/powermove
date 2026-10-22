@@ -2,11 +2,11 @@
 import { Window as HappyWindow } from 'happy-dom';
 import { describe, expect, it } from 'vitest';
 
-import type { FramePainter } from './gpu';
+import { FrameUnusableError, type FramePainter } from './gpu';
 import { servePresenter, type FromWorker, type ToWorker } from './present-worker';
 import type { WorkerLike } from './worker-presenter';
 import type { FrameSource } from './presenter';
-import { overlayToCss, PRESENTATION_STATUS, ViewerPresentation, type EngineViewerChannel, type EngineViewerHandlers, type EngineViewerService, type ViewParams } from './presentation';
+import { MAX_SURFACE_RENEWALS, overlayToCss, PRESENTATION_STATUS, ViewerPresentation, type EngineViewerChannel, type EngineViewerHandlers, type EngineViewerService, type ViewParams } from './presentation';
 import type { FrameDescriptor, FrameRelease, OverlayGeometry, ViewerState } from './protocol';
 
 class FakeFrame {
@@ -38,6 +38,9 @@ class Source implements FrameSource {
 class Painter implements FramePainter {
   draws = 0;
   disposed = false;
+  /** Pool generations whose frames cannot be read (imports from before a GPU restart). */
+  unreadable = new Set<number>();
+  private generation = 0;
   private loseDevice: (reason: string) => void = () => {};
   readonly lost = new Promise<string>((resolve) => (this.loseDevice = resolve));
   /** The device goes away (the GPU process restarted). */
@@ -45,7 +48,12 @@ class Painter implements FramePainter {
     this.loseDevice(reason);
   }
   configure(): void {}
+  /** The next frame drawn comes from pool `generation`. */
+  from(generation: number): void {
+    this.generation = generation;
+  }
   draw(): void {
+    if (this.unreadable.has(this.generation)) throw new FrameUnusableError('VideoFrame RGBA16F upload failed (GL 0x501)');
     this.draws++;
   }
   workDone(): Promise<void> {
@@ -113,10 +121,10 @@ const OVERLAY: OverlayGeometry = {
   caret: { top: [40, 40], bottom: [40, 80] }
 };
 
-function desc(seq: number, viewSeq: number): FrameDescriptor {
+function desc(seq: number, viewSeq: number, poolGeneration = 1): FrameDescriptor {
   return {
     poolIndex: seq % 4,
-    poolGeneration: 1,
+    poolGeneration,
     seq,
     pts: 0,
     revision: 7,
@@ -775,7 +783,16 @@ describe('ViewerPresentation', () => {
     expect(painters[0]!.draws).toBe(1);
     painters[0]!.lose('A valid external Instance reference no longer exists.');
     await settleLong();
-    expect(logs).toEqual(['engine presentation lost its graphics context (A valid external Instance reference no longer exists.); drawing again on a new one']);
+    expect(logs).toEqual([
+      'engine presentation lost its graphics context (A valid external Instance reference no longer exists.); drawing again on a new one',
+      'engine presentation asks for new surfaces: the graphics context was lost (A valid external Instance reference no longer exists.)'
+    ]);
+    // The imports from before the loss may not upload any more: the new
+    // drawing asks for new surfaces (the next epoch, a new view).
+    const renewal = channel.states.at(-1)!;
+    expect(renewal.surfaceEpoch).toBe(1);
+    expect(renewal.viewSeq).toBe(channel.states[0]!.viewSeq + 1);
+    expect(presentation.state?.surfaceEpoch).toBe(1);
     // A new worker on a new canvas, the same session; still off the main thread.
     expect(made).toBe(2);
     expect(workers[0]!.terminated).toBe(true);
@@ -789,6 +806,108 @@ describe('ViewerPresentation', () => {
     expect(channel.releases.map((r) => r.seq)).toEqual([1, 2]);
     presentation.dispose();
     delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+  });
+
+  it('asks for new surfaces once per pool whose frames cannot be read, and draws the new pool without any view change', async () => {
+    const service = new Service();
+    Object.assign(service, { exclusive: true });
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const logs: string[] = [];
+    const painter = new Painter();
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => painter, log: (_l, m) => logs.push(m) });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
+    painter.from(1);
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    expect(painter.draws).toBe(1);
+    expect(presentation.presenting).toBe(true);
+    // The GPU process restarted under a drawing that survived: frames of
+    // the pool imported before it fail to upload.
+    painter.unreadable.add(1);
+    channel.handlers.message({ type: 'frame', frame: desc(2, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    channel.handlers.message({ type: 'frame', frame: desc(3, 1) }, performance.now());
+    runFrames(rafs, performance.now());
+    expect(presentation.stats()!.dropped['unusable']).toBe(2);
+    // One renewal for the pool, however many of its frames fail.
+    expect(channel.states.map((s) => s.surfaceEpoch ?? 0)).toEqual([0, 1]);
+    expect(channel.states[1]!.viewSeq).toBe(2);
+    expect(logs).toEqual(['engine presentation asks for new surfaces: the presented frame could not be read: VideoFrame RGBA16F upload failed (GL 0x501)']);
+    // The engine's new pool for the renewed view draws.
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 2, surfaces: [] } }, performance.now());
+    painter.from(2);
+    channel.handlers.message({ type: 'frame', frame: desc(4, 2, 2) }, performance.now());
+    runFrames(rafs, performance.now());
+    expect(painter.draws).toBe(2);
+    expect(presentation.latest?.seq).toBe(4);
+    expect(presentation.status).toBe(null);
+    // Later views keep the epoch; they are not renewals.
+    presentation.update({ ...PARAMS, zoom: 0.75 });
+    expect(channel.states.at(-1)!.surfaceEpoch).toBe(1);
+    expect(channel.states.at(-1)!.viewSeq).toBe(3);
+    presentation.dispose();
+  });
+
+  it('asks for new surfaces when a presentation worker cannot read a pool', async () => {
+    const service = new Service();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    offscreenCanvases(window as unknown as Window);
+    const logs: string[] = [];
+    const painter = new Painter();
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createWorker: () => inProcessWorker(painter), createPainter: async () => new Painter(), log: (_l, m) => logs.push(m) });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
+    painter.unreadable.add(1);
+    painter.from(1);
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    await settleLong();
+    expect(presentation.offMainThread).toBe(true);
+    expect(painter.draws).toBe(0);
+    expect(channel.states.map((s) => s.surfaceEpoch ?? 0)).toEqual([0, 1]);
+    expect(logs).toEqual(['engine presentation asks for new surfaces: the presented frame could not be read: VideoFrame RGBA16F upload failed (GL 0x501)']);
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 2, surfaces: [] } }, performance.now());
+    painter.from(2);
+    channel.handlers.message({ type: 'frame', frame: desc(2, 2, 2) }, performance.now());
+    await settleLong();
+    expect(painter.draws).toBe(1);
+    expect(presentation.presenting).toBe(true);
+    expect(channel.releases.map((r) => r.seq)).toEqual([1, 2]);
+    presentation.dispose();
+    delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+  });
+
+  it('stops renewing surfaces that keep failing and says so on the stage', async () => {
+    const service = new Service();
+    Object.assign(service, { exclusive: true });
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const logs: { level: string; message: string }[] = [];
+    const painter = new Painter();
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => painter, log: (level, message) => logs.push({ level, message }) });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    let seq = 0;
+    // Every pool's frames fail (an upload the context always rejects).
+    for (let generation = 1; generation <= MAX_SURFACE_RENEWALS + 2; generation++) {
+      painter.unreadable.add(generation);
+      channel.handlers.message({ type: 'surfacePool', pool: { generation, surfaces: [] } }, performance.now());
+      painter.from(generation);
+      channel.handlers.message({ type: 'frame', frame: desc(++seq, channel.states.at(-1)!.viewSeq, generation) }, performance.now());
+      runFrames(rafs, performance.now());
+    }
+    expect(painter.draws).toBe(0);
+    expect(channel.states.filter((s) => s.surfaceEpoch).length).toBe(MAX_SURFACE_RENEWALS);
+    expect(logs.filter((l) => l.level === 'error')).toEqual([
+      { level: 'error', message: `engine presentation cannot read its surfaces: ${MAX_SURFACE_RENEWALS} renewals in 30 s (the presented frame could not be read: VideoFrame RGBA16F upload failed (GL 0x501))` },
+      { level: 'error', message: `engine presentation cannot read its surfaces: ${MAX_SURFACE_RENEWALS} renewals in 30 s (the presented frame could not be read: VideoFrame RGBA16F upload failed (GL 0x501))` }
+    ]);
+    expect(presentation.status).toBe(PRESENTATION_STATUS.unreadable);
+    presentation.dispose();
   });
 
   it('replaces a main-thread painter whose device was lost, and gives up after repeated losses', async () => {
