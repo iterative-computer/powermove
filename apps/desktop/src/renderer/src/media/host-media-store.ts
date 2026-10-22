@@ -16,6 +16,8 @@ import { Blake3 } from '../../../shared/blake3';
 import type { AssetStorage, ClassifyResult, ConversionKind, MediaBinding, MediaConversion, MediaLink, MediaReadOpen, MediaRecordSource, MediaStoreBridge, MediaStoreRecord } from '../../../shared/media-store';
 import { compactEditLog } from '../core/edit-log';
 import { applyEngineStamp } from '../../../shared/engine-stamp';
+import { mimeOf } from '../../../shared/media-mime';
+export { mimeOf } from '../../../shared/media-mime';
 
 /** Bytes per IPC chunk (main caps reads and writes at 4 MiB). */
 export const CHUNK_BYTES = 4 * 1024 * 1024;
@@ -417,16 +419,6 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
     }
   };
   return store;
-}
-
-const MIME: Record<string, string> = {
-  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska',
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
-  wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', flac: 'audio/flac'
-};
-export function mimeOf(name: unknown): string {
-  const match = /\.([A-Za-z0-9]{1,8})$/.exec(String(name || ''));
-  return match ? MIME[match[1]!.toLowerCase()] ?? '' : '';
 }
 
 /**

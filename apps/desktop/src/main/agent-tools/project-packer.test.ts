@@ -64,6 +64,23 @@ it('saves when no media can be found at all, as today', async () => {
   expect(restored.document.proj.assets.linked.storage).toBe('linked');
 });
 
+it.each([false, true])('keeps today’s blob MIME type with contentHash=%s and no asset.type', async contentHash => {
+  const root = await tempRoot('pm-agent-pack-mime-'), file = path.join(root, 'source.bin');
+  await writeFile(file, new Uint8Array([1, 2, 3]));
+  const asset = { id: 'a', name: 'motion.gif', ...(contentHash ? { contentHash: 'a'.repeat(64) } : {}) };
+  const document = { proj: { id: 'P', name: 'MIME', assets: { a: asset }, layers: [] } };
+  // Key reads retain the stored blob's type; hash reads use today's filename
+  // fallback, even when the stored bytes are an animated-image conversion.
+  const type = contentHash ? 'image/gif' : 'video/webm';
+  const output = await packAgentProject(document.proj, {
+    directory: path.join(root, 'exports'), resolveAsset: async () => ({ path: file, type: 'video/webm' })
+  }, document);
+  const rendererPacker = '../../renderer/src/legacy/core/project-file';
+  const { packProjectFileBlob } = await import(/* @vite-ignore */ rendererPacker);
+  const expected = await (await packProjectFileBlob(structuredClone(document), { get: async () => new Blob([await readFile(file)], { type }) })).arrayBuffer();
+  expect(Buffer.from(await readFile(output))).toEqual(Buffer.from(expected));
+});
+
 it('reserves exclusive names for concurrent saves', async () => {
   const root = await tempRoot('pm-agent-pack-names-');
   const { project, paths } = await fixture(root);

@@ -264,12 +264,17 @@ export class MediaStoreService {
    * offline the job falls back to windows bound to the same project, so a
    * relink (Locate Media) or media that comes back lets a waiting job resume.
    */
-  private readonly jobBindings = new Map<number, { projectId: string | null; assets: Map<string, MediaBinding> }>();
+  private readonly jobBindings = new Map<number, { projectId: string | null; assets: Map<string, MediaBinding>; types: Map<string, string> }>();
 
   async bindJob(session: number, project: Record<string, any> | null): Promise<void> {
     if (!project) { this.jobBindings.delete(session); return; }
     const projectId = typeof project['id'] === 'string' && project['id'] ? project['id'] : null;
-    this.jobBindings.set(session, { projectId, assets: await this.snapshotBindings(project) });
+    const assets = await this.snapshotBindings(project), types = new Map<string, string>();
+    for (const [id, binding] of assets) {
+      const record = binding.key ? await this.store.record(binding.key) : null;
+      if (record?.type && record.hash === binding.hash) types.set(id, record.type);
+    }
+    this.jobBindings.set(session, { projectId, assets, types });
   }
 
   /** Persist content references when a queue entry is added, before its
@@ -327,13 +332,17 @@ export class MediaStoreService {
    * bytes are in and its content hash, or null when the asset is offline,
    * unknown, or bound to different content in two windows.
    */
-  async resolveAsset(asset: string, context?: { process: EngineProcess; session: number }): Promise<{ path: string; contentHash: ContentHash | null } | null> {
+  async resolveAsset(asset: string, context?: { process: EngineProcess; session: number }): Promise<{ path: string; contentHash: ContentHash | null; type?: string } | null> {
     const job = context?.process === 'job' ? this.jobBindings.get(context.session) : undefined;
     if (job) {
       const frozen = job.assets.get(asset);
-      const resolved = frozen ? await this.resolveBindings([frozen]) : null;
-      if (resolved || job.projectId === null) return resolved;
-      return this.resolveBindings([...this.bindings.values()].filter((b) => b.projectId === job.projectId).map((b) => b.assets.get(asset)));
+      const resolved = (frozen ? await this.resolveBindings([frozen]) : null)
+        ?? (job.projectId === null ? null : await this.resolveBindings([...this.bindings.values()].filter((b) => b.projectId === job.projectId).map((b) => b.assets.get(asset))));
+      if (!resolved) return null;
+      // A host save needs the same blob MIME as a window's key read. Never
+      // borrow a replacement key's type for a different frozen content hash.
+      const type = job.types.get(asset) ?? '';
+      return { ...resolved, ...(type ? { type } : {}) };
     }
     return this.resolveBindings([...this.bindings.values()].map((b) => b.assets.get(asset)));
   }
