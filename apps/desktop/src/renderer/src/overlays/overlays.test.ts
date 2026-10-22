@@ -6,6 +6,7 @@ import { installSvelteOverlays, unmountSvelteOverlays } from './install';
 import { paletteEntries, scorePaletteMatch } from './palette';
 import { withWhenCheck } from '../kernel/registries';
 import { BLINK_MS } from '../controls/menu-blink';
+import { installPointerFocus } from '../controls/pointer-focus';
 
 let PM: Record<string, any>;
 
@@ -465,6 +466,64 @@ describe('installSvelteOverlays', () => {
 
     expect(handle.el.isConnected).toBe(false);
     expect(stopped).not.toHaveBeenCalled();
+  });
+
+  it('keeps Escape in the modal after a pointer click on a button that leaves it open', async () => {
+    const dispose = installPointerFocus();
+    const global = vi.fn();
+    window.addEventListener('keydown', global);
+    try {
+      const body = document.createElement('div');
+      const destination = document.createElement('button');
+      destination.type = 'button';
+      destination.textContent = 'Video';
+      const chosen = vi.fn();
+      destination.onclick = chosen;
+      body.append(destination);
+      const handle = PM.modal({ title: 'Export', body });
+      await Promise.resolve();
+      flushSync();
+
+      destination.focus();
+      destination.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
+      expect(chosen).toHaveBeenCalledOnce();
+      expect(handle.el.isConnected).toBe(true);
+      expect(document.activeElement).toBe(handle.el);
+
+      // Send the key where focus really is, as the app does, rather than to the dialog by hand.
+      document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(handle.el.isConnected).toBe(false);
+      expect(global).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('keydown', global);
+      dispose();
+    }
+  });
+
+  it('returns focus to a pointer-focused modal when a stacked modal opened from it closes', async () => {
+    const dispose = installPointerFocus();
+    try {
+      const body = document.createElement('div');
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.textContent = 'More';
+      let inner: { el: HTMLElement } | undefined;
+      more.onclick = () => { inner = PM.modal({ title: 'More', body: 'Details' }); };
+      body.append(more);
+      const outer = PM.modal({ title: 'Export', body });
+      await Promise.resolve();
+      flushSync();
+
+      more.focus();
+      more.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
+      flushSync();
+      inner!.el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(inner!.el.isConnected).toBe(false);
+      expect(outer.el.isConnected).toBe(true);
+      expect(document.activeElement).toBe(outer.el);
+    } finally {
+      dispose();
+    }
   });
 
   it('falls back to #app when an action detaches the modal trigger', () => {
