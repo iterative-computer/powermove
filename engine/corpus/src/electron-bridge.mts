@@ -18,6 +18,7 @@
  * the renderer's CSP does not apply to it.
  */
 import { createRequire } from 'node:module';
+import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 interface Request { id: number; op: string; args: Record<string, unknown> }
@@ -47,7 +48,12 @@ async function launch(args: Record<string, unknown>): Promise<unknown> {
   if (app) throw new Error('The app is already launched');
   const env = { ...(args.env as Record<string, string>) };
   delete env.ELECTRON_RUN_AS_NODE;
-  launching = _electron.launch({ args: ['.'], cwd: desktopRoot, env, timeout: Number(args.timeout) || 120_000 });
+  if (!env.POWERMOVE_USER_DATA) throw new Error('An owned app profile is required');
+  // Keep driver artifacts inside the profile's awaited cleanup. Playwright's
+  // default temporary-directory removal can still be pending at bridge exit.
+  const artifactsDir = path.join(env.POWERMOVE_USER_DATA, 'playwright-artifacts');
+  await mkdir(artifactsDir, { recursive: true });
+  launching = _electron.launch({ args: ['.'], cwd: desktopRoot, env, artifactsDir, timeout: Number(args.timeout) || 120_000 });
   try { app = await launching; } finally { launching = null; }
   await send({ event: 'electron-pid', text: String(app.process().pid) });
   // Native dialogs are substituted, never shown on the user's desktop (as e2e/helpers/app.ts).

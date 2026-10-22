@@ -3471,6 +3471,10 @@ and SIGINT join the child and remove the owned tree, including a cooperative
 child that joins a grandchild in a separate session. The app and bridge use
 one shared close operation for normal close, signals and disconnect; the
 outer owners wait for teardown before removing profiles or releasing leases.
+The first resumed Electron smoke exposed an empty driver artifacts directory
+after a completed Today loop. Driver artifacts now live inside the owned app
+profile, so their deletion is awaited with profile teardown. The failed smoke
+is retained as a cleanup failure and supplies no native qualification.
 An uncatchable process
 kill still relies on the reservation's fixed expiry. The exclusive paired
 measurement phase releases its reservation before the sixty playback-suite
