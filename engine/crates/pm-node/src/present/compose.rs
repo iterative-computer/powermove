@@ -884,6 +884,7 @@ impl Composer {
                     pm_render::sampling::Sampling::Final
                 },
                 video_end: pm_render::VideoEnd::Preview,
+                origin: None,
             };
             let reuse = self
                 .scratch

@@ -4083,6 +4083,7 @@ impl Thread {
             },
             sampling: pm_render::sampling::Sampling::Final,
             video_end: pm_render::VideoEnd::of(purpose),
+            origin: None,
         };
         if needs_blender {
             match blender_frames(renderer, doc, &job, &request, self.blender.as_deref()) {

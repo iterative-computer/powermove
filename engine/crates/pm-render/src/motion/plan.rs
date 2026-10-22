@@ -17,7 +17,13 @@ fn full(width: u32, height: u32) -> [f64; 6] {
 
 /// The accumulation target of one blurred layer: transparent, in the
 /// parent's pixel space.
-fn accumulation(scope: &Scope<'_, '_>, width: u32, height: u32, draws: Vec<Draw>) -> CompPlan {
+fn accumulation(
+    scope: &Scope<'_, '_>,
+    width: u32,
+    height: u32,
+    draws: Vec<Draw>,
+    view: Option<crate::plan::OutputView>,
+) -> CompPlan {
     CompPlan {
         composition: scope.comp.id().to_string_lossy(),
         group: true,
@@ -25,6 +31,7 @@ fn accumulation(scope: &Scope<'_, '_>, width: u32, height: u32, draws: Vec<Draw>
         height,
         background: Background::Transparent,
         draws,
+        view,
     }
 }
 
@@ -83,7 +90,13 @@ pub(crate) fn blur_layer<'d>(
         layer: js::layer_id(layer),
         matrix: full(width, height),
         content: Content::Texture {
-            source: Source::Accumulate(Box::new(accumulation(scope, width, height, draws))),
+            source: Source::Accumulate(Box::new(accumulation(
+                scope,
+                width,
+                height,
+                draws,
+                crate::plan::level_view(scope, b.origin, width, height, scale),
+            ))),
             uv: [0.0, 0.0, 1.0, 1.0],
             alpha: 1.0,
         },
@@ -131,7 +144,13 @@ pub(crate) fn blur_group<'d>(
         layer: js::layer_id(group),
         matrix: full(width, height),
         content: Content::Texture {
-            source: Source::Accumulate(Box::new(accumulation(scope, width, height, draws))),
+            source: Source::Accumulate(Box::new(accumulation(
+                scope,
+                width,
+                height,
+                draws,
+                crate::plan::level_view(scope, b.origin, width, height, scale),
+            ))),
             uv: [0.0, 0.0, 1.0, 1.0],
             alpha,
         },
