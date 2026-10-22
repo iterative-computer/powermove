@@ -3653,3 +3653,24 @@ proof. Unknown work, setup, seek and shuttle retain their existing reserves,
 including the explicit 1 ms initialization reserve. Callback period,
 computation and constraint limits, overrun assertions, canonical preroll and
 head sizes are unchanged. Runtime and paired verification remain required.
+
+
+Review of that reserve change found a short-period regression: 250
+microseconds can exceed the old half-computation reserve at 96/192 kHz with
+32-frame buffers. Process admission now uses the smaller of 250 microseconds
+and the old default, for both producer and workers. Explicit setup requests
+remain unchanged. New tests exercise short periods, actual checkpoint paths
+and role/phase attribution. Fixed atomic counters now expose admitted DSP
+span maxima by worker/producer and the 19 stable phase IDs through
+`schedulingMaxDspUnitByRolePhaseNs`; they add no allocation on audio threads.
+This will distinguish the earlier unattributed 394 microsecond maximum from
+the worker-only process measurements. The producer's process units need
+measurement too; no worst-case claim is made from the old worker profiles.
+
+V40 was not device-qualified. Its plain and stressed 40-test smokes each
+finished 39/40 at the enforced cold-distinct bound. Plain first buffers were
+10.804/9.066/9.707/9.496 ms; stressed were
+11.156/11.223/14.065/11.700 ms. Every start remained complete and simultaneous
+with zero program underruns and RT errors. The owned temporary tree was
+empty and removed. These failures remain in the evidence; the short-period
+correction and new span attribution require fresh runtime verification.

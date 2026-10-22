@@ -182,6 +182,30 @@ enum RealtimePhase {
     ReadLinearFree,
 }
 
+/// Indices in DSP-span metrics follow `RealtimePhase`'s stable IDs. The
+/// outer index is 0 for workers and 1 for the producer.
+pub const REALTIME_DSP_PHASE_LABELS: [&str; 19] = [
+    "unknown",
+    "prepare-job",
+    "prepare-resolve",
+    "prepare-map",
+    "prepare-prefetch",
+    "prepare-scratch",
+    "stretch-fresh",
+    "stretch-map",
+    "stretch-init",
+    "stretch-read",
+    "stretch-output-seek",
+    "stretch-process",
+    "shuttle-map",
+    "shuttle-read",
+    "shuttle-reset",
+    "shuttle-output-seek",
+    "shuttle-process",
+    "read-linear-grid",
+    "read-linear-free",
+];
+
 impl RealtimePhase {
     #[cfg(any(target_os = "macos", test))]
     fn from_label(label: &'static str) -> Self {
@@ -411,6 +435,10 @@ pub struct RealtimeMetrics {
     pub max_unit_ns: u64,
     /// Largest thread-CPU span following an admitted DSP-step checkpoint.
     pub max_dsp_unit_ns: u64,
+    /// Thread-CPU maxima for admitted DSP spans, indexed by role (worker,
+    /// producer) and `REALTIME_DSP_PHASE_LABELS`. No sampled span is inferred
+    /// from wall time or attributed to a phase it did not execute in.
+    pub max_dsp_unit_by_role_phase_ns: [[u64; REALTIME_DSP_PHASE_LABELS.len()]; 2],
     /// Largest DSP span as parts per million of its actual computation budget.
     pub max_dsp_unit_fraction_ppm: u64,
     /// Number of sampled spans following admitted DSP-step checkpoints.
@@ -461,6 +489,7 @@ pub struct RealtimeMetrics {
 struct MetricCounters {
     max_unit_ns: AtomicU64,
     max_dsp_unit_ns: AtomicU64,
+    max_dsp_unit_by_role_phase_ns: [[AtomicU64; REALTIME_DSP_PHASE_LABELS.len()]; 2],
     max_dsp_unit_fraction_ppm: AtomicU64,
     dsp_unit_observations: AtomicU64,
     max_period_cpu_ns: AtomicU64,
@@ -496,6 +525,11 @@ impl MetricCounters {
         RealtimeMetrics {
             max_unit_ns: self.max_unit_ns.load(Ordering::Relaxed),
             max_dsp_unit_ns: self.max_dsp_unit_ns.load(Ordering::Relaxed),
+            max_dsp_unit_by_role_phase_ns: std::array::from_fn(|role| {
+                std::array::from_fn(|phase| {
+                    self.max_dsp_unit_by_role_phase_ns[role][phase].load(Ordering::Relaxed)
+                })
+            }),
             max_dsp_unit_fraction_ppm: self.max_dsp_unit_fraction_ppm.load(Ordering::Relaxed),
             dsp_unit_observations: self.dsp_unit_observations.load(Ordering::Relaxed),
             max_period_cpu_ns: self.max_period_cpu_ns.load(Ordering::Relaxed),
@@ -2100,11 +2134,11 @@ mod mac {
 
     const STRETCH_PROCESS_RESERVE_NS: u64 = 250_000;
 
-    fn phase_reserve(phase: super::RealtimePhase) -> Option<u64> {
-        // The short, wall-gated stretch processing steps need less headroom
-        // than an unknown unit. Setup, seek, and shuttle retain their larger
-        // existing reservations.
-        (phase == super::RealtimePhase::StretchProcess).then_some(STRETCH_PROCESS_RESERVE_NS)
+    fn phase_reserve(phase: super::RealtimePhase, computation_ns: u64) -> Option<u64> {
+        // Short processing steps can use less headroom than an unknown unit,
+        // but never more than the default on a shorter callback period.
+        (phase == super::RealtimePhase::StretchProcess)
+            .then_some(STRETCH_PROCESS_RESERVE_NS.min((computation_ns / 2).min(500_000)))
     }
 
     pub(super) fn checkpoint_dsp_step() {
@@ -2114,8 +2148,10 @@ mod mac {
             let slot = slot.borrow();
             let budget = slot.as_ref().filter(|budget| budget.depth > 0)?;
             let interval_ns = (budget.period_ns / 16).clamp(1, 100_000);
-            (budget.last_checkpoint_wall.elapsed().as_nanos() >= interval_ns as u128)
-                .then_some((budget.id, phase_reserve(budget.phase)))
+            (budget.last_checkpoint_wall.elapsed().as_nanos() >= interval_ns as u128).then_some((
+                budget.id,
+                phase_reserve(budget.phase, budget.computation_ns),
+            ))
         });
         if let Some((id, reserve)) = checkpoint {
             checkpoint_with_reserve(id, reserve, None, true);
@@ -2313,6 +2349,9 @@ mod mac {
                 .dsp_unit_observations
                 .fetch_add(1, Ordering::Relaxed);
             b.metrics.max_dsp_unit_ns.fetch_max(unit, Ordering::Relaxed);
+            let role = usize::from(b.constraint_ns < b.period_ns);
+            let phase = b.phase as usize;
+            b.metrics.max_dsp_unit_by_role_phase_ns[role][phase].fetch_max(unit, Ordering::Relaxed);
             b.metrics.max_dsp_unit_fraction_ppm.fetch_max(
                 dsp_unit_fraction_ppm(unit, b.computation_ns),
                 Ordering::Relaxed,
@@ -2396,7 +2435,8 @@ mod mac {
         computation_ns: u64,
         requested_reserve_ns: Option<u64>,
     ) -> bool {
-        // Ordinary checkpoints retain their historical 500 µs reserve.
+        // Ordinary checkpoints retain the default reserve of at most half
+        // the computation budget and at most 500 µs.
         // A caller that knows the next indivisible unit can request more
         // headroom, up to the callback's computation allowance.
         let reserve = requested_reserve_ns
@@ -2470,9 +2510,14 @@ mod mac {
 
     pub(super) fn checkpoint_current_phase(phase: super::RealtimePhase) {
         BUDGET.with(|slot| {
-            let id = slot.borrow().as_ref().map(|b| b.id);
-            if let Some(id) = id {
-                checkpoint_with_reserve(id, phase_reserve(phase), Some(phase), false);
+            let context = slot.borrow().as_ref().map(|b| (b.id, b.computation_ns));
+            if let Some((id, computation_ns)) = context {
+                checkpoint_with_reserve(
+                    id,
+                    phase_reserve(phase, computation_ns),
+                    Some(phase),
+                    false,
+                );
             }
         });
     }
@@ -3403,8 +3448,9 @@ mod mac {
         fn short_stretch_process_reserve_does_not_change_other_phases() {
             use crate::realtime::RealtimePhase;
 
+            const COMPUTATION_NS: u64 = 1_266_666; // 64 frames at 48 kHz, 95%.
             assert_eq!(
-                phase_reserve(RealtimePhase::StretchProcess),
+                phase_reserve(RealtimePhase::StretchProcess, COMPUTATION_NS),
                 Some(STRETCH_PROCESS_RESERVE_NS)
             );
             // The phase ID table includes setup, seek, shuttle, and unknown
@@ -3412,37 +3458,199 @@ mod mac {
             for id in 0..=u8::MAX {
                 let phase = RealtimePhase::from_id(id);
                 if phase != RealtimePhase::StretchProcess {
-                    assert_eq!(phase_reserve(phase), None, "{phase:?}");
+                    assert_eq!(phase_reserve(phase, COMPUTATION_NS), None, "{phase:?}");
                 }
             }
 
-            const COMPUTATION_NS: u64 = 1_266_666; // 64 frames at 48 kHz, 95%.
             assert!(!reservation_requires_next_period(
                 766_665,
                 COMPUTATION_NS,
-                phase_reserve(RealtimePhase::Unknown),
+                phase_reserve(RealtimePhase::Unknown, COMPUTATION_NS),
             ));
             assert!(reservation_requires_next_period(
                 766_666,
                 COMPUTATION_NS,
-                phase_reserve(RealtimePhase::Unknown),
+                phase_reserve(RealtimePhase::Unknown, COMPUTATION_NS),
             ));
             assert!(!reservation_requires_next_period(
                 1_016_665,
                 COMPUTATION_NS,
-                phase_reserve(RealtimePhase::StretchProcess),
+                phase_reserve(RealtimePhase::StretchProcess, COMPUTATION_NS),
             ));
             assert!(reservation_requires_next_period(
                 1_016_666,
                 COMPUTATION_NS,
-                phase_reserve(RealtimePhase::StretchProcess),
+                phase_reserve(RealtimePhase::StretchProcess, COMPUTATION_NS),
             ));
+            // 32 frames at 96 kHz: the worker and producer both have less
+            // than 500 µs of computation, so process admission must match
+            // the historical half-computation reserve exactly.
+            for computation in [316_666, 266_666] {
+                let reserve = (computation / 2).min(500_000);
+                assert_eq!(
+                    phase_reserve(RealtimePhase::StretchProcess, computation),
+                    Some(reserve)
+                );
+                assert_eq!(
+                    reservation_requires_next_period(computation - reserve, computation, None),
+                    reservation_requires_next_period(
+                        computation - reserve,
+                        computation,
+                        phase_reserve(RealtimePhase::StretchProcess, computation),
+                    )
+                );
+            }
+            // 32 frames at 192 kHz has an even tighter policy.
+            for computation in [158_333, 133_333] {
+                let reserve = (computation / 2).min(500_000);
+                assert_eq!(
+                    phase_reserve(RealtimePhase::StretchProcess, computation),
+                    Some(reserve)
+                );
+                assert_eq!(
+                    reservation_requires_next_period(computation - reserve - 1, computation, None),
+                    reservation_requires_next_period(
+                        computation - reserve - 1,
+                        computation,
+                        phase_reserve(RealtimePhase::StretchProcess, computation),
+                    )
+                );
+            }
             // Constructor/reset admission still uses its explicit 1 ms.
             assert!(reservation_requires_next_period(
                 266_666,
                 COMPUTATION_NS,
                 Some(1_000_000),
             ));
+        }
+
+        #[test]
+        fn checkpoint_paths_apply_process_reserve_to_worker_and_producer() {
+            std::thread::spawn(|| {
+                // A fresh thread can have less CPU time than the synthetic
+                // debt below. Accrue it before subtracting, so saturating
+                // subtraction cannot silently weaken the tested threshold.
+                let spin_start = Instant::now();
+                while thread_cpu_ns() < 1_000_000 {
+                    assert!(spin_start.elapsed() < Duration::from_secs(1));
+                    std::hint::spin_loop();
+                }
+                // A long synthetic wall window makes the distinction in
+                // admission observable without installing a Mach policy.
+                // The CPU budget is the real 48 kHz / 64-frame budget.
+                for (constraint, computation, accrued) in [
+                    (100_000_000, 1_266_666, 800_000),
+                    (85_000_000, 1_066_666, 650_000),
+                ] {
+                    for use_dsp_hook in [false, true] {
+                        for phase in [
+                            crate::realtime::RealtimePhase::StretchProcess,
+                            crate::realtime::RealtimePhase::StretchRead,
+                        ] {
+                            let metrics = Arc::new(MetricCounters::default());
+                            let now = Instant::now();
+                            let cpu = thread_cpu_ns();
+                            BUDGET.with(|slot| {
+                                *slot.borrow_mut() = Some(Budget {
+                                    id: 0xA710,
+                                    depth: 1,
+                                    wall_start: now,
+                                    cpu_start_ns: cpu.saturating_sub(accrued),
+                                    last_checkpoint_cpu_ns: cpu,
+                                    last_checkpoint_wall: now - Duration::from_millis(1),
+                                    exit_cpu_ns: cpu,
+                                    period_ns: 100_000_000,
+                                    computation_ns: computation,
+                                    constraint_ns: constraint,
+                                    computation_reported: false,
+                                    constraint_reported: false,
+                                    dsp_span_active: false,
+                                    phase,
+                                    metrics: metrics.clone(),
+                                });
+                            });
+                            if use_dsp_hook {
+                                crate::realtime::checkpoint_dsp_step();
+                            } else {
+                                checkpoint_current_phase(phase);
+                            }
+                            assert_eq!(
+                                metrics.snapshot().throttle_sleeps,
+                                u64::from(phase == crate::realtime::RealtimePhase::StretchRead),
+                                "{phase:?}, DSP hook: {use_dsp_hook}, computation: {computation}"
+                            );
+                            BUDGET.with(|slot| *slot.borrow_mut() = None);
+                        }
+                    }
+                }
+            })
+            .join()
+            .unwrap();
+        }
+
+        #[test]
+        fn admitted_dsp_spans_keep_role_and_phase_of_the_preceding_unit() {
+            for (id, label) in crate::realtime::REALTIME_DSP_PHASE_LABELS
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(
+                    crate::realtime::RealtimePhase::from_id(id as u8).label(),
+                    *label
+                );
+            }
+            let metrics = Arc::new(MetricCounters::default());
+            let now = Instant::now();
+            let mut budget = Budget {
+                id: 0xA711,
+                depth: 1,
+                wall_start: now,
+                cpu_start_ns: 1_000_000,
+                last_checkpoint_cpu_ns: 1_000_000,
+                last_checkpoint_wall: now,
+                exit_cpu_ns: 1_000_000,
+                period_ns: 1_333_333,
+                computation_ns: 1_066_666,
+                constraint_ns: 1_333_333,
+                computation_reported: false,
+                constraint_reported: false,
+                dsp_span_active: true,
+                phase: crate::realtime::RealtimePhase::StretchProcess,
+                metrics: metrics.clone(),
+            };
+            sample(&mut budget, now, 1_180_000);
+            budget.last_checkpoint_cpu_ns = 1_180_000;
+            budget.constraint_ns = 1_133_333;
+            budget.phase = crate::realtime::RealtimePhase::StretchRead;
+            sample(&mut budget, now, 1_480_000);
+
+            let observed = metrics.snapshot();
+            assert_eq!(observed.max_dsp_unit_ns, 300_000);
+            assert_eq!(observed.dsp_unit_observations, 2);
+            assert_eq!(
+                observed.max_dsp_unit_by_role_phase_ns[0]
+                    [crate::realtime::RealtimePhase::StretchProcess as usize],
+                180_000
+            );
+            assert_eq!(
+                observed.max_dsp_unit_by_role_phase_ns[1]
+                    [crate::realtime::RealtimePhase::StretchRead as usize],
+                300_000
+            );
+            assert_eq!(
+                crate::realtime::REALTIME_DSP_PHASE_LABELS
+                    [crate::realtime::RealtimePhase::StretchProcess as usize],
+                "stretch-process"
+            );
+            assert_eq!(
+                observed
+                    .max_dsp_unit_by_role_phase_ns
+                    .iter()
+                    .flatten()
+                    .filter(|&&span| span != 0)
+                    .count(),
+                2
+            );
         }
     }
 }

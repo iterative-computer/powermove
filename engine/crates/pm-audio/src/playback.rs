@@ -323,6 +323,10 @@ pub struct StartTiming {
     pub worker_hint_error: i32,
     pub scheduling_max_unit_ns: u64,
     pub scheduling_max_dsp_unit_ns: u64,
+    /// DSP thread-CPU maxima by worker/producer and stable phase ID; the
+    /// phase labels are `realtime::REALTIME_DSP_PHASE_LABELS`.
+    pub scheduling_max_dsp_unit_by_role_phase_ns:
+        [[u64; crate::realtime::REALTIME_DSP_PHASE_LABELS.len()]; 2],
     pub scheduling_max_dsp_unit_fraction_ppm: u64,
     pub scheduling_dsp_unit_observations: u64,
     pub scheduling_max_period_cpu_ns: u64,
@@ -564,6 +568,9 @@ impl StartTrace {
             worker_hint_error: 0,
             scheduling_max_unit_ns: 0,
             scheduling_max_dsp_unit_ns: 0,
+            scheduling_max_dsp_unit_by_role_phase_ns: [[0;
+                crate::realtime::REALTIME_DSP_PHASE_LABELS.len()];
+                2],
             scheduling_max_dsp_unit_fraction_ppm: 0,
             scheduling_dsp_unit_observations: 0,
             scheduling_max_period_cpu_ns: 0,
@@ -1201,6 +1208,7 @@ impl Playback {
             timing.profile_worker_flush_failures = profile_stats.flush_failures;
             timing.scheduling_max_unit_ns = metrics.max_unit_ns;
             timing.scheduling_max_dsp_unit_ns = metrics.max_dsp_unit_ns;
+            timing.scheduling_max_dsp_unit_by_role_phase_ns = metrics.max_dsp_unit_by_role_phase_ns;
             timing.scheduling_max_dsp_unit_fraction_ppm = metrics.max_dsp_unit_fraction_ppm;
             timing.scheduling_dsp_unit_observations = metrics.dsp_unit_observations;
             timing.scheduling_max_period_cpu_ns = metrics.max_period_cpu_ns;
