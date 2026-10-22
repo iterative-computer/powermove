@@ -44,6 +44,24 @@ fn capture_dir() -> Option<PathBuf> {
     dirs.pop()
 }
 
+/// A captured media path, or the same file in this checkout: captures
+/// record repository fixtures by the absolute path of the worktree that made
+/// them (`apps/desktop/e2e/fixtures/…`), which may be gone; media the capture
+/// generated lives in its own `media/` directory.
+fn resolve_media(capture: &Path, file: &Path) -> PathBuf {
+    if file.is_file() {
+        return file.to_path_buf();
+    }
+    let Some(name) = file.file_name() else {
+        return file.to_path_buf();
+    };
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    [capture.join("media").join(name), fixtures.join(name)]
+        .into_iter()
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| file.to_path_buf())
+}
+
 fn get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
         Value::Object(m) => m.get(key),
@@ -92,27 +110,10 @@ struct Measured {
 enum Ceiling {
     /// The whole mix.
     Mix(f64),
-    /// The mix with in-points rounded as today's export plays them
-    /// (allowed difference 9).
-    WholeSample(f64),
-    /// The mix outside spans (seconds) where an allowed difference sits.
-    Masked(f64, &'static [(f64, f64)]),
-    /// The mix below a frequency (Hz): an allowed difference lies above it.
-    Below(f64, f64),
     /// Ours with a document edit that reproduces today's behavior where an
     /// allowed difference changes it.
     Adjusted(f64, fn(&mut Value) -> bool),
 }
-
-/// The composition frame (30 fps) today's envelope ramps a switch over,
-/// with a millisecond either side for the 16-sample control interpolation:
-/// the frame after a switch off (0.5 s, 1 s), the frame before a switch on
-/// (1.5 s).
-const SWITCH_FRAMES: &[(f64, f64)] = &[
-    (0.499, 0.5 + 1.0 / 30.0 + 0.001),
-    (0.999, 1.0 + 1.0 / 30.0 + 0.001),
-    (1.5 - 1.0 / 30.0 - 0.001, 1.501),
-];
 
 /// Today's bus while a 5.1 source plays: the mono layer folds at √½.
 fn mono_at_center_fold(doc: &mut Value) -> bool {
@@ -139,22 +140,22 @@ fn mono_at_center_fold(doc: &mut Value) -> bool {
     changed
 }
 
-/// Each project's residual ceiling (dBFS).
+/// Each project's residual ceiling (dBFS). Today's export model
+/// (`pm_audio::today`, decisions AUDIO-5 and AUDIO-6) makes the mix
+/// bit-identical to today's (−240 dBFS here) wherever both decode the same
+/// samples and the bus stays stereo.
 fn ceiling(name: &str) -> Ceiling {
     match name {
-        // Single-sample clicks resampled from 44.1 kHz: Chromium's resampler
-        // rolls off from about 17 kHz (difference 11).
-        "clicks-44k" => Ceiling::Below(-85.0, 15_000.0),
-        // One-frame switch ramps today (difference 10).
-        "mute-groups" => Ceiling::Masked(-85.0, SWITCH_FRAMES),
-        // A 5.1 source widens today's bus, mono folds at −3 dB (difference
-        // 12); the 22.05 and 44.1 kHz tones go through Chromium's resampler
-        // (difference 11).
-        "layouts" => Ceiling::Adjusted(-85.0, mono_at_center_fold),
-        // Keyframed levels: straight segments one frame apart today (difference 5).
-        "gain-fades" | "precomp-nesting" => Ceiling::Mix(-75.0),
-        n if n.starts_with("real-") => Ceiling::WholeSample(-65.0),
-        _ => Ceiling::Mix(-85.0),
+        // Lossy decoders: FFmpeg revisions round differently from
+        // Chromium's (AAC, MP3, Opus, the H.264 file's AAC soundtrack).
+        "corpus-media-audio" => Ceiling::Mix(-90.0),
+        "embedded" => Ceiling::Mix(-105.0),
+        "mono" => Ceiling::Mix(-150.0),
+        // A 5.1 source widens today's bus, so mono folds at −3 dB through
+        // the center (difference 12; docs/engine/pm-audio.md).
+        "layouts" => Ceiling::Adjusted(-145.0, mono_at_center_fold),
+        n if n.starts_with("real-") => Ceiling::Mix(-90.0),
+        _ => Ceiling::Mix(-240.0),
     }
 }
 
@@ -189,7 +190,7 @@ fn offline_mixes_match_todays_export_audio() {
                 if let (Some(id), Some(file)) =
                     (text(get(info, "assetId")), text(get(info, "file")))
                 {
-                    media.insert(id, PathBuf::from(file));
+                    media.insert(id, resolve_media(&dir, &PathBuf::from(file)));
                 }
             }
         }
@@ -337,20 +338,6 @@ fn offline_mixes_match_todays_export_audio() {
         // (docs/engine/pm-audio.md) are accounted for, as regression guards.
         let (residual, ceiling) = match ceiling(&name) {
             Ceiling::Mix(db) => (m.rms_diff_db, db),
-            Ceiling::WholeSample(db) => (m.whole_sample_db.unwrap_or(m.rms_diff_db), db),
-            Ceiling::Masked(db, spans) => {
-                let masked = |i: usize| {
-                    let t = i as f64 / rate as f64;
-                    spans.iter().any(|(a, b)| t >= *a && t < *b)
-                };
-                (residual_db(&ours, &legacy, n, |i| !masked(i)), db)
-            }
-            Ceiling::Below(db, hz) => {
-                let low = |x: &[f32]| low_pass(&x[..n], hz / rate as f64);
-                let ours_low = [low(&ours[0]), low(&ours[1])];
-                let legacy_low: Vec<Vec<f32>> = legacy.iter().map(|c| low(c)).collect();
-                (residual_db(&ours_low, &legacy_low, n, |_| true), db)
-            }
             Ceiling::Adjusted(db, edit) => {
                 let mut adjusted =
                     parse(&std::fs::read_to_string(pdir.join("loaded.json")).unwrap()).unwrap();
@@ -412,39 +399,6 @@ fn residual_db(
         }
     }
     db((e / k.max(1) as f64).sqrt())
-}
-
-/// A linear-phase low-pass at `cutoff` (a fraction of the sample rate):
-/// 1023 taps of a Blackman-windowed sinc, about −74 dB from 1 kHz above the
-/// cutoff at 48 kHz.
-fn low_pass(x: &[f32], cutoff: f64) -> Vec<f32> {
-    let taps = 1023usize;
-    let half = (taps / 2) as f64;
-    let h: Vec<f64> = (0..taps)
-        .map(|k| {
-            let t = k as f64 - half;
-            let sinc = if t == 0.0 {
-                2.0 * cutoff
-            } else {
-                (2.0 * std::f64::consts::PI * cutoff * t).sin() / (std::f64::consts::PI * t)
-            };
-            let w = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * k as f64 / (taps - 1) as f64).cos()
-                + 0.08 * (4.0 * std::f64::consts::PI * k as f64 / (taps - 1) as f64).cos();
-            sinc * w
-        })
-        .collect();
-    (0..x.len())
-        .map(|i| {
-            let mut acc = 0f64;
-            for (k, hk) in h.iter().enumerate() {
-                let j = i as i64 + k as i64 - half as i64;
-                if j >= 0 && (j as usize) < x.len() {
-                    acc += hk * x[j as usize] as f64;
-                }
-            }
-            acc as f32
-        })
-        .collect()
 }
 
 /// Media the graph could not open: (layer, asset, reason).

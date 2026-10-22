@@ -129,6 +129,10 @@ pub struct VoicePlan {
     /// the pitch choice): two revisions with the same key read the source
     /// identically, so a time stretch in progress carries over a live edit.
     pub map_key: u64,
+    /// Today's decode resampling of a linear voice's source to the project
+    /// rate and to 48 kHz (the export's), prepared with the graph so no
+    /// render walks a long file ([`crate::today::conversion`]).
+    pub conversions: Vec<Arc<crate::today::Conversion>>,
 }
 
 /// One evaluation of a voice at a master time.
@@ -545,6 +549,22 @@ impl<'d> Walk<'_, 'd> {
             _ => None,
         };
         let map_key = self.map_key(&levels, kind, &asset, &file, &source, conform, pitch);
+        let mut conversions: Vec<Arc<crate::today::Conversion>> = Vec::new();
+        if offset.is_some()
+            && let Some(frames) = source.length()
+        {
+            let project = crate::mixer::project_sample_rate(self.doc);
+            for rate in [project, 48_000] {
+                if rate != source.sample_rate() && !conversions.iter().any(|c| c.rate == rate) {
+                    conversions.push(crate::today::conversion(
+                        source.id(),
+                        frames,
+                        source.sample_rate(),
+                        rate,
+                    ));
+                }
+            }
+        }
         let mut plan = VoicePlan {
             id,
             strip,
@@ -562,6 +582,7 @@ impl<'d> Walk<'_, 'd> {
             conform,
             constant_rate,
             map_key,
+            conversions,
         };
         if !plan.animated {
             // Every input is static: evaluate once, inside the window.

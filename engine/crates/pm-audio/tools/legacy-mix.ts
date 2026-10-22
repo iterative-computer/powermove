@@ -98,6 +98,18 @@ function tone(rate: number, seconds: number, hz: number, amplitude: number): Flo
   return x;
 }
 
+/** Deterministic white noise (a 32-bit LCG): every band, so a resampler or
+ * an interpolation that differs anywhere shows. */
+function noise(rate: number, seconds: number, amplitude: number, seed: number): Float32Array {
+  const x = new Float32Array(Math.round(rate * seconds));
+  let state = seed >>> 0;
+  for (let i = 0; i < x.length; i++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    x[i] = amplitude * (state / 2147483648 - 1);
+  }
+  return x;
+}
+
 /** Frame N at fps num/den lands at sample floor(N × rate × den / num). */
 const frameSample = (n: number, rate: number, [num, den]: [number, number]) => Math.floor(n * rate * den / num);
 
@@ -117,6 +129,11 @@ function generateMedia(dir: string): Record<string, string> {
   files['tone550.wav'] = wav(48000, [tone(48000, 4, 550, 0.4), tone(48000, 4, 550, 0.4)], STEREO);
   files['tone660.wav'] = wav(48000, [tone(48000, 4, 660, 0.4), tone(48000, 4, 660, 0.3)], STEREO);
   files['tone44k.wav'] = wav(44100, [tone(44100, 3, 1000, 0.5), tone(44100, 3, 1500, 0.5)], STEREO);
+  // Full-band noise at the rates people import, for the decode resampler.
+  for (const rate of [22050, 32000, 44100, 88200, 96000]) {
+    files[`noise${rate}.wav`] = wav(rate, [noise(rate, 1.2, 0.4, rate), noise(rate, 1.2, 0.4, rate + 1)], STEREO);
+  }
+  files['noise48.wav'] = wav(48000, [noise(48000, 3, 0.4, 7), noise(48000, 3, 0.4, 8)], STEREO);
   files['mono22k.wav'] = wav(22050, [tone(22050, 3, 330, 0.6)], MONO);
   files['surround.wav'] = wav(48000, [300, 400, 500, 60, 700, 800].map(hz => tone(48000, 3, hz, 0.2)), SIDE51);
   // Mono in the ways files carry it: plain, with a center mask, with no mask, at 22.05 kHz.
@@ -208,6 +225,41 @@ function projects(): AudioProject[] {
   b = newProject('audio/mono', { name: 'Mono sources', fps: 30, dur: MONO_SOURCES.length * 0.5 });
   MONO_SOURCES.forEach((name, i) => b.add(audioLayer(b, name, {}, { from: i * 0.5, dur: 0.5 })));
   out.push({ name: 'mono', doc: b.root, notes: `Mono sources in turn, 0.5 s each: ${MONO_SOURCES.join(', ')}.` });
+
+  // The app's own shape (PM.P channels on every field, as the export
+  // encoding parity spec builds its automation project): gain keyframes,
+  // fades and trims as channels, a nested composition with channel levels.
+  b = newProject('audio/app-channels', { name: 'App channels', fps: 30, dur: 1 });
+  const nestedComp = b.composition({ name: 'Nested audio', fps: 30, dur: 1 });
+  nestedComp.audioGain = b.ch(0.7);
+  b.within(nestedComp, () => b.add(audioLayer(b, 'tone440.wav', { gain: b.ch(0.35), trim: b.ch(0.1), speed: b.ch(1), fadeIn: b.ch(0.08), fadeOut: b.ch(0.1) }, { from: 0, dur: 1 }), nestedComp));
+  b.add(audioLayer(b, 'tone550.wav', { gain: b.ch(0.25, [[0, 0.25], [0.4, 0.9], [0.85, 0.4]]), trim: b.ch(0.05), fadeIn: b.ch(0.14), fadeOut: b.ch(0.2) }, { from: 0.1, dur: 0.85 }));
+  b.add(b.layer('precomp', { name: 'Nested mix', from: 0, dur: 1, d: { comp: nestedComp.id, audioGain: b.ch(0.75), trim: b.ch(0) } }));
+  out.push({ name: 'app-channels', doc: b.root, notes: 'Every content field a channel, a nested composition, gain keyframes.' });
+
+  // Today's envelope steps one frame apart (at least 30 a second) along
+  // eased keys and animated fades, from where each clip starts.
+  for (const fps of [24, 60]) {
+    b = newProject(`audio/eased-${fps}`, { name: `Eased levels at ${fps} fps`, fps, dur: 2.5 });
+    b.add(audioLayer(b, 'noise48.wav', { gain: b.ch(0.2, [[0.1, 0.2, { legacy: 'easeInOut' }], [1.2, 1.4, { legacy: 'expoOut' }], [2, 0.3, { legacy: 'backOut' }]]), fadeIn: b.ch(0.2, [[0, 0.2], [1, 0.4]]), fadeOut: b.ch(0.35) }, { from: 0.05, dur: 2.3 }));
+    b.add(audioLayer(b, 'tone660.wav', { gain: b.ch(0.6), trim: b.ch(0.2), fadeIn: b.ch(0.5), fadeOut: b.ch(0.5) }, { from: 0.4, dur: 1.2 }));
+    out.push({ name: `eased-${fps}`, doc: b.root, notes: `Eased gain keys and an animated fade in at ${fps} fps.` });
+  }
+
+  // In-points and starts between samples: today's source node interpolates
+  // a start between frames and rounds the offset to a whole sample.
+  b = newProject('audio/fractional', { name: 'Fractional starts', fps: 30, dur: 2 });
+  b.add(audioLayer(b, 'noise48.wav', { trim: 0.0104167, gain: 0.6 }, { from: 0.123457, dur: 0.7654321 }));
+  b.add(audioLayer(b, 'tone440.wav', { trim: 0.333333, gain: 0.5, fadeIn: 0.0123 }, { from: 1.0000104, dur: 0.9 }));
+  const shifted = b.composition({ name: 'Shifted', fps: 30, dur: 2 });
+  b.within(shifted, () => b.add(audioLayer(b, 'tone550.wav', { trim: 0.0201, gain: 0.7 }, { from: 0.0313, dur: 1.2 }), shifted));
+  b.add(b.layer('precomp', { name: 'Shifted', from: 0.40007, dur: 1.5, d: { comp: shifted.id, trim: 0.0507, audioGain: 0.9 } }));
+  out.push({ name: 'fractional', doc: b.root, notes: 'Clip starts, trims and precomposition offsets between samples.' });
+
+  // Every common import rate through the decode resampler.
+  b = newProject('audio/rates', { name: 'Sample rates', fps: 30, dur: 3.2 });
+  [22050, 32000, 44100, 88200, 96000].forEach((rate, i) => b.add(audioLayer(b, `noise${rate}.wav`, { trim: 0.05, gain: 0.8 }, { from: i * 0.6, dur: 0.9 })));
+  out.push({ name: 'rates', doc: b.root, notes: 'Full-band noise at 22.05, 32, 44.1, 88.2 and 96 kHz, overlapping.' });
 
   b = newProject('audio/embedded', { name: 'Embedded audio', fps: 30, dur: 2 });
   b.add(b.layer('video', { name: 'MOV soundtrack', from: 0.2, dur: 1.6, d: { asset: ref('h264-aac.mov'), fit: 'contain', w: 320, h: 180, trim: 0.3, embeddedAudio: true, audioGain: 0.8 } }));

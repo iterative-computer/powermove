@@ -177,6 +177,28 @@ struct Voice {
     preparing: Option<i64>,
     fixed: Option<crate::graph::StaticMap>,
     prefill: Option<Prefill>,
+    /// Today's export model of a linear voice ([`crate::today`]).
+    today: Today,
+}
+
+/// Whether a voice plays through today's export model.
+enum Today {
+    /// Not yet looked at (the composition is needed).
+    Unbuilt,
+    /// Not covered (a time map that is not linear, a negative start, a
+    /// source without a known length): the engine's readers play it.
+    Off,
+    On(Box<TodayVoice>),
+}
+
+struct TodayVoice {
+    shape: crate::today::Shape,
+    /// Today's decode of a source at another rate.
+    conversion: Option<Arc<crate::today::Conversion>>,
+    /// Frames of the decoded buffer at the mix rate.
+    len: u64,
+    /// The clip for the mixer's range; `None` when today plays nothing.
+    clip: Option<crate::today::Clip>,
 }
 
 /// Whether a voice plays through the time stretch.
@@ -241,6 +263,10 @@ pub struct Mixer {
     /// prepared start identical to a fresh offline render at that point.
     prepared: HashMap<i64, Prepared>,
     standard_content: bool,
+    /// Today's export range for linear voices ([`Self::set_today_range`]).
+    today_range: crate::today::Range,
+    /// Scratch: source frames a converted voice reads.
+    today_src: Vec<Vec<f32>>,
 }
 
 // A normal ring's worth of complete PCM covers independent priming.
@@ -829,6 +855,8 @@ impl Mixer {
             reads: HashMap::new(),
             prepared: HashMap::new(),
             standard_content: false,
+            today_range: crate::today::Range::default(),
+            today_src: vec![],
         };
         m.glide_len = (m.format.sample_rate as usize * RETUNE_GLIDE_MS as usize / 1000).max(1);
         m.set_graph(m.doc.clone(), graph);
@@ -837,6 +865,103 @@ impl Mixer {
 
     pub fn format(&self) -> &MixFormat {
         &self.format
+    }
+
+    /// Today's export range (seconds) for the voices today's model plays
+    /// ([`crate::today`]): context frame 0 is project sample `origin`.
+    /// Exports set their range; the default is the project from its start.
+    pub fn set_today_range(&mut self, t0: f64, t1: f64, origin: i64) {
+        let range = crate::today::Range { t0, t1, origin };
+        if range == self.today_range {
+            return;
+        }
+        self.today_range = range;
+        for voice in self
+            .voices
+            .iter_mut()
+            .chain(self.outgoing.iter_mut().flat_map(|g| g.voices.iter_mut()))
+        {
+            voice.today = Today::Unbuilt;
+        }
+    }
+
+    /// Builds voice `vi`'s place in today's model if it has none yet.
+    fn ensure_today(
+        &mut self,
+        vi: usize,
+        plan: &VoicePlan,
+        comps: &[pm_eval::Comp<'_>],
+    ) -> Result<()> {
+        if !matches!(self.voices[vi].today, Today::Unbuilt) {
+            return Ok(());
+        }
+        if !today_candidate(plan) {
+            self.voices[vi].today = Today::Off;
+            return Ok(());
+        }
+        let p = self.format.sample_rate;
+        let root = self.doc.root();
+        let shape = root.and_then(|root| crate::today::Shape::new(plan, comps, root));
+        let source = &plan.source;
+        let built = match (shape, source.length()) {
+            (Some(shape), Some(frames)) => {
+                let (conversion, len) = if source.sample_rate() == p {
+                    (None, frames)
+                } else {
+                    // The graph prepared it (the walk over a long file is
+                    // not a render's work); other rates compute it here.
+                    let c = plan
+                        .conversions
+                        .iter()
+                        .find(|c| c.rate == p)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            crate::today::conversion(source.id(), frames, source.sample_rate(), p)
+                        });
+                    let len = c.len;
+                    (Some(c), len)
+                };
+                let clip = crate::today::Clip::new(
+                    &shape,
+                    &mut self.ev,
+                    comps,
+                    len,
+                    p as f64,
+                    self.today_range,
+                )?;
+                Today::On(Box::new(TodayVoice {
+                    shape,
+                    conversion,
+                    len,
+                    clip,
+                }))
+            }
+            _ => Today::Off,
+        };
+        self.voices[vi].today = built;
+        Ok(())
+    }
+
+    /// The source frames today's model reads for voice `vi` over project
+    /// samples `[start, end)`, if it plays the voice.
+    fn today_span(&self, vi: usize, start: i64, end: i64) -> Option<Option<(i64, i64)>> {
+        let Today::On(t) = &self.voices[vi].today else {
+            return None;
+        };
+        let Some(clip) = &t.clip else {
+            return Some(None);
+        };
+        let first = clip.read.start_frame + self.today_range.origin;
+        let (a, b) = (start.max(first), end.min(first + clip.read.frames));
+        if b <= a {
+            return Some(None);
+        }
+        let x0 = clip.read.position(a - first).floor() as i64 - 1;
+        let x1 = clip.read.position(b - 1 - first).floor() as i64 + 2;
+        Some(Some(match &t.conversion {
+            None => (x0, x1),
+            Some(c) => c.source_span(x0.max(0) as u64, (x1.max(0) as u64).min(c.len)),
+        }))
     }
 
     /// Replaces the evaluator (an expression engine, hooks).
@@ -849,6 +974,7 @@ impl Mixer {
         ) {
             voice.fixed = None;
             voice.prefill = None;
+            voice.today = Today::Unbuilt;
             if voice.stretch.is_some() {
                 voice.stretch = Some(Arc::new(std::sync::Mutex::new(StretchRun::new(
                     plan.source.channels(),
@@ -1436,6 +1562,7 @@ impl Mixer {
                     preparing: None,
                     fixed: None,
                     prefill: prefills.get(&(v.id.clone(), v.map_key)).cloned(),
+                    today: Today::Unbuilt,
                 }
             })
             .collect();
@@ -1710,6 +1837,16 @@ impl Mixer {
         frames: usize,
         options: &RenderOptions,
     ) -> Result<Option<bool>> {
+        self.ensure_today(vi, plan, comps)?;
+        if matches!(self.voices[vi].today, Today::On(_)) {
+            let mut today = std::mem::replace(&mut self.voices[vi].today, Today::Off);
+            let Today::On(t) = &mut today else {
+                unreachable!()
+            };
+            let result = self.render_today(vi, plan, t, comps, start, frames, options);
+            self.voices[vi].today = today;
+            return result;
+        }
         let p = self.format.sample_rate as f64;
         let end = start + frames as i64;
         let (first, last) = voice_bounds(&self.voices[vi].reader, plan, p);
@@ -1982,19 +2119,175 @@ impl Mixer {
             }
         }
         // Fold into the strip with the per-sample gain.
-        let strip = &mut self.strips[voice.strip];
-        for (bus, row) in strip.iter_mut().zip(&voice.matrix) {
-            for (c, &m) in row.iter().enumerate() {
-                if m == 0.0 {
-                    continue;
-                }
-                let src = &self.voice_out[c];
-                let dst = &mut bus[offset..offset + n];
-                for i in 0..n {
-                    dst[i] += src[i] * (m * self.gains[i]);
+        fold(
+            &mut self.strips[voice.strip],
+            &voice.matrix,
+            &self.voice_out,
+            &self.gains,
+            offset,
+            n,
+        );
+        Ok(Some(!complete))
+    }
+
+    /// Mixes a voice through today's export model ([`crate::today`]) into
+    /// its strip: today's decode at the mix rate, its source node's start
+    /// and length, its gain envelope.
+    #[allow(clippy::too_many_arguments)]
+    fn render_today(
+        &mut self,
+        vi: usize,
+        plan: &VoicePlan,
+        t: &mut TodayVoice,
+        comps: &[pm_eval::Comp<'_>],
+        start: i64,
+        frames: usize,
+        options: &RenderOptions,
+    ) -> Result<Option<bool>> {
+        let Some(clip) = t.clip.as_mut() else {
+            return Ok(None);
+        };
+        let first = clip.read.start_frame + self.today_range.origin;
+        let (a, b) = (
+            start.max(first),
+            (start + frames as i64).min(first + clip.read.frames),
+        );
+        if b <= a {
+            return Ok(None);
+        }
+        let n = (b - a) as usize;
+        let offset = (a - start) as usize;
+        self.gains.clear();
+        self.gains.resize(n, 0.0);
+        clip.envelope.gains(
+            a - self.today_range.origin,
+            &mut self.gains,
+            &t.shape,
+            &mut self.ev,
+            comps,
+        )?;
+        if self.gains.iter().all(|&g| g == 0.0) {
+            return Ok(None);
+        }
+        // The decoded buffer frames these outputs read (one either side for
+        // the interpolation and its extrapolation at the end).
+        let k0 = a - first;
+        let x0 = clip.read.position(k0);
+        let x1 = clip.read.position(k0 + n as i64 - 1);
+        let fractional = x0.fract() != 0.0;
+        // The extrapolation at the buffer's last frame reads the one before.
+        let lo = x0.floor() as i64 - i64::from(x0.floor() as u64 + 1 >= t.len);
+        let hi = x1.floor() as i64 + 1 + i64::from(fractional);
+        let span = (hi - lo) as usize;
+        let source = plan.source.clone();
+        let sc = source.channels();
+        self.src.resize_with(sc, Vec::new);
+        for c in self.src.iter_mut() {
+            c.clear();
+            c.resize(span, 0.0);
+        }
+        let mut complete = true;
+        match &t.conversion {
+            None => {
+                let mut views: Vec<&mut [f32]> =
+                    self.src.iter_mut().map(|c| &mut c[..span]).collect();
+                self.src_valid.clear();
+                self.src_valid.resize(span, true);
+                complete &= self.cache.read_valid(
+                    &source,
+                    lo,
+                    span,
+                    &mut views,
+                    options.wait,
+                    options
+                        .drop_starved
+                        .then_some(self.src_valid.as_mut_slice()),
+                )?;
+            }
+            Some(conv) => {
+                // Only frames inside the converted buffer exist.
+                let j0 = lo.max(0);
+                let j1 = hi.min(t.len as i64);
+                if j1 > j0 {
+                    let (s0, s1) = conv.source_span(j0 as u64, j1 as u64);
+                    let sspan = (s1 - s0) as usize;
+                    self.today_src.resize_with(sc, Vec::new);
+                    for c in self.today_src.iter_mut() {
+                        c.clear();
+                        c.resize(sspan, 0.0);
+                    }
+                    let mut views: Vec<&mut [f32]> =
+                        self.today_src.iter_mut().map(|c| &mut c[..sspan]).collect();
+                    self.src_valid.clear();
+                    self.src_valid.resize(sspan, true);
+                    complete &= self.cache.read_valid(
+                        &source,
+                        s0,
+                        sspan,
+                        &mut views,
+                        options.wait,
+                        options
+                            .drop_starved
+                            .then_some(self.src_valid.as_mut_slice()),
+                    )?;
+                    let at = (j0 - lo) as usize;
+                    let m = (j1 - j0) as usize;
+                    for c in 0..sc {
+                        conv.render(
+                            j0 as u64,
+                            &self.today_src[c],
+                            s0,
+                            &mut self.src[c][at..at + m],
+                        );
+                    }
+                    if !complete && options.drop_starved {
+                        // Which converted frames have all of their taps.
+                        let mut converted = vec![true; span];
+                        conv.valid(j0 as u64, &self.src_valid, s0, &mut converted[at..at + m]);
+                        self.src_valid.clear();
+                        self.src_valid.extend_from_slice(&converted);
+                    }
                 }
             }
         }
+        if !complete && options.drop_starved {
+            // Drop just the frames whose buffer frames are missing.
+            let mut x = x0;
+            for i in 0..n {
+                let ri = x.floor() as i64 - lo;
+                let need = if fractional { 2 } else { 1 };
+                let ok = (ri..ri + need)
+                    .all(|k| k < 0 || k as usize >= span || self.src_valid[k as usize]);
+                if !ok {
+                    if self.gains[i] != 0.0 {
+                        self.voice_dropped_frames += 1;
+                    }
+                    self.gains[i] = 0.0;
+                }
+                x += 1.0;
+            }
+        }
+        self.voice_out.resize_with(sc, Vec::new);
+        for c in self.voice_out.iter_mut() {
+            c.clear();
+            c.resize(n, 0.0);
+        }
+        let mut x = x0;
+        for i in 0..n {
+            for c in 0..sc {
+                self.voice_out[c][i] = clip.read.sample(x, &self.src[c], lo);
+            }
+            x += 1.0;
+        }
+        let voice = &self.voices[vi];
+        fold(
+            &mut self.strips[voice.strip],
+            &voice.matrix,
+            &self.voice_out,
+            &self.gains,
+            offset,
+            n,
+        );
         Ok(Some(!complete))
     }
 
@@ -2165,6 +2458,21 @@ impl Mixer {
                     .get(&start)
                     .is_some_and(|p| p.output_ready(vi))
             {
+                continue;
+            }
+            if matches!(self.voices[vi].today, Today::Unbuilt) && !today_candidate(plan) {
+                self.voices[vi].today = Today::Off;
+            }
+            if matches!(self.voices[vi].today, Today::Unbuilt)
+                && let Ok(comps) = graph.resolve(&doc)
+                && self.ensure_today(vi, plan, &comps).is_err()
+            {
+                self.voices[vi].today = Today::Off;
+            }
+            if let Some(span) = self.today_span(vi, start, end) {
+                if let Some((lo, hi)) = span {
+                    out.push((plan.source.clone(), lo, hi));
+                }
                 continue;
             }
             let (first, last) = voice_bounds(&self.voices[vi].reader, plan, p);
@@ -2365,6 +2673,36 @@ fn blend(acc: &mut [Vec<f32>], next: &[Vec<f32>], done: usize, len: f32) {
 /// measured on that lattice: a clip whose in-point falls between two samples
 /// starts with its first source sample at the rounded position instead of
 /// losing it to `ceil` (a clip at frame 7 of 29.97 fps, 11,211.2 samples).
+/// Whether today's export model can play a voice: a linear time map at
+/// the source's own rate (the cheap part of [`crate::today::Shape::new`]).
+fn today_candidate(plan: &VoicePlan) -> bool {
+    plan.offset.is_some() && plan.conform == 1.0 && plan.source.length().is_some()
+}
+
+/// Adds a voice's channels into its strip through its fold matrix, with the
+/// per-sample gain.
+fn fold(
+    strip: &mut [Vec<f32>],
+    matrix: &[Vec<f32>],
+    voice_out: &[Vec<f32>],
+    gains: &[f32],
+    offset: usize,
+    n: usize,
+) {
+    for (bus, row) in strip.iter_mut().zip(matrix) {
+        for (c, &m) in row.iter().enumerate() {
+            if m == 0.0 {
+                continue;
+            }
+            let src = &voice_out[c];
+            let dst = &mut bus[offset..offset + n];
+            for i in 0..n {
+                dst[i] += src[i] * (m * gains[i]);
+            }
+        }
+    }
+}
+
 fn voice_bounds(reader: &Reader, plan: &VoicePlan, p: f64) -> (i64, i64) {
     match (reader, plan.offset) {
         (Reader::Copy { shift }, Some(offset)) => (

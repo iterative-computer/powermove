@@ -1557,6 +1557,12 @@ fn chromium_to_float(offset: f32, below: f32, above: f32) -> f32 {
     }
 }
 
+/// `FloatSampleTypeTraits<float>::FromFloat`: NaN is silence, everything
+/// else is clamped to the unit range.
+fn chromium_clip(v: f32) -> f32 {
+    if v.is_nan() { 0.0 } else { v.clamp(-1.0, 1.0) }
+}
+
 const U8_BELOW: f32 = 1.0 / 128.0;
 const U8_ABOVE: f32 = 1.0 / 127.0;
 const S16_BELOW: f32 = 1.0 / 32768.0;
@@ -1590,12 +1596,15 @@ unsafe fn convert(
             ff::AV_SAMPLE_FMT_S64 | ff::AV_SAMPLE_FMT_S64P => out.extend((skip..n).map(|i| {
                 ((at(i) as *const i64).read_unaligned() as f64 / 9_223_372_036_854_775_808.0) as f32
             })),
+            // Chromium clips decoded floats to [−1, 1] (NaN to 0) when it
+            // copies them into the decode's bus (`FloatSampleTypeTraits`):
+            // a loud MP3 or AAC frame plays clipped today.
             ff::AV_SAMPLE_FMT_FLT | ff::AV_SAMPLE_FMT_FLTP => {
-                out.extend((skip..n).map(|i| (at(i) as *const f32).read_unaligned()))
+                out.extend((skip..n).map(|i| chromium_clip((at(i) as *const f32).read_unaligned())))
             }
-            ff::AV_SAMPLE_FMT_DBL | ff::AV_SAMPLE_FMT_DBLP => {
-                out.extend((skip..n).map(|i| (at(i) as *const f64).read_unaligned() as f32))
-            }
+            ff::AV_SAMPLE_FMT_DBL | ff::AV_SAMPLE_FMT_DBLP => out.extend(
+                (skip..n).map(|i| chromium_clip((at(i) as *const f64).read_unaligned() as f32)),
+            ),
             _ => out.extend(std::iter::repeat_n(0.0, n - skip)),
         }
     }
@@ -1604,6 +1613,15 @@ unsafe fn convert(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn float_samples_clip_as_chromium_does() {
+        // A loud MP3 decodes past full scale; decodeAudioData holds it there.
+        assert_eq!(chromium_clip(-1.1439409), -1.0);
+        assert_eq!(chromium_clip(1.0966294), 1.0);
+        assert_eq!(chromium_clip(f32::NAN), 0.0);
+        assert_eq!(chromium_clip(0.4744522), 0.4744522);
+    }
 
     #[test]
     fn integer_samples_convert_as_chromium_does() {

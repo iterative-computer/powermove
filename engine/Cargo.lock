@@ -2045,6 +2045,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "libc",
+ "libm",
  "pm-audio",
  "pm-eval",
  "pm-media",
