@@ -155,7 +155,6 @@ fn draw_doc(
         .unwrap();
     let surface = &pool.surfaces[0];
     let place = placement(s, comp.0, comp.1);
-    assert_eq!(composed.reduced, place.reduced);
     // The overlay geometry names the layer where it is drawn.
     let layer = &composed.overlay.layers[0];
     assert_eq!(layer.layer.as_str(), "box");
@@ -301,19 +300,19 @@ fn todays_canvas_box_snaps_each_edge_and_renders_what_is_visible() {
 
 /// Today's crop at 500% on a 2x display of a 1920 × 1080 composition,
 /// panned to its right edge (`previewRenderViewport` for a 400 × 300 CSS
-/// stage: a 656 × 556 CSS crop at composition (1788.8, 444.4), a 1312 ×
-/// 1112 canvas). Its output from the composition's origin would be 19,200
-/// pixels wide, past the largest output: the crop is drawn from a smaller
-/// canvas, but into today's box, so every layer lands where today's does.
+/// stage: a 656 × 556 CSS crop at composition (1788.86, 444.4), a 1312 ×
+/// 1112 canvas). The output is today's canvas at today's full scale (10),
+/// starting at the crop's unrounded origin (17,888.6, 4,444), so every
+/// layer lands where today's does, at today's resolution (decision V1b).
 #[test]
-fn a_crop_past_the_largest_output_is_drawn_where_todays_canvas_is() {
+fn a_crop_far_from_the_origin_is_drawn_at_todays_scale_in_todays_box() {
     let mut s = state(PreviewResolution::Automatic);
     s.zoom = 5.0;
     s.canvas = Some(ViewerCanvas {
         width: 1312,
         height: 1112,
         crop: Rect {
-            x: 1788.8,
+            x: 1788.86,
             y: 444.4,
             width: 131.2,
             height: 111.2,
@@ -325,29 +324,27 @@ fn a_crop_past_the_largest_output_is_drawn_where_todays_canvas_is() {
             height: 556.0,
         },
     });
-    // The red solid covers composition (1880, 500) to (1920, 520): CSS
-    // (200, 150) to (400, 250) with the frame at (−9200, −2350).
+    // The red solid covers composition (1880, 500) to (1920, 520): output
+    // (911.4, 556) to (1311.4, 756), frame (399.4, 300) to (799.4, 500).
     let document = doc_sized("#3366CC", (1920, 1080), (1880.0, 500.0));
     let (bytes, bpr, place) = draw_doc(&document, (1920.0, 1080.0), &s, false);
     assert!(place.canvas);
-    let (kx, _) = place.reduced.expect("below today's resolution");
-    assert!(kx < 1.0 && kx > 0.8, "{kx}");
+    assert_eq!(place.output, Size::new(1312, 1112));
+    let (ox, oy) = place.origin.unwrap();
+    assert!((ox - 17888.6).abs() < 1e-6 && (oy - 4444.0).abs() < 1e-6);
     let red = [0, 0, 255, 255];
     let bg = [0xCC, 0x66, 0x33, 255];
-    // Device pixels: red from (400, 300) to (800, 500); the edges are
-    // bilinear over at most two reduced texels.
-    assert_eq!(bgra(&bytes, bpr, 403, 303), red);
-    assert_eq!(bgra(&bytes, bpr, 797, 497), red);
-    assert_eq!(bgra(&bytes, bpr, 396, 400), bg);
-    assert_eq!(bgra(&bytes, bpr, 600, 296), bg);
-    assert_eq!(bgra(&bytes, bpr, 600, 504), bg);
+    // A solid's quad covers the texels whose centers it holds: texel 911
+    // (center 911.5 ≥ 911.4) is red, at frame pixel 399, through 1311
+    // (center 1311.5 > 1311.4: not) at frame 799; a 1:1 box samples each
+    // texel exactly.
+    assert_eq!(bgra(&bytes, bpr, 399, 400), red);
+    assert_eq!(bgra(&bytes, bpr, 398, 400), bg);
+    assert_eq!(bgra(&bytes, bpr, 798, 400), red);
+    assert_eq!(bgra(&bytes, bpr, 799, 400), bg);
+    assert_eq!(bgra(&bytes, bpr, 600, 300), red);
+    assert_eq!(bgra(&bytes, bpr, 600, 299), bg);
+    assert_eq!(bgra(&bytes, bpr, 600, 499), red);
+    assert_eq!(bgra(&bytes, bpr, 600, 500), bg);
     assert_eq!(bgra(&bytes, bpr, 10, 10), bg);
-    // Where the 50% coverage falls: within one device pixel of today's edge.
-    let row: Vec<u8> = (390..410).map(|x| bgra(&bytes, bpr, x, 400)[2]).collect();
-    let edge = (390..410)
-        .zip(&row)
-        .find(|(_, r)| **r >= 128)
-        .map(|(x, _)| x)
-        .unwrap();
-    assert!((399..=401).contains(&edge), "{edge}: {row:?}");
 }
