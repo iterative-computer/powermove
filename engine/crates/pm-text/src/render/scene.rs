@@ -213,7 +213,9 @@ pub trait MaskSource {
     /// `post` (`[scaleX, skewY, skewX, scaleY]`, kept to 1/1024) with the
     /// synthetic skew `skew`, at quarter offsets `sub` in x and y, as the
     /// platform generates glyphs under a rotated, skewed or non-uniform
-    /// matrix. `None` when the platform does not draw glyphs this way.
+    /// matrix. `None` when the platform does not draw glyphs this way. A
+    /// mask over 256 px (beyond `fitsInAtlasDirect`) may carry its bounds
+    /// only, with empty `coverage`: the scene draws that glyph as a path.
     #[cfg(feature = "cg-masks")]
     #[allow(clippy::too_many_arguments)]
     fn matrix_mask(
@@ -523,6 +525,56 @@ impl Painter<'_> {
         Some(Arc::new(path))
     }
 
+    /// A glyph drawn as its canonical 64 px platform path under the
+    /// glyph's matrix (Skia's path sub run).
+    #[cfg(feature = "cg-masks")]
+    fn canonical_path_glyph(
+        &mut self,
+        run: &Run<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        place: &Placement,
+        origin: (f64, f64),
+        position: (f64, f64),
+    ) -> Option<PathGlyph> {
+        let path = self.canonical_glyph(run, coords, glyph)?;
+        Some(PathGlyph {
+            path,
+            matrix: place.glyph_matrix(origin, position, run.size / 64.0),
+            stroke: None,
+        })
+    }
+
+    /// The direct mask `m` of a glyph, or, when Skia's atlas rejects it
+    /// (`SkGlyphDigest::fitsInAtlasDirect`), the glyph's canonical path:
+    /// rejected direct-mask glyphs fall through to the path sub run.
+    #[cfg(feature = "cg-masks")]
+    #[allow(clippy::too_many_arguments)]
+    fn direct_mask_or_path(
+        &mut self,
+        m: Arc<GlyphMask>,
+        at: (i64, i64, bool),
+        run: &Run<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        place: &Placement,
+        origin: (f64, f64),
+        position: (f64, f64),
+        platform: &mut Vec<(i64, i64, Arc<GlyphMask>, bool)>,
+        canonical: &mut Vec<PathGlyph>,
+    ) {
+        if fits_atlas_direct(&m) {
+            platform.push((at.0, at.1, m, at.2));
+        } else if let Some(p) =
+            self.canonical_path_glyph(run, coords, glyph, place, origin, position)
+        {
+            canonical.push(p);
+        } else {
+            self.unsupported
+                .push("canonical platform glyph path unavailable".into());
+        }
+    }
+
     /// The fake-bold outset per side for a synthesized bold run.
     fn fake_bold(&self, synthetic: bool, device_size: f64) -> (f64, f64) {
         if synthetic {
@@ -686,7 +738,16 @@ impl Painter<'_> {
                 let Some(bare) = self.outlines.get(run.face, run.coords, g.id, plain) else {
                     continue;
                 };
-                let as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                // `SubRunContainer` draws masks only while
+                // `ApproximateTransformedTextSize` (the size times the
+                // matrix's largest scale) is below 256. Under a skew or a
+                // non-uniform scale that exceeds the uniform device size.
+                let as_path = self.profile.glyph_as_path(device_size, bare.bounds)
+                    || (self.masks.is_some()
+                        && !place.axis_aligned
+                        && self
+                            .profile
+                            .as_path(f64::from(run.size * place.max_scale())));
                 // A glyph whose distance field is beyond the atlas is drawn
                 // as a direct mask when its mask fits (`SubRunContainer`
                 // hands the SDFT run's rejects to the direct mask case).
@@ -734,14 +795,16 @@ impl Painter<'_> {
                     // the canonical 64 px under the glyph's matrix.
                     #[cfg(feature = "cg-masks")]
                     if let Coords::User(coords) = run.coords
-                        && let Some(local) = self.canonical_glyph(run, coords, g.id as u16)
+                        && let Some(glyph) = self.canonical_path_glyph(
+                            run,
+                            coords,
+                            g.id as u16,
+                            &place,
+                            origin,
+                            (g.x, g.y),
+                        )
                     {
-                        let gm = place.glyph_matrix(origin, (g.x, g.y), run.size / 64.0);
-                        canonical_glyphs.push(PathGlyph {
-                            path: local,
-                            matrix: gm,
-                            stroke: None,
-                        });
+                        canonical_glyphs.push(glyph);
                         continue;
                     }
                     self.unsupported
@@ -778,7 +841,18 @@ impl Painter<'_> {
                         place.strike_scale(),
                         super::skpath::Frame::fake_bold(run.size),
                     ) {
-                        platform.push((ix as i64, y as i64, m, true));
+                        self.direct_mask_or_path(
+                            m,
+                            (ix as i64, y as i64, true),
+                            run,
+                            coords,
+                            g.id as u16,
+                            &place,
+                            origin,
+                            (g.x, g.y),
+                            &mut platform,
+                            &mut canonical_glyphs,
+                        );
                     }
                     continue;
                 }
@@ -805,6 +879,20 @@ impl Painter<'_> {
                         style,
                         bare.bounds.inflate(grow_x, 0.0),
                     ) {
+                        #[cfg(feature = "cg-masks")]
+                        self.direct_mask_or_path(
+                            m,
+                            (ix as i64, y as i64, false),
+                            run,
+                            coords,
+                            g.id as u16,
+                            &place,
+                            origin,
+                            (g.x, g.y),
+                            &mut platform,
+                            &mut canonical_glyphs,
+                        );
+                        #[cfg(not(feature = "cg-masks"))]
                         platform.push((ix as i64, y as i64, m, false));
                     }
                     continue;
@@ -833,7 +921,20 @@ impl Painter<'_> {
                         skew_of(run) as f32,
                         sub,
                     ) {
-                        platform.push((ix as i64, iy as i64, m, false));
+                        // A skew or rotation can widen a glyph's mask past
+                        // the atlas even when its upright outline fits.
+                        self.direct_mask_or_path(
+                            m,
+                            (ix as i64, iy as i64, false),
+                            run,
+                            coords,
+                            g.id as u16,
+                            &place,
+                            origin,
+                            (g.x, g.y),
+                            &mut platform,
+                            &mut canonical_glyphs,
+                        );
                     }
                     continue;
                 }
@@ -1286,7 +1387,7 @@ impl Painter<'_> {
                     continue;
                 };
                 // Glyph images beyond the atlas are drawn as paths.
-                if m.width > 256 || m.height > 256 {
+                if !fits_atlas_direct(&m) {
                     return false;
                 }
                 platform.push((ix as i64, y as i64, m, true));
@@ -1526,6 +1627,19 @@ fn sdf_image(
 
 /// Ordered platform glyph masks of a `fillText` call, using the paint's
 /// preblend table. Filtered calls instead retain their N32 save layer.
+/// `SkGlyphDigest::fitsInAtlasDirect`: Skia places a direct glyph mask in
+/// its atlas only when `maxDimension() <= kSkSideTooBigForAtlas` (256).
+#[cfg(feature = "cg-masks")]
+fn fits_atlas_direct(m: &GlyphMask) -> bool {
+    m.width.max(m.height) <= 256
+}
+
+/// Whether `m` holds its pixels (an atlas-rejected mask may carry its
+/// bounds only).
+fn has_coverage(m: &GlyphMask) -> bool {
+    m.coverage.len() == m.width as usize * m.height as usize
+}
+
 fn mask_image(
     masks: &[(i64, i64, Arc<GlyphMask>, bool)],
     tables: [&[u8; 256]; 2],
@@ -1543,7 +1657,7 @@ fn mask_image(
     masks
         .iter()
         .filter_map(|(x, y, mask, path)| {
-            if mask.width == 0 || mask.height == 0 {
+            if mask.width == 0 || mask.height == 0 || !has_coverage(mask) {
                 return None;
             }
             let table = tables[usize::from(*path)];
@@ -1586,7 +1700,8 @@ fn mask_save_layer(
     blur: f64,
 ) -> Option<Item> {
     let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
-    for (x, y, m, _) in masks {
+    let masks: Vec<_> = masks.iter().filter(|(.., m, _)| has_coverage(m)).collect();
+    for (x, y, m, _) in &masks {
         x0 = x0.min(x + i64::from(m.left));
         y0 = y0.min(y + i64::from(m.top));
         x1 = x1.max(x + i64::from(m.left) + i64::from(m.width));
@@ -1998,6 +2113,123 @@ mod tests {
         }
         out.extend(body);
         out
+    }
+
+    /// Glyph images beyond Skia's direct-mask atlas draw as paths, never as
+    /// masks (the GPU atlas holds 512 px plots). Two gates, as in
+    /// `SubRunContainer`: text whose `ApproximateTransformedTextSize` (size
+    /// times the matrix's largest scale) is 256 or more draws as paths (an
+    /// 80 degree animator skew of 75 px text at 2x), and a glyph whose mask
+    /// is over 256 px is rejected to the path sub run (`fitsInAtlasDirect`:
+    /// a Zapfino glyph that fits upright, rotated 45 degrees). A nearly
+    /// upright rotation keeps the direct mask.
+    #[cfg(all(feature = "cg-masks", target_os = "macos"))]
+    #[test]
+    fn glyph_images_beyond_the_atlas_draw_as_paths() {
+        use skrifa::MetadataProvider;
+        use std::cell::RefCell;
+        struct Recorder(RefCell<Vec<usize>>);
+        impl PathRasterizer for Recorder {
+            fn raster(
+                &self,
+                paths: &[PathGlyph],
+                _: (u32, u32),
+                _: Rgba,
+                _: f64,
+                _: f64,
+            ) -> Option<Item> {
+                self.0.borrow_mut().push(paths.len());
+                None
+            }
+        }
+        let font = |name: &str| {
+            std::fs::read(format!("/System/Library/Fonts/Supplemental/{name}.ttf"))
+                .expect("ships with macOS")
+        };
+        let (arial, zapfino) = (font("Arial"), font("Zapfino"));
+        let draw = |data: &[u8], ch: char, size: f32, m: Affine| {
+            let face = FaceRef {
+                data,
+                index: 0,
+                id: 1,
+            };
+            let id = skrifa::FontRef::new(data)
+                .unwrap()
+                .charmap()
+                .map(ch)
+                .unwrap()
+                .to_u32();
+            let glyphs = [PlacedGlyph { id, x: 0.0, y: 0.0 }];
+            let mut outlines = Outlines::new();
+            let mut bitmaps = Bitmaps::new();
+            let mut masks = super::super::cgmask::CgMasks::new();
+            let recorder = Recorder(RefCell::new(Vec::new()));
+            let mut painter = Painter {
+                outlines: &mut outlines,
+                bitmaps: &mut bitmaps,
+                masks: Some(&mut masks),
+                viewport: Some((2000, 1000)),
+                path_rasterizer: Some(&recorder),
+                profile: Profile::CANVAS2D,
+                unsupported: Vec::new(),
+            };
+            let run = Run {
+                face,
+                size,
+                coords: Coords::User(&[]),
+                synthetic_bold: false,
+                synthetic_italic: false,
+                oblique: 0.0,
+                glyphs: &glyphs,
+                bitmap_size: None,
+            };
+            let mut items = Vec::new();
+            painter.fill_text(
+                &mut items,
+                &[run],
+                (300.0, 300.0),
+                m,
+                [0.0, 0.0, 0.0, 1.0],
+                1.0,
+                0.0,
+            );
+            let masks: Vec<(u32, u32)> = items
+                .iter()
+                .filter_map(|i| match &i.content {
+                    ItemContent::GlyphMask { mask, .. } => Some((mask.width, mask.height)),
+                    _ => None,
+                })
+                .collect();
+            let unsupported = painter.unsupported;
+            (masks, recorder.0.into_inner(), unsupported)
+        };
+        let skew = 80f64.to_radians().tan();
+        let rotated = |deg: f64| Affine::scale(2.0) * Affine::rotate(deg.to_radians());
+        for (name, data, ch, size, m) in [
+            (
+                "skew",
+                &arial,
+                'H',
+                75.0,
+                Affine::new([2.0, 0.0, 2.0 * skew, 2.0, 0.0, 0.0]),
+            ),
+            ("rotation", &zapfino, 'g', 50.0, rotated(45.0)),
+        ] {
+            let (masks, paths, unsupported) = draw(data, ch, size, m);
+            assert!(unsupported.is_empty(), "{name}: {unsupported:?}");
+            assert!(
+                masks.is_empty(),
+                "{name}: a mask beyond the atlas: {masks:?}"
+            );
+            assert_eq!(paths, [1], "{name}: drawn as its canonical path");
+        }
+        let (masks, paths, unsupported) = draw(&zapfino, 'g', 50.0, rotated(1.0));
+        assert!(
+            unsupported.is_empty() && paths.is_empty(),
+            "{unsupported:?}"
+        );
+        assert_eq!(masks.len(), 1);
+        assert!(masks[0].0.max(masks[0].1) <= 256, "{masks:?}");
     }
 
     #[test]
