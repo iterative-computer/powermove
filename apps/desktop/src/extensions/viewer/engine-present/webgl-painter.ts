@@ -4,7 +4,7 @@
  * deliberately reject an 8-bit drawing buffer instead of silently losing EDR.
  * The engine still renders every frame natively; this only presents its surface.
  */
-import { DeviceLostError, type FramePainter, type PaintTarget } from './gpu';
+import { DeviceLostError, FrameUnusableError, type FramePainter, type PaintTarget } from './gpu';
 import type { SurfaceFormat, ViewerColorSpace } from './protocol';
 
 type GlWithFloatDrawingBuffer = WebGL2RenderingContext & {
@@ -141,15 +141,27 @@ export async function createWebGlPainter(canvas: PaintTarget): Promise<FramePain
       throw new DeviceLostError(lostReason!);
     }
     if (error !== gl.NO_ERROR) {
-      // During a GPU-process restart the imported VideoFrame's mailbox
-      // can become invalid before this context's loss event is dispatched.
-      // No JS exception is thrown by texImage2D in that interval. Retire
-      // this painter through the same loss path, never reuse that mailbox.
-      if (error === gl.INVALID_VALUE || error === gl.INVALID_OPERATION) {
-        markLost(`${operation} lost its graphics resource (GL 0x${error.toString(16)})`);
-        throw new DeviceLostError(lostReason!);
-      }
       throw new WebGlPainterCapabilityError(`${operation} failed (GL 0x${error.toString(16)})`);
+    }
+  };
+  /** The upload's own check: a frame naming a shared image that is gone. */
+  const checkUpload = (): void => {
+    const error = gl.getError();
+    if (error === gl.CONTEXT_LOST_WEBGL || gl.isContextLost()) {
+      markLost('WebGL context lost during VideoFrame RGBA16F upload');
+      throw new DeviceLostError(lostReason!);
+    }
+    if (error === gl.INVALID_VALUE || error === gl.INVALID_OPERATION) {
+      // During a GPU process restart a VideoFrame of an earlier surface
+      // import can name a shared image the new GPU process does not have;
+      // texImage2D reports it as a GL error and throws nothing. That frame
+      // is unusable, not this context: replacing the painter for it would
+      // count one restart as several losses and stop the presentation.
+      // A real loss still arrives through `webglcontextlost`.
+      throw new FrameUnusableError(`VideoFrame RGBA16F upload failed (GL 0x${error.toString(16)})`);
+    }
+    if (error !== gl.NO_ERROR) {
+      throw new WebGlPainterCapabilityError(`VideoFrame RGBA16F upload failed (GL 0x${error.toString(16)})`);
     }
   };
 
@@ -197,7 +209,7 @@ export async function createWebGlPainter(canvas: PaintTarget): Promise<FramePain
       // VideoFrame is a WebGL TexImageSource. HALF_FLOAT must be accepted for
       // F16 input; an unsupported upload fails closed instead of using RGBA8.
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, frame);
-      checkError('VideoFrame RGBA16F upload');
+      checkUpload();
       gl.bindVertexArray(vao);
       gl.useProgram(program);
       gl.clearColor(0, 0, 0, 0);

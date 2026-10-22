@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { DeviceLostError, type FramePainter } from './gpu';
+import { DeviceLostError, FrameUnusableError, type FramePainter } from './gpu';
 import { EnginePresenter, RESIZE_HOLD_MS, type FrameLink, type FrameSource, type PresentedFrame } from './presenter';
 import { TICKS_PER_SECOND, type ClockSample, type FrameDescriptor, type FrameRelease, type ViewerState, type VsyncHint } from './protocol';
 
@@ -43,6 +43,8 @@ class Painter implements FramePainter {
   draws: FakeFrame[] = [];
   configured: string[] = [];
   lostReason: string | null = null;
+  /** Frames whose upload fails as a stale shared image's does. */
+  unusable = new Set<string>();
   private pending: (() => void)[] = [];
   configure(format: string, colorSpace: string, width: number, height: number): void {
     this.configured.push(`${format}:${colorSpace}:${width}x${height}`);
@@ -50,6 +52,7 @@ class Painter implements FramePainter {
   draw(frame: VideoFrame): void {
     if (this.lostReason !== null) throw new DeviceLostError(this.lostReason);
     const fake = frame as unknown as FakeFrame;
+    if (this.unusable.has(fake.id)) throw new FrameUnusableError('GL 0x501');
     expect(fake.closed).toBe(false);
     this.draws.push(fake);
   }
@@ -379,6 +382,26 @@ describe('EnginePresenter', () => {
     expect(source.frames[0]!.closed).toBe(true);
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(presenter.stats.dropped['device-lost']).toBe(1);
+  });
+
+  it('releases a frame that cannot be read and keeps drawing the next ones on the same painter', async () => {
+    const { source, painter, link, presenter } = setup();
+    source.arrive(1, 1); source.arrive(1, 2);
+    painter.unusable.add('1:1');
+    presenter.receive({ type: 'frame', frame: desc(1) });
+    expect(() => presenter.refresh(16)).not.toThrow();
+    expect(painter.draws).toHaveLength(0);
+    expect(source.frames[0]!.closed).toBe(true);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+    expect(presenter.stats.dropped.unusable).toBe(1);
+    presenter.receive({ type: 'frame', frame: desc(2) });
+    presenter.refresh(32);
+    expect(painter.draws.map((f) => f.id)).toEqual(['1:2']);
+    painter.finishGpu();
+    await flush();
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }, { poolIndex: 2, seq: 2 }]);
+    expect(presenter.stats.dropped['device-lost']).toBeUndefined();
+    presenter.dispose();
   });
 
   it('picks the frame nearest the calibrated display instant (nearestRefresh, presentOffsetMs)', () => {
