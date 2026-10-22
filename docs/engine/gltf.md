@@ -186,7 +186,8 @@ repository.
   `createUniqueName`; shared-node attachment and root ownership across
   scenes follow r180's promise order since round 7 (see below).
 - An imported scene over two million vertices: today's runtime throws in
-  `sync` (not re-checked in round 6).
+  `sync`. Round 8 compares three accepted 600,000-vertex placements and
+  the fourth placement's refusal in both app routes; see scene3d.md.
 - Blender rendering of models is the Blender lane's.
 
 ## Changes outside the lane
@@ -379,7 +380,7 @@ The paired legacy/native shared-node and final-material capture is 100%
 within 2 CV. Applying the production 3D bar to its PNGs, without any edge
 exclusion, gives max 2 CV and object SSIM 0.99999768.
 
-## Phase 3c round 8: the NORMAL input of Basic and flat programs
+## Phase 3c round 8: consumed NORMAL inputs
 
 Round 7's draw rule treated `NORMAL` as consumed only by unflat Standard
 and Physical programs. Two parts of that were wrong against three r180:
@@ -400,8 +401,10 @@ and Physical programs. Two parts of that were wrong against three r180:
   only when NORMAL is absent; the rule now matches the measured program.
 
 `consumes_short_attribute` now reads: depth/distance programs consume
-NORMAL only with a displacement map; Standard/Physical always; Basic (and
-LineBasic, which shares `meshbasic_vert`) only when skinned or env-mapped.
+NORMAL only with a displacement map; Lambert/Phong/Standard/Physical
+always; Basic (and LineBasic, which shares `meshbasic_vert`) only when
+skinned or env-mapped. The four lit mesh shaders retain their normal input
+under flat shading, morph normals, environment maps and normal maps.
 Evidence: the Chromium probe (`e2e/scene3d-short-attributes.spec.ts`) has
 36 cases, 8 of them new: skinned Basic with full and short normals,
 env-mapped Basic, flat and skinned-flat Standard, and `overlay.ts`'s mask
@@ -411,3 +414,31 @@ others drew red. `pm-render`'s `viewport_chrome` test renders the color
 frame and all three chrome planes for skinned and unskinned, unlit and
 Standard short-normal GLBs (complete-normal controls draw everywhere), and
 fails against the round 7 rule.
+
+`scene3d-normal-matrix.spec.ts` also captures the Cartesian product of
+Basic, Lambert, Phong, Standard and Physical with skinning, morph normals,
+environment map, flat shading and normal map. Each normal-map state has
+tangent-space variants with and without vertex tangents, plus object-space
+normal mapping. Every variant has a complete-normal control and a short
+normal draw: 640 Chromium captures, 320 pairs. Morph-normal targets include
+POSITION, so these exercise valid morph-texture packing. Environment maps
+have a valid equirectangular size. Program reflection, defines, GL errors,
+coverage and center pixels accompany every capture.
+
+Of those pairs, 272 have drawable controls. Every active NORMAL rejects
+the short buffer with `INVALID_OPERATION` and zero coverage; inactive
+NORMAL draws exactly like its control. The remaining 48 pairs mutate
+MeshBasicMaterial with a normalMap, which r180 does not support: even the
+complete-normal control throws during uniform refresh before drawing.
+They are explicitly recorded as pre-draw exceptions, rather than evidence
+of short-attribute refusal. GLTFLoader excludes normalTexture when it
+constructs MeshBasicMaterial, so imported unlit models cannot reach that
+unsupported mutation. All combinations without that mutation are proven.
+
+The synthetic program-reflection oracle lives in
+`pm-render/tests/fixtures/short-normal-programs.json`; the native test checks
+NORMAL, TANGENT and TEXCOORD_0 against all 272 valid programs and separately
+counts the 48 invalid controls. Vertex tangents remain active only with a
+normal map and without flat shading. No import-wide NORMAL refusal was
+added: the importer retains original short lengths, and each final color,
+shadow or chrome program decides whether it consumes the attribute.
