@@ -378,13 +378,15 @@ test.describe('Use New Engine: existing extensions', () => {
       PM.setTime(0);
       await new Promise((r) => setTimeout(r, 300));
       at.length = 0; times.length = 0;
+      const started = performance.now();
       PM.play();
       await new Promise((r) => setTimeout(r, 3000));
       PM.pause();
       if (typeof off === 'function') off(); else off?.dispose?.();
       const gaps = at.slice(1).map((v, i) => v - at[i]!);
       const sorted = [...gaps].sort((a, b) => a - b);
-      return { frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null };
+      const firstFrameMs = Math.round(at.length ? at[0]! - started : 3000);
+      return { firstFrameMs, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null };
     });
     const { page } = session;
     await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint') && Boolean((window as any).PM?.EngineRender));
@@ -416,6 +418,7 @@ test.describe('Use New Engine: existing extensions', () => {
     // and no fewer frames than today's compositor presents.
     // Today's longest gap plus one frame at 30 fps, at most.
     expect(engine.maxGap).toBeLessThanOrEqual(today.maxGap + Math.ceil(1000 / 30));
+    expect(engine.firstFrameMs).toBeLessThanOrEqual(today.firstFrameMs + Math.ceil(1000 / 30));
     // (A 3 s window can start or end one frame apart: one frame of alignment.)
     expect(engine.frames).toBeGreaterThanOrEqual(today.frames - 1);
     expect(engine.uniqueTimes).toBeGreaterThanOrEqual(today.uniqueTimes - 1);
