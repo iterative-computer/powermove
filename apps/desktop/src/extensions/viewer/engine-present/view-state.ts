@@ -6,7 +6,7 @@
  * View), Play Every Frame, whether the display shows EDR values, and the
  * view sequence each descriptor echoes.
  */
-import type { EditorCamera, MediaPreference, PreviewResolution, Shading3d, ViewerColorSpace, ViewerState } from './protocol';
+import type { EditorCamera, MediaPreference, PreviewResolution, Shading3d, ViewerCanvas, ViewerColorSpace, ViewerState } from './protocol';
 
 export type ViewInput = {
   composition: string;
@@ -31,6 +31,8 @@ export type ViewInput = {
   /** The 3D chrome wants each frame's depth and object-id surface. */
   depthId?: boolean;
   chromeSelection?: import('./protocol').ChromeSelection;
+  /** Today's viewer canvas for this view (`todaysCanvas`, decision V1). */
+  canvas?: ViewerCanvas | null;
 };
 
 const MAX_EDGE = 16384;
@@ -39,6 +41,13 @@ const MAX_EDGE = 16384;
 export function deviceSize(cssWidth: number, cssHeight: number, dpr: number): { width: number; height: number } {
   const edge = (css: number): number => Math.min(MAX_EDGE, Math.max(1, Math.round(css * (dpr > 0 ? dpr : 1))));
   return { width: edge(cssWidth), height: edge(cssHeight) };
+}
+
+/** A canvas the engine accepts (`ViewerState::validate`). */
+function validCanvas(canvas: ViewerCanvas | null | undefined): canvas is ViewerCanvas {
+  const rect = (r: ViewerCanvas['crop']) => [r.x, r.y, r.width, r.height].every(Number.isFinite) && r.width > 0 && r.height > 0;
+  const edge = (v: number) => Number.isInteger(v) && v >= 1 && v <= MAX_EDGE;
+  return !!canvas && edge(canvas.width) && edge(canvas.height) && rect(canvas.crop) && rect(canvas.css);
 }
 
 function sameState(a: ViewerState, b: ViewerState): boolean {
@@ -84,7 +93,8 @@ export class ViewSequencer {
       edr: input.edr,
       viewSeq: this.seq,
       ...(input.depthId ? { depthId: true } : {}),
-      ...(input.chromeSelection ? { chromeSelection: input.chromeSelection } : {})
+      ...(input.chromeSelection ? { chromeSelection: input.chromeSelection } : {}),
+      ...(validCanvas(input.canvas) ? { canvas: { width: input.canvas.width, height: input.canvas.height, crop: { ...input.canvas.crop }, css: { ...input.canvas.css } } } : {})
     };
     if (this.last && sameState(this.last, candidate)) return { state: this.last, changed: false };
     this.seq += 1;

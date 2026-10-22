@@ -234,6 +234,7 @@ fn state(view_seq: u64, edr: bool, pan: [f64; 2]) -> ViewerState {
         vsync: None,
         depth_id: None,
         chrome_selection: None,
+        canvas: None,
     }
 }
 

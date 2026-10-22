@@ -217,6 +217,7 @@ fn build_options(
         sampling: request.sampling,
         shader_fallback,
         video_end: request.video_end,
+        origin: request.origin,
     }
 }
 
@@ -675,6 +676,7 @@ impl Renderer {
                 precision,
                 working: pm_protocol::color::WorkingEncoding::Standard,
                 full,
+                view: None,
                 taken: &mut taken,
                 native: Some(crate::effects::exec::Native {
                     effects: &mut self.effects,
@@ -717,7 +719,7 @@ impl Renderer {
             width: w,
             height: h,
         });
-        let coordinates = crate::effects::exec::effect_coordinates(region, full, (w, h));
+        let coordinates = crate::effects::exec::effect_coordinates(region, full, (w, h), None);
         self.with_runner(|r| {
             r.with_gpu("pm effects", precision, full, |gpu| {
                 Some(

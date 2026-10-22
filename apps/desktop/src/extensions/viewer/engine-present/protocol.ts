@@ -119,7 +119,13 @@ export type ViewerState = {
   /** Ask for each frame's depth and object-id surface (the 3D chrome). */
   depthId?: boolean | null;
   chromeSelection?: ChromeSelection;
+  /** Today's viewer canvas (decision V1): the engine renders at its size. */
+  canvas?: ViewerCanvas | null;
 };
+
+/** The WebGL canvas today's viewer draws a view into: its backing size, the
+ *  composition part it holds, and its CSS box in stage CSS pixels. */
+export type ViewerCanvas = { width: number; height: number; crop: Rect; css: Rect };
 
 /** Refreshes (BeginFrame times) fall at `hostTime + n × periodUs` (host µs). */
 export type VsyncHint = { hostTime: number; periodUs: number };
