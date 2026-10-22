@@ -445,7 +445,7 @@ function makeRender(PM: LegacyPM): RenderAPI {
       },
       resize: (width, height, viewport) => {
         const legacy = !!PM?.GL?.resize?.(width, height, viewport);
-        PM?.EngineCanvas?.resize?.();
+        PM?.EngineCanvas?.resize?.(width, height, viewport);
         return legacy || !!PM?.EngineCanvas?.bound;
       },
       compileError: (key) => PM?.GL?.compileError?.(key) ?? null,

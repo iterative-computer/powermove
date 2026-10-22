@@ -24,6 +24,7 @@
  * presenting engine session for a stage nobody sees).
  */
 import type { EngineViewerService, ViewParams } from '../../../extensions/viewer/engine-present/presentation';
+import { todaysCanvas } from '../../../extensions/viewer/engine-present/view-params';
 
 /** Mirrors engine-present/presentation.ts `ENGINE_STAGE_EVENT`. */
 export const ENGINE_STAGE_EVENT = 'powermove:engine-stage';
@@ -145,8 +146,10 @@ export class EngineCanvasBinding {
   }
 
   /** `render.gl.resize(width, height, previewViewport)`: the canvas moved
-   *  or changed size; the engine follows. */
-  resize(): void {
+   *  or changed size; the engine follows. The caller's backing size and
+   *  crop are today's compositor's canvas: the engine renders at it and
+   *  scales it into the canvas's box as the browser does (decision V1). */
+  resize(width?: number, height?: number, viewport?: { x: number; y: number; width: number; height: number } | null): void {
     const canvas = this.canvas;
     if (!canvas) return;
     if (!canvas.isConnected) {
@@ -183,8 +186,15 @@ export class EngineCanvasBinding {
       box.left + box.width / 2 - (parent.left + parent.width / 2),
       box.top + box.height / 2 - (parent.top + parent.height / 2)
     ];
+    // The canvas's box is its crop's box: the composition frame starts
+    // `crop.x × zoom` before it.
+    const zoomOfBox = viewport ? box.width / viewport.width : zoom;
+    const todays = width !== undefined && height !== undefined
+      ? todaysCanvas(comp.w, comp.h, { width, height }, viewport,
+        { x: box.left - parent.left - (viewport?.x ?? 0) * zoomOfBox, y: box.top - parent.top - (viewport?.y ?? 0) * zoomOfBox }, zoomOfBox)
+      : null;
     this.presentation.update(
-      { zoom: zoom > 0 && Number.isFinite(zoom) ? zoom : 1, pan, resolution: resolution(this.options.quality()), media: 'automatic', playEveryFrame: false },
+      { zoom: zoom > 0 && Number.isFinite(zoom) ? zoom : 1, pan, resolution: resolution(this.options.quality()), media: 'automatic', playEveryFrame: false, ...(todays ? { canvas: todays } : {}) },
       { width: parent.width, height: parent.height }
     );
   }
