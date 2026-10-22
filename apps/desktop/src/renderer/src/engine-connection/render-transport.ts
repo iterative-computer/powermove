@@ -221,10 +221,13 @@ export const COMPAT_LOOKAHEAD = 6;
 export const STALE_FRAMES = 12;
 /** Main-thread time one lookahead call may take (ms); the rest waits for the next frame. */
 const LOOKAHEAD_BUDGET_MS = 6;
+/** Most answers in one batched message (pm_protocol MAX_COMPAT_ANSWERS). */
+export const MAX_COMPAT_ANSWERS = 4096;
 /** Preparations (engine base rasters) started per turn; answers the
  *  producer gives at once are bounded by the turn's time budget only (a
  *  large project's frame has dozens of layers each frame). */
 const LOOKAHEAD_MAX_PREPARATIONS = 16;
+/** The turn scheduler without a window (tests, workers): a short timer. */
 const LOOKAHEAD_POLL_MS = 4;
 
 type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; revision: number | null; clockCursor: number | null };
@@ -280,6 +283,14 @@ export type RenderTransportOptions = {
   createCanvas?: (width: number, height: number) => HTMLCanvasElement;
   /** Level 1 SVG rasters a snapshot needs (svg-rasters.ts, decision S1). */
   svgRasters?: () => TransportSvgRasters | null;
+  /**
+   * Runs `fn` at the window's next animation frame (`requestAnimationFrame`).
+   * While playing, the engine's needs and the lookahead are answered in one
+   * task per frame there, where today's compositor ran the `raster` chain,
+   * instead of a task per message and a polling timer. Default: a short
+   * timer (no window).
+   */
+  nextFrame?: (fn: () => void) => void;
 };
 
 /** What draws the level 1 SVG rasters a snapshot names (SvgRasters). */
@@ -345,9 +356,17 @@ export class EngineRenderTransport {
   /** Clock-driven, bounded playback lookahead. Answers are keyed by the
    * layer's exact need (including scale/crop) and document revision. */
   private readonly ahead = new Map<string, AheadEntry>();
-  private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private aheadTurn = 0;
   private pumpingAhead = false;
+  /** Needs the engine asked for while playing, answered at the next turn. */
+  private queued: { need: CompatNeed; session: TransportSession }[] = [];
+  private turnPending = false;
+  private disposed = false;
+  /** While a turn (or a task answering several needs) runs: its pass-throughs
+   *  and reuses per session, posted together when it ends. */
+  private batch: Map<TransportSession, { natives: Record<string, unknown>[]; reuses: Record<string, unknown>[] }> | null = null;
+  /** Turns run and batched messages posted (diagnostics). */
+  readonly turnStats = { turns: 0, batches: 0, batchedAnswers: 0, turnMs: 0, slowestTurnMs: 0 };
   readonly lookaheadStats = { answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, inFlight: 0, maxInFlight: 0, obsolete: 0, slowestAnswerMs: 0, answerMs: 0, recentAnswers: [] as { time: number; ms: number }[], recent: [] as number[] };
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
@@ -361,8 +380,8 @@ export class EngineRenderTransport {
 
   dispose(): void {
     this.offAsk();
-    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer);
-    this.aheadTimer = null;
+    this.disposed = true;
+    this.queued = [];
     this.ahead.clear();
     this.producers.clear();
     this.answerers.clear();
@@ -422,40 +441,152 @@ export class EngineRenderTransport {
     }
   }
 
-  /** The engine asked `session` for answers (`CompatMessage` `needs`). */
+  /**
+   * The engine asked `session` for answers (`CompatMessage` `needs`). While
+   * playing they wait for the next turn (the window's next animation frame),
+   * which answers every need asked since the last one and the lookahead in
+   * one task; paused, they are answered now (a seek's frame waits on them).
+   */
   receiveCompat(message: Record<string, unknown>, session: TransportSession | null = this.options.session()): void {
     if (message['compat'] !== 'needs' || !session) return;
     const needs = Array.isArray(message['needs']) ? message['needs'] as CompatNeed[] : [];
-    const playing = !!this.options.playing?.();
-    const clock = playing ? this.options.playhead?.() : null;
-    const frame = this.options.frameTicks?.() ?? 0;
-    for (const need of needs) {
-      // A request far behind the clock is no longer a frame the engine can
-      // present: answer the clock's frame instead of filling an obsolete
-      // FIFO. One a few frames behind is answered: the engine holds that
-      // frame for it (its schedule skips frames that turn late), and a
-      // window whose turns run longer than a frame would otherwise skip
-      // every need the engine waits for.
-      const stale = !!clock && need.composition === this.options.composition() && frame > 0
-        && Math.sign(clock.rate) * (clock.time - need.time) > STALE_FRAMES * frame;
-      const asynchronous = playing && this.prepares(need);
-      const answered = !stale && !asynchronous && this.answerNeed(need, session);
-      if (asynchronous && !stale) this.ahead.get(this.aheadTag(need))?.sent.delete(need.time);
-      if (stale) this.lookaheadStats.skipped++;
-      if (playing) {
-        this.lookaheadStats.asked++;
-        const entry = this.ahead.get(this.aheadTag(need));
-        if (entry?.sent.has(need.time)) this.lookaheadStats.askedAhead++;
-        this.lookaheadStats.recent.push(need.time);
-        if (this.lookaheadStats.recent.length > 12) this.lookaheadStats.recent.shift();
-      }
-      this.lookahead(need, session, answered);
+    if (this.options.playing?.()) {
+      for (const need of needs) this.queued.push({ need, session });
+      this.requestTurn();
+      return;
     }
-    if (playing || this.preparers.size) this.presentedWhilePlaying(!playing);
+    this.withBatch(() => {
+      for (const need of needs) this.receiveNeed(need, session, false);
+      if (this.preparers.size) this.pump(true);
+    });
   }
 
-  /** Clock-driven replenishment also runs when no frame was presented. */
+  /** One need the engine asked for: answered, prepared, or skipped as stale. */
+  private receiveNeed(need: CompatNeed, session: TransportSession, playing: boolean): void {
+    const clock = playing ? this.options.playhead?.() : null;
+    const frame = this.options.frameTicks?.() ?? 0;
+    // A request far behind the clock is no longer a frame the engine can
+    // present: answer the clock's frame instead of filling an obsolete
+    // FIFO. One a few frames behind is answered: the engine holds that
+    // frame for it (its schedule skips frames that turn late), and a
+    // window whose turns run longer than a frame would otherwise skip
+    // every need the engine waits for.
+    const stale = !!clock && need.composition === this.options.composition() && frame > 0
+      && Math.sign(clock.rate) * (clock.time - need.time) > STALE_FRAMES * frame;
+    const asynchronous = playing && this.prepares(need);
+    const answered = !stale && !asynchronous && this.answerNeed(need, session);
+    if (asynchronous && !stale) this.ahead.get(this.aheadTag(need))?.sent.delete(need.time);
+    if (stale) this.lookaheadStats.skipped++;
+    if (playing) {
+      this.lookaheadStats.asked++;
+      const entry = this.ahead.get(this.aheadTag(need));
+      if (entry?.sent.has(need.time)) this.lookaheadStats.askedAhead++;
+      this.lookaheadStats.recent.push(need.time);
+      if (this.lookaheadStats.recent.length > 12) this.lookaheadStats.recent.shift();
+    }
+    this.lookahead(need, session, answered);
+  }
+
+  /** Asks for a turn at the window's next animation frame. */
+  private requestTurn(): void {
+    if (this.turnPending || this.disposed) return;
+    this.turnPending = true;
+    const run = (): void => {
+      this.turnPending = false;
+      if (!this.disposed) this.turn();
+    };
+    if (this.options.nextFrame) this.options.nextFrame(run);
+    else setTimeout(run, LOOKAHEAD_POLL_MS);
+  }
+
+  /**
+   * One turn while playing: the needs the engine asked for since the last
+   * turn (each once), then the lookahead within its budget, their
+   * pass-throughs and reuses posted as one message per session. While
+   * playing the next turn is asked for at once, so the horizon follows the
+   * clock on every animation frame whether or not a frame was presented.
+   */
+  private turn(): void {
+    const began = performance.now();
+    const playing = !!this.options.playing?.();
+    const queued = this.queued.splice(0);
+    this.withBatch(() => {
+      const seen = new Set<string>();
+      for (const { need, session } of queued) {
+        if (session.closed) continue;
+        const tag = `${this.aheadTag(need)}\u0000${need.time}\u0000${need.scale}\u0000${need.crop ? `${need.crop.x},${need.crop.y},${need.crop.width},${need.crop.height}` : ''}`;
+        if (seen.has(tag)) continue;
+        seen.add(tag);
+        this.receiveNeed(need, session, playing);
+      }
+      if (playing) this.pump(false);
+    });
+    const ms = performance.now() - began;
+    this.turnStats.turns++;
+    this.turnStats.turnMs += ms;
+    this.turnStats.slowestTurnMs = Math.max(this.turnStats.slowestTurnMs, ms);
+    if (playing && (this.ahead.size || this.queued.length)) this.requestTurn();
+  }
+
+  /**
+   * Runs `fn` with the pass-throughs and reuses it answers held back, then
+   * posts them as one `answers` message per session (in chunks of
+   * `MAX_COMPAT_ANSWERS`). Pixels go at once: a reuse posted with the batch
+   * names pixels posted before it. Nested calls join the outer batch.
+   */
+  private withBatch(fn: () => void): void {
+    if (this.batch) return fn();
+    const batch: NonNullable<EngineRenderTransport['batch']> = new Map();
+    this.batch = batch;
+    try {
+      fn();
+    } finally {
+      this.batch = null;
+      for (const [session, { natives, reuses }] of batch) {
+        if (session.closed) continue;
+        // One answer goes as its own message.
+        if (natives.length + reuses.length === 1) {
+          session.post(natives.length ? { type: 'compat', compat: 'native', ...natives[0] } : { type: 'compat', compat: 'reuse', ...reuses[0] });
+          continue;
+        }
+        for (let n = 0, r = 0; n < natives.length || r < reuses.length;) {
+          const takeNatives = Math.min(natives.length - n, MAX_COMPAT_ANSWERS);
+          const takeReuses = Math.min(reuses.length - r, MAX_COMPAT_ANSWERS - takeNatives);
+          const message = { type: 'compat', compat: 'answers', natives: natives.slice(n, n + takeNatives), reuses: reuses.slice(r, r + takeReuses) };
+          n += takeNatives; r += takeReuses;
+          if (!session.post(message)) break;
+          this.turnStats.batches++;
+          this.turnStats.batchedAnswers += takeNatives + takeReuses;
+        }
+      }
+    }
+  }
+
+  /** Posts a pass-through or reuse now, or holds it for the batch being made. */
+  private postAnswer(session: TransportSession, kind: 'natives' | 'reuses', answer: Record<string, unknown>, message: Record<string, unknown> & { type: string }): boolean {
+    const batch = this.batch;
+    if (!batch) return session.post(message);
+    if (session.closed || session.id === null) return false;
+    let held = batch.get(session);
+    if (!held) batch.set(session, held = { natives: [], reuses: [] });
+    held[kind].push(answer);
+    return true;
+  }
+
+  /**
+   * Clock-driven replenishment, also when no frame was presented: while
+   * playing, at the next turn; `warm` (paused, before Play) now.
+   */
   presentedWhilePlaying(warm = false, warmUntil = performance.now() + 50): void {
+    if (warm) {
+      this.withBatch(() => this.pump(true, warmUntil));
+      return;
+    }
+    if (this.options.playing?.()) this.requestTurn();
+  }
+
+  /** The lookahead: answers (or prepares) the known layers' frames ahead of the clock, within its budget. */
+  private pump(warm: boolean, warmUntil = performance.now() + 50): void {
     if (warm && !this.options.playing?.() && performance.now() >= warmUntil) return;
     if ((!this.options.playing?.() && !warm) || this.pumpingAhead) return;
     this.pumpingAhead = true;
@@ -522,11 +653,14 @@ export class EngineRenderTransport {
       this.lookaheadStats.pending = pending;
       this.lookaheadStats.maxPending = Math.max(this.lookaheadStats.maxPending, pending);
     } finally { this.pumpingAhead = false; }
-    this.scheduleAhead();
   }
 
+  /** Play: the known layers' frames at the playhead are answered in this
+   *  task (they reach the engine right after the play), then turns follow. */
   playbackStarted(): void {
-    this.presentedWhilePlaying();
+    if (!this.options.playing?.()) return;
+    this.withBatch(() => this.pump(false));
+    this.requestTurn();
   }
 
   /**
@@ -550,7 +684,7 @@ export class EngineRenderTransport {
       entry.sent.clear();
       moved = true;
     }
-    if (moved) this.presentedWhilePlaying(true, performance.now() + 50);
+    if (moved) this.withBatch(() => this.pump(true, performance.now() + 50));
   }
 
   /** Whether `need` waits for an asynchronous preparation before its
@@ -577,7 +711,8 @@ export class EngineRenderTransport {
         this.lookaheadStats.obsolete++;
         return;
       }
-      const answered = this.answerNeed(need, entry.session, true);
+      let answered = false;
+      this.withBatch(() => { answered = this.answerNeed(need, entry.session, true); });
       entry.sent.add(time);
       if (answered) {
         entry.posted = time;
@@ -594,19 +729,11 @@ export class EngineRenderTransport {
       this.aheadInFlight--;
       this.lookaheadStats.inFlight = this.aheadInFlight;
       // Each completed answer is independent: a slower sibling does not
-      // hold its ready pixels behind a Promise.all barrier.
-      this.presentedWhilePlaying(warm, warmUntil);
+      // hold its ready pixels behind a Promise.all barrier. Paused (the
+      // warm-up) the next preparations start now; playing, at the next turn.
+      if (this.options.playing?.()) this.requestTurn();
+      else if (warm) this.presentedWhilePlaying(true, warmUntil);
     });
-  }
-
-  private scheduleAhead(): void {
-    // A timer, rather than a presented-frame callback, breaks the deadlock
-    // when one late answer consumed the entire presentation horizon.
-    if (!this.options.playing?.() || !this.options.playhead || this.aheadTimer !== null || !this.ahead.size) return;
-    this.aheadTimer = setTimeout(() => {
-      this.aheadTimer = null;
-      this.presentedWhilePlaying();
-    }, LOOKAHEAD_POLL_MS);
   }
 
   private aheadTag(need: CompatNeed): string {
@@ -682,13 +809,15 @@ export class EngineRenderTransport {
     const id = { composition: need.composition, layer: need.layer, time: need.time, source: need.source };
     if (answer.kind === 'native') {
       this.compatStats.natives++;
-      return session.post({ type: 'compat', compat: 'native', ...id, scale: need.scale, revision, ...crop });
+      const native = { ...id, scale: need.scale, revision, ...crop };
+      return this.postAnswer(session, 'natives', native, { type: 'compat', compat: 'native', ...native });
     }
     if (answer.kind === 'reuse') {
       this.compatStats.reuses++;
       this.reused.add(`${tag}\u0000${revision}`);
       if (this.reused.size > 4096) this.reused.clear();
-      return session.post({ type: 'compat', compat: 'reuse', id: { ...id, key: answer.key }, scale: need.scale, revision, ...crop });
+      const reuse = { id: { ...id, key: answer.key }, scale: need.scale, revision, ...crop };
+      return this.postAnswer(session, 'reuses', reuse, { type: 'compat', compat: 'reuse', ...reuse });
     }
     this.compatStats.rasters++;
     return this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer, need.crop ?? undefined);
@@ -717,6 +846,17 @@ export class EngineRenderTransport {
     if (!compat.length) return;
     const session = this.options.session();
     if (!session) throw new EngineSnapshotError('unavailable', 'The window has no engine session to post compatibility pixels on.');
+    // The next request follows at once: these answers go before it.
+    const held = this.batch;
+    this.batch = null;
+    try {
+      this.answerEach(compat, session);
+    } finally {
+      this.batch = held;
+    }
+  }
+
+  private answerEach(compat: CompatNeed[], session: TransportSession): void {
     for (const need of compat) {
       if (!this.answerNeed(need, session)) {
         throw new EngineSnapshotError('notHeadlessRenderable', `No ${need.source === 'rasterOverride' ? 'raster override' : 'compatibility context'} in this window answered for layer ${need.layer}.`);
@@ -793,10 +933,12 @@ export class EngineRenderTransport {
       uploadFallback: () => {},
       post: (event) => { events.push(event as EngineCompatEvent); return true; }
     };
-    for (const need of compat) {
-      if (!this.answerNeed(need, carrier)) {
-        throw new EngineSnapshotError('notHeadlessRenderable', `No ${need.source === 'rasterOverride' ? 'raster override' : 'compatibility context'} in this window answered for layer ${need.layer}.`);
-      }
+    const held = this.batch;
+    this.batch = null;
+    try {
+      this.answerEach(compat, carrier);
+    } finally {
+      this.batch = held;
     }
     return events;
   }

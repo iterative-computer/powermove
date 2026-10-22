@@ -394,6 +394,13 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     },
     captionsHidden: () => PM.captionsHidden === true,
     svgRasters: () => svgRasters,
+    // Playing, the `raster` override's answers are drawn in one task per
+    // animation frame, as today's compositor called it from its frame loop
+    // (a hidden window has none: a short timer then).
+    nextFrame: (fn) => {
+      if (target.document?.visibilityState === 'hidden') setTimeout(fn, 16);
+      else target.requestAnimationFrame(() => fn());
+    },
     log
   });
   (PM as any).EngineRender = renderTransport;

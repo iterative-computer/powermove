@@ -514,19 +514,25 @@ describe('compatibility answers during playback', () => {
     const posted: any[] = [];
     const session: TransportSession = { id: 3, closed: false, generation: 2, resyncPending: false, applied: 5, uploadFallback: () => {}, post: (e) => { posted.push(e); return true; } };
     const state = { playing, time: 0, rate: 1, revision: 5 };
+    // The window's animation frames, run by hand.
+    const frames: Array<() => void> = [];
     const t = new EngineRenderTransport({
       native: {}, session: () => session, revision: () => state.revision, composition: () => 'P-root', document: () => 'P', viewSeq: () => null, fallbackRunner: () => null, log: () => {},
-      playing: () => state.playing, frameTicks: () => frame, playhead: () => ({ time: state.time, rate: state.rate })
+      playing: () => state.playing, frameTicks: () => frame, playhead: () => ({ time: state.time, rate: state.rate }),
+      nextFrame: (fn: () => void) => frames.push(fn)
     } as any);
     const asked: number[] = [];
     t.answerCompat('rasterOverride', (need) => { asked.push(need.time); return { kind: 'native' }; });
-    return { t, session, posted, asked, state };
+    const runFrame = (): void => { for (const fn of frames.splice(0)) fn(); };
+    return { t, session, posted, asked, state, frames, runFrame };
   }
+  /** Every pass-through posted, alone or in a batch. */
+  const natives = (posted: any[]): any[] => posted.flatMap((e) => e.compat === 'native' ? [e] : e.compat === 'answers' ? e.natives : []);
   const need = (time: number, layer = 'title') => ({ composition: 'P-root', layer, time, source: 'rasterOverride' as const, scale: 1 });
 
-  it('answers needs the producer is ready for at once while playing, and prepares only the rest', async () => {
+  it('answers needs the producer is ready for in the next animation frame while playing, and prepares only the rest', async () => {
     vi.useFakeTimers();
-    const { t, session, asked } = rig(true);
+    const { t, session, asked, runFrame } = rig(true);
     const prepared: string[] = [];
     // Many pass-through layers and one whose base must be prepared (a large
     // project: hundreds of text and shape layers, one wrapper that changes one).
@@ -535,61 +541,95 @@ describe('compatibility answers during playback', () => {
     try {
       const layers = Array.from({ length: 24 }, (_, i) => `layer-${i}`);
       t.receiveCompat({ compat: 'needs', needs: [...layers, 'typed'].map(l => need(0, l)) }, session);
-      // Every ready layer's current frame is answered in the same task.
+      // Nothing in the message's own task: the needs wait for the frame.
+      expect(asked).toEqual([]);
+      runFrame();
+      // Every ready layer's current frame is answered in that one task.
       expect(asked.filter(time => time === 0)).toHaveLength(24);
       expect(prepared).toEqual([]);
       await vi.advanceTimersByTimeAsync(0);
       expect(prepared[0]).toBe('typed@0');
       expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(2);
       // The horizon fills over the next turns, the ready layers synchronously.
-      for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(4);
+      for (let i = 0; i < 20; i++) { runFrame(); await vi.advanceTimersByTimeAsync(0); }
       for (let k = 0; k <= 6; k++) expect(asked.filter(time => time === k * frame).length).toBeGreaterThanOrEqual(24);
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 
   it('keeps a bounded horizon ahead of the clock without repeating work on duplicate presentation callbacks', () => {
-    const { t, session, asked, state } = rig(true);
+    const { t, session, asked, state, frames, runFrame } = rig(true);
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      runFrame();
       expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => i * frame));
       state.time = frame;
       t.presentedWhilePlaying();
+      runFrame();
       expect(asked.at(-1)).toBe(7 * frame);
       const count = asked.length;
       for (let i = 0; i < 20; i++) t.presentedWhilePlaying();
+      // One turn per animation frame, however many callbacks asked for it.
+      expect(frames).toHaveLength(1);
+      runFrame();
       expect(asked).toHaveLength(count);
       state.time = 3 * frame;
       t.receiveCompat({ compat: 'needs', needs: [need(3 * frame)] }, session);
+      runFrame();
       expect(asked.slice(count)).toEqual([3, 8, 9].map(n => n * frame));
     } finally { t.dispose(); }
   });
 
-  it('recovers from a missed horizon without any presented frame or reversal inferred from a delayed need', async () => {
-    vi.useFakeTimers();
-    const { t, session, asked, state } = rig(true);
+  it('recovers from a missed horizon without any presented frame or reversal inferred from a delayed need', () => {
+    const { t, session, asked, state, runFrame } = rig(true);
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      runFrame();
       const before = asked.length;
       state.time = 30 * frame;
       // The old engine request can arrive after the audio clock moved on.
       t.receiveCompat({ compat: 'needs', needs: [need(frame)] }, session);
+      runFrame();
       expect(asked.slice(before)).toEqual(Array.from({ length: 7 }, (_, i) => (30 + i) * frame));
       expect(t.lookaheadStats.skipped).toBe(1);
+      // The next animation frame follows the clock (no frame was presented).
       state.time = 40 * frame;
-      await vi.advanceTimersByTimeAsync(4);
+      runFrame();
       expect(asked.at(-1)).toBe(46 * frame);
       expect(t.lookaheadStats.recoveries).toBeGreaterThan(0);
-    } finally { t.dispose(); vi.useRealTimers(); }
+    } finally { t.dispose(); }
+  });
+
+  it('answers every need asked between two animation frames in one turn, posting the pass-throughs as one message', () => {
+    const { t, session, asked, posted, runFrame } = rig(true);
+    try {
+      const layers = Array.from({ length: 30 }, (_, i) => `layer-${i}`);
+      // Three messages (and one need repeated) before the frame.
+      t.receiveCompat({ compat: 'needs', needs: layers.slice(0, 10).map((l) => need(0, l)) }, session);
+      t.receiveCompat({ compat: 'needs', needs: layers.slice(10).map((l) => need(0, l)) }, session);
+      t.receiveCompat({ compat: 'needs', needs: [need(0, 'layer-3')] }, session);
+      expect(posted.filter((e) => e.compat !== 'producers')).toEqual([]);
+      runFrame();
+      expect(asked.filter((time) => time === 0)).toHaveLength(30);
+      const answers = posted.filter((e) => e.compat !== 'producers');
+      // One message: the 30 needs and the lookahead's frames ahead.
+      expect(answers.map((e) => e.compat)).toEqual(['answers']);
+      expect(answers[0].reuses).toEqual([]);
+      expect(natives(posted).filter((n) => n.time === 0).map((n) => n.layer).sort()).toEqual([...layers].sort());
+      expect(natives(posted)[0]).toMatchObject({ composition: 'P-root', time: 0, source: 'rasterOverride', scale: 1, revision: 5 });
+      expect(t.turnStats).toMatchObject({ turns: 1, batches: 1 });
+    } finally { t.dispose(); }
   });
 
   it('answers an engine need a few frames behind the clock, which the engine holds its frame for', () => {
-    const { t, session, asked, state } = rig(true);
+    const { t, session, asked, state, runFrame } = rig(true);
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      runFrame();
       const before = asked.length;
       // The window's turn ran long: the clock is three frames past the need.
       state.time = 4 * frame;
       t.receiveCompat({ compat: 'needs', needs: [need(frame)] }, session);
+      runFrame();
       expect(asked.slice(before)).toContain(frame);
       expect(t.lookaheadStats.skipped).toBe(0);
     } finally { t.dispose(); }
@@ -646,11 +686,12 @@ describe('compatibility answers during playback', () => {
 
   it('bounds async preparations, presents ready answers independently, and drops obsolete completions', async () => {
     vi.useFakeTimers();
-    const { t, session, asked, state } = rig(true);
+    const { t, session, asked, state, runFrame } = rig(true);
     const pending: Array<{ time: number; done: () => void }> = [];
     t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, n => new Promise(resolve => pending.push({ time: n.time, done: resolve })));
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      runFrame();
       await vi.advanceTimersByTimeAsync(0);
       expect(pending.map(p => p.time)).toEqual([0, frame]);
       expect(asked).toEqual([]);
@@ -664,42 +705,49 @@ describe('compatibility answers during playback', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual([frame]);
       expect(t.lookaheadStats.obsolete).toBe(1);
-      expect(pending.at(-1)!.time).toBe(30 * frame);
+      // The next turn prepares from the clock, two at a time.
+      runFrame();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending.slice(2).map(p => p.time)).toEqual([30 * frame, 31 * frame]);
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 
   it('keeps a nested composition time offset while following the open clock', () => {
-    const { t, session, asked, state } = rig(true);
+    const { t, session, asked, state, runFrame } = rig(true);
     try {
       state.time = 20 * frame;
       t.receiveCompat({ compat: 'needs', needs: [{ ...need(5 * frame), composition: 'nested' }] }, session);
+      runFrame();
       expect(asked.at(-1)).toBe(11 * frame);
       state.time = 30 * frame;
       t.presentedWhilePlaying();
+      runFrame();
       expect(asked.at(-1)).toBe(21 * frame);
     } finally { t.dispose(); }
   });
 
   it('uses the explicit reverse rate and resets its horizon on a seek or revision change', () => {
-    const { t, session, asked, state } = rig(true);
+    const { t, session, asked, state, runFrame } = rig(true);
     try {
       state.time = 20 * frame; state.rate = -1;
       t.receiveCompat({ compat: 'needs', needs: [need(state.time)] }, session);
+      runFrame();
       expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => (20 - i) * frame));
       state.time = 40 * frame;
       t.presentedWhilePlaying();
+      runFrame();
       expect(asked.at(-1)).toBe(34 * frame);
       const before = asked.length;
       state.revision++;
       t.presentedWhilePlaying();
+      runFrame();
       expect(asked.length - before).toBe(7);
     } finally { t.dispose(); }
   });
 
-  it('bounds producer work per turn even when one answer consumes the budget, and retires the timer', async () => {
-    vi.useFakeTimers();
+  it('bounds producer work per turn even when one answer consumes the budget, and stops turning once disposed', () => {
     const now = vi.spyOn(performance, 'now');
-    const { t, session, asked, state } = rig(false);
+    const { t, session, asked, state, frames, runFrame } = rig(false);
     let spent = 0;
     now.mockImplementation(() => spent);
     try {
@@ -713,13 +761,14 @@ describe('compatibility answers during playback', () => {
       expect(asked).toHaveLength(1);
       expect(t.lookaheadStats.pending).toBeLessThanOrEqual(40 * 7);
       state.time = 20 * frame;
-      await vi.advanceTimersByTimeAsync(4);
+      runFrame();
       expect(asked.at(-1)).toBe(state.time);
       expect(asked).toHaveLength(2);
       t.dispose();
-      await vi.advanceTimersByTimeAsync(100);
+      runFrame();
       expect(asked).toHaveLength(2);
-    } finally { t.dispose(); now.mockRestore(); vi.useRealTimers(); }
+      expect(frames).toHaveLength(0);
+    } finally { t.dispose(); now.mockRestore(); }
   });
 
   it('answers the layers it knows at a paused seek\'s frame before the seek reaches the engine', () => {
@@ -730,7 +779,7 @@ describe('compatibility answers during playback', () => {
       t.seeking(2);
       const at = 2 * 705_600_000;
       expect(asked.filter((time) => time === at)).toHaveLength(2);
-      expect(posted.filter((e) => e.compat === 'native' && e.time === at).map((e) => e.layer).sort()).toEqual(['a', 'b']);
+      expect(natives(posted).filter((e) => e.time === at).map((e) => e.layer).sort()).toEqual(['a', 'b']);
       // Not while playing (the clock drives the horizon then).
       asked.length = 0;
     } finally { t.dispose(); }
