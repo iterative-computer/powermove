@@ -678,6 +678,13 @@ mod tests {
     /// once, and a problem listed before (a media resolve) stays.
     #[test]
     fn recurring_render_errors_are_listed_once() {
+        struct ShutdownCache(Arc<SourceCache>);
+        impl Drop for ShutdownCache {
+            fn drop(&mut self) {
+                self.0.shutdown();
+            }
+        }
+
         let rate = 48_000u32;
         let directory = tempfile::Builder::new()
             .prefix("pm-node-audio-problems-")
@@ -694,6 +701,7 @@ mod tests {
         write_wav(&bad_file, rate, &[vec![0.3; n], vec![0.3; n]]);
         write_wav(&late_file, rate, &[vec![0.0; n], vec![0.2; n]]);
         let cache = SourceCache::new(64 << 20, 2);
+        let _decode_workers = ShutdownCache(cache.clone());
         let good = cache.open(&good_file, None).unwrap();
         cache.block(&good, 0, true).unwrap();
         let bad = cache.open(&bad_file, None).unwrap();
@@ -776,6 +784,5 @@ mod tests {
             "{problems:?}"
         );
         drop(playback);
-        cache.shutdown();
     }
 }

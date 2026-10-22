@@ -3453,3 +3453,18 @@ removes its own tree. The guard's regression checks cover a successful child,
 an exception exit and a deliberately leaking child. A failed-extension launch
 also returns to an empty temporary tree. This prevents repeated playback
 runs from accumulating generated media in the host temporary directory.
+
+Presenter fixtures used by the audio campaign also retain their temporary
+Blender area until both the host and worker threads have stopped. The audio
+presenter test joins decoder workers during panic unwinding.
+
+The guard uses a short owned directory and sets both `TMPDIR` and
+`MAC_CHROMIUM_TMPDIR`, covering generated test media, harness profiles and
+Chromium temporary files without exceeding macOS's socket-path limit. It
+checks for growth before reserving the device as well as at campaign exit.
+The report is published as running before launch and must bracket the final
+manifest's timestamps to qualify. Signal regressions verify that SIGTERM
+and SIGINT join the child and remove the owned tree. An uncatchable process
+kill still relies on the reservation's fixed expiry. The exclusive paired
+measurement phase releases its reservation before the sixty playback-suite
+runs, which each acquire an ordinary lease for their own duration.

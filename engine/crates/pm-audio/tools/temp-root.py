@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
+import sys
 import subprocess
 import tempfile
 import time
@@ -39,6 +41,15 @@ def interrupted(signum, _frame):
 def main():
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, interrupted)
+    if sys.argv[1:] == ['--check-current']:
+        root = Path(os.environ['PM_AUDIO_TEMP_ROOT'])
+        if Path(os.environ['TMPDIR']).resolve() != root.resolve():
+            raise SystemExit('campaign TMPDIR no longer matches its owned root')
+        state = snapshot(root)
+        if state['files'] or state['directories'] or state['bytes']:
+            raise SystemExit(f'temporary growth before reservation: {state}')
+        print('campaign temporary directory is empty before reservation', flush=True)
+        return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', required=True, type=Path)
     parser.add_argument('command', nargs=argparse.REMAINDER)
@@ -48,15 +59,36 @@ def main():
         parser.error('a child command is required')
     report = {'started': time.time(), 'status': 'running'}
     code = 1
+    root = None
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.report.write_text(json.dumps(report, indent=2) + '\n')
     try:
-        with tempfile.TemporaryDirectory(prefix='pm-audio-campaign-') as directory:
+        with tempfile.TemporaryDirectory(prefix='pma-', dir='/tmp') as directory:
             root = Path(directory)
             report.update(tmpdir=str(root), before=snapshot(root))
             env = os.environ.copy()
-            env.update(TMPDIR=str(root) + os.sep, TMP=str(root), TEMP=str(root))
+            env.update(TMPDIR=str(root) + os.sep, TMP=str(root), TEMP=str(root),
+                       MAC_CHROMIUM_TMPDIR=str(root), PM_AUDIO_TEMP_ROOT=str(root))
+            args.report.write_text(json.dumps(report, indent=2) + '\n')
             child = subprocess.Popen(command, env=env, start_new_session=True)
+            report['childPid'] = child.pid
+            args.report.write_text(json.dumps(report, indent=2) + '\n')
             try:
                 code = child.wait()
+                try:
+                    os.killpg(child.pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    # The direct child exited but left its own descendants.
+                    os.killpg(child.pid, signal.SIGTERM)
+                    code = code or 1
+                    report['survivingProcessGroup'] = True
+                    time.sleep(0.1)
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             except BaseException:
                 # This process group contains only this harness's child tree.
                 os.killpg(child.pid, signal.SIGTERM)
@@ -75,6 +107,14 @@ def main():
         report.update(status='failed', error=f'{type(error).__name__}: {error}')
         code = code or 1
     finally:
+        if root is not None:
+            if root.exists():
+                try:
+                    shutil.rmtree(root)
+                except OSError as error:
+                    report.update(status='failed', cleanupError=str(error))
+                    code = code or 1
+            report['removed'] = not root.exists()
         report['finished'] = time.time()
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2) + '\n')

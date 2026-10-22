@@ -816,7 +816,6 @@ fn blender_status(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicU64;
 
     use pm_blender::key::hex;
     use pm_blender::snapshot::BlenderFrame;
@@ -872,16 +871,11 @@ mod tests {
         }
     }
 
-    fn area() -> PathBuf {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "pm-viewer-blender-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn area() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("pm-viewer-blender-")
+            .tempdir()
+            .unwrap()
     }
 
     fn png(w: u32, h: u32, seed: u16) -> Vec<u8> {
@@ -1035,9 +1029,14 @@ mod tests {
         sent: Arc<Mutex<Vec<Envelope>>>,
         stats: Arc<Mutex<Stats>>,
         host: Host,
+        // Drop after the host and blender threads have stopped using the area.
+        _directory: Option<tempfile::TempDir>,
     }
 
     fn rig(mode: Mode, area_dir: Option<PathBuf>, budget: u64) -> Rig {
+        let directory = area_dir.is_none().then(area);
+        let area_path =
+            area_dir.unwrap_or_else(|| directory.as_ref().unwrap().path().to_path_buf());
         let link = HostLink::new(Arc::new(|| {}));
         let ready = Arc::new(Mutex::new(Vec::new()));
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -1065,7 +1064,7 @@ mod tests {
             Duration::from_millis(20),
         )
         .unwrap();
-        let host = host(link, area_dir.unwrap_or_else(area), mode);
+        let host = host(link, area_path, mode);
         Rig {
             blender,
             ready,
@@ -1073,6 +1072,7 @@ mod tests {
             sent,
             stats,
             host,
+            _directory: directory,
         }
     }
 

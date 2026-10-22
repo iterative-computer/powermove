@@ -1,5 +1,8 @@
 """The campaign guard must detect leaks and remove its tree on every exit."""
 import json
+import os
+import signal
+import time
 from pathlib import Path
 import subprocess
 import sys
@@ -39,6 +42,42 @@ class TempRootTests(unittest.TestCase):
         self.assertFalse(data['noGrowth'])
         self.assertGreater(data['after']['bytes'], data['before']['bytes'])
         self.assertEqual(data['status'], 'failed')
+
+    def test_signal_joins_child_and_removes_tree(self):
+        for stop in (signal.SIGTERM, signal.SIGINT):
+            with tempfile.TemporaryDirectory(prefix='pm-audio-signal-test-') as output:
+                report = Path(output) / 'report.json'
+                process = subprocess.Popen([
+                    sys.executable, str(Path(__file__).with_name('temp-root.py')),
+                    '--report', str(report), '--', sys.executable, '-c',
+                    'import os,time; open(os.environ["TMPDIR"]+"ready", "w").close(); time.sleep(100)',
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    until = time.monotonic() + 5
+                    ready = False
+                    while time.monotonic() < until:
+                        if report.exists():
+                            try:
+                                data = json.loads(report.read_text())
+                                ready = (Path(data.get('tmpdir', '/nonexistent')) / 'ready').exists()
+                            except json.JSONDecodeError:
+                                pass
+                            if ready:
+                                break
+                        time.sleep(.01)
+                    self.assertTrue(ready, 'child did not become ready')
+                    process.send_signal(stop)
+                    self.assertNotEqual(process.wait(timeout=5), 0)
+                    data = json.loads(report.read_text())
+                    self.assertEqual(data['status'], 'failed')
+                    self.assertTrue(data['removed'])
+                    self.assertFalse(Path(data['tmpdir']).exists())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(data['childPid'], 0)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
 
 
 if __name__ == '__main__':
