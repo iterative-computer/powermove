@@ -1646,31 +1646,3 @@ fn programs_built_ahead_draw_the_same_frame() {
     assert_eq!(pending, 0);
     assert_eq!(warm.prewarm_programs(Some(&doc)), 0, "nothing left to build");
 }
-
-/// Decision PROBE-1's idle sweep: the frames a viewer draws offscreen so
-/// the document's unjudged user programs are probed before playback meets
-/// them, one per program, just inside the first frame of the first layer
-/// using it; none once the programs are judged or without a runner.
-#[test]
-fn the_idle_sweep_lists_one_frame_per_unjudged_user_program() {
-    let _gpu = gpu();
-    let (set, code) = probe_swap();
-    let mut first = layer("a", "#3366CC", json!([{ "id": "f", "type": "probe.swap", "on": true, "p": {} }]), Value::Null);
-    first["from"] = json!(2.0);
-    first["dur"] = json!(3.0);
-    let mut again = layer("b", "#CC6633", json!([{ "id": "f", "type": "probe.swap", "on": true, "p": {} }]), Value::Null);
-    again["from"] = json!(4.0);
-    let plain = layer("c", "#202020", json!([{ "id": "f", "type": "blur", "on": true, "p": {} }]), Value::Null);
-    let doc = document(vec![first, again, plain]);
-    let mut r = Renderer::headless().unwrap();
-    r.set_definitions(&set).unwrap();
-    // Without a runner nothing is probed.
-    r.effects_mut().parity.configure(Some("sweep".into()), None);
-    assert!(r.probe_times(&doc, "P-root").is_empty());
-    r.set_shader_fallback_runner(true);
-    let times = r.probe_times(&doc, "P-root");
-    assert_eq!(times, vec![pm_render::compat::ticks_of(2.05)], "one frame for the user program, none for the built-in");
-    // Judged: nothing left to sweep.
-    r.effects_mut().parity.judge(&code, &FallbackPixels { width: 1, height: 1, rgba16f: vec![0; 4] }, &FallbackPixels { width: 1, height: 1, rgba16f: vec![0; 4] });
-    assert!(r.probe_times(&doc, "P-root").is_empty());
-}

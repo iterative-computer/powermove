@@ -598,10 +598,6 @@ struct View {
     /// needs, since when): it is planned again once all of them arrived,
     /// not once per answer (`compat_ready`).
     compat_waiting: Option<(Revision, Vec<pm_protocol::snapshot::CompatNeed>, std::time::Instant, i64)>,
-    /// Decision PROBE-1's idle sweep: frames (composition ticks) still to
-    /// draw offscreen so their programs are probed, and when the last was.
-    probe_sweep: Vec<Ticks>,
-    probe_swept_at: i64,
     /// Level 1 SVG buckets the latest frame drew without (the window could
     /// not draw them): asked for again while it shows them.
     svg_without: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
@@ -716,9 +712,6 @@ const COMPAT_WAIT_REPLAN: std::time::Duration = std::time::Duration::from_millis
 /// Frames past a playing frame that waits for compatibility answers whose
 /// needs are asked with it, and the most planning time spent on them.
 const COMPAT_ASK_AHEAD: i64 = 3;
-
-/// The idle sweep draws at most one probe frame this often (µs).
-const PROBE_SWEEP_US: i64 = 150_000;
 const COMPAT_ASK_AHEAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(30);
 
 /// Most waveform requests that wait for media answers at once.
@@ -2243,8 +2236,6 @@ impl Thread {
             dirty: true,
             external_wait: None,
             compat_waiting: None,
-            probe_sweep: Vec::new(),
-            probe_swept_at: 0,
             svg_without: Vec::new(),
             requests: VecDeque::new(),
             retry: None,
@@ -2937,7 +2928,6 @@ impl Thread {
         let keys: Vec<Key> = self.views.keys().copied().collect();
         for key in keys {
             self.work_view(key);
-            self.probe_sweep_step(key);
         }
         self.work_snapshots();
         #[cfg(feature = "remote-layer")]
@@ -3188,50 +3178,6 @@ impl Thread {
             Event::Failure(FailureReport { revision, error }),
             Some(revision),
         );
-    }
-
-    /// Decision PROBE-1's idle sweep: while `key`'s view is paused and has
-    /// nothing to draw or wait for, one frame of its sweep list is drawn
-    /// offscreen every [`PROBE_SWEEP_US`] and its probes are sent.
-    fn probe_sweep_step(&mut self, key: Key) {
-        let t = now();
-        let Some(view) = self.views.get_mut(&key) else {
-            return;
-        };
-        if view.probe_sweep.is_empty()
-            || view.clock.is_playing()
-            || view.dirty
-            || view.external_wait.is_some()
-            || view.compat_waiting.is_some()
-            || t - view.probe_swept_at < PROBE_SWEEP_US
-            || !self.config.document
-        {
-            return;
-        }
-        let Some(time) = view.probe_sweep.pop() else {
-            return;
-        };
-        view.probe_swept_at = t;
-        let state = view.state.clone();
-        let composition = state.composition.as_str().to_owned();
-        let (Some(gpu), Some(doc)) = (self.gpu.as_mut(), self.docs.get(&key)) else {
-            return;
-        };
-        let composer = gpu.composer_with(&self.config, self.frame_cache);
-        let _ = composer.use_definitions(key, doc.definitions(), &[]);
-        let probes = composer.probe_frame(doc.document(), &composition, doc.media(), time, &state);
-        if !probes.is_empty() {
-            Self::send_fallback(
-                &self.sink,
-                &mut self.fallback,
-                composer.renderer(),
-                key,
-                Revision::new(doc.revision()).ok(),
-                probes,
-                t,
-                false,
-            );
-        }
     }
 
     fn work_view(&mut self, key: Key) {
@@ -3615,10 +3561,6 @@ impl Thread {
             // program, are built off this thread.
             if loaded.is_some() | doc.take_prewarm_due() {
                 composer.renderer().prewarm_programs(Some(doc.document()));
-                // The frames that first use a program not judged yet are
-                // drawn offscreen while the view is idle.
-                view.probe_sweep = composer.renderer().probe_times(doc.document(), &composition);
-                view.probe_sweep.reverse();
             }
             // A preceding capture's hide-captions option is scoped to it.
             composer.renderer().set_captions_hidden(false);
