@@ -71,13 +71,13 @@ async function shapeTintProject(page: Page): Promise<void> {
 /** A 640×360 composition for playback cadence: a typewriter text whose
  *  progress is keyed 0 → 100 over the whole 3 s, so the typed prefix (the
  *  detached layer the fixture rasterizes through the service) changes
- *  almost every frame, and a plain text, over #203040. */
+ *  every frame, and a plain text, over #203040. */
 async function typewriterCadenceProject(page: Page): Promise<void> {
   await page.evaluate(() => {
     const PM = (window as any).PM;
     const project = PM.mkProject({ name: 'Typewriter cadence', w: 640, h: 360, fps: 30, dur: 3, bg: '#203040' });
     project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
-    const typed = PM.mkLayer('text', { name: 'Typed', from: 0, dur: 3, d: { text: 'Typed on the engine, one letter at a time, every frame', font: 'Helvetica', size: 20, weight: 700, color: '#FFFFFF' } }, project);
+    const typed = PM.mkLayer('text', { name: 'Typed', from: 0, dur: 3, d: { text: 'Every frame reveals another letter while the engine prepares the next changing text base asynchronously, ahead of the playhead.', font: 'Helvetica', size: 20, weight: 700, color: '#FFFFFF' } }, project);
     typed.id = 'typed';
     typed.p['position.x'].v = 320; typed.p['position.y'].v = 140;
     const fx = PM.mkEffect('typewriter');
@@ -90,6 +90,10 @@ async function typewriterCadenceProject(page: Page): Promise<void> {
     project.layers = [typed, plain];
     PM.replaceProject(project);
     PM.Projects?.put?.(PM.proj);
+    const api = PM.Kernel.api('changing-base-proof');
+    // Match the unmodified fixture's typedCount (floor plus its epsilon).
+    const counts = Array.from({ length: 90 }, (_, i) => Math.floor(String(typed.d.text).length * api.anim.evP(PM.proj.layers[0], PM.proj.layers[0].fx[0].p.progress, i / 30, `${fx.id}.progress`) / 100 + 1e-8));
+    if (new Set(counts).size !== 90) throw new Error('Typewriter cadence requires 90 different typed prefixes.');
   });
 }
 
@@ -112,6 +116,33 @@ async function shapeSizeProject(page: Page): Promise<void> {
     project.layers = [tinted, plain];
     PM.replaceProject(project);
     PM.Projects?.put?.(PM.proj);
+    const api = PM.Kernel.api('changing-base-proof');
+    const sizes = Array.from({ length: 90 }, (_, i) => { const d = api.anim.resolveContent(PM.proj.layers[0], i / 30); return JSON.stringify([d.w, d.h]); });
+    if (new Set(sizes).size !== 90) throw new Error('Shape cadence requires 90 different base sizes.');
+  });
+}
+
+/** A vector path whose vertex and tangent channels change on every frame. */
+async function pathProject(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const project = PM.mkProject({ name: 'Path cadence', w: 320, h: 180, fps: 30, dur: 3, bg: '#203040' });
+    project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
+    const channel = (v: any) => PM.P(v);
+    const values = { x: 0, y: 0, rotation: 0, scaleX: 100, scaleY: 100, closed: true, fill: '#33CC66', fillEnabled: true, fillOpacity: 100, stroke: '#ffffff', strokeWidth: 2, strokeOpacity: 100, trimStart: 0, trimEnd: 100, trimOffset: 0, copies: 1, repeatX: 30, repeatY: 0, repeatRotation: 0 };
+    const path = { id: 'outline', name: 'Animated outline', parent: null, p: Object.fromEntries(Object.entries(values).map(([k, v]) => [k, channel(v)])), vertices: [[-60, -40], [60, -40], [60, 40], [-60, 40]].map(([x, y], i) => ({ id: `v${i}`, p: Object.fromEntries(Object.entries({ x, y, inX: 0, inY: 0, outX: 0, outY: 0 }).map(([k, v]) => [k, channel(v)])) })) };
+    path.vertices[1]!.p.x = PM.P(60, { kf: [PM.KF(0, 60), PM.KF(3, 100)] });
+    path.vertices[1]!.p.outY = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(3, 70)] });
+    const tinted = PM.mkLayer('shape', { name: 'Tinted', from: 0, dur: 3, d: { paths: [path] } }, project);
+    tinted.id = 'tinted';
+    tinted.p['position.x'].v = 120; tinted.p['position.y'].v = 90;
+    project.layers = [tinted];
+    PM.replaceProject(project);
+    PM.Projects?.put?.(PM.proj);
+    const api = PM.Kernel.api('changing-base-proof');
+    const layer = PM.proj.layers[0], vertexX = layer.d.paths[0].vertices[1].p.x;
+    const vertices = Array.from({ length: 90 }, (_, i) => api.anim.evP(layer, vertexX, i / 30, 'g.outline.v.v1.x'));
+    if (new Set(vertices).size !== 90) throw new Error('Path cadence requires 90 different vertex positions.');
   });
 }
 
@@ -125,7 +156,8 @@ const FIXTURE: Record<string, string> = {
 async function flagOffApp(extension: string | null) {
   const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-today-'));
   if (extension) await cp(path.join(__dirname, FIXTURE[extension]!), path.join(userData, 'extensions', extension), { recursive: true });
-  return launchApp({ userData, env: {} });
+  try { return await launchApp({ userData, env: {} }); }
+  catch (error) { await rm(userData, { recursive: true, force: true }); throw error; }
 }
 
 /** Today's exporter's PNG frames: the session closes, and today's app
@@ -445,23 +477,37 @@ test.describe('Use New Engine: existing extensions', () => {
       PM.setTime(0);
       await new Promise((r) => setTimeout(r, 300));
       at.length = 0; times.length = 0; wrapped = false;
+      const longTasks: { startTime: number; duration: number }[] = [];
+      const observer = new PerformanceObserver(list => { for (const entry of list.getEntries()) longTasks.push({ startTime: entry.startTime, duration: entry.duration }); });
+      observer.observe({ type: 'longtask' });
       const last = PM.proj.dur - 1 / PM.proj.fps - 1e-6;
       const started = performance.now();
+      const basesBefore = PM.RasterCompat?.stats ? JSON.parse(JSON.stringify(PM.RasterCompat.stats)) : null;
       PM.play();
       while (!wrapped && !(times.length && times.at(-1)! >= last) && performance.now() - started < 6000) await new Promise((r) => setTimeout(r, 4));
       PM.pause();
       if (typeof off === 'function') off(); else off?.dispose?.();
+      observer.disconnect();
       const gaps = at.slice(1).map((v, i) => v - at[i]!);
       const sorted = [...gaps].sort((a, b) => a - b);
       const firstFrameMs = Math.round(at.length ? at[0]! - started : 3000);
-      return { firstFrameMs, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
+      return { longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
     });
     const { page } = session;
     await page.waitForFunction((id) => (window as any).PM?.Kernel?.loader?.activeIds?.().includes(id) && Boolean((window as any).PM?.EngineRender), extension);
     await setup(page);
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
     await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
+    const profileDirectory = process.env.PM_COMPAT_CPU_PROFILE_DIR;
+    const profiler = profileDirectory ? await page.context().newCDPSession(page) : null;
+    if (profiler) { await profiler.send('Profiler.enable'); await profiler.send('Profiler.start'); }
     const engine = await play(page);
+    if (profiler && profileDirectory) {
+      const { profile } = await profiler.send('Profiler.stop');
+      await mkdir(profileDirectory, { recursive: true });
+      await writeFile(path.join(profileDirectory, `${label.replaceAll(/[^a-z0-9]/gi, '-')}-${Date.now()}.cpuprofile`), JSON.stringify(profile));
+      await profiler.detach();
+    }
     expect(session.diagnostics.pageErrors).toEqual([]);
     await session.close();
     const off = await flagOffApp(extension);
@@ -487,11 +533,45 @@ test.describe('Use New Engine: existing extensions', () => {
     // Today's longest gap plus one frame at 30 fps, at most.
     expect(engine.maxGap).toBeLessThanOrEqual(today.maxGap + Math.ceil(1000 / 30));
     expect(engine.firstFrameMs).toBeLessThanOrEqual(today.firstFrameMs + Math.ceil(1000 / 30));
+    expect(engine.lastMs).toBeLessThanOrEqual(today.lastMs + Math.ceil(1000 / 30));
     // (The two sides can start one frame apart: one frame of alignment.)
     expect(engine.frames).toBeGreaterThanOrEqual(today.frames - 1);
     expect(engine.uniqueTimes).toBeGreaterThanOrEqual(today.uniqueTimes - 1);
     return { engine, today };
   }
+
+  test('asynchronous playback readback preserves synchronous raster pixels and geometry', async ({ session }) => {
+    test.setTimeout(120_000);
+    await session.openEditor();
+    await shapeTintProject(session.page);
+    await expect.poll(() => session.page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    const results = await session.page.evaluate(async () => {
+      const PM = (window as any).PM, api = PM.Kernel.api('readback-proof');
+      const results: any[] = [];
+      for (const colorSpace of ['srgb', 'display-p3']) {
+        const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64;
+        const ctx = cv.getContext('2d', { colorSpace } as any)!;
+        for (let x = 0; x < 256; x++) { ctx.fillStyle = `rgba(${x * 37 % 256},${x * 11 % 256},${x * 19 % 256},${x / 255})`; ctx.fillRect(x, 0, 1, 64); }
+        ctx.fillStyle = '#E8202A80'; ctx.beginPath(); ctx.arc(128, 32, 24.5, 0, Math.PI * 2); ctx.fill();
+        const surface = { cv, w: 256, h: 64, anchorX: 20, anchorY: 30, key: `readback:${colorSpace}` };
+        const registration = api.services.register('raster', () => surface);
+        try {
+          const need = { composition: PM.proj.compId ?? PM.proj.id, layer: PM.proj.layers[0].id, time: 352_800_000, source: 'rasterOverride', scale: 1 };
+          const revision = PM.EngineDoc.barrier.revision;
+          await PM.RasterCompat.prepare(need, revision);
+          const prepared = PM.RasterCompat.answer(need, revision, { prepared: true });
+          const sync = PM.RasterCompat.answer(need, revision, { fresh: true });
+          if (prepared?.kind !== 'raster' || sync?.kind !== 'raster') throw new Error('Both readback paths must return their raster.');
+          let max = 0;
+          for (let i = 0; i < sync.data.length; i++) max = Math.max(max, Math.abs(sync.data[i] - prepared.data[i]));
+          results.push({ colorSpace, max, size: prepared.size, anchor: prepared.anchor, format: prepared.format, geometryEqual: JSON.stringify([prepared.size, prepared.anchor, prepared.uv]) === JSON.stringify([sync.size, sync.anchor, sync.uv]) });
+        } finally { registration.dispose(); }
+      }
+      return results;
+    });
+    console.log(JSON.stringify({ asynchronousReadback: results }));
+    for (const result of results) { expect(result.max).toBe(0); expect(result.geometryEqual).toBe(true); expect(result.format).toBe('rgba8Premultiplied'); }
+  });
 
   test('playback with a raster override keeps today\'s cadence: every frame asks the window, none stalls', async ({ session }) => {
     test.setTimeout(240_000);
@@ -504,12 +584,27 @@ test.describe('Use New Engine: existing extensions', () => {
     // The override drew the typed text itself for every presented time (its
     // pixels for that time, posted or reused), never the engine's text.
     expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+    expect(engine.bases.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+    expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
+    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads).toBe(0);
   });
 
   test('playback with a raster override over a shape whose size animates keeps today\'s cadence', async ({ session }) => {
     test.setTimeout(240_000);
     const { engine } = await cadenceGate(session, 'shape-tint', shapeSizeProject, 'shape-tint animated size');
     expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+    expect(engine.bases.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+    expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
+    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads).toBe(0);
+  });
+
+  test('playback with a raster override over a path whose vertices animate keeps today\'s cadence', async ({ session }) => {
+    test.setTimeout(240_000);
+    const { engine } = await cadenceGate(session, 'shape-tint', pathProject, 'shape-tint animated path');
+    expect(engine.rasters).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+    expect(engine.bases.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
+    expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
+    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads).toBe(0);
   });
 
   test('an export of a project with a raster override draws the override, frame by frame', async ({ session }, testInfo) => {
