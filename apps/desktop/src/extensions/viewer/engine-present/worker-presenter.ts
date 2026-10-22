@@ -250,7 +250,8 @@ export class WorkerPresenter implements Presenter {
       parkTimeouts: this.local.parkTimeouts,
       staleGeneration: this.local.staleGeneration,
       maxQueued: r?.maxQueued ?? 0,
-      generation: this.generation
+      generation: this.generation,
+      shownLate: r?.shownLate ?? 0
     };
   }
 

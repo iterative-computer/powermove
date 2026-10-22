@@ -720,14 +720,16 @@ const COMPAT_WAIT_REPLAN: std::time::Duration = std::time::Duration::from_millis
 const COMPAT_ASK_AHEAD: i64 = 3;
 const COMPAT_ASK_AHEAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(30);
 
-/// Frames (at the schedule's stride) past the frame a playing view just drew
-/// whose raster-override needs are kept asked: the window answers them in
-/// its next animation frame, long before the schedule draws them, so a
-/// frame does not wait a turn of the window's main thread for its own.
+/// Frames past the frame a playing view just drew whose raster-override
+/// needs are kept asked: the window answers them in its next animation
+/// frame, long before the schedule draws them, so a frame does not wait a
+/// turn of the window's main thread for its own.
 const COMPAT_KEEP_AHEAD: i64 = 8;
-/// Planning time spent keeping them asked after a frame (the first turn of
-/// a run, which asks the whole span, gets [`COMPAT_ASK_AHEAD_BUDGET`]).
-const COMPAT_KEEP_AHEAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
+/// Planning time spent keeping them asked after a frame: about one frame's
+/// plan on a large project, so the frontier moves a frame per frame drawn
+/// (the first turn of a run, which asks the whole span, gets
+/// [`COMPAT_ASK_AHEAD_BUDGET`]).
+const COMPAT_KEEP_AHEAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -3574,13 +3576,10 @@ impl Thread {
         let composer = gpu.composer_with(&self.config, self.frame_cache);
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         let epoch = view.clock.epoch();
-        let frame_us = super::schedule::Schedule::frame_us(&view.clock).max(1.0);
-        let cost = view.schedule.cost_us().unwrap_or(0.0);
-        let stride = ((cost + super::schedule::DELIVERY_US) / frame_us)
-            .ceil()
-            .clamp(1.0, 240.0) as i64;
+        // Every frame: the schedule skips by the clock, not a fixed stride,
+        // and a pass-through the window gives for a frame it skips is cheap.
         let dir = if view.clock.rate().num < 0 { -1 } else { 1 };
-        let step = dir * stride;
+        let step = dir;
         let target = k + COMPAT_KEEP_AHEAD * step;
         let (mut at, budget) = match view.compat_asked_ahead {
             Some((r, e, j)) if r == revision && e == epoch && (j - k) * dir > 0 => {

@@ -215,12 +215,15 @@ export type CompatAnswerResult =
   | null;
 
 /** Answers the engine's needs for one source (the raster override's producer). */
-/** Frames of compatibility answers kept ahead of the clock during playback. */
-export const COMPAT_LOOKAHEAD = 6;
+/** Frames of compatibility answers kept ahead of the clock during playback:
+ *  the engine draws a few frames ahead of it (its lead) and the window
+ *  answers once per animation frame, which on a large project comes every
+ *  150 to 250 ms (about 0.7 s at 24 fps). */
+export const COMPAT_LOOKAHEAD = 16;
 /** Frames behind the playback clock past which an engine need is skipped. */
 export const STALE_FRAMES = 12;
-/** Main-thread time one lookahead call may take (ms); the rest waits for the next frame. */
-const LOOKAHEAD_BUDGET_MS = 6;
+/** Main-thread time one lookahead turn may take (ms); the rest waits for the next frame. */
+const LOOKAHEAD_BUDGET_MS = 10;
 /** Most answers in one batched message (pm_protocol MAX_COMPAT_ANSWERS). */
 export const MAX_COMPAT_ANSWERS = 4096;
 /** Preparations (engine base rasters) started per turn; answers the

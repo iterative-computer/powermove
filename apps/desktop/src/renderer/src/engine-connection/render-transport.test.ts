@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -561,11 +561,11 @@ describe('compatibility answers during playback', () => {
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       runFrame();
-      expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => i * frame));
+      expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => i * frame));
       state.time = frame;
       t.presentedWhilePlaying();
       runFrame();
-      expect(asked.at(-1)).toBe(7 * frame);
+      expect(asked.at(-1)).toBe((COMPAT_LOOKAHEAD + 1) * frame);
       const count = asked.length;
       for (let i = 0; i < 20; i++) t.presentedWhilePlaying();
       // One turn per animation frame, however many callbacks asked for it.
@@ -575,7 +575,7 @@ describe('compatibility answers during playback', () => {
       state.time = 3 * frame;
       t.receiveCompat({ compat: 'needs', needs: [need(3 * frame)] }, session);
       runFrame();
-      expect(asked.slice(count)).toEqual([3, 8, 9].map(n => n * frame));
+      expect(asked.slice(count)).toEqual([3, COMPAT_LOOKAHEAD + 2, COMPAT_LOOKAHEAD + 3].map(n => n * frame));
     } finally { t.dispose(); }
   });
 
@@ -589,12 +589,12 @@ describe('compatibility answers during playback', () => {
       // The old engine request can arrive after the audio clock moved on.
       t.receiveCompat({ compat: 'needs', needs: [need(frame)] }, session);
       runFrame();
-      expect(asked.slice(before)).toEqual(Array.from({ length: 7 }, (_, i) => (30 + i) * frame));
+      expect(asked.slice(before)).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => (30 + i) * frame));
       expect(t.lookaheadStats.skipped).toBe(1);
       // The next animation frame follows the clock (no frame was presented).
       state.time = 40 * frame;
       runFrame();
-      expect(asked.at(-1)).toBe(46 * frame);
+      expect(asked.at(-1)).toBe((40 + COMPAT_LOOKAHEAD) * frame);
       expect(t.lookaheadStats.recoveries).toBeGreaterThan(0);
     } finally { t.dispose(); }
   });
@@ -642,13 +642,13 @@ describe('compatibility answers during playback', () => {
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
-      expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => i * frame));
+      expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => i * frame));
       expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(2);
       expect(vi.getTimerCount()).toBe(0);
       state.playing = true;
       t.playbackStarted();
       await vi.advanceTimersByTimeAsync(0);
-      expect(asked).toHaveLength(7);
+      expect(asked).toHaveLength(COMPAT_LOOKAHEAD + 1);
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 
@@ -660,7 +660,7 @@ describe('compatibility answers during playback', () => {
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(20 * frame)] }, session);
       await vi.advanceTimersByTimeAsync(0);
-      expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => (20 - i) * frame));
+      expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => (20 - i) * frame));
       expect(vi.getTimerCount()).toBe(0);
     } finally { t.dispose(); vi.useRealTimers(); }
   });
@@ -718,11 +718,11 @@ describe('compatibility answers during playback', () => {
       state.time = 20 * frame;
       t.receiveCompat({ compat: 'needs', needs: [{ ...need(5 * frame), composition: 'nested' }] }, session);
       runFrame();
-      expect(asked.at(-1)).toBe(11 * frame);
+      expect(asked.at(-1)).toBe((5 + COMPAT_LOOKAHEAD) * frame);
       state.time = 30 * frame;
       t.presentedWhilePlaying();
       runFrame();
-      expect(asked.at(-1)).toBe(21 * frame);
+      expect(asked.at(-1)).toBe((15 + COMPAT_LOOKAHEAD) * frame);
     } finally { t.dispose(); }
   });
 
@@ -732,16 +732,16 @@ describe('compatibility answers during playback', () => {
       state.time = 20 * frame; state.rate = -1;
       t.receiveCompat({ compat: 'needs', needs: [need(state.time)] }, session);
       runFrame();
-      expect(asked).toEqual(Array.from({ length: 7 }, (_, i) => (20 - i) * frame));
+      expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => (20 - i) * frame));
       state.time = 40 * frame;
       t.presentedWhilePlaying();
       runFrame();
-      expect(asked.at(-1)).toBe(34 * frame);
+      expect(asked.at(-1)).toBe((40 - COMPAT_LOOKAHEAD) * frame);
       const before = asked.length;
       state.revision++;
       t.presentedWhilePlaying();
       runFrame();
-      expect(asked.length - before).toBe(7);
+      expect(asked.length - before).toBe(COMPAT_LOOKAHEAD + 1);
     } finally { t.dispose(); }
   });
 
@@ -759,7 +759,7 @@ describe('compatibility answers during playback', () => {
       state.playing = true;
       t.playbackStarted();
       expect(asked).toHaveLength(1);
-      expect(t.lookaheadStats.pending).toBeLessThanOrEqual(40 * 7);
+      expect(t.lookaheadStats.pending).toBeLessThanOrEqual(40 * (COMPAT_LOOKAHEAD + 1));
       state.time = 20 * frame;
       runFrame();
       expect(asked.at(-1)).toBe(state.time);
@@ -800,7 +800,7 @@ describe('compatibility answers during playback', () => {
       expect(asked).toEqual([0]);
       state.time = 12 * frame; state.playing = true;
       t.playbackStarted();
-      expect(asked.slice(1)).toEqual(Array.from({ length: 7 }, (_, i) => (12 + i) * frame));
+      expect(asked.slice(1)).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => (12 + i) * frame));
     } finally { t.dispose(); }
   });
 });
