@@ -110,7 +110,7 @@ What stands between this tip and a pass, by owner:
    class's reference may clip Catmull-Rom chroma overshoot (zimg's 16-bit
    resize does, 23.2 and 25.5 CV on the corpus H.264 media; an unclipped f64
    reference matches the engine to 0.000 CV), the WebGL-unstable review (Store
-   `liquid-glass-ios27` 2.0.8; built-in Color, Levels, Posterize), how the
+   `private-extension-19` 2.0.8; built-in Color, Levels, Posterize), how the
    energy line applies to `compat` level 1 effects, and the S5 per-window
    budget for `pm-wasm` (the real project's mirror holds 11.3 MB against the
    proposed 8 MB).
@@ -470,7 +470,7 @@ accepts). The app captures of every shader and extension project compare in
 `tests/corpus.rs` (above).
 
 Pass as measured, with three items for review: the Store's
-`mrsigma/liquid-glass-ios27` 2.0.8 (43 to 49 pixels up to 99 CV; WebGL against
+`mrsigma/private-extension-19` 2.0.8 (43 to 49 pixels up to 99 CV; WebGL against
 itself under a one-step input perturbation moves 26 to 33 pixels up to 67 CV),
 and the built-in Color, Levels, and Posterize effects, WebGL-unstable at the
 shader level (Posterize's corpus frames are the six review frames above). Open

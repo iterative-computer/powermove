@@ -140,7 +140,7 @@ describe('analyzeExtensionSource', () => {
   });
 
   it('finds every deprecated use in the shipped typewriter fixture', () => {
-    const dir = path.resolve(__dirname, '../../e2e/fixtures/typewriter-effect');
+    const dir = path.resolve(__dirname, '../../e2e/fixtures/compat-typewriter');
     const files = ['index.ts', 'raster.ts', 'cursor.ts', 'typing.js'].map((name) => ({ path: name, text: readFileSync(path.join(dir, name), 'utf8') }));
     expect(brief(analyzeExtensionSource(files)).filter((line) => line.includes('services.raster'))).toEqual(['34:services.raster:static', '107:services.raster:static']);
   });

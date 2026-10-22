@@ -117,7 +117,7 @@ headless-renderable. Nothing is drawn wrong, and nothing is routed.
 
 **ANGLE-only programs** (`effects::ANGLE_ONLY`, orchestrator decision DEFS-2,
 2026-10-19). One Store program still differs natively with ANGLE's calls:
-`mrsigma/liquid-glass-ios27` 2.0.8 (`liquid-glass-ios27.glass`). Its rim
+`mrsigma/private-extension-19` 2.0.8 (`private-extension-19.glass`). Its rim
 search bisects the bilinear alpha of `u_orig` at coordinates built from
 screen-space derivatives, a 2×2 inverse, and `cos`/`sin`, and branches on
 `alpha < 0.5`; the hardware filter weighs texels with 8-bit fractions, so a
@@ -133,7 +133,7 @@ attached (the app's viewer and its exports) it draws through it, the same
 ANGLE that draws it today; a renderer without one (`pm-cli`) draws the
 native translation. Its GPU program is still built, so `validate_effect`
 compiles it. Built-ins (all bit-exact natively) and layers are never
-listed; the Store's other `liquid-glass-ios27` (zellzoi 2.0.1) matches
+listed; the Store's other `private-extension-19` (zellzoi 2.0.1) matches
 natively and has another fingerprint. (A private user setup contains manifest 2.0.1, byte-identical to
 zellzoi 2.0.1, rather than the separately listed 2.0.8 release.) Through the runner the program is
 bit-exact against WebGL in all four variants (`effects_webgl`
@@ -1098,7 +1098,7 @@ Measured 2026-10-19 (M4 Max, debug build):
   `retime/speed`, `space25d/precomps`), identical with this lane's changes
   removed.
 
-The Store `mrsigma/liquid-glass-ios27` 2.0.8 glass effect is the shader
+The Store `mrsigma/private-extension-19` 2.0.8 glass effect is the shader
 gate's WebGL-unstable item (`docs/engine/shaders.md`): there both renderers
 get bit-identical inputs, so the difference is the arithmetic. ANGLE and
 naga each translate the GLSL to their own MSL, and Metal compiles both
@@ -1266,7 +1266,7 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
   `sceneWarnings` and `sceneError` for 3D scene layers are the 3D lane's.
 - **Fallback runner throughput is below today's** (measured 2026-10-19, M4
   Max, needs Jude's call; the ANGLE-only listing adds the Store
-  liquid-glass-ios27 2.0.8 effect to the programs that pay it). Each fallback step reads its textures back and
+  private-extension-19 2.0.8 effect to the programs that pay it). Each fallback step reads its textures back and
   sends them to the renderer and the pixels back (binary16, about 16 MB per
   full-HD texture each way); results are cached by content key (512 MB), so
   a still frame costs one round trip, but an animated fallback effect does
@@ -1336,8 +1336,8 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
   clean on pm-render, pm-glsl, pm-cli, and pm-node).
 - The generated corpus was written by an agent from the docs, not produced through the
   in-app agent harness (S3 provenance gap); the Store's 4 public releases (figuate
-  chrome 1.0.0, zellzoi ascii-magic-effects 1.0.0 and liquid-glass-ios27 2.0.1, mrsigma
-  liquid-glass-ios27 2.0.8; 5 effects) are not in this corpus but in the shader gate's
+  chrome 1.0.0, zellzoi private-extension-03 1.0.0 and private-extension-19 2.0.1, mrsigma
+  private-extension-19 2.0.8; 5 effects) are not in this corpus but in the shader gate's
   (`docs/engine/shaders.md`; their sources stay outside the repository); one machine
   and one GPU family.
 - WebGL's "Expression too complex" rule and ternaries on structs and arrays are not
