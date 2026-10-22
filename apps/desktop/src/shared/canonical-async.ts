@@ -48,7 +48,13 @@ export class JsonBudget {
   private deadline = performance.now() + 2;
   private operations = 0;
   constructor(private readonly task: () => Promise<void> = yieldJsonTask) {}
-  due(): boolean { return ++this.operations >= 256 || performance.now() >= this.deadline; }
+  /** At most 256 operations, or 2 ms, between yields. The clock is read every
+   *  32 operations: reading it on every value cost more than the work it
+   *  bounded (about half of the large private project's preparation, 2026-10-22). */
+  due(): boolean {
+    const operations = ++this.operations;
+    return operations >= 256 || (operations & 31) === 0 && performance.now() >= this.deadline;
+  }
   async yield(): Promise<void> {
     await this.task();
     this.operations = 0;
