@@ -30,7 +30,9 @@ test('compact layer rows keep names centered and parenting in dedicated controls
   // Nested disclosure buttons follow the indentation of their badges and names.
   await page.mouse.click(box.x+64,box.y+box.ruler+box.row*8.5);
   await page.waitForFunction(()=>{ const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return timeline.rows.some((r:any)=>r.L.name==='Nested'); });
-  await page.mouse.click(box.x+76,box.y+box.ruler+box.row*9.5);
+  // Opening the group scrolls its new rows into view; aim at the row where it is drawn now.
+  const scrollY=await page.evaluate(()=>(window as any).PM.Kernel.services.get('timeline').scrollY);
+  await page.mouse.click(box.x+76,box.y+box.ruler+box.row*9.5-scrollY);
   await page.waitForFunction(()=>{ const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return timeline.rows.some((r:any)=>r.L.name==='Prompt'); });
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
