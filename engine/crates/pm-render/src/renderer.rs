@@ -141,6 +141,10 @@ pub struct Rendered {
     pub stages: FrameStages,
 }
 
+/// Idle intermediate targets older than the last frame the pool keeps
+/// (`TargetPool::end_frame`): a frame's own targets always stay.
+pub const MAX_IDLE_TARGET_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Bytes the renderer's frame caches hold (`Renderer::memory`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1724,6 +1728,8 @@ impl Renderer {
         for t in taken {
             self.pool.give(t);
         }
+        // Targets of sizes no recent frame used go (bounded idle bytes).
+        self.pool.end_frame(MAX_IDLE_TARGET_BYTES);
         if prefix {
             if unsupported.is_empty() && pending.is_empty() {
                 self.prefix.remember(std::mem::take(&mut plan.draws));

@@ -98,10 +98,13 @@ struct Key {
 /// Reusable targets.
 #[derive(Default)]
 pub struct TargetPool {
-    free: Vec<(Key, Target)>,
+    /// Idle targets, with the frame they were last given back in.
+    free: Vec<(Key, Target, u64)>,
     /// Bytes held by targets in the pool and taken from it.
     live_bytes: u64,
     created: u64,
+    /// Frames ended so far ([`TargetPool::end_frame`]).
+    frame: u64,
 }
 
 impl TargetPool {
@@ -124,7 +127,7 @@ impl TargetPool {
             format,
             usage,
         };
-        if let Some(i) = self.free.iter().position(|(k, _)| *k == key) {
+        if let Some(i) = self.free.iter().position(|(k, _, _)| *k == key) {
             return self.free.swap_remove(i).1;
         }
         let target = Target::new(device, "pm working target", width, height, format, usage);
@@ -160,13 +163,43 @@ impl TargetPool {
             format: target.format(),
             usage: target.texture.usage(),
         };
-        self.free.push((key, target));
+        self.free.push((key, target, self.frame));
     }
 
     /// Frees idle targets until the pool holds at most `bytes`.
     pub fn trim(&mut self, bytes: u64) {
         while self.live_bytes > bytes {
-            let Some((_, t)) = self.free.pop() else { break };
+            let Some((_, t, _)) = self.free.pop() else { break };
+            self.live_bytes = self.live_bytes.saturating_sub(t.bytes());
+            t.texture.destroy();
+        }
+    }
+
+    /// Ends a frame: idle targets no frame since an earlier one used are
+    /// freed, oldest first, until at most `keep_idle` bytes of them stay.
+    /// The frame's own targets always stay (the next frame of the same
+    /// layers takes them again); sizes that went by (a layer whose scale
+    /// animates sizes its target anew every frame) do not pile up.
+    pub fn end_frame(&mut self, keep_idle: u64) {
+        let frame = self.frame;
+        self.frame += 1;
+        let mut idle: u64 = self
+            .free
+            .iter()
+            .filter(|(_, _, used)| *used < frame)
+            .map(|(_, t, _)| t.bytes())
+            .sum();
+        if idle <= keep_idle {
+            return;
+        }
+        self.free.sort_by_key(|(_, _, used)| *used);
+        let mut i = 0;
+        while idle > keep_idle && i < self.free.len() {
+            if self.free[i].2 >= frame {
+                break;
+            }
+            let (_, t, _) = self.free.remove(i);
+            idle -= t.bytes();
             self.live_bytes = self.live_bytes.saturating_sub(t.bytes());
             t.texture.destroy();
         }
@@ -185,5 +218,45 @@ impl TargetPool {
     /// Targets created so far (a steady state stops creating).
     pub fn created(&self) -> u64 {
         self.created
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_keeps_its_own_targets_and_sizes_that_went_by_do_not_pile_up() {
+        let Ok(gpu) = crate::Gpu::new("target pool test") else {
+            eprintln!("no GPU: skipped");
+            return;
+        };
+        let usage = working_usage();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut pool = TargetPool::new();
+        // A layer whose scale animates sizes its target anew every frame.
+        for frame in 0..50u32 {
+            let t = pool.take(&gpu.device, 100 + frame, 100, format, usage);
+            let steady = pool.take(&gpu.device, 64, 64, format, usage);
+            pool.give(t);
+            pool.give(steady);
+            pool.end_frame(200 * 1024);
+        }
+        // About 40 KB per animated target: no more than the idle budget
+        // stays, plus the last frame's own two.
+        assert!(pool.bytes() <= 200 * 1024 + 2 * 150 * 400, "{} bytes", pool.bytes());
+        // The steady size is reused, never made again.
+        let before = pool.created();
+        let t = pool.take(&gpu.device, 64, 64, format, usage);
+        assert_eq!(pool.created(), before);
+        pool.give(t);
+        // A frame's own targets stay even over the budget.
+        let big = pool.take(&gpu.device, 512, 512, format, usage);
+        pool.give(big);
+        pool.end_frame(0);
+        assert!(pool.idle() >= 1);
+        let again = pool.take(&gpu.device, 512, 512, format, usage);
+        assert_eq!(pool.created(), before + 1, "kept for the next frame");
+        pool.give(again);
     }
 }
