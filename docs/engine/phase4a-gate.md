@@ -69,7 +69,14 @@ process's first ProRes session (356 ms) landed on the first played frame
 and a playback start during the proxy's integrity lookup froze the original
 for the clip. The paired rows settle 2 s while paused after a proxy completes.
 
-The one-hour memory row is reported separately (see the report).
+One hour of native 4K HEVC Automatic playback (60 one-minute samples, a
+test-hooks-free addon from before the last scheduler and proxy fixes): total
+process working set 1367 MiB at the start, warmup plateau 1395 MiB, final
+1395 MiB, post-warmup slope 40.9 KiB/min (upper 121.5, bar 512), 83,870 timed
+frames; native usage 595 MiB within its lease; media cache 175 of 256 MiB,
+preview cache 166 of 256 MiB. Same engine processes throughout. 1097 late
+skips (0.3%) occurred during the hour while other lanes held load at 20 to 40;
+the memory row does not gate on cadence.
 
 ## Known residuals outside this lane
 
