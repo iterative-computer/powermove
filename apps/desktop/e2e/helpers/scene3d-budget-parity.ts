@@ -95,15 +95,23 @@ export type BudgetFrame = Awaited<ReturnType<typeof measureBudgetFrame>>;
 export async function measureBudgetFrame(page: Page, engine: boolean, repeats = 12) {
   return page.evaluate(({ engine, repeats, width, height }) => {
     const PM = (window as any).PM;
-    const draw = (): Uint8Array => engine
-      ? new Uint8Array(PM.EngineRender.snapshotSync({ time: 0, width, height,
-        pixels: 'premultiplied', motionBlurSamples: 0, background: false }).data)
-      : new Uint8Array(PM.GL.renderToPixels(0, width, height,
+    // The engine's own split of each capture: queue wait and render+readback
+    // in the engine (µs), and main's request-to-answer time (ms).
+    const split: { waitedUs: number; renderUs: number; mainMs: number }[] = [];
+    let measuring = false;
+    const draw = (): Uint8Array => {
+      if (!engine) return new Uint8Array(PM.GL.renderToPixels(0, width, height,
         { transparent: true, mblur: false }));
+      const shot = PM.EngineRender.snapshotSync({ time: 0, width, height,
+        pixels: 'premultiplied', motionBlurSamples: 0, background: false });
+      if (measuring) split.push({ waitedUs: shot.waitedUs, renderUs: shot.renderUs, mainMs: shot.mainMs });
+      return new Uint8Array(shot.data);
+    };
     const times: number[] = [];
     let pixels: Uint8Array;
     try {
       for (let i = 0; i < 3; i++) draw();
+      measuring = true;
       pixels = new Uint8Array(width * height * 4);
       for (let i = 0; i < repeats; i++) {
         const start = performance.now();
@@ -134,7 +142,7 @@ export async function measureBudgetFrame(page: Page, engine: boolean, repeats = 
       (height - 1 - y) * width * 4);
     const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
     canvas.getContext('2d')!.putImageData(new ImageData(topDown, width, height), 0, 0);
-    return { ok: true as const, error: null, timesMs: times,
+    return { ok: true as const, error: null, timesMs: times, split,
       pixels: [...pixels], png: canvas.toDataURL('image/png'), occupied,
       occupiedColumns: [...columns].sort((a, b) => a - b),
       webglContextLost: !!PM.GL.gl?.isContextLost?.() };
