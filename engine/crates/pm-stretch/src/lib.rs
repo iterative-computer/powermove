@@ -592,7 +592,12 @@ mod tests {
             .map(|&(channels, rate)| render(channels, rate))
             .collect();
         let disabled = dsp_diagnostic_snapshot().expect("all native diagnostic regions");
-        assert!(disabled.iter().flatten().all(|&(ns, marker)| ns == 0 && marker == 0));
+        assert!(
+            disabled
+                .iter()
+                .flatten()
+                .all(|&(ns, marker)| ns == 0 && marker == 0)
+        );
         enable_dsp_diagnostics();
         for ((channels, rate), expected) in variants.into_iter().zip(reference) {
             assert_eq!(
