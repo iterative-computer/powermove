@@ -16,12 +16,10 @@
  *
  * `snapshotAsync` keeps today's contract: it refuses while an export or
  * another frame capture runs, pauses playback while it captures (and
- * resumes it), and a Blender composition's frame is rendered by Blender
- * first (today's `prepareFrame`; the engine's Blender stage, the same one
- * behind the paused viewer's Rendered shading), then captured. `snapshot`
- * draws a frame an earlier capture prepared, or fails with today's error.
+ * resumes it). Blender rendering is retired (main 2b1fa379a): a
+ * composition's `render3d` settings are inert and 3D draws natively in
+ * both captures.
  */
-import { engineBlenderCapture } from '../core/scene3d/rendering';
 import type { PMRegistry } from '../legacy/registry';
 
 export type CaptureEngine = {
@@ -31,14 +29,6 @@ export type CaptureEngine = {
 
 /** Today's refusal while an export or another frame capture runs. */
 export const CAPTURE_BUSY = 'Wait for the current frame capture or export to finish.';
-
-/** Whether `project` has a composition Blender renders (`render3d.enabled`):
- *  the open one or any in `comps`. */
-export function usesBlender(project: { render3d?: { enabled?: unknown } | null; comps?: Record<string, { render3d?: { enabled?: unknown } | null } | null> | null } | null | undefined): boolean {
-  if (!project) return false;
-  if (project.render3d?.enabled) return true;
-  return Object.values(project.comps ?? {}).some((comp) => !!comp?.render3d?.enabled);
-}
 
 /** `PM.EngineCaptures`: what the exporter's captures draw with. */
 export type EngineCaptures = {
@@ -58,8 +48,7 @@ export function installAppCaptures(PM: PMRegistry, engine: CaptureEngine): () =>
       PM.agentFrameCapture = true;
       const captionsHidden = PM.captionsHidden === true;
       try {
-        const capture = () => engine.snapshotDataUrl(Number(time) || 0, Number(maxWidth) || 480, PM.proj, { prepareBlender: true, captionsHidden });
-        return await (usesBlender(PM.proj) ? engineBlenderCapture(PM, capture) : capture());
+        return await engine.snapshotDataUrl(Number(time) || 0, Number(maxWidth) || 480, PM.proj, { captionsHidden });
       } finally {
         PM.agentFrameCapture = false;
         if (wasPlaying) PM.play?.();

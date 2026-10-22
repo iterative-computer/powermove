@@ -45,7 +45,6 @@ import type { ChannelFactory, ClientPortInfo, PortLike, SpawnEngine } from './po
 import { isRecord, isSafeUint, ProtocolError } from './protocol';
 import { serveHostFallback, type ShaderFallbackResult } from './shader-fallback-relay';
 import { CACHE_DIRS, HostServicesCore } from './services';
-import { EngineBlender, type BlenderLocator } from './blender';
 import { EngineSupervisor, type Launch, type SupervisorState } from './supervisor';
 
 export const DEFAULT_SLICING_POLICY: SlicingPolicy = {
@@ -78,11 +77,6 @@ export type NativeEngineOptions = {
   resolveProxy?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   now?: () => number;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
-  /** Finds the user's Blender (contract 11 Blender jobs from the job
-   *  engine's exports and the interactive engine's paused viewer); without
-   *  it Blender requests answer `unsupported` and the current engine runs
-   *  Blender. */
-  blender?: { locate: BlenderLocator; tempRoot: string };
   /** The job engine's `compatFrame` requests: a layer's compatibility
    *  pixels drawn by the document's window (compat-frames.ts). Without it
    *  they answer `notHeadlessRenderable`. */
@@ -116,7 +110,7 @@ export const RENDERER_CLIENT: ClientKind = { peer: 'renderer', processes: ['inte
 export interface NativeEngineListener {
   crash?(report: CrashReport): void;
   status?(status: NativeEngineStatus): void;
-  /** Playback started or stopped (Blender supervision pauses its workers). */
+  /** Playback started or stopped. */
   playback?(playing: boolean): void;
   jobStatus?(status: JobStatus): void;
 }
@@ -142,8 +136,6 @@ const SESSION_EVENTS: ReadonlySet<string> = new Set(['patchesApplied', 'renderSt
 
 export class NativeEngine {
   readonly services: HostServicesCore;
-  /** Blender supervision for both engines (contract 11, `blender.ts`). */
-  readonly blender: EngineBlender | null;
   readonly definitions = new DefinitionRelay();
   /** Texture bands the interactive engine sends ahead of a snapshot's
    *  `needsRenderer` answer (fallback-inputs.ts). */
@@ -198,9 +190,6 @@ export class NativeEngine {
       ...(options.resolveProxy ? { resolveProxy: options.resolveProxy } : {}),
       ...(options.now ? { now: options.now } : {})
     });
-    this.blender = options.blender
-      ? new EngineBlender({ locate: options.blender.locate, handles: this.services.handles, tempRoot: options.blender.tempRoot, log: options.log })
-      : null;
     const make = (process: EngineProcess): EngineSupervisor => {
       const supervisor = new EngineSupervisor({
         process,
@@ -238,7 +227,7 @@ export class NativeEngine {
 
   async stop(): Promise<void> {
     this.stopping = true;
-    await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop(), this.blender?.dispose()]);
+    await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop()]);
   }
 
   supervisor(process: EngineProcess): EngineSupervisor {
@@ -496,7 +485,6 @@ export class NativeEngine {
 
   private onEnded(launch: Launch, report: CrashReport | null): void {
     const { process } = launch;
-    this.blender?.endPort(launch.hostPort);
     void this.services.endLaunch(process, launch.hostPort).then((n) => {
       if (n) this.options.log('info', `removed ${n} unfinished output(s) of the ${process} engine`);
     });
@@ -575,22 +563,6 @@ export class NativeEngine {
       request: (body, session) => {
         const current = launch();
         if (!current) return Promise.reject(new ProtocolError('internal', 'the engine launch ended'));
-        const blender = this.blender;
-        if (blender) {
-          if (body.type === 'blenderStatus') return blender.status();
-          if (body.type === 'blenderRender') {
-            // The job engine's exports, and the interactive engine's paused
-            // viewer (Material Preview and Rendered shading). Surfaces and
-            // progress go to the launch that asked, before the answer.
-            const send = (event: Event): void => {
-              if (launch() === current) this.supervisors[process].event(event, session);
-            };
-            return blender.render(body, session ?? 0, current.hostPort, send).then(() => ({ type: 'ack' }) as Response);
-          }
-          if (body.type === 'cancelJobs' && body.kind === 'job' && (process === 'job' || blender.owns(body.job, current.hostPort))) {
-            return Promise.resolve({ type: 'jobsCancelled', jobs: blender.cancel(body.job) ? [body.job] : [] } as Response);
-          }
-        }
         if (body.type === 'shaderFallback') {
           if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks the host to run fallback requests.'));
           return this.runShaderFallback(body, session ?? 0, current.hostPort);
@@ -712,7 +684,6 @@ export class NativeEngine {
     this.supervisors.job.event({ type: 'deadline', ...signal });
     this.lastPlaybackStarted = signal;
     if (was) return;
-    if (DEFAULT_SLICING_POLICY.blender.kind === 'pause') this.blender?.setPaused(true);
     this.sendGrants(this.memory.playbackStarted());
     for (const l of this.listeners) l.playback?.(true);
   }
@@ -721,7 +692,6 @@ export class NativeEngine {
     if (this.lastPlaybackStarted === null) return;
     this.supervisors.job.event({ type: 'deadline', ...(signal ?? { signal: 'playbackStopped', at: this.options.hostNow() }) });
     this.lastPlaybackStarted = null;
-    this.blender?.setPaused(false);
     if (grants) this.sendGrants(this.memory.playbackStopped());
     for (const l of this.listeners) l.playback?.(false);
   }
