@@ -323,6 +323,11 @@ export class EngineRenderTransport {
   /** Producers of viewer frames' and snapshots' compatibility answers. */
   private readonly answerers = new Map<CompatSource, CompatAnswerer>();
   private readonly preparers = new Map<CompatSource, (need: CompatNeed, revision: number) => Promise<void>>();
+  /** Whether a producer can answer a need now without blocking this thread
+   *  on the engine (a layer its wrapper passes through, or whose base pixels
+   *  are already here). Without one, every need of a producer with a
+   *  preparer is prepared first while playing. */
+  private readonly readies = new Map<CompatSource, (need: CompatNeed, revision: number) => boolean>();
   private aheadInFlight = 0;
   /** Needs answered with `reuse`, so a repeated ask gets pixels instead
    *  (the engine dropped that raster meanwhile). */
@@ -382,15 +387,17 @@ export class EngineRenderTransport {
    * `needsRenderer` rounds). The session learns which producers it has; the
    * engine asks none without one. Returns an unregister.
    */
-  answerCompat(source: CompatSource, answerer: CompatAnswerer, prepare?: (need: CompatNeed, revision: number) => Promise<void>): () => void {
+  answerCompat(source: CompatSource, answerer: CompatAnswerer, prepare?: (need: CompatNeed, revision: number) => Promise<void>, ready?: (need: CompatNeed, revision: number) => boolean): () => void {
     for (const [key, entry] of this.ahead) if (entry.need.source === source) this.ahead.delete(key);
     this.answerers.set(source, answerer);
     if (prepare) this.preparers.set(source, prepare); else this.preparers.delete(source);
+    if (prepare && ready) this.readies.set(source, ready); else this.readies.delete(source);
     this.syncProducers();
     return () => {
       if (this.answerers.get(source) !== answerer) return;
       this.answerers.delete(source);
       this.preparers.delete(source);
+      this.readies.delete(source);
       for (const [key, entry] of this.ahead) if (entry.need.source === source) this.ahead.delete(key);
       this.syncProducers();
     };
@@ -417,7 +424,7 @@ export class EngineRenderTransport {
       // Answer the clock's frame instead of filling an obsolete FIFO.
       const stale = !!clock && need.composition === this.options.composition() && frame > 0
         && Math.sign(clock.rate) * (clock.time - need.time) > frame;
-      const asynchronous = playing && this.preparers.has(need.source);
+      const asynchronous = playing && this.prepares(need);
       const answered = !stale && !asynchronous && this.answerNeed(need, session);
       if (asynchronous && !stale) this.ahead.get(this.aheadTag(need))?.sent.delete(need.time);
       if (stale) this.lookaheadStats.skipped++;
@@ -475,7 +482,10 @@ export class EngineRenderTransport {
           if (time < 0 || entry.sent.has(time) || entry.pending.has(time)) continue;
           pending++;
           if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
-          const prepare = this.preparers.get(entry.need.source);
+          // Only a need whose base pixels must come from the engine first is
+          // prepared (bounded in flight); one the producer can answer now
+          // (a pass-through, pixels already here) is answered at once.
+          const prepare = this.prepares({ ...entry.need, time }, revision ?? 0) ? this.preparers.get(entry.need.source) : undefined;
           if (prepare && this.aheadInFlight >= 2) continue;
           done++;
           if (prepare) {
@@ -500,6 +510,14 @@ export class EngineRenderTransport {
 
   playbackStarted(): void {
     this.presentedWhilePlaying();
+  }
+
+  /** Whether `need` waits for an asynchronous preparation before its
+   *  producer answers it (while playing, and in the paused warm-up). */
+  private prepares(need: CompatNeed, revision = this.options.revision() ?? 0): boolean {
+    if (!this.preparers.has(need.source)) return false;
+    const ready = this.readies.get(need.source);
+    return !ready || !ready(need, revision);
   }
 
   private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>, warm = false, warmUntil = Infinity): void {

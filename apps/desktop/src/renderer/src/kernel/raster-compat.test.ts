@@ -141,6 +141,30 @@ describe('the raster override producer', () => {
     expect(engineRaster).toHaveBeenCalledTimes(1);
   });
 
+  it('is ready at once for layers its chain passes through, and waits for prepared pixels only where the chain read the base', async () => {
+    const { services, compat, engineRaster, need } = setup(true);
+    const original = services.get<any>('raster');
+    // A wrapper that changes text layers only (today's typewriter pattern).
+    services.register('raster', (layer: any, ...rest: any[]) => layer.type === 'text' ? { ...original(layer, ...rest), key: `typed:${rest[1]}` } : original(layer, ...rest));
+    // Never answered: answer now (a pass-through costs no round trip).
+    expect(compat.ready(need('box'), 4)).toBe(true);
+    expect(compat.ready(need('title'), 4)).toBe(true);
+    expect(compat.answer(need('box'), 4)).toEqual({ kind: 'native' });
+    expect(compat.answer(need('title'), 4)).toMatchObject({ kind: 'raster' });
+    expect(engineRaster).toHaveBeenCalledTimes(1);
+    // The pass-through stays ready at every time; the layer whose chain read
+    // its base waits for its pixels at the next time.
+    expect(compat.ready(need('box', 1.5), 4)).toBe(true);
+    expect(compat.ready(need('title', 1.5), 4)).toBe(false);
+    await compat.prepare(need('title', 1.5), 4);
+    expect(compat.ready(need('title', 1.5), 4)).toBe(true);
+    expect(compat.answer(need('title', 1.5), 4, { prepared: true })).toMatchObject({ kind: 'raster' });
+    expect(engineRaster).toHaveBeenCalledTimes(1);
+    // A chain change forgets what the old chain read.
+    compat.reset();
+    expect(compat.ready(need('title', 2), 4)).toBe(true);
+  });
+
   it('answers native for a wrapper that passes a layer through, without drawing the base', () => {
     const { services, compat, engineRaster, need } = setup();
     const original = services.get<any>('raster');

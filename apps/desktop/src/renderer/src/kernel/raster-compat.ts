@@ -89,6 +89,10 @@ export interface RasterCompatHandle {
   answer(need: CompatNeed, revision: number, options?: CompatAnswerOptions): CompatAnswerResult;
   /** Optional interactive-playback preparation before a synchronous answer. */
   prepare(need: CompatNeed, revision: number): Promise<void>;
+  /** Whether `answer` can run now without asking the engine for base pixels
+   *  on this thread: the chain passed this layer through the last time it
+   *  ran (it read no base), or the base it reads is already here. */
+  ready(need: CompatNeed, revision: number): boolean;
   dispose(): void;
 }
 
@@ -270,6 +274,12 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   const preparing = new Map<string, { layer: unknown; promise: Promise<void> }>();
   const bases = new Map<string, { layer: unknown; surface: any; bytes: number }>();
   let baseBytes = 0;
+  /** Layers (composition, layer) whose chain read the base the last time it
+   *  answered them: only those wait for prepared pixels while playing. The
+   *  rest (the chain passed them through) answer at once. */
+  const readsBase = new Set<string>();
+  /** Base surfaces loaded so far (a load during an answer marks its layer). */
+  let loads = 0;
   let answeringLayer: unknown = null;
   let pending = 0, generation = 0, readyRevision: number | null = null;
   let active: { layer: unknown; key: string; scale: number; time: number; crop: string } | null = null;
@@ -317,6 +327,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const matches = prepared?.layer === layer && active?.scale === s && active.time === t && active.crop === cropKey(crop ?? undefined);
       const key = answeringLayer === layer ? options.rasterKey?.(layer, s, t, crop ?? undefined) ?? null : null;
       const load = () => {
+        loads++;
         if (matches) return prepared!.surface;
         const surface = options.engineRaster(layer, s, t, crop ?? undefined);
         rememberBase(key, layer, surface);
@@ -342,133 +353,184 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       // Today's preview crop window, as the engine planned it for a viewer
       // frame (pm_render::compat_crop); exports and snapshots have none.
       const crop: RasterWindowLike | undefined = need.crop ? { x: need.crop.x, y: need.crop.y, width: need.crop.width, height: need.crop.height } : undefined;
-      let result: any;
-      producing++;
-      answeringLayer = layer;
-      active = answerOptions?.prepared === true && answerOptions.layer === undefined
-        ? { layer, key: sampleKey(need, revision), scale, time, crop: cropKey(crop) } : null;
+      const loadsBefore = loads;
       try {
-        // `uploaded`: today the compositor's lookup of a raster it holds by
-        // key; here none is held (the engine keeps the pixels), so it answers
-        // undefined, a lookup miss.
-        result = chain(layer, scale, time, NOT_UPLOADED, crop);
-      } catch (error) {
-        // Today the exception leaves the compositor's draw and fails the
-        // frame; here it fails the answer (render-transport.ts reports it,
-        // and an export frame fails with its message). The layer is never
-        // drawn without the wrapper instead.
-        log(`the raster override failed for layer ${String(need.layer)}: ${error instanceof Error ? error.message : String(error)}`);
-        throw error;
+        return answerWith(need, revision, answerOptions, layer, chain, time, scale, crop);
       } finally {
-        producing--;
-        if (active) ready.delete(active.key);
-        active = null;
-        answeringLayer = null;
+        rememberReads(need, loads > loadsBefore);
       }
-      const mark: LazyMark | undefined = result?.[LAZY];
-      // The base itself, for this layer, density and window, untouched: the
-      // engine draws it. A wrapper that wrote a field or took its canvas
-      // (it may have drawn on it) gets its result drawn as returned.
-      if (mark && mark.layer === layer && mark.scale === scale && mark.crop === crop && !mark.touched) return { kind: 'native' };
-      if (result == null) return TRANSPARENT;
-      const tag = `${String(need.composition)}\u0000${String(need.layer)}\u0000${need.time}\u0000${scale}\u0000${crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : ''}`;
-      // The engine holds the key in at most MAX_COMPAT_KEY_BYTES of UTF-8; a
-      // longer or broken one becomes its digest (a cut would merge keys).
-      const ownKey = typeof result.key === 'string' && result.key ? compatKey(result.key) : '';
-      if (ownKey && !answerOptions?.fresh && posted.get(tag) === ownKey) return { kind: 'reuse', key: ownKey };
-      const source = canvasOf(result);
-      if (!source) return TRANSPARENT;
-      const pixels = readPixels(source);
-      if (!pixels) return TRANSPARENT;
-      const w = Number(result.w) || pixels.width / scale;
-      const h = Number(result.h) || pixels.height / scale;
-      const centered = layer.type === 'shape' && !layer.d?.paths?.length;
-      const anchor: [number, number] = centered ? [w / 2, h / 2] : [Number(result.anchorX) || 0, Number(result.anchorY) || 0];
-      const uv = resultUv(result, pixels.width, pixels.height);
-      const key = ownKey || `powermove:${++serial}:${revision}`;
-      if (!answerOptions?.fresh) posted.set(tag, key);
-      if (posted.size > 8192) posted.clear();
-      return { kind: 'raster', key, ...pixels, anchor, size: [w, h], ...(uv ? { uv } : {}) };
+    },
+
+    ready(need: CompatNeed, revision: number): boolean {
+      if (!readsBase.has(readTag(need)) || !wrapped()) return true;
+      if (readyRevision === revision && ready.has(sampleKey(need, revision))) return true;
+      const layer = findLayer(PM, String(need.composition), String(need.layer));
+      if (!layer) return true;
+      const baseKey = options.rasterKey?.(layer, Number(need.scale), Number(need.time) / TICKS_PER_SECOND, need.crop ?? undefined) ?? null;
+      return readyRevision === revision && !!baseKey && bases.get(baseKey)?.layer === layer;
     },
 
     async prepare(need: CompatNeed, revision: number): Promise<void> {
-      if (!options.engineRasterAsync || !wrapped()) return;
-      sampleRevision(revision);
-      const layer = findLayer(PM, String(need.composition), String(need.layer));
-      if (!layer || (layer.type === 'captions' && PM?.captionsHidden)) return;
-      const key = sampleKey(need, revision);
-      if (ready.get(key)?.layer === layer) return;
-      const baseKey = options.rasterKey?.(layer, Number(need.scale), Number(need.time) / TICKS_PER_SECOND, need.crop ?? undefined) ?? null;
-      const cached = baseKey ? bases.get(baseKey) : undefined;
-      if (cached && cached.layer === layer) {
-        ready.set(key, { layer, surface: cached.surface });
-        while (ready.size > 2) ready.delete(ready.keys().next().value!);
-        return;
-      }
-      const existing = preparing.get(key);
-      if (existing) { if (existing.layer === layer) await existing.promise; return; }
-      if (pending >= 2) return;
-      const epoch = generation;
-      const crop = need.crop ? { ...need.crop } : undefined;
-      pending++;
-      const promise = Promise.resolve().then(async () => {
-        try {
-          const surface = await options.engineRasterAsync!(layer, Number(need.scale), Number(need.time) / TICKS_PER_SECOND, crop);
-          if (generation !== epoch || findLayer(PM, String(need.composition), String(need.layer)) !== layer || !wrapped()) return;
-          rememberBase(baseKey, layer, surface);
-          ready.set(key, { layer, surface });
-          while (ready.size > 2) ready.delete(ready.keys().next().value!);
-        } catch (error) {
-          log(`asynchronous base raster preparation failed: ${error instanceof Error ? error.message : String(error)}`);
-          throw error;
-        }
-        finally { pending--; if (preparing.get(key)?.promise === promise) preparing.delete(key); }
-      });
-      preparing.set(key, { layer, promise });
-      await promise;
+      return prepareBase(need, revision);
     },
 
     attach(next: EngineRenderTransport): () => void {
-      transport = next;
-      sync();
-      return () => {
-        if (transport !== next) return;
-        clearReady();
-        unanswer?.();
-        unanswer = null;
-        transport = null;
-      };
+      return attachTo(next);
     },
 
     reset(): void {
-      posted.clear();
-      clearReady();
-      if (!transport || !unanswer) return;
-      // A producer list without the source drops its answers, then the
-      // source comes back: the next frame asks afresh.
-      unanswer();
-      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options), options.engineRasterAsync ? (need, revision) => handle.prepare(need, revision) : undefined);
+      resetAnswers();
     },
 
     dispose(): void {
+      disposeAll();
+    }
+  };
+
+  const readTag = (need: CompatNeed) => `${need.composition}\u0000${need.layer}`;
+  function rememberReads(need: CompatNeed, read: boolean): void {
+    const tag = readTag(need);
+    readsBase.delete(tag);
+    if (!read) return;
+    readsBase.add(tag);
+    if (readsBase.size > 4096) readsBase.delete(readsBase.values().next().value!);
+  }
+
+  function answerWith(need: CompatNeed, revision: number, answerOptions: CompatAnswerOptions | undefined, layer: any, chain: Raster, time: number, scale: number, crop: RasterWindowLike | undefined): CompatAnswerResult {
+    let result: any;
+    producing++;
+    answeringLayer = layer;
+    active = answerOptions?.prepared === true && answerOptions.layer === undefined
+      ? { layer, key: sampleKey(need, revision), scale, time, crop: cropKey(crop) } : null;
+    try {
+      // `uploaded`: today the compositor's lookup of a raster it holds by
+      // key; here none is held (the engine keeps the pixels), so it answers
+      // undefined, a lookup miss.
+      result = chain(layer, scale, time, NOT_UPLOADED, crop);
+    } catch (error) {
+      // Today the exception leaves the compositor's draw and fails the
+      // frame; here it fails the answer (render-transport.ts reports it,
+      // and an export frame fails with its message). The layer is never
+      // drawn without the wrapper instead.
+      log(`the raster override failed for layer ${String(need.layer)}: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    } finally {
+      producing--;
+      if (active) ready.delete(active.key);
+      active = null;
+      answeringLayer = null;
+    }
+    const mark: LazyMark | undefined = result?.[LAZY];
+    // The base itself, for this layer, density and window, untouched: the
+    // engine draws it. A wrapper that wrote a field or took its canvas
+    // (it may have drawn on it) gets its result drawn as returned.
+    if (mark && mark.layer === layer && mark.scale === scale && mark.crop === crop && !mark.touched) return { kind: 'native' };
+    if (result == null) return TRANSPARENT;
+    const tag = `${String(need.composition)}\u0000${String(need.layer)}\u0000${need.time}\u0000${scale}\u0000${crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : ''}`;
+    // The engine holds the key in at most MAX_COMPAT_KEY_BYTES of UTF-8; a
+    // longer or broken one becomes its digest (a cut would merge keys).
+    const ownKey = typeof result.key === 'string' && result.key ? compatKey(result.key) : '';
+    if (ownKey && !answerOptions?.fresh && posted.get(tag) === ownKey) return { kind: 'reuse', key: ownKey };
+    const source = canvasOf(result);
+    if (!source) return TRANSPARENT;
+    const pixels = readPixels(source);
+    if (!pixels) return TRANSPARENT;
+    const w = Number(result.w) || pixels.width / scale;
+    const h = Number(result.h) || pixels.height / scale;
+    const centered = layer.type === 'shape' && !layer.d?.paths?.length;
+    const anchor: [number, number] = centered ? [w / 2, h / 2] : [Number(result.anchorX) || 0, Number(result.anchorY) || 0];
+    const uv = resultUv(result, pixels.width, pixels.height);
+    const key = ownKey || `powermove:${++serial}:${revision}`;
+    if (!answerOptions?.fresh) posted.set(tag, key);
+    if (posted.size > 8192) posted.clear();
+    return { kind: 'raster', key, ...pixels, anchor, size: [w, h], ...(uv ? { uv } : {}) };
+  }
+
+  async function prepareBase(need: CompatNeed, revision: number): Promise<void> {
+    if (!options.engineRasterAsync || !wrapped()) return;
+    sampleRevision(revision);
+    const layer = findLayer(PM, String(need.composition), String(need.layer));
+    if (!layer || (layer.type === 'captions' && PM?.captionsHidden)) return;
+    const key = sampleKey(need, revision);
+    if (ready.get(key)?.layer === layer) return;
+    const baseKey = options.rasterKey?.(layer, Number(need.scale), Number(need.time) / TICKS_PER_SECOND, need.crop ?? undefined) ?? null;
+    const cached = baseKey ? bases.get(baseKey) : undefined;
+    if (cached && cached.layer === layer) {
+      ready.set(key, { layer, surface: cached.surface });
+      while (ready.size > 2) ready.delete(ready.keys().next().value!);
+      return;
+    }
+    const existing = preparing.get(key);
+    if (existing) { if (existing.layer === layer) await existing.promise; return; }
+    if (pending >= 2) return;
+    const epoch = generation;
+    const crop = need.crop ? { ...need.crop } : undefined;
+    pending++;
+    const promise = Promise.resolve().then(async () => {
+      try {
+        const surface = await options.engineRasterAsync!(layer, Number(need.scale), Number(need.time) / TICKS_PER_SECOND, crop);
+        if (generation !== epoch || findLayer(PM, String(need.composition), String(need.layer)) !== layer || !wrapped()) return;
+        rememberBase(baseKey, layer, surface);
+        ready.set(key, { layer, surface });
+        while (ready.size > 2) ready.delete(ready.keys().next().value!);
+      } catch (error) {
+        log(`asynchronous base raster preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+        throw error;
+      }
+      finally { pending--; if (preparing.get(key)?.promise === promise) preparing.delete(key); }
+    });
+    preparing.set(key, { layer, promise });
+    await promise;
+  }
+
+  function attachTo(next: EngineRenderTransport): () => void {
+    transport = next;
+    sync();
+    return () => {
+      if (transport !== next) return;
       clearReady();
-      chainChange.dispose();
-      offFonts?.();
       unanswer?.();
       unanswer = null;
       transport = null;
-    }
-  };
+    };
+  }
+
+  function register(target: EngineRenderTransport): () => void {
+    return options.engineRasterAsync
+      ? target.answerCompat('rasterOverride', (need, revision, o) => handle.answer(need, revision, o), (need, revision) => handle.prepare(need, revision), (need, revision) => handle.ready(need, revision))
+      : target.answerCompat('rasterOverride', (need, revision, o) => handle.answer(need, revision, o));
+  }
+
+  function resetAnswers(): void {
+    posted.clear();
+    readsBase.clear();
+    clearReady();
+    if (!transport || !unanswer) return;
+    // A producer list without the source drops its answers, then the
+    // source comes back: the next frame asks afresh.
+    unanswer();
+    unanswer = register(transport);
+  }
+
+  function disposeAll(): void {
+    clearReady();
+    chainChange.dispose();
+    offFonts?.();
+    unanswer?.();
+    unanswer = null;
+    transport = null;
+  }
 
   function sync(): void {
     clearReady();
     if (!transport) return;
     if (wrapped() && !unanswer) {
-      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options), options.engineRasterAsync ? (need, revision) => handle.prepare(need, revision) : undefined);
+      unanswer = register(transport);
     } else if (!wrapped() && unanswer) {
       unanswer();
       unanswer = null;
       posted.clear();
+      readsBase.clear();
       clearReady();
     } else if (unanswer) {
       // Another wrapper on top, or one of several disposed: what the chain

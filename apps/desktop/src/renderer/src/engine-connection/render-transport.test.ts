@@ -524,6 +524,29 @@ describe('compatibility answers during playback', () => {
   }
   const need = (time: number, layer = 'title') => ({ composition: 'P-root', layer, time, source: 'rasterOverride' as const, scale: 1 });
 
+  it('answers needs the producer is ready for at once while playing, and prepares only the rest', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked } = rig(true);
+    const prepared: string[] = [];
+    // Many pass-through layers and one whose base must be prepared (a large
+    // project: hundreds of text and shape layers, one wrapper that changes one).
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; },
+      async n => { prepared.push(`${n.layer}@${n.time}`); }, n => n.layer !== 'typed');
+    try {
+      const layers = Array.from({ length: 24 }, (_, i) => `layer-${i}`);
+      t.receiveCompat({ compat: 'needs', needs: [...layers, 'typed'].map(l => need(0, l)) }, session);
+      // Every ready layer's current frame is answered in the same task.
+      expect(asked.filter(time => time === 0)).toHaveLength(24);
+      expect(prepared).toEqual([]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepared[0]).toBe('typed@0');
+      expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(2);
+      // The horizon fills over the next turns, the ready layers synchronously.
+      for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(4);
+      for (let k = 0; k <= 6; k++) expect(asked.filter(time => time === k * frame).length).toBeGreaterThanOrEqual(24);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
   it('keeps a bounded horizon ahead of the clock without repeating work on duplicate presentation callbacks', () => {
     const { t, session, asked, state } = rig(true);
     try {
