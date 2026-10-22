@@ -362,7 +362,7 @@ pub fn load(bytes: &[u8]) -> Result<Model> {
     // The document as raw JSON, as GLTFLoader reads it (a typed schema
     // refuses files GLTFLoader loads: a 15-value matrix, an animation
     // channel without a node).
-    let (raw, blob) = crate::gltf::container(bytes).map_err(|e| Error(e.0))?;
+    let (raw, mut blob) = crate::gltf::container(bytes).map_err(|e| Error(e.0))?;
     let used: Vec<String> = raw["extensionsUsed"]
         .as_array()
         .map(|a| {
@@ -374,14 +374,16 @@ pub fn load(bytes: &[u8]) -> Result<Model> {
     // GLTFLoader warns about an unknown required extension and loads the
     // file; the ones it refuses (Draco without a decoder, KTX2, meshopt)
     // are refused by the acceptance check (`scene::import`).
-    let mut owned: Vec<Vec<u8>> = Vec::new();
+    let mut owned: Vec<std::borrow::Cow<'_, [u8]>> = Vec::new();
     for (i, b) in raw["buffers"].as_array().into_iter().flatten().enumerate() {
         match b["uri"].as_str() {
             None if i == 0 => owned.push(
-                blob.clone()
+                blob.take()
                     .ok_or_else(|| Error("GLB has no BIN chunk".into()))?,
             ),
-            Some(uri) if uri.starts_with("data:") => owned.push(decode_data_uri(uri)?),
+            Some(uri) if uri.starts_with("data:") => {
+                owned.push(std::borrow::Cow::Owned(decode_data_uri(uri)?))
+            }
             _ => {
                 return err(
                     "Use a self-contained GLB with embedded textures and geometry. External glTF files are not loaded.",
@@ -391,7 +393,7 @@ pub fn load(bytes: &[u8]) -> Result<Model> {
     }
     let data = Data {
         json: &raw,
-        buffers: owned.iter().map(|b| b.as_slice()).collect(),
+        buffers: owned.iter().map(|b| b.as_ref()).collect(),
     };
     let mut model = Model {
         extensions_used: used,
@@ -817,7 +819,9 @@ fn load_nodes(raw: &Value, data: &Data<'_>, model: &mut Model) -> Result<()> {
         .ok_or_else(|| Error("glTF node hierarchy is cyclic or invalid".into()))?;
     model.roots = selected.default_roots;
     for i in 0..model.nodes.len() {
-        model.nodes[i].children.retain(|&c| selected.parents.get(c) == Some(&Some(i)));
+        model.nodes[i]
+            .children
+            .retain(|&c| selected.parents.get(c) == Some(&Some(i)));
     }
     for (i, parent) in selected.parents.into_iter().enumerate() {
         model.nodes[i].parent = parent;

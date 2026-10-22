@@ -46,6 +46,7 @@ struct GpuMesh {
     position: wgpu::Buffer,
     normal: wgpu::Buffer,
     uv: wgpu::Buffer,
+    shared_zero: bool,
     index: wgpu::Buffer,
     count: u32,
     wireframe: Option<(wgpu::Buffer, u32)>,
@@ -53,11 +54,12 @@ struct GpuMesh {
 
 impl GpuMesh {
     fn bytes(&self) -> u64 {
-        [&self.position, &self.normal, &self.uv, &self.index]
+        let total = [&self.position, &self.normal, &self.uv, &self.index]
             .into_iter()
             .chain(self.wireframe.as_ref().map(|(b, _)| b))
             .map(wgpu::Buffer::size)
-            .sum()
+            .sum::<u64>();
+        total - if self.shared_zero { self.uv.size() } else { 0 }
     }
 }
 
@@ -119,6 +121,12 @@ struct PipelineKey {
     samples: u32,
     state: DrawState,
     color4: bool,
+    constant_attributes: u8,
+}
+
+fn constant_attributes(geometry: &super::model::Geometry3d) -> u8 {
+    u8::from(geometry.geometry.normals().len() < geometry.geometry.vertex_count() * 3)
+        | (u8::from(geometry.geometry.uvs().is_empty()) << 1)
 }
 
 /// The vertex inputs a program reads, by location.
@@ -782,55 +790,99 @@ impl Scene3dRenderer {
             return m.clone();
         }
         let geometry = &g.geometry;
-        let buffer = |label: &str, mut bytes: Vec<u8>, usage: wgpu::BufferUsages| {
+        let buffer = |label: &str,
+                      words: &mut dyn Iterator<Item = u32>,
+                      len: usize,
+                      usage: wgpu::BufferUsages| {
             // naga's MSL vertex pulling admits element i only when
             // i < bound size / stride (S7 finding 6); padding keeps GL's rule.
-            bytes.resize(bytes.len() + 256, 0);
-            wgpu::util::DeviceExt::create_buffer_init(
-                device,
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents: &bytes,
-                    usage,
-                },
-            )
+            // Write directly into the mapped buffer. A large model formerly
+            // held a second full-size Vec<u8> for each upload, plus cloned or
+            // synthesized float arrays for normal and UV.
+            let b = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (len * 4 + 256) as u64,
+                usage,
+                mapped_at_creation: true,
+            });
+            {
+                let mut mapped = b
+                    .slice(..)
+                    .get_mapped_range_mut()
+                    .expect("buffer mapped at creation");
+                mapped
+                    .slice(..len * 4)
+                    .write_iter(words.flat_map(u32::to_le_bytes));
+                mapped.slice(len * 4..).fill(0);
+            }
+            b.unmap();
+            b
         };
-        let f = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
         let count = geometry.vertex_count();
-        let uvs = if geometry.uvs.is_empty() {
-            // No `uv` attribute: WebGL's constant attribute value (0, 0).
-            vec![0f32; count * 2]
-        } else {
-            geometry.uvs.clone()
-        };
-        // No `normal` attribute (flat-shaded glTF): WebGL's constant zero.
-        let normals = if geometry.normals.len() < count * 3 {
-            vec![0f32; count * 3]
-        } else {
-            geometry.normals.clone()
-        };
-        let index = |v: &[u32]| v.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<u8>>();
         let wire = wireframe.then(|| {
             let w = geometry.wireframe_indices();
             (
-                buffer("3d wireframe", index(&w), wgpu::BufferUsages::INDEX),
+                buffer(
+                    "3d wireframe",
+                    &mut w.iter().copied(),
+                    w.len(),
+                    wgpu::BufferUsages::INDEX,
+                ),
                 w.len() as u32,
+            )
+        });
+        let normals = if geometry.normals().len() < count * 3 {
+            // No `normal` attribute: WebGL's constant zero.
+            None
+        } else {
+            Some(geometry.normals())
+        };
+        let uvs = (!geometry.uvs().is_empty()).then_some(geometry.uvs());
+        let zero = (normals.is_none() || uvs.is_none()).then(|| {
+            buffer(
+                "3d missing attributes",
+                &mut std::iter::repeat_n(0, 4),
+                4,
+                wgpu::BufferUsages::VERTEX,
             )
         });
         let m = Arc::new(GpuMesh {
             position: buffer(
                 "3d position",
-                f(&geometry.positions),
+                &mut geometry.positions().iter().map(|v| v.to_bits()),
+                geometry.positions().len(),
                 wgpu::BufferUsages::VERTEX,
             ),
-            normal: buffer("3d normal", f(&normals), wgpu::BufferUsages::VERTEX),
-            uv: buffer("3d uv", f(&uvs), wgpu::BufferUsages::VERTEX),
+            normal: normals.map_or_else(
+                || zero.as_ref().expect("missing normal buffer").clone(),
+                |values| {
+                    buffer(
+                        "3d normal",
+                        &mut values.iter().map(|v| v.to_bits()),
+                        count * 3,
+                        wgpu::BufferUsages::VERTEX,
+                    )
+                },
+            ),
+            uv: uvs.map_or_else(
+                || zero.as_ref().expect("missing UV buffer").clone(),
+                |values| {
+                    buffer(
+                        "3d uv",
+                        &mut values.iter().map(|v| v.to_bits()),
+                        values.len(),
+                        wgpu::BufferUsages::VERTEX,
+                    )
+                },
+            ),
+            shared_zero: normals.is_none() && uvs.is_none(),
             index: buffer(
                 "3d index",
-                index(&geometry.indices),
+                &mut geometry.indices().iter().copied(),
+                geometry.indices().len(),
                 wgpu::BufferUsages::INDEX,
             ),
-            count: geometry.indices.len() as u32,
+            count: geometry.indices().len() as u32,
             wireframe: wire,
         });
         self.meshes.insert(g.key, (m.clone(), generation));
@@ -918,11 +970,12 @@ impl Scene3dRenderer {
         compiled: &Compiled,
         samples: u32,
         state: DrawState,
-        extra: Option<Arc<super::gltf::VertexExtra>>,
+        geometry: &super::model::Geometry3d,
     ) -> wgpu::RenderPipeline {
+        let extra = geometry.extra.as_deref();
+        let constant_attributes = constant_attributes(geometry);
         // The color attribute's item size is part of the vertex layout.
         let color4 = extra
-            .as_ref()
             .and_then(|x| x.color.as_ref())
             .is_some_and(|c| c.1 == 4);
         let key = PipelineKey {
@@ -931,34 +984,42 @@ impl Scene3dRenderer {
             samples,
             state,
             color4,
+            constant_attributes,
         };
         if let Some(p) = self.pipelines.get(&key) {
             return p.clone();
         }
         let inputs = vertex_inputs(compiled);
-        let attrs: Vec<[wgpu::VertexAttribute; 1]> = inputs
-            .iter()
-            .map(|(loc, name)| {
-                let (format, _, _) = super::gltf::gpu::attribute_format(name, extra.as_deref())
-                    .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
-                [wgpu::VertexAttribute {
-                    format,
-                    offset: instance_column(name) * 16,
-                    shader_location: *loc,
-                }]
-            })
-            .collect();
+        let attrs: Vec<[wgpu::VertexAttribute; 1]> =
+            inputs
+                .iter()
+                .map(|(loc, name)| {
+                    let (format, _, _) = super::gltf::gpu::attribute_format(name, extra)
+                        .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
+                    [wgpu::VertexAttribute {
+                        format,
+                        offset: instance_column(name) * 16,
+                        shader_location: *loc,
+                    }]
+                })
+                .collect();
         let layouts: Vec<Option<wgpu::VertexBufferLayout>> = inputs
             .iter()
             .zip(attrs.iter())
             .map(|((_, name), a)| {
-                let (_, stride, instance) = super::gltf::gpu::attribute_format(
-                    name,
-                    extra.as_deref(),
-                )
-                .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
+                let (_, stride, instance) = super::gltf::gpu::attribute_format(name, extra)
+                    .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
                 Some(wgpu::VertexBufferLayout {
-                    array_stride: stride,
+                    // Missing WebGL attributes have a constant zero value.
+                    // Zero stride repeats one tuple without a vertex-sized
+                    // zero allocation, including skinning and env-map reads.
+                    array_stride: if (*name == "normal" && constant_attributes & 1 != 0)
+                        || (*name == "uv" && constant_attributes & 2 != 0)
+                    {
+                        0
+                    } else {
+                        stride
+                    },
                     step_mode: if instance {
                         wgpu::VertexStepMode::Instance
                     } else {
@@ -1128,7 +1189,7 @@ impl Scene3dRenderer {
             &compiled,
             samples,
             draw.state,
-            mesh_desc.geometry.extra.clone(),
+            &mesh_desc.geometry,
         );
         let mut block = vec![0u8; compiled.block_size.max(16) as usize];
         for (name, v) in &draw.uniforms {

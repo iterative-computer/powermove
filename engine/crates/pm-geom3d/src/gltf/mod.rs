@@ -21,10 +21,10 @@
 
 pub mod anim;
 mod load;
-pub(crate) mod promise_order;
 pub mod math;
 pub mod pick;
 pub mod pose;
+pub(crate) mod promise_order;
 
 pub use load::{Limits, load, load_with};
 pub(crate) use load::{container, js_number};
@@ -65,7 +65,7 @@ pub enum Mode {
 /// integers already mapped to floats) and the item size.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
-    pub data: Vec<f32>,
+    pub data: std::sync::Arc<Vec<f32>>,
     pub size: usize,
 }
 
@@ -129,7 +129,7 @@ pub struct Geometry {
     /// Whether `skin_weight` is a normalized 8 or 16-bit accessor (its
     /// normalized weights are re-quantized, as `setXYZW` stores them).
     pub skin_weight_bits: Option<u32>,
-    pub index: Option<Vec<u32>>,
+    pub index: Option<std::sync::Arc<Vec<u32>>>,
     pub morph: Morph,
     /// `computeBounds`: the `POSITION` accessor's min and max grown by the
     /// largest morph displacement (`None` without min and max).
@@ -163,11 +163,9 @@ impl Geometry {
                 hi[k] = hi[k].max(v);
             }
         };
-        let positions: Vec<&[f32]> = self.position.data.chunks_exact(3).collect();
-        if positions.is_empty() {
-            return None;
-        }
-        for p in &positions {
+        let mut positions = self.position.data.chunks_exact(3);
+        grow(positions.next()?);
+        for p in positions {
             grow(p);
         }
         // `computeBoundingBox` with relative morph attributes: each
@@ -175,7 +173,10 @@ impl Geometry {
         for (i, target) in self.morph.position.iter().flatten().enumerate() {
             let mut tlo = [f64::INFINITY; 3];
             let mut thi = [f64::NEG_INFINITY; 3];
-            let source_len = self.morph.source_counts[0].get(i).copied().unwrap_or(target.count());
+            let source_len = self.morph.source_counts[0]
+                .get(i)
+                .copied()
+                .unwrap_or(target.count());
             for p in target.data[..source_len * 3].chunks_exact(3) {
                 for k in 0..3 {
                     tlo[k] = tlo[k].min(f64::from(p[k]));

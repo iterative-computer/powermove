@@ -52,19 +52,30 @@ pub(crate) struct GltfGpu {
 fn buffer(
     device: &wgpu::Device,
     label: &str,
-    mut bytes: Vec<u8>,
+    len: usize,
+    values: impl Iterator<Item = f32>,
     usage: wgpu::BufferUsages,
 ) -> wgpu::Buffer {
-    // Padding as the scene meshes' buffers (S7 finding 6).
-    bytes.resize(bytes.len() + 256, 0);
-    wgpu::util::DeviceExt::create_buffer_init(
-        device,
-        &wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: &bytes,
-            usage,
-        },
-    )
+    // Padding as the scene meshes' buffers (S7 finding 6). Write directly
+    // into mapped GPU storage instead of allocating a full-size byte copy.
+    let b = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: (len * 4 + 256) as u64,
+        usage,
+        mapped_at_creation: true,
+    });
+    {
+        let mut mapped = b
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("buffer mapped at creation");
+        mapped
+            .slice(..len * 4)
+            .write_iter(values.flat_map(f32::to_le_bytes));
+        mapped.slice(len * 4..).fill(0);
+    }
+    b.unmap();
+    b
 }
 
 fn f32_bytes(v: impl Iterator<Item = f32>) -> Vec<u8> {
@@ -496,7 +507,7 @@ struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         let n = geometry.geometry.vertex_count();
         let (_, stride, _) = attribute_format(name, x)?;
         let comps = (stride / 4) as usize;
-        let data: Option<&Vec<f32>> = match name {
+        let data: Option<&Arc<Vec<f32>>> = match name {
             "tangent" => x.and_then(|x| x.tangent.as_ref()),
             "color" => x.and_then(|x| x.color.as_ref()).map(|c| &c.0),
             "uv1" => x.and_then(|x| x.uv1.as_ref()),
@@ -506,18 +517,22 @@ struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             "skinWeight" => x.and_then(|x| x.skin_weight.as_ref()),
             _ => None,
         };
-        let bytes = match data {
-            Some(d) if d.len() >= n * comps => f32_bytes(d[..n * comps].iter().copied()),
-            _ => {
-                f32_bytes((0..n * comps).map(|i| if comps == 4 && i % 4 == 3 { 1.0 } else { 0.0 }))
-            }
+        let b = match data {
+            Some(d) if d.len() >= n * comps => buffer(
+                device,
+                "3d gltf attribute",
+                n * comps,
+                d[..n * comps].iter().copied(),
+                wgpu::BufferUsages::VERTEX,
+            ),
+            _ => buffer(
+                device,
+                "3d gltf attribute",
+                n * comps,
+                (0..n * comps).map(|i| if comps == 4 && i % 4 == 3 { 1.0 } else { 0.0 }),
+                wgpu::BufferUsages::VERTEX,
+            ),
         };
-        let b = buffer(
-            device,
-            "3d gltf attribute",
-            bytes,
-            wgpu::BufferUsages::VERTEX,
-        );
         self.vertex
             .insert(key, (VertexBuffer { buffer: b.clone() }, generation));
         Some(b)
@@ -551,23 +566,29 @@ struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             e.1 = generation;
             return Some(e.0.buffer.clone());
         }
-        let bytes = match column {
+        let b = match column {
             // One buffer of whole matrices; each column attribute reads it
             // at its offset with a 64-byte stride.
-            Some(_) => f32_bytes(inst.matrices.iter().flat_map(|m| m.iter().copied())),
+            Some(_) => buffer(
+                device,
+                "3d gltf instances",
+                inst.matrices.len() * 16,
+                inst.matrices.iter().flat_map(|m| m.iter().copied()),
+                wgpu::BufferUsages::VERTEX,
+            ),
             None => {
                 let c = inst.colors.as_ref()?;
-                f32_bytes((0..inst.matrices.len()).flat_map(|i| {
-                    (0..3).map(move |k| c.data.get(i * c.size + k).copied().unwrap_or(0.0))
-                }))
+                buffer(
+                    device,
+                    "3d gltf instances",
+                    inst.matrices.len() * 3,
+                    (0..inst.matrices.len()).flat_map(|i| {
+                        (0..3).map(move |k| c.data.get(i * c.size + k).copied().unwrap_or(0.0))
+                    }),
+                    wgpu::BufferUsages::VERTEX,
+                )
             }
         };
-        let b = buffer(
-            device,
-            "3d gltf instances",
-            bytes,
-            wgpu::BufferUsages::VERTEX,
-        );
         self.instances
             .insert(k, (VertexBuffer { buffer: b.clone() }, generation));
         Some(b)

@@ -333,6 +333,32 @@ fn imported_model_above_inline_budget_keeps_all_placements() {
             .iter()
             .all(|object| object.meshes[0].geometry.geometry.vertex_count() == VERTICES)
     );
+    let asset = pm_render::scene3d::gltf::asset::load(&path).unwrap();
+    for object in &imported {
+        let pm_render::scene3d::model::GeometryPayload::Gltf {
+            source,
+            generated_indices,
+        } = &object.meshes[0].geometry.geometry
+        else {
+            panic!("imported model used copied renderer geometry");
+        };
+        assert!(Arc::ptr_eq(
+            &source.position.data,
+            &asset.model.geometries[0].position.data
+        ));
+        assert!(Arc::ptr_eq(
+            source.index.as_ref().unwrap(),
+            asset.model.geometries[0].index.as_ref().unwrap()
+        ));
+        assert!(generated_indices.is_none());
+    }
+
+    // Missing normal/UV values are constant vertex inputs, shared by all
+    // placements. Their storage must not grow with POSITION's vertex count.
+    render(&mut renderer, &doc, &resolver("model", &path)).unwrap();
+    let resident = renderer.scene3d_resident();
+    assert_eq!(resident.meshes, 1, "placements share one GPU mesh");
+    assert!(resident.mesh_bytes < VERTICES as u64 * 12 + 4096);
 
     let mut fourth = base;
     fourth["id"] = json!("o3");

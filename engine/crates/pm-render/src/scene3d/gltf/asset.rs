@@ -41,6 +41,10 @@ pub struct GltfAsset {
     /// Per glTF image: the decoded pixels, or `None` when Chromium would
     /// not decode it.
     pub images: Vec<Option<Arc<DecodedImage>>>,
+    /// Draw metadata and generated indices live exactly as long as this file
+    /// version. A scene can release its draw between frames without paying
+    /// for another full-size index build on the next frame.
+    pub(crate) geometry_cache: Mutex<HashMap<usize, super::Geometry3d>>,
 }
 
 impl std::fmt::Debug for GltfAsset {
@@ -85,6 +89,15 @@ fn cache() -> &'static Loaded {
     C.get_or_init(Default::default)
 }
 
+/// Release cached file versions when the source has disappeared. Any scene
+/// already drawing one still owns its geometry and textures through Arcs.
+pub(crate) fn forget(path: &Path) {
+    cache()
+        .lock()
+        .unwrap()
+        .retain(|version, _| version.0 != path);
+}
+
 /// The model at `path`, loaded once per file version. `Err` when the file
 /// does not load (today's importer refuses it, so the asset has no scene
 /// and draws as the missing-model box).
@@ -118,6 +131,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Arc<GltfAsset>, String> {
         key: hash(&[b"gltf asset 1", bytes]),
         model: Arc::new(model),
         images,
+        geometry_cache: Mutex::new(HashMap::new()),
     }))
 }
 

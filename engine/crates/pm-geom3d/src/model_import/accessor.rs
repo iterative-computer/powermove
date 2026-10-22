@@ -50,9 +50,28 @@ impl<'a> Data<'a> {
         })
     }
 
+    fn checked_layout(&self, index: usize) -> Result<Layout> {
+        let layout = self.layout(index)?;
+        match layout.component_type {
+            5120 | 5121 | 5122 | 5123 | 5125 | 5126 => Ok(layout),
+            c => err(format!("component type {c}")),
+        }
+    }
+
     /// Reads an accessor as f64 components: normalized integers mapped as
     /// three.js's getters map them (`denormalize`), others as stored.
     pub fn read(&self, index: usize) -> Result<(Vec<f64>, usize)> {
+        let layout = self.checked_layout(index)?;
+        let mut out = vec![0.0; layout.count * layout.comps];
+        let comps = self.visit(index, |row, component, value| {
+            out[row * layout.comps + component] = value;
+        })?;
+        Ok((out, comps))
+    }
+
+    /// Decode components into the caller's storage. Keeping the f64 getter
+    /// result scalar preserves normalized rounding without a full f64 array.
+    fn visit(&self, index: usize, mut set: impl FnMut(usize, usize, f64)) -> Result<usize> {
         let a = self.accessor(index)?;
         let Layout {
             count,
@@ -92,7 +111,6 @@ impl<'a> Data<'a> {
                 _ => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
             }
         };
-        let mut out = vec![0.0; count * comps];
         let kind = a["type"].as_str().unwrap_or("");
         if let Some(view_index) = a["bufferView"].as_u64() {
             let view = &self.json["bufferViews"][view_index as usize];
@@ -134,7 +152,7 @@ impl<'a> Data<'a> {
                         }
                         _ => c * csize,
                     };
-                    out[i * comps + c] = decode(&buffer[base + offset..]);
+                    set(i, c, decode(&buffer[base + offset..]));
                 }
             }
         }
@@ -182,23 +200,143 @@ impl<'a> Data<'a> {
                     continue;
                 }
                 for c in 0..comps {
-                    out[target * comps + c] = decode(&vb[(k * comps + c) * csize..]);
+                    set(target, c, decode(&vb[(k * comps + c) * csize..]));
                 }
             }
         }
-        Ok((out, comps))
+        Ok(comps)
     }
 
     /// An accessor as f32 tuples of `N` components (as three.js stores
     /// attributes in Float32Arrays, or reads normalized integers through its
     /// getters).
     pub fn read_n<const N: usize>(&self, index: usize) -> Result<Vec<[f32; N]>> {
-        let (v, comps) = self.read(index)?;
-        if comps != N {
+        let layout = self.checked_layout(index)?;
+        if layout.comps != N {
+            // Preserve the old path's error ordering for malformed accessors:
+            // it validated the buffer before reporting a tuple-size mismatch.
+            let (_, comps) = self.read(index)?;
             return err(format!("accessor {index} has {comps} components, not {N}"));
         }
-        Ok(v.chunks_exact(N)
-            .map(|c| std::array::from_fn(|i| c[i] as f32))
-            .collect())
+        let mut out = vec![[0.0; N]; layout.count];
+        self.visit(index, |row, component, value| {
+            out[row][component] = value as f32;
+        })?;
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn direct_tuples_match_f64_getters_for_sparse_normalized_values() {
+        let bytes = [0u8, 127, 128, 255, 0, 1, 1, 127, 0, 128];
+        let json = json!({
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":6},
+                {"buffer":0,"byteOffset":6,"byteLength":1},
+                {"buffer":0,"byteOffset":7,"byteLength":3}
+            ],
+            "accessors":[{"bufferView":0,"componentType":5120,"normalized":true,
+                "count":2,"type":"VEC3","sparse":{"count":1,
+                    "indices":{"bufferView":1,"componentType":5121},
+                    "values":{"bufferView":2}}}]
+        });
+        let data = Data {
+            json: &json,
+            buffers: vec![&bytes],
+        };
+        let (old, _) = data.read(0).unwrap();
+        let direct = data.read_n::<3>(0).unwrap();
+        let old_bits: Vec<_> = old.iter().map(|v| (*v as f32).to_bits()).collect();
+        let direct_bits: Vec<_> = direct.iter().flatten().map(|v| v.to_bits()).collect();
+        assert_eq!(direct_bits, old_bits);
+        assert_eq!(direct[0][0], 0.0);
+        assert_eq!(direct[0][1], 1.0);
+        assert_eq!(direct[0][2], -1.0);
+        assert_eq!(direct[1], [1.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn direct_matrix_tuples_honor_column_padding() {
+        let bytes = [1u8, 2, 3, 99, 4, 5, 6, 99, 7, 8, 9, 99];
+        let json = json!({
+            "bufferViews":[{"buffer":0,"byteLength":12}],
+            "accessors":[{"bufferView":0,"componentType":5121,"count":1,"type":"MAT3"}]
+        });
+        let data = Data {
+            json: &json,
+            buffers: vec![&bytes],
+        };
+        assert_eq!(
+            data.read_n::<9>(0).unwrap(),
+            [[1., 2., 3., 4., 5., 6., 7., 8., 9.]]
+        );
+    }
+
+    #[test]
+    fn wide_integer_and_malformed_tuple_keep_old_semantics() {
+        let bytes = u32::MAX.to_le_bytes();
+        let json = json!({
+            "bufferViews":[{"buffer":0,"byteLength":4}],
+            "accessors":[{"bufferView":0,"componentType":5125,"count":1,"type":"SCALAR"}]
+        });
+        let data = Data {
+            json: &json,
+            buffers: vec![&bytes],
+        };
+        assert_eq!(data.read(0).unwrap().0, [u32::MAX as f64]);
+        assert_eq!(data.read_n::<1>(0).unwrap(), [[u32::MAX as f32]]);
+        assert_eq!(
+            data.read_n::<3>(0).unwrap_err().0,
+            "accessor 0 has 1 components, not 3"
+        );
+    }
+
+    #[test]
+    fn direct_float_tuples_keep_signed_zero_and_nan_round_trip() {
+        let values = [f32::from_bits(0x7f80_0001), -0.0, 1.25];
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let json = json!({
+            "bufferViews":[{"buffer":0,"byteLength":12}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3"}]
+        });
+        let data = Data {
+            json: &json,
+            buffers: vec![&bytes],
+        };
+        let (old, _) = data.read(0).unwrap();
+        let direct = data.read_n::<3>(0).unwrap();
+        for i in 0..3 {
+            assert_eq!(direct[0][i].to_bits(), (old[i] as f32).to_bits());
+        }
+        assert_eq!(direct[0][1].to_bits(), (-0.0f32).to_bits());
+    }
+
+    #[test]
+    fn unsupported_component_type_precedes_large_output_allocation() {
+        // A VEC3 output at this count would overflow its length before visit
+        // could reject the component type.
+        let json = json!({"accessors":[{
+            "componentType":9999,"count":(usize::MAX / 2) as u64,"type":"VEC3"
+        }]});
+        let data = Data {
+            json: &json,
+            buffers: vec![],
+        };
+        assert_eq!(data.read(0).unwrap_err().0, "component type 9999");
+
+        // The direct tuple path must validate before allocating as well.
+        let json = json!({"accessors":[{
+            "componentType":9999,"count":0,"type":"VEC3"
+        }]});
+        let data = Data {
+            json: &json,
+            buffers: vec![],
+        };
+        assert_eq!(data.read_n::<3>(0).unwrap_err().0, "component type 9999");
     }
 }
