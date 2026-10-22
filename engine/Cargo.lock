@@ -2403,6 +2403,7 @@ dependencies = [
 name = "pm-node-addon"
 version = "0.1.0"
 dependencies = [
+ "dhat",
  "napi-build",
  "pm-media",
  "pm-node",

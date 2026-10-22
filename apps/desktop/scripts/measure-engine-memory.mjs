@@ -177,6 +177,19 @@ for (let round = 0; round < count; round++) {
         return { ms: performance.now() - start, encodedBytes: image.length };
       });
       states.push(await capture('corpus', prefix, round === 0));
+      // The capture settled past the presenter's rest release: the next
+      // snapshot takes fresh targets; the one after it is warm.
+      const snapshotMs = () => page.evaluate(async () => {
+        const start = performance.now();
+        const image = await window.PM.Export.snapshotAsync(0, 320);
+        if (typeof image !== 'string' || !image.startsWith('data:image/')) throw new Error('The snapshot failed.');
+        return performance.now() - start;
+      });
+      const restSnapshot = { afterRestMs: await snapshotMs(), warmMs: await snapshotMs() };
+      const restReport = variant === 'off' ? null : await app.evaluate(async () => {
+        const report = await globalThis.__powermoveNativeEngine.engine.report('interactive');
+        return { restReleases: report?.presenter?.restReleases ?? null, restReleasedBytes: report?.presenter?.restReleasedBytes ?? null };
+      });
       if (process.env.PM_MEMORY_CLOSED === '1') {
         // Back to an empty project: what the corpus project leaves behind.
         await page.evaluate(() => { window.PM.replaceProject(window.PM.mkProject({ name: 'Memory measurement' })); });
@@ -189,7 +202,7 @@ for (let round = 0; round < count; round++) {
         await globalThis.__powermoveNativeEngine.engine.ensureReady('job');
         return performance.now() - start;
       });
-      samples.push({ round: round + 1, variant, states, emptyReadyMs, projectReadyMs, firstJobReadyMs, firstEmptySnapshot, firstCorpusSnapshot });
+      samples.push({ round: round + 1, variant, states, emptyReadyMs, projectReadyMs, firstJobReadyMs, firstEmptySnapshot, firstCorpusSnapshot, restSnapshot, restReport });
       await writeFile(path.join(output, 'samples.json'), JSON.stringify(samples, null, 2));
       process.stdout.write(`${prefix} captured\n`);
       let trace;

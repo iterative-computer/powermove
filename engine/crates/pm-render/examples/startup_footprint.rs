@@ -93,6 +93,33 @@ fn main() {
         drop(renderer.render(&document, &root, t, &request, &resolver));
     }
     checkpoint("ten frames", Some(&gpu.device));
+    // First-frame cost after a rest release against a warm frame (the
+    // presenter's `release_at_rest`), median of five each.
+    let t = Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
+    let mut timed = |release: bool| {
+        let mut samples: Vec<f64> = (0..5)
+            .map(|_| {
+                if release {
+                    renderer.release_idle_targets();
+                }
+                let start = std::time::Instant::now();
+                drop(renderer.render(&document, &root, t, &request, &resolver));
+                let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                start.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        samples.sort_by(f64::total_cmp);
+        samples[2]
+    };
+    let warm = timed(false);
+    let after_release = timed(true);
+    println!("frame ms: warm {warm:.2}, after a rest release {after_release:.2}");
+    checkpoint("released", Some(&gpu.device));
+    // Hold the renderer for `heap`/`vmmap` (`PM_PROBE_HOLD_S` seconds).
+    if let Some(hold) = std::env::var("PM_PROBE_HOLD_S").ok().and_then(|s| s.parse().ok()) {
+        println!("holding {hold} s, pid {}", std::process::id());
+        std::thread::sleep(Duration::from_secs(hold));
+    }
     drop(renderer);
     checkpoint("renderer dropped", Some(&gpu.device));
 }

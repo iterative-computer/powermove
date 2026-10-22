@@ -31,10 +31,22 @@ one startup among concurrent callers, including media probes and agent work.
 It waits through negotiation, preserves the normal restart policy, cancels
 waiters on host shutdown, and reports a fatal addon load without repeatedly
 forking it. Late startup receives the current playback policy, memory lease,
-font replay, client ports, and direct engine peer connection. The job utility
-remains resident after use; safe retirement with live renderer ports remains
-open. Attribution, latency checks, and remaining memory gates are in
-[memory.md](memory.md).
+font replay, client ports, and direct engine peer connection. Main starts it
+as soon as an export or a queued job is asked for, while the offline message
+and the save panel are open, and a render queue left running at quit resumes
+once the engines are up. The export sheet never routes because the job
+utility is stopped: main starts it, and answers `unavailable` only when it
+cannot run.
+
+A job utility nothing has used for `JOB_IDLE_MS` (60 s) exits. Main retires
+it only when none of its own job requests is outstanding, no activity
+happened during the check, and the utility's own report shows no session
+(exports, agent frame sessions, validations and any renderer-opened session
+hold one), nothing in flight, and no unfinished job, queued work, probe,
+frame run or compile. Requests arriving during the check wait and then start
+a new utility; an asked-for start after such a stop reports `starting`, not
+`restarting`. Eager job fixtures never retire. Attribution, latency checks,
+and remaining memory gates are in [memory.md](memory.md).
 
 Main creates every `MessageChannelMain`:
 
