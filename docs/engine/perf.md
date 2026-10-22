@@ -177,7 +177,12 @@ they were answered at (one look at that index and the shadow's id there). Only
 native answers for layers of the current composition are kept (a detached layer
 can change without the barrier seeing it); dual mode always asks, so the
 auditor still compares every answer. Callers get their own copy of an array
-answer. In a 500-layer drag (20.5 s sampled) the structural queries were
+answer. A memoized answer that holds layer objects (`groupAncestors`,
+`transformRoots`) is served only while each of them is still the composition's
+own: Undo, Redo, and a canceled gesture restore a layer by replacing its object
+with a clone, at an unchanged shape, and a press that took its transform roots
+from the replaced objects read the undone state (a rotate after an undone resize
+wrote the resize's scale back, `history-identity.test.ts`). In a 500-layer drag (20.5 s sampled) the structural queries were
 6.6 s (timeline rows, the inspector's parent menu, the move tool) and are
 1.4 s after, most of it the barrier's flush of the drag itself; all pm-wasm
 queries together went from 7.0 to 3.5 s, and the page's main thread from 27%
