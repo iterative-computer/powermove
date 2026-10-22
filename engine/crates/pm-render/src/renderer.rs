@@ -1150,6 +1150,16 @@ impl Renderer {
                 .contains(wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE)
     }
 
+    /// The output format a fresh [`Self::render`] frame would use. Callers
+    /// rendering into their own target must make the same precision choice.
+    pub fn target_format(document: &Document, request: &RenderRequest) -> wgpu::TextureFormat {
+        let precision = match document.root().map(project_settings) {
+            Some(Ok(c)) => effective_precision(request.precision, c.precision),
+            _ => request.precision,
+        };
+        working_format(precision)
+    }
+
     /// Renders `composition` at `time` into a new texture.
     pub fn render(
         &mut self,
@@ -1160,16 +1170,12 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let precision = match document.root().map(project_settings) {
-            Some(Ok(c)) => effective_precision(request.precision, c.precision),
-            _ => request.precision,
-        };
         let target = Target::new(
             &self.device,
             "pm frame",
             size.width,
             size.height,
-            working_format(precision),
+            Self::target_format(document, request),
             pm_gpu::target::working_usage(),
         );
         let depth_id = request.depth_id.then(|| {

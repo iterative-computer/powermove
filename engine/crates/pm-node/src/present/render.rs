@@ -557,6 +557,8 @@ struct Gpu {
     display: DisplayTransform,
     /// Reused by serial snapshot copies on this device.
     snapshot_readback: pm_gpu::readback::Readback,
+    /// One reusable snapshot color attachment. Every capture still redraws it.
+    snapshot_target: Option<pm_gpu::Target>,
     /// Draws documents (made with the first document frame).
     composer: Option<Composer>,
     /// The font generation the composer's renderer lays text out with.
@@ -580,17 +582,62 @@ impl Gpu {
         composer
     }
 
-    fn composer_and_readback(
+    fn composer_and_snapshot_resources(
         &mut self,
         config: &ThreadConfig,
         frame_cache: usize,
-    ) -> (&mut Composer, &mut pm_gpu::readback::Readback) {
+    ) -> (
+        &mut Composer,
+        &mut pm_gpu::readback::Readback,
+        &mut Option<pm_gpu::Target>,
+    ) {
         self.composer_with(config, frame_cache);
         (
             self.composer.as_mut().expect("made above"),
             &mut self.snapshot_readback,
+            &mut self.snapshot_target,
         )
     }
+}
+
+/// Keep at most one moderate-sized snapshot attachment on a device. Large
+/// captures are still rendered normally, then their attachment is released.
+const MAX_CACHED_SNAPSHOT_TARGET_BYTES: u64 = 64 * 1024 * 1024;
+
+fn cache_snapshot_target(width: u32, height: u32, format: wgpu::TextureFormat) -> bool {
+    let bpp = u64::from(format.block_copy_size(None).unwrap_or(16));
+    u64::from(width) * u64::from(height) * bpp <= MAX_CACHED_SNAPSHOT_TARGET_BYTES
+}
+
+fn snapshot_output_target(
+    slot: &mut Option<pm_gpu::Target>,
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> pm_gpu::Target {
+    if let Some(target) = slot.as_ref()
+        && target.width() == width
+        && target.height() == height
+        && target.format() == format
+    {
+        return target.clone();
+    }
+    // Release the old attachment before a resize or format change, including
+    // an oversized one-off capture, so it cannot overlap the new allocation.
+    *slot = None;
+    let target = pm_gpu::Target::new(
+        device,
+        "pm snapshot output",
+        width,
+        height,
+        format,
+        pm_gpu::target::working_usage(),
+    );
+    if cache_snapshot_target(width, height, format) {
+        *slot = Some(target.clone());
+    }
+    target
 }
 
 struct Live {
@@ -1010,6 +1057,7 @@ impl Thread {
                         queue,
                         display,
                         snapshot_readback: pm_gpu::readback::Readback::default(),
+                        snapshot_target: None,
                         composer: None,
                         fonts_installed: None,
                         lost,
@@ -4912,7 +4960,8 @@ impl Thread {
             && pm_render::unsupported(doc.document(), job.request.composition.as_str())
                 .iter()
                 .any(|u| u.feature == pm_render::Feature::Blender);
-        let (composer, readback) = gpu.composer_and_readback(&self.config, self.frame_cache);
+        let (composer, readback, snapshot_target) =
+            gpu.composer_and_snapshot_resources(&self.config, self.frame_cache);
         // The session's definitions, without consuming the re-registrations
         // its viewer's next frame applies.
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
@@ -4990,6 +5039,15 @@ impl Thread {
             }
         }
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        let size = request.target_size();
+        let format = pm_render::Renderer::target_format(doc.document(), &request);
+        let target = snapshot_output_target(
+            snapshot_target,
+            renderer.device(),
+            size.width,
+            size.height,
+            format,
+        );
         // A snapshot never draws an SVG bucket's stand-in: it waits for the
         // renderer's raster (decision S1). The renderer is the viewer's
         // too: the guard gives the viewer its policy back however this
@@ -4998,22 +5056,25 @@ impl Thread {
         let rendered = {
             let mut renderer = renderer.svg_waiting();
             renderer
-                .render(
+                .render_into(
                     doc.document(),
                     job.request.composition.as_str(),
                     job.request.time,
                     &request,
                     doc.media(),
+                    &target,
+                    None,
                 )
-                .and_then(|frame| {
+                .and_then(|_| {
                     let pixels = super::snapshot::read_rgba8(
                         readback,
                         renderer.device(),
                         renderer.queue(),
-                        &frame.color.texture,
+                        &target.texture,
                         job.request.pixels,
-                    )?;
-                    Ok((frame.color.width(), frame.color.height(), pixels))
+                    );
+                    readback.trim(MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+                    Ok((target.width(), target.height(), pixels?))
                 })
         };
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
@@ -5650,6 +5711,18 @@ fn fallback_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_target_cache_policy_accounts_for_format_and_resize() {
+        use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
+
+        assert!(cache_snapshot_target(320, 180, Rgba16Float));
+        assert!(cache_snapshot_target(4096, 2048, Rgba16Float));
+        assert!(!cache_snapshot_target(4096, 2049, Rgba16Float));
+        assert!(cache_snapshot_target(4096, 4096, Rgba8Unorm));
+        assert!(!cache_snapshot_target(4096, 4096, Rgba16Float));
+        assert!(!cache_snapshot_target(4096, 2048, Rgba32Float));
+    }
 
     fn preview_thread() -> (Thread, Arc<Mutex<Vec<PreviewStatus>>>) {
         let statuses = Arc::new(Mutex::new(Vec::new()));

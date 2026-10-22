@@ -149,6 +149,19 @@ pub struct Readback {
 }
 
 impl Readback {
+    /// Bytes held by the reusable GPU staging buffer.
+    pub fn capacity_bytes(&self) -> u64 {
+        self.capacity
+    }
+
+    /// Release an oversized staging allocation after its mapping is closed.
+    pub fn trim(&mut self, max_bytes: u64) {
+        if self.capacity > max_bytes {
+            self.buffer = None;
+            self.capacity = 0;
+        }
+    }
+
     /// Copy this texture into the staging buffer and map it afresh. The
     /// buffer can be reused only after the previous mapping was dropped and
     /// unmapped; this method always completes that sequence synchronously.
@@ -317,6 +330,18 @@ mod tests {
             .unwrap();
         assert_eq!(got.as_slice(), taller_bytes.as_slice());
         assert_eq!(readback.allocations, 2, "taller copy grows once");
+        readback.trim(512);
+        assert_eq!(readback.capacity_bytes(), 512);
+        readback.trim(256);
+        assert_eq!(readback.capacity_bytes(), 0);
+        assert!(readback.buffer.is_none());
+        let got = readback
+            .with_mapped_rows(&gpu.device, &gpu.queue, &half, |data, row, _, _| {
+                data[..row].to_vec()
+            })
+            .unwrap();
+        assert_eq!(got.as_slice(), half_bytes.as_slice());
+        assert_eq!(readback.allocations, 3, "trimmed staging is recreated");
     }
 
     #[test]

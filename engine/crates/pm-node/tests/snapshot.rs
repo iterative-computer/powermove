@@ -552,6 +552,31 @@ fn child_snapshots() {
     assert_eq!(at(&px, 320, 120, 70), BACKGROUND, "the box moved away");
     assert_eq!(at(&px, 320, 220, 70), BOX);
 
+    // The output target is reused only at the matching size and is drawn
+    // afresh. Resize up and back after the document revision changed: no
+    // pixels from the old location or the transparent capture may survive.
+    c.snapshot(
+        20,
+        frame_request(SnapshotClass::Sync, big, SnapshotPixels::Opaque, 5_000),
+        Some(2),
+        WINDOW,
+        session,
+    );
+    let px = pixels_of(&rendered(c.inbox.wait(Duration::from_secs(20), answer(20))));
+    assert_eq!(at(&px, 1280, 480, 280), BACKGROUND);
+    assert_eq!(at(&px, 1280, 800, 280), BOX);
+    c.snapshot(
+        21,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(2),
+        WINDOW,
+        session,
+    );
+    let px = pixels_of(&rendered(c.inbox.wait(Duration::from_secs(20), answer(21))));
+    assert_eq!(at(&px, 320, 120, 70), BACKGROUND);
+    assert_eq!(at(&px, 320, 200, 70), BOX);
+    assert_eq!(at(&px, 320, 10, 10), BACKGROUND);
+
     // A revision that never comes: a bounded wait, then `timeout`.
     let started = Instant::now();
     c.snapshot(
@@ -750,9 +775,9 @@ fn child_snapshots() {
 
     let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
     let presenter = &status["presenter"];
-    // Four frames and three layer rasters.
-    assert_eq!(presenter["snapshots"], 7, "{presenter}");
-    assert_eq!(presenter["snapshotShared"], 1, "{presenter}");
+    // Six frames and three layer rasters.
+    assert_eq!(presenter["snapshots"], 9, "{presenter}");
+    assert_eq!(presenter["snapshotShared"], 2, "{presenter}");
     println!("CHILD-OK");
 }
 
@@ -1265,8 +1290,8 @@ fn child_depth() {
         pool_index: first.pool_index,
         seq: first.seq,
     }));
-    // The 3D chrome asks: a depth pool (rgbaf16, as many surfaces as the
-    // color pool) is announced, and each frame names its surface in it.
+    // The 3D chrome asks: each color slot owns an rgbaf16 depth/ID and
+    // selection-coverage pair, retained until that color frame is released.
     let mut asking = viewer_state();
     asking.view_seq = Seq::new(2).unwrap();
     asking.depth_id = Some(true);
@@ -1279,7 +1304,7 @@ fn child_depth() {
             } if port == WINDOW && p.role == Some(PoolRole::DepthId) => Some(p.clone()),
             _ => None,
         });
-    assert_eq!(depth_pool.surfaces.len(), pool.surfaces.len());
+    assert_eq!(depth_pool.surfaces.len(), pool.surfaces.len() * 2);
     assert!(
         depth_pool
             .surfaces
@@ -1300,10 +1325,9 @@ fn child_depth() {
         .expect("a frame of a view that asks names its depth surface");
     assert_eq!(depth.pool_generation, depth_pool.generation);
     assert_eq!(depth.seq, framed.seq);
-    assert_eq!(
-        u64::from(depth.pool_index),
-        framed.seq.get() % depth_pool.surfaces.len() as u64
-    );
+    assert_eq!(depth.pool_index, framed.pool_index * 2);
+    assert_eq!(depth.coverage_pool_index, Some(depth.pool_index + 1));
+    assert!((depth.pool_index + 1) < depth_pool.surfaces.len() as u32);
     c.event(Event::ReleaseFrame(FrameRelease {
         pool_index: framed.pool_index,
         seq: framed.seq,
@@ -2283,8 +2307,8 @@ fn child_svg_viewer_timeout() {
     let cap = Duration::from_millis(SVG_WAIT_CAP_MS.parse().unwrap());
     let path = svg_file("viewer-timeout");
     let mut c = Child::start();
-    let t = Instant::now();
     let _key = svg_viewer(&mut c, &path);
+    let t = Instant::now();
     // Never answered: drawn without it at the bound, counted from the ask.
     let drawn = serve_media(&mut c, &path, Duration::from_secs(20), viewer_frame);
     let waited = t.elapsed();
