@@ -223,6 +223,10 @@ fn corpus_render_parity() {
             // The capture's motion blur: 16 samples opaque, 20 transparent.
             let mut request =
                 RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
+            // capture.ts runs prepareFrame before renderToPixels: final
+            // output keeps the last source frame with 1 / composition fps
+            // padding, unlike the viewer's default 0.04 seconds.
+            request.video_end = pm_render::VideoEnd::Final;
             request.motion_blur = pm_render::motion::MotionBlur::Samples(16);
             let frame = match renderer.render(
                 &p.document,

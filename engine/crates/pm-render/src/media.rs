@@ -696,6 +696,38 @@ pub(crate) fn convert(
     factors: Factors,
     reuse: Option<Target>,
 ) -> Target {
+    convert_format(
+        device,
+        queue,
+        pipelines,
+        encoder,
+        normalized,
+        color,
+        working,
+        precision,
+        factors,
+        reuse,
+        working_format(precision),
+    )
+}
+
+/// Source storage is independent of the composition's working precision.
+/// Today's opaque level 1 video upload clips and quantizes to RGBA8 before
+/// the layer's bilinear filter; native and interpreted sources keep floats.
+#[allow(clippy::too_many_arguments)]
+fn convert_format(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipelines: &Pipelines,
+    encoder: &mut wgpu::CommandEncoder,
+    normalized: &Normalized,
+    color: &SourceColor,
+    working: WorkingEncoding,
+    precision: Precision,
+    factors: Factors,
+    reuse: Option<Target>,
+    format: wgpu::TextureFormat,
+) -> Target {
     let (luma, chroma, chroma_info) = match normalized {
         Normalized::Rgb { rgba } => (rgba, None, None),
         Normalized::YCbCr { luma, chroma } => (
@@ -706,18 +738,32 @@ pub(crate) fn convert(
     };
     let (w, h) = (luma.width(), luma.height());
     let out = reuse
-        .filter(|t| t.width() == w && t.height() == h && t.format() == working_format(precision))
+        .filter(|t| t.width() == w && t.height() == h && t.format() == format)
         .unwrap_or_else(|| {
             Target::new(
                 device,
                 "pm source",
                 w,
                 h,
-                working_format(precision),
+                format,
                 pm_gpu::target::working_usage(),
             )
         });
-    let uniform = source_uniform(color, working, precision, chroma_info);
+    let mut uniform = source_uniform(color, working, precision, chroma_info);
+    if format == wgpu::TextureFormat::Rgba8Unorm {
+        // Store the f32 conversion directly: an intermediate half-float
+        // rounding can change which side of an 8-bit boundary it lands on.
+        uniform.c[2] = 0;
+        if let Some((factors, _, _)) = chroma_info {
+            // Chromium's Skia video upload treats subsampled chroma as
+            // centered and reconstructs it bilinearly before the RGBA8
+            // store. Keep the native float source's siting/filter policy.
+            uniform.b[2] = u32::from(factors.x > 1);
+            uniform.b[3] = u32::from(factors.y > 1);
+            uniform.origin[0] = (factors.x - 1) as f32 * 0.5;
+            uniform.origin[1] = (factors.y - 1) as f32 * 0.5;
+        }
+    }
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("pm source params"),
         size: size_of::<SourceUniform>() as u64,
@@ -742,7 +788,7 @@ pub(crate) fn convert(
             dummy.view.clone()
         }
     };
-    let layout = pipelines.source_layout(precision);
+    let layout = pipelines.source_layout(format);
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("pm source"),
         layout: &layout,
@@ -769,7 +815,7 @@ pub(crate) fn convert(
         label: Some("pm source"),
         timestamp_writes: None,
     });
-    pass.set_pipeline(pipelines.source(precision));
+    pass.set_pipeline(pipelines.source(format));
     pass.set_bind_group(0, &bind, &[]);
     pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
     drop(pass);
@@ -1335,17 +1381,35 @@ impl MediaCache {
             color
         };
         let factors = Factors::from_log2(frame.format.log2_chroma_w, frame.format.log2_chroma_h);
+        // texImage2D uploads ordinary opaque legacy video into RGBA8.
+        // Clip/quantize each source texel before the layer samples it, so
+        // saturated out-of-range RGB cannot bleed across a filtered edge.
+        // The sequence path keeps its separate Chromium/libyuv conversion;
+        // level 2, alpha, explicit interpretations, and HDR retain native precision.
+        let compatibility_bitmap = compat
+            && !sequence
+            && working == WorkingEncoding::Standard
+            && color.alpha == AlphaMode::Opaque
+            && interp.is_empty()
+            && !self.interpretations.contains_key(path)
+            && fields.is_none()
+            && color.tone_map.is_none()
+            && !matches!(color.transfer, Transfer::Pq | Transfer::Hlg)
+            && matches!(color.primaries, Primaries::Bt709 | Primaries::Unspecified);
+        let format = if compatibility_bitmap {
+            wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            working_format(precision)
+        };
         // A converted frame retired by an earlier render (its reads are
         // submitted) is overwritten instead of allocating another.
         let (w, h) = (frame.format.width as u32, frame.format.height as u32);
         let reuse = self
             .free_frames
             .iter()
-            .position(|t| {
-                t.width() == w && t.height() == h && t.format() == working_format(precision)
-            })
+            .position(|t| t.width() == w && t.height() == h && t.format() == format)
             .map(|i| self.free_frames.swap_remove(i));
-        let converted = convert(
+        let converted = convert_format(
             device,
             queue,
             pipelines,
@@ -1356,6 +1420,7 @@ impl MediaCache {
             precision,
             factors,
             reuse,
+            format,
         );
         let importer = self.importer()?;
         if fields.is_none() {
@@ -1475,3 +1540,7 @@ impl MediaCache {
         self.recount();
     }
 }
+
+#[cfg(test)]
+#[path = "media/source_storage_tests.rs"]
+mod source_storage_tests;

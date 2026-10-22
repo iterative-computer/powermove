@@ -191,6 +191,38 @@ to working values in f32: chroma upsampling, matrix, transfer and primaries,
 alpha. BT.601 primaries read as Rec.709 in Standard (today's Chromium does
 not convert them).
 
+### Level 1 video source storage
+
+Ordinary opaque level 1 SDR video in Standard color converts directly into an
+`Rgba8Unorm` source texture before the layer's bilinear filter, matching
+`compositor.ts`'s `texImage2D(RGBA, UNSIGNED_BYTE)` upload. Previously the
+source pass left negative and superwhite RGB in a float texture; filtering
+those values before clipping changed saturated edges. This compatibility
+upload also reconstructs subsampled chroma with centered bilinear filtering,
+matching Chromium 152's [Skia YUV upload shader](https://skia.googlesource.com/skia/+/b6d106297ff9ef2ff8094033695d045e87775581/src/gpu/ganesh/effects/GrYUVtoRGBEffect.cpp).
+Native sources retain their existing chroma siting and filter policy.
+Chroma reconstruction and the Y′CbCr matrix stay in the existing GPU source
+pass. The conversion stores f32 directly into RGBA8, without an intermediate
+f16 rounding.
+
+Level 2, explicit document or per-file interpretations, linear blending,
+HDR, alpha-bearing video, and deinterlacing keep working-format float sources.
+Animated-image and numbered-sequence renditions keep their existing libyuv conversion.
+Converted-frame cache readings distinguish these paths, and retired targets
+are reused only at the selected storage format.
+
+`media/source_storage_tests.rs` checks direct byte rounding on both sides
+of every half-byte boundary, unclipped native float storage, and switching
+a real H.264 frame between compatibility/native/linear/interpreted readings
+through cache hits, frame advances, and per-file override removal. A normalized
+4:2:0 fixture checks compatibility bytes against an independent centered
+bilinear CPU reference and native floats against a left/Catmull-Rom reference.
+
+The general corpus request uses `VideoEnd::Final`, matching the capture's
+`prepareFrame` before `renderToPixels`. The viewer default (`0.04` s padding)
+selected frame 118 instead of 119 in the final `retime/speed` sample; final
+output uses `1 / composition fps`. The renderer's two policies are unchanged.
+
 **Recorded deviations in the corpus comparison** (`tests/corpus.rs`):
 `hevc-alpha.mov` is encoded with straight alpha but its probe reports Apple's
 premultiplied default, so the test interprets it as straight, as Chromium

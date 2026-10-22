@@ -117,11 +117,15 @@ through VideoToolbox; MP4 export with motion blur on; 2026-10-18 for all three):
 - the paused viewer shows the right frame with blur on (frames 3, 8, 15: levels
   50, 100, 170, the same as without blur).
 
-So today's preview and export disagree, and the engine follows the preview.
-This is an appendix A item for the plan owner, not a parity target the engine
-should reproduce. The side-by-sides of the corpus capture against the engine
-and the export levels are kept with the lane's evidence, outside the
-repository, for Jude's decision.
+Today's preview and export disagree, and the engine currently follows the
+preview. Under owner amendment 22, the export difference remains a blocker
+for existing projects; the earlier appendix A exemption does not apply.
+Matching it requires the legacy upload history, not a fixed choice of frame 0:
+outside this capture the shared element can hold another previously uploaded
+frame. The side-by-sides of the corpus capture against the engine and the
+export levels stay outside the repository. The general corpus checks in
+`tests/corpus.rs` keep failing on both samples; neither stored reference was
+replaced with native output.
 
 ## 2.5D
 
@@ -384,6 +388,44 @@ unchanged, continuous precomp rasterization, level 2 routing.
   cases), and `apps/desktop/e2e/legacy-blurred-video-export.spec.ts` (today's
   export and preview of blurred video, VP9, H.264, and ProRes sources).
 
+## Video corpus history (2026-10-21)
+
+A first-parent bisect identifies `e9a809393` (compclose) as the merge that
+exposed the five video failures in the general corpus test. It added the
+`motion-*` captures to the default selection. Its parent, `fa05a261b`, does
+not select these projects by default; selecting the same motion capture
+explicitly reproduces all five failures on that parent too. Both release
+comparisons report 255 CV at the two `motion/blur-video` samples, 3 CV at
+`retime/speed` t=2.9, and 7/9 CV at `space25d/precomps` t=1.5/2.6. The original
+motion notes already describe them. This is a coverage expansion, with no
+previously passing native render established for those samples.
+
+A fresh hidden capture from app 1.1.3 / Electron 44 on the same machine
+matches all ten stored opaque frames pixel for pixel, including both blurred
+video samples. Those references are current; replacing them with native
+center frames would hide an existing-project difference.
+
+The clean integration baseline (`8d772dac8`, normal thin-LTO release profile)
+compares 354 frames and fails exactly those five. The historical release
+comparisons disable LTO because they predate the CrabbyAvif link fix
+(`release-build.md`); the pixel bounds stay unchanged.
+
+The precomp chroma residuals came from the source upload, not frame selection:
+ordinary opaque level 1 video needs Chromium's centered bilinear chroma
+reconstruction and RGBA8 source storage before layer filtering. Native float
+sources keep their existing reconstruction. The last retiming sample also
+used the wrong output kind in the corpus harness: the capture's `prepareFrame`
+uses final-output padding, while `RenderRequest::sized` defaults to viewer
+padding. The harness now explicitly requests `VideoEnd::Final`; production
+viewer and final-output policies are unchanged. See `pm-render.md` for the
+source conversion and regression coverage.
+
+The corrected normal thin-LTO release run compares the same 354 frames:
+352 meet their existing class, with only the two blurred-video samples still
+at 255 CV. All eight retiming/precomp samples have zero interior difference.
+The four source-storage GPU regressions and seven color tests pass. No
+reference, bound, or project selection was changed.
+
 ## Gaps
 
 - The cached preview (section 8, "used by every path including … cached preview")
@@ -398,11 +440,10 @@ unchanged, continuous precomp rasterization, level 2 routing.
   at 1.75×) up to 2 pixels below the text box that `bounds` and `pick` measure
   with level 1 metrics, so those pixels do not select the layer (new content,
   no legacy reference): the text lane's.
-- Video decode differences at saturated chroma edges (up to 9 CV at a few pixels)
-  belong to the media lane's decode path; an H.264 file tagged only with a BT.709
+- An H.264 file tagged only with a BT.709
   matrix (no primaries or transfer) is read with BT.601 coefficients by Chromium and
   BT.709 by the engine (up to 23 CV on saturated red), an interpretation question
   for the color lane (the corpus videos are untagged).
 - WebM exports have no `MotionBlurKind`; the export lane passes `AlphaExport` (20)
   for them.
-- Blurred video: appendix A decision (above).
+- Blurred video: existing-project compatibility blocker (above).
