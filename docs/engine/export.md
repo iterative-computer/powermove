@@ -469,6 +469,47 @@ Queued user jobs continue waiting for relinked media. The phase 3b routing
 description below records the earlier implementation and is superseded for
 offline media by this decision.
 
+### Beta decision EXPORT-1 (2026-10-21)
+
+EXPORT-1 replaces OFFLINE-1's encoded-file byte identity criterion. An export
+without missing media must match the prior exporter in every decoded RGBA frame,
+byte for byte, and in every decoded audio sample. Video codec/profile, pixel
+format and bit depth, color primaries/transfer/matrix/range, dimensions, frame
+rate and time base, frame count, start time, and duration must match. Audio
+codec, sample format, channel layout/count, sample rate, start time, and
+duration must match when audio is present. Both files must import and decode in
+FFprobe/FFmpeg and QuickTime/AVFoundation for MOV/MP4, or Chromium for WebM.
+Container creation times, handler/vendor strings, and atom layout may differ.
+An added MOV timecode track must begin at `00:00:00:00` and must not alter the
+video start time or duration AVFoundation reads.
+
+The ProRes elementary-stream byte at offset 21 holds
+`aspect_ratio_information` in its high nibble and `frame_rate_code` in its
+low nibble, not a picture flag. In the observed exports the aspect-ratio code
+is `0` (unspecified) in both files; FFmpeg writes frame-rate code `0`
+(unspecified) and the native encoder writes `2` (24 fps).
+[SMPTE RDD 36:2022, §§5.1–5.1.1 and Tables 3–4](https://pub.smpte.org/doc/rdd36/20220909-pub/rdd36-2022.pdf)
+defines both codes; the difference is permitted only when the decoded frames,
+movie timing, and imports pass the tests above. MOV/MP4 video time bases follow
+the [bundled FFmpeg 9.0.2 MOV/MP4 muxer's rule](https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/libavformat/movenc.c):
+use the stream time-base denominator (the reduced frame-rate numerator for our
+exports), doubled until it reaches at least 10,000 ticks per second (24 fps:
+`1/12288`, 25 fps: `1/12800`, 29.97 fps: `1/30000`). The native writer sets both the movie and
+video media timescales to that value.
+
+| Export frame rate | Video time base |
+|---|---|
+| 24000/1001 (23.976) | 1/24000 |
+| 24 | 1/12288 |
+| 25, 50 | 1/12800 |
+| 30000/1001 (29.97) | 1/30000 |
+| 30, 60 | 1/15360 |
+| 60000/1001 (59.94) | 1/60000 |
+
+The common native writer uses this rule for sheet, queue, agent, and CLI MOV/MP4
+exports. The timing unit test covers every supported frame rate, including the
+higher-rate presets.
+
 - The sheet is a Settings sheet: Output, Rendering, Delivery, File,
   Captions, and Presets cards; rows appear only for settings the format
   reads (`fieldSupport`). Actions: Cancel, Add to Queue, Export.

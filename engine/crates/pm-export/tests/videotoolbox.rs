@@ -359,7 +359,7 @@ fn h264_mp4_with_aac_and_quicktime_tags() {
     assert_eq!((r.cicp, r.full_range), ((1, 13, 1), false));
     assert_eq!(
         (r.frames, r.movie_timescale, r.duration),
-        (45, 30_000, 45_000)
+        (45, 15_360, 23_040)
     );
     let audio = r.audio.as_ref().unwrap();
     assert_eq!(audio.codec, "mp4a");
@@ -411,7 +411,7 @@ fn broadcast_tags_are_1_1_1() {
             done.report.cicp,
             done.report.media_timescale
         ),
-        ("apcs", (1, 1, 1), 25_000)
+        ("apcs", (1, 1, 1), 12_800)
     );
     if let Some(p) = probe(&done.path, "stream=color_transfer,r_frame_rate") {
         assert!(

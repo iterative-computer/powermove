@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -7,6 +7,8 @@ import { expect, test, type ElectronApplication, type Page } from '@playwright/t
 
 import { launchApp } from './helpers/app';
 import { ffmpegBinary } from './helpers/ffmpeg';
+import { avFoundationImport, expectExportParity, proResFrameHeaderCodes } from './helpers/export-parity';
+import { importFixture } from './helpers/media';
 
 /* Phase 3b delivery with Use New Engine on (plan section 17): the export sheet
    offers every format at cutover and the five presets, writes a start
@@ -57,6 +59,20 @@ async function solidProject(page: Page, name: string, extra: Array<Record<string
 }
 
 const exportDone = (page: Page) => page.waitForFunction(() => !(window as any).PM.Export.busy, undefined, { timeout: 60_000 });
+
+async function trackNativeOfflineExport(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__offlineNativeStatuses = [];
+    w.__powermoveTestBridge.nativeEngine.onExportStatus((s: any) => w.__offlineNativeStatuses.push({ state: s.state, routed: !!s.routed }));
+  });
+}
+async function expectNativeOfflineExport(page: Page): Promise<void> {
+  const statuses = await page.evaluate(() => (window as any).__offlineNativeStatuses as Array<{ state: string; routed: boolean }>);
+  expect(statuses.some(status => status.state === 'done')).toBe(true);
+  expect(statuses.some(status => status.routed)).toBe(false);
+}
+
 
 test('the export sheet writes the new formats, presets, timecode and reel, with live previews', async () => {
   test.setTimeout(240_000);
@@ -206,6 +222,7 @@ for (const setting of ['0', '1'] as const) {
       if (setting === '1') await engineReady(session.app);
       await session.openEditor();
       await solidProject(session.page, 'Offline choices');
+      if (setting === '1') await trackNativeOfflineExport(session.page);
       await session.page.evaluate(() => {
         const PM = (window as any).PM;
         PM.proj.assets = { ...PM.proj.assets, gone: { id: 'gone', name: 'Missing.mov', kind: 'video', format: 'mov', w: 320, h: 180, dur: 1, fps: 24 } };
@@ -235,6 +252,7 @@ for (const setting of ['0', '1'] as const) {
       await session.app.evaluate(() => { (globalThis as { __answer?: number }).__answer = 1; });
       expect(await session.page.evaluate((o) => (window as any).PM.Export.run(o), options)).toEqual({ cancelled: false });
       expect((await stat(missing)).size).toBeGreaterThan(1000);
+      if (setting === '1') await expectNativeOfflineExport(session.page);
       const prompts = await session.app.evaluate(() => (globalThis as { __messages?: Array<Record<string, unknown>> }).__messages ?? []);
       expect(prompts).toHaveLength(3);
       expect(prompts[0]).toMatchObject({ buttons: ['Locate Media…', 'Export Without Missing Media', 'Cancel'] });
@@ -254,6 +272,96 @@ for (const setting of ['0', '1'] as const) {
     }
   });
 }
+
+test('offline exports preserve decoded media and delivery properties with the new engine on', async ({}, testInfo) => {
+  test.setTimeout(420_000);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-offline-parity-'));
+  const exports: Record<string, Record<string, string>> = { prores: {}, mp4: {}, webm: {} };
+  const webmImports: Record<string, { width: number; height: number; duration: number }> = {};
+  try {
+    for (const setting of ['0', '1']) {
+      let session: Awaited<ReturnType<typeof launchApp>> | undefined;
+      try {
+        session = await launchApp({ userData: path.join(root, `profile-${setting}`), env: { POWERMOVE_NEW_ENGINE: setting } });
+        if (setting === '1') await engineReady(session.app);
+        await session.openEditor();
+        await solidProject(session.page, 'Offline parity');
+        await importFixture(session.page, 'tone.wav');
+        await session.page.waitForFunction(() => (window as any).PM.proj.layers.some(
+          (layer: any) => layer.type === 'audio' && layer.name === 'tone.wav',
+        ));
+        if (setting === '1') await trackNativeOfflineExport(session.page);
+        await session.page.evaluate(() => {
+          const PM = (window as any).PM;
+          PM.proj.assets.gone = { id: 'gone', name: 'Missing.mov', kind: 'video', format: 'mov', w: 320, h: 180, dur: 1, fps: 24 };
+          PM.proj.layers.push({ ...PM.mkLayer('video', { d: { asset: 'gone', w: 320, h: 180 } }), id: 'offline-clip', from: 0, dur: 1 });
+          PM.touch();
+        });
+        await session.app.evaluate(({ dialog }) => {
+          dialog.showMessageBox = (async () => ({ response: 1, checkboxChecked: false })) as typeof dialog.showMessageBox;
+        });
+        for (const format of ['prores', 'mp4', 'webm'] as const) {
+          const file = path.join(root, `export-${format}-${setting}.${format === 'prores' ? 'mov' : format}`);
+          await stubSavePanels(session.app, [file]);
+          if (setting === '1') await session.page.evaluate(() => { (window as any).__offlineNativeStatuses = []; });
+          expect(await session.page.evaluate((selected) => (window as any).PM.Export.run({
+            format: selected, scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: true,
+          }), format)).toEqual({ cancelled: false });
+          if (setting === '1') await expectNativeOfflineExport(session.page);
+          exports[format]![setting] = file;
+          if (format === 'webm') {
+            const bytes = [...await readFile(file)];
+            webmImports[setting] = await session.page.evaluate(async (data) => {
+              const video = document.createElement('video');
+              if (!video.canPlayType('video/webm; codecs="vp9"')) throw new Error('Chromium cannot import VP9 WebM');
+              const url = URL.createObjectURL(new Blob([Uint8Array.from(data)], { type: 'video/webm' }));
+              try {
+                video.preload = 'auto'; video.muted = true; video.src = url;
+                await new Promise<void>((resolve, reject) => {
+                  video.addEventListener('loadeddata', () => resolve(), { once: true });
+                  video.addEventListener('error', () => reject(new Error('Chromium could not decode WebM')), { once: true });
+                });
+                const initial = { width: video.videoWidth, height: video.videoHeight, duration: video.duration };
+                await new Promise<void>((resolve, reject) => {
+                  video.addEventListener('seeked', () => resolve(), { once: true });
+                  video.addEventListener('error', () => reject(new Error('Chromium could not seek WebM')), { once: true });
+                  video.currentTime = Math.max(0, video.duration - 1 / 24);
+                });
+                return initial;
+              } finally { video.removeAttribute('src'); video.load(); URL.revokeObjectURL(url); }
+            }, bytes);
+          }
+        }
+      } finally { await session?.close(); }
+    }
+    for (const format of ['prores', 'mp4', 'webm'] as const) for (const setting of ['0', '1']) {
+      await testInfo.attach(`offline-${format}-${setting}`, { path: exports[format]![setting]!, contentType: format === 'webm' ? 'video/webm' : format === 'mp4' ? 'video/mp4' : 'video/quicktime' });
+    }
+    for (const format of ['prores', 'mp4', 'webm'] as const) {
+      expectExportParity(exports[format]!['0']!, exports[format]!['1']!, 24, true);
+    }
+    for (const format of ['prores', 'mp4'] as const) {
+      const legacyImport = avFoundationImport(exports[format]!['0']!);
+      const nativeImport = avFoundationImport(exports[format]!['1']!);
+      for (const imported of [legacyImport, nativeImport]) {
+        expect(imported).toMatchObject({ readable: true, playable: true, frames: 24, firstPTS: 0, duration: 1, videoDuration: 1 });
+        expect(imported.audioSamples, 'AVFoundation decoded audio samples').toBeGreaterThan(0);
+      }
+      expect(nativeImport.audioSamples, 'AVFoundation audio sample count').toBe(legacyImport.audioSamples);
+      if (format === 'prores') {
+        expect(nativeImport.timecodeTrackStart, 'AVFoundation timecode start').toBe(0);
+        expect(nativeImport.timecodeTrackDuration, 'AVFoundation timecode duration').toBe(legacyImport.videoDuration);
+      }
+    }
+    expect(probe(exports.prores!['1']!).streams.find((stream: any) => stream.tags?.timecode)?.tags?.timecode).toBe('00:00:00:00');
+    // RDD 36: byte 21's aspect-ratio nibble stays unspecified, while the
+    // frame-rate nibble changes from unspecified to a correct 24 fps code.
+    expect(proResFrameHeaderCodes(exports.prores!['0']!)).toEqual({ aspectRatio: 0, frameRate: 0 });
+    expect(proResFrameHeaderCodes(exports.prores!['1']!)).toEqual({ aspectRatio: 0, frameRate: 2 });
+    expect(webmImports['1']).toEqual(webmImports['0']);
+    expect(webmImports['1']).toEqual({ width: 320, height: 180, duration: 1 });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('the render queue runs jobs unattended, keeps going past a failure, and keeps user jobs across a relaunch', async () => {
   test.setTimeout(240_000);
