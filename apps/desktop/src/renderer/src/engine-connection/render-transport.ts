@@ -255,6 +255,10 @@ export type RenderTransportOptions = {
   frameTicks?: () => number | null;
   /** Audio-clock playhead in ticks, independent of frames reaching the viewer. */
   playhead?: () => { time: number; rate: number } | null;
+  /** The open composition's playable span in ticks, `[start, end)`: the
+   *  loop the clock wraps by, else the composition. Playback never shows a
+   *  frame outside it, so the lookahead prepares none there. */
+  span?: () => { start: number; end: number } | null;
   /** Every open session of the window (viewer sessions and the standby):
    *  each learns which compatibility producers the window has. */
   sessions?: () => TransportSession[];
@@ -495,11 +499,13 @@ export class EngineRenderTransport {
       // Breadth first: every layer's current frame precedes speculative
       // work. A slow producer gets at most one turn before another layer.
       let done = 0, pending = 0;
+      const span = this.options.span?.() ?? null;
+      const outside = (entry: AheadEntry, time: number) => time < 0 || (!!span && entry.need.composition === this.options.composition() && (time < span.start || time >= span.end));
       for (let offset = 0; offset <= COMPAT_LOOKAHEAD; offset++) {
         for (let i = 0; i < entries.length; i++) {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
           const time = entry.cursor + offset * entry.step;
-          if (time < 0 || entry.sent.has(time) || entry.pending.has(time)) continue;
+          if (outside(entry, time) || entry.sent.has(time) || entry.pending.has(time)) continue;
           if (warm && performance.now() >= warmUntil && !entry.required.has(time)) continue;
           pending++;
           if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
@@ -527,7 +533,7 @@ export class EngineRenderTransport {
             if (this.prefetchInFlight >= COMPAT_PREFETCH_IN_FLIGHT) break;
             const prepare = this.preparers.get(entry.need.source);
             const time = entry.cursor + offset * entry.step;
-            if (!prepare || time < 0 || entry.prefetched.has(time)) continue;
+            if (!prepare || outside(entry, time) || entry.prefetched.has(time)) continue;
             entry.prefetched.add(time);
             this.prefetchAhead(entry.need, time, revision ?? 0, prepare);
           }
