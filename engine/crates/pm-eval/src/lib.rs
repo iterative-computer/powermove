@@ -60,6 +60,7 @@ pub mod text_anim;
 pub mod text_geom;
 pub mod text_level2;
 pub mod text_measure;
+pub mod track_cache;
 pub mod transform;
 
 pub use comp::{Comp, CompError};

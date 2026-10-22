@@ -421,6 +421,8 @@ pub struct Evaluator {
     /// The address of the root of the document last seen by id.
     last_root: usize,
     stats: CacheStats,
+    /// Prepared keyframe tracks by array (`crate::track_cache`).
+    tracks: crate::track_cache::TrackCache,
 }
 
 impl Default for Evaluator {
@@ -482,6 +484,7 @@ impl Evaluator {
             last_revision: 0,
             last_root: 0,
             stats: CacheStats::default(),
+            tracks: crate::track_cache::TrackCache::default(),
         }
     }
 
@@ -656,7 +659,19 @@ impl Evaluator {
         t: f64,
         interpolate_color: bool,
     ) -> JsResult<JsValue> {
+        // A long track is prepared once per array, as today's
+        // `temporalEvaluate` caches it per array and version.
+        if let Some(track) = self.tracks.get(kf, &mut self.springs) {
+            let track = track.clone();
+            return track.value(kf, t, interpolate_color, &mut self.springs);
+        }
         crate::keyframes::evaluate(kf, t, interpolate_color, &mut self.springs)
+    }
+
+    /// The prepared-track cache's counters: reads answered from a kept
+    /// track, tracks prepared, tracks held.
+    pub fn track_cache_stats(&self) -> (u64, u64, usize) {
+        (self.tracks.hits, self.tracks.prepared, self.tracks.len())
     }
 
     /// `PM.ev(L, key, T)`: one channel of `L.p` at composition time `T`.
