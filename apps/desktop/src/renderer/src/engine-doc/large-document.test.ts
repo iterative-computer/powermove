@@ -43,6 +43,21 @@ describe('incremental large-document synchronization', () => {
     expect(barrier.check('custom toJSON repaired').ok).toBe(true);
   });
 
+  it('keeps a self-returning toJSON and nested hooks consistent with the real wasm mirror', async () => {
+    const instance = await wasm();
+    const project = large(2, 4);
+    const channel: any = project.layers[0]!.p.x;
+    channel.nested = { toJSON: () => ({ value: 7 }) };
+    Object.defineProperty(channel, 'toJSON', { value() { return this; } });
+    const barrier = new DocumentBarrier(instance, () => project);
+    barrier.resync();
+    expect(barrier.check('self-returning hook').ok).toBe(true);
+    channel.v = 81; // Raw alias: no touch or announcement.
+    expect(barrier.check('missed raw alias').ok).toBe(false);
+    expect(barrier.check('repaired raw alias').ok).toBe(true);
+    expect(instance.consistencyHash()).toBe(new ConsistencyHash().digest(barrier.shadow));
+  });
+
   it('batches baked keyframes instead of issuing a tiny hash for each key', () => {
     const tree = canonicalProject(large());
     const hash = new ConsistencyHash();

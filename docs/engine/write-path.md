@@ -494,7 +494,8 @@ writes retain their existing raw object identities and structural diff behavior;
 production never enables the development Proxy to gain speed.
 
 Local consistency checks compare the live JSON form to the shadow, including
-retained mutable aliases and custom non-enumerable `toJSON`. A missed write still
+retained mutable aliases and custom non-enumerable `toJSON` (called once at each
+JSON member location, including a hook returning its own object). A missed write still
 fails, records its paths, and forces a full resync. When they agree, independently
 implemented JS and Rust integrity digests compare the shadow and pm-wasm mirror:
 containers above depth six hash their kind, keys/order, and child digests; deeper
