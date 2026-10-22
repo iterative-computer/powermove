@@ -19,6 +19,9 @@ test('saving an inactive tab preserves live edits after a local recovery write f
     // Simulate a full/unavailable recovery store while keeping the external
     // project destination writable. All edit and native save code still runs.
     PM.store.set = (key: string, value: any) => key === `projectJournal.${second}` ? false : set(key, value);
+    // The native engine branch writes the journal off the edit's task (setAsync).
+    const setAsync = PM.store.setAsync;
+    if (setAsync) PM.store.setAsync = (key: string, value: any) => key === `projectJournal.${second}` ? Promise.resolve(false) : setAsync(key, value);
     PM.hist.do('Rename second', () => { PM.proj.name = 'Latest second document'; });
     const live = PM.proj;
     const recover = PM.Projects.recoverAsync;
@@ -35,7 +38,7 @@ test('saving an inactive tab preserves live edits after a local recovery write f
       const liveName = PM.proj.name;
       const undo = PM.hist.undo(), restoredName = PM.proj.name;
       return { started, recoveryName, saved, dirty, activeStayed, sameDocument, liveName, undo, restoredName };
-    } finally { PM.store.set = set; PM.Projects.recoverAsync = recover; release(); }
+    } finally { PM.store.set = set; if (setAsync) PM.store.setAsync = setAsync; PM.Projects.recoverAsync = recover; release(); }
   });
   expect(result).toEqual({ started: true, recoveryName: 'Second document', saved: true, dirty: false,
     activeStayed: true, sameDocument: true, liveName: 'Latest second document', undo: true, restoredName: 'Second document' });
