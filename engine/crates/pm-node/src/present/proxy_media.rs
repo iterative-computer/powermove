@@ -782,7 +782,21 @@ impl ProxyMedia {
                     && let Some(hash) = &hash
                 {
                     let key = format!("{hash}:{format:?}:{size:?}");
-                    self.proxy_path(key, hash.clone(), format, size, false);
+                    let ready = self.proxy_path(key, hash.clone(), format, size, false);
+                    // A proxy that playback will choose (its original is known
+                    // too slow here) is decoded once on the idle probe worker:
+                    // that measures its real cost and loads its codec into
+                    // this process (the first ProRes session costs ~350 ms),
+                    // so the first played frame does not.
+                    let known_slow = original.as_ref().is_some_and(|p| slow.contains(p))
+                        || self.assessed_slow.as_ref().is_some_and(|(_, slow)| slow.contains(hash));
+                    if let Some(proxy) = ready.filter(|_| known_slow) {
+                        let dims = |key: &str| match meta.get(key).map(Node::kind) {
+                            Some(pm_model::NodeKind::Number(value)) if value.is_finite() && *value > 0.0 => *value as u32,
+                            _ => 0,
+                        };
+                        self.probe_cost(&proxy, ProbeScale::Full, (dims("w"), dims("h")));
+                    }
                 }
                 let clip = active_clip_signature(doc, composition, &id, seconds);
                 if playing {
