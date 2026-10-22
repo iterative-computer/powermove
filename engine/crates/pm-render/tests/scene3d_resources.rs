@@ -193,6 +193,33 @@ fn render_plan(
 }
 
 #[test]
+fn equivalent_rebuilt_scene_reuses_depth_prepass_but_camera_change_records_again() {
+    let mut planner = Renderer::headless().unwrap();
+    let plan = object_plans(&mut planner, &textured(false), &MapResolver::default())
+        .pop()
+        .unwrap();
+    let mut rebuilt = plan.clone();
+    rebuilt.scene = Arc::new(plan.scene.as_ref().clone());
+    assert!(!Arc::ptr_eq(&plan.scene, &rebuilt.scene));
+
+    let gpu = pm_gpu::Gpu::new("pm-render prepass reuse test").expect("a Metal device");
+    let mut renderer = Scene3dRenderer::default();
+    renderer.begin_frame();
+    let first = render_plan(&gpu, &mut renderer, &plan).unwrap();
+    assert_eq!(renderer.prepass_recordings(), 1);
+    renderer.begin_frame();
+    let second = render_plan(&gpu, &mut renderer, &rebuilt).unwrap();
+    assert_eq!(second, first);
+    assert_eq!(renderer.prepass_recordings(), 1);
+
+    let mut moved = rebuilt;
+    Arc::make_mut(&mut moved.scene).camera.world[12] += 0.25;
+    renderer.begin_frame();
+    let _ = render_plan(&gpu, &mut renderer, &moved).unwrap();
+    assert_eq!(renderer.prepass_recordings(), 2);
+}
+
+#[test]
 fn maps_that_change_after_planning_route_or_drop() {
     let dir = Dir::new("3d-maps-late");
     let path = dir.0.join("tex.png");
@@ -333,6 +360,32 @@ fn imported_model_above_inline_budget_keeps_all_placements() {
             .iter()
             .all(|object| object.meshes[0].geometry.geometry.vertex_count() == VERTICES)
     );
+    let asset = pm_render::scene3d::gltf::asset::load(&path).unwrap();
+    for object in &imported {
+        let pm_render::scene3d::model::GeometryPayload::Gltf {
+            source,
+            generated_indices,
+        } = &object.meshes[0].geometry.geometry
+        else {
+            panic!("imported model used copied renderer geometry");
+        };
+        assert!(Arc::ptr_eq(
+            &source.position.data,
+            &asset.model.geometries[0].position.data
+        ));
+        assert!(Arc::ptr_eq(
+            source.index.as_ref().unwrap(),
+            asset.model.geometries[0].index.as_ref().unwrap()
+        ));
+        assert!(generated_indices.is_none());
+    }
+
+    // Missing normal/UV values are constant vertex inputs, shared by all
+    // placements. Their storage must not grow with POSITION's vertex count.
+    render(&mut renderer, &doc, &resolver("model", &path)).unwrap();
+    let resident = renderer.scene3d_resident();
+    assert_eq!(resident.meshes, 1, "placements share one GPU mesh");
+    assert!(resident.mesh_bytes < VERTICES as u64 * 12 + 4096);
 
     let mut fourth = base;
     fourth["id"] = json!("o3");

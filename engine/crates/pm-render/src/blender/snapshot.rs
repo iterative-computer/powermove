@@ -162,18 +162,28 @@ fn object_meshes(scene_node: &Value, object: &crate::scene3d::Object3d) -> Vec<V
     for mesh in &object.meshes {
         let g = &mesh.geometry.geometry;
         let vertices = g.vertex_count();
-        let index_count = if g.indexed { g.indices.len() } else { vertices };
-        let index = |i: usize| -> usize { if g.indexed { g.indices[i] as usize } else { i } };
-        let groups: Vec<(usize, usize, u32)> = if g.groups.is_empty() {
+        let index_count = if g.indexed() {
+            g.indices().len()
+        } else {
+            vertices
+        };
+        let index = |i: usize| -> usize {
+            if g.indexed() {
+                g.indices()[i] as usize
+            } else {
+                i
+            }
+        };
+        let groups: Vec<(usize, usize, u32)> = if g.groups().is_empty() {
             vec![(0, index_count, 0)]
         } else {
-            g.groups
+            g.groups()
                 .iter()
                 .map(|gr| (gr.start as usize, gr.count as usize, gr.material_index))
                 .collect()
         };
-        let has_normals = !g.normals.is_empty();
-        let has_uvs = !g.uvs.is_empty();
+        let has_normals = !g.normals().is_empty();
+        let has_uvs = !g.uvs().is_empty();
         for (start, count, material_index) in groups {
             let end = (start + count).min(index_count);
             let n = end.saturating_sub(start);
@@ -182,14 +192,18 @@ fn object_meshes(scene_node: &Value, object: &crate::scene3d::Object3d) -> Vec<V
             let mut uvs = Vec::with_capacity(n * 2);
             for i in start..end {
                 let v = index(i);
-                positions.extend(g.positions[v * 3..v * 3 + 3].iter().map(|p| f64::from(*p)));
+                positions.extend(
+                    g.positions()[v * 3..v * 3 + 3]
+                        .iter()
+                        .map(|p| f64::from(*p)),
+                );
                 if has_normals {
-                    let q = &g.normals[v * 3..v * 3 + 3];
+                    let q = &g.normals()[v * 3..v * 3 + 3];
                     normals.extend(normalize(f64::from(q[0]), f64::from(q[1]), f64::from(q[2])));
                 }
                 if has_uvs {
-                    uvs.push(or_zero(g.uvs[v * 2]));
-                    uvs.push(or_zero(g.uvs[v * 2 + 1]));
+                    uvs.push(or_zero(g.uvs()[v * 2]));
+                    uvs.push(or_zero(g.uvs()[v * 2 + 1]));
                 } else {
                     uvs.extend([0.0, 0.0]);
                 }

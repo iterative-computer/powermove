@@ -18,13 +18,13 @@ pub mod asset;
 pub(crate) mod gpu;
 pub mod material;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use pm_geom3d::gltf::{self as g, Mode, ObjectKind, pose};
 
 use super::model::{
-    Geometry3d, Light3d, LightKind, Material3d, MaterialKind, Materials, Mesh3d, Texture3d,
+    Geometry3d, GeometryPayload, Light3d, LightKind, Material3d, MaterialKind, Materials, Mesh3d,
+    Texture3d,
 };
 use crate::three::materials::Side;
 use crate::three::math::{self, Mat4};
@@ -40,6 +40,7 @@ pub use asset::{DecodedImage, GltfAsset};
 pub fn lookup(path: &std::path::Path) -> super::model::ModelLookup {
     use super::model::ModelLookup;
     if std::fs::metadata(path).is_err() {
+        asset::forget(path);
         return ModelLookup::Missing;
     }
     match asset::load(path) {
@@ -117,14 +118,14 @@ pub struct MorphTexture {
 /// carry instead of the data).
 #[derive(PartialEq)]
 pub struct VertexExtra {
-    pub tangent: Option<Vec<f32>>,
+    pub tangent: Option<Arc<Vec<f32>>>,
     /// `color` and its item size (3 or 4).
-    pub color: Option<(Vec<f32>, usize)>,
-    pub uv1: Option<Vec<f32>>,
-    pub uv2: Option<Vec<f32>>,
-    pub uv3: Option<Vec<f32>>,
-    pub skin_index: Option<Vec<f32>>,
-    pub skin_weight: Option<Vec<f32>>,
+    pub color: Option<(Arc<Vec<f32>>, usize)>,
+    pub uv1: Option<Arc<Vec<f32>>>,
+    pub uv2: Option<Arc<Vec<f32>>>,
+    pub uv3: Option<Arc<Vec<f32>>>,
+    pub skin_index: Option<Arc<Vec<f32>>>,
+    pub skin_weight: Option<Arc<Vec<f32>>>,
     pub mode: Mode,
     pub has_normal: bool,
     pub has_uv: bool,
@@ -354,48 +355,28 @@ fn morph_texture(
     }))
 }
 
-type GeometryCache = HashMap<(u64, usize), Geometry3d>;
-
-fn geometries() -> &'static Mutex<GeometryCache> {
-    static C: OnceLock<Mutex<GeometryCache>> = OnceLock::new();
-    C.get_or_init(Default::default)
-}
-
 /// The renderer's geometry for glTF geometry `index` of `asset`.
 pub fn geometry(asset: &GltfAsset, index: usize) -> Geometry3d {
-    if let Some(found) = geometries().lock().unwrap().get(&(asset.key, index)) {
+    let mut cache = asset.geometry_cache.lock().unwrap();
+    if let Some(found) = cache.get(&index) {
         return found.clone();
     }
     let gm = &asset.model.geometries[index];
     let n = gm.vertex_count();
-    let indices = match (&gm.index, gm.mode) {
+    let generated_indices = match (&gm.index, gm.mode) {
         // `LineLoop` draws as segments including the closing one.
         (ix, Mode::LineLoop) => {
-            let list: Vec<u32> = ix.clone().unwrap_or_else(|| (0..n as u32).collect());
-            let mut out = Vec::with_capacity(list.len() * 2);
-            for k in 0..list.len() {
-                out.push(list[k]);
-                out.push(list[(k + 1) % list.len()]);
+            let len = ix.as_ref().map_or(n, |ix| ix.len());
+            let at = |k: usize| ix.as_ref().map_or(k as u32, |ix| ix[k]);
+            let mut out = Vec::with_capacity(len * 2);
+            for k in 0..len {
+                out.push(at(k));
+                out.push(at((k + 1) % len));
             }
-            out
+            Some(Arc::new(out))
         }
-        (Some(ix), _) => ix.clone(),
-        (None, _) => (0..n as u32).collect(),
-    };
-    let geometry = pm_geom3d::Geometry {
-        positions: gm.position.data.clone(),
-        normals: gm
-            .normal
-            .as_ref()
-            .map(|a| a.data.clone())
-            .unwrap_or_default(),
-        uvs: gm.uv[0]
-            .as_ref()
-            .map(|a| a.data.clone())
-            .unwrap_or_default(),
-        indices,
-        indexed: gm.index.is_some(),
-        groups: Vec::new(),
+        (Some(_), _) => None,
+        (None, _) => Some(Arc::new((0..n as u32).collect())),
     };
     let (center, radius) = gm.bounding_sphere();
     let morph = morph_texture(asset.key, index, gm).map(|t| {
@@ -428,15 +409,14 @@ pub fn geometry(asset: &GltfAsset, index: usize) -> Geometry3d {
             &asset.key.to_le_bytes(),
             &(index as u64).to_le_bytes(),
         ]),
-        geometry: Arc::new(geometry),
+        geometry: GeometryPayload::Gltf {
+            source: Arc::new(gm.clone()),
+            generated_indices,
+        },
         sphere: (center, radius),
         extra: Some(Arc::new(extra)),
     };
-    let mut c = geometries().lock().unwrap();
-    if c.len() >= 4096 {
-        c.clear();
-    }
-    c.insert((asset.key, index), g3.clone());
+    cache.insert(index, g3.clone());
     g3
 }
 
@@ -843,10 +823,12 @@ pub fn posed_triangles(asset: &GltfAsset, world: &Mat4, time: f64) -> Vec<(Strin
 #[cfg(test)]
 mod short_morph_tests {
     use super::*;
+    use pm_geom3d::model_import::glb::GlbWriter;
+    use serde_json::{Map, json};
 
     fn attr(values: &[f32]) -> g::Attribute {
         g::Attribute {
-            data: values.to_vec(),
+            data: Arc::new(values.to_vec()),
             size: 3,
         }
     }
@@ -894,11 +876,56 @@ mod short_morph_tests {
     #[test]
     fn indexed_draw_does_not_fetch_unused_short_attribute_tail() {
         let mut geom = geometry(2);
-        geom.index = Some(vec![0, 1, 2]);
+        geom.index = Some(Arc::new(vec![0, 1, 2]));
         assert_eq!(fetched_vertex_count(&geom), 3);
-        geom.index = Some(vec![0, 1, 1]);
+        geom.index = Some(Arc::new(vec![0, 1, 1]));
         assert_eq!(fetched_vertex_count(&geom), 2);
         geom.index = None;
         assert_eq!(fetched_vertex_count(&geom), 3);
+    }
+
+    #[test]
+    fn generated_indices_live_with_asset_across_draw_rebuilds() {
+        let mut writer = GlbWriter::default();
+        let positions = writer.floats(&[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]], true);
+        let mut document = Map::new();
+        document.insert("asset".into(), json!({"version":"2.0"}));
+        document.insert(
+            "meshes".into(),
+            json!([{"primitives":[{"attributes":{"POSITION":positions}}]}]),
+        );
+        document.insert("nodes".into(), json!([{"mesh":0}]));
+        document.insert("scenes".into(), json!([{"nodes":[0]}]));
+        let asset = asset::from_bytes(&writer.finish(document)).unwrap();
+
+        let first = super::geometry(&asset, 0);
+        let GeometryPayload::Gltf {
+            generated_indices: Some(indices),
+            ..
+        } = &first.geometry
+        else {
+            panic!("unindexed glTF requires generated draw indices")
+        };
+        let index_handle = Arc::downgrade(indices);
+        let extra_handle = Arc::downgrade(first.extra.as_ref().unwrap());
+        drop(first);
+
+        let second = super::geometry(&asset, 0);
+        let GeometryPayload::Gltf {
+            generated_indices: Some(indices),
+            ..
+        } = &second.geometry
+        else {
+            panic!("unindexed glTF requires generated draw indices")
+        };
+        assert!(Arc::ptr_eq(indices, &index_handle.upgrade().unwrap()));
+        assert!(Arc::ptr_eq(
+            second.extra.as_ref().unwrap(),
+            &extra_handle.upgrade().unwrap()
+        ));
+        drop(second);
+        drop(asset);
+        assert!(index_handle.upgrade().is_none());
+        assert!(extra_handle.upgrade().is_none());
     }
 }

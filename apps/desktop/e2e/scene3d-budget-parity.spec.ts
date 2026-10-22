@@ -1,14 +1,41 @@
 import { mkdir, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { expect, launchApp, test, type LaunchedApp } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 import {
   BUDGET_HEIGHT, BUDGET_VERTICES, BUDGET_WIDTH, addFourthBudgetPlacement,
   budgetMemorySample, installBudgetScene, measureBudgetFrame, percentile,
 } from './helpers/scene3d-budget-parity';
 
-const dense = process.env.PM_SCENE3D_BUDGET_DENSE === '1';
-const OUT = `/tmp/ne-w5/scene3d-r8-budget/${dense ? 'dense' : 'sparse'}`;
+const denseModes = process.env.PM_SCENE3D_BUDGET_DENSE === undefined
+  ? [false, true] : [process.env.PM_SCENE3D_BUDGET_DENSE === '1'];
 
-async function lane(engine: boolean) {
+async function captureStage(session: LaunchedApp, file: string) {
+  await session.page.evaluate(() => new Promise<void>(resolve =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  const bounds = await session.page.locator('#stage').evaluate(stage => {
+    const r = stage.getBoundingClientRect();
+    return { x: Math.ceil(r.x), y: Math.ceil(r.y), width: Math.floor(r.width) - 2, height: Math.floor(r.height) - 2 };
+  });
+  const png = await session.app.evaluate(async ({ BrowserWindow }, bounds) => {
+    const window = BrowserWindow.getAllWindows().find(w => !w.isDestroyed() && w.webContents.getURL().startsWith('app:'))!;
+    return (await window.webContents.capturePage(bounds)).toPNG().toString('base64');
+  }, bounds);
+  const bytes = Buffer.from(png, 'base64');
+  await writeFile(file, bytes);
+  // A row through the models avoids toolbar/cursor ink. Group gaps below
+  // 1% of the image width: dense mode has tiny gaps between its triangles.
+  const row = execFileSync(ffmpegBinary, ['-v', 'error', '-f', 'png_pipe', '-i', 'pipe:0',
+    '-vf', 'crop=iw:1:0:floor(ih*0.55)', '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', 'pipe:1'],
+  { input: bytes, maxBuffer: 16 << 20 });
+  const modelColumns: number[] = [];
+  for (let i = 0; i < row.length; i += 4) {
+    if (row[i]! > 80 && row[i]! > row[i + 1]! * 1.4 && row[i]! > row[i + 2]! * 1.4) modelColumns.push(i / 4);
+  }
+  return { bounds, modelColumns, modelBands: occupiedBands(modelColumns, Math.max(1, Math.round(row.length / 4 * .01))) };
+}
+
+async function lane(engine: boolean, dense: boolean) {
   let session: LaunchedApp | undefined;
   try {
     session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: engine ? '1' : '0' } });
@@ -29,14 +56,23 @@ async function lane(engine: boolean) {
       phase = 'accepted frames';
       const imported = await budgetMemorySample(session.app);
       const accepted = await measureBudgetFrame(session.page, engine);
+      const out = `/tmp/ne-w5/scene3d-r8-budget/${dense ? 'dense' : 'sparse'}`;
+      await mkdir(out, { recursive: true });
+      if (engine) await expect.poll(() => session!.page.evaluate(() => {
+        const PM = (window as any).PM;
+        const p = PM.Kernel.services.get('viewer')?.enginePresentation;
+        return !!p?.presenting && p.latest?.revision >= PM.EngineDoc.barrier.revision;
+      }), { timeout: 30_000 }).toBe(true);
+      const stageBefore = await captureStage(session, `${out}/${engine ? 'native' : 'legacy'}-stage-before.png`);
       phase = 'fourth placement';
       const added = await addFourthBudgetPlacement(session.page, model.assetId);
       const refused = added.ok ? await measureBudgetFrame(session.page, engine, 1) : null;
+      const stageRefusal = await captureStage(session, `${out}/${engine ? 'native' : 'legacy'}-stage-refusal.png`);
       phase = 'steady';
       const steady = await budgetMemorySample(session.app);
       const jsHeapBytes = await session.page.evaluate(() =>
         (performance as any).memory?.usedJSHeapSize ?? null);
-      return { engine, model, accepted, refusal: { added, frame: refused },
+      return { engine, model, accepted, stageBefore, stageRefusal, refusal: { added, frame: refused },
         memory: { baseline, imported, steady, samples, jsHeapBytes },
         rendererPageErrors: [...session.diagnostics.pageErrors],
         rendererErrors: session.diagnostics.console.filter(record => record.type === 'error'),
@@ -51,10 +87,10 @@ async function lane(engine: boolean) {
   }
 }
 
-function occupiedBands(columns: number[]) {
+function occupiedBands(columns: number[], gap = 1) {
   let bands = 0, prior = -2;
   for (const x of columns) {
-    if (x > prior + 1) bands++;
+    if (x > prior + gap) bands++;
     prior = x;
   }
   return bands;
@@ -62,15 +98,17 @@ function occupiedBands(columns: number[]) {
 
 function memoryTotals(processes: Awaited<ReturnType<typeof budgetMemorySample>>) {
   const sum = (key: 'workingSetKiB' | 'peakWorkingSetKiB' | 'privateKiB') =>
-    processes.reduce((total, process) => total + (process[key] ?? 0), 0);
+    processes.some(process => process[key] !== null)
+      ? processes.reduce((total, process) => total + (process[key] ?? 0), 0) : null;
   return { workingSetKiB: sum('workingSetKiB'),
     processLifetimePeakKiB: sum('peakWorkingSetKiB'), privateKiB: sum('privateKiB') };
 }
 
-test('600k-vertex glTF placements draw in both lanes until the legacy 2M scene limit', async () => {
+for (const dense of denseModes) test(`600k-vertex glTF placements draw until the legacy 2M limit (${dense ? 'dense' : 'sparse'})`, async () => {
+  const OUT = `/tmp/ne-w5/scene3d-r8-budget/${dense ? 'dense' : 'sparse'}`;
   test.setTimeout(dense ? 480_000 : 300_000);
-  const legacy = await lane(false);
-  const native = await lane(true);
+  const legacy = await lane(false, dense);
+  const native = await lane(true, dense);
   await mkdir(OUT, { recursive: true });
   for (const result of [legacy, native]) {
     if (result.accepted.ok && result.accepted.png) {
@@ -91,6 +129,13 @@ test('600k-vertex glTF placements draw in both lanes until the legacy 2M scene l
     maximum = Math.max(maximum, diff);
   }
   const fractionWithin2CV = withinTwo / (BUDGET_WIDTH * BUDGET_HEIGHT);
+  const refusedA = legacy.refusal.frame?.pixels, refusedB = native.refusal.frame?.pixels;
+  let refusalWithinTwo = 0;
+  if (refusedA && refusedB) for (let i = 0; i < refusedA.length; i += 4) {
+    if ([0, 1, 2, 3].every(k => Math.abs(refusedA[i + k]! - refusedB[i + k]!) <= 2)) refusalWithinTwo++;
+  }
+  const refusalFractionWithin2CV = refusedA && refusedB
+    ? refusalWithinTwo / (BUDGET_WIDTH * BUDGET_HEIGHT) : null;
   const summarize = (result: typeof legacy) => ({
     ...result,
     memory: { ...result.memory,
@@ -98,18 +143,19 @@ test('600k-vertex glTF placements draw in both lanes until the legacy 2M scene l
         imported: memoryTotals(result.memory.imported),
         steady: memoryTotals(result.memory.steady),
         sampledPeakWorkingSetKiB: Math.max(0, ...result.memory.samples.map(sample =>
-          memoryTotals(sample.processes).workingSetKiB)),
+          memoryTotals(sample.processes).workingSetKiB ?? 0)),
       } },
     accepted: { ...result.accepted, pixels: undefined, png: undefined,
       frameP50Ms: percentile(result.accepted.timesMs, .5),
       frameP95Ms: percentile(result.accepted.timesMs, .95),
+      frameP99Ms: percentile(result.accepted.timesMs, .99),
       occupiedBands: occupiedBands(result.accepted.occupiedColumns) },
     refusal: { ...result.refusal,
       frame: result.refusal.frame && { ...result.refusal.frame, pixels: undefined, png: undefined } },
   });
   await writeFile(`${OUT}/measure.json`, JSON.stringify({
     modelVertices: BUDGET_VERTICES, dense, width: BUDGET_WIDTH, height: BUDGET_HEIGHT,
-    fractionWithin2CV, maximumCV: maximum,
+    fractionWithin2CV, maximumCV: maximum, refusalFractionWithin2CV,
     legacy: summarize(legacy), native: summarize(native),
   }, null, 2));
 
@@ -137,4 +183,13 @@ test('600k-vertex glTF placements draw in both lanes until the legacy 2M scene l
   expect(legacyRefusal).toContain('two million vertices');
   expect(nativeRefusal.includes('two million vertices') ||
     (native.refusal.frame?.ok && native.refusal.frame.occupied === 0)).toBe(true);
+  if (native.refusal.frame?.ok) {
+    expect(native.refusal.frame.occupied).toBe(legacy.refusal.frame?.occupied ?? 0);
+  }
+  if (refusalFractionWithin2CV !== null) expect(refusalFractionWithin2CV).toBeGreaterThanOrEqual(.99934);
+  for (const result of [legacy, native]) {
+    expect(result.stageBefore.modelBands).toBe(3);
+    expect(result.stageRefusal.modelBands).toBe(3);
+    expect(result.stageRefusal.modelColumns).toEqual(result.stageBefore.modelColumns);
+  }
 });

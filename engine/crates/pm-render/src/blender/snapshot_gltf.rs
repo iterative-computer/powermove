@@ -229,7 +229,7 @@ pub(super) fn meshes(
             continue;
         }
         let poser = pose::Poser::new(model, i, d, &posed.influences[i], &worlds);
-        let count = g.index.as_ref().map_or(g.vertex_count(), Vec::len);
+        let count = g.index.as_ref().map_or(g.vertex_count(), |index| index.len());
         let mut positions = Vec::with_capacity(count * 3);
         let mut normals = Vec::new();
         let mut uvs = Vec::with_capacity(count * 2);

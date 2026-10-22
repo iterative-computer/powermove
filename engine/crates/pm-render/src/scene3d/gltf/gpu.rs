@@ -41,6 +41,9 @@ pub(crate) struct GltfGpu {
     data: HashMap<u64, (wgpu::TextureView, u64)>,
     /// Per geometry key and attribute name.
     vertex: HashMap<(u64, &'static str), (VertexBuffer, u64)>,
+    /// WebGL's constant vertex attribute (0, 0, 0, 1), shared by every
+    /// missing extra attribute and read with a zero-stride vertex layout.
+    default_vertex: Option<wgpu::Buffer>,
     instances: HashMap<(u64, &'static str), (VertexBuffer, u64)>,
     pub transmission: Option<Transmission>,
     mip16: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Sampler)>,
@@ -52,19 +55,30 @@ pub(crate) struct GltfGpu {
 fn buffer(
     device: &wgpu::Device,
     label: &str,
-    mut bytes: Vec<u8>,
+    len: usize,
+    values: impl Iterator<Item = f32>,
     usage: wgpu::BufferUsages,
 ) -> wgpu::Buffer {
-    // Padding as the scene meshes' buffers (S7 finding 6).
-    bytes.resize(bytes.len() + 256, 0);
-    wgpu::util::DeviceExt::create_buffer_init(
-        device,
-        &wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: &bytes,
-            usage,
-        },
-    )
+    // Padding as the scene meshes' buffers (S7 finding 6). Write directly
+    // into mapped GPU storage instead of allocating a full-size byte copy.
+    let b = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: (len * 4 + 256) as u64,
+        usage,
+        mapped_at_creation: true,
+    });
+    {
+        let mut mapped = b
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("buffer mapped at creation");
+        mapped
+            .slice(..len * 4)
+            .write_iter(values.flat_map(f32::to_le_bytes));
+        mapped.slice(len * 4..).fill(0);
+    }
+    b.unmap();
+    b
 }
 
 fn f32_bytes(v: impl Iterator<Item = f32>) -> Vec<u8> {
@@ -102,6 +116,37 @@ pub(crate) fn attribute_format(
     })
 }
 
+fn extra_data<'a>(extra: Option<&'a VertexExtra>, name: &str) -> Option<&'a [f32]> {
+    let extra = extra?;
+    match name {
+        "tangent" => extra.tangent.as_deref().map(Vec::as_slice),
+        "color" => extra.color.as_ref().map(|c| c.0.as_slice()),
+        "uv1" => extra.uv1.as_deref().map(Vec::as_slice),
+        "uv2" => extra.uv2.as_deref().map(Vec::as_slice),
+        "uv3" => extra.uv3.as_deref().map(Vec::as_slice),
+        "skinIndex" => extra.skin_index.as_deref().map(Vec::as_slice),
+        "skinWeight" => extra.skin_weight.as_deref().map(Vec::as_slice),
+        _ => None,
+    }
+}
+
+/// Whether the old upload path synthesized a full vertex-sized default
+/// array. The pipeline must use zero stride for exactly these attributes.
+pub(crate) fn constant_attribute(geometry: &super::super::model::Geometry3d, name: &str) -> bool {
+    let n = geometry.geometry.vertex_count();
+    match name {
+        "normal" => geometry.geometry.normals().len() < n * 3,
+        "uv" => geometry.geometry.uvs().is_empty(),
+        "tangent" | "color" | "uv1" | "uv2" | "uv3" | "skinIndex" | "skinWeight" => {
+            let (_, stride, _) = attribute_format(name, geometry.extra.as_deref())
+                .expect("known glTF vertex attribute");
+            extra_data(geometry.extra.as_deref(), name)
+                .is_none_or(|data| data.len() < n * (stride as usize / 4))
+        }
+        _ => false,
+    }
+}
+
 impl GltfGpu {
     pub fn evict(&mut self, generation: u64, keep_from: u64) {
         self.generation = generation;
@@ -117,9 +162,14 @@ impl GltfGpu {
             .values()
             .chain(self.instances.values())
             .map(|(b, _)| b.buffer.size())
-            .sum();
+            .sum::<u64>()
+            + self.default_vertex.as_ref().map_or(0, wgpu::Buffer::size);
         (
-            self.vertex.len() + self.instances.len() + self.images.len() + self.data.len(),
+            self.vertex.len()
+                + self.instances.len()
+                + self.images.len()
+                + self.data.len()
+                + usize::from(self.default_vertex.is_some()),
             bytes,
         )
     }
@@ -486,36 +536,38 @@ struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         geometry: &super::super::model::Geometry3d,
         name: &'static str,
     ) -> Option<wgpu::Buffer> {
+        let x = geometry.extra.as_deref();
+        let n = geometry.geometry.vertex_count();
+        let (_, stride, _) = attribute_format(name, x)?;
+        let comps = (stride / 4) as usize;
+        let data = extra_data(x, name);
+        if data.is_none_or(|data| data.len() < n * comps) {
+            return Some(
+                self.default_vertex
+                    .get_or_insert_with(|| {
+                        buffer(
+                            device,
+                            "3d gltf default attribute",
+                            4,
+                            [0.0, 0.0, 0.0, 1.0].into_iter(),
+                            wgpu::BufferUsages::VERTEX,
+                        )
+                    })
+                    .clone(),
+            );
+        }
         let generation = self.generation;
         let key = (geometry.key, name);
         if let Some(e) = self.vertex.get_mut(&key) {
             e.1 = generation;
             return Some(e.0.buffer.clone());
         }
-        let x = geometry.extra.as_deref();
-        let n = geometry.geometry.vertex_count();
-        let (_, stride, _) = attribute_format(name, x)?;
-        let comps = (stride / 4) as usize;
-        let data: Option<&Vec<f32>> = match name {
-            "tangent" => x.and_then(|x| x.tangent.as_ref()),
-            "color" => x.and_then(|x| x.color.as_ref()).map(|c| &c.0),
-            "uv1" => x.and_then(|x| x.uv1.as_ref()),
-            "uv2" => x.and_then(|x| x.uv2.as_ref()),
-            "uv3" => x.and_then(|x| x.uv3.as_ref()),
-            "skinIndex" => x.and_then(|x| x.skin_index.as_ref()),
-            "skinWeight" => x.and_then(|x| x.skin_weight.as_ref()),
-            _ => None,
-        };
-        let bytes = match data {
-            Some(d) if d.len() >= n * comps => f32_bytes(d[..n * comps].iter().copied()),
-            _ => {
-                f32_bytes((0..n * comps).map(|i| if comps == 4 && i % 4 == 3 { 1.0 } else { 0.0 }))
-            }
-        };
+        let data = data.expect("default attribute returned above");
         let b = buffer(
             device,
             "3d gltf attribute",
-            bytes,
+            n * comps,
+            data[..n * comps].iter().copied(),
             wgpu::BufferUsages::VERTEX,
         );
         self.vertex
@@ -551,23 +603,29 @@ struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             e.1 = generation;
             return Some(e.0.buffer.clone());
         }
-        let bytes = match column {
+        let b = match column {
             // One buffer of whole matrices; each column attribute reads it
             // at its offset with a 64-byte stride.
-            Some(_) => f32_bytes(inst.matrices.iter().flat_map(|m| m.iter().copied())),
+            Some(_) => buffer(
+                device,
+                "3d gltf instances",
+                inst.matrices.len() * 16,
+                inst.matrices.iter().flat_map(|m| m.iter().copied()),
+                wgpu::BufferUsages::VERTEX,
+            ),
             None => {
                 let c = inst.colors.as_ref()?;
-                f32_bytes((0..inst.matrices.len()).flat_map(|i| {
-                    (0..3).map(move |k| c.data.get(i * c.size + k).copied().unwrap_or(0.0))
-                }))
+                buffer(
+                    device,
+                    "3d gltf instances",
+                    inst.matrices.len() * 3,
+                    (0..inst.matrices.len()).flat_map(|i| {
+                        (0..3).map(move |k| c.data.get(i * c.size + k).copied().unwrap_or(0.0))
+                    }),
+                    wgpu::BufferUsages::VERTEX,
+                )
             }
         };
-        let b = buffer(
-            device,
-            "3d gltf instances",
-            bytes,
-            wgpu::BufferUsages::VERTEX,
-        );
         self.instances
             .insert(k, (VertexBuffer { buffer: b.clone() }, generation));
         Some(b)

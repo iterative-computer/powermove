@@ -3,7 +3,16 @@
  * from pm-geom3d. The object is independent of the engine's render scene. */
 import * as THREE from 'three';
 
-const flat = (rows: number[][] | null | undefined) => rows?.flat() ?? [];
+const flat = (rows: number[] | number[][] | null | undefined): number[] =>
+  rows ? (Array.isArray(rows[0]) ? (rows as number[][]).flat() : rows as number[]) : [];
+const floatAttribute = (rows: number[] | number[][] | Float32Array, components: number) =>
+  rows instanceof Float32Array
+    ? new THREE.BufferAttribute(rows, components)
+    : new THREE.Float32BufferAttribute(flat(rows), components);
+const zeroMorph = (positions: number[][] | Float32Array): number[][] | Float32Array =>
+  positions instanceof Float32Array
+    ? new Float32Array(positions.length)
+    : positions.map(() => [0, 0, 0]);
 const bytes = (base64: string) => Uint8Array.from(atob(base64), c => c.charCodeAt(0));
 function sourceJson(bytes: Uint8Array): any {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -70,24 +79,46 @@ async function texturesOf(data: any): Promise<THREE.Texture[]> {
 function geometry(p: any, metadata?: any): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry();
   applyMetadata(g, metadata);
-  g.setAttribute('position', new THREE.Float32BufferAttribute(flat(p.positions), 3));
-  if (p.normals) g.setAttribute('normal', new THREE.Float32BufferAttribute(flat(p.normals), 3));
-  if (p.uv) g.setAttribute('uv', new THREE.Float32BufferAttribute(flat(p.uv), 2));
-  if (p.uv1) g.setAttribute('uv1', new THREE.Float32BufferAttribute(flat(p.uv1), 2));
-  if (p.uv2) g.setAttribute('uv2', new THREE.Float32BufferAttribute(flat(p.uv2), 2));
-  if (p.uv3) g.setAttribute('uv3', new THREE.Float32BufferAttribute(flat(p.uv3), 2));
-  if (p.colors) g.setAttribute('color', new THREE.Float32BufferAttribute(flat(p.colors).filter((_: number, i: number) => p.colorComponents === 4 || i % 4 !== 3), p.colorComponents));
-  if (p.tangents) g.setAttribute('tangent', new THREE.Float32BufferAttribute(flat(p.tangents), 4));
-  if (p.joints) g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(flat(p.joints), 4));
-  if (p.weights) g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(flat(p.weights), 4));
-  if (p.indices) g.setIndex(p.indices);
+  g.setAttribute('position', floatAttribute(p.positions, 3));
+  if (p.normals) g.setAttribute('normal', floatAttribute(p.normals, 3));
+  if (p.uv) g.setAttribute('uv', floatAttribute(p.uv, 2));
+  if (p.uv1) g.setAttribute('uv1', floatAttribute(p.uv1, 2));
+  if (p.uv2) g.setAttribute('uv2', floatAttribute(p.uv2, 2));
+  if (p.uv3) g.setAttribute('uv3', floatAttribute(p.uv3, 2));
+  if (p.colors) {
+    let colors: number[] | number[][] | Float32Array = p.colors;
+    if (p.colorComponents === 3) {
+      if (colors instanceof Float32Array) {
+        const rgb = new Float32Array(colors.length / 4 * 3);
+        for (let i = 0, j = 0; i < colors.length; i += 4, j += 3) {
+          rgb[j] = colors[i]!; rgb[j + 1] = colors[i + 1]!; rgb[j + 2] = colors[i + 2]!;
+        }
+        colors = rgb;
+      } else {
+        colors = flat(colors).filter((_: number, i: number) => i % 4 !== 3);
+      }
+    }
+    g.setAttribute('color', floatAttribute(colors, p.colorComponents));
+  }
+  if (p.tangents) g.setAttribute('tangent', floatAttribute(p.tangents, 4));
+  if (p.joints) g.setAttribute('skinIndex', p.joints instanceof Uint32Array
+    ? new THREE.BufferAttribute(Uint16Array.from(p.joints), 4)
+    : new THREE.Uint16BufferAttribute(flat(p.joints), 4));
+  if (p.weights) g.setAttribute('skinWeight', floatAttribute(p.weights, 4));
+  if (p.indices) {
+    if (p.indices instanceof Uint32Array) {
+      // WebGL2 reserves 65535 for primitive restart (three r180 utils).
+      const wide = p.indices.some((value: number) => value >= 65535);
+      g.setIndex(new THREE.BufferAttribute(wide ? p.indices : Uint16Array.from(p.indices), 1));
+    } else g.setIndex(p.indices);
+  }
   if (p.accessorBounds) {
     g.boundingBox = new THREE.Box3(new THREE.Vector3(...p.accessorBounds[0]), new THREE.Vector3(...p.accessorBounds[1]));
     g.boundingSphere = g.boundingBox.getBoundingSphere(new THREE.Sphere());
   }
   const targets = p.targets ?? [];
-  if (targets.some((t: any) => t.position)) g.morphAttributes.position = targets.map((t: any) => new THREE.Float32BufferAttribute(flat(t.position ?? p.positions.map(() => [0, 0, 0])), 3));
-  if (targets.some((t: any) => t.normal)) g.morphAttributes.normal = targets.map((t: any) => new THREE.Float32BufferAttribute(flat(t.normal ?? p.positions.map(() => [0, 0, 0])), 3));
+  if (targets.some((t: any) => t.position)) g.morphAttributes.position = targets.map((t: any) => floatAttribute(t.position ?? zeroMorph(p.positions), 3));
+  if (targets.some((t: any) => t.normal)) g.morphAttributes.normal = targets.map((t: any) => floatAttribute(t.normal ?? zeroMorph(p.positions), 3));
   g.morphTargetsRelative = true;
   return g;
 }

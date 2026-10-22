@@ -140,6 +140,13 @@ pub extern "C" fn pm_out_len() -> usize {
     with(|s| s.out.len())
 }
 
+/// Release a large output after JavaScript has copied it out of linear
+/// memory. The next reply can allocate afresh.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_out_release() {
+    with(|s| s.out = Vec::new())
+}
+
 /// Whether the last JSON reply holds special-number markers (`crate::reply`).
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_out_special() -> u32 {
@@ -478,6 +485,27 @@ pub extern "C" fn pm_model_import(len: usize) -> u32 {
             }
         }
     })
+}
+
+/// Import glTF/GLB as a packed compatibility scene. On success, `pm_out`
+/// holds a u32 LE JSON-header length, the JSON metadata, padding to four
+/// bytes, then the numeric mesh attributes named by its packed markers.
+/// A failure returns 1 with the message in `pm_out`.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_model_import_packed(len: usize) -> u32 {
+    with(
+        |s| match crate::imported_model::import_packed(input(s, len)) {
+            Ok(packet) => {
+                s.out = packet;
+                s.out_special = false;
+                0
+            }
+            Err(message) => {
+                reply(s, &message, false);
+                1
+            }
+        },
+    )
 }
 
 /// Bundle selected OBJ/MTL/texture files through pm-geom3d. Input is a u32

@@ -930,10 +930,11 @@ checked by the shared native validator.
   deferred to the orchestrator's quiet, awake measurement window; no current
   performance pass is claimed.
 
-## Phase 3c round 8: skinned short normals and session startup
+## Phase 3c round 8: normal inputs, preview recovery and model budgets
 
-- Draw rule: skinned or env-mapped MeshBasic programs consume `NORMAL`,
-  and flat shading no longer exempts Standard/Physical (gltf.md, round 8).
+- Draw rule: skinned or env-mapped MeshBasic programs consume `NORMAL`;
+  Lambert, Phong, Standard and Physical consume it even with flat shading
+  (gltf.md, round 8's 640-capture define matrix).
   This covers a skinned unlit glTF color draw and the native chrome's
   Basic override draws (depth, IDs, outline mask), which today's
   `overlay.ts` MeshBasicMaterial overrides lose for a skinned mesh with a
@@ -941,15 +942,123 @@ checked by the shared native validator.
 - `DocumentSession.start()` is back to the bridge lane's semantics. A
   refused or interrupted first resync no longer throws: a session closed
   while starting logs no spurious warning, and a session whose first resync
-  failed stays open for a later gap or load resync. Only the cache
-  preview's wake (`documentWake` in `engine-connection/preview.ts`) refuses
-  an unaccepted document, with `EnginePreviewUnavailable`.
+  failed stays open for a later gap or load resync. The cache preview's
+  wake (`documentWake` in `engine-connection/preview.ts`) refuses an
+  unaccepted document, with `EnginePreviewUnavailable`. Readiness now
+  tracks acceptance of the current full document, rather than the lifetime
+  count of successful resyncs. It resets before a load resync and on close,
+  and is checked again after flushing the render's revision. A refused
+  project load therefore cannot render the preceding project's cache.
+  Tests cover refusal after a prior success, recovery, closure during
+  resync and exact propagation of a synchronous flush error.
+- The deferred `() => wakeStandby()` callback fixes installation's lexical
+  initialization order. These preview fixes are in scope for THREED-6.
+  Broader session recovery belongs to the bigproject lane: pending viewer
+  state after a refused initial resync, advancing streamRevision before
+  acceptance, and queued patch handling after a refused load need that
+  owner's coverage. This round does not change their recovery policy.
 - Decision kept: with the setting on and no `PM.EngineConnection` (the
   install returned null: no frame bridge or kernel services),
   `renderFrame` still throws `EnginePreviewUnavailable`. Rendering it
   through today's three.js path would be the silent legacy routing the
   owner rules forbid; `cancelRender` resolves because there is nothing to
   cancel.
-- Still open for the orchestrator: whether the 500,000-vertex geometry
-  budget joins THREED-3's beta-list bug fixes (it stays a refusal, like
-  today), and the paired idle 3D orbit row (G).
+
+### Geometry-budget decision
+
+There is no native-only 500,000-vertex limit on imported models and no
+simplification at the budget checks. The existing 500,000 estimate applies
+to inline primitive, mesh, extrude and lathe sources in `parseScene`;
+assetId contributes zero. Imported glTF instead has today's separate
+1,000,000 predicted POSITION-vertex and 500,000-triangle file limits, and
+the runtime counts imported vertices per placement against 2,000,000.
+OBJ also retains today's 1,000,000 source-vertex and 500,000-triangle import
+limits. The native raster planner now counts OBJ source vertices in the
+placed total, matching the legacy asset store; expanded draw vertices
+would undercount a file with many unused source vertices.
+
+These legacy refusals are parser/import/runtime policy checks before the
+GPU draw, not demonstrated context loss or OOM. They do not justify any
+additional engine budget. A model accepted by today's importer remains
+eligible above the inline 500k threshold, and all of its vertices are
+retained in engine geometry and the deprecated compatibility Object3D.
+THREED-3's explicitly approved object/light/name/document-size bug fixes
+remain independent of these model limits.
+
+Round 8's paired app probe imports the same 600,000-vertex,
+200,000-triangle GLB into each route and places it three times (1.8M total).
+It checks full geometry counts and three visible image bands, then adds a
+fourth placement to compare today's two-million refusal. Sparse geometry
+isolates allocation/budget behavior; dense geometry uses 200,000 distinct
+triangles. Both keep the same complete input in each route. Native resource
+tests independently cover three 600,001-vertex glTF placements and the
+OBJ source-count boundary. Temporary model and app profile directories
+are removed with drop/finally guards.
+
+The measurement records per-process Electron memory at baseline, after
+import and after rendering, plus samples approximately every 50 ms. OS
+process-lifetime peaks and renderer JS heap are retained where available;
+sampling can miss brief allocations. Frame latency is 12 synchronous
+256×144 output/readback calls after three warmups, including IPC and
+readback. It is separate from display-present throughput and from the
+still-deferred paired idle-orbit measurement (G).
+
+The final paired sparse and dense PNGs are byte-for-byte equal: the full
+production 3D bar gives max 0 CV and object SSIM 1.0 without edge exclusions.
+Neither route loses its WebGL context or reduces the geometry. At the fourth
+placement, the legacy snapshot throws the existing two-million error; the
+native snapshot supplies a failed-scene frame with no model pixels. Actual
+composed-viewport captures independently prove the visible result: both keep
+their previous three model groups, with exactly unchanged model coverage
+across a row through the models. The probe does not claim equality between
+those two different snapshot API failure surfaces. Native capture stays at
+the viewport's resolution while the legacy export probe explicitly resizes
+its GL buffer, so composed screenshots are used for retention coverage,
+rather than a cross-route pixel bar.
+
+Final observations on the shared machine (2026-10-21):
+
+| Geometry | Route | After-import Δ MiB | After-probes Δ MiB | Output p50 ms | p95 ms | p99 ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| sparse | today | 78.1 | 214.0 | 1.50 | 5.50 | 5.50 |
+| sparse | native | 363.9 | 1108.8 | 4.30 | 12.30 | 12.30 |
+| dense | today | 79.0 | 207.1 | 1.40 | 6.50 | 6.50 |
+| dense | native | 397.9 | 825.8 | 3.70 | 5.40 | 5.40 |
+
+Memory is the sum of per-process working sets relative to each route's
+baseline; shared pages can be counted more than once. After-probes includes
+the fourth-placement failure and composed-viewport captures, not an idle
+steady-state measurement. The probe also reads the deprecated Object3D in
+both routes to verify frozen-reader compatibility. Private-byte values are
+unavailable on this platform and remain null. Native uses more working set
+and has higher median output latency in these samples; no memory or speed
+improvement is claimed. Twelve samples make p95 and p99 the observed maximum,
+and concurrent lanes prevent a quiet-window performance qualification.
+
+### Round 8 verification
+
+- Real-WASM 3D/viewer/connection/Blender units: 52 files and 466 distinct
+  tests pass. An initial five-second geometry-test timeout under load was
+  rechecked by running all 13 geometry tests with a twenty-second timeout;
+  all pass without source changes to their expectations.
+- Rust: 249 core, 124 presenter and 178 render tests pass. Five timing-only
+  tests remain ignored. Changed native crates pass all-target Clippy with
+  warnings denied; the changed Rust files pass rustfmt.
+- Blender: 182/182 snapshots, 29 converted textures by decoded pixels,
+  90 frame lists, full-depth TIFF, 112 texel-exact map classes and 224 exact
+  mip comparisons pass.
+- App checks use one worker under the Electron lease, with builds outside
+  it: 30 distinct flag-on checks pass across the native batch, preview API
+  checks and Chromium probes. The flag-off batch passes 20/20 (16 required
+  legacy checks, two Chromium probes and two paired budget cases). Final
+  budget retention assertions also pass separately for sparse and dense.
+- The 640-capture material matrix and 36 short-input probes pass in both
+  settings. Chrome has zero selected/active outline-mask mismatches and
+  zero CV outside proven reference MSAA edges; the paired shared-node glTF
+  capture has max 2 CV and object SSIM 0.99999768 without exclusions.
+- Node, bridge and WASM wrappers build separately; both native addons'
+  required exports are verified. The first preview attempt used a bridge
+  built without its node feature; rebuilding it correctly makes both mounted
+  and viewerless preview API checks pass. Renderer/node type checks retain
+  the existing 9/75 diagnostics outside the changed lane. Whole-workspace
+  formatting has existing differences; changed Rust files pass independently.

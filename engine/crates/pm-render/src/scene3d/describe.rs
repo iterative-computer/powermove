@@ -229,7 +229,7 @@ fn items<'s>(scene: &'s Scene3d, object: usize, planes: &[[f64; 4]; 6]) -> Vec<I
                 range: None,
             }),
             Materials::Slots(list) => {
-                for g in &mesh.geometry.geometry.groups {
+                for g in mesh.geometry.geometry.groups() {
                     if let Some(material) = list.get(g.material_index as usize) {
                         out.push(Item {
                             object,
@@ -1007,7 +1007,7 @@ fn clip4(m: &Mat4, v: [f64; 4]) -> [f64; 4] {
 }
 
 /// `geometry.computeBoundingSphere().center`: the bounding box center.
-fn sphere_center(g: &pm_geom3d::Geometry) -> [f64; 3] {
+fn sphere_center(g: &super::model::GeometryPayload) -> [f64; 3] {
     match g.bounds() {
         Some((lo, hi)) => [
             (f64::from(lo[0]) + f64::from(hi[0])) * 0.5,

@@ -380,7 +380,7 @@ export class NativeApi {
   importModel(bytes: Uint8Array): any {
     const wasm = this.ready();
     if (!wasm) throw new Error('The engine model importer is unavailable');
-    return wasm.importModel(bytes);
+    return wasm.importModel(bytes, true);
   }
 
   /** Package model import inputs through the engine's import pipeline. */

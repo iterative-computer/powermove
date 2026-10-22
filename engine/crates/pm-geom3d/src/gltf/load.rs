@@ -1,5 +1,6 @@
 //! `loadGltf` and three.js r180's `GLTFLoader.parse`, as data.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -52,7 +53,7 @@ const CHUNK_JSON: u32 = 0x4e4f_534a;
 
 /// The JSON document and the GLB `BIN` chunk, with `loadGltf`'s container
 /// checks.
-pub(crate) fn container(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>)> {
+pub(crate) fn container(bytes: &[u8]) -> Result<(Value, Option<Cow<'_, [u8]>>)> {
     if bytes.len() >= 20 && u32_at(bytes, 0) == GLB_MAGIC {
         if u32_at(bytes, 4) != 2 || u32_at(bytes, 8) as usize != bytes.len() {
             return err("Invalid GLB container");
@@ -68,7 +69,7 @@ pub(crate) fn container(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>)> {
         let glb = gltf::Glb::from_slice(bytes).map_err(|e| Error(format!("GLB: {e}")))?;
         let json: Value =
             serde_json::from_slice(&glb.json).map_err(|e| Error(format!("GLB JSON: {e}")))?;
-        let body = glb.bin.map(|b| b.into_owned());
+        let body = glb.bin;
         Ok((json, body))
     } else {
         let text = std::str::from_utf8(bytes).map_err(|e| Error(format!("glTF JSON: {e}")))?;
@@ -197,7 +198,7 @@ impl Names {
 
 struct Doc<'a> {
     json: &'a Value,
-    buffers: Vec<Vec<u8>>,
+    buffers: Vec<Cow<'a, [u8]>>,
 }
 
 const TYPES: [(&str, usize); 7] = [
@@ -210,19 +211,81 @@ const TYPES: [(&str, usize); 7] = [
     ("MAT4", 16),
 ];
 
-/// An accessor as three.js holds it: values as numbers (normalized
-/// integers kept raw), component type, item size.
+/// An accessor with exact source components (normalized integers kept raw),
+/// component type, and item size. `raw`/`get` expose three.js numbers.
+enum Components {
+    Float(Arc<Vec<f32>>),
+    Integer(Vec<u32>),
+}
+
+impl Components {
+    fn len(&self) -> usize {
+        match self {
+            Self::Float(values) => values.len(),
+            Self::Integer(values) => values.len(),
+        }
+    }
+
+    fn resize(&mut self, len: usize) {
+        match self {
+            Self::Float(values) => Arc::make_mut(values).resize(len, 0.0),
+            Self::Integer(values) => values.resize(len, 0),
+        }
+    }
+}
+
+/// Accessor assembly is exclusively owned; wrap float storage in an Arc
+/// only after base and sparse writes are complete.
+enum DecodeBuffer {
+    Float(Vec<f32>),
+    Integer(Vec<u32>),
+}
+
+impl DecodeBuffer {
+    fn set_bits(&mut self, index: usize, bits: u32) {
+        match self {
+            Self::Float(values) => {
+                // The old path decoded to f64, then stored in a Float32Array.
+                // Keep that round trip (including signaling-NaN quieting).
+                values[index] = f64::from(f32::from_bits(bits)) as f32;
+            }
+            Self::Integer(values) => values[index] = bits,
+        }
+    }
+
+    fn share(self) -> Components {
+        match self {
+            Self::Float(values) => Components::Float(Arc::new(values)),
+            Self::Integer(values) => Components::Integer(values),
+        }
+    }
+}
+
 struct Raw {
-    values: Vec<f64>,
+    // A glTF component occupies at most four bytes. Keep its exact source
+    // bits until a consumer asks for a JS number: f64 staging doubled the
+    // peak size of large POSITION accessors, while f32 staging would lose
+    // exact u32 indices above 2^24.
+    values: Components,
     size: usize,
     component: u64,
     normalized: bool,
 }
 
 impl Raw {
+    fn raw(&self, i: usize) -> f64 {
+        match &self.values {
+            Components::Float(values) => f64::from(values[i]),
+            Components::Integer(values) => match self.component {
+                5120 | 5122 => f64::from(values[i] as i32),
+                _ => f64::from(values[i]),
+            },
+        }
+    }
+
     /// The value `BufferAttribute.getX` returns (denormalized).
     fn get(&self, i: usize) -> f64 {
-        let v = self.values[i];
+        let v = self.raw(i);
         if !self.normalized {
             return v;
         }
@@ -238,7 +301,12 @@ impl Raw {
     /// The f32 value WebGL's vertex fetch produces.
     fn attribute(&self) -> Attribute {
         Attribute {
-            data: (0..self.values.len()).map(|i| self.get(i) as f32).collect(),
+            data: match &self.values {
+                Components::Float(values) => values.clone(),
+                Components::Integer(_) => {
+                    Arc::new((0..self.values.len()).map(|i| self.get(i) as f32).collect())
+                }
+            },
             size: self.size,
         }
     }
@@ -298,17 +366,20 @@ impl Doc<'_> {
             5125 | 5126 => 4,
             c => return err(format!("accessor component type {c}")),
         };
-        let decode = |b: &[u8]| -> f64 {
+        let decode = |b: &[u8]| -> u32 {
             match component {
-                5120 => f64::from(b[0] as i8),
-                5121 => f64::from(b[0]),
-                5122 => f64::from(i16::from_le_bytes([b[0], b[1]])),
-                5123 => f64::from(u16::from_le_bytes([b[0], b[1]])),
-                5125 => f64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])),
-                _ => f64::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+                5120 => i32::from(b[0] as i8) as u32,
+                5121 => u32::from(b[0]),
+                5122 => i32::from(i16::from_le_bytes([b[0], b[1]])) as u32,
+                5123 => u32::from(u16::from_le_bytes([b[0], b[1]])),
+                _ => u32_at(b, 0),
             }
         };
-        let mut values = vec![0.0; count * size];
+        let mut values = if component == 5126 {
+            DecodeBuffer::Float(vec![0.0; count * size])
+        } else {
+            DecodeBuffer::Integer(vec![0; count * size])
+        };
         if let Some(view_index) = index(&a["bufferView"]) {
             let view = self.view(view_index)?;
             let offset = a["byteOffset"].as_u64().unwrap_or(0) as usize;
@@ -344,7 +415,7 @@ impl Doc<'_> {
                     } else {
                         c * csize
                     };
-                    values[e * size + c] = decode(&view[base + at..]);
+                    values.set_bits(e * size + c, decode(&view[base + at..]));
                 }
             }
         }
@@ -378,12 +449,12 @@ impl Doc<'_> {
                     continue;
                 }
                 for c in 0..size.min(4) {
-                    values[target * size + c] = decode(&vb[(k * size + c) * csize..]);
+                    values.set_bits(target * size + c, decode(&vb[(k * size + c) * csize..]));
                 }
             }
         }
         Ok(Raw {
-            values,
+            values: values.share(),
             size,
             component,
             normalized,
@@ -919,7 +990,7 @@ impl Loader<'_> {
             a.map(|mut a| {
                 if a.count() < count {
                     short.push((name, a.count()));
-                    a.values.resize(count * a.size, 0.0);
+                    a.values.resize(count * a.size);
                 }
                 a
             })
@@ -950,7 +1021,11 @@ impl Loader<'_> {
         let mut indices = match index(&p["indices"]) {
             Some(i) => {
                 let a = self.doc.accessor(i)?;
-                Some(a.values.iter().map(|v| *v as u32).collect::<Vec<u32>>())
+                Some(
+                    (0..a.values.len())
+                        .map(|k| a.raw(k) as u32)
+                        .collect::<Vec<u32>>(),
+                )
             }
             None => None,
         };
@@ -1067,7 +1142,7 @@ impl Loader<'_> {
                         // A missing target attribute is the base attribute
                         // itself (relative: added as is).
                         None => out.push(base.map(Raw::attribute).unwrap_or(Attribute {
-                            data: vec![0.0; count * 3],
+                            data: Arc::new(vec![0.0; count * 3]),
                             size: 3,
                         })),
                     }
@@ -1076,15 +1151,33 @@ impl Loader<'_> {
             };
             if hp {
                 morph.position = Some(list("POSITION", Some(&position))?);
-                morph.source_counts[0] = morph.position.as_ref().unwrap().iter().map(Attribute::count).collect();
+                morph.source_counts[0] = morph
+                    .position
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(Attribute::count)
+                    .collect();
             }
             if hn {
                 morph.normal = Some(list("NORMAL", normal.as_ref())?);
-                morph.source_counts[1] = morph.normal.as_ref().unwrap().iter().map(Attribute::count).collect();
+                morph.source_counts[1] = morph
+                    .normal
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(Attribute::count)
+                    .collect();
             }
             if hc {
                 morph.color = Some(list("COLOR_0", color.as_ref())?);
-                morph.source_counts[2] = morph.color.as_ref().unwrap().iter().map(Attribute::count).collect();
+                morph.source_counts[2] = morph
+                    .color
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(Attribute::count)
+                    .collect();
             }
         }
         // WebGLMorphtargets packs morph attributes into a texture in JS.
@@ -1092,7 +1185,7 @@ impl Loader<'_> {
         for targets in [&mut morph.position, &mut morph.normal, &mut morph.color] {
             for t in targets.iter_mut().flatten() {
                 if t.data.len() < count * t.size {
-                    t.data.resize(count * t.size, 0.0);
+                    Arc::make_mut(&mut t.data).resize(count * t.size, 0.0);
                 }
             }
         }
@@ -1103,12 +1196,12 @@ impl Loader<'_> {
             uv,
             color: color.map(|a| a.attribute()),
             skin_index: joints.map(|a| Attribute {
-                data: a.values.iter().map(|v| *v as f32).collect(),
+                data: Arc::new((0..a.values.len()).map(|k| a.raw(k) as f32).collect()),
                 size: 4,
             }),
             skin_weight_bits: weights.as_ref().and_then(Raw::bits),
             skin_weight: weights.map(|a| a.attribute()),
-            index: indices,
+            index: indices.map(Arc::new),
             morph,
             bounding_box,
             mode,
@@ -1135,7 +1228,7 @@ impl Loader<'_> {
         let Some(w) = &mut g.skin_weight else {
             return;
         };
-        for v in w.data.chunks_exact_mut(4) {
+        for v in Arc::make_mut(&mut w.data).chunks_exact_mut(4) {
             let x = [
                 f64::from(v[0]),
                 f64::from(v[1]),
@@ -1499,7 +1592,9 @@ impl Loader<'_> {
                 stack.extend(self.objects[x].children.iter().copied());
             }
         }
-        for c in children { self.attach(o, c); }
+        for c in children {
+            self.attach(o, c);
+        }
         Ok(o)
     }
 
@@ -1604,7 +1699,7 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
     if bytes.len() > limits.bytes {
         return err("GLB models must be smaller than 128 MB");
     }
-    let (json, body) = container(bytes)?;
+    let (json, mut body) = container(bytes)?;
     for dep in json["buffers"]
         .as_array()
         .into_iter()
@@ -1676,10 +1771,10 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
         }
         match b["uri"].as_str() {
             None if i == 0 => buffers.push(
-                body.clone()
+                body.take()
                     .ok_or_else(|| Error("GLB has no BIN chunk".into()))?,
             ),
-            Some(uri) => buffers.push(decode_data_uri(uri)?.1),
+            Some(uri) => buffers.push(Cow::Owned(decode_data_uri(uri)?.1)),
             None => return err("a buffer without data"),
         }
     }
@@ -1810,7 +1905,9 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
     let mut roots = Vec::new();
     for n in scene["nodes"].as_array().into_iter().flatten() {
         let n = index(n).ok_or_else(|| Error("a scene node is not an index".into()))?;
-        if !loader.selected_roots.contains(&n) { continue; }
+        if !loader.selected_roots.contains(&n) {
+            continue;
+        }
         roots.push(loader.node(n, 0)?);
     }
     // `loadScene`: `scene.add(node)` for each scene node once every one
@@ -1874,7 +1971,7 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
             }
             let n = g.vertex_count();
             vertices += n;
-            triangles += g.index.as_ref().map_or(n, Vec::len) as f64 / 3.0;
+            triangles += g.index.as_ref().map_or(n, |index| index.len()) as f64 / 3.0;
         }
     }
     for i in model.traversal() {
@@ -2027,7 +2124,7 @@ fn clips(loader: &mut Loader<'_>) -> Result<Vec<Clip>> {
                 .map(|i| output.get(i) as f32)
                 .collect();
             let times: Vec<f32> = (0..input.values.len())
-                .map(|i| input.values[i] as f32)
+                .map(|i| input.raw(i) as f32)
                 .collect();
             let value_size = if times.is_empty() {
                 0
@@ -2089,4 +2186,105 @@ fn clips(loader: &mut Loader<'_>) -> Result<Vec<Clip>> {
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+    use crate::model_import::glb::GlbWriter;
+    use serde_json::{Map, json};
+
+    #[test]
+    fn glb_container_borrows_its_bin_chunk() {
+        let mut writer = GlbWriter::default();
+        writer.view(&[1, 2, 3, 4], None);
+        let mut document = Map::new();
+        document.insert("asset".into(), json!({"version":"2.0"}));
+        let bytes = writer.finish(document);
+        let (_, bin) = container(&bytes).unwrap();
+        let Cow::Borrowed(bin) = bin.unwrap() else {
+            panic!("GLB BIN was copied")
+        };
+        assert_eq!(bin, [1, 2, 3, 4]);
+        assert!(bin.as_ptr() >= bytes.as_ptr());
+        assert!((bin.as_ptr() as usize) + bin.len() <= (bytes.as_ptr() as usize) + bytes.len());
+    }
+
+    #[test]
+    fn sparse_float_accessor_shares_exact_attribute_bits() {
+        let original = [f32::from_bits(0x7f80_0001), -0.0, 1.0, 0.0];
+        let mut bytes: Vec<u8> = original.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let sparse_index = bytes.len();
+        bytes.push(2);
+        let sparse_value = bytes.len();
+        bytes.extend_from_slice(&2.0f32.to_le_bytes());
+        let json = json!({
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":16},
+                {"buffer":0,"byteOffset":sparse_index,"byteLength":1},
+                {"buffer":0,"byteOffset":sparse_value,"byteLength":4}
+            ],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"SCALAR",
+                "sparse":{"count":1,"indices":{"bufferView":1,"componentType":5121},
+                    "values":{"bufferView":2}}}]
+        });
+        let doc = Doc {
+            json: &json,
+            buffers: vec![Cow::Borrowed(&bytes)],
+        };
+        let raw = doc.accessor(0).unwrap();
+        let attribute = raw.attribute();
+        let Components::Float(values) = &raw.values else {
+            panic!("float accessor made integer staging")
+        };
+        assert!(Arc::ptr_eq(values, &attribute.data));
+        assert_eq!(
+            attribute.data[0].to_bits(),
+            (f64::from(original[0]) as f32).to_bits()
+        );
+        assert_eq!(attribute.data[1].to_bits(), (-0.0f32).to_bits());
+        assert_eq!(attribute.data[2].to_bits(), 2.0f32.to_bits());
+        assert_eq!(raw.raw(2), 2.0);
+    }
+
+    #[test]
+    fn wide_integer_accessor_keeps_exact_index() {
+        let bytes = u32::MAX.to_le_bytes();
+        let json = json!({
+            "bufferViews":[{"buffer":0,"byteLength":4}],
+            "accessors":[{"bufferView":0,"componentType":5125,"count":1,"type":"SCALAR"}]
+        });
+        let doc = Doc {
+            json: &json,
+            buffers: vec![Cow::Borrowed(&bytes)],
+        };
+        let raw = doc.accessor(0).unwrap();
+        assert_eq!(raw.raw(0), u32::MAX as f64);
+    }
+
+    #[test]
+    fn integer_normalization_and_padded_matrix_keep_getter_values() {
+        let bytes = [128u8, 127, 0, 1, 2, 3, 99, 4, 5, 6, 99, 7, 8, 9, 99];
+        let json = json!({
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":3},
+                {"buffer":0,"byteOffset":3,"byteLength":12}
+            ],
+            "accessors":[
+                {"bufferView":0,"componentType":5120,"normalized":true,"count":1,"type":"VEC3"},
+                {"bufferView":1,"componentType":5121,"count":1,"type":"MAT3"}
+            ]
+        });
+        let doc = Doc {
+            json: &json,
+            buffers: vec![Cow::Borrowed(&bytes)],
+        };
+        let normalized = doc.accessor(0).unwrap().attribute();
+        assert_eq!(normalized.data.as_slice(), &[-1.0, 1.0, 0.0]);
+        let matrix = doc.accessor(1).unwrap().attribute();
+        assert_eq!(
+            matrix.data.as_slice(),
+            &[1., 2., 3., 4., 5., 6., 7., 8., 9.]
+        );
+    }
 }

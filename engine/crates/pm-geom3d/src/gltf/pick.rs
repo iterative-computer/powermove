@@ -724,7 +724,7 @@ impl Picker {
                     let found = if mode == super::Mode::Points {
                         points_hit(
                             &positions,
-                            g.index.as_deref(),
+                            g.index.as_ref().map(|index| index.as_slice()),
                             &local,
                             threshold * threshold,
                             world,
@@ -733,7 +733,7 @@ impl Picker {
                     } else {
                         line_hit(
                             &positions,
-                            g.index.as_deref(),
+                            g.index.as_ref().map(|index| index.as_slice()),
                             mode,
                             &local,
                             threshold * threshold,
