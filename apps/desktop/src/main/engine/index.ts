@@ -24,6 +24,7 @@ import { discoverBlender } from '../blender-service';
 import { routeToCurrentExporter } from '../render-encoder';
 import type { EngineProcess } from '../../shared/engine-protocol';
 import type { Log } from './connection';
+import { createMemoryRelief, RELIEF_MIN_BYTES, type ReliefTarget } from './memory-relief';
 import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, type SharedTextureLike } from './bridge';
 import { EngineFontClient, FONT_CLIENT_ID, installEngineFontService, JOB_FONT_CLIENT_ID } from '../engine-fonts';
 import { startEngineFontSeeds } from '../engine-fonts-seeds';
@@ -415,7 +416,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     log
   });
 
-  const uninstallDocumentKernel = installDocumentKernelIpc({ ipc: options.ipc, cache: path.join(cacheDirectory, 'Documents'), trusted: options.isTrustedSender, call: (owner, request, bytes) => engine!.documentKernel(owner, request, bytes) });
+  const relief = createMemoryRelief({ warn: message => console.warn(`[engine] ${message}`) });
+  const uninstallDocumentKernel = installDocumentKernelIpc({ ipc: options.ipc, cache: path.join(cacheDirectory, 'Documents'), trusted: options.isTrustedSender, call: (owner, request, bytes) => engine!.documentKernel(owner, request, bytes),
+    ingested: (sender, bytes) => { if (bytes >= RELIEF_MIN_BYTES) relief.schedule(sender as unknown as ReliefTarget); } });
 
   // The font registry and subsetting run in the interactive engine (plan
   // section 12, Phase 2): main relays pm-wasm's font requests over its own
@@ -691,6 +694,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     attachWindow,
     dispose: async () => {
       removeSnapshotIpc();
+      relief.dispose();
       await uninstallDocumentKernel();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
       windowSessions.dispose();
