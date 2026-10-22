@@ -700,11 +700,44 @@ pub fn coverage(v: &Varyings) -> f32 {
 /// Per-sample coverage of one instance: for each covered sample, the
 /// fragment coverage of the first triangle (in primitive order) covering it.
 pub struct Samples {
+    /// The window asked for.
     pub width: u32,
     pub height: u32,
-    /// `width × height × samples per pixel`; `None` where no triangle covers
-    /// the sample.
+    /// The part of the window the mesh reaches (window-local
+    /// `[x0, y0, x1, y1)`): only it is stored; every sample outside is
+    /// uncovered.
+    pub sub: [u32; 4],
+    /// Samples per pixel.
+    n: usize,
+    /// `sub`'s pixels × samples per pixel, row-major; `None` where no
+    /// triangle covers the sample.
     pub coverage: Vec<Option<f32>>,
+}
+
+impl Samples {
+    fn empty(width: u32, height: u32, n: usize) -> Samples {
+        Samples { width, height, sub: [0, 0, 0, 0], n, coverage: Vec::new() }
+    }
+
+    /// The coverage of sample `s` of window pixel `(x, y)`.
+    #[inline]
+    pub fn at(&self, x: u32, y: u32, s: usize) -> Option<f32> {
+        let [x0, y0, x1, y1] = self.sub;
+        if x < x0 || x >= x1 || y < y0 || y >= y1 {
+            return None;
+        }
+        self.coverage[((y - y0) * (x1 - x0) + x - x0) as usize * self.n + s]
+    }
+
+    /// The pixels that may be covered, if any (`sub` when not empty).
+    pub fn dirty(&self) -> Option<[u32; 4]> {
+        let [x0, y0, x1, y1] = self.sub;
+        (x0 < x1 && y0 < y1).then_some(self.sub)
+    }
+
+    pub fn samples_per_pixel(&self) -> usize {
+        self.n
+    }
 }
 
 /// Rasterizes an instance's mesh.
@@ -736,11 +769,181 @@ pub(super) fn rasterize_window(inst: &Instance, width: u32, height: u32, pattern
 }
 
 /// Rasterizes mesh vertices into a `width × height` window at `origin`.
+///
+/// Each triangle visits only the pixels its samples cover: per sample row,
+/// the sample at `sx` is inside when exactly one of the two edges crossing
+/// the row has `num <= sx·den` ([`inside_triangle`]), so its pixels are a
+/// span between the edges' exact rational thresholds. The samples, their
+/// order (the first triangle covering a sample wins) and the interpolation
+/// are those of the per-pixel test ([`rasterize_verts_reference`]).
 fn rasterize_verts(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64; 2]], origin: [u32; 2]) -> Samples {
+    let n = pattern.len();
+    let one = 1i64 << SUBPIXEL_BITS;
+    struct Tri {
+        v: [Varyings; 3],
+        p: [(i64, i64); 3],
+        bbox: [i64; 4],
+    }
+    let mut tris: Vec<Tri> = Vec::with_capacity(INDICES.len());
+    let (mut sx0, mut sy0, mut sx1, mut sy1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for k in 2..INDICES.len() {
+        let v = [
+            verts[INDICES[k - 2] as usize],
+            verts[INDICES[k - 1] as usize],
+            verts[INDICES[k] as usize],
+        ];
+        let p = v.map(|v| (snap(f64::from(v.pos[0])), snap(f64::from(v.pos[1]))));
+        let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1) - (p[2].0 - p[0].0) * (p[1].1 - p[0].1);
+        if area == 0 {
+            continue;
+        }
+        let minx = p.iter().map(|q| q.0).min().unwrap().div_euclid(one).max(i64::from(origin[0]));
+        let maxx = p.iter().map(|q| q.0).max().unwrap().div_euclid(one).min(i64::from(origin[0] + width) - 1);
+        let miny = p.iter().map(|q| q.1).min().unwrap().div_euclid(one).max(i64::from(origin[1]));
+        let maxy = p.iter().map(|q| q.1).max().unwrap().div_euclid(one).min(i64::from(origin[1] + height) - 1);
+        if maxx < minx || maxy < miny {
+            continue;
+        }
+        sx0 = sx0.min(minx);
+        sy0 = sy0.min(miny);
+        sx1 = sx1.max(maxx + 1);
+        sy1 = sy1.max(maxy + 1);
+        tris.push(Tri { v, p, bbox: [minx, miny, maxx, maxy] });
+    }
+    if tris.is_empty() {
+        return Samples::empty(width, height, n);
+    }
+    // Window-local stored part.
+    let sub = [
+        (sx0 - i64::from(origin[0])) as u32,
+        (sy0 - i64::from(origin[1])) as u32,
+        (sx1 - i64::from(origin[0])) as u32,
+        (sy1 - i64::from(origin[1])) as u32,
+    ];
+    let sw = (sx1 - sx0) as usize;
+    let mut out = Samples {
+        width,
+        height,
+        sub,
+        n,
+        coverage: vec![None; sw * (sy1 - sy0) as usize * n],
+    };
+    let index = |px: i64, py: i64, si: usize| ((py - sy0) as usize * sw + (px - sx0) as usize) * n + si;
+    for tri in &tris {
+        let p = &tri.p;
+        let [minx, miny, maxx, maxy] = tri.bbox;
+        // The edges crossing sample rows, oriented downward.
+        let mut edges = [(0i64, 0i64, 0i64, 0i64, 0i32); 3];
+        let mut ne = 0;
+        for i in 0..3 {
+            let (a, b) = (p[i], p[(i + 1) % 3]);
+            if a.1 == b.1 {
+                continue;
+            }
+            edges[ne] = if a.1 < b.1 { (a.0, a.1, b.0, b.1, 1) } else { (b.0, b.1, a.0, a.1, -1) };
+            ne += 1;
+        }
+        // Barycentric weights from the snapped positions (the rasterizer's
+        // plane equations), evaluated at pixel centers.
+        let (x0, y0) = (p[0].0 as f64, p[0].1 as f64);
+        let (x1, y1) = (p[1].0 as f64, p[1].1 as f64);
+        let (x2, y2) = (p[2].0 as f64, p[2].1 as f64);
+        let det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+        for py in miny..=maxy {
+            // Each sample's covered pixel span on this row.
+            let mut spans = [(0i64, 0i64); 4];
+            let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+            for (si, s) in pattern.iter().enumerate() {
+                let sy = py * one + (s[1] * one as f64) as i64;
+                let sxo = (s[0] * one as f64) as i64;
+                let mut cr = [(0i64, 0i32); 3];
+                let mut nc = 0;
+                for &(ex0, ey0, ex1, ey1, wd) in &edges[..ne] {
+                    if sy < ey0 || sy >= ey1 {
+                        continue;
+                    }
+                    let den = ey1 - ey0;
+                    let num = ex0 * den + (ex1 - ex0) * (sy - ey0);
+                    let nn = i128::from(num) - i128::from(sxo) * i128::from(den);
+                    let d = i128::from(one) * i128::from(den);
+                    let x = nn.div_euclid(d) + i128::from(nn.rem_euclid(d) != 0);
+                    cr[nc] = (x.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64, wd);
+                    nc += 1;
+                }
+                cr[..nc].sort_unstable_by_key(|c| c.0);
+                // A triangle's row is one interval (its two crossing edges
+                // have opposite windings); a degenerate row is empty.
+                let (mut a, mut b) = (0i64, 0i64);
+                let mut w = 0;
+                for k in 0..nc {
+                    w += cr[k].1;
+                    if w != 0 {
+                        let start = cr[k].0.max(minx);
+                        let end = if k + 1 < nc { cr[k + 1].0 } else { i64::MAX }.min(maxx + 1);
+                        if end > start {
+                            debug_assert!(b <= a, "one interval per triangle row");
+                            a = start;
+                            b = end;
+                        }
+                    }
+                }
+                spans[si] = (a, b);
+                if b > a {
+                    lo = lo.min(a);
+                    hi = hi.max(b);
+                }
+            }
+            for px in lo.max(minx)..hi.min(maxx + 1) {
+                let mut covered = [false; 4];
+                let mut any = false;
+                for si in 0..n {
+                    let (a, b) = spans[si];
+                    if px >= a && px < b && out.coverage[index(px, py, si)].is_none() {
+                        covered[si] = true;
+                        any = true;
+                    }
+                }
+                if !any {
+                    continue;
+                }
+                // Varyings interpolated at the pixel center.
+                let cx = (px as f64 + 0.5) * one as f64;
+                let cy = (py as f64 + 0.5) * one as f64;
+                let b1 = ((cx - x0) * (y2 - y0) - (x2 - x0) * (cy - y0)) / det;
+                let b2 = ((x1 - x0) * (cy - y0) - (cx - x0) * (y1 - y0)) / det;
+                let b0 = 1.0 - b1 - b2;
+                let lerp = |a: f32, b: f32, c: f32| (b0 * f64::from(a) + b1 * f64::from(b) + b2 * f64::from(c)) as f32;
+                let t = &tri.v;
+                let mut v = t[0];
+                for i in 0..4 {
+                    v.jacobian[i] = lerp(t[0].jacobian[i], t[1].jacobian[i], t[2].jacobian[i]);
+                    v.edge[i] = lerp(t[0].edge[i], t[1].edge[i], t[2].edge[i]);
+                }
+                for i in 0..2 {
+                    v.control[i] = lerp(t[0].control[i], t[1].control[i], t[2].control[i]);
+                }
+                let c = coverage(&v);
+                for (si, &cov) in covered.iter().enumerate().take(n) {
+                    if cov {
+                        out.coverage[index(px, py, si)] = Some(c);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The per-pixel rasterization the span version is tested against: the
+/// whole `width × height × n` coverage.
+#[cfg(test)]
+pub(crate) fn rasterize_verts_reference(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64; 2]], origin: [u32; 2]) -> Vec<Option<f32>> {
     let n = pattern.len();
     let mut out = Samples {
         width,
         height,
+        sub: [0, 0, width, height],
+        n,
         coverage: vec![None; (width * height) as usize * n],
     };
     let one = 1i64 << SUBPIXEL_BITS;
@@ -811,10 +1014,11 @@ fn rasterize_verts(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64;
             }
         }
     }
-    out
+    out.coverage
 }
 
 /// The top-left sample test for one triangle in grid units.
+#[cfg(test)]
 fn inside_triangle(p: &[(i64, i64)], sx: i64, sy: i64) -> bool {
     let mut w = 0i32;
     for i in 0..3 {
@@ -837,4 +1041,63 @@ fn inside_triangle(p: &[(i64, i64)], sx: i64, sy: i64) -> bool {
         }
     }
     w != 0
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+    use crate::canvas2d::msaa::{SAMPLES_1X, SAMPLES_4X};
+
+    /// A small deterministic generator (no test dependency).
+    struct Lcg(u64);
+    impl Lcg {
+        fn f(&mut self, lo: f32, hi: f32) -> f32 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lo + (hi - lo) * ((self.0 >> 40) as f32 / (1u64 << 24) as f32)
+        }
+    }
+
+    #[test]
+    fn span_rasterization_matches_the_per_pixel_test_sample_for_sample() {
+        let mut r = Lcg(7);
+        let mut compared = 0usize;
+        for case in 0..400 {
+            let x = r.f(-20.0, 60.0);
+            let y = r.f(-20.0, 60.0);
+            let w = r.f(0.1, 70.0);
+            let h = r.f(0.1, 70.0);
+            let rect = [x, y, x + w, y + h];
+            let g = match case % 5 {
+                0 => Geometry::FillRect(rect),
+                1 => Geometry::FillRRect { rect, radii: [r.f(0.0, 12.0), r.f(0.0, 12.0)] },
+                2 => Geometry::StrokeRRect { rect, corner_radius: r.f(0.0, 9.0), radius: r.f(0.2, 6.0), join: [-1.0, 0.0, 4.0][case % 3] },
+                3 => Geometry::StrokeRect { rect, radius: r.f(0.2, 6.0), join: [-1.0, 0.0, 4.0][case % 3] },
+                _ => Geometry::StrokeLine { line: [x, y, x + w, y - h * 0.5], radius: r.f(0.2, 5.0), cap: [super::super::stroke::Cap::Butt, super::super::stroke::Cap::Round, super::super::stroke::Cap::Square][case % 3] },
+            };
+            // Rotations, skews, mirrored and fractional transforms.
+            let a = r.f(-3.2, 3.2);
+            let s = r.f(0.3, 2.5);
+            let m = Mat { sx: s * a.cos(), kx: -s * a.sin() + r.f(-0.3, 0.3), tx: r.f(-5.0, 5.0), ky: s * a.sin(), sy: s * a.cos() * if case % 7 == 0 { -1.0 } else { 1.0 }, ty: r.f(-5.0, 5.0) };
+            let inst = instance(&g, &m);
+            let verts: Vec<Varyings> = (0..36).map(|i| vertex(&inst, i)).collect();
+            for pattern in [&SAMPLES_4X[..], &SAMPLES_1X[..]] {
+                for (width, height, origin) in [(96u32, 80u32, [0u32, 0u32]), (37, 29, [11, 17])] {
+                    let fast = rasterize_verts(&verts, width, height, pattern, origin);
+                    let slow = rasterize_verts_reference(&verts, width, height, pattern, origin);
+                    let n = pattern.len();
+                    for yy in 0..height {
+                        for xx in 0..width {
+                            for si in 0..n {
+                                let a = fast.at(xx, yy, si);
+                                let b = slow[((yy * width + xx) as usize) * n + si];
+                                assert_eq!(a.map(f32::to_bits), b.map(f32::to_bits), "case {case} ({xx},{yy}) sample {si}");
+                                compared += usize::from(b.is_some());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 100_000, "the cases cover samples ({compared})");
+    }
 }

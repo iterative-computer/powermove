@@ -48,6 +48,9 @@ pub struct SampleMask {
     /// The sample positions (4× or 1×).
     pub pattern: &'static [[f64; 2]],
     pub bits: Vec<u8>,
+    /// Pixels (mask-local `[x0, y0, x1, y1)`) outside of which no bit was
+    /// set by the fills: what a draw has to visit. Empty when `x0 >= x1`.
+    pub bounds: [u32; 4],
 }
 
 impl SampleMask {
@@ -58,7 +61,31 @@ impl SampleMask {
             origin: [0, 0],
             pattern,
             bits: vec![0; (width * height) as usize],
+            bounds: [u32::MAX, u32::MAX, 0, 0],
         }
+    }
+
+    /// The pixels a fill may have set bits in, if any.
+    pub fn dirty(&self) -> Option<[u32; 4]> {
+        let [x0, y0, x1, y1] = self.bounds;
+        (x0 < x1 && y0 < y1).then_some([x0, y0, x1, y1])
+    }
+
+    /// Sets `bit` on mask-local pixels `x0..x1` of row `y`.
+    #[inline]
+    fn set_span(&mut self, y: u32, x0: u32, x1: u32, bit: u8) {
+        if x0 >= x1 {
+            return;
+        }
+        let row = (y * self.width) as usize;
+        for bits in &mut self.bits[row + x0 as usize..row + x1 as usize] {
+            *bits |= bit;
+        }
+        let b = &mut self.bounds;
+        b[0] = b[0].min(x0);
+        b[1] = b[1].min(y);
+        b[2] = b[2].max(x1);
+        b[3] = b[3].max(y + 1);
     }
 
     pub fn count(&self, x: u32, y: u32) -> u32 {
@@ -69,6 +96,13 @@ impl SampleMask {
     pub fn union(&mut self, o: &SampleMask) {
         for (a, b) in self.bits.iter_mut().zip(&o.bits) {
             *a |= *b;
+        }
+        if let Some([x0, y0, x1, y1]) = o.dirty() {
+            let b = &mut self.bounds;
+            b[0] = b[0].min(x0);
+            b[1] = b[1].min(y0);
+            b[2] = b[2].max(x1.min(self.width));
+            b[3] = b[3].max(y1.min(self.height));
         }
     }
 }
@@ -148,15 +182,13 @@ pub fn fill_polygons(mask: &mut SampleMask, contours: &[Vec<[f64; 2]>], rule: Ru
             events.sort_unstable_by_key(|e| e.0);
             let x0 = i64::from(mask.origin[0]);
             let x1 = x0 + i64::from(mask.width);
-            let row = (py as u32 - mask.origin[1]) as usize * mask.width as usize;
+            let row = py as u32 - mask.origin[1];
             let (mut x, mut w) = (x0, 0);
             for (edge, wd) in events.into_iter().chain(std::iter::once((x1, 0))) {
                 let end = edge.clamp(x0, x1);
                 let inside = match rule { Rule::NonZero => w != 0, Rule::EvenOdd => w & 1 != 0 };
                 if inside && end > x {
-                    for bits in &mut mask.bits[row + (x-x0) as usize..row + (end-x0) as usize] {
-                        *bits |= 1 << si;
-                    }
+                    mask.set_span(row, (x - x0) as u32, (end - x0) as u32, 1 << si);
                 }
                 w += wd;
                 x = end;
@@ -223,14 +255,22 @@ impl MsaaTarget {
     /// Source-over blends `color × coverage` into each sample an analytic
     /// draw covers.
     pub fn blend_coverage(&mut self, samples: &super::analytic::Samples, color: [f32; 4]) {
-        for (i, c) in samples.coverage.iter().enumerate() {
-            let Some(c) = *c else { continue };
-            let src = [color[0] * c, color[1] * c, color[2] * c, color[3] * c];
-            let d = &mut self.samples[i];
-            let inv = 1.0 - src[3];
-            for k in 0..4 {
-                let dst = f32::from(d[k]) / 255.0;
-                d[k] = unorm8(src[k] + dst * inv);
+        let n = self.pattern.len();
+        let Some([x0, y0, x1, y1]) = samples.dirty() else {
+            return;
+        };
+        for y in y0..y1 {
+            for x in x0..x1 {
+                for s in 0..n {
+                    let Some(c) = samples.at(x, y, s) else { continue };
+                    let src = [color[0] * c, color[1] * c, color[2] * c, color[3] * c];
+                    let d = &mut self.samples[(y * self.width + x) as usize * n + s];
+                    let inv = 1.0 - src[3];
+                    for k in 0..4 {
+                        let dst = f32::from(d[k]) / 255.0;
+                        d[k] = unorm8(src[k] + dst * inv);
+                    }
+                }
             }
         }
     }
@@ -287,7 +327,97 @@ pub fn explain(contours: &[Vec<[f64; 2]>], px: i64, py: i64) -> Vec<(usize, f64,
 
 /// Rasterizes triangles (window coordinates) into `mask` as their union,
 /// with the same snapping and top-left rule as [`fill_polygons`].
+///
+/// Each sample row of a triangle is one span: the sample at `sx` is inside
+/// when exactly one of the two edges crossing its row has `num <= sx·den`
+/// (their windings are opposite), so the covered pixels are those between
+/// the two edges' exact rational thresholds (the same ceil as
+/// [`fill_polygons`]). Only the pixels of the span are visited, not the
+/// triangle's whole bounding box.
 pub fn fill_triangles(mask: &mut SampleMask, tris: &[[[f32; 2]; 3]]) {
+    let one = 1i64 << SUBPIXEL_BITS;
+    let pattern = mask.pattern;
+    for t in tris {
+        let v: [(i64, i64); 3] = [0, 1, 2].map(|i| (snap(f64::from(t[i][0])), snap(f64::from(t[i][1]))));
+        // Zero-area triangles cover nothing.
+        let area = (v[1].0 - v[0].0) * (v[2].1 - v[0].1) - (v[2].0 - v[0].0) * (v[1].1 - v[0].1);
+        if area == 0 {
+            continue;
+        }
+        let (minx, maxx) = (v.iter().map(|p| p.0).min().unwrap(), v.iter().map(|p| p.0).max().unwrap());
+        let (miny, maxy) = (v.iter().map(|p| p.1).min().unwrap(), v.iter().map(|p| p.1).max().unwrap());
+        let px0 = (minx.div_euclid(one)).max(i64::from(mask.origin[0]));
+        let px1 = (maxx.div_euclid(one)).min(i64::from(mask.origin[0] + mask.width) - 1);
+        let py0 = (miny.div_euclid(one)).max(i64::from(mask.origin[1]));
+        let py1 = (maxy.div_euclid(one)).min(i64::from(mask.origin[1] + mask.height) - 1);
+        if px1 < px0 || py1 < py0 {
+            continue;
+        }
+        let mut edges = [GridEdge { x0: 0, y0: 0, x1: 0, y1: 0, winding: 0 }; 3];
+        let mut ne = 0;
+        for i in 0..3 {
+            let (a, b) = (v[i], v[(i + 1) % 3]);
+            if a.1 == b.1 {
+                continue;
+            }
+            edges[ne] = if a.1 < b.1 {
+                GridEdge { x0: a.0, y0: a.1, x1: b.0, y1: b.1, winding: 1 }
+            } else {
+                GridEdge { x0: b.0, y0: b.1, x1: a.0, y1: a.1, winding: -1 }
+            };
+            ne += 1;
+        }
+        for py in py0..=py1 {
+            for (si, s) in pattern.iter().enumerate() {
+                let (_, sy) = sample_grid(0, py, *s);
+                let sx0 = (s[0] * one as f64) as i64;
+                // The first pixel whose sample is on or right of each edge
+                // crossing this sample row, with its winding.
+                let mut cr = [(0i64, 0i32); 3];
+                let mut n = 0;
+                for e in &edges[..ne] {
+                    if sy < e.y0 || sy >= e.y1 {
+                        continue;
+                    }
+                    let den = e.y1 - e.y0;
+                    let num = e.x0 * den + (e.x1 - e.x0) * (sy - e.y0);
+                    let nn = i128::from(num) - i128::from(sx0) * i128::from(den);
+                    let d = i128::from(one) * i128::from(den);
+                    let x = nn.div_euclid(d) + i128::from(nn.rem_euclid(d) != 0);
+                    cr[n] = (x.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64, e.winding);
+                    n += 1;
+                }
+                // The winding at pixel px is the sum over crossings with
+                // threshold <= px: nonzero between thresholds whose partial
+                // sums are nonzero.
+                cr[..n].sort_unstable_by_key(|c| c.0);
+                let mut w = 0;
+                let row = (py as u32) - mask.origin[1];
+                for k in 0..n {
+                    w += cr[k].1;
+                    if w == 0 {
+                        continue;
+                    }
+                    let start = cr[k].0.max(px0);
+                    let end = if k + 1 < n { cr[k + 1].0 } else { i64::MAX }.min(px1 + 1);
+                    if end > start {
+                        mask.set_span(
+                            row,
+                            (start - i64::from(mask.origin[0])) as u32,
+                            (end - i64::from(mask.origin[0])) as u32,
+                            1 << si,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The previous per-pixel triangle fill, kept as the reference the span
+/// fill is tested against.
+#[cfg(test)]
+pub(crate) fn fill_triangles_reference(mask: &mut SampleMask, tris: &[[[f32; 2]; 3]]) {
     let one = 1i64 << SUBPIXEL_BITS;
     for t in tris {
         let v: Vec<(i64, i64)> = t.iter().map(|p| (snap(f64::from(p[0])), snap(f64::from(p[1])))).collect();
@@ -410,5 +540,55 @@ mod tests {
         m.bits[0] = 0b0111;
         t.blend(&m, [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(t.resolve()[3], 191);
+    }
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+
+    #[test]
+    fn span_triangle_fill_matches_the_per_pixel_test_bit_for_bit() {
+        let mut seed = 11u64;
+        let mut f = |lo: f32, hi: f32| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lo + (hi - lo) * ((seed >> 40) as f32 / (1u64 << 24) as f32)
+        };
+        let mut set = 0u32;
+        for case in 0..300 {
+            // Fans of thin wedges (as tessellated paths make), slivers,
+            // vertices on the sample grid and outside the window.
+            let cx = f(-10.0, 70.0);
+            let cy = f(-10.0, 70.0);
+            let mut tris = Vec::new();
+            for _ in 0..(1 + case % 12) {
+                let snap_grid = |v: f32| if case % 4 == 0 { (v * 8.0).round() / 8.0 } else { v };
+                tris.push([
+                    [snap_grid(cx), snap_grid(cy)],
+                    [snap_grid(f(-20.0, 90.0)), snap_grid(f(-20.0, 90.0))],
+                    [snap_grid(f(-20.0, 90.0)), snap_grid(f(-20.0, 90.0))],
+                ]);
+            }
+            for pattern in [&SAMPLES_4X[..], &SAMPLES_1X[..]] {
+                for (w, h, origin) in [(64u32, 64u32, [0u32, 0u32]), (23, 31, [9, 14])] {
+                    let mut fast = SampleMask::new(w, h, pattern);
+                    fast.origin = origin;
+                    let mut slow = fast.clone();
+                    fill_triangles(&mut fast, &tris);
+                    fill_triangles_reference(&mut slow, &tris);
+                    assert_eq!(fast.bits, slow.bits, "case {case}");
+                    // Every set bit is inside the reported bounds.
+                    let b = fast.dirty().unwrap_or([0, 0, 0, 0]);
+                    for (i, bits) in fast.bits.iter().enumerate() {
+                        if *bits != 0 {
+                            let (x, y) = (i as u32 % w, i as u32 / w);
+                            assert!(x >= b[0] && x < b[2] && y >= b[1] && y < b[3], "case {case}");
+                            set += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(set > 10_000, "the cases set bits ({set})");
     }
 }

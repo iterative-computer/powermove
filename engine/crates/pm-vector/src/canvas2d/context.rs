@@ -634,9 +634,8 @@ impl Context {
             for x in 0..w {
                 let p = (y * w + x) as usize;
                 let sum: u32 = match &coverage {
-                    Some(c) => c.coverage[p * n..(p + 1) * n]
-                        .iter()
-                        .map(|c| u32::from(super::msaa::unorm8(c.unwrap_or(0.0))))
+                    Some(c) => (0..n)
+                        .map(|s| u32::from(super::msaa::unorm8(c.at(x, y, s).unwrap_or(0.0))))
                         .sum(),
                     None => mask.bits[p].count_ones() * 255,
                 };
@@ -707,8 +706,10 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
                     let polys = viewport.map_polygons(&tess::to_device(&local, m));
                     if let Some(g) = geometry {
                         let c = analytic::rasterize(&analytic::instance(g, m), target.width, target.height, target.pattern);
-                        for (a, b) in union.iter_mut().zip(c.coverage) {
-                            let b = b.unwrap_or(0.0);
+                        let n = target.pattern.len();
+                        for (i, a) in union.iter_mut().enumerate() {
+                            let p = (i / n) as u32;
+                            let b = c.at(p % target.width, p / target.width, i % n).unwrap_or(0.0);
                             *a += b * (1.0 - *a);
                         }
                     } else {
@@ -767,27 +768,42 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
             return;
         }
     };
-    for (i, d) in target.samples.iter_mut().enumerate() {
-        let p = i / target.pattern.len();
-        let s = i % target.pattern.len();
-        let cov = if let Some(c) = &coverage {
-            c.coverage[i].unwrap_or(0.0)
-        } else if mask.bits[p] & (1 << s) != 0 {
-            1.0
-        } else {
-            0.0
-        };
-        let cov = cov * clip.map_or(1.0, |c| c[i]);
-        if cov == 0.0 {
-            continue;
-        }
-        let color = paint
-            .at((p % target.width as usize) as f32 + origin[0] as f32 + 0.5,
-                (p / target.width as usize) as f32 + origin[1] as f32 + 0.5)
-            .map(|v| v * cov);
-        let inv = 1.0 - color[3];
-        for c in 0..4 {
-            d[c] = unorm8(color[c] + f32::from(d[c]) / 255.0 * inv)
+    // Only the pixels the fill reached can have coverage: every other
+    // sample is left as it is, so the draw visits just those.
+    let n = target.pattern.len();
+    let dirty = match &coverage {
+        Some(c) => c.dirty(),
+        None => mask.dirty(),
+    };
+    let Some([x0, y0, x1, y1]) = dirty else {
+        return;
+    };
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = (y * target.width + x) as usize;
+            for s in 0..n {
+                let i = p * n + s;
+                let cov = if let Some(c) = &coverage {
+                    c.at(x, y, s).unwrap_or(0.0)
+                } else if mask.bits[p] & (1 << s) != 0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                let cov = cov * clip.map_or(1.0, |c| c[i]);
+                if cov == 0.0 {
+                    continue;
+                }
+                let color = paint
+                    .at(x as f32 + origin[0] as f32 + 0.5,
+                        y as f32 + origin[1] as f32 + 0.5)
+                    .map(|v| v * cov);
+                let d = &mut target.samples[i];
+                let inv = 1.0 - color[3];
+                for c in 0..4 {
+                    d[c] = unorm8(color[c] + f32::from(d[c]) / 255.0 * inv)
+                }
+            }
         }
     }
 }
