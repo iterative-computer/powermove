@@ -579,6 +579,26 @@ pub fn standard_video_primaries(p: Primaries) -> Primaries {
     }
 }
 
+/// Whether Interpret Footage overrides how a video's code values become
+/// colour: primaries, transfer, matrix, range or chroma siting. Frame rate,
+/// field order, pixel aspect and clean aperture only choose or place frames,
+/// and an alpha choice only acts on a file with an alpha channel, so none of
+/// them may move a level 1 video off today's compatibility upload.
+fn interprets_video_color(i: &Interpretation) -> bool {
+    i.primaries.is_some()
+        || i.transfer.is_some()
+        || i.matrix.is_some()
+        || i.range.is_some()
+        || i.siting.is_some()
+}
+
+/// Whether the overrides change the video's colour description (its
+/// colour members or its alpha reading). Without them the frame's own tags
+/// apply, exactly as for an uninterpreted asset.
+fn interprets_video_reading(i: &Interpretation) -> bool {
+    interprets_video_color(i) || i.alpha.is_some()
+}
+
 /// The source pass parameters for a source.
 fn source_uniform(
     color: &SourceColor,
@@ -1271,7 +1291,7 @@ impl MediaCache {
         }
         let bitmap = if sequence
             && compat
-            && interp.is_empty()
+            && !interprets_video_reading(interp)
             && fields.is_none()
             && !self.interpretations.contains_key(path)
             && v.color.tagged.matrix.is_none()
@@ -1336,7 +1356,7 @@ impl MediaCache {
         };
         let mut desc: ColorDescription = match self.interpretations.get(path) {
             Some(d) => *d,
-            None if !interp.is_empty() => reading.color,
+            None if interprets_video_reading(interp) => reading.color,
             None => frame.color.unwrap_or(reading.color),
         };
         // raster.ts encodes image sequences as untagged BT.601 VP9, even
@@ -1385,12 +1405,17 @@ impl MediaCache {
         // Clip/quantize each source texel before the layer samples it, so
         // saturated out-of-range RGB cannot bleed across a filtered edge.
         // The sequence path keeps its separate Chromium/libyuv conversion;
-        // level 2, alpha, explicit interpretations, and HDR retain native precision.
+        // Level 2, alpha files, colour interpretations (Interpret Footage's
+        // colour members or a file's colour override), and HDR retain
+        // native precision. Overrides that only choose or place frames
+        // (frame rate, field order, pixel aspect, clean aperture) keep the
+        // upload, so they cannot change a level 1 video's colours.
         let compatibility_bitmap = compat
             && !sequence
             && working == WorkingEncoding::Standard
+            && !frame.format.has_alpha()
             && color.alpha == AlphaMode::Opaque
-            && interp.is_empty()
+            && !interprets_video_color(interp)
             && !self.interpretations.contains_key(path)
             && fields.is_none()
             && color.tone_map.is_none()

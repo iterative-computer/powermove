@@ -205,8 +205,24 @@ Chroma reconstruction and the Y′CbCr matrix stay in the existing GPU source
 pass. The conversion stores f32 directly into RGBA8, without an intermediate
 f16 rounding.
 
-Level 2, explicit document or per-file interpretations, linear blending,
-HDR, alpha-bearing video, and deinterlacing keep working-format float sources.
+Level 2, colour interpretations, linear blending, HDR, alpha-bearing video,
+and deinterlacing keep working-format float sources. A colour interpretation
+is an Interpret Footage primaries, transfer, matrix, range or chroma siting
+override, or the host's per-file colour override (`MediaCache::interpret`).
+Members that only choose or place frames (frame rate, field order, pixel
+aspect, clean aperture) and an alpha choice on a file without alpha keep the
+RGBA8 upload: setting one must not change a level 1 video's colours (the
+upload's first version left it for any member, so a frame-rate override alone
+moved saturated chroma edges by up to 0.45). The same members no
+longer replace the frame's own colour tags with the probe's reading, and the
+numbered-sequence bitmap applies the same rule.
+
+**Precision.** The RGBA8 upload ignores the composition's or export's
+working precision: a level 1 video in a Float16 or Float32 project or export
+is stored at 8 bits per channel, as today's `texImage2D(RGBA, UNSIGNED_BYTE)`
+stores it and as level 1 stills already are. Float precision applies to the
+layers and intermediates after the source; level 2 (or a colour
+interpretation) reads the video at full precision.
 Animated-image and numbered-sequence renditions keep their existing libyuv conversion.
 Converted-frame cache readings distinguish these paths, and retired targets
 are reused only at the selected storage format.
@@ -217,6 +233,15 @@ a real H.264 frame between compatibility/native/linear/interpreted readings
 through cache hits, frame advances, and per-file override removal. A normalized
 4:2:0 fixture checks compatibility bytes against an independent centered
 bilinear CPU reference and native floats against a left/Catmull-Rom reference.
+The cache test also keeps a frame-placing interpretation (pixel aspect, clean
+aperture, progressive, alpha ignored) on RGBA8. `tests/footage.rs`
+`interpret_overrides_change_the_reading` checks an uninterpreted level 1
+ProRes 4:2:2 frame against an independent RGBA8 reference (centered chroma,
+BT.601, clipped and rounded: max 3e-8), each frame-placing member against that
+render exactly, and colour overrides against the native float reading (max
+3e-7). Its earlier uninterpreted float assertion predates the RGBA8 upload;
+the native reading is now checked through a colour override restating the
+file's primaries.
 
 The general corpus request uses `VideoEnd::Final`, matching the capture's
 `prepareFrame` before `renderToPixels`. The viewer default (`0.04` s padding)

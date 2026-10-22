@@ -112,6 +112,14 @@ fn video_storage_keeps_compatibility_and_native_cache_entries_separate() {
         transfer: Some(Transfer::DisplayE),
         ..Default::default()
     };
+    // Members that only choose or place frames keep today's upload.
+    let placed = Interpretation {
+        pixel_aspect: Some((1, 1)),
+        clean_aperture: Some(false),
+        field_order: pm_media::interlace::FieldOverride::Progressive,
+        alpha: Some(pm_media::interpret::AlphaChoice::Ignore),
+        ..Default::default()
+    };
     // Revisit the same decoded frame across readings, then advance to
     // exercise retired-target reuse. Neither the converted cache nor
     // its free targets may lend RGBA8 storage to a native reading.
@@ -134,6 +142,12 @@ fn video_storage_keeps_compatibility_and_native_cache_entries_separate() {
                 WorkingEncoding::Standard,
                 Some(&interpreted),
                 wgpu::TextureFormat::Rgba32Float,
+            ),
+            (
+                true,
+                WorkingEncoding::Standard,
+                Some(&placed),
+                wgpu::TextureFormat::Rgba8Unorm,
             ),
             (
                 true,
