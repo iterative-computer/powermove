@@ -253,6 +253,147 @@ fn obj_doc() -> Value {
     doc
 }
 
+/// Legacy parseScene's 500,000 scene-geometry budget counts only inline
+/// geometry. A 600,001-vertex imported model draws in three placements below
+/// SceneRuntime's separate two-million imported-vertex limit. A fourth
+/// placement crosses that legacy limit and fails visibly at the layer.
+#[test]
+fn imported_model_above_inline_budget_keeps_all_placements() {
+    const VERTICES: usize = 600_001;
+    let dir = Dir::new("3d-imported-budget");
+    let path = dir.0.join("model.glb");
+    let mut bin = vec![0_u8; VERTICES * 12 + 8];
+    for (i, value) in [-1.0_f32, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0]
+        .into_iter()
+        .enumerate()
+    {
+        bin[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let index_offset = VERTICES * 12;
+    bin[index_offset..index_offset + 6].copy_from_slice(&[0, 0, 1, 0, 2, 0]);
+    let graph = json!({
+        "asset": {"version": "2.0"}, "scene": 0,
+        "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+        "buffers": [{"byteLength": VERTICES * 12 + 6}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": VERTICES * 12},
+            {"buffer": 0, "byteOffset": index_offset, "byteLength": 6}
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": VERTICES,
+                "type": "VEC3", "min": [-1, -1, 0], "max": [1, 1, 0]},
+            {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}
+        ]
+    });
+    let mut json = serde_json::to_vec(&graph).unwrap();
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
+    let mut glb = Vec::with_capacity(12 + 8 + json.len() + 8 + bin.len());
+    glb.extend_from_slice(b"glTF");
+    glb.extend_from_slice(&2_u32.to_le_bytes());
+    glb.extend_from_slice(&(12_u32 + 8 + json.len() as u32 + 8 + bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"JSON");
+    glb.extend_from_slice(&json);
+    glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"BIN\0");
+    glb.extend_from_slice(&bin);
+    std::fs::write(&path, glb).unwrap();
+
+    let mut doc = obj_doc();
+    doc["assets"]["model"]["format"] = json!("glb");
+    doc["assets"]["model"]["name"] = json!("model.glb");
+    let base = doc["layers"][2].clone();
+    for i in 1..3 {
+        let mut layer = base.clone();
+        layer["id"] = json!(format!("o{i}"));
+        set(&mut layer, "position.x", json!(i as f64 - 1.5));
+        doc["layers"].as_array_mut().unwrap().push(layer);
+    }
+    let mut renderer = Renderer::headless().unwrap();
+    let plans = object_plans(&mut renderer, &doc, &resolver("model", &path));
+    assert_eq!(plans.len(), 3);
+    assert!(
+        plans
+            .iter()
+            .all(|plan| Arc::ptr_eq(&plans[0].scene, &plan.scene))
+    );
+    let imported: Vec<_> = plans[0]
+        .scene
+        .objects
+        .iter()
+        .filter(|object| matches!(object.id.as_str(), "o" | "o1" | "o2"))
+        .collect();
+    assert_eq!(imported.len(), 3);
+    assert!(imported.iter().all(|object| object.meshes.len() == 1));
+    assert!(
+        imported
+            .iter()
+            .all(|object| object.meshes[0].geometry.geometry.vertex_count() == VERTICES)
+    );
+
+    let mut fourth = base;
+    fourth["id"] = json!("o3");
+    set(&mut fourth, "position.x", json!(1.5));
+    doc["layers"].as_array_mut().unwrap().push(fourth);
+    let (_, failures) = renderer
+        .plan(
+            &load(&doc),
+            "Ptest-root",
+            ticks(0.0),
+            &request(),
+            &resolver("model", &path),
+        )
+        .unwrap();
+    assert!(!failures.is_empty());
+    assert!(
+        failures
+            .iter()
+            .all(|failure| failure.message.contains("two million vertices"))
+    );
+}
+
+#[test]
+fn obj_source_vertices_count_toward_the_legacy_imported_scene_limit() {
+    // The OBJ asset store reports sourceVertexCount, rather than the three
+    // expanded draw vertices of this single face. SceneRuntime.sync sums that
+    // asset.vertices field for every placement, including repeated assets.
+    const VERTICES: usize = 500_001;
+    let dir = Dir::new("3d-obj-placed-budget");
+    let path = dir.0.join("model.obj");
+    let mut source = String::from("v -1 -1 0\nv 1 -1 0\nv 0 1 0\n");
+    for _ in 3..VERTICES {
+        source.push_str("v 0 0 0\n");
+    }
+    source.push_str("f 1 2 3\n");
+    std::fs::write(&path, source).unwrap();
+    let mut doc = obj_doc();
+    let base = doc["layers"][2].clone();
+    for i in 1..4 {
+        let mut layer = base.clone();
+        layer["id"] = json!(format!("o{i}"));
+        doc["layers"].as_array_mut().unwrap().push(layer);
+    }
+    let mut renderer = Renderer::headless().unwrap();
+    let (_, failures) = renderer
+        .plan(
+            &load(&doc),
+            "Ptest-root",
+            ticks(0.0),
+            &request(),
+            &resolver("model", &path),
+        )
+        .unwrap();
+    assert!(!failures.is_empty());
+    assert!(
+        failures
+            .iter()
+            .all(|failure| failure.message.contains("two million vertices"))
+    );
+}
+
 #[test]
 fn obj_geometry_follows_the_file_version() {
     let dir = Dir::new("3d-obj-version");

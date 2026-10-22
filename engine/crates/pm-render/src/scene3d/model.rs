@@ -1012,7 +1012,12 @@ impl SceneBuilder {
                         missing = true;
                         None
                     }
-                    ModelLookup::Obj { key, mesh } => Some(self.obj(key, &mesh)),
+                    ModelLookup::Obj { key, mesh } => {
+                        // `SceneRuntime.sync` sums asset.vertices for OBJ too;
+                        // the asset store records its sourceVertexCount.
+                        imported_vertices += mesh.source_vertex_count;
+                        Some(self.obj(key, &mesh))
+                    }
                 }
             } else {
                 // A primitive the schema does not know fails the scene:
