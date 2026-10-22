@@ -178,8 +178,10 @@ mod tests {
 
     #[test]
     fn gamma_applies_only_without_higher_precedence_chunks() {
-        let dir = std::env::temp_dir().join(format!("pm-png-gamma-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("pm-png-gamma-")
+            .tempdir()
+            .unwrap();
         let g = |v: u32| v.to_be_bytes();
         type Chunks<'a> = &'a [(&'a [u8; 4], &'a [u8])];
         let cases: [(Chunks, Option<f32>); 8] = [
@@ -194,13 +196,12 @@ mod tests {
             (&[(b"IDAT", &[]), (b"gAMA", &g(70_000))], None),
         ];
         for (i, (chunks, want)) in cases.iter().enumerate() {
-            let path = dir.join(format!("{i}.png"));
+            let path = dir.path().join(format!("{i}.png"));
             std::fs::write(&path, png(chunks)).unwrap();
             assert_eq!(png_gamma(&path).unwrap(), *want, "case {i}");
         }
-        std::fs::write(dir.join("not.png"), b"GIF89a").unwrap();
-        assert_eq!(png_gamma(&dir.join("not.png")).unwrap(), None);
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::write(dir.path().join("not.png"), b"GIF89a").unwrap();
+        assert_eq!(png_gamma(&dir.path().join("not.png")).unwrap(), None);
     }
 
     /// ImageIO's sRGB window, measured: 45445..=45464 read as sRGB; 45444,

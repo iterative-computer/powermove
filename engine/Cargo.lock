@@ -2056,6 +2056,7 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -2296,6 +2297,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -2332,6 +2334,7 @@ dependencies = [
  "pm-text",
  "serde",
  "serde_json",
+ "tempfile",
  "wgpu",
 ]
 

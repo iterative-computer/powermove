@@ -679,9 +679,11 @@ mod tests {
     #[test]
     fn recurring_render_errors_are_listed_once() {
         let rate = 48_000u32;
-        let dir =
-            std::env::temp_dir().join(format!("pm-node-audio-problems-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("pm-node-audio-problems-")
+            .tempdir()
+            .unwrap();
+        let dir = directory.path();
         let (good_file, bad_file, late_file) = (
             dir.join("good.wav"),
             dir.join("bad.wav"),
@@ -775,6 +777,5 @@ mod tests {
         );
         drop(playback);
         cache.shutdown();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

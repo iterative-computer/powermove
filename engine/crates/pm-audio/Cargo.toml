@@ -29,3 +29,4 @@ test-hooks = []
 [dev-dependencies]
 proptest.workspace = true
 pm-audio = { path = ".", features = ["test-hooks"] }
+tempfile = "3.27"

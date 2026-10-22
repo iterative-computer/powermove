@@ -3253,10 +3253,17 @@ mod tests {
                 self.0.set_decode_blocked(&self.1, false);
             }
         }
-        let dir =
-            std::env::temp_dir().join(format!("pm-audio-first-interval-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("source.wav");
+        struct ShutdownCache(Arc<SourceCache>);
+        impl Drop for ShutdownCache {
+            fn drop(&mut self) {
+                self.0.shutdown();
+            }
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("pm-audio-first-interval-")
+            .tempdir()
+            .unwrap();
+        let file = dir.path().join("source.wav");
         let frames = 2 * crate::source::BLOCK;
         let wav = std::fs::File::create(&file).unwrap();
         let mut writer =
@@ -3265,6 +3272,7 @@ mod tests {
         writer.finish().unwrap();
 
         let cache = SourceCache::new(64 << 20, 2);
+        let _decode_workers = ShutdownCache(cache.clone());
         let source = cache.open(&file, None).unwrap();
         cache.block(&source, 0, true).unwrap();
         cache.set_decode_blocked(&source, true);

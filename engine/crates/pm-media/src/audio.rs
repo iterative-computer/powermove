@@ -1594,10 +1594,8 @@ mod tests {
     }
 
     /// A WebM/Opus file from Powermove's FFmpeg build (`PM_FFMPEG_DIR`).
-    fn webm_opus(name: &str, seconds: u32) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pm-media-audio-unit-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let out = dir.join(name);
+    fn webm_opus(dir: &tempfile::TempDir, name: &str, seconds: u32) -> PathBuf {
+        let out = dir.path().join(name);
         let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -1635,7 +1633,11 @@ mod tests {
     /// block.
     #[test]
     fn failed_anchors_fall_back_after_a_few() {
-        let file = webm_opus("failed-anchors.webm", 30);
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-audio-unit-")
+            .tempdir()
+            .unwrap();
+        let file = webm_opus(&dir, "failed-anchors.webm", 30);
         let mut d = AudioDecoder::open(&file, None).unwrap();
         let mut pcm = vec![Vec::new()];
         while d.read(&mut pcm, 4096).unwrap() > 0 {}
@@ -1676,7 +1678,11 @@ mod tests {
     /// start; the seeks after it use their anchors again.
     #[test]
     fn a_stray_failed_anchor_does_not_stick() {
-        let file = webm_opus("stray-anchor.webm", 30);
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-audio-unit-")
+            .tempdir()
+            .unwrap();
+        let file = webm_opus(&dir, "stray-anchor.webm", 30);
         let mut d = AudioDecoder::open(&file, None).unwrap();
         let mut pcm = vec![Vec::new()];
         while d.read(&mut pcm, 4096).unwrap() > 0 {}
@@ -1712,7 +1718,11 @@ mod tests {
     /// first frame.
     #[test]
     fn a_seek_that_lands_after_its_target_starts_an_anchor_earlier() {
-        let file = webm_opus("landed-after.webm", 30);
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-audio-unit-")
+            .tempdir()
+            .unwrap();
+        let file = webm_opus(&dir, "landed-after.webm", 30);
         let mut s = AudioDecoder::open(&file, None).unwrap();
         assert!(s.codec_delay > 100);
         let a = s.anchor_for(20 * 48_000).unwrap();

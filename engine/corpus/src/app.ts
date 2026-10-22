@@ -20,6 +20,16 @@ const bridgeEntry = path.join(import.meta.dir, 'electron-bridge.mts');
 
 type PageFunction<A, R> = (arg: A) => R | Promise<R>;
 
+// Cancel the losing timer so successful cleanup does not keep the harness alive.
+export async function withCleanupTimeout<T>(value: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([value, new Promise<undefined>(resolve => { timer = setTimeout(resolve, ms); })]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export interface LegacyApp {
   userData: string;
   pageErrors: string[];
@@ -88,13 +98,19 @@ export async function launchLegacyApp(options: LaunchOptions = {}): Promise<Lega
   if (!existsSync(mainEntry)) throw new Error(`The legacy app is not built (${mainEntry} is missing). Run: bun run --cwd apps/desktop build`);
   const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-corpus-'));
   const extensions = options.extensions ?? [];
-  for (const name of extensions) {
-    const source = path.join(fixturesDir, name);
-    if (!existsSync(path.join(source, 'manifest.json'))) throw new Error(`No fixture extension ${name} in ${fixturesDir}`);
-    await cp(source, path.join(userData, 'extensions', name), { recursive: true });
-  }
   const pageErrors: string[] = [], consoleErrors: string[] = [];
-  const bridge = new Bridge((event, text) => (event === 'pageerror' ? pageErrors : consoleErrors).push(text));
+  let bridge: Bridge;
+  try {
+    for (const name of extensions) {
+      const source = path.join(fixturesDir, name);
+      if (!existsSync(path.join(source, 'manifest.json'))) throw new Error(`No fixture extension ${name} in ${fixturesDir}`);
+      await cp(source, path.join(userData, 'extensions', name), { recursive: true });
+    }
+    bridge = new Bridge((event, text) => (event === 'pageerror' ? pageErrors : consoleErrors).push(text));
+  } catch (error) {
+    await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    throw error;
+  }
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
     CODEX_BINARY: path.join(desktopRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'),
@@ -115,17 +131,23 @@ export async function launchLegacyApp(options: LaunchOptions = {}): Promise<Lega
     async close() {
       if (closed) return;
       closed = true;
-      // The bridge force-kills Electron after 20 s; this outer limit covers a wedged bridge.
-      let confirmed = false;
-      if (!bridge.exited) {
-        const result = await Promise.race([bridge.request<{ forced: boolean } | null>('close', { exit: true, timeout: 20_000 }).catch(() => undefined), Bun.sleep(40_000)]);
-        confirmed = !!result || result === null;
+      try {
+        // The bridge force-kills Electron after 20 s; this outer limit covers a wedged bridge.
+        let confirmed = false;
+        if (!bridge.exited) {
+          const result = await withCleanupTimeout(bridge.request<{ forced: boolean } | null>('close', { exit: true, timeout: 20_000 }).catch(() => undefined), 40_000);
+          confirmed = !!result || result === null;
+        }
+        await withCleanupTimeout(bridge.process.exited, 5_000);
+        if (!bridge.exited) {
+          bridge.process.kill('SIGKILL');
+          await withCleanupTimeout(bridge.process.exited, 5_000);
+        }
+        // Without the bridge's confirmation Electron may still be running (a wedged or crashed bridge).
+        if (!confirmed && electronPid) { try { process.kill(electronPid, 'SIGKILL'); } catch { /* already gone */ } }
+      } finally {
+        await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       }
-      await Promise.race([bridge.process.exited, Bun.sleep(5_000)]);
-      if (!bridge.exited) bridge.process.kill('SIGKILL');
-      // Without the bridge's confirmation Electron may still be running (a wedged or crashed bridge).
-      if (!confirmed && electronPid) { try { process.kill(electronPid, 'SIGKILL'); } catch { /* already gone */ } }
-      await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     },
   };
   try {

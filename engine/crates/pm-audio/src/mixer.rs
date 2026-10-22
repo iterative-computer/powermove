@@ -2542,19 +2542,17 @@ mod prepared_tests {
     use pm_model::json::parse;
 
     struct Fixture {
-        dir: std::path::PathBuf,
         cache: Arc<SourceCache>,
+        dir: tempfile::TempDir,
     }
     impl Fixture {
         fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "pm-audio-prepared-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
+            let dir = tempfile::Builder::new()
+                .prefix("pm-audio-prepared-")
+                .tempdir()
+                .unwrap();
             let mut w = WavWriter::new(
-                std::fs::File::create(dir.join("tone.wav")).unwrap(),
+                std::fs::File::create(dir.path().join("tone.wav")).unwrap(),
                 PcmFormat::F32,
                 2,
                 48_000,
@@ -2572,11 +2570,11 @@ mod prepared_tests {
             w.write(0, &pcm).unwrap();
             w.finish().unwrap();
             let cache = SourceCache::new(64 << 20, 0);
-            let source = cache.open(&dir.join("tone.wav"), None).unwrap();
+            let source = cache.open(&dir.path().join("tone.wav"), None).unwrap();
             for b in 0..9 {
                 cache.block(&source, b, true).unwrap();
             }
-            Self { dir, cache }
+            Self { cache, dir }
         }
         fn graph(&self, gain: f64, speed: f64, dur: f64) -> (Arc<Document>, Arc<MixGraph>) {
             self.mapped_graph(gain, &speed.to_string(), dur)
@@ -2595,7 +2593,7 @@ mod prepared_tests {
             ));
             let graph = Arc::new(
                 MixGraph::build(&doc, "C", &mut Evaluator::new(), &self.cache, &|_: &str| {
-                    Some(self.dir.join("tone.wav"))
+                    Some(self.dir.path().join("tone.wav"))
                 })
                 .unwrap(),
             );
@@ -2615,7 +2613,6 @@ mod prepared_tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             self.cache.shutdown();
-            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
     fn prepare(m: &mut Mixer, start: i64) {
@@ -2658,7 +2655,7 @@ mod prepared_tests {
             ));
             let graph = Arc::new(
                 MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
-                    Some(f.dir.join("tone.wav"))
+                    Some(f.dir.path().join("tone.wav"))
                 })
                 .unwrap(),
             );
@@ -2989,7 +2986,7 @@ mod prepared_tests {
         ));
         let graph = Arc::new(
             MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
-                Some(f.dir.join("tone.wav"))
+                Some(f.dir.path().join("tone.wav"))
             })
             .unwrap(),
         );
@@ -3061,7 +3058,7 @@ mod prepared_tests {
     #[test]
     fn the_a3_safety_net_omits_only_voices_whose_own_input_is_missing() {
         let f = Fixture::new();
-        let late = f.dir.join("late.wav");
+        let late = f.dir.path().join("late.wav");
         let mut w = WavWriter::new(
             std::fs::File::create(&late).unwrap(),
             PcmFormat::F32,
@@ -3097,7 +3094,7 @@ mod prepared_tests {
                         Some(if asset == "late" {
                             late.clone()
                         } else {
-                            f.dir.join("tone.wav")
+                            f.dir.path().join("tone.wav")
                         })
                     },
                 )
@@ -4175,7 +4172,7 @@ mod prepared_tests {
             1,
         ));
         let graph = MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
-            Some(f.dir.join("tone.wav"))
+            Some(f.dir.path().join("tone.wav"))
         })
         .unwrap();
         let ids: Vec<&str> = graph.voices.iter().map(|v| v.id.as_str()).collect();
