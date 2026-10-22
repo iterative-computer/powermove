@@ -28,10 +28,12 @@
  *
  * Above 100% the project is crop-safe, so today's canvas is the cropped
  * `previewRenderViewport`: 237% unpanned and panned by a fractional amount,
- * at every preview resolution. A second project (1920 × 1080) at 800%,
- * panned to its right edge, is the crop whose output passes the largest
- * output (16,384 pixels from the composition's origin): the engine draws it
- * from a smaller canvas into today's box.
+ * at every preview resolution. The engine renders today's crop from its
+ * unrounded origin (decision V1b, `RenderRequest::origin`). Two more
+ * projects are crops far from the composition's origin: 1920 × 1080 at
+ * 800% and 3840 × 2160 at 250%, each flush with its right edge (today's
+ * crop starts past 16,384 output pixels from the origin); the engine draws
+ * them at today's full resolution.
  *
  * Every case asserts the corpus bound on the whole stage and outside the
  * video layer. Cases with a known visible difference are listed in KNOWN
@@ -61,38 +63,32 @@ const ZOOMS = [0.25, 0.5, 0.61, 1] as const;
 const RESOLUTIONS = ['auto', '1', '0.5'] as const;
 const NAMES: Record<string, string> = { auto: 'Auto', '1': 'Full', '0.5': 'Half' };
 
-/** A view: zoom, pan in CSS pixels (or flush with the composition's right edge), preview resolution. */
-type View = { zoom: number; pan: [number, number] | 'right'; resolution: string };
-const name = (v: View) => `${Math.round(v.zoom * 100)}%${v.pan === 'right' ? ' right edge' : v.pan[0] || v.pan[1] ? ' panned' : ''} ${NAMES[v.resolution]}`;
+/** A view: zoom, pan in CSS pixels (or flush with the composition's right
+ *  edge), preview resolution, and the far-crop project it shows (`comp`). */
+type View = { zoom: number; pan: [number, number] | 'right'; resolution: string; comp?: [number, number] };
+const name = (v: View) => `${v.comp ? `${v.comp[0]} × ${v.comp[1]} ` : ''}${Math.round(v.zoom * 100)}%${v.pan === 'right' ? ' right edge' : v.pan[0] || v.pan[1] ? ' panned' : ''} ${NAMES[v.resolution]}`;
 /** The mixed project: 25 to 100% (whole canvas), and 237% (cropped canvas) unpanned and panned. */
 const MIXED: View[] = [
   ...RESOLUTIONS.flatMap((resolution) => ZOOMS.map((zoom): View => ({ zoom, pan: [0, 0], resolution }))),
   ...RESOLUTIONS.flatMap((resolution) => [[0, 0], [-137.3, 61.7]].map((pan): View => ({ zoom: 2.37, pan: pan as [number, number], resolution }))),
 ];
-/** The 1920 × 1080 project at 800% flush with its right edge: today's crop
- *  starts about 30,000 output pixels from the composition's origin. */
-const BEYOND: View[] = [{ zoom: 8, pan: 'right', resolution: '1' }];
+/** Crops far from the composition's origin: 1920 × 1080 at 800% and
+ *  3840 × 2160 at 250%, flush with the right edge (today's crop starts
+ *  about 28,700 and 17,100 output pixels from the origin). */
+const BEYOND: View[] = [
+  { zoom: 8, pan: 'right', resolution: '1', comp: [1920, 1080] },
+  { zoom: 2.5, pan: 'right', resolution: '1', comp: [3840, 2160] },
+];
 
 /** Cases with a known visible difference, and why. Each must fail the
  *  bound named (`stage`: the whole stage; `outside`: also outside the video). */
 const VIDEO_COPY = 'video editing copy at Auto or quality below 1 (Phase 4a proxies; issues.md)';
-const SUBPIXEL = 'crop origin rounded to the nearest output pixel (F4, issues.md; bridge.md "Today\'s viewer canvas")';
 const KNOWN: Record<string, { why: string; fails: 'stage' | 'outside' }> = {
   '25% Auto': { why: VIDEO_COPY, fails: 'stage' },
   '25% Half': { why: VIDEO_COPY, fails: 'stage' },
   '50% Half': { why: VIDEO_COPY, fails: 'stage' },
   '61% Half': { why: VIDEO_COPY, fails: 'stage' },
   '100% Half': { why: VIDEO_COPY, fails: 'stage' },
-  // A cropped canvas's grid starts at the nearest output pixel, today's at
-  // the crop's fractional origin: every hard edge moves by up to half a
-  // device pixel (F4 in issues.md; pm-render has no output origin).
-  '237% Auto': { why: SUBPIXEL, fails: 'outside' },
-  '237% panned Auto': { why: SUBPIXEL, fails: 'outside' },
-  '237% Full': { why: SUBPIXEL, fails: 'outside' },
-  '237% panned Full': { why: SUBPIXEL, fails: 'outside' },
-  '237% Half': { why: SUBPIXEL, fails: 'outside' },
-  '237% panned Half': { why: SUBPIXEL, fails: 'outside' },
-  '800% right edge Full': { why: `crop past the largest output, drawn below today's resolution (bridge.md "Beyond the largest output"), and ${SUBPIXEL}`, fails: 'outside' },
 };
 
 const ART = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90" viewBox="0 0 160 90">
@@ -134,18 +130,19 @@ async function mixedProject(page: Page, video: number[]): Promise<void> {
   }, { svg: ART, video });
 }
 
-/** 1920 × 1080: text, a rotated box and a hairline at its right edge. */
-async function wideProject(page: Page): Promise<void> {
-  await page.evaluate(() => {
+/** `w` × `h`: text, a rotated box and a hairline at its right edge. */
+async function wideProject(page: Page, [w, h]: [number, number]): Promise<void> {
+  await page.evaluate(({ w, h }) => {
     const PM = (window as any).PM;
-    const project = PM.mkProject({ name: 'Viewer canvas wide', w: 1920, h: 1080, fps: 30, dur: 2, bg: '#1b2433' });
+    const project = PM.mkProject({ name: 'Viewer canvas wide', w, h, fps: 30, dur: 2, bg: '#1b2433' });
     project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#1b2433', position: 0 }] };
     PM.replaceProject(project);
     const at = (layer: any, x: number, y: number) => { layer.p['position.x'].v = x; layer.p['position.y'].v = y; return layer; };
-    const title = at(PM.mkLayer('text', { name: 'Edge', d: { text: 'Edge 800%', font: 'Arial', size: 14, color: '#ffffff' } }, PM.proj), 1880, 520);
-    const box = at(PM.mkLayer('shape', { name: 'Box', d: { shape: 'rect', w: 30, h: 18, radius: 4, color: '#ff5500' } }, PM.proj), 1895, 545);
+    const y = h / 2 - 20;
+    const title = at(PM.mkLayer('text', { name: 'Edge', d: { text: 'Edge', font: 'Arial', size: 14, color: '#ffffff' } }, PM.proj), w - 40, y);
+    const box = at(PM.mkLayer('shape', { name: 'Box', d: { shape: 'rect', w: 30, h: 18, radius: 4, color: '#ff5500' } }, PM.proj), w - 25, y + 25);
     box.p.rotation.v = 9;
-    const line = at(PM.mkLayer('shape', { name: 'Line', d: { shape: 'rect', w: 60, h: 1, color: '#ffffff' } }, PM.proj), 1885, 535);
+    const line = at(PM.mkLayer('shape', { name: 'Line', d: { shape: 'rect', w: 60, h: 1, color: '#ffffff' } }, PM.proj), w - 35, y + 15);
     PM.proj.layers = [title, line, box];
     PM.ProjectIndex?.invalidate?.();
     PM.selectLayers?.([]);
@@ -153,7 +150,7 @@ async function wideProject(page: Page): Promise<void> {
     PM.Projects?.put?.(PM.proj);
     PM.pause?.();
     PM.setTime(0.5, { force: true });
-  });
+  }, { w, h });
 }
 
 type Capture = { width: number; height: number; data: Uint8Array; geometry: unknown; content?: unknown };
@@ -319,12 +316,10 @@ test('the engine viewer shows today’s canvas, scaled as today’s, from 25 to 
         });
         for (const view of MIXED.filter((v) => KNOWN[name(v)]?.why === VIDEO_COPY)) out[`${name(view)} original video`] = { ...(await capture(session, view, engine)), video: true } as Capture;
       }
-      await wideProject(session.page);
-      if (engine) await expect.poll(() => session.page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
-      for (const view of BEYOND) out[name(view)] = await capture(session, view, engine);
-      if (engine) {
-        const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive')).catch(() => null) as any;
-        (out as any).reducedFrames = report?.presenter?.reducedFrames ?? null;
+      for (const view of BEYOND) {
+        await wideProject(session.page, view.comp!);
+        if (engine) await expect.poll(() => session.page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
+        out[name(view)] = await capture(session, view, engine);
       }
       expect(session.diagnostics.pageErrors).toEqual([]);
       return out;
@@ -357,10 +352,8 @@ test('the engine viewer shows today’s canvas, scaled as today’s, from 25 to 
     await record(label, t, e);
   }
   for (const label of Object.keys(today).filter((k) => k.endsWith(' original video'))) await record(label, today[label]!, engine[label.replace(' original video', '')]!);
-  (results as any).reducedFrames = (engine as any).reducedFrames;
   if (evidence) await writeFile(path.join(evidence, 'results.json'), JSON.stringify(results, null, 1));
   for (const [label, r] of Object.entries(results)) {
-    if (label === 'reducedFrames') continue;
     const known = KNOWN[label];
     if (!known) {
       expect.soft({ label, passes: r.passes, outsideVideo: r.outsideVideo.passes, r }).toMatchObject({ label, passes: true, outsideVideo: true });
@@ -371,6 +364,4 @@ test('the engine viewer shows today’s canvas, scaled as today’s, from 25 to 
       expect.soft({ label, why: known.why, outsideVideo: r.outsideVideo.passes, r }).toMatchObject({ label, outsideVideo: false });
     }
   }
-  // The crop past the largest output is drawn below today's resolution, and counted.
-  expect.soft((engine as any).reducedFrames).toBeGreaterThan(0);
 });
