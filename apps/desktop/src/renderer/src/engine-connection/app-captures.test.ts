@@ -100,6 +100,27 @@ describe('the app’s captures with the new engine on', () => {
     expect(PM.agentFrameCapture).toBe(false);
   });
 
+  it('snapshotAsync honours the capture signal: refused when aborted, rejected on abort, busy until the draw ends', async () => {
+    const { PM } = legacyPM();
+    let finish: (url: string) => void = () => {};
+    const e = engine();
+    e.snapshotDataUrl.mockImplementation(() => new Promise<string>((resolve) => { finish = resolve; }));
+    installAppCaptures(PM, e);
+    installExporter(PM);
+    const early = new AbortController();
+    early.abort(new DOMException('gone', 'AbortError'));
+    await expect(PM.Export.snapshotAsync(0, 320, { signal: early.signal })).rejects.toThrow('gone');
+    expect(e.snapshotDataUrl).not.toHaveBeenCalled();
+    const controller = new AbortController();
+    const pending = PM.Export.snapshotAsync(1, 320, { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(PM.agentFrameCapture).toBe(true);
+    finish('data:late');
+    await vi.waitFor(() => expect(PM.agentFrameCapture).toBe(false));
+  });
+
   it('reads caption visibility separately for synchronous and asynchronous captures', async () => {
     const { PM } = legacyPM();
     const e = engine();

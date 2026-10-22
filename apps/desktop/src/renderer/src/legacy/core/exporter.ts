@@ -1435,7 +1435,7 @@ X.muxWebM = muxWebM;
 /* Await source decoding before an agent reviews a video frame. */
 X.snapshotAsync = (time: number, maxWidth = 480, options: { signal?: AbortSignal } = {}) => {
   // "Use New Engine": the engine draws it (engine-connection/app-captures.ts).
-  if (PM.EngineCaptures) return PM.EngineCaptures.snapshotAsync(time, maxWidth);
+  if (PM.EngineCaptures) return PM.EngineCaptures.snapshotAsync(time, maxWidth, options);
   return captureAgentFrame(PM, X, time, maxWidth, options);
 };
 
