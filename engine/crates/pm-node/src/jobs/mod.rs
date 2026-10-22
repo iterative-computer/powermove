@@ -544,6 +544,12 @@ impl StatsHandle {
                 "user": st.user.as_ref().map_or(0, |s| s.len()),
             },
             "jobs": st.jobs.len(),
+            // Work that still needs this process: main retires an idle job
+            // utility only when all of these are zero and it has no session.
+            "active": st.jobs.values().filter(|r| !r.state.is_terminal()).count(),
+            "probes": st.probes.len(),
+            "frameRuns": st.frame_runs.len(),
+            "compiles": st.compiles.0.len(),
         })
     }
 }

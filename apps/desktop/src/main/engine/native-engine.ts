@@ -60,10 +60,33 @@ export const DEFAULT_SLICING_POLICY: SlicingPolicy = {
 /** Staged resync documents kept per engine launch before the oldest goes. */
 const STAGED_PER_LAUNCH = 16;
 
+/** A job utility with no session, job, probe, or request for this long
+ *  exits; it holds a Node runtime, a Metal device, and its caches
+ *  (docs/engine/memory.md, "Process lifetime"). */
+export const JOB_IDLE_MS = 60_000;
+
+/** Whether a job engine report shows nothing that needs the process: no
+ *  session (exports, agent frames, validations hold one), nothing in
+ *  flight, no unfinished job, queued work, probe, frame run, or compile. */
+export function jobReportIdle(report: unknown): boolean {
+  if (typeof report !== 'object' || report === null) return false;
+  const r = report as { sessions?: unknown; inFlight?: unknown; jobs?: Record<string, unknown> | null };
+  const jobs = r.jobs;
+  if (!Array.isArray(r.sessions) || r.sessions.length !== 0 || r.inFlight !== 0) return false;
+  if (typeof jobs !== 'object' || jobs === null) return false;
+  const queued = jobs['queued'] as Record<string, unknown> | undefined;
+  const zero = (v: unknown): boolean => v === 0;
+  return zero(jobs['active']) && zero(jobs['probes']) && zero(jobs['frameRuns']) && zero(jobs['compiles']) &&
+    typeof queued === 'object' && queued !== null && Object.values(queued).every(zero);
+}
+
 export type NativeEngineOptions = {
   spawn: SpawnEngine;
   /** Start job utilities on demand; eager startup is for host integration tests. */
   eagerJobs?: boolean;
+  /** How long an unused job utility stays before it exits (default
+   *  `JOB_IDLE_MS`). The next job request starts it again. */
+  jobIdleMs?: number;
   channel: ChannelFactory;
   /** Engine caches (one directory per cache kind). */
   cacheDirectory: string;
@@ -174,6 +197,15 @@ export class NativeEngine {
   private prepared: Promise<void> = Promise.resolve();
   private readiness = new Map<EngineProcess, Promise<void>>();
   private cancelReadiness = new Set<() => void>();
+  /** Main's own job requests not yet answered, and a stamp bumped by any
+   *  job activity (requests, job statuses, staging): retirement only
+   *  follows a quiet `jobIdleMs` with an unchanged stamp. */
+  private jobOutstanding = 0;
+  private jobActivity = 0;
+  private jobIdleTimer: { cancel(): void } | null = null;
+  /** Set while main checks an idle job utility and stops it; job requests
+   *  wait for it, then start a new utility if it stopped. */
+  private retiring: Promise<void> | null = null;
   /** Interpret Footage probes per asset: the one in flight and the newest
    *  request waiting behind it (the sheet probes on every change and keeps
    *  only its latest answer, so a waiting request a newer one replaces is
@@ -259,6 +291,8 @@ export class NativeEngine {
     this.stopping = true;
     this.started = false;
     this.jobDemanded = false;
+    this.jobIdleTimer?.cancel();
+    this.jobIdleTimer = null;
     for (const cancel of this.cancelReadiness) cancel();
     await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop(), this.blender?.dispose()]);
   }
@@ -272,6 +306,10 @@ export class NativeEngine {
   /** One startup shared by concurrent callers. Never retries a fatal addon load. */
   async ensureReady(process: EngineProcess): Promise<void> {
     await this.prepared;
+    if (process === 'job') {
+      while (this.retiring) await this.retiring;
+      this.touchJob();
+    }
     if (!this.started || this.stopping) return Promise.reject(new Error('The engine host is stopped.'));
     if (this.isReady(process)) return Promise.resolve();
     const pending = this.readiness.get(process);
@@ -455,8 +493,61 @@ export class NativeEngine {
    *  exports and agent snapshots; tests). `revision` is the envelope
    *  revision (an agent frame request's read-your-writes revision). */
   async request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
-    if (process === 'job') await this.ensureReady(process);
-    return this.supervisors[process].request(body, session, revision);
+    if (process !== 'job') return this.supervisors[process].request(body, session, revision);
+    await this.ensureReady(process);
+    this.jobOutstanding++;
+    this.touchJob();
+    try {
+      return await this.supervisors.job.request(body, session, revision);
+    } finally {
+      this.jobOutstanding--;
+      this.touchJob();
+    }
+  }
+
+  /** Records job activity and restarts the idle countdown. */
+  private touchJob(): void {
+    this.jobActivity++;
+    if (this.options.eagerJobs || !this.started || this.stopping) return;
+    this.jobIdleTimer?.cancel();
+    const schedule = this.options.schedule ?? ((fn: () => void, ms: number) => {
+      const timer = setTimeout(fn, ms);
+      timer.unref?.();
+      return { cancel: () => clearTimeout(timer) };
+    });
+    this.jobIdleTimer = schedule(() => {
+      this.jobIdleTimer = null;
+      void this.retireIdleJob();
+    }, this.options.jobIdleMs ?? JOB_IDLE_MS);
+  }
+
+  /**
+   * Stops a job utility nothing has used for `jobIdleMs`, after its own
+   * report confirms it holds no session and no work. Requests arriving
+   * meanwhile wait (`retiring`) and then start a new utility; activity
+   * during the check cancels the stop.
+   */
+  private async retireIdleJob(): Promise<void> {
+    const launch = this.supervisors.job.current;
+    if (!launch || launch.exiting || this.stopping || !this.started || this.retiring || this.jobOutstanding ||
+      this.readiness.has('job') || this.probes.size) return;
+    const stamp = this.jobActivity;
+    let release = (): void => {};
+    this.retiring = new Promise<void>((resolve) => { release = resolve; });
+    let retired = false;
+    try {
+      const report = await launch.report(2000);
+      if (stamp !== this.jobActivity || this.jobOutstanding || this.supervisors.job.current !== launch || !jobReportIdle(report)) return;
+      this.jobDemanded = false;
+      await this.supervisors.job.stop();
+      retired = true;
+      this.options.log('info', `the job engine exited after ${Math.round((this.options.jobIdleMs ?? JOB_IDLE_MS) / 1000)} s unused (generation ${launch.generation})`);
+    } finally {
+      this.retiring = null;
+      release();
+      // Still running (busy or a failed check): look again later.
+      if (!retired) this.touchJob();
+    }
   }
 
   /** A destination the user chose for a job, as a write handle bound to the
@@ -543,6 +634,7 @@ export class NativeEngine {
     this.options.log('info', `the ${process} engine is ready (generation ${launch.generation}, pid ${launch.pid ?? '?'})`);
     this.sendGrants(this.memory.initial(process));
     if (process === 'job') {
+      this.touchJob();
       launch.connection.event({ type: 'slicing', ...DEFAULT_SLICING_POLICY });
       if (this.lastPlaybackStarted) launch.connection.event({ type: 'deadline', ...this.lastPlaybackStarted });
     }
@@ -725,6 +817,7 @@ export class NativeEngine {
         return;
       case 'jobStatus':
         if (process !== 'job') throw new Error('only the job engine reports jobs');
+        this.touchJob();
         for (const l of this.listeners) l.jobStatus?.(body);
         return;
       default:
