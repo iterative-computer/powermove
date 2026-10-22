@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { HostEncode } from '../../shared/engine-protocol';
 import type { EncoderCommand, EncoderReply } from '../../shared/export-encoder';
-import { ExportEncoders, type EncodeContext, type EncoderWindow } from './export-encoder';
+import { ExportEncoders, MAX_IN_FLIGHT, type EncodeContext, type EncoderWindow } from './export-encoder';
 
 /** A window that answers each command from `answer`, in order. */
 class FakeWindow implements EncoderWindow {
@@ -85,21 +85,36 @@ describe('ExportEncoders', () => {
     expect(encoders.active).toBe(0);
   });
 
-  it('surfaces the window\'s errors and drops the encode', async () => {
+  it('surfaces the window\'s errors at the next step and drops the encode', async () => {
     const { encoders, context, written } = harness((command) => command.type === 'video'
       ? { type: 'error', seq: command.seq, message: 'VideoEncoder: Encoding error.' } : ack(command));
     await encoders.serve(open(), context);
-    await expect(encoders.serve({ job: 'job-1', step: 'video', index: 0, pixels: { kind: 'inline', bytes: new Uint8Array(16) } }, context))
+    // Answered before the window: the error fails the next step.
+    await encoders.serve({ job: 'job-1', step: 'video', index: 0, pixels: { kind: 'inline', bytes: new Uint8Array(16) } }, context);
+    await expect(encoders.serve({ job: 'job-1', step: 'finish' }, context))
       .rejects.toThrow('The export encoder failed: VideoEncoder: Encoding error.');
     await expect(encoders.serve({ job: 'job-1', step: 'finish' }, context)).rejects.toThrow('not encoding');
     expect(written).toEqual([]);
   });
 
-  it('fails every waiting step when the window goes, and opens a new one for the next encode', async () => {
+  it('keeps at most MAX_IN_FLIGHT frames waiting in the window', async () => {
+    // The window never answers frames.
     const { encoders, context, windows } = harness((command) => command.type === 'video' ? null : ack(command));
     await encoders.serve(open(), context);
-    const pending = encoders.serve({ job: 'job-1', step: 'video', index: 0, pixels: { kind: 'inline', bytes: new Uint8Array(16) } }, context);
-    await Promise.resolve();
+    const frame = (index: number) => encoders.serve({ job: 'job-1', step: 'video', index, pixels: { kind: 'inline', bytes: new Uint8Array(16) } }, context);
+    for (let i = 0; i < MAX_IN_FLIGHT; i++) await frame(i);
+    let fifth = false;
+    void frame(MAX_IN_FLIGHT).then(() => { fifth = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(windows[0]!.commands.filter((c) => c.type === 'video')).toHaveLength(MAX_IN_FLIGHT + 1);
+    expect(fifth).toBe(false);
+  });
+
+  it('fails every waiting step when the window goes, and opens a new one for the next encode', async () => {
+    const { encoders, context, windows } = harness((command) => command.type === 'finish' ? null : ack(command));
+    await encoders.serve(open(), context);
+    const pending = encoders.serve({ job: 'job-1', step: 'finish' }, context);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     windows[0]!.crash();
     await expect(pending).rejects.toThrow('window is gone');
     expect(encoders.active).toBe(0);

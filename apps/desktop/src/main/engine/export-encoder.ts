@@ -11,9 +11,11 @@
  * the muxed file into the export's temporary output, which the engine then
  * verifies and commits as usual.
  *
- * One encode per job and engine port. Steps arrive in order and each is
- * answered after the window answered it, so a slow encoder slows the engine
- * rather than buffering frames here. An encode no step reaches for
+ * One encode per job and engine port. Steps arrive in order. Frame and
+ * audio steps are answered as soon as the window has them while at most
+ * `MAX_IN_FLIGHT` are unanswered (a window error fails the next step), so a
+ * slow encoder slows the engine rather than buffering frames here; `open`
+ * and `finish` are answered after the window answered them. An encode no step reaches for
  * `idleMs` while nothing is in flight is aborted (the engine that asked is
  * gone); the window closes `closeMs` after its last encode ends and is
  * reopened by the next.
@@ -52,7 +54,18 @@ export type EncodeContext = {
 
 type Timer = { cancel(): void };
 type Waiting = { resolve(reply: EncoderReply): void; reject(error: Error): void };
-type Session = { key: string; id: string; output: string; frameBytes: number; busy: number; idle: Timer | null };
+type Session = {
+  key: string; id: string; output: string; frameBytes: number; busy: number; idle: Timer | null;
+  /** Frame and audio steps the window has not answered yet. */
+  inFlight: Promise<void>[];
+  /** The first failure of an unanswered step, thrown at the next step. */
+  failure: Error | null;
+};
+
+/** Frame and audio steps answered before the window answers them, so the
+ *  engine renders the next frame while the window encodes this one. At most
+ *  this many wait in the window (four 1080p frames: 33 MB). */
+export const MAX_IN_FLIGHT = 4;
 type Live = { window: EncoderWindow; seq: number; waiting: Map<number, Waiting>; gone: boolean };
 
 const defaultSchedule = (fn: () => void, ms: number): Timer => {
@@ -87,7 +100,9 @@ export class ExportEncoders {
     if (body.step === 'open') {
       if (this.sessions.has(key)) throw new ProtocolError('invalidMessage', 'This export is already encoding.');
       const output = context.resolveOutput(body.output, body.job);
-      const session: Session = { key, id: `e${++nextId}`, output, frameBytes: body.width * body.height * 4, busy: 0, idle: null };
+      const session: Session = {
+        key, id: `e${++nextId}`, output, frameBytes: body.width * body.height * 4, busy: 0, idle: null, inFlight: [], failure: null
+      };
       this.sessions.set(key, session);
       this.closeTimer?.cancel();
       this.closeTimer = null;
@@ -113,7 +128,7 @@ export class ExportEncoders {
       switch (body.step) {
         case 'video': {
           const rgba = this.pixels(body.pixels, session.frameBytes, context);
-          await this.command(session, { type: 'video', seq: 0, id: session.id, index: body.index, rgba });
+          await this.pipelined(session, { type: 'video', seq: 0, id: session.id, index: body.index, rgba });
           return;
         }
         case 'audio': {
@@ -121,10 +136,11 @@ export class ExportEncoders {
           // Copy into an aligned buffer: message bytes may start at any offset.
           const samples = new Float32Array(bytes.byteLength / 4);
           new Uint8Array(samples.buffer).set(bytes);
-          await this.command(session, { type: 'audio', seq: 0, id: session.id, samples });
+          await this.pipelined(session, { type: 'audio', seq: 0, id: session.id, samples });
           return;
         }
         case 'finish': {
+          await this.drain(session);
           const reply = await this.command(session, { type: 'finish', seq: 0, id: session.id });
           if (reply.type !== 'file') throw new ProtocolError('exportFailed', 'The export encoder did not return a file.');
           this.end(session);
@@ -166,6 +182,24 @@ export class ExportEncoders {
     const data = context.takePixels(payload.name, payload.length);
     if (data.byteLength !== expected) throw new ProtocolError('invalidMessage', `the shared frame held ${data.byteLength} of ${expected} bytes`);
     return data;
+  }
+
+  /** Sends a frame or audio step and answers it once at most
+   *  `MAX_IN_FLIGHT` steps of the encode wait in the window. */
+  private async pipelined(session: Session, command: EncoderCommand): Promise<void> {
+    if (session.failure) throw session.failure;
+    const sent = this.command(session, command).then(() => undefined, (error: unknown) => {
+      session.failure ??= error instanceof Error ? error : new Error(String(error));
+    });
+    session.inFlight.push(sent);
+    while (session.inFlight.length > MAX_IN_FLIGHT) await session.inFlight.shift();
+    if (session.failure) throw session.failure;
+  }
+
+  /** Waits for every unanswered step of the encode. */
+  private async drain(session: Session): Promise<void> {
+    while (session.inFlight.length) await session.inFlight.shift();
+    if (session.failure) throw session.failure;
   }
 
   private async abort(session: Session): Promise<void> {

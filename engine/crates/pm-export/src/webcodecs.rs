@@ -94,6 +94,21 @@ impl Capture {
     }
 }
 
+/// [`crate::render::to_rgba8`] of a frame, row-parallel at the caller's QoS
+/// (a 1080p frame is 8.3 million samples).
+fn canvas_bytes(frame: &WorkingFrame) -> Vec<u8> {
+    let row = frame.width as usize * 4;
+    let mut out = vec![0u8; frame.rgba.len()];
+    crate::par::rows(&mut out, row, |y, dst| {
+        let src = &frame.rgba[y * row..(y + 1) * row];
+        for (d, v) in dst.iter_mut().zip(src) {
+            let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+            *d = (v * 255.0).round_ties_even() as u8;
+        }
+    });
+    out
+}
+
 /// The sink: renders go to the host's encoders, then the file is verified.
 pub struct WebCodecsSink {
     host: Box<dyn EncodeHost>,
@@ -152,7 +167,7 @@ impl Sink for WebCodecsSink {
     type Output = Delivered;
 
     fn video_rgba(&mut self, index: u64, frame: &WorkingFrame) -> Result<bool, Error> {
-        let rgba = crate::render::to_rgba8(frame.rgba);
+        let rgba = canvas_bytes(frame);
         if let Some(capture) = self.capture.as_mut() {
             capture
                 .rgba
@@ -306,6 +321,17 @@ mod tests {
                 "abort",
             ]
         );
+    }
+
+    #[test]
+    fn canvas_bytes_are_the_unorm_writes() {
+        let rgba: Vec<f32> = (0..64 * 4).map(|i| (i as f32 / 255.0) * 0.999 - 0.01).collect();
+        let frame = WorkingFrame {
+            rgba: &rgba,
+            width: 8,
+            height: 8,
+        };
+        assert_eq!(canvas_bytes(&frame), crate::render::to_rgba8(&rgba));
     }
 
     #[test]
