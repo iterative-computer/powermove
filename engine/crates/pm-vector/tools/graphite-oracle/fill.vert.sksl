@@ -1,29 +1,23 @@
-// m152 TessellateWedgesRenderStep: the fixed 32-segment middle-out tree.
-layout(set=0, binding=0) uniform Params { float4 u[9]; };
-layout(set=0, binding=1) readonly buffer Patches { float4 p[]; };
+// m152 TessellateWedgesRenderStep, using the source static/instance attributes.
+layout(set=0,binding=0) uniform Params { float4 u[12]; };
+layout(location=0) in float2 resolveLevel_and_idx;
+layout(location=1) in float4 p01;
+layout(location=2) in float4 p23;
+layout(location=3) in float2 fanPoint;
+layout(location=4) in float depth;
+layout(location=5) in uint ssboIndex;
+layout(location=6) in float curveType;
 void main() {
-    uint base = uint(sk_InstanceID) * 5;
-    float4 p01 = p[base], p23 = p[base+1], affine = p[base+2], tr = p[base+3];
-    float2 local;
-    if (sk_VertexID == 0) {
-        local = p[base+4].xy;
+    float4x4 localToDevice=float4x4(u[1],u[2],u[3],u[4]);
+    float2 localCoord;
+    if (resolveLevel_and_idx.x < 0) {
+        localCoord=fanPoint;
     } else {
-        float level, index;
-        if (sk_VertexID < 3) {
-            level = 0.0; index = sk_VertexID == 1 ? 0.0 : 1.0;
-        } else {
-            uint triangle = uint((sk_VertexID - 3) / 3);
-            uint lev = 1;
-            while (triangle >= (1u << lev) - 1u) { lev++; }
-            uint mid = 2u * (triangle - ((1u << (lev-1u)) - 1u)) + 1u;
-            level = float(lev); index = float(mid) + float((sk_VertexID - 3) % 3) - 1.0;
-        }
-        local = tessellate_filled_curve(float2x2(affine.xy, affine.zw),
-            level, index, p01, p23, tr.w);
+        float2x2 vectorXform=float2x2(localToDevice[0].xy,localToDevice[1].xy);
+        localCoord=tessellate_filled_curve(vectorXform,resolveLevel_and_idx.x,
+            resolveLevel_and_idx.y,p01,p23,curveType);
     }
-    float4x4 localToDevice=float4x4(float4(affine.xy,0,0),float4(affine.zw,0,0),
-        float4(0,0,1,0),float4(tr.xy,0,1));
-    float4 devPosition=localToDevice*float4(local,0,1);
-    devPosition.z=0.5;
-    sk_Position = float4(u[0].zw * devPosition.xy - sign(u[0].zw)*devPosition.ww, devPosition.zw);
+    float4 devPosition=localToDevice*float4(localCoord,0,1);
+    devPosition.z=depth;
+    sk_Position=float4(u[0].zw*devPosition.xy-sign(u[0].zw)*devPosition.ww,devPosition.zw);
 }

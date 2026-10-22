@@ -1,8 +1,32 @@
 // m152 SDFTextRenderStep and source-over solid paint. Atlas is R8Unorm.
-layout(set=0,binding=0) uniform Params { float4 u[9]; };
-layout(set=0,binding=2) sampler2D atlas;
-layout(location=0) in float2 textureCoords;
-layout(location=1) in float2 unormTexCoords;
+struct CombinedUniformData {
+    half4 paintColor;
+    float4x4 maskToDevice;
+    float4x4 localToDevice;
+    float2 atlasSizeInv;
+    half2 gammaParams;
+};
+layout(set=0,binding=1) readonly buffer CombinedUniforms {
+    CombinedUniformData combinedUniformData[];
+};
+
+layout(set=0,binding=0) uniform IntrinsicUniforms { float4 viewport; float4 dstReadBounds; };
+layout(set=0,binding=2) sampler2D atlas0;
+layout(set=0,binding=4) sampler2D atlas1;
+layout(set=0,binding=6) sampler2D atlas2;
+layout(set=0,binding=8) sampler2D atlas3;
+layout(location=0) in flat uint ssboIndices;
+layout(location=1) in noperspective half4 perPrimitiveColor;
+layout(location=2) in float2 unormTexCoords;
+layout(location=3) in float2 textureCoords;
+layout(location=4) in float texIndex;
+uint bufferIndex;
 void main() {
-    sk_FragColor=half4(u[8])*sdf_text_coverage_fn(sample(atlas,textureCoords).r,half2(0),unormTexCoords);
+    bufferIndex=ssboIndices;
+    half4 outputColor=perPrimitiveColor;
+    half2 gammaParams=combinedUniformData[bufferIndex].gammaParams;
+    half4 outputCoverage=half4(1);
+    outputCoverage=sdf_text_coverage_fn(sample_indexed_atlas(textureCoords,
+        int(texIndex),atlas0,atlas1,atlas2,atlas3).r,gammaParams,unormTexCoords);
+    sk_FragColor=outputColor*outputCoverage;
 }

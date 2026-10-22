@@ -30,7 +30,9 @@ with tempfile.TemporaryDirectory() as tmp:
         wgsl = wgsl.replace('diagnostic(off, chromium.unreachable_code);\n', '')
         # SkSL assigns separate sampler/texture IDs. The single atlas occupies
         # the explicit common layout's texture and sampler bindings.
-        wgsl = wgsl.replace('@binding(10001)', '@binding(3)').replace('@binding(10002)', '@binding(2)')
+        for atlas in range(4):
+            wgsl = wgsl.replace(f'@binding({10001+2*atlas})', f'@binding({3+2*atlas})')
+            wgsl = wgsl.replace(f'@binding({10002+2*atlas})', f'@binding({2+2*atlas})')
         (OUT / f'{stem}.wgsl').write_text(HEADER + wgsl)
     for stem in ['analytic-vs', 'analytic-fs', 'fill-vs', 'stroke-vs', 'sdf-vs', 'sdf-fs',
                  'primitive-vs', 'primitive-fs']:
@@ -42,4 +44,10 @@ with tempfile.TemporaryDirectory() as tmp:
         subprocess.run([TINT, str(OUT / f'{source}.wgsl'), '--format', 'msl',
                         '--entry-point', entry, '--rename-all', 'true',
                         '--disable-robustness', 'true', '-o', str(dest)], check=True)
-        (OUT / f'{stem}.metal').write_text(HEADER + METAL + dest.read_text())
+        msl = dest.read_text()
+        if stem == 'sdf-fs':
+            # Tint's standalone writer compacts the sole active buffer to
+            # slot 0. The shared pipeline layout reserves slot 0 for the
+            # intrinsic uniforms and slot 1 for the combined storage data.
+            msl = msl.replace('[[buffer(0)]]', '[[buffer(1)]]')
+        (OUT / f'{stem}.metal').write_text(HEADER + METAL + msl)

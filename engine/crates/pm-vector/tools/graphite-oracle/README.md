@@ -19,6 +19,10 @@ Chromium's `gpu/command_buffer/service/dawn_context_provider.cc` disables
 Dawn's `ShaderModuleMTL.mm` selects relaxed Metal math unless strict math
 is requested; the generated MSL carries that pragma.
 
+Skia's direct Metal generator retains half types even with that program
+setting. Its MSL output is diagnostic only. The production MSL is generated
+from the f32 WGSL by the pinned Tint writer, as Chromium's Dawn backend does.
+
 Build pinned Skia with `skia_enable_graphite=true` and `skia_use_metal=true`.
 Compile the extractor against that build, for example on macOS:
 
@@ -50,3 +54,18 @@ and `FixedCount{Wedges,Strokes}::VertexCount`. Build it against the same
 Skia library with `-ffp-contract=off`. It reports the line, quad, cubic and
 rational-conic allocation counts at scales 1 and 5, with round, bevel and
 miter joins. These synthetic records contain no fonts or captured pixels.
+
+`sdf.cpp` calls the pinned CPU `SkGenerateDistanceFieldFromA8Image` on eight
+synthetic A8 masks. Its FNV-1a hashes check the complete padded atlas bytes
+in pm-text's `tests/distance_fields.rs`, independently of GPU interpolation.
+
+`canvas.cpp` records SkM44 bits for a caption's scale/translate sequence
+and an animated glyph's setTransform/translate/concat sequence. The text
+renderer checks those independent records in `text/canvas.rs`. Arguments
+are narrowed to float before every Canvas2D operation, as Chromium's
+`Canvas2DRecorderContext` does.
+
+`atlas.cpp` independently runs thirty synthetic allocations through
+`RectanizerSkyline`. Compile it together with `src/gpu/RectanizerSkyline.cpp`
+and the pinned CPU Skia library. The native atlas checks all coordinates,
+including failed allocations, in `text/graphite/atlas.rs`.
