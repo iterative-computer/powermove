@@ -1,4 +1,3 @@
-import { requestJobEngine } from './helpers/job-engine';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
@@ -23,11 +22,12 @@ test('the export sheet renders in the job engine and routes what it cannot rende
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-engine-export-'));
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
   try {
-    await requestJobEngine(session.app);
+    // The job engine starts on demand: the first export finds it stopped
+    // and must still render in it, not route to the current exporter.
     await expect.poll(() => session.app.evaluate(() => {
       const status = (globalThis as { __powermoveNativeEngine?: { engine: { status(): Record<string, { state: string }> } | null } }).__powermoveNativeEngine?.engine?.status();
       return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';
-    }), { timeout: 20_000 }).toBe('ready/ready');
+    }), { timeout: 20_000 }).toBe('ready/stopped');
     await session.openEditor();
     const exportTo = async (file: string, options: Record<string, unknown>): Promise<unknown> => {
       let asked = 0;

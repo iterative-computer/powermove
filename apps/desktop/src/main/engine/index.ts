@@ -321,6 +321,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   engine = new NativeEngine({
     // A measurement control only; packaged apps always start jobs on demand.
     eagerJobs: !options.isPackaged && env['POWERMOVE_ENGINE_EAGER_JOBS'] === '1',
+    // A test control only: how long an unused job engine stays.
+    ...(!options.isPackaged && Number(env['POWERMOVE_ENGINE_JOB_IDLE_MS']) > 0 ? { jobIdleMs: Number(env['POWERMOVE_ENGINE_JOB_IDLE_MS']) } : {}),
     compatFrame: (request) => compatFrames.serve(request),
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
