@@ -600,3 +600,120 @@ Leads, by expected size:
    about 37 MB.
 4. The storage writes during the open are a shared cost of about 4 minutes;
    each is a full main-thread freeze for both settings.
+
+### Open-time storage writes and preparation (OPENWRITE-1, 2026-10-22)
+
+Beta DECISION bug fix (OPENWRITE-1, both settings). Opening the large private
+project froze the window for about six minutes with either setting. The
+cause was the context bridge, not serialization. An object passed from the
+page to preload is copied member by member on the page's JavaScript thread.
+Two such crossings happened per open:
+
+- **The open reply** carried the parsed document: 62 to 75 s for PMV4, and
+  90 to 119 s for PMV3 with its undo history. Main now also returns the JSON
+  text it parsed (`documentJSON`; for PMV3, the header with
+  `documentMember: 'document'`), and the window parses it in about a second.
+- **Five whole-project slot writes** (`PM.store.set` of `project.<id>`),
+  at 56 to 79 s each. They were switchProject's put, the autosave it
+  schedules, the poster backfill's checkpoint, the session capture as the
+  open finishes, and the autosave after it. A project slot now crosses as its
+  `JSON.stringify` text through `storage:set-serialized`. That is the same
+  atomic snapshot of the call that the structured clone was, about a second
+  for PMV4. They are also the bytes main's engine stores: it used to
+  `JSON.stringify` the clone. Reads answer from the posted text until main
+  has it.
+
+The writes are also coalesced (`core/projects.ts`):
+
+- An open checkpoints the document once, at the same point as before
+  (switchProject).
+- A later `Projects.put` of a large slot (4 Mi characters or more) that this
+  window wrote from the same object, with an empty journal, is checked
+  instead of rewritten. The document is serialized in slices (`json-slices.ts`:
+  exactly `JSON.stringify`'s text, in 4 ms slices, about 0.5 s for PMV4) and
+  digested with SHA-256. It is rewritten (synchronously, as a fresh snapshot)
+  if the digest differs, or if a change was announced three times while it was
+  read. Small slots are written directly, as before.
+- Asset metadata changes outside typed history (the poster backfill) are one
+  journal entry replacing `assets` (about 20 KB here), instead of a full
+  checkpoint. The check understands a journal that holds only such entries.
+- Main's store engine writes a project's journal (entries or its deletion)
+  only after that project's pending or in-flight slot write reaches disk.
+  Before, a crash between the two could recover the older slot without its
+  journal. The new crash-point test fails on the old order.
+
+The dirty check's fingerprints (twice per autosave and per open) are now
+serialized in slices and hashed on a worker (`project-fingerprint.ts`, the
+same SHA-256 as before). The unsaved baseline reuses the checkpoint's text
+from the same task.
+
+**Crash safety.** The bar was that a crash at any moment recovers at least
+what the previous code did. Two tests prove it:
+
+- `legacy/__tests__/project-checkpoint-crash.test.ts` runs the real window
+  store, project registry and main store engine through an open's checkpoint
+  sequence. That sequence includes a raw unannounced write, a history edit,
+  and an announced edit during a check. The directory is rebuilt as it stood
+  after every prefix of the logged file operations, which is every possible
+  crash point. Each recovers nothing or a complete state the document had,
+  never an older state than an earlier point. Every settled point recovers
+  exactly what the previous code recovered there. Slot writes: 1 for the open
+  (was 5), and 3 more only where the document really changed.
+- `e2e/project-open-crash-recovery.spec.ts` SIGKILLs the whole app at 15
+  seeded moments, from 0.2 s into a large open to after it settles, with
+  either setting. Every relaunch recovered nothing (killed before the first
+  checkpoint) or exactly the document a clean open stores, and no store file
+  was quarantined. The first checkpoint is durable about 2 s into the open.
+  The previous code made its first slot write durable only after its 75 s
+  bridge copy.
+
+Preparation (engine on) also lost two of its three whole-document passes:
+
+- `JsonBudget.due()` read the clock on every value: half of the CPU.
+- The renderer integrity digest is no longer computed before publication.
+  Main hashes the ingested stream, and the utility derives the canonical hash
+  of the tree it parsed, so the tree is exactly the shadow. The first
+  consistency check after publication fills the digests and compares them.
+- The shadow is cloned by `jsonCloneSliced` (jsonCloneAsync's copy, about 4
+  times faster).
+- The shadow is ingested as its `JSON.stringify` text, not canonical JSON.
+  The utility loads it with `source: "text"`: it checks the bytes against
+  main's hash of the stream and answers the canonical hash of the parsed
+  tree. Recovery copies keep the byte hash (document-recovery.md).
+
+PMV4 preparation went from 23 to 35 s to 7.2 s: clone 0.75 s, stream and
+native load 6.5 s.
+
+The font prewarm yields every 8 ms. Five seconds after a large ingestion,
+main reports moderate memory pressure to that window (DevTools'
+`Memory.simulatePressureNotification`, `memory-relief.ts`).
+
+Paired medians, with one build, three runs per mode and project, interleaved,
+and the load average at 14 to 40 (other lanes running):
+
+| Median | PMV4 today | PMV4 engine | PMV3 today | PMV3 engine |
+|---|---|---|---|---|
+| Open (s) | 31.6 (was 372) | 30.7 (was 419) | 9.5 (was 120) | 14.7 (was 135) |
+| Renderer RSS (MiB) | 1,896 | 2,594 | 1,305 | 1,376 |
+| Total RSS (MiB) | 2,818 | 4,520 | 2,369 | 3,098 |
+| Renderer footprint (MiB) | 1,452 | 1,811 | 922 | 1,071 |
+| Total footprint (MiB) | 2,303 | 3,899 | 2,624 | 4,044 |
+| Engine processes' footprint (MiB) | n/a | 1,052 | n/a | 1,078 |
+| Longest main-thread task in the open (s) | 6.1 | 3.1 | 2.8 | 2.7 |
+| Tasks over 100 ms in the open | 48 | 4 | 7 | 9 |
+| Blank opens | 0 of 3 | 0 of 3 | 0 of 3 | 0 of 3 |
+
+What remains:
+
+- **Memory.** The utility holds about 1 GB of footprint: the native tree, its
+  allocator, and 0.4 to 1 GB GPU-owned. The renderer holds the shadow (+142
+  MiB of heap after GC on PMV4) plus freed pages. A 16-byte node is not
+  possible inside pm-model's `forbid(unsafe_code)` with inline `Arc`
+  children. It needs either an arena of containers addressed by index, or
+  revisions held by containers rather than by every node.
+- **PMV3 open.** The engine's tail asks the utility synchronous font and
+  raster questions while the open finishes.
+- **PMV4 tasks.** Today's 48 tasks over 100 ms are mostly its legacy viewer
+  drawing 258 layers once the window stays responsive. The engine's are the
+  reply parse (0.6 s), switchProject (3.1 s, the same as today's), and two of
+  about 0.2 s.

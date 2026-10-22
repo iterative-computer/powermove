@@ -47,3 +47,10 @@ the renderer has seen the port close (2026-10-22: the same generation,
 disconnected, 119 ms). Both runs end with 24 ordered edits, zero exceptions
 or fallbacks, equal revisions and frame hashes, and byte-identical final
 documents (four passes).
+
+Documents now arrive as JSON text in any member order (see "Open-time
+storage writes and preparation" in host-processes.md). Main's recovery copy
+of such a document keeps the hash of its bytes and reloads it as text; the
+first load answers the tree's canonical hash, which activation and later
+restores use. Checkpoints the utility persists are canonical again.
+`document-recovery.test.ts` restores a text-ingested document across a kill.
