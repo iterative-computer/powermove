@@ -22,6 +22,7 @@ const BUS_TO_TICK: Record<string, MutationKind> = {
   layers: 'structure',
   project: 'project',
   assets: 'assets',
+  'audio:peaks': 'assets',
   library: 'library',
   history: 'history',
   'draw:ui': 'values'

@@ -1451,9 +1451,11 @@ pub fn events() -> Vec<Envelope> {
         })),
         event(Event::Audio(AudioMessage::PeaksWanted {
             asset: "asset-7".into(),
+            request: Some(seq(7)),
         })),
         event(Event::Audio(AudioMessage::Peaks(AudioPeaks {
             asset: "asset-7".into(),
+            request: Some(seq(7)),
             peaks_per_second: 100.0,
             duration: 0.03,
             peaks: vec![0.0, 0.5, 0.25],

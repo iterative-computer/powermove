@@ -16,6 +16,7 @@ use std::time::SystemTime;
 use pm_engine::Action;
 use pm_protocol::clock::{AudioMessage, AudioPeaks, MAX_PEAKS};
 use pm_protocol::codec;
+use pm_protocol::common::Seq;
 use pm_protocol::envelope::{Envelope, Event, Message};
 
 use super::render::{Key, Sink};
@@ -27,6 +28,7 @@ type Kept = Mutex<VecDeque<(FileKey, Arc<(Vec<f32>, f64)>)>>;
 struct Job {
     key: Key,
     asset: String,
+    request: Option<Seq>,
     path: Option<PathBuf>,
 }
 
@@ -59,11 +61,12 @@ impl PeakWorker {
                     // Drop duplicates queued meanwhile (a timeline redraw
                     // asks again).
                     while let Ok(j) = rx.try_recv() {
-                        if !pending
-                            .iter()
-                            .chain(std::iter::once(&job))
-                            .any(|p| p.key == j.key && p.asset == j.asset && p.path == j.path)
-                        {
+                        if !pending.iter().chain(std::iter::once(&job)).any(|p| {
+                            p.key == j.key
+                                && p.asset == j.asset
+                                && p.path == j.path
+                                && p.request == j.request
+                        }) {
                             pending.push_back(j);
                         }
                     }
@@ -90,9 +93,14 @@ impl PeakWorker {
 
     /// Asks for an asset's peaks (`path`: where the session's media map
     /// resolved it, `None` when offline).
-    pub fn request(&self, key: Key, asset: String, path: Option<PathBuf>) {
+    pub fn request(&self, key: Key, asset: String, path: Option<PathBuf>, request: Option<Seq>) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Job { key, asset, path });
+            let _ = tx.send(Job {
+                key,
+                asset,
+                path,
+                request,
+            });
         }
     }
 }
@@ -109,6 +117,7 @@ impl Drop for PeakWorker {
 fn answer(job: &Job, kept: &Kept) -> AudioPeaks {
     let none = |error: String| AudioPeaks {
         asset: job.asset.clone(),
+        request: job.request,
         peaks_per_second: pm_audio::waveform::PEAKS_PER_SECOND,
         duration: 0.0,
         peaks: Vec::new(),
@@ -152,9 +161,61 @@ fn answer(job: &Job, kept: &Kept) -> AudioPeaks {
     };
     AudioPeaks {
         asset: job.asset.clone(),
+        request: job.request,
         peaks_per_second: pm_audio::waveform::PEAKS_PER_SECOND,
         duration: data.1,
         peaks: data.0.clone(),
         error: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_protocol::common::SessionId;
+    use pm_protocol::host::PortId;
+
+    #[test]
+    fn offline_replies_echo_each_request_generation() {
+        let kept = Kept::default();
+        for generation in [1, 2] {
+            let request = Some(Seq::new(generation).unwrap());
+            let reply = answer(
+                &Job {
+                    key: (PortId(1), SessionId::new(2).unwrap()),
+                    asset: "clip".into(),
+                    request,
+                    path: None,
+                },
+                &kept,
+            );
+            assert_eq!(reply.request, request);
+            assert!(reply.error.is_some());
+        }
+    }
+
+    #[test]
+    fn cached_envelopes_keep_the_new_request_generation() {
+        // A real file identity, but an already-cached envelope: no decoder,
+        // media fixture or temporary file is needed to exercise the hit.
+        let path = std::env::current_exe().unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let kept = Mutex::new(VecDeque::from([(
+            (path.clone(), meta.len(), meta.modified().ok()),
+            Arc::new((vec![0.2, 0.8], 0.02)),
+        )]));
+        let request = Some(Seq::new(9).unwrap());
+        let reply = answer(
+            &Job {
+                key: (PortId(1), SessionId::new(2).unwrap()),
+                asset: "clip".into(),
+                request,
+                path: Some(path),
+            },
+            &kept,
+        );
+        assert_eq!(reply.request, request);
+        assert_eq!(reply.peaks, vec![0.2, 0.8]);
+        assert_eq!(reply.error, None);
     }
 }

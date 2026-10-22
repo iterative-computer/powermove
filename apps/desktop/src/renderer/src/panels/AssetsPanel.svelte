@@ -1022,7 +1022,7 @@
         <span class={`asset-preview ${asset.kind}`}>
           {#if asset.kind === 'audio'}
             <span class="asset-wave" aria-hidden="true">
-              {#each waveBins(asset) as h}<i style={`height:${h}%`}></i>{/each}
+              {#each (doc.tick.assets, waveBins(asset)) as h}<i style={`height:${h}%`}></i>{/each}
             </span>
           {:else}
             <Icon {PM} name={assetIcon(asset.kind)} />

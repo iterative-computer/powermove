@@ -20,7 +20,7 @@ function fakeSession() {
   return { session, sent };
 }
 
-function rig(assets: Record<string, any>[] = []) {
+function rig(assets: Record<string, any>[] = [], source?: (id: string) => unknown) {
   let now = 1000;
   const { session, sent } = fakeSession();
   const changed = vi.fn();
@@ -29,6 +29,7 @@ function rig(assets: Record<string, any>[] = []) {
     session: () => session,
     driving: () => driving,
     assets: () => assets,
+    source,
     peaksChanged: changed,
     now: () => now
   });
@@ -74,18 +75,18 @@ describe('the engine audio for the audio panels', () => {
     expect(sent).toEqual([
       { audio: 'monitor', solo: ['L1'] },
       { audio: 'monitor', solo: ['L1'] },
-      { audio: 'peaksWanted', asset: 'a1' },
-      { audio: 'peaksWanted', asset: 'v1' }
+      { audio: 'peaksWanted', asset: 'a1', request: 1 },
+      { audio: 'peaksWanted', asset: 'v1', request: 2 }
     ]);
-    audio.receive({ audio: 'peaks', asset: 'a1', peaksPerSecond: 100, duration: 0.03, peaks: [0.1, 0.5, 0.2], error: null }, session);
+    audio.receive({ audio: 'peaks', asset: 'a1', request: 1, peaksPerSecond: 100, duration: 0.03, peaks: [0.1, 0.5, 0.2], error: null }, session);
     expect(Array.from(assets[0]!.peaks as unknown as Float32Array)).toEqual([0.1, 0.5, 0.2].map(Math.fround));
     expect(changed).toHaveBeenCalledTimes(1);
     // A failure leaves the asset as it was, and the next sync asks again
     // (offline media resolves later).
-    audio.receive({ audio: 'peaks', asset: 'v1', peaksPerSecond: 100, duration: 0, peaks: [], error: 'the media is offline' }, session);
+    audio.receive({ audio: 'peaks', asset: 'v1', request: 2, peaksPerSecond: 100, duration: 0, peaks: [], error: 'the media is offline' }, session);
     expect((assets[1] as any).peaks).toBeUndefined();
     audio.sync();
-    expect(sent.at(-1)).toEqual({ audio: 'peaksWanted', asset: 'v1' });
+    expect(sent.at(-1)).toEqual({ audio: 'peaksWanted', asset: 'v1', request: 3 });
     audio.sync();
     expect(sent.filter((m) => m.audio === 'peaksWanted' && m.asset === 'v1')).toHaveLength(2);
   });
@@ -115,4 +116,78 @@ describe('the engine audio for the audio panels', () => {
     undo();
     expect(pmAudio['setMonitorSolo']).toBe(legacySolo);
   });
+});
+
+
+function peak(request: number, value: number): AudioMessage {
+  return { audio: 'peaks', asset: 'clip', request, peaksPerSecond: 100, duration: .01, peaks: [value], error: null } as AudioMessage;
+}
+
+it('rejects the in-flight waveform from before a document resync', () => {
+  const assets = [{ id: 'clip', kind: 'audio' }];
+  const { audio, session, sent, changed } = rig(assets);
+  audio.sync();
+  audio.resynced();
+  expect(sent.filter(message => message.audio === 'peaksWanted')).toEqual([
+    { audio: 'peaksWanted', asset: 'clip', request: 1 },
+    { audio: 'peaksWanted', asset: 'clip', request: 2 },
+  ]);
+  audio.receive(peak(1, .9), session);
+  expect(changed).not.toHaveBeenCalled();
+  audio.receive(peak(2, .2), session);
+  expect(Array.from((assets[0] as any).peaks)).toEqual([Math.fround(.2)]);
+});
+
+it('rejects old and out-of-order answers after replacing a source with the same id', () => {
+  const assets = [{ id: 'clip', kind: 'audio', contentHash: 'old' }];
+  const { audio, session, sent, changed } = rig(assets);
+  audio.sync();
+  assets[0] = { id: 'clip', kind: 'audio', contentHash: 'new' };
+  audio.sync();
+  expect(sent.filter(message => message.audio === 'peaksWanted')).toHaveLength(2);
+  audio.receive(peak(1, .9), session);
+  expect(changed).not.toHaveBeenCalled();
+  audio.receive(peak(2, .2), session);
+  audio.receive(peak(1, .9), session);
+  expect(Array.from((assets[0] as any).peaks)).toEqual([Math.fround(.2)]);
+  expect(changed).toHaveBeenCalledTimes(1);
+});
+
+it('invalidates a completed waveform on relink even when the asset object stays live', () => {
+  const assets = [{ id: 'clip', kind: 'video', contentHash: 'old' }];
+  const { audio, session, sent } = rig(assets);
+  audio.sync();
+  audio.receive(peak(1, .9), session);
+  assets[0]!.contentHash = 'new';
+  audio.sync();
+  expect((assets[0] as any).peaks).toBeNull();
+  expect(sent.filter(message => message.audio === 'peaksWanted')).toHaveLength(2);
+  audio.receive(peak(1, .9), session);
+  audio.receive(peak(2, .2), session);
+  expect(Array.from((assets[0] as any).peaks)).toEqual([Math.fround(.2)]);
+});
+
+it('rejects answers for assets removed while the decoder was working', () => {
+  const assets = [{ id: 'clip', kind: 'audio' }];
+  const { audio, session, changed } = rig(assets);
+  audio.sync();
+  assets.length = 0;
+  audio.receive(peak(1, .9), session);
+  expect(changed).not.toHaveBeenCalled();
+});
+
+it('invalidates a hashless restored asset when its persisted source is relinked', () => {
+  const assets: Record<string, any>[] = [{ id: 'clip', kind: 'audio', storageKey: 'sampled-key' }];
+  let hash = 'original';
+  const { audio, session, sent } = rig(assets, () => [hash]);
+  audio.sync();
+  audio.receive(peak(1, .9), session);
+  hash = 'replacement';
+  audio.sync();
+  expect(assets[0]!.peaks).toBeNull();
+  expect(sent.filter(message => message.audio === 'peaksWanted')).toHaveLength(2);
+  audio.receive(peak(1, .9), session);
+  expect(assets[0]!.peaks).toBeNull();
+  audio.receive(peak(2, .2), session);
+  expect(Array.from(assets[0]!.peaks)).toEqual([Math.fround(.2)]);
 });

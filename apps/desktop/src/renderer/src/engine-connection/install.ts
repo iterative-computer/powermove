@@ -196,6 +196,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     session: () => current,
     driving: () => transport.active(),
     assets: () => (PM.assets?.map?.values?.() ?? []) as Iterable<Record<string, any>>,
+    source: (id) => {
+      const meta = PM.proj?.assets?.[id];
+      return [meta?.contentHash, meta?.storageKey, meta?.link?.hash, meta?.link?.path];
+    },
     peaksChanged: () => {
       PM.invalidate?.('timeline');
       PM.bus?.emit?.('audio:peaks');
@@ -277,6 +281,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           preview.close(session);
           sessions.delete(session);
           if (current === session) {
+            stats.reset();
+            PM.invalidate?.('status');
             current = null;
             sessionReady = null;
             const handlers = viewerHandlers;
@@ -301,6 +307,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       // overwrite the replacement document's requested UI position.
       onLoading: () => transport.seek(Number(PM.time) || 0, false),
       onLoaded: () => {
+        stats.reset();
+        PM.invalidate?.('status');
+        audio.resynced();
         if (session.headless) session.sendHeadless(openComposition());
         PM.bus?.emit?.('layout');
       },

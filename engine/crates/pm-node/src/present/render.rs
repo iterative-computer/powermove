@@ -713,7 +713,7 @@ struct Thread {
     /// Compatibility rasters the renderers uploaded.
     compat: super::compat::CompatStore,
     /// Waveform requests waiting for the host's media answer.
-    peaks_waiting: BTreeSet<(Key, String)>,
+    peaks_waiting: BTreeMap<(Key, String), Option<Seq>>,
     /// With the per-frame trace on: each session's revisions not shown yet
     /// (revision, posted, applied; host µs).
     doc_trace: BTreeMap<Key, Vec<[i64; 3]>>,
@@ -807,7 +807,7 @@ pub fn run(
         last_interactive: None,
         snapshot_costs: BTreeMap::new(),
         compat: super::compat::CompatStore::default(),
-        peaks_waiting: BTreeSet::new(),
+        peaks_waiting: BTreeMap::new(),
         doc_trace: BTreeMap::new(),
         work_start: 0,
         completer,
@@ -1593,8 +1593,9 @@ impl Thread {
                 }
             }
             Command::Media { key, asset, path } => {
-                if self.peaks_waiting.remove(&(key, asset.clone())) {
-                    self.peaks.request(key, asset.clone(), path.clone());
+                if let Some(request) = self.peaks_waiting.remove(&(key, asset.clone())) {
+                    self.peaks
+                        .request(key, asset.clone(), path.clone(), request);
                 }
                 let doc = self.docs.entry(key).or_default();
                 doc.set_media(&asset, path);
@@ -1971,7 +1972,7 @@ impl Thread {
         }
         self.snapshot_costs.remove(&key);
         self.compat.forget_session(key);
-        self.peaks_waiting.retain(|(k, _)| *k != key);
+        self.peaks_waiting.retain(|(k, _), _| *k != key);
         for job in self.snapshots.take_session(key) {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
@@ -2308,14 +2309,17 @@ impl Thread {
                     audio.send(AudioCtl::Solo(solo));
                 }
             }
-            AudioMessage::PeaksWanted { asset } => {
+            AudioMessage::PeaksWanted { asset, request } => {
                 // Asked before the host answered for the asset (a file just
                 // imported): wait for the answer rather than call it offline.
                 match self.docs.get(&key).and_then(|d| d.media().answer(&asset)) {
-                    Some(path) => self.peaks.request(key, asset, path),
+                    Some(path) => self.peaks.request(key, asset, path, request),
                     None => {
-                        if self.peaks_waiting.len() < MAX_PEAKS_WAITING {
-                            self.peaks_waiting.insert((key, asset));
+                        let pending = (key, asset);
+                        if self.peaks_waiting.contains_key(&pending)
+                            || self.peaks_waiting.len() < MAX_PEAKS_WAITING
+                        {
+                            self.peaks_waiting.insert(pending, request);
                         }
                     }
                 }
@@ -3605,6 +3609,7 @@ impl Thread {
             ) {
                 State::Waiting => {
                     view.external_wait = Some(wait);
+                    self.send_stats(key);
                     return;
                 }
                 State::Obsolete => {}
@@ -3680,7 +3685,7 @@ impl Thread {
                         .is_some_and(|l| l.ledger.free().is_none())
                     {
                         self.stats().pool_waits += 1;
-                        return;
+                        break;
                     }
                     let f = view.clock.frame_ticks();
                     let media = view.clock.wrap(k * f);
@@ -3702,7 +3707,7 @@ impl Thread {
                     // frame follows when the raster arrives (never skip it
                     // merely because its asynchronous request was sent).
                     if rendered.is_none() && view.external_wait.is_some() {
-                        return;
+                        break;
                     }
                     view.schedule.rendered(&view.clock, k);
                     if rendered.is_some() {
@@ -5704,7 +5709,7 @@ mod tests {
             last_interactive: None,
             snapshot_costs: BTreeMap::new(),
             compat: super::super::compat::CompatStore::default(),
-            peaks_waiting: BTreeSet::new(),
+            peaks_waiting: BTreeMap::new(),
             doc_trace: BTreeMap::new(),
             work_start: 0,
             completer: None,
@@ -5715,6 +5720,45 @@ mod tests {
 
     fn preview_key() -> Key {
         (PortId(1), SessionId::new(2).unwrap())
+    }
+
+    #[test]
+    fn pending_waveforms_keep_latest_generation_even_at_capacity() {
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        for index in 0..MAX_PEAKS_WAITING {
+            thread.audio_message(
+                key,
+                AudioMessage::PeaksWanted {
+                    asset: format!("clip-{index}"),
+                    request: Some(Seq::new(1).unwrap()),
+                },
+            );
+        }
+        thread.audio_message(
+            key,
+            AudioMessage::PeaksWanted {
+                asset: "clip-0".into(),
+                request: Some(Seq::new(2).unwrap()),
+            },
+        );
+        thread.audio_message(
+            key,
+            AudioMessage::PeaksWanted {
+                asset: "beyond-capacity".into(),
+                request: Some(Seq::new(3).unwrap()),
+            },
+        );
+        assert_eq!(thread.peaks_waiting.len(), MAX_PEAKS_WAITING);
+        assert_eq!(
+            thread.peaks_waiting[&(key, "clip-0".into())],
+            Some(Seq::new(2).unwrap())
+        );
+        assert!(
+            !thread
+                .peaks_waiting
+                .contains_key(&(key, "beyond-capacity".into()))
+        );
     }
 
     #[test]

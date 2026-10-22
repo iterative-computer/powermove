@@ -30,8 +30,7 @@ there is no version bump. The generated TypeScript (`AudioDiagnostics.ts`,
 `RenderStats.ts`) and the `event-renderStats` wire fixture were regenerated
 with `pm-protocol-gen`. The fixture now carries a dropped-voice problem.
 
-RFC 16 ("Stats") still lists the fields from before this change. Its owner
-should add `audio?` there. This lane was not allowed to edit the RFC.
+RFC 16 ("Stats") documents the optional audio field.
 
 ## Engine (pm-node)
 
@@ -43,8 +42,9 @@ should add `audio?` there. This lane was not allowed to edit the RFC.
   the node's stats every turn. It now passes the same status to the view's
   `ViewStats`. The render loop wakes at least every 50 ms, so a paused
   session reports a dropped voice or a failed device without presenting a
-  frame. A view whose surface pool has not arrived yet used to return before
-  `send_stats`. It now falls through to it, so its audio still reports.
+  frame. Views without a surface pool, with a full pool, or waiting for external
+  pixels still reach `send_stats`, so audio health does not depend on a
+  successful presentation frame.
 - Not covered: a composition the engine routes to the legacy viewer returns
   before `send_stats`. That routing is dev scaffolding being retired
   (amendment 21).
@@ -99,9 +99,10 @@ should add `audio?` there. This lane was not allowed to edit the RFC.
 
 ## Open
 
-- No end-to-end run through the app: this lane did no Electron run or native
-  addon rebuild. `PROTOCOL_BUILD` changed, so the pm-node addon must be
-  rebuilt before the app talks to it.
+- The addon was rebuilt after the audio diagnostics wire change. The real
+  native transport gate passed four cases, including mixer levels and audio
+  scrub. The diagnostics surface has mounted component coverage; an injected
+  real device failure has not been exercised through Electron.
 - Counters and problems never reset while a session's audio link lives (the
   audio thread keeps them). Once a session drops audio, its status field
   stays until the session closes.
