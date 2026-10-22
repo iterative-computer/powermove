@@ -420,26 +420,41 @@ test.describe('Use New Engine: existing extensions', () => {
     await cp(path.join(__dirname, FIXTURE[extension]!), path.join(session.userData, 'extensions', extension), { recursive: true });
     await session.relaunch();
     await session.openEditor();
-    /** Plays 3 s from 0 and records when frames were presented. */
+    /**
+     * Plays the 3 s composition from 0 through its last frame and records
+     * when frames were presented. The window is the composition's span on
+     * both sides, not a wall-clock 3 s: today's clock starts with its first
+     * drawn frame (~200 ms after Play) and its busy main thread fires a 3 s
+     * timer ~200 ms late, while the engine presents from Play on, so a
+     * wall-clock window compared different spans of the composition
+     * (measured 2026-10-21: today's last frame at 3166 to 3206 ms, the
+     * engine's at 3003 ms). Playback stops once the last frame is presented,
+     * or after 6 s; frames after a wrap to the start are not counted.
+     */
     const play = (page: Page) => page.evaluate(async () => {
       const PM = (window as any).PM;
       const api = PM.Kernel.api('cadence-probe');
       const at: number[] = [], times: number[] = [];
-      const off: any = api.events.on('frame:rendered', (event: any) => { at.push(performance.now()); times.push(event.time); });
+      let wrapped = false;
+      const off: any = api.events.on('frame:rendered', (event: any) => {
+        if (times.length && event.time < times.at(-1)! - 1e-9) wrapped = true;
+        if (!wrapped) { at.push(performance.now()); times.push(event.time); }
+      });
       const needs = PM.EngineRender?.compatStats?.needs ?? 0;
       const rasters = (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0);
       PM.setTime(0);
       await new Promise((r) => setTimeout(r, 300));
-      at.length = 0; times.length = 0;
+      at.length = 0; times.length = 0; wrapped = false;
+      const last = PM.proj.dur - 1 / PM.proj.fps - 1e-6;
       const started = performance.now();
       PM.play();
-      await new Promise((r) => setTimeout(r, 3000));
+      while (!wrapped && !(times.length && times.at(-1)! >= last) && performance.now() - started < 6000) await new Promise((r) => setTimeout(r, 4));
       PM.pause();
       if (typeof off === 'function') off(); else off?.dispose?.();
       const gaps = at.slice(1).map((v, i) => v - at[i]!);
       const sorted = [...gaps].sort((a, b) => a - b);
       const firstFrameMs = Math.round(at.length ? at[0]! - started : 3000);
-      return { firstFrameMs, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
+      return { firstFrameMs, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
     });
     const { page } = session;
     await page.waitForFunction((id) => (window as any).PM?.Kernel?.loader?.activeIds?.().includes(id) && Boolean((window as any).PM?.EngineRender), extension);
@@ -472,7 +487,7 @@ test.describe('Use New Engine: existing extensions', () => {
     // Today's longest gap plus one frame at 30 fps, at most.
     expect(engine.maxGap).toBeLessThanOrEqual(today.maxGap + Math.ceil(1000 / 30));
     expect(engine.firstFrameMs).toBeLessThanOrEqual(today.firstFrameMs + Math.ceil(1000 / 30));
-    // (A 3 s window can start or end one frame apart: one frame of alignment.)
+    // (The two sides can start one frame apart: one frame of alignment.)
     expect(engine.frames).toBeGreaterThanOrEqual(today.frames - 1);
     expect(engine.uniqueTimes).toBeGreaterThanOrEqual(today.uniqueTimes - 1);
     return { engine, today };
