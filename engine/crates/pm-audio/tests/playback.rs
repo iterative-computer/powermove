@@ -84,11 +84,19 @@ fn native_dsp_diagnostics_enabled() -> bool {
 
 fn log_native_dsp_diagnostics(label: &str) {
     if native_dsp_diagnostics_enabled() {
+        let Some(rows) = pm_stretch::dsp_diagnostic_snapshot() else {
+            eprintln!("{label}: native DSP snapshot unavailable");
+            return;
+        };
         eprintln!(
-            "{label}: native DSP processGlobalSinceEnableNs regions={:?} maxima(ns,ordinal)={:?}",
+            "{label}: native DSP diagnostic enabled; process-global maxima since enable, not per trial; regions={:?}",
             pm_stretch::DSP_DIAGNOSTIC_REGIONS,
-            pm_stretch::dsp_diagnostic_snapshot(),
         );
+        for (entry, row) in pm_stretch::DSP_DIAGNOSTIC_ENTRIES.iter().zip(rows) {
+            eprintln!(
+                "{label}: native DSP entry={entry} processGlobalSinceEnableNs max(ns,localStepMarker)={row:?}",
+            );
+        }
     }
 }
 

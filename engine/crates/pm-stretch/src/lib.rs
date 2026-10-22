@@ -102,9 +102,17 @@ pub const DSP_DIAGNOSTIC_REGIONS: [&str; 10] = [
     "spectrum-step",
     "synthesis-step",
     "synthesis-fft",
-    "output-read-move",
+    "inter-block-output-run",
     "logical-step",
 ];
+
+/// Native entry points recorded separately by the process-wide diagnostic.
+#[doc(hidden)]
+pub const DSP_DIAGNOSTIC_ENTRIES: [&str; 3] = ["process", "output-seek", "flush"];
+
+#[doc(hidden)]
+pub type DspDiagnosticSnapshot =
+    [[(u64, u16); DSP_DIAGNOSTIC_REGIONS.len()]; DSP_DIAGNOSTIC_ENTRIES.len()];
 
 /// Enable native DSP timing once on an ordinary thread before audio work.
 /// This process-wide diagnostic resets its maxima when enabled.
@@ -114,18 +122,24 @@ pub fn enable_dsp_diagnostics() {
     unsafe { pm_stretch_diag_enable(1) }
 }
 
-/// Process-global maximum thread CPU time and native step ordinal per region
-/// since diagnostics were last enabled.
+/// Process-global maximum thread CPU time and native local step marker per
+/// entry point and region since diagnostics were last enabled. The marker is
+/// not a global ordinal: FFT regions may report a sentinel or local index.
 /// Returns `None` if the native diagnostic cannot fill the fixed-size snapshot.
 #[doc(hidden)]
-pub fn dsp_diagnostic_snapshot() -> Option<[(u64, u16); DSP_DIAGNOSTIC_REGIONS.len()]> {
-    let mut packed = [0u64; DSP_DIAGNOSTIC_REGIONS.len()];
+pub fn dsp_diagnostic_snapshot() -> Option<DspDiagnosticSnapshot> {
+    let mut packed = [0u64; DSP_DIAGNOSTIC_ENTRIES.len() * DSP_DIAGNOSTIC_REGIONS.len()];
     // SAFETY: the native function writes at most `capacity` entries to this array.
     let written = unsafe { pm_stretch_diag_snapshot(packed.as_mut_ptr(), packed.len() as c_int) };
     if written != packed.len() as c_int {
         return None;
     }
-    Some(packed.map(|entry| (entry >> 16, entry as u16)))
+    Some(std::array::from_fn(|entry| {
+        std::array::from_fn(|region| {
+            let value = packed[entry * DSP_DIAGNOSTIC_REGIONS.len() + region];
+            (value >> 16, value as u16)
+        })
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,23 +535,41 @@ mod tests {
     fn optional_dsp_diagnostics_preserve_pcm_and_report_native_steps() {
         extern "C" fn checkpoint() {}
 
-        fn render() -> Vec<f32> {
-            let mut stretch = Stretcher::new(1, 48_000).unwrap();
-            let input: Vec<f32> = (0..32_000)
-                .map(|i| (i as f32 * 0.013).sin() * 0.25)
+        fn render(channels: usize, rate: f64) -> Vec<u32> {
+            let mut stretch = Stretcher::new(channels, 48_000).unwrap();
+            let input: Vec<Vec<f32>> = (0..channels)
+                .map(|channel| {
+                    (0..65_536)
+                        .map(|i| ((i as f32 * 0.013) + channel as f32 * 0.37).sin() * 0.25)
+                        .collect()
+                })
                 .collect();
-            let lead = stretch.output_seek_length(1.0);
-            stretch.output_seek(&[&input[..lead]]).unwrap();
+            let lead = stretch.output_seek_length(rate);
+            let seek: Vec<&[f32]> = input.iter().map(|channel| &channel[..lead]).collect();
+            stretch
+                .output_seek_with_checkpoint(&seek, checkpoint)
+                .unwrap();
             let interval = stretch.interval_samples();
             let mut output = Vec::new();
+            let mut blocks = vec![vec![0.0; interval]; channels];
+            let mut fed = lead;
             for step in 0..8 {
-                let from = lead + step * interval;
-                let to = from + interval;
-                let mut block = vec![0.0; interval];
-                stretch
-                    .process_with_checkpoint(&[&input[from..to]], &mut [&mut block], checkpoint)
-                    .unwrap();
-                output.extend(block);
+                let produced = (step + 1) * interval;
+                let want = (lead as f64 + produced as f64 * rate).round() as usize;
+                let read: Vec<&[f32]> = input.iter().map(|channel| &channel[fed..want]).collect();
+                {
+                    let mut write: Vec<&mut [f32]> =
+                        blocks.iter_mut().map(Vec::as_mut_slice).collect();
+                    stretch
+                        .process_with_checkpoint(&read, &mut write, checkpoint)
+                        .unwrap();
+                }
+                for frame in 0..interval {
+                    for channel in &blocks {
+                        output.push(channel[frame].to_bits());
+                    }
+                }
+                fed = want;
             }
             output
         }
@@ -554,16 +586,27 @@ mod tests {
         let _disable = DisableDiagnostics;
         // SAFETY: test setup runs on an ordinary thread, outside native DSP.
         unsafe { pm_stretch_diag_enable(0) }
-        let reference = render();
+        let variants = [(1, 1.5), (1, 1.6), (2, 1.5), (2, 1.6)];
+        let reference: Vec<_> = variants
+            .iter()
+            .map(|&(channels, rate)| render(channels, rate))
+            .collect();
+        let disabled = dsp_diagnostic_snapshot().expect("all native diagnostic regions");
+        assert!(disabled.iter().flatten().all(|&(ns, marker)| ns == 0 && marker == 0));
         enable_dsp_diagnostics();
-        let diagnosed = render();
-        let snapshot = dsp_diagnostic_snapshot().expect("all ten native diagnostic regions");
-        assert_eq!(snapshot.len(), DSP_DIAGNOSTIC_REGIONS.len());
-        assert!(snapshot.iter().any(|(ns, _)| *ns > 0));
-        assert_eq!(
-            reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            diagnosed.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-        );
+        for ((channels, rate), expected) in variants.into_iter().zip(reference) {
+            assert_eq!(
+                expected,
+                render(channels, rate),
+                "{channels} channels at {rate}x"
+            );
+        }
+        let snapshot = dsp_diagnostic_snapshot().expect("all native diagnostic regions");
+        assert_eq!(snapshot.len(), DSP_DIAGNOSTIC_ENTRIES.len());
+        assert!(snapshot[1].iter().any(|(ns, _)| *ns > 0));
+        for region in [3, 5, 6, 9] {
+            assert!(snapshot[0][region].0 > 0, "process region {region}");
+        }
     }
 
     #[test]

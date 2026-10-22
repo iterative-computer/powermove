@@ -11,12 +11,7 @@
 #include <atomic>
 #include <memory>
 #include <new>
-#if defined(_WIN32)
-#	ifndef NOMINMAX
-#		define NOMINMAX
-#	endif
-#	include <windows.h>
-#elif defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__) || defined(__linux__)
 #	include <time.h>
 #endif
 
@@ -27,60 +22,70 @@ typedef void pm_stretch_checkpoint_fn();
 // The library invokes this before each indivisible analysis, spectrum, or
 // synthesis step. A null callback leaves ordinary/offline processing alone.
 static thread_local pm_stretch_checkpoint_fn *pm_stretch_active_checkpoint = nullptr;
+// 0 direct process, 1 output seek, 2 flush, 3 outside a diagnosed entry.
+static thread_local unsigned pm_stretch_diag_entry = 3;
 // Setup hooks also occur in STFT helpers used during processing. Enable them
 // only inside construction/reset; processing keeps its existing step hooks.
 static thread_local pm_stretch_checkpoint_fn *pm_stretch_active_setup_checkpoint = nullptr;
 
 // Explicitly enabled by an ordinary caller before guarded work. The normal
 // path takes no clock readings, allocates nothing, and never logs. Each
-// record packs the largest thread-CPU span in the high 48 bits and its
-// logical step ordinal in the low 16 bits.
+// record packs the largest thread-CPU span in the high 48 bits and an
+// operator-local or block-relative index in the low 16 bits. FFT
+// categories 4/7 use channel index; category 9 uses the block step index.
 static std::atomic<bool> pm_stretch_diag_enabled{false};
-static std::atomic<uint64_t> pm_stretch_diag_max[10]{};
+static std::atomic<uint64_t> pm_stretch_diag_max[3][10]{};
 
 static bool pm_stretch_thread_cpu_ns(uint64_t &out) {
-#if defined(_WIN32)
-	FILETIME created{}, exited{}, kernel{}, user{};
-	if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return false;
-	uint64_t kernel100ns = (uint64_t(kernel.dwHighDateTime) << 32) | kernel.dwLowDateTime;
-	uint64_t user100ns = (uint64_t(user.dwHighDateTime) << 32) | user.dwLowDateTime;
-	out = (kernel100ns + user100ns)*100;
-	return true;
-#elif defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__) || defined(__linux__)
 	timespec ts{};
 	if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return false;
 	out = uint64_t(ts.tv_sec)*1000000000ULL + uint64_t(ts.tv_nsec);
 	return true;
 #else
+	// GetThreadTimes has scheduler-quantum resolution on Windows, so its
+	// apparent per-operator maxima would be misleading. Keep the binding
+	// buildable there and report zero diagnostic observations.
 	(void)out;
 	return false;
 #endif
 }
 
 struct pm_stretch_diag_scope {
-	unsigned category, step;
+	unsigned category, step, entry = 3;
 	uint64_t start = 0;
 	bool active = false;
-	pm_stretch_diag_scope(unsigned category, unsigned step) : category(category), step(step) {
-		if (!pm_stretch_active_checkpoint || !pm_stretch_diag_enabled.load(std::memory_order_relaxed)) return;
+	pm_stretch_diag_scope(unsigned category, unsigned step, bool start_now=true)
+		: category(category), step(step) {
+		if (start_now) begin();
+	}
+	void begin() {
+		if (active || !pm_stretch_diag_enabled.load(std::memory_order_relaxed)) return;
+		if (!pm_stretch_active_checkpoint || pm_stretch_diag_entry >= 3) return;
+		entry = pm_stretch_diag_entry;
 		active = pm_stretch_thread_cpu_ns(start);
 	}
-	~pm_stretch_diag_scope() {
+	void finish() {
 		if (!active) return;
+		active = false;
 		uint64_t end;
 		if (!pm_stretch_thread_cpu_ns(end)) return;
 		uint64_t duration = std::min<uint64_t>(end >= start ? end - start : 0, (uint64_t(1) << 48) - 1);
 		uint64_t packed = (duration << 16) | std::min<unsigned>(step, 65535);
-		auto &maximum = pm_stretch_diag_max[category];
+		auto &maximum = pm_stretch_diag_max[entry][category];
 		uint64_t old = maximum.load(std::memory_order_relaxed);
 		while (packed > old && !maximum.compare_exchange_weak(old, packed, std::memory_order_relaxed)) {}
 	}
+	~pm_stretch_diag_scope() { finish(); }
 };
 
 #define PM_STRETCH_DIAG_JOIN_(a, b) a##b
 #define PM_STRETCH_DIAG_JOIN(a, b) PM_STRETCH_DIAG_JOIN_(a, b)
 #define SIGNALSMITH_STRETCH_DIAG_SCOPE(category, step) \
 	pm_stretch_diag_scope PM_STRETCH_DIAG_JOIN(pm_stretch_diag_scope_, __LINE__)(category, step)
+#define SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_DECLARE() pm_stretch_diag_scope pm_stretch_diag_output_run(8, 0, false)
+#define SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_BEGIN() pm_stretch_diag_output_run.begin()
+#define SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END() pm_stretch_diag_output_run.finish()
 #define SIGNALSMITH_STRETCH_PROFILE_PROCESS_STEP(step, steps) \
 	do { \
 		if (pm_stretch_active_checkpoint) pm_stretch_active_checkpoint(); \
@@ -93,6 +98,9 @@ struct pm_stretch_diag_scope {
 #undef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
 #undef SIGNALSMITH_STRETCH_HAS_SETUP_CHECKPOINT
 #undef SIGNALSMITH_STRETCH_DIAG_SCOPE
+#undef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_DECLARE
+#undef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_BEGIN
+#undef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END
 #undef PM_STRETCH_DIAG_JOIN
 #undef PM_STRETCH_DIAG_JOIN_
 
@@ -110,14 +118,18 @@ struct Handle {
 struct CheckpointScope {
 	pm_stretch_checkpoint_fn *previous;
 	pm_stretch_checkpoint_fn *previousSetup;
-	explicit CheckpointScope(pm_stretch_checkpoint_fn *callback, bool setup=false)
-		: previous(pm_stretch_active_checkpoint), previousSetup(pm_stretch_active_setup_checkpoint) {
+	unsigned previousEntry;
+	explicit CheckpointScope(pm_stretch_checkpoint_fn *callback, bool setup=false, unsigned entry=3)
+		: previous(pm_stretch_active_checkpoint), previousSetup(pm_stretch_active_setup_checkpoint),
+		  previousEntry(pm_stretch_diag_entry) {
 		pm_stretch_active_checkpoint = callback;
 		pm_stretch_active_setup_checkpoint = setup ? callback : nullptr;
+		pm_stretch_diag_entry = entry;
 	}
 	~CheckpointScope() {
 		pm_stretch_active_checkpoint = previous;
 		pm_stretch_active_setup_checkpoint = previousSetup;
+		pm_stretch_diag_entry = previousEntry;
 	}
 };
 
@@ -133,19 +145,26 @@ struct Zeros {
 
 extern "C" {
 
-// Categories 0..9: energy, input copy, new-block setup, analysis step,
-// analysis FFT, spectrum step, synthesis step, synthesis FFT, output read,
-// and the entire logical process step after its cooperative checkpoint.
+// Rows 0..2: direct process, output seek, flush. Categories 0..9: energy,
+// input copy, new-block setup, analysis step, analysis FFT, spectrum step,
+// synthesis step, synthesis FFT, contiguous inter-block output/read run,
+// entire logical process step after its cooperative checkpoint.
 void pm_stretch_diag_enable(int enabled) {
 	pm_stretch_diag_enabled.store(false, std::memory_order_relaxed);
-	for (auto &maximum : pm_stretch_diag_max) maximum.store(0, std::memory_order_relaxed);
+	for (auto &row : pm_stretch_diag_max) {
+		for (auto &maximum : row) maximum.store(0, std::memory_order_relaxed);
+	}
 	pm_stretch_diag_enabled.store(enabled != 0, std::memory_order_relaxed);
 }
 
 int pm_stretch_diag_snapshot(uint64_t *packed, int capacity) {
-	if (!packed || capacity < 10) return -1;
-	for (int i = 0; i < 10; ++i) packed[i] = pm_stretch_diag_max[i].load(std::memory_order_relaxed);
-	return 10;
+	if (!packed || capacity < 30) return -1;
+	for (int entry = 0; entry < 3; ++entry) {
+		for (int category = 0; category < 10; ++category) {
+			packed[entry*10 + category] = pm_stretch_diag_max[entry][category].load(std::memory_order_relaxed);
+		}
+	}
+	return 30;
 }
 
 // Status codes: 0 ok, -1 an exception (allocation) inside the library.
@@ -241,7 +260,7 @@ int pm_stretch_seek(void *handle, const float *const *inputs, int samples, doubl
 
 int pm_stretch_output_seek(void *handle, const float *const *inputs, int samples,
 		pm_stretch_checkpoint_fn *checkpoint) {
-	CheckpointScope scope(checkpoint);
+	CheckpointScope scope(checkpoint, false, 1);
 	try {
 		static_cast<Handle *>(handle)->stretch->outputSeek(inputs, samples);
 		return 0;
@@ -252,7 +271,7 @@ int pm_stretch_output_seek(void *handle, const float *const *inputs, int samples
 
 int pm_stretch_process(void *handle, const float *const *inputs, int input_samples,
 		float *const *outputs, int output_samples, pm_stretch_checkpoint_fn *checkpoint) {
-	CheckpointScope scope(checkpoint);
+	CheckpointScope scope(checkpoint, false, 0);
 	try {
 		auto &s = *static_cast<Handle *>(handle)->stretch;
 		if (input_samples == 0) {
@@ -268,7 +287,7 @@ int pm_stretch_process(void *handle, const float *const *inputs, int input_sampl
 
 int pm_stretch_flush(void *handle, float *const *outputs, int output_samples, float rate,
 		pm_stretch_checkpoint_fn *checkpoint) {
-	CheckpointScope scope(checkpoint);
+	CheckpointScope scope(checkpoint, false, 2);
 	try {
 		static_cast<Handle *>(handle)->stretch->flush(outputs, output_samples, rate);
 		return 0;

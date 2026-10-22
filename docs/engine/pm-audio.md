@@ -3695,3 +3695,24 @@ timing inside those operators will locate the required checkpoint boundaries;
 the canonical preroll, PCM arithmetic and realtime limits remain unchanged.
 V40's plain cold miss had no throttle sleeps, so its timing cannot be credited
 to a reserve change. The final campaign and its reservation remain pending.
+
+The diagnostic-only V42 build passed strict Clippy, its enabled/disabled PCM
+regression and all 22 realtime unit tests. Its queued cold captures were
+cancelled before execution: independent review found that the first native
+snapshot mixed output seek, process and flush. The revised diagnostic splits
+those entry points. `PM_STRETCH_DSP_DIAGNOSTICS=1` enables fixed native CPU
+maxima before audio work; logs distinguish process-global maxima since enable
+from the realtime schedule's context-lifetime maxima. Neither is a per-trial
+delta. Capture one exact test with one test thread; resetting counters while
+background preparation runs would not produce a clean trial boundary.
+
+Nested scopes cover analysis/synthesis steps and their FFTs, spectrum passes,
+input copying, setup, energy, logical steps and the work between hooks. Inner
+scopes contribute to their enclosing scopes. Local FFT/channel indices differ
+from the block-relative logical-step ordinal; the block's step layout can
+change after seeks. Native scopes do not identify a particular historical
+Rust maximum or its worker role. Enabled timing adds CPU and changes checkpoint
+placement, so its latency and Rust span maxima cannot qualify A7/A8 or set a
+reserve. Re-measure with diagnostics disabled after any checkpoint fix. Windows
+CPU timing is unavailable in this diagnostic rather than reporting scheduler
+quantum values as operator durations. No device qualification is implied.

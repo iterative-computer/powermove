@@ -3550,52 +3550,81 @@ mod mac {
                             crate::realtime::RealtimePhase::StretchProcess,
                             crate::realtime::RealtimePhase::StretchRead,
                         ] {
-                            let metrics = Arc::new(MetricCounters::default());
-                            let now = Instant::now();
-                            let cpu = thread_cpu_ns();
-                            let initial_cpu_start = cpu.saturating_sub(accrued);
-                            BUDGET.with(|slot| {
-                                *slot.borrow_mut() = Some(Budget {
-                                    id: 0xA710,
-                                    depth: 1,
-                                    wall_start: now,
-                                    cpu_start_ns: initial_cpu_start,
-                                    last_checkpoint_cpu_ns: cpu,
-                                    last_checkpoint_wall: now - Duration::from_millis(1),
-                                    exit_cpu_ns: cpu,
-                                    period_ns: 100_000_000,
-                                    computation_ns: computation,
-                                    constraint_ns: constraint,
-                                    computation_reported: false,
-                                    constraint_reported: false,
-                                    dsp_span_active: false,
-                                    phase,
-                                    metrics: metrics.clone(),
+                            let mut verified = false;
+                            for _attempt in 0..10 {
+                                let metrics = Arc::new(MetricCounters::default());
+                                let now = Instant::now();
+                                let cpu = thread_cpu_ns();
+                                let initial_cpu_start = cpu.saturating_sub(accrued);
+                                BUDGET.with(|slot| {
+                                    *slot.borrow_mut() = Some(Budget {
+                                        id: 0xA710,
+                                        depth: 1,
+                                        wall_start: now,
+                                        cpu_start_ns: initial_cpu_start,
+                                        last_checkpoint_cpu_ns: cpu,
+                                        last_checkpoint_wall: now - Duration::from_millis(1),
+                                        exit_cpu_ns: cpu,
+                                        period_ns: 100_000_000,
+                                        computation_ns: computation,
+                                        constraint_ns: constraint,
+                                        computation_reported: false,
+                                        constraint_reported: false,
+                                        dsp_span_active: false,
+                                        phase,
+                                        metrics: metrics.clone(),
+                                    });
                                 });
-                            });
-                            if use_dsp_hook {
-                                crate::realtime::checkpoint_dsp_step();
-                            } else {
-                                checkpoint_current_phase(phase);
-                            }
-                            if phase == crate::realtime::RealtimePhase::StretchRead {
-                                // Both a throttle and an already expired wall
-                                // window reset the admitted budget. A heavily
-                                // descheduled test thread need not actually sleep.
+                                if use_dsp_hook {
+                                    crate::realtime::checkpoint_dsp_step();
+                                } else {
+                                    checkpoint_current_phase(phase);
+                                }
                                 let cpu_start = BUDGET.with(|slot| {
                                     slot.borrow().as_ref().unwrap().cpu_start_ns
                                 });
-                                assert_ne!(
+                                let sleeps = metrics.snapshot().throttle_sleeps;
+                                let wall_expired = now.elapsed() >= Duration::from_millis(100);
+                                BUDGET.with(|slot| *slot.borrow_mut() = None);
+
+                                if phase == crate::realtime::RealtimePhase::StretchRead {
+                                    assert_ne!(
+                                        cpu_start, initial_cpu_start,
+                                        "{phase:?}, DSP hook: {use_dsp_hook}, computation: {computation}"
+                                    );
+                                    if sleeps == 1 {
+                                        verified = true;
+                                        break;
+                                    }
+                                    // An expired synthetic wall window can
+                                    // reset debt without testing admission.
+                                    if wall_expired {
+                                        continue;
+                                    }
+                                    panic!(
+                                        "{phase:?}, DSP hook: {use_dsp_hook}, computation: {computation}: no admission sleep"
+                                    );
+                                }
+                                if wall_expired {
+                                    // A normal period rollover cannot prove
+                                    // that process admission was skipped.
+                                    continue;
+                                }
+                                assert_eq!(
+                                    sleeps, 0,
+                                    "{phase:?}, DSP hook: {use_dsp_hook}, computation: {computation}"
+                                );
+                                assert_eq!(
                                     cpu_start, initial_cpu_start,
                                     "{phase:?}, DSP hook: {use_dsp_hook}, computation: {computation}"
                                 );
-                            } else {
-                                assert_eq!(
-                                    metrics.snapshot().throttle_sleeps, 0,
-                                    "{phase:?}, DSP hook: {use_dsp_hook}, computation: {computation}"
-                                );
+                                verified = true;
+                                break;
                             }
-                            BUDGET.with(|slot| *slot.borrow_mut() = None);
+                            assert!(
+                                verified,
+                                "could not observe an unexpired admission window for {phase:?}, DSP hook: {use_dsp_hook}, computation: {computation}"
+                            );
                         }
                     }
                 }

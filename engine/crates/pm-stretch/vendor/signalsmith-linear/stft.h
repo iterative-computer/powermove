@@ -452,14 +452,14 @@ struct DynamicSTFT {
 		}
 		auto *spectrumPtr = spectrum(channel);
 		if (splitComputation) {
-			SIGNALSMITH_STRETCH_DIAG_SCOPE(4, step);
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(4, channel);
 			fft.fft(step, timeBuffer.data(), spectrumPtr);
 			if (unpacked && step == fft.steps() - 1) {
 				spectrumPtr[_fftBins - 1] = spectrumPtr[0].imag();
 				spectrumPtr[0].imag(0);
 			}
 		} else {
-			SIGNALSMITH_STRETCH_DIAG_SCOPE(4, step);
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(4, channel);
 			fft.fft(timeBuffer.data(), spectrum(channel));
 			if (unpacked) {
 				spectrumPtr[_fftBins - 1] = spectrumPtr[0].imag();
@@ -494,12 +494,12 @@ struct DynamicSTFT {
 
 		if (splitComputation) {
 			if (step < fftSteps) {
-				SIGNALSMITH_STRETCH_DIAG_SCOPE(7, step);
+				SIGNALSMITH_STRETCH_DIAG_SCOPE(7, channel);
 				fft.ifft(step, spectrumPtr, timeBuffer.data());
 				return;
 			}
 		} else {
-			SIGNALSMITH_STRETCH_DIAG_SCOPE(7, step);
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(7, channel);
 			fft.ifft(spectrumPtr, timeBuffer.data());
 		}
 		

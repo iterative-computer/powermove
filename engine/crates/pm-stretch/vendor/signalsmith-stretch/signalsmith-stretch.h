@@ -11,6 +11,12 @@
 #	define SIGNALSMITH_STRETCH_DIAG_SCOPE(category, step) ((void)0)
 #	define SIGNALSMITH_STRETCH_LOCAL_DIAG_SCOPE
 #endif
+#ifndef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_DECLARE
+#	define SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_DECLARE() ((void)0)
+#	define SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_BEGIN() ((void)0)
+#	define SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END() ((void)0)
+#	define SIGNALSMITH_STRETCH_LOCAL_DIAG_OUTPUT_RUN
+#endif
 
 #include <vector>
 #include <array>
@@ -235,6 +241,7 @@ struct SignalsmithStretch {
 		SIGNALSMITH_STRETCH_PROFILE_PROCESS_START(inputSamples, outputSamples);
 #endif
 		int prevCopiedInput = 0;
+		SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_DECLARE();
 		auto copyInput = [&](int toIndex){
 			SIGNALSMITH_STRETCH_DIAG_SCOPE(1, 0);
 
@@ -307,6 +314,7 @@ struct SignalsmithStretch {
 		for (int outputIndex = 0; outputIndex < outputSamples; ++outputIndex) {
 			bool newBlock = blockProcess.samplesSinceLast >= stft.defaultInterval();
 			if (newBlock) {
+				SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END();
 				SIGNALSMITH_STRETCH_DIAG_SCOPE(2, 0);
 				blockProcess.step = 0;
 				blockProcess.steps = 0; // how many processing steps this block will have
@@ -351,6 +359,7 @@ struct SignalsmithStretch {
 				Sample processRatio = Sample(blockProcess.samplesSinceLast + 1)/stft.defaultInterval();
 				processToStep = std::min(blockProcess.steps, static_cast<size_t>((blockProcess.steps + 0.999f)*processRatio));
 			}
+			if (blockProcess.step < processToStep) SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END();
 			
 			while (blockProcess.step < processToStep) {
 				size_t step = blockProcess.step++;
@@ -436,20 +445,19 @@ struct SignalsmithStretch {
 			SIGNALSMITH_STRETCH_PROFILE_PROCESS_ENDSTEP();
 #endif
 
-			{
-				SIGNALSMITH_STRETCH_DIAG_SCOPE(8, 0);
-				++blockProcess.samplesSinceLast;
-				if (_splitComputation) stashedOutput.swap(stft.output);
-				for (int c = 0; c < channels; ++c) {
-					auto &&outputChannel = outputs[c];
-					Sample v = 0;
-					stft.readOutput(c, 1, &v);
-					outputChannel[outputIndex] = v;
-				}
-				stft.moveOutput(1);
-				if (_splitComputation) stashedOutput.swap(stft.output);
+			SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_BEGIN();
+			++blockProcess.samplesSinceLast;
+			if (_splitComputation) stashedOutput.swap(stft.output);
+			for (int c = 0; c < channels; ++c) {
+				auto &&outputChannel = outputs[c];
+				Sample v = 0;
+				stft.readOutput(c, 1, &v);
+				outputChannel[outputIndex] = v;
 			}
+			stft.moveOutput(1);
+			if (_splitComputation) stashedOutput.swap(stft.output);
 		}
+		SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END();
 		
 		copyInput(inputSamples);
 		prevInputOffset -= inputSamples;
@@ -1100,5 +1108,11 @@ private:
 #ifdef SIGNALSMITH_STRETCH_LOCAL_DIAG_SCOPE
 #	undef SIGNALSMITH_STRETCH_DIAG_SCOPE
 #	undef SIGNALSMITH_STRETCH_LOCAL_DIAG_SCOPE
+#endif
+#ifdef SIGNALSMITH_STRETCH_LOCAL_DIAG_OUTPUT_RUN
+#	undef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_DECLARE
+#	undef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_BEGIN
+#	undef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END
+#	undef SIGNALSMITH_STRETCH_LOCAL_DIAG_OUTPUT_RUN
 #endif
 #endif // include guard
