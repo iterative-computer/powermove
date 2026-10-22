@@ -235,6 +235,9 @@ test('paired 60-second Automatic 4K long-GOP playback uses measured presentation
           if (native) await session.page.waitForFunction(() =>
             (window as any).PM.EngineConnection?.status?.().route === 'engine');
           const needsProxy = native ? await settleAutomatic(session) : null;
+          // Settled while paused: the idle viewer validates the new proxy and
+          // decodes it once (loading its codec) within about a second.
+          if (needsProxy) await new Promise(resolve => setTimeout(resolve, 2_000));
           const result = await playFor(session, native, 60_000);
           pair.push(result);
           rows.push({ source: clip.name, engine: native ? 'native' : 'current', needsProxy, ...result });
@@ -298,6 +301,7 @@ test('paused ProRes and HEVC upgrade to original on the first presented frame', 
       await importClip(session, source(file));
       await session.page.waitForFunction(() => (window as any).PM.EngineConnection?.status?.().route === 'engine');
       expect(await settleAutomatic(session), `${file} must need a proxy on this Mac`).toBe(true);
+      await new Promise(resolve => setTimeout(resolve, 2_000));
       // Its original decodes in software (VideoToolbox has no 4:2:2 10-bit
       // H.264), so its paused frame has no plan latency bar; PROXY-1 requires
       // that nothing but original pixels is shown once paused.

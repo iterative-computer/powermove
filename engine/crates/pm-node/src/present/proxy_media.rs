@@ -507,7 +507,7 @@ impl ProxyMedia {
         }
     }
 
-    /// While paused, about once a second: re-read this machine's decode
+    /// While paused, four times a second: re-read this machine's decode
     /// assessments and, for an original assessed too slow, find its ready
     /// proxy off-thread and decode it once on the idle probe worker. That
     /// measures the proxy's real cost and loads its codec into this process
@@ -520,7 +520,7 @@ impl ProxyMedia {
         let now = Instant::now();
         if self
             .watched_at
-            .is_some_and(|at| now.duration_since(at) < Duration::from_secs(1))
+            .is_some_and(|at| now.duration_since(at) < Duration::from_millis(250))
         {
             return;
         }
@@ -911,12 +911,17 @@ impl ProxyMedia {
                 let Some(hash) = hash else { continue };
                 let key = format!("{hash}:{format:?}:{size:?}");
                 let ready_proxy = self.proxy_path(
-                    key,
+                    key.clone(),
                     hash,
                     format,
                     size,
                     preference == MediaPreference::Proxies && !playing,
                 );
+                // An integrity lookup still in flight is not a decision: the
+                // choice is made again on the next frame instead of freezing
+                // the original for the whole clip.
+                let lookup_pending = ready_proxy.is_none()
+                    && self.entries.get(&key).is_some_and(|entry| entry.result.is_none());
                 let original_online = original.as_ref().is_some_and(|p| p.exists());
                 let number = |key: &str| match meta.get(key).map(Node::kind) {
                     Some(pm_model::NodeKind::Number(value))
@@ -1032,7 +1037,9 @@ impl ProxyMedia {
                 };
                 if playing
                     && !(choice.proxy.is_none()
-                        && (preference == MediaPreference::Proxies || !original_online))
+                        && (preference == MediaPreference::Proxies
+                            || !original_online
+                            || representation == PolicyRepresentation::Proxy && lookup_pending))
                 {
                     self.choices.insert(choice_key, choice.clone());
                 }
