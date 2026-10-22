@@ -504,25 +504,29 @@ impl TextGpu {
             // A full Canvas viewport may exceed Metal's texture limit even
             // when its ink crop fits. Keep the existing CPU primitive image
             // for those canvases; never shrink the viewport and change AA.
-            if let ItemContent::Graphite { raster, .. } = &item.content
+            if let ItemContent::Graphite { raster, image, .. } = &item.content
                 && raster.width <= device.limits().max_texture_dimension_2d
                 && raster.height <= device.limits().max_texture_dimension_2d
             {
                 let native = self
                     .graphite
                     .get_or_insert_with(|| super::graphite::Gpu::new(device, queue));
-                images.insert(
-                    i,
-                    native.render(
-                        device,
-                        queue,
-                        encoder,
-                        pool,
-                        taken,
-                        raster,
-                        &mut self.glyph_atlas,
-                    ),
+                let drawn = native.render(
+                    device,
+                    queue,
+                    encoder,
+                    pool,
+                    taken,
+                    raster,
+                    &mut self.glyph_atlas,
                 );
+                // A distance field beyond an atlas plot keeps the CPU
+                // primitive image of the same draws.
+                let drawn = match drawn {
+                    Some(drawn) => drawn,
+                    None => self.image(device, queue, image),
+                };
+                images.insert(i, drawn);
             } else if let ItemContent::Image { image, .. }
             | ItemContent::GlyphMask { image, .. }
             | ItemContent::Graphite { image, .. } = &item.content

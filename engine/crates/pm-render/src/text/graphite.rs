@@ -511,7 +511,16 @@ impl Gpu {
         taken: &mut Vec<Target>,
         raster: &Raster,
         atlas: &mut atlas::Atlas,
-    ) -> (wgpu::TextureView, [f32; 2]) {
+    ) -> Option<(wgpu::TextureView, [f32; 2])> {
+        // Every distance field needs an A8 plot. The scene emits fields up
+        // to 256 px (`fitsInAtlasDirect`); anything larger keeps the CPU
+        // primitive image instead of an unplaced (or panicking) draw.
+        if raster.draws.iter().any(|d| {
+            matches!(&d.geometry, Geometry::Sdf { field, .. }
+                if !atlas::Atlas::fits(field.width, field.height))
+        }) {
+            return None;
+        }
         atlas.begin_run();
         let (w, h) = (raster.width, raster.height);
         let samples = if raster.multisampled { 4 } else { 1 };
@@ -596,7 +605,8 @@ impl Gpu {
                 let inverse = atlas::Atlas::inverse_size();
                 uniforms[9] = [inverse, inverse, 0., 0.];
                 uniforms[11] = draw.color;
-                Some(atlas.locate(device, queue, field, *font_size))
+                // Placed: every field fits a fresh plot (checked above).
+                atlas.locate(device, queue, field, *font_size)
             } else {
                 None
             };
@@ -820,7 +830,7 @@ impl Gpu {
         );
         let result = (image.view.clone(), [(cw + 2) as f32, (ch + 2) as f32]);
         taken.extend([resolved, image]);
-        result
+        Some(result)
     }
 }
 

@@ -160,13 +160,15 @@ impl Atlas {
             touched: Default::default(),
         }
     }
+    /// The atlas placement of an SDF glyph, uploading it on first use; None
+    /// for a field no plot can hold (callers check [`Atlas::fits`] first).
     pub fn locate(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         field: &Arc<SdfGlyph>,
         font_size: u32,
-    ) -> ([u32; 2], usize) {
+    ) -> Option<([u32; 2], usize)> {
         if let Some(e) = self
             .entries
             .iter()
@@ -174,9 +176,9 @@ impl Atlas {
         {
             let location = (e.pos, e.page);
             self.touch(location.1, location.0);
-            return location;
+            return Some(location);
         }
-        let (pos, page) = self.allocate(device, field.width, field.height);
+        let (pos, page) = self.allocate(device, field.width, field.height)?;
         self.touch(page, pos);
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -207,14 +209,21 @@ impl Atlas {
             page,
             pos,
         });
-        (pos, page)
+        Some((pos, page))
     }
+    /// Reserves a direct A8 mask's atlas space (its allocation moves later
+    /// SDF placements). A mask beyond a plot is never placed: Skia rejects
+    /// glyph images over `kSkSideTooBigForAtlas` to the path sub run, and
+    /// the scene draws such glyphs as paths.
     pub fn reserve_mask(
         &mut self,
         device: &wgpu::Device,
         mask: &Arc<pm_text::render::scene::GlyphMask>,
         paint: u64,
     ) {
+        if !Self::fits(mask.width, mask.height) {
+            return;
+        }
         if let Some(e) = self
             .masks
             .iter()
@@ -224,7 +233,9 @@ impl Atlas {
             self.touch(page, pos);
             return;
         }
-        let (pos, page) = self.allocate(device, mask.width, mask.height);
+        let Some((pos, page)) = self.allocate(device, mask.width, mask.height) else {
+            return;
+        };
         self.touch(page, pos);
         self.masks.push(MaskEntry {
             mask: mask.clone(),
@@ -245,7 +256,21 @@ impl Atlas {
             order.insert(0, plot as usize);
         }
     }
-    fn allocate(&mut self, device: &wgpu::Device, width: u32, height: u32) -> ([u32; 2], usize) {
+    /// Whether a `width` x `height` glyph fits one plot of a fresh page.
+    pub const fn fits(width: u32, height: u32) -> bool {
+        width <= PLOT && height <= PLOT
+    }
+    /// A plot position for the glyph; None (and no reset) when it is larger
+    /// than a plot, which no generation could hold.
+    fn allocate(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> Option<([u32; 2], usize)> {
+        if !Self::fits(width, height) {
+            return None;
+        }
         let mut found = None;
         for (i, page) in self.pages.iter_mut().enumerate() {
             if let Some(pos) = page.add(width, height) {
@@ -253,7 +278,7 @@ impl Atlas {
                 break;
             }
         }
-        found.unwrap_or_else(|| {
+        found.or_else(|| {
             if self.pages.len() == 4 {
                 // A fresh generation preserves pending command buffers: an
                 // upload never overwrites texels an encoded draw still reads.
@@ -264,11 +289,10 @@ impl Atlas {
             }
             let i = self.pages.len();
             let mut page = Page::new(device);
-            let pos = page
-                .add(width, height)
-                .expect("SDF glyph fits a Skia A8 plot");
+            // An empty plot holds any glyph up to its size.
+            let pos = page.add(width, height)?;
             self.pages.push(page);
-            (pos, i)
+            Some((pos, i))
         })
     }
     pub fn view(&self, index: usize) -> &wgpu::TextureView {
@@ -281,7 +305,55 @@ impl Atlas {
 
 #[cfg(test)]
 mod tests {
-    use super::Skyline;
+    use super::{Atlas, PLOT, Skyline};
+    use pm_text::render::{scene::GlyphMask, sdf::SdfGlyph};
+    use std::sync::Arc;
+
+    /// A glyph beyond a plot is never placed and never panics: Skia rejects
+    /// such glyph images from the atlas (`fitsInAtlasDirect`), and before a
+    /// mask reaches here the scene draws it as a path. It also never resets
+    /// the atlas generation, so placements of fitting glyphs are unchanged.
+    #[test]
+    fn glyphs_beyond_a_plot_are_never_placed() {
+        let gpu = pm_gpu::Gpu::new("atlas test").expect("a Metal device");
+        let (device, queue) = (&gpu.device, &gpu.queue);
+        let mut atlas = Atlas::new();
+        assert!(Atlas::fits(PLOT, PLOT) && !Atlas::fits(PLOT + 1, 1) && !Atlas::fits(1, PLOT + 1));
+        let mask = |width: u32, height: u32| {
+            Arc::new(GlyphMask {
+                width,
+                height,
+                left: 0,
+                top: 0,
+                coverage: vec![255; (width * height) as usize],
+            })
+        };
+        let field = |width: u32, height: u32| {
+            Arc::new(SdfGlyph {
+                left: 0,
+                top: 0,
+                width,
+                height,
+                field: vec![128; (width * height) as usize],
+            })
+        };
+        let small = field(40, 60);
+        let first = atlas.locate(device, queue, &small, 1).expect("placed");
+        // An 80-degree skew of 110 px text: a 624 x 114 px glyph image.
+        atlas.reserve_mask(device, &mask(624, 114), 0);
+        atlas.reserve_mask(device, &mask(64, 4096), 0);
+        assert!(
+            atlas.masks.is_empty(),
+            "oversized masks hold no atlas space"
+        );
+        assert!(atlas.locate(device, queue, &field(513, 20), 1).is_none());
+        assert_eq!(atlas.pages.len(), 1, "no generation reset");
+        assert_eq!(atlas.locate(device, queue, &small, 1), Some(first));
+        // A plot-sized glyph still fits (on a page of its own).
+        atlas.reserve_mask(device, &mask(PLOT, PLOT), 0);
+        assert_eq!(atlas.masks.len(), 1);
+    }
+
     #[test]
     fn synthetic_allocations_match_pinned_rectanizer_skyline() {
         // Independently emitted by tools/graphite-oracle/atlas.cpp.
