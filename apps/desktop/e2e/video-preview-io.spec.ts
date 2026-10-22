@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import path from 'node:path';
-import { expect, repoRoot, test } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 import { fixturePath } from './helpers/media';
 
 for (const alpha of [false, true]) {
@@ -18,11 +18,11 @@ for (const alpha of [false, true]) {
         frame[(y * 64 + x) * 4] = 255;
         frame[(y * 64 + x) * 4 + 3] = 255;
       }
-      const ffmpeg = createRequire(path.join(repoRoot, 'package.json'))('ffmpeg-static') as string | null;
-      if (!ffmpeg) throw new Error('FFmpeg fixture binary is unavailable');
-      execFileSync(ffmpeg, [
+      // Powermove's FFmpeg has no prores_ks: ProRes 4444 with alpha encodes
+      // through VideoToolbox (as import-prores-alpha.spec.ts does).
+      execFileSync(ffmpegBinary, [
         '-v', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', '64x64', '-r', '30', '-i', 'pipe:0',
-        '-c:v', 'prores_ks', '-profile:v', '4', '-pix_fmt', 'yuva444p10le', file,
+        '-c:v', 'prores_videotoolbox', '-allow_sw', '1', '-profile:v', '4444', '-pix_fmt', 'ayuv64le', file,
       ], { input: Buffer.concat(Array.from({ length: 30 }, () => frame)) });
     } else {
       // A valid MP4 free box makes the upload cross three 1 MiB chunks without
