@@ -37,11 +37,14 @@ pub enum VectorSource {
         scale: f64,
         crop: Option<[u32; 4]>,
     },
-    /// A level 1 editable-paths raster (`rasterPaths(PM, L, T, scale)`).
+    /// A level 1 editable-paths raster (`rasterPaths(PM, L, T, scale)`):
+    /// with `crop`, only that window of the bitmap (the part a frame
+    /// samples, `crate::compat_crop::paths_plan`).
     Paths {
         nodes: Vec<PathNode>,
         colors: Vec<PathColors>,
         scale: f64,
+        crop: Option<[u32; 4]>,
     },
     /// Level 2: a coverage scene in target pixels, rendered into `rect`.
     Scene {
@@ -99,6 +102,7 @@ impl VectorSource {
                 nodes,
                 colors,
                 scale,
+                crop,
             } => {
                 h.update(b"paths");
                 for (n, c) in nodes.iter().zip(colors) {
@@ -109,6 +113,12 @@ impl VectorSource {
                     h.update([0]);
                 }
                 h.update(scale.to_bits().to_le_bytes());
+                if let Some(c) = crop {
+                    h.update(b"crop");
+                    for v in c {
+                        h.update(v.to_le_bytes());
+                    }
+                }
             }
             VectorSource::Scene { scene, rect } => {
                 h.update(b"scene");
@@ -243,6 +253,7 @@ pub fn plan_shape<'d>(
     world: &Mat2d,
     target: PixelRect,
     crop: Option<pm_protocol::common::PixelRect>,
+    paths_view: Option<([f64; 6], f64, f64)>,
 ) -> JsResult<Option<VectorQuad>> {
     let has_paths = pm_eval::node::array(pm_eval::node::member(
         pm_eval::node::member(Some(layer), "d"),
@@ -270,17 +281,40 @@ pub fn plan_shape<'d>(
     if has_paths {
         let (nodes, colors, layer_paths) = paths(scope, layer, time)?;
         let b = layer_paths.bounds;
+        // Only the window a frame samples of a large paths bitmap (the
+        // engine's own draw; `crate::compat_crop::paths_plan`).
+        let raster = layer_paths.raster(scale);
+        let crop = match paths_view.map(|(m, vw, vh)| {
+            crate::compat_crop::paths_plan(b.x0, b.y0, b.w, b.h, raster.width, raster.height, &m, vw, vh)
+        }) {
+            Some(crate::compat_crop::CropPlan::Outside) => return Ok(None),
+            Some(crate::compat_crop::CropPlan::Crop(c)) if c.width > 0 && c.height > 0 => Some(c),
+            _ => None,
+        };
+        let uv = match crop {
+            Some(c) => {
+                let (cw, ch) = (f64::from(c.width), f64::from(c.height));
+                [
+                    -f64::from(c.x) / cw,
+                    -f64::from(c.y) / ch,
+                    raster.width / cw,
+                    raster.height / ch,
+                ]
+            }
+            None => [0.0, 0.0, 1.0, 1.0],
+        };
         return Ok(Some(VectorQuad::Layer {
             source: VectorSource::Paths {
                 nodes,
                 colors,
                 scale,
+                crop: crop.map(|c| [c.x, c.y, c.width, c.height]),
             },
             w: b.w,
             h: b.h,
             ax: -b.x0,
             ay: -b.y0,
-            uv: [0.0, 0.0, 1.0, 1.0],
+            uv,
         }));
     }
     let (content, colors) = shape_content(d);

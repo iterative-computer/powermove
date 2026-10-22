@@ -170,9 +170,28 @@ pub struct PathColors {
 
 /// `rasterPaths(PM, layer, time, scale)`.
 pub fn raster_paths(layer: &PathLayer, colors: &[PathColors], scale: f64) -> Result<(Bitmap, PathRaster), RasterError> {
+    raster_paths_window(layer, colors, scale, None)
+}
+
+/// [`raster_paths`] for only the window `[x, y, width, height]` of the
+/// bitmap: a canvas of the window's size translated by `(-x, -y)` before
+/// the raster's own transform (the engine draws the part of a large paths
+/// raster a frame samples; its pixels are the whole bitmap's there).
+pub fn raster_paths_window(
+    layer: &PathLayer,
+    colors: &[PathColors],
+    scale: f64,
+    crop: Option<[u32; 4]>,
+) -> Result<(Bitmap, PathRaster), RasterError> {
     let raster = layer.raster(scale);
-    let (width, height) = (raster.width as u32, raster.height as u32);
+    let (width, height) = match crop {
+        Some([_, _, w, h]) => (w, h),
+        None => (raster.width as u32, raster.height as u32),
+    };
     let mut c = Context::new(width.max(1), height.max(1));
+    if let Some([x, y, _, _]) = crop {
+        c.translate(-f64::from(x), -f64::from(y));
+    }
     c.scale(raster.density, raster.density);
     c.translate(-layer.bounds.x0, -layer.bounds.y0);
     let empty = PathColors::default();

@@ -854,3 +854,41 @@ fn level1_rasters_drawn_ahead_on_workers_are_the_rasters_drawn_in_order() {
     }
     assert!(drawn_ahead >= 40, "rasters drawn ahead: {drawn_ahead}");
 }
+
+/// Bigrender round 2: a large paths layer's own raster is drawn only over
+/// the window a frame samples (today draws the whole bitmap; the window's
+/// pixels are the bitmap's there), in viewer frames and exports alike: the
+/// frame is the same pixels as with the whole bitmap.
+#[test]
+fn a_large_paths_layer_draws_only_the_window_a_frame_samples() {
+    let mut big = path_layer("big", 128.0, 128.0, 25.0);
+    // Scale the paths up so the bitmap is far larger than the frame.
+    set(&mut big, "scale.x", json!(1400));
+    set(&mut big, "scale.y", json!(1100));
+    let doc = load(&project(256, 256, 2.0, no_fill(), vec![big]));
+    for (export, region) in [
+        (true, None),
+        (false, Some(pm_protocol::common::PixelRect { x: 0, y: 0, width: 256, height: 256 })),
+        (false, Some(pm_protocol::common::PixelRect { x: 100, y: 40, width: 96, height: 128 })),
+    ] {
+        let mut request = RenderRequest::at_scale(Size::new(256, 256), 1.0, Precision::Float32);
+        request.export = export;
+        request.region = region;
+        let draw = |r: &mut Renderer| {
+            let frame = r
+                .render(&doc, "Ptest-root", ticks(0.7), &request, &MapResolver::default())
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            (r.read_rgba(&frame).unwrap(), r.memory().vector_cache)
+        };
+        let mut clipped = Renderer::headless().unwrap();
+        let (a, clipped_bytes) = draw(&mut clipped);
+        let mut whole = Renderer::headless().unwrap();
+        whole.set_shape_clipping(false);
+        let (b, whole_bytes) = draw(&mut whole);
+        let max = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+        assert_eq!(max, 0.0, "export {export} {region:?}");
+        assert!(a.iter().any(|v| *v > 0.0));
+        assert!(clipped_bytes * 2 < whole_bytes, "{clipped_bytes} vs {whole_bytes}");
+    }
+}

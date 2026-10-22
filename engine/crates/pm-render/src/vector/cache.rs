@@ -19,7 +19,6 @@
 use std::collections::HashMap;
 
 use pm_protocol::color::Precision;
-use pm_vector::canvas2d::shape::raster_paths;
 use pm_vector::gpu::GpuCoverage;
 use pm_vector::path::PathLayer;
 use pm_vector::render::cpu::render_coverage;
@@ -114,9 +113,11 @@ fn raster_level1(source: &VectorSource) -> Result<(u32, u32, Vec<u8>), String> {
             nodes,
             colors,
             scale,
+            crop,
         } => {
             let layer = PathLayer::new(nodes);
-            let (b, _) = raster_paths(&layer, colors, *scale).map_err(|e| e.to_string())?;
+            let (b, _) = pm_vector::canvas2d::shape::raster_paths_window(&layer, colors, *scale, *crop)
+                .map_err(|e| e.to_string())?;
             Ok((b.width, b.height, b.rgba))
         }
         _ => Err("not a level 1 raster".into()),

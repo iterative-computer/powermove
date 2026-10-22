@@ -1272,7 +1272,7 @@ fn native_content_quad<'d>(
         "shape" => {
             if crate::vector::level2(layer) && scope.is_3d_layer(layer)? {
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
-                    crate::vector::plan_shape(scope, layer, &d, time, world, target, None)
+                    crate::vector::plan_shape(scope, layer, &d, time, world, target, None, None)
                 };
                 return local_level2(
                     scope,
@@ -1299,17 +1299,25 @@ fn native_content_quad<'d>(
             for group in scope.group_ancestors(layer)? {
                 padded |= scope.has_renderable_effects(group, time)?;
             }
-            let crop = if crate::vector::level2(layer) || padded {
-                None
-            } else {
+            let own = !(crate::vector::level2(layer) || padded);
+            let crop = if own {
                 let raster_scale = crate::vector::continuous_raster_scale(&world);
                 match preview_crop(scope, b, layer, "shape", time, scale, raster_scale, false)? {
                     crate::compat_crop::CropPlan::Outside => return Ok(None),
                     crate::compat_crop::CropPlan::Crop(window) => Some(window),
                     crate::compat_crop::CropPlan::Full | crate::compat_crop::CropPlan::Solid => None,
                 }
+            } else {
+                None
             };
-            let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target, crop)?;
+            // A paths layer's own raster: the window a frame samples.
+            let paths_view = if own {
+                paths_clip_view(scope, b, layer, time, &world)?
+            } else {
+                None
+            };
+            let quad =
+                crate::vector::plan_shape(scope, layer, &d, time, &world, target, crop, paths_view)?;
             Ok(quad.map(device_quad))
         }
         "solid" => {
@@ -1821,6 +1829,43 @@ fn compat_quad<'d>(
             Ok(Some(None))
         }
     }
+}
+
+/// The view a paths layer's own raster is clipped to
+/// (`BuildOptions::shape_window`): the visible matrix and the window's size,
+/// under the conditions of today's preview clipping other than its paths
+/// rule (no masks, track matte, transitions or renderable effects, 2D, in
+/// the open root composition outside any nested composition).
+fn paths_clip_view<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    world: &Mat2d,
+) -> JsResult<Option<([f64; 6], f64, f64)>> {
+    let Some(window) = b.shape_window else {
+        return Ok(None);
+    };
+    if !(scope.comp.at_root() || scope.comp.is_open_canonical()) || b.precomp_depth > 0 {
+        return Ok(None);
+    }
+    let masked = node::member(Some(layer), "masks").is_some_and(|v| match v.kind() {
+        pm_model::NodeKind::Array(items) => !items.is_empty(),
+        _ => false,
+    });
+    if masked
+        || node::truthy(node::member(Some(layer), "matteSource"))
+        || node::truthy(node::member(Some(layer), "transitionIn"))
+        || node::truthy(node::member(Some(layer), "transitionOut"))
+        || scope.has_renderable_effects(layer, time)?
+        || scope.is_3d_layer(layer)?
+    {
+        return Ok(None);
+    }
+    let mut visible = *world;
+    visible[4] -= window.x;
+    visible[5] -= window.y;
+    Ok(Some((visible, window.width, window.height)))
 }
 
 /// Today's preview source clipping of a layer `PM.raster` draws

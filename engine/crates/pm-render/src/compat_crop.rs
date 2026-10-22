@@ -227,6 +227,49 @@ pub fn shape_plan(d: &ShapeFacts, scale: f64, m: &[f64; 6], width: f64, height: 
     window(left, top, right - left, bottom - top).map_or(CropPlan::Full, CropPlan::Crop)
 }
 
+/// The window of a paths raster a `width` × `height` viewport samples
+/// (engine-internal: today draws a paths layer's whole raster, whose pixels
+/// a window keeps wherever the frame samples it). The quad covers layer
+/// units `(x0, y0)` to `(x0 + w, y0 + h)` with the `bw` × `bh` bitmap
+/// stretched over it; `m` maps layer units to viewport pixels. Today's two
+/// pixel margin and bucket steps keep sampling inside the window.
+#[allow(clippy::too_many_arguments)]
+pub fn paths_plan(
+    x0: f64,
+    y0: f64,
+    w: f64,
+    h: f64,
+    bw: f64,
+    bh: f64,
+    m: &[f64; 6],
+    width: f64,
+    height: f64,
+) -> CropPlan {
+    if !(w > 0.0 && h > 0.0 && bw >= 1.0 && bh >= 1.0) {
+        return CropPlan::Full;
+    }
+    let Some(points) = corners(m, width, height) else {
+        return CropPlan::Full;
+    };
+    let (sx, sy) = (bw / w, bh / h);
+    let texel = points.map(|(x, y)| ((x - x0) * sx, (y - y0) * sy));
+    let (tx0, ty0, tx1, ty1) = bounds(&texel);
+    if tx1 < 0.0 || ty1 < 0.0 || tx0 > bw || ty0 > bh {
+        return CropPlan::Outside;
+    }
+    let left = crate::js::max(0.0, ((tx0 - 2.0) / STEP).floor() * STEP);
+    let top = crate::js::max(0.0, ((ty0 - 2.0) / STEP).floor() * STEP);
+    let right = crate::js::min(bw, ((tx1 + 2.0) / STEP).ceil() * STEP);
+    let bottom = crate::js::min(bh, ((ty1 + 2.0) / STEP).ceil() * STEP);
+    if right <= left || bottom <= top {
+        return CropPlan::Outside;
+    }
+    if left == 0.0 && top == 0.0 && right == bw && bottom == bh {
+        return CropPlan::Full;
+    }
+    window(left, top, right - left, bottom - top).map_or(CropPlan::Full, CropPlan::Crop)
+}
+
 fn window(x: f64, y: f64, width: f64, height: f64) -> Option<PixelRect> {
     let ok = |v: f64| v.is_finite() && v >= 0.0 && v <= f64::from(u32::MAX);
     if !(ok(x) && ok(y) && ok(width) && ok(height)) || width < 1.0 || height < 1.0 {
