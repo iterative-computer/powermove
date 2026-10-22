@@ -504,6 +504,7 @@ describe('compatibility answers during playback', () => {
     const { t, session, asked, state } = rig(true);
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      t.presentedWhilePlaying(); // The bounded first turn leaves the tail for the next turn.
       expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => i * frame));
       state.time = frame;
       t.presentedWhilePlaying();
@@ -522,10 +523,12 @@ describe('compatibility answers during playback', () => {
     const { t, session, asked, state } = rig(true);
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      t.presentedWhilePlaying(); // The bounded first turn leaves the tail for the next turn.
       const before = asked.length;
       state.time = 30 * frame;
       // The old engine request can arrive after the audio clock moved on.
       t.receiveCompat({ compat: 'needs', needs: [need(frame)] }, session);
+      t.presentedWhilePlaying();
       expect(asked.slice(before)).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => (30 + i) * frame));
       expect(t.lookaheadStats.skipped).toBe(1);
       state.time = 40 * frame;
@@ -574,7 +577,7 @@ describe('compatibility answers during playback', () => {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
       expect(pending).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
-      await vi.advanceTimersByTimeAsync(51);
+      await vi.advanceTimersByTimeAsync(151);
       pending.forEach(resolve => resolve());
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual([0]);
@@ -608,7 +611,7 @@ describe('compatibility answers during playback', () => {
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 
-  it('prepares base pixels past the answer horizon only once that horizon is answered or in flight, two at a time', async () => {
+  it('prepares base pixels past the answer horizon only once that horizon is answered or in flight, within the speculative concurrency bound', async () => {
     vi.useFakeTimers();
     const { t, session, state } = rig(true);
     const prepared: number[] = [];
@@ -621,15 +624,15 @@ describe('compatibility answers during playback', () => {
       // The answer horizon first: its two preparations, nothing speculative.
       expect(prepared).toEqual([0, frame]);
       while (prepared.length < COMPAT_LOOKAHEAD + 1) { pending.shift()!(); await vi.advanceTimersByTimeAsync(0); }
-      // The last two answer frames are in flight: speculation may start, two at a time.
+      // The last answer frames are in flight: speculation may use its bounded spare slot.
       expect(prepared.slice(0, COMPAT_LOOKAHEAD + 1)).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => i * frame));
-      expect(prepared.slice(COMPAT_LOOKAHEAD + 1)).toEqual([COMPAT_LOOKAHEAD + 1, COMPAT_LOOKAHEAD + 2].map(n => n * frame));
+      expect(prepared.slice(COMPAT_LOOKAHEAD + 1)).toEqual(Array.from({ length: COMPAT_PREFETCH_IN_FLIGHT }, (_, i) => (COMPAT_LOOKAHEAD + 1 + i) * frame));
       expect(t.lookaheadStats.maxPrefetchInFlight).toBe(COMPAT_PREFETCH_IN_FLIGHT);
       while (pending.length) { pending.shift()!(); await vi.advanceTimersByTimeAsync(0); }
       // Never past the prefetch horizon, and each frame once.
       expect(Math.max(...prepared)).toBe(COMPAT_PREFETCH * frame);
       expect(new Set(prepared.filter(time => time > COMPAT_LOOKAHEAD * frame)).size).toBe(prepared.filter(time => time > COMPAT_LOOKAHEAD * frame).length);
-      // Speculative preparations never run the wrapper.
+      // Speculative results are never posted past the answer horizon.
       expect(Math.max(...answered)).toBe(COMPAT_LOOKAHEAD * frame);
       // The clock moves on: the answer horizon catches up through the prepared frames.
       state.time = 4 * frame;
@@ -658,6 +661,7 @@ describe('compatibility answers during playback', () => {
     try {
       state.time = 20 * frame;
       t.receiveCompat({ compat: 'needs', needs: [{ ...need(5 * frame), composition: 'nested' }] }, session);
+      t.presentedWhilePlaying();
       expect(asked.at(-1)).toBe((5 + COMPAT_LOOKAHEAD) * frame);
       state.time = 30 * frame;
       t.presentedWhilePlaying();
@@ -670,12 +674,15 @@ describe('compatibility answers during playback', () => {
     try {
       state.time = 20 * frame; state.rate = -1;
       t.receiveCompat({ compat: 'needs', needs: [need(state.time)] }, session);
+      t.presentedWhilePlaying();
       expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => (20 - i) * frame));
       state.time = 40 * frame;
+      t.presentedWhilePlaying();
       t.presentedWhilePlaying();
       expect(asked.at(-1)).toBe((40 - COMPAT_LOOKAHEAD) * frame);
       const before = asked.length;
       state.revision++;
+      t.presentedWhilePlaying();
       t.presentedWhilePlaying();
       expect(asked.length - before).toBe(COMPAT_LOOKAHEAD + 1);
     } finally { t.dispose(); }
@@ -715,6 +722,7 @@ describe('compatibility answers during playback', () => {
       expect(asked).toEqual([0]);
       state.time = 12 * frame; state.playing = true;
       t.playbackStarted();
+      t.presentedWhilePlaying();
       expect(asked.slice(1)).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => (12 + i) * frame));
     } finally { t.dispose(); }
   });

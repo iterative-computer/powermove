@@ -215,26 +215,21 @@ export type CompatAnswerResult =
 
 /** Answers the engine's needs for one source (the raster override's producer). */
 /** Frames of compatibility answers kept ahead of the clock during playback. */
-export const COMPAT_LOOKAHEAD = 6;
+export const COMPAT_LOOKAHEAD = 18;
+/** A bounded paused prefill; never an ongoing paused timer. */
+export const COMPAT_WARM_MS = 150;
 /** Main-thread time one lookahead call may take (ms); the rest waits for the next frame. */
 const LOOKAHEAD_BUDGET_MS = 6;
 const LOOKAHEAD_MAX_ANSWERS = 16;
 const LOOKAHEAD_POLL_MS = 4;
 /** Base-raster preparations for the answer horizon in flight at once. */
 export const COMPAT_PREPARE_IN_FLIGHT = 2;
-/** Frames ahead of the clock whose base pixels are prepared speculatively,
- *  without running the wrapper, once every layer's answer horizon is
- *  answered or in flight. A base that changes every frame (an animated
- *  size, a keyed text) costs one asynchronous engine raster per frame, and
- *  under CPU load single rasters take up to five frames: the extra frames
- *  of prepared pixels absorb those stalls instead of the presented frames.
- *  Measured under load (docs/engine/extensions-compat.md): 15 frames held
- *  an animated size to today's cadence in 8 of 10 runs, 24 in 10 of 10. A
- *  deeper answer horizon (10) instead cost the typewriter frames: it runs
- *  the wrapper, and its synchronous typed-prefix rasters, earlier. */
+/** Frames of asynchronously prepared compatibility work ahead of the clock.
+ *  The producer resolves every base dependency before retaining its result;
+ *  only the shorter answer horizon is uploaded to the engine. */
 export const COMPAT_PREFETCH = 24;
 /** Speculative base preparations in flight at once (beyond the answer horizon's). */
-export const COMPAT_PREFETCH_IN_FLIGHT = 2;
+export const COMPAT_PREFETCH_IN_FLIGHT = 1;
 
 type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null };
 
@@ -449,7 +444,7 @@ export class EngineRenderTransport {
   }
 
   /** Clock-driven replenishment also runs when no frame was presented. */
-  presentedWhilePlaying(warm = false, warmUntil = performance.now() + 50): void {
+  presentedWhilePlaying(warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
     if (warm && !this.options.playing?.() && performance.now() >= warmUntil) return;
     if ((!this.options.playing?.() && !warm) || this.pumpingAhead) return;
     this.pumpingAhead = true;
@@ -510,7 +505,7 @@ export class EngineRenderTransport {
           }
         }
       }
-      // Speculative base pixels past the answer horizon, never ahead of it:
+      // Speculative preparation past the answer horizon, never ahead of it:
       // only while no layer's nearer frame is still waiting to start.
       if (pending === 0 && clock) {
         for (let offset = COMPAT_LOOKAHEAD + 1; offset <= COMPAT_PREFETCH && this.prefetchInFlight < COMPAT_PREFETCH_IN_FLIGHT; offset++) {
@@ -535,7 +530,7 @@ export class EngineRenderTransport {
     this.presentedWhilePlaying();
   }
 
-  /** Prepares one frame's base pixels ahead; the answer horizon reaching
+  /** Prepares one frame's compatibility work ahead; the answer horizon reaching
    *  that frame finds them ready (raster-compat `prepare`). A failure is
    *  reported when that frame's own preparation repeats it. */
   private prefetchAhead(need: CompatNeed, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>): void {

@@ -72,25 +72,23 @@ describe('the raster override producer', () => {
       await compat.prepare(need('title', time), 4);
       expect(compat.answer(need('title', time), 4, { prepared: true })).toMatchObject({ kind: 'raster', key: `typed:${time}` });
     }
-    // The source text was prepared once; the unchanged prefix 'He' was drawn once.
-    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
-    expect(engineRaster).toHaveBeenCalledTimes(1);
-    expect(engineRaster.mock.calls[0]![0]).toMatchObject({ d: { text: 'He' } });
-    // A new prefix is new content: it is drawn, the source still is not.
+    // Both source and detached prefix are asynchronous. The prefix is
+    // reused only while its content is identical, then fetched anew.
+    expect(engineRasterAsync).toHaveBeenCalledTimes(2);
+    expect(engineRaster).not.toHaveBeenCalled();
+    expect(engineRasterAsync.mock.calls[1]![0]).toMatchObject({ d: { text: 'He' } });
     await compat.prepare(need('title', 1.2), 4);
     compat.answer(need('title', 1.2), 4, { prepared: true });
-    expect(engineRaster).toHaveBeenCalledTimes(2);
-    expect(engineRaster.mock.calls[1]![0]).toMatchObject({ d: { text: 'Hel' } });
-    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
-    expect(compat.stats).toMatchObject({ syncLoads: 2, asyncLoads: 1 });
-    // A new revision draws everything again.
+    expect(engineRasterAsync).toHaveBeenCalledTimes(3);
+    expect(engineRasterAsync.mock.calls[2]![0]).toMatchObject({ d: { text: 'Hel' } });
+    expect(compat.stats).toMatchObject({ syncLoads: 0, asyncLoads: 3 });
     await compat.prepare(need('title', 1.4), 5);
     compat.answer(need('title', 1.4), 5, { prepared: true });
-    expect(engineRasterAsync).toHaveBeenCalledTimes(2);
-    expect(engineRaster).toHaveBeenCalledTimes(3);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(5);
+    expect(engineRaster).not.toHaveBeenCalled();
   });
 
-  it('does not prepare a layer the chain passed through untouched, and prepares it again once the chain reads it', async () => {
+  it('discovers a newly read base asynchronously even after the chain passed it through', async () => {
     const { services, compat, engineRaster, engineRasterAsync, need } = setup(true);
     const original = services.get<any>('raster');
     let tint = false;
@@ -98,23 +96,68 @@ describe('the raster override producer', () => {
       const base = original(layer, ...rest);
       return tint ? { ...base, cv: base.cv, key: 'tinted' } : base;
     });
-    await compat.prepare(need('box', 0.2), 4);
-    expect(compat.answer(need('box', 0.2), 4, { prepared: true })).toEqual({ kind: 'native' });
-    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
-    // Passed through: the next frames prepare nothing.
-    await compat.prepare(need('box', 0.4), 4);
-    expect(compat.answer(need('box', 0.4), 4, { prepared: true })).toEqual({ kind: 'native' });
-    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
-    expect(compat.stats.passThroughSkips).toBe(1);
-    // The wrapper starts reading it: one synchronous base, then prepared again.
+    for (const time of [0.2, 0.4]) {
+      await compat.prepare(need('box', time), 4);
+      expect(compat.answer(need('box', time), 4, { prepared: true })).toEqual({ kind: 'native' });
+    }
+    expect(engineRasterAsync).not.toHaveBeenCalled();
     tint = true;
     await compat.prepare(need('box', 0.6), 4);
     expect(compat.answer(need('box', 0.6), 4, { prepared: true })).toMatchObject({ kind: 'raster', key: 'tinted' });
-    expect(engineRaster).toHaveBeenCalledTimes(1);
     await compat.prepare(need('box', 0.8), 4);
     expect(compat.answer(need('box', 0.8), 4, { prepared: true })).toMatchObject({ kind: 'raster', key: 'tinted' });
     expect(engineRasterAsync).toHaveBeenCalledTimes(2);
-    expect(engineRaster).toHaveBeenCalledTimes(1);
+    expect(engineRaster).not.toHaveBeenCalled();
+  });
+
+  it('never publishes a result from a wrapper that caught a suspended base read', async () => {
+    const { services, compat, engineRaster, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, ...rest: any[]) => {
+      try { return { ...original(layer, ...rest), key: 'real-pixels' }; }
+      catch { return { cv: { width: 1, height: 1 }, key: 'caught-missing' }; }
+    });
+    await compat.prepare(need('title'), 4);
+    expect(compat.answer(need('title'), 4, { prepared: true })).toMatchObject({ key: 'real-pixels', width: 96 });
+    expect(engineRaster).not.toHaveBeenCalled();
+  });
+
+  it('rejects an incomplete result a wrapper cached while catching a suspended read', async () => {
+    const { services, compat, need } = setup(true);
+    const original = services.get<any>('raster');
+    let cached: any;
+    services.register('raster', (layer: any, ...rest: any[]) => {
+      if (cached) return cached;
+      try { return { ...original(layer, ...rest), key: 'real' }; }
+      catch { return cached = { cv: { width: 1, height: 1 }, key: 'incomplete' }; }
+    });
+    await expect(compat.prepare(need('title'), 4)).rejects.toThrow('cached a result before its base pixels');
+    expect(compat.answer(need('title'), 4, { prepared: true })).toBeNull();
+  });
+
+  it('lets a ready sibling finish while another detached base is slow, and runs a completed wrapper only once', async () => {
+    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true);
+    const original = services.get<any>('raster');
+    const finished = vi.fn();
+    services.register('raster', (layer: any, scale: number, time: number) => {
+      const detached = { ...layer, id: `${layer.id}:copy`, d: { ...layer.d, time } };
+      const result = { ...original(detached, scale, time), key: `done:${layer.id}` };
+      finished(layer.id);
+      return result;
+    });
+    let resolve!: (surface: any) => void;
+    const render = engineRasterAsync.getMockImplementation()!;
+    engineRasterAsync.mockImplementation((layer, scale, time) => layer.id === 'title:copy' ? new Promise(done => { resolve = done; }) : render(layer, scale, time));
+    const slow = compat.prepare(need('title'), 4);
+    await Promise.resolve();
+    await compat.prepare(need('box'), 4);
+    expect(compat.answer(need('box'), 4, { prepared: true })).toMatchObject({ key: 'done:box' });
+    expect(finished.mock.calls).toEqual([['box']]);
+    resolve(await render(text, 2, .5));
+    await slow;
+    expect(compat.answer(need('title'), 4, { prepared: true })).toMatchObject({ key: 'done:title' });
+    expect(finished.mock.calls).toEqual([['box'], ['title']]);
+    expect(engineRaster).not.toHaveBeenCalled();
   });
 
   it('prepares fresh pixels when evaluated content changes with time', async () => {
@@ -164,14 +207,14 @@ describe('the raster override producer', () => {
     const original = services.get<any>('raster');
     services.register('raster', (layer: any, ...rest: any[]) => ({ ...original(layer, ...rest), key: `copy:${layer.id}` }));
     await compat.prepare(need('title', 0.5, 2), 4);
-    compat.answer(need('box', 0.5, 2), 4, { prepared: true });
-    compat.answer(need('title', 1, 2), 4, { prepared: true });
-    compat.answer({ ...need('title', 0.5, 2), crop: { x: 1, y: 2, width: 3, height: 4 } }, 4, { prepared: true });
-    expect(engineRaster).toHaveBeenCalledTimes(3);
+    expect(compat.answer(need('box', 0.5, 2), 4, { prepared: true })).toBeNull();
+    expect(compat.answer(need('title', 1, 2), 4, { prepared: true })).toBeNull();
+    expect(compat.answer({ ...need('title', 0.5, 2), crop: { x: 1, y: 2, width: 3, height: 4 } }, 4, { prepared: true })).toBeNull();
+    expect(engineRaster).not.toHaveBeenCalled();
     services.register('raster', (layer: any, ...rest: any[]) => ({ ...original({ ...layer }, ...rest), key: 'detached' }));
     await compat.prepare(need('title', 0.5, 2), 4);
     compat.answer(need('title', 0.5, 2), 4, { prepared: true });
-    expect(engineRaster).toHaveBeenCalledTimes(4);
+    expect(engineRaster).not.toHaveBeenCalled();
   });
 
   it('drops prepared samples after reset and when the document revision changes', async () => {
@@ -181,11 +224,10 @@ describe('the raster override producer', () => {
     const request = need('title');
     await compat.prepare(request, 4);
     compat.reset();
-    compat.answer(request, 4, { prepared: true });
-    expect(engineRaster).toHaveBeenCalledTimes(1);
+    expect(compat.answer(request, 4, { prepared: true })).toBeNull();
     await compat.prepare(request, 4);
-    compat.answer(request, 5, { prepared: true });
-    expect(engineRaster).toHaveBeenCalledTimes(2);
+    expect(compat.answer(request, 5, { prepared: true })).toBeNull();
+    expect(engineRaster).not.toHaveBeenCalled();
   });
 
   it('ignores an asynchronous surface that finishes after reset', async () => {
@@ -199,8 +241,8 @@ describe('the raster override producer', () => {
     compat.reset();
     resolve({ cv: { width: 96, height: 48 }, w: 48, h: 24, anchorX: 4, anchorY: 18 });
     await pending;
-    compat.answer(need('title'), 4, { prepared: true });
-    expect(engineRaster).toHaveBeenCalledTimes(1);
+    expect(compat.answer(need('title'), 4, { prepared: true })).toBeNull();
+    expect(engineRaster).not.toHaveBeenCalled();
   });
 
   it('answers native for a wrapper that passes a layer through, without drawing the base', () => {
