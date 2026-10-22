@@ -166,9 +166,18 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
       if (readback.png) await testInfo.attach('Native canvas copy', { body: Buffer.from(readback.png.split(',')[1]!, 'base64'), contentType: 'image/png' });
       else await testInfo.attach('Native canvas copy error', { body: readback.error ?? 'No readback', contentType: 'text/plain' });
     }
+    /* Compare two fresh drawings of the overlay. Chromium can move a 2D canvas
+       that is read back (the samples above) to another rasterizer, and a
+       presented engine frame redraws the overlay, so an old drawing and a
+       new one of the same state can differ in edge coverage alone. */
+    const redrawOverlay = () => page.evaluate(() => new Promise<void>(resolve => {
+      (window as any).PM.bus.emit('overlay');
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    }));
     // The overlay's own pixels, kept beside any difference the hashes report.
     const overlayPng = () => page.evaluate(() => ((window as any).PM.panelInst.viewer.el as HTMLElement).querySelector<HTMLCanvasElement>('#overlay')!.toDataURL());
     const attachOverlay = async (name: string) => testInfo.attach(name, { body: Buffer.from((await overlayPng()).split(',')[1]!, 'base64'), contentType: 'image/png' });
+    await redrawOverlay();
     const before = await live();
     await attachOverlay('Live overlay before the Library');
     expect(before.zoom).toBe(ZOOM);
@@ -186,6 +195,7 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
     await page.evaluate(() => document.fonts.ready);
     await expect.poll(stableViewer, { timeout: 10_000 }).toBe(true);
     // The live viewer kept its zoom, pan and overlay while the Library opened.
+    await redrawOverlay();
     const after = await live();
     await attachOverlay('Live overlay with the Library open');
     expect(after).toEqual(before);
