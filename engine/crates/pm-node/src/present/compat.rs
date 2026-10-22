@@ -53,7 +53,7 @@ pub fn needs_event(
 }
 
 /// Most bytes of assembled and partial rasters one engine keeps.
-pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_BYTES: u64 = 192 * 1024 * 1024;
 /// Most rasters being assembled at once (bands still missing).
 pub const MAX_PARTIAL: usize = 32;
 

@@ -141,6 +141,21 @@ pub struct Rendered {
     pub stages: FrameStages,
 }
 
+/// Bytes the renderer's frame caches hold (`Renderer::memory`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RendererMemory {
+    /// Shape, path and SVG rasters (GPU).
+    pub vector_cache: u64,
+    /// Intermediate targets and level 2 mip pyramids (GPU).
+    pub pooled: u64,
+    /// Image and decoded video textures (GPU).
+    pub media_textures: u64,
+    /// Prepared keyframe tracks (CPU, estimated), and reads they served.
+    pub keyframe_tracks: u64,
+    pub keyframe_track_hits: u64,
+}
+
 /// The CPU stages of one frame on the thread that renders it (µs): the
 /// per-frame breakdown the presenter reports (docs/engine/host-processes.md,
 /// "Large projects, rendering").
@@ -401,6 +416,18 @@ impl Renderer {
     /// either way).
     pub fn set_vector_prefetch(&mut self, on: bool) {
         self.vector_prefetch = on;
+    }
+
+    /// What the renderer's frame caches hold now (the presenter reports it).
+    pub fn memory(&self) -> RendererMemory {
+        let (hits, _, _) = self.evaluator.track_cache_stats();
+        RendererMemory {
+            vector_cache: self.vector.bytes(),
+            pooled: self.pooled_bytes(),
+            media_textures: self.media.texture_bytes(),
+            keyframe_tracks: self.evaluator.track_cache_bytes() as u64,
+            keyframe_track_hits: hits,
+        }
     }
 
     /// The stages of the last frame planned (finished or not).

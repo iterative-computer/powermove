@@ -471,6 +471,8 @@ pub struct Stats {
     /// Where viewer frames' render-thread time went, summed over frames
     /// (docs/engine/host-processes.md, "Large projects, rendering").
     pub stages: StageTotals,
+    /// What the viewer renderer's frame caches held after the last frame.
+    pub memory: pm_render::RendererMemory,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -3398,6 +3400,11 @@ impl Thread {
             );
             composer.renderer().set_compat_rasters(None);
             let stages = composer.renderer().last_stages();
+            let memory = composer.renderer().memory();
+            self.stats
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .memory = memory;
             depth_surface = depth_slot.map(|(index, generation, _)| (index, generation));
             composer.set_blender(pm_render::blender::BlenderRender::Native);
             // What the paused frame lacked (nothing in a draft shading); a

@@ -674,6 +674,11 @@ impl Evaluator {
         (self.tracks.hits, self.tracks.prepared, self.tracks.len())
     }
 
+    /// Estimated bytes of the prepared-track cache.
+    pub fn track_cache_bytes(&self) -> usize {
+        self.tracks.bytes()
+    }
+
     /// `PM.ev(L, key, T)`: one channel of `L.p` at composition time `T`.
     pub fn ev(
         &mut self,

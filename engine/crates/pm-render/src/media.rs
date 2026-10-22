@@ -1427,6 +1427,11 @@ impl MediaCache {
         Ok(self.source(path)?.color)
     }
 
+    /// Bytes of converted textures held (images and decoded frames).
+    pub fn texture_bytes(&self) -> u64 {
+        self.bytes
+    }
+
     /// Bytes of converted textures held.
     fn recount(&mut self) {
         self.bytes = self
