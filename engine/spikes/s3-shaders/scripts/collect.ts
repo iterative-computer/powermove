@@ -407,7 +407,7 @@ for (const dir of (await readdir(join(REPO, 'apps/cloud/samples'))).sort()) {
 }
 
 /* ── 6. e2e and test fixtures ──────────────────────────────────────── */
-for (const file of ['e2e/fixtures/typewriter-effect/index.ts', 'test/fixtures/sandboxed-ext/index.ts']) {
+for (const file of ['e2e/fixtures/compat-typewriter/index.ts', 'test/fixtures/sandboxed-ext/index.ts']) {
   addRegistered('e2e', slug(file), await activateModule(join(APP, file)), `apps/desktop/${file}`);
 }
 for (const file of (await readdir(join(APP, 'e2e'))).filter((f) => f.endsWith('.spec.ts') && !f.includes(' 2.')).sort()) {

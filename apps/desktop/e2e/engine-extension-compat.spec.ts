@@ -3,7 +3,7 @@
  * 24; docs/engine/extensions-compat.md). Extensions written against today's
  * API keep working unchanged on the engine:
  *
- * - The typewriter fixture (e2e/fixtures/typewriter-effect), an apiVersion
+ * - The typewriter fixture (e2e/fixtures/compat-typewriter), an apiVersion
  *   1 extension that wraps the `raster` service: its typed prefix and cursor
  *   are what the engine draws in snapshots and viewer frames, at the layer's
  *   own time and density (a scaled, animated layer), next to an unaffected
@@ -71,7 +71,7 @@ async function shapeTintProject(page: Page): Promise<void> {
 /** The fixtures' folder of each extension id the tests install. */
 const FIXTURE: Record<string, string> = {
   'shape-tint': 'fixtures/compat-corpus/shape-tint',
-  'typewriter-effect': 'fixtures/typewriter-effect'
+  'compat-typewriter': 'fixtures/compat-typewriter'
 };
 
 /** Today's app: a fresh profile with `extension` installed and "Use New Engine" off. */
@@ -126,11 +126,11 @@ test.describe('Use New Engine: existing extensions', () => {
   test.use({ desktopLaunchOptions: { env: ON } });
 
   test('a raster override (the typewriter fixture) is drawn by the engine as today, and disposing it restores the layer', async ({ session }, testInfo) => {
-    await cp(path.join(__dirname, 'fixtures/typewriter-effect'), path.join(session.userData, 'extensions/typewriter-effect'), { recursive: true });
+    await cp(path.join(__dirname, 'fixtures/compat-typewriter'), path.join(session.userData, 'extensions/compat-typewriter'), { recursive: true });
     await session.relaunch();
     await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('typewriter-effect') && Boolean((window as any).PM?.EngineRender));
+    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('compat-typewriter') && Boolean((window as any).PM?.EngineRender));
     await typewriterProject(page);
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
     // The base raster an override wraps is today's surface: the whole
@@ -197,7 +197,7 @@ test.describe('Use New Engine: existing extensions', () => {
       const viewerAsked = PM.EngineRender.compatStats.needs - stats.needs;
       // Disposal: the plain layer comes back everywhere.
       const plainBefore = pixels(api.render.renderFrameTo(2.5, W, H, { mblur: false }));
-      await PM.Kernel.loader.deactivate('typewriter-effect');
+      await PM.Kernel.loader.deactivate('compat-typewriter');
       const restored = api.render.renderFrameTo(2.5, W, H, { mblur: false });
       cx.drawImage(restored, 0, row * H);
       const restoredPixels = pixels(restored);
@@ -249,11 +249,11 @@ test.describe('Use New Engine: existing extensions', () => {
 
   test('the typewriter project exports through the engine, the window drawing the override frame by frame', async ({ session }, testInfo) => {
     test.setTimeout(240_000);
-    await cp(path.join(__dirname, 'fixtures/typewriter-effect'), path.join(session.userData, 'extensions/typewriter-effect'), { recursive: true });
+    await cp(path.join(__dirname, 'fixtures/compat-typewriter'), path.join(session.userData, 'extensions/compat-typewriter'), { recursive: true });
     await session.relaunch();
     await session.openEditor();
     const { app, page } = session;
-    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('typewriter-effect') && Boolean((window as any).PM?.EngineRender));
+    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('compat-typewriter') && Boolean((window as any).PM?.EngineRender));
     await typewriterProject(page);
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
     const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-typewriter-export-'));
@@ -277,7 +277,7 @@ test.describe('Use New Engine: existing extensions', () => {
       expect(files.length).toBe(90);
       expect(session.diagnostics.pageErrors).toEqual([]);
       const frames = [0, 24, 75];
-      const today = await todayPngExport(session, 'typewriter-effect', typewriterProject, path.join(root, 'Today'), frames);
+      const today = await todayPngExport(session, 'compat-typewriter', typewriterProject, path.join(root, 'Today'), frames);
       const diffs = frames.map((frame, i) => {
         const exported = pngRgba(path.join(folder, files[frame]!));
         let max = 0, over1 = 0, values = 0;

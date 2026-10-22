@@ -34,7 +34,7 @@ const FIXTURES: Record<string, string> = {
   'context-watermark': 'fixtures/compat-corpus/context-watermark',
   'crop-recorder': 'fixtures/compat-corpus/crop-recorder',
   'label-substitution': 'fixtures/compat-corpus/label-substitution',
-  'typewriter-effect': 'fixtures/typewriter-effect'
+  'compat-typewriter': 'fixtures/compat-typewriter'
 };
 
 async function install(userData: string, ids: string[]): Promise<void> {
@@ -290,7 +290,7 @@ test.describe('Use New Engine: the customization moat, round two', () => {
 
   test('a raster override advances at zoom 8 and 16 and receives today\'s planned crop windows', async ({ session }) => {
     test.setTimeout(180_000);
-    const ids = ['typewriter-effect', 'crop-recorder'];
+    const ids = ['compat-typewriter', 'crop-recorder'];
     await install(session.userData, ids);
     await session.relaunch();
     await session.openEditor();
