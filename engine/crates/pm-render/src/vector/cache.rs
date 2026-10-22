@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use pm_protocol::color::Precision;
-use pm_vector::canvas2d::shape::{raster_paths, raster_shape};
+use pm_vector::canvas2d::shape::raster_paths;
 use pm_vector::gpu::GpuCoverage;
 use pm_vector::path::PathLayer;
 use pm_vector::render::cpu::render_coverage;
@@ -94,8 +94,10 @@ fn raster_level1(source: &VectorSource) -> Result<(u32, u32, Vec<u8>), String> {
             content,
             colors,
             scale,
+            crop,
         } => {
-            let b = raster_shape(content, colors, *scale).map_err(|e| e.to_string())?;
+            let b = pm_vector::canvas2d::shape::raster_shape_window(content, colors, *scale, *crop)
+                .map_err(|e| e.to_string())?;
             Ok((b.width, b.height, b.rgba))
         }
         VectorSource::Paths {

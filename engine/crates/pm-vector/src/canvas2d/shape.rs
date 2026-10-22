@@ -53,9 +53,28 @@ pub struct ShapeColors {
 
 /// `rasterShape(d, scale)` without a preview crop.
 pub fn raster_shape(d: &ShapeContent, colors: &ShapeColors, scale: f64) -> Result<Bitmap, RasterError> {
+    raster_shape_window(d, colors, scale, None)
+}
+
+/// `rasterShape(d, scale, crop)`: with a preview crop `[x, y, width,
+/// height]` (raster pixels), the canvas is the crop's size and is translated
+/// by `(-x, -y)` before the shape's own transform, as today's viewer asks
+/// for the visible window of a large shape (`previewShapeRaster`).
+pub fn raster_shape_window(
+    d: &ShapeContent,
+    colors: &ShapeColors,
+    scale: f64,
+    crop: Option<[u32; 4]>,
+) -> Result<Bitmap, RasterError> {
     let g = ShapeRaster::new(d, scale);
-    let (width, height) = (g.width as u32, g.height as u32);
+    let (width, height) = match crop {
+        Some([_, _, w, h]) => (w, h),
+        None => (g.width as u32, g.height as u32),
+    };
     let mut c = Context::new(width, height);
+    if let Some([x, y, _, _]) = crop {
+        c.translate(-f64::from(x), -f64::from(y));
+    }
     c.scale(g.density, g.density);
     c.translate(g.pad, g.pad);
     c.set_fill_style(&colors.color);

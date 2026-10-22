@@ -1263,7 +1263,7 @@ fn native_content_quad<'d>(
         "shape" => {
             if crate::vector::level2(layer) && scope.is_3d_layer(layer)? {
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
-                    crate::vector::plan_shape(scope, layer, &d, time, world, target)
+                    crate::vector::plan_shape(scope, layer, &d, time, world, target, None)
                 };
                 return local_level2(
                     scope,
@@ -1277,7 +1277,23 @@ fn native_content_quad<'d>(
             }
             let world = vector_world(scope, layer, time, scale, b.origin)?;
             let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
-            let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target)?;
+            // Today's preview source clipping (`nativeContentQuad`): in a
+            // viewer frame only the visible window of a large shape is
+            // rasterized, a shape the viewport misses is not drawn, and
+            // inside a plain rectangle's fill only the window over the
+            // viewport is (its pixels there are the fill, as the whole
+            // raster's are).
+            let crop = if crate::vector::level2(layer) {
+                None
+            } else {
+                let raster_scale = crate::vector::continuous_raster_scale(&world);
+                match preview_crop(scope, b, layer, "shape", time, scale, raster_scale, false)? {
+                    crate::compat_crop::CropPlan::Outside => return Ok(None),
+                    crate::compat_crop::CropPlan::Crop(window) => Some(window),
+                    crate::compat_crop::CropPlan::Full | crate::compat_crop::CropPlan::Solid => None,
+                }
+            };
+            let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target, crop)?;
             Ok(quad.map(device_quad))
         }
         "solid" => {
@@ -1744,7 +1760,7 @@ fn compat_quad<'d>(
     let raster_scale = crate::text::continuous_raster_scale(&world);
     // Today's preview source clipping: the window the compositor passes to
     // `PM.raster` in a viewer frame, or no raster call at all.
-    let crop = match preview_crop(scope, b, layer, ty, time, scale, raster_scale)? {
+    let crop = match preview_crop(scope, b, layer, ty, time, scale, raster_scale, true)? {
         crate::compat_crop::CropPlan::Outside => return Ok(Some(None)),
         crate::compat_crop::CropPlan::Solid => return Ok(None),
         crate::compat_crop::CropPlan::Full => None,
@@ -1806,6 +1822,7 @@ fn preview_crop<'d>(
     time: f64,
     scale: (f64, f64),
     raster_scale: f64,
+    solid: bool,
 ) -> JsResult<crate::compat_crop::CropPlan> {
     use crate::compat_crop::{CropPlan, ShapeFacts, TextGeometry};
     let Some(window) = b.preview else {
@@ -1848,7 +1865,11 @@ fn preview_crop<'d>(
         let hex6 = color.len() == 7
             && color.starts_with('#')
             && color[1..].bytes().all(|c| c.is_ascii_hexdigit());
-        let plain_rect = matches!(js::get(&content, "shape"), pm_eval::JsValue::String(s) if s.to_string_lossy() == "rect")
+        // `solid: false`: the window over the viewport instead of today's
+        // fill shortcut (the engine's native draw of a plain fill, whose
+        // pixels there are the raster's interior).
+        let plain_rect = solid
+            && matches!(js::get(&content, "shape"), pm_eval::JsValue::String(s) if s.to_string_lossy() == "rect")
             && hex6;
         let facts = ShapeFacts {
             w: shape.w,
@@ -2023,13 +2044,14 @@ fn device_quad(q: crate::vector::VectorQuad) -> Quad {
             h,
             ax,
             ay,
+            uv,
         } => Quad::Texture {
             source: Source::Vector(Box::new(source)),
             w,
             h,
             ax,
             ay,
-            uv: [0.0, 0.0, 1.0, 1.0],
+            uv,
         },
         crate::vector::VectorQuad::Device { source, rect } => Quad::Device {
             source: Source::Vector(Box::new(source)),

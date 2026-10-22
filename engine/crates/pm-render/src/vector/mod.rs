@@ -28,11 +28,14 @@ use crate::js;
 /// Vector content the executor resolves to a texture.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VectorSource {
-    /// A level 1 shape raster (`rasterShape(d, scale)`).
+    /// A level 1 shape raster (`rasterShape(d, scale, crop)`): with a
+    /// preview crop `[x, y, width, height]`, only that window of the raster
+    /// (today's viewer, `previewShapeRaster`; `crate::compat_crop`).
     Shape {
         content: ShapeContent,
         colors: ShapeColors,
         scale: f64,
+        crop: Option<[u32; 4]>,
     },
     /// A level 1 editable-paths raster (`rasterPaths(PM, L, T, scale)`).
     Paths {
@@ -76,6 +79,7 @@ impl VectorSource {
                 content,
                 colors,
                 scale,
+                crop,
             } => {
                 h.update(b"shape");
                 h.update(format!("{content:?}").as_bytes());
@@ -83,6 +87,13 @@ impl VectorSource {
                 h.update([0]);
                 h.update(colors.stroke_color.as_bytes());
                 h.update(scale.to_bits().to_le_bytes());
+                // The whole raster keeps its key; a window is another one.
+                if let Some(c) = crop {
+                    h.update(b"crop");
+                    for v in c {
+                        h.update(v.to_le_bytes());
+                    }
+                }
             }
             VectorSource::Paths {
                 nodes,
@@ -142,6 +153,9 @@ pub enum VectorQuad {
         h: f64,
         ax: f64,
         ay: f64,
+        /// The bitmap's texture coordinates over the quad (today's `r.uv`:
+        /// a cropped raster maps its window into the whole quad).
+        uv: [f64; 4],
     },
     /// Pixels in target space covering `rect` exactly.
     Device {
@@ -228,6 +242,7 @@ pub fn plan_shape<'d>(
     time: f64,
     world: &Mat2d,
     target: PixelRect,
+    crop: Option<pm_protocol::common::PixelRect>,
 ) -> JsResult<Option<VectorQuad>> {
     let has_paths = pm_eval::node::array(pm_eval::node::member(
         pm_eval::node::member(Some(layer), "d"),
@@ -265,20 +280,39 @@ pub fn plan_shape<'d>(
             h: b.h,
             ax: -b.x0,
             ay: -b.y0,
+            uv: [0.0, 0.0, 1.0, 1.0],
         }));
     }
     let (content, colors) = shape_content(d);
     let g = ShapeRaster::new(&content, scale);
+    // Today's `rasterShape(d, scale, crop)`: the quad stays the layer's, the
+    // window's texture coordinates are
+    // `[-x / cw, -y / ch, width / cw, height / ch]`.
+    let crop = crop.filter(|c| c.width > 0 && c.height > 0);
+    let uv = match crop {
+        Some(c) => {
+            let (cw, ch) = (f64::from(c.width), f64::from(c.height));
+            [
+                -f64::from(c.x) / cw,
+                -f64::from(c.y) / ch,
+                g.width / cw,
+                g.height / ch,
+            ]
+        }
+        None => [0.0, 0.0, 1.0, 1.0],
+    };
     Ok(Some(VectorQuad::Layer {
         source: VectorSource::Shape {
             content,
             colors,
             scale,
+            crop: crop.map(|c| [c.x, c.y, c.width, c.height]),
         },
         w: g.w,
         h: g.h,
         ax: g.w / 2.0,
         ay: g.h / 2.0,
+        uv,
     }))
 }
 

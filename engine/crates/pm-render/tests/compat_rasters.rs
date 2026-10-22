@@ -488,3 +488,57 @@ fn a_frame_s_needs_from_its_plan_alone_are_the_ones_its_render_names() {
         .compat_needs(&document, "Ptest-root", ticks(0.5), &request, &MapResolver::default())
         .is_empty());
 }
+
+/// Bigrender round 2: today's preview source clipping for the engine's own
+/// level 1 shape rasters (`nativeContentQuad`, `rasterShape(d, scale,
+/// crop)`). A viewer frame of a large shape rasterizes only the window over
+/// the viewport, emulating today's crop canvas, and its pixels are the
+/// whole raster's there; a shape the viewport misses is not drawn.
+#[test]
+fn a_viewer_frame_rasterizes_only_today_s_window_of_a_large_shape() {
+    // A 1400 × 1000 stroked rectangle (no plain-fill shortcut) and an
+    // ellipse, centred, viewed at 2x through windows over their edges.
+    let mut renderer = Renderer::headless().unwrap();
+    for (name, d) in [
+        ("rect", json!({ "shape": "rect", "w": 1400, "h": 1000, "color": "#3366CC", "stroke": 6, "strokeColor": "#FFCC00", "radius": 40 })),
+        ("ellipse", json!({ "shape": "ellipse", "w": 1400, "h": 1000, "color": "#3366CCB0", "stroke": 0 })),
+        ("plain", json!({ "shape": "rect", "w": 1400, "h": 1000, "color": "#3366CC", "stroke": 0 })),
+    ] {
+        let doc = load(&shape_doc("big", d, 128.0, 128.0));
+        for region in [
+            PixelRect { x: 0, y: 0, width: 512, height: 512 },
+            PixelRect { x: 64, y: 192, width: 128, height: 96 },
+            PixelRect { x: 200, y: 100, width: 312, height: 300 },
+        ] {
+            let mut request = RenderRequest::at_scale(Size::new(512, 512), 2.0, Precision::Float32);
+            request.region = Some(region);
+            let frame = renderer
+                .render(&doc, "Ptest-root", ticks(0.0), &request, &MapResolver::default())
+                .unwrap();
+            let cropped = renderer.read_rgba(&frame).unwrap();
+            // The same frame without a viewer window (no clipping), at the
+            // region's pixels.
+            request.export = true;
+            let frame = renderer
+                .render(&doc, "Ptest-root", ticks(0.0), &request, &MapResolver::default())
+                .unwrap();
+            let whole = renderer.read_rgba(&frame).unwrap();
+            let mut max = 0f32;
+            for (a, b) in cropped.iter().zip(&whole) {
+                max = max.max((a - b).abs());
+            }
+            assert!(max == 0.0, "{name} {region:?}: max {max}");
+        }
+    }
+    // Viewer frames alone hold windows, not the whole rasters (about 23 MiB
+    // each here), and a viewport that misses the shape draws nothing.
+    let mut viewer = Renderer::headless().unwrap();
+    let doc = load(&shape_doc("big", json!({ "shape": "rect", "w": 1400, "h": 1000, "color": "#3366CC", "stroke": 6, "strokeColor": "#FFCC00" }), 128.0, 128.0));
+    let mut request = RenderRequest::at_scale(Size::new(512, 512), 2.0, Precision::Float32);
+    request.region = Some(PixelRect { x: 0, y: 0, width: 256, height: 256 });
+    viewer
+        .render(&doc, "Ptest-root", ticks(0.0), &request, &MapResolver::default())
+        .unwrap();
+    let cached = viewer.memory().vector_cache;
+    assert!(cached > 0 && cached < 8 << 20, "{cached}");
+}
