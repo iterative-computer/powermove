@@ -256,9 +256,20 @@ fn selected() -> Option<(PathBuf, Vec<Case>)> {
             continue;
         }
         let refused = dir.join(format!("{id}.refused.txt")).exists();
+        // The reader refuses a file it does not load (the missing-model
+        // box, as today's asset without a scene).
+        let reader_refuses = |c: &Case| {
+            c.models.0.values().any(|p| {
+                p.exists() && !matches!(pm_render::scene3d::gltf::lookup(p), ModelLookup::Gltf(_))
+            })
+        };
         match case(&c, &dir) {
-            Ok(c) if !refused => out.push(c),
-            Ok(_) => panic!("{id}: three.js refused the model; the engine loads it"),
+            Ok(c) if refused && reader_refuses(&c) => eprintln!("{id}: refused by both"),
+            Ok(_) if refused => panic!("{id}: three.js refused the model; the engine loads it"),
+            Ok(c) if reader_refuses(&c) => {
+                panic!("{id}: the engine refuses a model three.js loads")
+            }
+            Ok(c) => out.push(c),
             Err(e) if refused => eprintln!("{id}: refused by both ({e})"),
             Err(e) => panic!("{id}: {e}"),
         }
@@ -1096,8 +1107,17 @@ fn frame_time_gltf_at_1080p() {
     let gpu = pm_gpu::Gpu::new("pm-render glTF frame time").expect("a Metal device");
     let mut renderer = Scene3dRenderer::default();
     let mut pool = pm_gpu::TargetPool::new();
-    for id in ["khr-BrainStem-0.8", "khr-Fox-0.7", "khr-ToyCar", "pbr-ext", "transmission"] {
-        let Some(raw) = fixture().into_iter().find(|c| text(obj(c).get("id")).as_deref() == Some(id)) else {
+    for id in [
+        "khr-BrainStem-0.8",
+        "khr-Fox-0.7",
+        "khr-ToyCar",
+        "pbr-ext",
+        "transmission",
+    ] {
+        let Some(raw) = fixture()
+            .into_iter()
+            .find(|c| text(obj(c).get("id")).as_deref() == Some(id))
+        else {
             continue;
         };
         let mut raw = raw;
@@ -1120,7 +1140,18 @@ fn frame_time_gltf_at_1080p() {
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             let mut outs = Vec::new();
             for (plan, _) in &c.outputs {
-                outs.push(renderer.render(&gpu.device, &gpu.queue, &mut encoder, &mut pool, plan, false).unwrap());
+                outs.push(
+                    renderer
+                        .render(
+                            &gpu.device,
+                            &gpu.queue,
+                            &mut encoder,
+                            &mut pool,
+                            plan,
+                            false,
+                        )
+                        .unwrap(),
+                );
             }
             gpu.queue.submit([encoder.finish()]);
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());

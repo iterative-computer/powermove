@@ -102,7 +102,7 @@ fn full_export_is_identical_after_every_viewer_cache_contamination_input() {
                     let state = ViewerState {
                         headless: None, composition: "Ptest-root".into(), size: Size::new(W, H), device_pixel_ratio: 1.0,
                         zoom: 1.0, pan: [0.0, 0.0], resolution, media: preference, color_space: ViewerColorSpace::Srgb,
-                        view: None, play_every_frame: false, edr: false, view_seq: Seq::new(1).unwrap(), vsync: None, depth_id: None, canvas: None,
+                        view: None, play_every_frame: false, edr: false, view_seq: Seq::new(1).unwrap(), vsync: None, depth_id: None, canvas: None, chrome_selection: None,
                     };
                     composer.compose(&document, "Ptest-root", &media, at, &state, &working).unwrap();
                     let deadline = Instant::now() + Duration::from_secs(5);

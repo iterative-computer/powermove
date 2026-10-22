@@ -16,6 +16,9 @@ test("Blender models, editable materials, regeneration and engine renders work i
     !status.available,
     "Install Blender to run the real rendering integration",
   );
+  const nativeEnabled = await page.evaluate(
+    () => !!(window as any).PM.EngineDoc?.enabled,
+  );
   const created = await page.evaluate(async () => {
     const PM = (window as any).PM,
       api = PM.Kernel.api("blender-proof");
@@ -113,23 +116,26 @@ test("Blender models, editable materials, regeneration and engine renders work i
     }, theme);
     await page.screenshot({ path: `/tmp/powermove-blender-${theme}.png` });
   }
-  // Inspect the completed worker's own engine, rather than trusting UI settings.
-  await session.app.evaluate(({ ipcMain }) => {
-    const ipc = ipcMain as any,
-      original = ipc._invokeHandlers.get("blender:run"),
-      proof: any[] = [];
-    (globalThis as any).__blenderEngineProof = proof;
-    ipc.removeHandler("blender:run");
-    ipc.handle("blender:run", async (event: any, job: any) => {
-      const result = await original(event, job);
-      if (job.operation === "render")
-        proof.push({ requested: job.snapshot.settings.engine, actual: result.manifest.renderEngine });
-      return result;
+  // Legacy previews use the renderer's Blender IPC; native previews use the
+  // engine host and are checked against its completed worker manifests.
+  if (!nativeEnabled) {
+    await session.app.evaluate(({ ipcMain }) => {
+      const ipc = ipcMain as any,
+        original = ipc._invokeHandlers.get("blender:run"),
+        proof: any[] = [];
+      (globalThis as any).__blenderEngineProof = proof;
+      ipc.removeHandler("blender:run");
+      ipc.handle("blender:run", async (event: any, job: any) => {
+        const result = await original(event, job);
+        if (job.operation === "render")
+          proof.push({ requested: job.snapshot.settings.engine, actual: result.manifest.renderEngine });
+        return result;
+      });
     });
-  });
+  }
   for (const engine of ["eevee", "cycles"]) {
     const render = await page.evaluate(
-      async ({ engine, body }) => {
+      async ({ engine, body, nativeEnabled }) => {
         const PM = (window as any).PM,
           api = PM.Kernel.api("blender-proof");
         const result = api.scene3d.setRendering({
@@ -145,36 +151,67 @@ test("Blender models, editable materials, regeneration and engine renders work i
         for (const layer of PM.proj.layers)
           if (layer.d?.data?.object && layer.id !== body) layer.on = false;
         PM.touch();
-        // Public preview API exercises real IPC and PNG decoding; export captures
-        // independently use the render-frame preparation path in the next check.
+        // Native snapshots expose the same synchronous engine capture path
+        // used by public render APIs. The legacy GL compositor has its own
+        // preview cache and cannot read an engine-presented Blender frame.
+        const capture = (draft3d: boolean) => nativeEnabled
+          ? [
+              ...PM.EngineRender.snapshotSync({
+                time: 0,
+                width: 192,
+                height: 128,
+                pixels: "premultiplied",
+                background: false,
+                motionBlurSamples: 0,
+                draft3d,
+              }).data,
+            ]
+          : [
+              ...PM.GL.renderToPixels(0, 192, 128, {
+                transparent: true,
+                mblur: false,
+                editorViewport: true,
+              }),
+            ];
         api.scene3d.setPreviewMode("draft");
-        const draft = [
-          ...PM.GL.renderToPixels(0, 192, 128, {
-            transparent: true,
-            mblur: false,
-            editorViewport: true,
-          }),
-        ];
+        const draft = capture(true);
         api.scene3d.setPreviewMode("rendered");
         await api.scene3d.renderFrame();
-        const pixels = [
-          ...PM.GL.renderToPixels(0, 192, 128, {
-            transparent: true,
-            mblur: false,
-            editorViewport: true,
-          }),
-        ];
+        const pixels = capture(false);
         const difference = pixels.reduce(
           (sum: number, v: number, i: number) => sum + Math.abs(v - draft[i]),
           0,
         );
         const snapshot = await PM.Export.snapshotAsync(0, 192);
-        const exported = [
-          ...PM.GL.renderToPixels(0, 192, 128, {
-            transparent: true,
-            mblur: false,
-          }),
-        ];
+        // Today the capture prepares the Blender frame for the compositor,
+        // which then draws it. With "Use New Engine" on, the engine's capture
+        // is the frame (its Blender stage prepared it); the WebGL compositor
+        // has no prepared frame, so the capture's own pixels are read.
+        const exported = nativeEnabled && PM.EngineCaptures
+          ? await (async () => {
+              const image = new Image();
+              image.src = snapshot;
+              await image.decode();
+              const canvas = document.createElement("canvas");
+              canvas.width = image.width;
+              canvas.height = image.height;
+              const ctx = canvas.getContext("2d")!;
+              ctx.drawImage(image, 0, 0);
+              // The JPEG has no alpha: a pixel is drawn where it is not black.
+              const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+              const drawn: number[] = [];
+              for (let i = 0; i < data.length; i += 4) {
+                const covered = data[i]! + data[i + 1]! + data[i + 2]! > 24;
+                drawn.push(data[i]!, data[i + 1]!, data[i + 2]!, covered ? 255 : 0);
+              }
+              return drawn;
+            })()
+          : [
+              ...PM.GL.renderToPixels(0, 192, 128, {
+                transparent: true,
+                mblur: false,
+              }),
+            ];
         return {
           difference,
           snapshot: snapshot.startsWith("data:image/jpeg"),
@@ -188,7 +225,7 @@ test("Blender models, editable materials, regeneration and engine renders work i
             .some((v: number) => v === 0),
         };
       },
-      { engine, body },
+      { engine, body, nativeEnabled },
     );
     expect(render.state.error).toBeNull();
     expect(render.nonempty).toBe(true);
@@ -196,7 +233,11 @@ test("Blender models, editable materials, regeneration and engine renders work i
     expect(render.difference).toBeGreaterThan(1000);
     expect(render.snapshot).toBe(true);
     expect(render.exported).toBe(true);
-    const proof = await session.app.evaluate(() => (globalThis as any).__blenderEngineProof);
+    const proof = nativeEnabled
+      ? await session.app.evaluate(() =>
+          (globalThis as any).__powermoveNativeEngine.engine.blender.completedRenders(),
+        )
+      : await session.app.evaluate(() => (globalThis as any).__blenderEngineProof);
     const jobs = proof.filter((job: any) => job.requested === engine);
     expect(jobs.length).toBeGreaterThan(0);
     for (const job of jobs)

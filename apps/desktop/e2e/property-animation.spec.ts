@@ -96,6 +96,11 @@ test('text, shader, extension, blend, and mask stopwatches animate their real va
       const button = page.locator(`[data-property-path="${path}"]`);
       // Numeric channel rows use their channel wrapper and the same leading stopwatch.
       const control = await button.count() ? button : page.locator(`[data-channel="${path}"] .property-stopwatch`);
+      // Later parameters sit in the section's closed More disclosure; open it
+      // the way a user does before reaching for the stopwatch.
+      if (await control.evaluate(element => !!element.closest('details:not([open])'))) {
+        await control.locator('xpath=ancestor::details[not(@open)][1]/summary').click();
+      }
       await control.click();
       await expect(control).toHaveAttribute('aria-pressed', 'true');
       expect(await page.evaluate(path => {

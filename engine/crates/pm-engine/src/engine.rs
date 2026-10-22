@@ -372,6 +372,8 @@ fn event_name(event: &Event) -> &'static str {
         Event::ShaderFallback(_) => "shaderFallback",
         Event::Compat(_) => "compat",
         Event::RenderStats(_) => "renderStats",
+        Event::PreviewControl(_) => "previewControl",
+        Event::PreviewStatus(_) => "previewStatus",
     }
 }
 
@@ -1525,7 +1527,8 @@ impl Engine {
                 | Event::Transport(_)
                 | Event::Audio(_)
                 | Event::ShaderFallback(_)
-                | Event::Compat(_)),
+                | Event::Compat(_)
+                | Event::PreviewControl(_)),
                 PeerKind::Renderer,
             ) if self.presenter.is_some() => {
                 let Some(sid) =
@@ -1553,6 +1556,7 @@ impl Engine {
                     Event::Audio(message) => p.audio(ctx, port, sid, message),
                     Event::ShaderFallback(message) => p.shader_fallback(ctx, port, sid, message),
                     Event::Compat(message) => p.compat(ctx, port, sid, message),
+                    Event::PreviewControl(control) => p.preview_control(ctx, port, sid, control),
                     _ => {}
                 });
                 if let Some(command) = transport {
@@ -1578,7 +1582,8 @@ impl Engine {
                 | Event::Transport(_)
                 | Event::Audio(_)
                 | Event::ShaderFallback(_)
-                | Event::Compat(_),
+                | Event::Compat(_)
+                | Event::PreviewControl(_),
                 PeerKind::Renderer,
             )
             | (Event::BlenderProgress(_) | Event::BlenderSurface(_), PeerKind::Host) => self

@@ -119,7 +119,7 @@ it('maps reverse speed and time remap into the nested composition before ranking
     { id: 'early', type: 'video', from: 0, dur: 1, d: { asset: 'v1' } }
   ] } };
   const instance = { id: 'reverse', type: 'precomp', from: 10, dur: 6,
-    d: { comp: 'nested', trim: 6, speed: -1 } };
+    d: { comp: 'nested', trim: 6, speed: -1 } as Record<string, unknown> };
   PM.proj.layers = [instance];
   make(PM, { ...bridge, prioritize });
   await settle();

@@ -39,9 +39,16 @@ export function thumbnailSize(w: number, h: number): { width: number; height: nu
 export function createCompThumbnails(PM: PMLike): CompThumbnails {
   const urls: Record<string, string> = $state({});
   const rendered = new Map<string, string>();
+  const attempts = new Map<string, number>();
   let key = '';
   let timer = 0;
   let disposed = false;
+  let generation = 0;
+  const waits = new Map<number, () => void>();
+  const releaseWaits = () => {
+    for (const [wait, resolve] of waits) { window.clearTimeout(wait); resolve(); }
+    waits.clear();
+  };
 
   const blocked = () => PM.interactionActive?.() || viewerService(PM as any)?.isNavigating?.() || PM.playing
     || PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active;
@@ -76,17 +83,23 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
 
   /** With the new engine on, the engine draws it (an idle snapshot: it
    *  waits out playback and gestures; a stale result comes back null). */
-  async function renderWithEngine(engine: any, id: string): Promise<string | null> {
+  async function renderWithEngine(engine: any, id: string, requestGeneration: number, projectAtRequest: any): Promise<string | null> {
     const project = PM.proj;
     const comp = project?.compId === id ? project : PM.Comps?.get?.(id);
     if (!comp || !Array.isArray(comp.layers)) return null;
     const { width, height } = thumbnailSize(comp.w || project.w, comp.h || project.h);
-    const snapshot = await engine.thumbnails.request({ key: `composition:${id}`, composition: id, time: posterTime(comp), width, height, draft3d: true });
-    if (!snapshot) return null;
+    const revision = engine.currentRevision?.();
+    const snapshot = await engine.thumbnails.request({ key: `composition:${id}`, composition: id, time: posterTime(comp), width, height, draft3d: true, minRevision: revision ?? undefined });
+    const current = () => !disposed && generation === requestGeneration && PM.proj === projectAtRequest && PM.EngineRender === engine
+      && (revision == null || engine.currentRevision?.() === revision);
+    if (!snapshot || !current()) return null;
     // The page's own work (the canvas and the JPEG encode) waits out
     // interaction, navigation, and playback, as today's capture does.
-    while (blocked() && !disposed) await new Promise((resolve) => window.setTimeout(resolve, RETRY_MS));
-    return disposed ? null : engine.toCanvas(snapshot).toDataURL('image/jpeg', .8);
+    while (blocked() && current()) await new Promise<void>((resolve) => {
+      const wait = window.setTimeout(() => { waits.delete(wait); resolve(); }, RETRY_MS);
+      waits.set(wait, resolve);
+    });
+    return current() ? engine.toCanvas(snapshot).toDataURL('image/jpeg', .8) : null;
   }
 
   function step() {
@@ -94,7 +107,7 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
     if (disposed || !PM.proj) return;
     if (blocked()) { schedule(RETRY_MS); return; }
     const ids: string[] = (PM.Comps?.list?.() ?? []).map((comp: { id: string }) => comp.id);
-    for (const id of Object.keys(urls)) if (!ids.includes(id)) { delete urls[id]; rendered.delete(id); }
+    for (const id of Object.keys(urls)) if (!ids.includes(id)) { delete urls[id]; rendered.delete(id); attempts.delete(id); }
     const next = ids.find((id) => rendered.get(id) !== key);
     if (!next) return;
     const renderedKey = key;
@@ -102,10 +115,23 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
     // a session when no viewer has one).
     const engine = PM.EngineRender;
     if (engine) {
-      void renderWithEngine(engine, next)
-        .then((url) => { if (url && !disposed) urls[next] = url; })
+      const requestGeneration = generation;
+      const project = PM.proj;
+      let success = false;
+      void renderWithEngine(engine, next, requestGeneration, project)
+        .then((url) => { if (url && !disposed && generation === requestGeneration && PM.proj === project) { urls[next] = url; success = true; } })
         .catch((error) => console.warn('Composition thumbnail failed', error))
-        .finally(() => { rendered.set(next, renderedKey); schedule(0); });
+        .finally(() => {
+          if (!disposed && generation === requestGeneration && PM.proj === project) {
+            if (success) { rendered.set(next, renderedKey); attempts.delete(next); }
+            else {
+              const count = (attempts.get(next) ?? 0) + 1;
+              attempts.set(next, count);
+              if (count >= 3) rendered.set(next, renderedKey);
+            }
+            schedule(success ? 0 : RETRY_MS);
+          }
+        });
       return;
     }
     try {
@@ -122,12 +148,17 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
   return {
     urls,
     refresh(next: string) {
+      generation++;
+      releaseWaits();
+      attempts.clear();
       if (next !== key) key = next;
       schedule(SETTLE_MS);
     },
     dispose() {
       disposed = true;
+      generation++;
       window.clearTimeout(timer);
+      releaseWaits();
     },
   };
 }

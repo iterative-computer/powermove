@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { PROTOCOL_BUILD, type CrashReport, type EngineProcess, type Envelope, type Event, type Request, type Response } from '../../shared/engine-protocol';
+import { PROTOCOL_BUILD, type CompatFrameRequest, type CrashReport, type EngineProcess, type Envelope, type Event, type Request, type Response } from '../../shared/engine-protocol';
 import { NativeEngine, PROBE_SUPERSEDED } from './native-engine';
 import type { ChildLike, ClientPortInfo, EngineControl, PortLike } from './ports';
 import { decodeEnvelope, encodeEnvelope, envelope, eventMessage, localRanges, requestMessage, responseMessage } from './protocol';
@@ -213,6 +213,7 @@ describe('NativeEngine with fake engines', () => {
   let host: NativeEngine;
   let logs: string[];
   let now: number;
+  let compatRequests: CompatFrameRequest[];
 
   beforeEach(async () => {
     dir = await mkdtemp(path.join(os.tmpdir(), 'pm-native-'));
@@ -220,6 +221,7 @@ describe('NativeEngine with fake engines', () => {
     timers = [];
     logs = [];
     now = 0;
+    compatRequests = [];
     host = new NativeEngine({
       spawn: (process) => {
         const engine = new FakeEngine(process);
@@ -232,6 +234,15 @@ describe('NativeEngine with fake engines', () => {
       physicalMemory: 16 * 1024 ** 3,
       log: (level, message) => logs.push(`${level}: ${message}`),
       hostNow: () => 42,
+      compatFrame: async (request) => {
+        compatRequests.push(request);
+        const png = new Uint8Array(33);
+        png.set([137, 80, 78, 71, 13, 10, 26, 10]);
+        png.set([73, 72, 68, 82], 12);
+        png[19] = 1; png[23] = 1;
+        return { type: 'compatFrame', key: 'ab'.repeat(32), width: 1, height: 1,
+          format: 'png', origin: [0, 0], scale: 1, payload: { kind: 'inline', bytes: png } };
+      },
       now: () => now,
       schedule: (fn, ms) => {
         const timer = { fn, ms, cancelled: false };
@@ -277,6 +288,28 @@ describe('NativeEngine with fake engines', () => {
     status('c', 'cancelled');
     await settle();
     expect(signals()).toEqual(['exportStarted', 'exportStopped']);
+  });
+
+  it('admits only interactive Blender PNG compatibility asks and preserves source identity', async () => {
+    const png: CompatFrameRequest = { document: 'doc-1', composition: 'blender', layer: 'blender',
+      time: 0, source: 'blenderPng', scale: 1, revision: 8,
+      blender: { asset: 'avif-map', content: new Uint8Array(32).fill(0xab) } };
+    const answer = await live('interactive').ask({ type: 'compatFrame', ...png }, 3);
+    expect(answer.message.kind === 'response' && answer.message.body.type).toBe('compatFrame');
+    expect(compatRequests).toHaveLength(1);
+    expect(compatRequests[0]).toMatchObject({ document: 'doc-1', revision: 8, source: 'blenderPng',
+      blender: { asset: 'avif-map', content: new Uint8Array(32).fill(0xab) } });
+
+    const { blender: _blender, ...base } = png;
+    for (const source of ['rasterOverride', 'compatContext', 'svgImage'] as const) {
+      const refused = await live('interactive').ask({ type: 'compatFrame', ...base, source }, 3);
+      expect(refused.message.kind === 'error' && refused.message.error.code).toBe('capabilityRejected');
+    }
+    expect(compatRequests).toHaveLength(1);
+
+    const job = await live('job').ask({ type: 'compatFrame', ...base, source: 'rasterOverride' }, 3);
+    expect(job.message.kind === 'response' && job.message.body.type).toBe('compatFrame');
+    expect(compatRequests).toHaveLength(2);
   });
 
   it('negotiates both engines, grants leases, sends the slicing policy, and links them', () => {

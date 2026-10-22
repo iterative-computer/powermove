@@ -362,6 +362,13 @@
       if (!(error instanceof DOMException && error.name === 'AbortError')) api.ui.toast('Could not sample that color');
     } finally {
       sampling = false;
+      // A keyboard-focused eyedropper drops focus to <body> while it is disabled;
+      // give it back to the still-open picker so Escape and Tab keep working.
+      await tick();
+      const active = document.activeElement;
+      if (open && phase === 'open' && popover?.isConnected && (!active || active === document.body)) {
+        popover.focus({ preventScroll: true });
+      }
     }
   }
 

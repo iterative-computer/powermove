@@ -62,7 +62,7 @@ describe('native Render Work Area', () => {
     });
     try {
       await f.PM.Preview.cache();
-      expect(f.session.cacheFrame.mock.calls.map(([time]) => time)).toEqual([0, 0, 1 / 24, 1 / 24, 0]);
+      expect(f.session.cacheFrame.mock.calls.map(([time]: [number]) => time)).toEqual([0, 0, 1 / 24, 1 / 24, 0]);
       expect(f.PM.Preview.count).toBe(2);
       expect(f.PM.toast).not.toHaveBeenCalled();
     } finally { f.dispose(); }

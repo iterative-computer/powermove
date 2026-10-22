@@ -10,7 +10,7 @@ test('color picker stays above adjacent panels and inside the viewport', async (
     const timeline = PM.Kernel.services.get('timeline');
     return Boolean(timeline?.cv);
   });
-  await page.evaluate(() => {
+  const layerId = await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Color picker overlay', dur: 5 }));
     const layer = PM.mkLayer('shape', {
@@ -22,6 +22,7 @@ test('color picker stays above adjacent panels and inside the viewport', async (
     PM.selectLayers(layer.id);
     PM.bus.emit('layers');
     PM.invalidate();
+    return layer.id as string;
   });
 
   const fillRow = page.locator('#panel-inspector .row').filter({ has: page.locator('[data-property-path="c.color"]') });
@@ -62,6 +63,11 @@ test('color picker stays above adjacent panels and inside the viewport', async (
   for (const top of [70, 520, 290]) {
     await page.keyboard.press('Escape');
     await expect(picker).toHaveCount(0);
+    // Escape belongs to the picker: it cancels the preview and must not reach the editor's deselect.
+    expect(await page.evaluate(() => {
+      const PM = (window as any).PM;
+      return { selection: [...PM.sel.layers], busy: PM.hist.busy() };
+    })).toEqual({ selection: [layerId], busy: false });
     const trigger = fillRow.locator('.color-field');
     await trigger.evaluate((element, y) => {
       Object.assign((element as HTMLElement).style, { position: 'fixed', top: `${y}px`, right: '24px' });

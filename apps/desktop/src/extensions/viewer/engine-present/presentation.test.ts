@@ -775,7 +775,7 @@ describe('ViewerPresentation', () => {
     expect(painters[0]!.draws).toBe(1);
     painters[0]!.lose('A valid external Instance reference no longer exists.');
     await settleLong();
-    expect(logs).toEqual(['engine presentation lost its WebGPU device (A valid external Instance reference no longer exists.); drawing again on a new one']);
+    expect(logs).toEqual(['engine presentation lost its graphics context (A valid external Instance reference no longer exists.); drawing again on a new one']);
     // A new worker on a new canvas, the same session; still off the main thread.
     expect(made).toBe(2);
     expect(workers[0]!.terminated).toBe(true);
@@ -818,7 +818,7 @@ describe('ViewerPresentation', () => {
       await settleLong();
     }
     expect(painters).toHaveLength(4);
-    expect(logs.at(-1)).toMatch(/^engine presentation stopped: the WebGPU device was lost 4 times/);
+    expect(logs.at(-1)).toMatch(/^engine presentation stopped: the graphics context was lost 4 times/);
     expect(presentation.presenting).toBe(false);
     channel.handlers.message({ type: 'frame', frame: desc(3, 1) }, performance.now());
     expect(channel.releases.at(-1)).toEqual({ poolIndex: 3, seq: 3 });

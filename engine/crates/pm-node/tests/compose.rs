@@ -77,6 +77,7 @@ fn state(resolution: PreviewResolution) -> ViewerState {
         view_seq: Seq::new(1).unwrap(),
         vsync: None,
         depth_id: None,
+        chrome_selection: None,
         canvas: None,
     }
 }

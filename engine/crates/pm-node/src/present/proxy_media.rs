@@ -654,6 +654,7 @@ impl ProxyMedia {
         &mut self,
         doc: &pm_model::Document,
         media: &'a MediaMap,
+        inner: &'a dyn AssetResolver,
         preference: MediaPreference,
         playing: bool,
         slow: &[PathBuf],
@@ -947,7 +948,7 @@ impl ProxyMedia {
             self.probe_entries.retain(|_, entry| entry.cost.is_none());
         }
         ProxyResolver {
-            original: media,
+            original: inner,
             proxies,
             forced,
             reduced,
@@ -1180,7 +1181,8 @@ mod tests {
 }
 
 pub(super) struct ProxyResolver<'a> {
-    original: &'a MediaMap,
+    /// The host's resolver for originals (and Blender map PNGs).
+    original: &'a dyn AssetResolver,
     proxies: BTreeMap<String, PathBuf>,
     forced: Vec<String>,
     reduced: BTreeMap<String, (f64, Option<f64>)>,
@@ -1255,6 +1257,14 @@ impl AssetResolver for ProxyResolver<'_> {
             // Proxy Only is a named missing-media layer, never an original.
             return None;
         }
-        AssetResolver::path(self.original, asset, record)
+        self.original.path(asset, record)
+    }
+
+    fn blender_png(
+        &self,
+        asset: &str,
+        source: &std::path::Path,
+    ) -> Result<Option<std::sync::Arc<Vec<u8>>>, String> {
+        self.original.blender_png(asset, source)
     }
 }

@@ -5,13 +5,12 @@
  * centered position), the preview resolution menu, and the 3D viewport's
  * shading and X-ray.
  *
- * The editor camera is not in the 3D viewport's API yet (it lives in the
- * three.js viewport); until the 3D lane exposes its view and projection,
- * the override carries shading and X-ray with no camera, and the engine
- * renders the composition camera.
+ * In the editor view the override carries the editor camera and Local View
+ * (`scene3d.viewport.state()`'s `engineCamera` and `localView`); in the
+ * camera view it carries none and the engine renders the composition camera.
  */
 import type { ViewParams } from './presentation';
-import type { MediaPreference, PreviewResolution, Shading3d, ViewerCanvas } from './protocol';
+import type { EditorCamera, MediaPreference, PreviewResolution, Shading3d, ViewerCanvas } from './protocol';
 
 export type ViewerLayoutState = {
   /** The zoom on screen (fit or chosen). */
@@ -21,7 +20,7 @@ export type ViewerLayoutState = {
   /** `api.transport.previewResolution`: 'auto', a scale, or its text. */
   previewResolution: string | number | null | undefined;
   /** The 3D viewport's state when the composition has a 3D scene. */
-  scene3d?: { hasScene: boolean; shading: Shading3d; xray: boolean } | null;
+  scene3d?: { hasScene: boolean; shading: Shading3d; xray: boolean; overlays?: boolean; selected?: string[]; active?: string | null; camera?: EditorCamera | null; localView?: string[] | null } | null;
   playEveryFrame?: boolean;
   /** The viewer menu's Media section (Automatic, Originals, Proxies). */
   media?: MediaPreference;
@@ -87,6 +86,6 @@ export function viewParamsFor(state: ViewerLayoutState): ViewParams {
     media: state.media ?? 'automatic',
     playEveryFrame: !!state.playEveryFrame,
     ...(state.canvas ? { canvas: state.canvas } : {}),
-    ...(scene ? { camera: null, shading: scene.shading, xray: scene.xray } : {})
+    ...(scene ? { depthId: scene.overlays !== false, ...(scene.selected ? { chromeSelection: { selected: scene.selected, active: scene.active ? [scene.active] : [] } } : {}), camera: scene.camera ?? null, shading: scene.shading, xray: scene.xray, ...(scene.localView?.length ? { localView: scene.localView } : {}) } : {})
   };
 }

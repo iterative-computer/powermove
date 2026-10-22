@@ -5,13 +5,16 @@ test('flat controls remain consistent across home, editor, settings, library, an
   await page.setViewportSize({ width: 1440, height: 1000 });
   async function inspect(name: string) {
     const raised = await page.locator('button:visible').evaluateAll(buttons => buttons.filter(button => {
+      // The query and this callback are separate round trips: a control the
+      // page replaced in between is no longer drawn and has no computed style.
+      if (!button.isConnected) return false;
       const style = getComputedStyle(button);
       // Preserve selection underlines and the uniform boundary that makes color swatches readable.
       const selectionCue = button.matches('.export-destination[aria-pressed="true"], .color-choice');
       return style.backgroundImage.includes('gradient') || style.boxShadow !== 'none' && !button.matches(':focus-visible') && !selectionCue;
     }).map(button => ({ label: button.getAttribute('aria-label') || button.textContent?.trim(), className: button.className, shadow: getComputedStyle(button).boxShadow, image: getComputedStyle(button).backgroundImage })));
-    expect(raised, name).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath(`${name}.png`) });
+    expect(raised, name).toEqual([]);
   }
   for (const theme of ['dark', 'light']) {
     await page.evaluate(theme => {
@@ -37,6 +40,8 @@ test('flat controls remain consistent across home, editor, settings, library, an
     await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
     await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
     await expect(page.getByRole('dialog', { name: 'Panel library', exact: true })).toBeVisible();
+    // Inspect the settled cards: the preview queue replaces clones while it builds.
+    await expect(page.locator('#library-screen')).toHaveAttribute('data-previews', 'ready');
     await inspect(`library-${theme}`);
     await page.keyboard.press('Escape');
     await page.evaluate(() => (window as any).PM.Export.dialog());
@@ -50,7 +55,9 @@ test('flat controls remain consistent across home, editor, settings, library, an
     const color = page.getByRole('dialog', { name: 'Background', exact: true });
     await expect(color).toBeVisible();
     await inspect(`color-${theme}`);
-    await color.getByRole('button', { name: 'OK', exact: true }).click();
+    // The unified picker has no OK button; it closes from its own header.
+    await color.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(color).toHaveCount(0);
     await composition.getByRole('button', { name: 'Cancel', exact: true }).click();
   }
   expect(session.diagnostics.pageErrors).toEqual([]);

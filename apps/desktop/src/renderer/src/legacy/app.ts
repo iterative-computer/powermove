@@ -637,18 +637,22 @@ function retryThumbnail(project: any) {
     // Retry only the preview. The document was already saved; rewriting it
     // every half second would keep serialization work running during playback.
     if (PM.proj === project) projectThumb();
-  }, 500);
+  }, Math.max(500, lastThumbAt + 5000 - Date.now()));
 }
 function canFinishThumbnail(project: any) {
   if (PM.proj !== project || discardedProjects.has(project.id)) return false;
   if (!thumbnailBlocked()) return true;
-  lastThumbAt = 0;
+  if (!PM.EngineRender) lastThumbAt = 0;
   retryThumbnail(project);
   return false;
 }
 function projectThumb() {
+  if (!PM.proj) return undefined;
   const now = Date.now();
-  if (now - lastThumbAt < 5000) return undefined;
+  if (now - lastThumbAt < 5000) {
+    retryThumbnail(PM.proj);
+    return undefined;
+  }
   if (thumbnailBlocked()) {
     retryThumbnail(PM.proj);
     return undefined;
@@ -661,11 +665,20 @@ function projectThumb() {
   const engine = PM.EngineRender;
   if (engine) {
     const project = PM.proj;
+    const generation = saveGeneration;
+    const revision = engine.currentRevision();
+    const captureTime = PM.time;
+    const stale = () => PM.proj !== project || saveGeneration !== generation || PM.EngineRender !== engine
+      || engine.currentRevision() !== revision || PM.time !== captureTime;
     const height = Math.max(1, Math.round(320 * (Number(project.h) || 1) / (Number(project.w) || 1)));
-    void engine.thumbnails.request({ key: `project-thumbnail:${project.id}`, time: PM.time, width: 320, height, draft3d: true })
+    void engine.thumbnails.request({ key: `project-thumbnail:${project.id}`, time: captureTime, width: 320, height, draft3d: true, minRevision: revision ?? undefined })
       .then((snapshot: any) => {
         if (!snapshot || !canFinishThumbnail(project)) return;
-        PM.Projects.upsertMeta({ id: project.id, name: project.name, at: Date.now(), thumb: engine.toCanvas(snapshot).toDataURL('image/jpeg', .7) });
+        if (stale()) { retryThumbnail(project); return; }
+        const thumb = engine.toCanvas(snapshot).toDataURL('image/jpeg', .7);
+        if (!canFinishThumbnail(project)) return;
+        if (stale()) { retryThumbnail(project); return; }
+        PM.Projects.upsertMeta({ id: project.id, name: project.name, at: Date.now(), thumb });
       })
       .catch(() => undefined);
     return undefined;

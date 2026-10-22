@@ -81,19 +81,21 @@ pass") into the full pass. The plan stays the authority.
   program in those cases; the pixels cannot differ.
 - **Shadow maps** are recorded in the prepass, as `shadowMap.autoUpdate`
   is on only there: a layer's color pass sees its own set's casters.
-- **Textures** decode through `pm-media` in the still classes the 2D
-  renderer draws, upload top row first (WebGL ignores `UNPACK_FLIP_Y` for
-  an `ImageBitmap`), sRGB maps as `Rgba8UnormSrgb`, and generate mipmaps
-  as box filters (in linear light for sRGB). Maps with transparency (any
-  alpha below 255) are routed: the premultiplication Chromium applies to an
-  `ImageBitmap` in WebGL has not been measured. `Textures::probe` decides
-  this statically (decoded once per file version: path, size, modification
-  time), so the capability check lists `3D texture maps with transparency`
-  before a frame renders. A map that changes after the check is met when
-  the scene's maps load at render time (`Scene3dRenderer::resolve_maps`,
-  before any draw); it returns `Error3d::Unsupported`, which `exec` turns
-  into `MediaFailure::Unsupported`, so the frame is routed
-  (`RenderError::Unsupported`) and never draws with the model missing.
+- **Textures** are today's level 1 content: the runtime's texture getter
+  hands three.js the asset's `ImageBitmap`, the bitmap image layers draw,
+  and WebGL ignores every unpack flag for an `ImageBitmap`. Maps therefore
+  decode through pm-render's level 1 still-compatibility bitmap
+  (`media::level1_bitmap`: PQ/HLG/cHRM/cICP PNG, CMYK JPEG, the TIFF
+  structures, the AVIF classes, Chromium's gamma and ICC readings) and
+  keep Chromium's premultiplied bytes, which three.js samples as straight
+  alpha. Deep and arithmetic JPEGs have no 8-bit bitmap: the importer keeps
+  an image element whose `texSubImage2D` fails, so the storage stays zeroed
+  (transparent black). Rows upload top row first, sRGB maps as
+  `Rgba8UnormSrgb`, and mipmaps are box filters (in linear light for sRGB),
+  equal to Chromium's `generateMipmap` (Phase 3c round 2, below). Probes
+  are cached per file version (`Textures::probe`). Nothing a level 1 image
+  layer draws is an unsupported map; SVG maps (an image element rasterized
+  by Chromium) are the one map class still listed.
 - **Missing textures** draw without the map and add `Missing texture: <id>`
   to `Scene3d::warnings`, as today's texture getter returns nothing for an
   image without a bitmap. That covers an image asset that is offline (the
@@ -117,8 +119,10 @@ pass") into the full pass. The plan stays the authority.
   Built geometry (OBJ triangles included) is shared across scenes and
   frames. `Geometry3d`'s debug form names the key, not the vertices, so
   content keys stay cheap.
-- **`doubleSided`** is read as `compositionScene` passes it (absent means
-  front side), not with the schema default.
+- **`doubleSided`**: `compositionScene` returns `parseScene`'s output, so a
+  3D object layer's material without `doubleSided` is double-sided (the
+  schema default; `pm-eval` fills it since Phase 3c). A legacy scene layer's
+  raw objects are read as stored (absent means front side).
 - **Depth and id surface.** Coverage is the layer's own alpha (≥ 0.5/255);
   depth comes from a single-sampled pass, so MSAA-only edge pixels report
   +inf. Inside a precomposition the depth is the nested camera's; a legacy
@@ -211,28 +215,42 @@ ANGLE on Metal and three.js 0.180.0 for references, 2026-10-15.
 
 ## Gaps
 
-- Imported glTF scenes, recipe parts (model groups), Blender surfaces, and
-  Studio Cube belong to other lanes and stay routed.
-- Third-party mesh layers render natively only with a definition
-  snapshot; the static check routes them until the definition snapshot lane
-  delivers them (the built-in OBJ model layer needs none).
-- 3D picks and bounds (`pm-eval`'s `LayerHost` hooks `pick_object`,
-  `object_bounds`, `scene_bounds`, `pick_extension_scene`) still come from
-  the host's three.js runtime (section 26, Phase 1: until 3c). Rectangle
-  picking of mesh layers is `pm-eval`'s `GL.pick` port and needs no 3D.
-- Corpus projects `3d/transparency` (a mask) and `3d/motion-blur` are
-  routed by 2D features other lanes own; their 3D behavior is covered by
-  the sweep and the document tests.
-- Texture maps with transparency, and maps outside the drawn still classes,
-  are routed (statically, and at render time if a file changes after the
-  check).
-- Scene warnings (`Missing texture`, `Missing model`) are kept in
-  `Scene3d::warnings` but have no channel to the host yet.
+Current as of Phase 3c round 7 (2026-10-19); the round sections below are
+history.
+
+- Nothing about a 3D layer routes. `Feature::Scene3d` no longer exists:
+  imported models draw or are today's missing-model box (`gltf.md`,
+  "Acceptance"), a scene the schema refuses draws as today (below,
+  "Corrupted scenes"), and a material map's still has the level 1 image
+  layer's verdict, feature for feature (`threed_maps.rs`). What an image
+  layer of the same still reports is the stills lane's to close.
+- Shared-parent glTF nodes follow GLTFLoader's promise resolution order;
+  image-dependent ordering uses the already-decoded-image policy described
+  in `gltf.md`, "Acceptance".
+- Native composition and legacy scene boundaries validate the same strict
+  keys, ranges, source and mesh refinements, material graphs, IDs, parenting,
+  and geometry budget as `parseScene`; invalid composition scenes fail their
+  3D pass, while invalid legacy scenes draw the missing-definition checkerboard.
+  Native picks and bounds refuse the same corruption. The four limits that
+  ordinary editing can exceed (512 objects, 16 lights, 160-character display
+  names, and 8 MB of serialized scene JSON) are accepted by the native engine.
+  For legacy queries, the original parser exception is returned for other
+  invalid scenes.
+- Blender snapshots of glTF primitives that WebGL refuses to draw (an
+  index past the last vertex is written as null as today; a vertex
+  attribute shorter than its positions is read as zeros where today reads
+  `undefined`) are not compared against a capture.
+- Scene warnings (`Missing texture`, `Missing model`) travel with native
+  frame descriptors to `uiState.getShaderMeta().sceneWarnings`; diagnostics
+  update when the matching frame is presented, including nested scenes.
 - 3D output stays 8-bit as today's canvas, renders at the full output size
   for a region of interest, and has no render cache yet (the content key
   is ready for one).
 - Program text differences that three.js's cache makes history-dependent
   (above) are reproduced as fresh programs, not as history.
+- The paired post-D 3D orbit row (pointer to pixel) is unmeasured (round
+  5's attempt ran with the display asleep); it moves to the Phase 3c
+  measurement window.
 
 ## Changes outside the lane
 
@@ -289,3 +307,1017 @@ answers with the unhydrated legacy evaluator, retains the absolute numeric
 22.5/45 assertions, checks assigned ids, and requires unchanged JSON after
 evaluation and a second hydration. Removing scene adoption fails the expanded
 regression; no easing behavior or renderer tolerance changed.
+
+## Phase 3c: 3D questions and model groups on the engine (3D lane, 2026-10-18)
+
+Plan section 8, appendix C rows C9, C10 and C14 (model groups), amendments
+21 and 22. Code: `engine/crates/pm-geom3d/src/query.rs`,
+`engine/crates/pm-eval/src/query3d.rs` and `recipe.rs`,
+`engine/crates/pm-wasm/src/geometry.rs`,
+`apps/desktop/src/renderer/src/core/scene3d/engine-geometry.ts`.
+
+### What changed
+
+- **pm-wasm answers every 3D question the mirror used to refuse.** The
+  `RefuseHost` is gone. `pm_eval::bounds::LayerHost` no longer has the five
+  three.js hooks; it offers `geometry()` (`pm_eval::query3d::Geometry3d`:
+  model assets, the editor camera, caches), and pm-eval answers:
+  - `GL.pick` on 3D object layers: `compositionRuntime(...).pick(ndc,
+    compositionDepthIds, viewportCamera)`, with Local View;
+  - `GL.bounds` on 3D object layers: `runtime.bounds(proj.w, proj.h, [id],
+    camera)` (the camera resized to the project, as today);
+  - `groups.bounds` / `GL.bounds` on model groups: `modelGroupBounds`,
+    including `z0` and `z1` (`Bounds::z`), and the native `groupPlacement`
+    edit writes the group's `anchor.z` / `position.z` for 3D groups as
+    today;
+  - extension scenes without a background (legacy `powermove.3d.scene`
+    layers and mesh definition layers): `sceneRuntime(...).bounds` and
+    `.pick`, with `parseScene`'s refusals of `sceneForLayer`'s scene (an
+    empty background throws a `ZodError` today and here).
+- **Geometry and semantics** (`pm_geom3d::query`): `Mesh.raycast` step by
+  step (bounding sphere unless it contains the origin, local bounding box,
+  draw range or per-group triangles with each group's material side, a
+  group without a material throws three.js's `TypeError`, an array
+  material on a mesh without groups finds nothing), the closest hit whose
+  object passes `pick`'s filter (visible chain, depth-set ids, not every
+  material at opacity 0); `Raycaster.setFromCamera` for both projections;
+  `worldBounds` (visible meshes' geometry boxes, lights, points, and lines
+  excluded), `Vector3.project`, and `Box3.setFromObject` (posed skinned
+  vertices, instances, points and lines included). Imported glTF models
+  are picked by the glTF lane's kernel (`gltf::pick::Picker`, 7,584 rays
+  equal to three.js) under `sync`'s material rule. Primitive, lathe,
+  extrude and mesh sources come from the bit-identical generators; OBJ
+  models from `obj::parse_obj`; the missing-model box is `BoxGeometry(1, 1,
+  1)`. Triangle meshes keep a BVH (built once per geometry and per source
+  key in the mirror).
+- **Model assets reach the mirror on demand.** A question that meets an
+  asset it lacks answers `{"models": [ids]}`; the renderer adds each one
+  from its asset store as `SceneRuntime.makeObject` reads it (a glTF
+  model's source bytes, kept by `loadGltf` per `object3d`; an OBJ model's
+  text; otherwise "missing", the orange box) and asks again
+  (`resolveModels`). A record that changes (relink, reload, removal) is
+  forgotten and fetched again (`refreshModels`). New ABI: `pm_model_set`,
+  `pm_model_forget`, `pm_models_clear`.
+- **The editor camera and Local View travel with each question**
+  (`geometryRequest`: `matrixWorld`, `matrixWorldInverse`,
+  `projectionMatrix` and its inverse exactly as the renderer holds them,
+  and the lens for questions that resize it). `editorCamera(PM)` gives the
+  camera without building the composition's three.js runtime.
+- **The three.js answer fallback for 3D picks is removed**
+  (`engine-doc/native.ts` no longer returns `fallback: '3d'`); 3D bounds,
+  group bounds, and geometry-dependent edits (`edits.ts`) carry the
+  geometry request too.
+- **Animated model-group recipes draw natively.** `animatedPart` and the
+  recipe geometry (`recipeParts`) moved to `pm_eval::recipe`:
+  `compositionScene` replaces a part's source with the recipe's geometry for
+  the evaluated parameters and moves its transform channels by the new base
+  minus the stored one; `compositionRuntime`'s parent-space offset is
+  `Scope::recipe_world_offset`, used by the render placement and the 3D
+  questions. Staircase steps are `BoxGeometry` through `rotateY`
+  (positions through the matrix, normals through the normal matrix and
+  normalized, stored as f32), extrusions are translated and their normals
+  renormalized as `applyNormalMatrix` does. pm-render no longer lists
+  "model groups" or "model-group recipe parts", pm-wasm's `compositionScene`
+  answers recipe parts, and 3D object, light, and camera layers inside a 3D
+  group draw (they are placed by `world3D` through the group; the
+  `TwoAndAHalfD` reason stays for other layer types).
+
+- **The engine viewer renders the editor view with the editor camera and
+  Local View.** `scene3d.viewport.state()` gains `engineCamera` (contract
+  2's `EditorCamera`: the editor camera's world-to-camera matrix and lens;
+  an orthographic view's half height is `3 / zoom`) and `localView`; the
+  viewer's view override carries them (`view-params.ts`), as today's
+  compositor renders `viewportCamera` and filters Local View in the editor
+  viewport. Blender previews in the editor view get the editor camera the
+  same way (docs/engine/blender.md, "The paused viewer").
+- **Blender snapshots of recipe parts** carry `generated` (the group's
+  `evaluatedRecipe` and the part name) as `renderSnapshot` does; the
+  recipe-part refusal is gone (`blender/snapshot.rs`).
+- **`doubleSided`**: `compositionScene`'s `parseScene` default (absent means
+  double-sided) is filled for 3D object layers.
+
+### Tests and measurements
+
+Apple M4 Max, macOS 27, 2026-10-18, load average about 9 to 12.
+
+| Test | What | Result |
+|---|---|---|
+| `engine-doc/scene3d-geometry.test.ts` (real pm-wasm, dual-answer mode against today's `GL.pick`, `GL.bounds`, `PM.groupBounds` with three.js r180) | 5 seeded compositions (every primitive, lathe, extrude with and without bevel, a mesh source with groups and one or two slots, a hand-built animated GLB, an OBJ model, the missing box, untextured Khronos models: `BoxAnimated`, `RiggedSimple`, `RiggedFigure`, `BrainStem`, `RecursiveSkeletons`, `AnimatedMorphCube`, `SimpleInstancing`; keyframed transforms, opacity 0, double-sided, inactive, solo, layer opacity, 2D barriers, plain and model groups, a camera layer; a legacy scene layer with a hierarchy and models, a mesh definition layer, one with an invalid empty background) at 4 times, in the camera view, the editor view (orbited, then orthographic), and Local View | 6,128 compared answers (picks, bounds, group bounds), 0 mismatches beyond the dual-answer classes (identity for picks; 1e-6 for bounds, amendment 20), 0 fragile differences, 0 fallbacks; picks hit 373 object layers and 341 extension scenes, 807 throws agreed (the invalid background) |
+| same | Animated rocket and staircase recipes: `compositionScene` from pm-wasm against today's at 5 times; picks and bounds in the camera and editor views | Scenes equal (every number exact, key order aside), 0 mismatches, 0 fallbacks |
+| same | Model assets fetched once; a relinked record fetched again; a removed one draws the missing box | Pass |
+| same | Pick latency in wasm (V8, Node), the 7 Khronos models above plus a random composition, a new time per pick (skinned models re-posed), 400 picks, editor view | p50 2.15 ms, p95 2.27 ms, max 3.73 ms |
+| same | `viewportBounds`' boxes (`Box3.expandByObject`) from pm-wasm (`objectBoxes3d`) against three.js on 3 compositions with the Khronos models, 3 times | 138 boxes, every number exact (difference 0) |
+| `pm-geom3d` `query` unit tests | Nearest object, depth-set ids, invisible and transparent objects, slots and groups (throw, nothing, hit), back faces by side, projected bounds, `setFromObject`, orthographic rays | Pass |
+| `pm-eval` `tests/layers_unit.rs` `object_picks_raycast_the_scene` | A box seen by the studio camera, a 2D layer below, no geometry host (`HostOnly`), Local View | Pass |
+| `pm-render` `tests/corpus.rs`, capture `threed-modelgroup-20261018-165040` (new corpus project `3d/model-group`, captured through the app) | Animated rocket and staircase recipes in turning 3D groups at 0, 1.5, 3 s | 3 frames: 100% exact outside 3D, 3D bar ≤ 2 CV 100%, max 1 CV, SSIM 0.99998 |
+| `pm-render` `tests/blender_snapshots.rs`, capture `threed-modelgroup2-20261018-170236` (the same project with Blender on, recorded at main's IPC) | Recipe-part snapshots (final, preview, export, exportAlpha) against today's `renderSnapshot`, with `generated` | 9 compared, 9 equal; geometry 122,832 values, max difference 0; 1,755 exact values; 6 of 6 frame lists equal |
+| `pm-render` `tests/blender_snapshots.rs`, corpus v1 | Regression | 158 compared, 135 equal, 23 not built (`3d/gltf`, `3d/gltf-materials`, imported models), as before |
+| `pm-wasm` `tests/geometry.rs` | Models asked for once, the missing box, an OBJ that does not parse (kept missing, named), the editor camera from behind, Local View | Pass |
+| `core/scene3d/engine-camera.test.ts`, `viewer/engine-present/view-params.test.ts` | The editor camera as contract 2's camera (perspective and orthographic), Local View in the snapshot and the view override | Pass |
+| `e2e/viewport3d.spec.ts` with `POWERMOVE_NEW_ENGINE=1` (under the Electron lock) | Blender keys (transform, duplicate, hide, select, key), Properties tabs, box select, X-ray, Walk, Local View, Zoom Border, area lights, Edit Mode | 4 of 4 pass |
+| `e2e/scene3d.spec.ts` with `POWERMOVE_NEW_ENGINE=1` | | 4 of 8 pass (navigation and framing, portable glTF export, OBJ bundles, normal maps and shadows); 4 fail where the spec reads today's WebGL canvas (`#gl`, `PM.GL.canvas` pixel sums of 0 while the engine draws the viewer) or calls `PM.Export.snapshot` before the window's engine session exists (`noSession`); none fails at a pick, bound, or gesture |
+| `pm-render` `tests/corpus.rs`, `PM_RENDER_ONLY=3d/` (v1 and render captures) | Regression after the capability changes | 30 frames, 0 failed (`3d/motion-blur`, `3d/transparency` still routed by motion blur and masks) |
+| `pm-render` `scene3d_document`, `headless`, `scene3d_layering`, `scene3d_resources` | Capability expectations updated (recipe parts and 3D objects in 3D groups draw) | Pass |
+| `pm-geom3d`, `pm-eval`, `pm-edit`, `pm-wasm` test suites; clippy `-D warnings` | | Pass |
+
+### THREED-1 behavior decisions (binding round 4; round 5 corrections)
+
+- Exactly equal-distance picks must match today's object insertion history.
+  **Corrected in round 5:** the native geometry host retains insertion
+  history across source replacement and asset relinking, and synchronizes it
+  at presented-frame boundaries as well as geometry queries. Edits before
+  one frame do not create intermediate runtime objects.
+- The skinned bounding sphere uses the current pose: **KEEP**, a recorded
+  bug fix. Today's first-pose sphere can miss a mesh after it moves outside
+  that sphere. The loaded-pose bounding box still matches today.
+- Corrupted legacy scenes must throw the same `ZodError` as today's
+  `parseScene`. **Corrected in round 5:** renderer geometry queries rethrow
+  the original parser error when they reach the scene, including its class,
+  message, and issues. The native frame-sync query uses the same parser.
+- Headless and agent picks return native 3D answers where today returns
+  null: **KEEP**, a recorded fix.
+
+The local bounding-box pre-test always runs (three.js runs it only after a
+bounds question computed the box); it only prunes. These decisions are
+settled, with no further approval requested. Direct headless pm-wasm callers
+receive a serialized validation marker; the renderer rethrows today's
+original JavaScript `ZodError` object.
+
+### Phase 3c round 2 (review fixes, 2026-10-19)
+
+- **Models the engine cannot load fail by name.** A model three.js holds
+  that `pm_geom3d::gltf::load` rejects, or an `object3d` without the bytes
+  it was loaded from, is `ModelAsset::Unloadable`: every question about its
+  scene replies `{unsupported: why}` (`MODEL_UNLOADABLE`), which the
+  renderer counts as `<op>:unsupported` and warns with the reason. It is
+  never answered with the missing-model box. (Corrected in round 3: this
+  said "strict hosts refuse", which no code did in round 2. Since the
+  document host's round 5 merge, the renderer and the document host install
+  the engine document strict whenever "Use New Engine" is on
+  (`legacy/bootstrap.ts`, `document-host/chain.ts`): `onFallback` turns any
+  fallback into a named `EngineFailure` with the editor's toast, so three.js
+  never answers. Round 3 adds the test.)
+- **Third-party mesh definitions and overrides by id.** Geometry requests
+  carry `meshFields` (definition id to `renderer.assetField`, from the
+  host's `PM.layerDefinition`, as `sceneForLayer` reads it), so a user's
+  own mesh definition, and an override of the built-in OBJ model layer,
+  are scenes picked and bounded like today, not rectangles. Without a
+  registry (no `meshFields`), only the built-in OBJ model layer is a mesh
+  layer.
+- **Viewport boxes go through the answer path.** `viewportBounds` asks
+  `objectBoxes3d` through `NativeApi.answer` (counted fallbacks, dual
+  compared, a named failure with the setting on) with the composition being viewed; it
+  no longer builds the three.js runtime itself when the engine is on.
+- **3D maps on level 1 bitmaps** (Textures, above). Measured through the
+  app (`e2e/tools/threed-maps-capture.ts`, the uploads three.js r180 makes,
+  read back texel for texel; hashes in
+  `pm-render/tests/fixtures/stills2/three-maps.json`).
+- **Blender textures** converted from the level 1 bitmap
+  (docs/engine/blender.md).
+- **Proof for 3D layers in 3D groups.** Corpus `3d/group-roles`: plain 3D
+  groups with anchors, animated non-uniform scale, X/Z rotation and
+  orientation, a nested 3D group, a spot and a point light inside groups, a
+  camera inside a 3D group, parenting to a grouped object, and 3D layers
+  in a flat group. (The integration branch's compositing closure lists no
+  3D group reason for 3D object, light, or camera layers; this corpus case
+  is the evidence for that.)
+- **The viewport's render camera from pm-wasm.** The camera view, view
+  framing, the view's field of view, and the gizmo's camera read
+  `renderCamera(PM)` (core/scene3d/render-camera.ts): pm-wasm's `camera3d`
+  (the composition scene's render camera, lens and `matrixWorld`) through
+  the answer path, not `compositionRuntime(PM).camera`.
+- **Transform targets from pm-wasm.** The gizmo, modal G/R/S, and the snap
+  and pivot operators resolve targets from each object's `matrixWorld`
+  (`objectWorlds3d`) and a flat group's members' boxes (`objectBoxes3d`)
+  through `targetScene(PM)` (core/scene3d/engine-targets.ts).
+- **Unknown primitives draw nothing.** A 3D object layer's scene is synced
+  unvalidated today, so `primitiveGeometry` returns nothing for a primitive
+  it does not know and the object draws nothing; the pass now does the
+  same instead of listing it. A legacy scene layer's `parseScene` refuses
+  such a scene, so it stays listed there (the layer fails today too).
+- **Blender assets named by content** (docs/engine/blender.md): media-store
+  files without an extension no longer fail the engine's Blender stage.
+- **e2e with "Use New Engine" on.** `scene3d.spec.ts` reads what the
+  viewport shows from the window (`capturePage`) when the engine presents,
+  and compares the engine's own frames (`snapshotAsync`, after they
+  settle) and the project's layers before and after its gestures and their
+  Undo. `blender-motion.spec.ts` reads the engine capture's own pixels where
+  it read today's compositor after a capture (the WebGL compositor has no
+  prepared Blender frame when the engine captured).
+- **The 3D orbit row** is measured (`scripts/frame-bridge-measure.mjs`
+  runs `p3c-orbit-*`, an orbit input mode in the app measurement; below).
+
+| Test | What | Result |
+|---|---|---|
+| `pm-render` `tests/threed_maps.rs` | `decode` of 128 fixture files (stills2 classes and the e2e still fixtures) against the texels the app stored | 112 classes texel-exact at level 0, 14 failed uploads zeroed, 2 rejected imports |
+| same, `map_mip_levels_against_todays_generate_mipmap` | The pass's level 1 mip, sRGB and linear, against Chromium's `generateMipmap` | 224 of 224 equal |
+| `pm-render` `tests/corpus.rs`, capture `threed-20261019-roles-maps` (through the app) | `3d/group-roles` (3 frames), `3d/maps-level1` (25 color maps and 5 linear maps of every class, 2 frames), `3d/model-group` (3 frames) | 8 frames, none skipped: 100% exact outside 3D, 3D bar ≤ 2 CV 100%, max 1 CV, SSIM ≥ 0.99998 |
+| `pm-render` `tests/corpus.rs`, `PM_RENDER_ONLY=3d/` (v1 and render captures) | Regression after the merges and the map change | 35 frames, 0 failed, none skipped (`3d/transparency` and `3d/motion-blur` included) |
+| `pm-render` `tests/blender_snapshots.rs`, v1 | Regression | 158 compared, 135 equal, 23 not built (imported glTF), as before |
+| same, capture `threed-20261019-roles-maps` | `3d/group-roles`, `3d/model-group` snapshots; `3d/maps-level1` snapshots | 18 of 24 equal; the 6 `3d/maps-level1` snapshots differ in converted textures (docs/engine/blender.md, Gaps) |
+| `engine-doc/scene3d-geometry.test.ts` (real pm-wasm) | The dual suite with a third-party mesh definition (`acme.turntable`, asset in its own field); viewport boxes through `answer`; an unloadable model | 0 mismatches, 0 fallbacks, third-party hits counted; boxes exact; the unloadable model reports `gl.pick:unsupported` and `gl.bounds:unsupported` with the reason |
+| `pm-wasm` `tests/geometry.rs` | A rejected glTF and an unloadable model: picks, bounds, and `objectBoxes3d` reply `unsupported`; a loadable model answers again | Pass |
+| `engine-doc/scene3d-geometry.test.ts`, render camera | 12 cameras (perspective and orthographic, animated, inside a turned 3D group) from `camera3d` against `compositionRuntime(PM).camera` | Exactly equal (lens and `matrixWorld`); no fallback |
+| same, transform targets | 108 targets (primitives, OBJ and glTF models, model groups, a flat group), 3 seeds, 3 times; then every target's edits for a move, a turn, and a scale | 6 numbers 1 ulp apart (relative 1.1e-16, pm-eval's `world3D` product), the rest exact; 303 gesture edits identical |
+| `pm-render` `tests/scene3d_resources.rs` | An unknown primitive on a 3D object layer | Nothing listed; the frame equals the frame without the object |
+| e2e with `POWERMOVE_NEW_ENGINE=1` (Electron lock), after the fixes below | `scene3d` (8), `viewport3d` (4), `comp-thumbnails` (1), `blender-motion` (3), `engine-blender` (2) | Run 2: 17 of 18 (`blender-motion` model and render spec failed on the unbound `.blend` source, fixed in `27ffb184`); run 3 (`blender-motion`, `scene3d`): 10 of 11, the one failure being the import defect below (the gizmo spec's first engine frame after the OBJ import is the missing-model box; the same spec passed in run 2). Gestures, cancels, and Undo leave the project's layers and the engine's frame identical wherever the model was drawn before them. `engine-blender`: the job engine's still 100% within 2 CV of today's (max 0), the paused viewer's Material Preview max 1 CV from the Blender surfaces |
+| same with `POWERMOVE_NEW_ENGINE=0` | `scene3d`, `blender-motion`, `viewport3d` with the adapted specs | 15 of 15 |
+| `scripts/frame-bridge-measure.mjs` `p3c-orbit-*` r1 (`docs/engine/phase3c-measurements/`): MMB orbit in the editor view of the primitives scene with a sun casting shadows, 1920 × 1080, 120 Hz panel, 2,401 events; load average 25 to 68 from other lanes during the runs | Pointer-to-pixel p50 / p95 / p99 | Today idle 25.7 / 38.5 / 42.6 ms (56 unpresented); engine idle 28.2 / 44.9 / 53.3 ms; today under the gate load 26.0 / 88.2 / 113.3 ms; engine under load 26.6 / 84.9 / 101.6 ms. The p95 ≤ 33 ms row is not met by either path; idle the engine is 2.5 ms worse at p50 and 10.7 ms at p99 (amendment 5's comparison fails idle, passes under load) |
+
+### Phase 3c round 3 (review fixes, 2026-10-19)
+
+- **No three.js answer with the setting on.** The renderer
+  (`legacy/bootstrap.ts`) and the document host (`document-host/chain.ts`)
+  install the engine document strict whenever "Use New Engine" is on (the
+  document host lane's round 5): `onFallback` turns every fallback of a
+  query (`unsupported`, `context`, `exception`, `host`, `unavailable`, a
+  trap) into a named `EngineFailure` with the editor's toast, so the
+  three.js closures passed to `answer` (picks, bounds, `objectBoxes3d`,
+  `objectWorlds3d`, `camera3d`, and round 3's `objectMesh3d` and
+  `cursorHit3d`) run only in the development modes (dual answers, as the
+  reference). A test installs the renderer's flag-on configuration (mode
+  `on`, strict) and checks that the 3D questions are answered natively
+  with none of the closures called, and that a model the engine cannot
+  load throws `The new engine could not answer gl.pick (unsupported)` with
+  the toast, never three.js. The round 2 wording "refused by strict hosts"
+  (false then) is corrected throughout.
+- **Edit Mode and the 3D cursor on pm-wasm.** `objectMesh3d` answers what
+  `runtime.objects.get(id)` holds for Edit Mode's `currentMesh` (missing,
+  not a mesh, or its geometry's buffers: f32 positions and uvs, the index
+  when it has one; the missing-model box and OBJ models included), and
+  `cursorHit3d` answers `placeCursor`'s surface point
+  (`pm_geom3d::query::Scene::cursor_hit`: the first visible mesh hit by
+  distance, no material filter, a model's meshes by their own visibility,
+  points and lines skipped). `core/scene3d/engine-edit.ts` builds a
+  `BufferGeometry` with today's buffers from the answer, so `meshFromGeometry`
+  runs unchanged; Edit Mode's point targets, overlay and extrude normal
+  read the object's world matrix through `targetScene` (pm-wasm's
+  `objectWorlds3d`). Box select of models uses `render.gl.bounds`
+  (`layerWorldBounds`), which is pm-wasm's bounds with the editor camera;
+  Edit Mode's box select tests the overlay's projected points, which now
+  come from pm-wasm's mesh and world matrix.
+- **The import race.** A model imported with the engine on was drawn as
+  the orange missing-model box for its first frames. Cause: the import
+  writes the asset record into the document before its window binds the
+  file (`flushBindings` follows), the engine asks main for the new asset at
+  once, main has no binding yet and answers offline, and the engine's first
+  retry is 250 ms later, so the layer that arrives after the bind draws
+  with offline media. Main's media store now holds the viewer engine's
+  read of an asset no window binds yet until a binding names it (up to
+  1 s; `MediaStoreService.resolveAsset` with the interactive process); the
+  engine shows nothing missing while a read is outstanding (its route stays
+  pending). Jobs and other callers never wait, and a bound but missing file
+  is offline at once. While a read waits the composition's frames wait
+  too (the route is pending), so an asset no window ever binds (IndexedDB
+  media not migrated yet) holds the viewer for up to 1 s at open where it
+  drew that layer's offline failure at once before. The e2e helper that
+  waited for frames to settle is
+  replaced by one that requires the engine's frame to be stable at once.
+- **Document host 3D geometry (issue D1).** A worker test adds 3D
+  objects, groups them into a model group and a mixed group (group
+  placement measures 3D bounds), reads the state and the 3D scene: 0
+  fallbacks, 0 failures, 0 dual mismatches, with `edit.groupPlacement` and
+  `camera3d` answered by pm-wasm (`hosts.test.ts`).
+
+| Check | Scope | Result (2026-10-19) |
+|---|---|---|
+| `scene3d-geometry.test.ts` (real pm-wasm, `PM_WASM_REQUIRED=1`) | 10 cases: the round 2 suite, Edit Mode meshes and cursor rays on 4 seeded compositions with models (skinned, morphed, instanced Khronos models, OBJ, the missing box, every primitive, lathe, extrude, mesh sources with slots) at 3 times, transform targets on 10 seeds, the flag-on strict configuration | 246 meshes and 480 rays (134 hits) exactly equal to three.js; transform targets 339 compared, 29 numbers 1 ulp apart (worst relative 2.2e-16), 939 gesture edits identical; strict: 0 closures called, the unloadable model a named failure |
+| `document-host/hosts.test.ts` 3D case | apply_commands with 3D objects, model and mixed groups, get_project_state, get_3d_scene, in `audit` mode | 0 fallbacks, 0 failures, 0 mismatches |
+| `media-store/service.test.ts` | the viewer read before the bind, an unbound asset, jobs, a bound missing file | 15 of 15 |
+| e2e `POWERMOVE_NEW_ENGINE=1` (Electron lock) | `scene3d` 8, `viewport3d` 4, `blender-motion` 3, `engine-blender` 2, `comp-thumbnails` 1 | **18 of 18**; the OBJ import gizmo spec (stable engine frame at once) 6 of 6 more with `--repeat-each=6` |
+| e2e `POWERMOVE_NEW_ENGINE=0` | `scene3d`, `viewport3d`, `blender-motion` | 15 of 15 |
+| `pm-render` `blender_snapshots` (v1 and `threed-20261019-roles-maps`; nothing allowed) | every Blender snapshot and frame list | 182 compared, 153 equal, 29 failures (23 glTF snapshots not built, 6 converted textures); fails by design until closed |
+
+### Open items at the end of round 4 (historical)
+
+- The 3D viewport chrome (`core/scene3d/overlay.ts`) still renders the
+  scene with three.js for grid occlusion and selection outlines, so the
+  composition's three.js runtime is still synced while the 3D viewport is
+  open (for the chrome only; no answer comes from it with the setting on).
+  Binding decision D requires replacing that redraw while retaining today's
+  pixels. The current depth/ID contract is insufficient on its own:
+  - the surface's depth is view-space depth in `rgbaf16` (about 11 bits
+    of mantissa: 0.008 world units at 10 units away), where today's grid
+    is depth-tested against a 24-bit depth buffer of the same scene, so the
+    grid's occlusion near surfaces at the floor (y = 0) would differ;
+  - the id channel names the topmost covering layer per pixel, where
+    today's outline mask draws every selected mesh whole (its occluded
+    parts included, `drawOutlines`), so outlines of partly hidden objects
+    would differ;
+  - the frame descriptor carries no id-to-layer legend (pm-render's
+    `Frame` has it), and the surface covers the composition, not the stage
+    the overlay draws over.
+  Matching today needs a selection-mask surface (selected objects' coverage
+  without depth against others) and a full-precision depth surface from the
+  engine (a contract 2 change). Keeping the three.js scene redraw is not an
+  accepted alternative. This implementation is still missing. The light and
+  camera glyphs box select reads (`glyphsIn`) are drawn by the same chrome.
+- The `scene3d` API is still assembled by `makeScene3DAPI` over today's
+  modeling, rendering, and controller code. Its geometry questions are
+  pm-wasm's (above), and `describe` evaluates through the engine document,
+  but with the engine drawing the viewer `renderFrame` and `cancelRender`
+  still run and cancel today's renderer-side Blender preview, and
+  `previewState` reports that preview, not the engine's (whose jobs are in
+  the presenter's `blenderPreview` status, which no renderer channel
+  carries yet). `assets.get().object3d` is still the importer's three.js
+  object, not one built from the engine's geometry.
+- Blender: all 23 previously unbuilt imported-glTF snapshots now match,
+  as do all six captured TIFF maps at full sample depth. Five AVIF maps
+  still differ when converted through Canvas2D (the six map snapshots
+  remain failures); see blender.md's round 4 results.
+- SVG maps use Chromium's compatibility upload channel with a distinct
+  material-map key, straight alpha and flipY. Blender's SVG-to-PNG asset
+  conversion still needs to consume the Chromium canvas raster; it does
+  not yet do so. The no-media static check still lists `imported models`
+  and map containers conservatively. `Feature::Scene3d` has not been
+  retired.
+- The 3D orbit row misses p95 ≤ 33 ms on both paths in r1 (2026-10-19,
+  load average 25 to 68: engine idle p50/p95/p99 28.2/44.9/53.3 ms against
+  today's 25.7/38.5/42.6 ms; under the gate load the engine is
+  26.6/84.9/101.6 ms against today's 26.0/88.2/113.3 ms;
+  `docs/engine/phase3c-measurements/p3c-orbit-*-r1.json`). The r2 rerun was
+  queued behind other lanes' jobs on the Electron lock for over an hour in
+  round 3 and cancelled unrun; it needs a quiet machine before the gate.
+
+### Phase 3c round 4
+
+Merged the integration branch, the bridge branch, and the accepted SVG
+compatibility branch (it was not yet in the integration ref when this lane
+started). The three SVG merge conflicts keep both draw reuse/performance
+state and SVG raster delivery. Protocol TypeScript and both addons were
+regenerated/rebuilt, as was pm-wasm.
+
+Imported-model Blender snapshots now use pm-geom3d's CPU pose for vertices
+and skin-adjusted normals, the renderer's source materials, and the
+asynchronous material-completion order for embedded texture ids and mesh
+order. The retained comparison builds all 182 snapshots; 176 are equal,
+including all 23 imported-glTF snapshots. All 90 frame lists match, with
+geometry max 3.47e-16 over 14,118,112 values. All six TIFF map conversions
+match at full decoded PNG depth. The six snapshots with AVIF maps remain
+failures; nothing is excluded or given a larger tolerance.
+
+The real-wasm geometry suite passes 10/10, including strict flag-on
+`objectMesh3d` and `cursorHit3d` failures with visible toasts and zero legacy
+closures called. The 3D gesture snapshots now assert occupied native pixels
+before comparing images, so two empty captures cannot establish parity.
+
+SVG material maps use S1's Chromium channel. A separate key distinguishes
+three.js's straight, flipped image-element upload from the 2D premultiplied
+bucket. Native color and data maps get their mip chains as before. Exports
+and synchronous captures wait for the exact requested raster. Missing
+preview maps are requested through the existing SVG miss channel; the
+presenter keeps the previous frame until those exact texels arrive,
+without presenting an absent 3D object. Oversized SVG maps follow
+three.js's 16,384 px resize rule. Corrupt SVGs recognized as broken images
+remain missing textures. pm-cli's resvg map raster is explicitly counted
+as an approximation, as S1 requires.
+
+Round 4 verification (same source and rebuilt addons, flag on):
+
+| Check | Observed result |
+|---|---|
+| `scene3d`, `viewport3d`, `engine-blender`, `blender-motion`, `comp-thumbnails` e2e | Required 18/18 pass, one worker; native gesture captures assert occupied pixels and multiple colors before Undo image comparisons |
+| SVG material-map e2e | Pass; 1,600 occupied pixels, 1,156 interior pixels compared, max 0 CV, no SVG failures, engine route |
+| `svg_level1` and `threed_maps` | 11/11 pass; all 112 retained still classes have exact texels, 14 failed uploads retain zero storage, two rejected imports remain missing textures; every retained sRGB/linear mip matches |
+| SVG transport and main snapshot unit tests | 45/45 pass |
+| SVG protocol key/band unit tests | 3/3 pass |
+| Real-wasm 3D geometry suite | 10/10 pass |
+| `cargo test -p pm-geom3d -p pm-eval -p pm-wasm -p pm-protocol` | Pass, four test threads |
+| `pm-geom3d` / `pm-render` library clippy | Pass with warnings denied |
+
+The complete Blender snapshot comparison remains a failing gate (176/182).
+Decisions D/E are unimplemented, so G was not re-measured: the earlier idle
+orbit regression remains a blocker. THREED-1's insertion-history tie break
+and corrupted-scene `ZodError` corrections also remain open. No visible
+difference is accepted by these test results.
+
+### Phase 3c round 5: query behavior corrections
+
+The geometry host now retains each scene's object insertion order across
+queries and native presented-frame syncs. A changed source or relinked asset
+removes and reinserts its object,
+matching `SceneRuntime.sync`'s `Map` behavior for equal-distance ray hits;
+document reordering alone leaves the existing order intact. The history is
+keyed by project and composition/layer and survives ordinary document edits.
+The skinned-model sphere still uses the current pose, per THREED-1.
+
+Renderer geometry queries validate legacy scene data with the same
+`parseScene` function as today's runtime. When a native pick or bounds query
+actually reaches a corrupted scene layer, it rethrows that parser's original
+error object, preserving the `ZodError` name, message, and issues. This does
+not run three.js geometry. Regression tests cover a tied pick after a source
+replacement, source/order history, a corrupt stored scene, and a corrupt
+generated model scene; the frame-sync path also checks the stored scene's
+original `ZodError`. The real-wasm geometry suite passes all 13 cases.
+
+
+### Phase 3c round 5: native viewport chrome and API compatibility
+
+The native presenter now owns the viewport geometry passes. A stage-sized
+`Depth32Float` target supplies window depth. Its f32 bits are split 11/11/10
+across an RGBA16F transport plane as exact binary fractions, so half-float
+storage does not reduce depth precision. A second plane carries the visible
+22-bit object ID and selected/active coverage. Selected objects are rendered
+independently of other objects' depth, in the same selected-then-active order
+as today's outline mask. The descriptor includes the object legend, expanded
+model-group selection and evaluated light/camera glyphs. Revision, view
+sequence, pool generation and frame sequence identify the complete pair.
+
+The fractional CSS composition rectangle determines the chrome projection,
+matching the overlay camera rather than the separately snapped color frame.
+`overlay.ts` restores the encoded depth for the existing grid shader and
+uses the independent coverage for the existing outline colors, radius and
+X-ray behavior. `controller.ts` does not synchronize `compositionRuntime`
+when the engine setting is on. Edit targets, navigation and glyph box select
+use native geometry and frame-aligned glyphs. A missing native answer is a
+named engine failure; it never selects the reference runtime.
+
+Chrome and color share slot ownership. The viewer retains the displayed
+chrome pair until replacement and until every WebGL read fence completes;
+color presentation alone cannot release a slot that the overlay still reads.
+Pool retirement also waits for those readers. The native bridge accepts 64
+slots, enough for both planes paired with each of the maximum 32 color slots.
+The preload's final-slot test and the replacement/drop/fence lease tests
+exercise this ownership boundary.
+
+The renderer's preview API uses the presenter's explicit Blender controls
+and status events. A render resolves only after its matching Blender frame
+is actually presented; cancel/restart invalidate the previous generation.
+Automatic viewer previews use separate generations. The native importer and
+Object3D compatibility adapter are described in gltf.md. The adapter keeps
+the deprecated API functional without loading engine-on models through
+GLTFLoader, and warns extension authors when they read it.
+
+Five paired hidden-window Chromium captures exercise grid occlusion by
+intersecting boxes, selected/active outlines including an occluded object,
+X-ray, box-selected light glyphs, and a transformed imported glTF. They pass
+the existing 3D comparison bar: 99.989–100% of pixels within 2 CV, zero CV
+outside the independently measured reference MSAA edges. An additional
+overlay-ink SSIM witness scores 0.999773–1.0 against a 0.995 threshold; it
+is an overlay quality check, separate from S7's per-object metric.
+Selected/active color masks have zero mismatching pixels, and X-ray is pixel-identical. The reference-only
+witness renders today's unchanged depth/grid pass with and without default
+framebuffer MSAA and dilates the difference by one pixel; it includes grid
+intersections inside meshes, where MSAA also changes depth-test coverage.
+It never reads native pixels to choose exclusions and never excludes an
+outline-color pixel. At most 879 of 864,000 captured pixels are excluded.
+The helper reads the actual transient camera through the public viewport
+API, avoiding a second bundled module's independent viewport WeakMap.
+
+The historical round 4 gaps and results above describe that earlier source,
+not accepted differences in the new implementation.
+
+
+### Round 5 synchronized verification and remaining gate
+
+The rebuilt native addon and generated TypeScript both speak
+`protocol-e0820481c9e45c9e`. With Use New Engine on, the synchronized app
+run passes **25/25 tests**, with no skips: all 19 required scene3d,
+viewport3d, Blender, motion, thumbnail and SVG-map checks, plus the new
+preview API, two live PNG-transport cases, chrome comparison, selected-file
+import parity and textured Object3D compatibility checks. Native gesture
+captures retain their nonempty-pixel and document/Undo assertions.
+
+The complete Blender corpus passes 182/182 snapshots (all 23 imported
+models included), 29 converted-map pixel comparisons and 90/90 frame lists.
+The real-wasm geometry suite passes 13 cases. Native preview failure tests
+pass 11/11, Blender compositor/chrome integration 7/7, and lossless depth
+packet boundaries 1/1. Protocol tests pass 96 unit, two integration and 11
+wire/generation cases; the fixture-update test remains intentionally
+ignored. All-target Clippy passes with warnings denied. Targeted renderer,
+main, preload and presenter tests pass, including replacement/fence lifetime,
+retired generations, cancellation and cache eviction. The restored flag-off
+Blender motion checks also pass 3/3. A follow-up preview API check passes
+cancellation and restart after an editor-camera orbit, with matching actual
+presented frame tags, nonempty native pixels, new native jobs and zero legacy
+preview jobs.
+
+**G is unmeasured after D.** The paired `p3c-orbit-today-idle` and
+`p3c-orbit-engine-idle` run was attempted under the Electron lock after the
+synchronized app checks. The harness skipped both because the main display
+was asleep and the session locked. No post-D p50/p95/p99 samples were
+produced, and no performance pass is claimed. Run this same pair with the
+display awake and session unlocked on a quiet machine; compare all three
+percentiles and profile any regression. The r1 values above remain
+historical pre-D results, not measurements of the new chrome.
+
+## Phase 3c round 6: no 3D routing, cancel, and Blender inputs
+
+### Corrupted scenes
+
+`corrupt-scenes.test.ts` pins today's behavior. `compositionScene` runs
+`parseScene` on the assembled scene, so an unknown primitive or light type
+on any 3D layer throws for the whole composition: the compositor's catch
+draws nothing for every object layer and an export fails. A legacy scene
+layer whose `sync` throws, or whose scene is absent, falls through to the
+missing-definition checkerboard. The engine now does the same:
+
+- `SceneBuilder` refuses unknown primitives in composition scenes too (the
+  old empty-geometry rule was wrong); a scene that does not build makes
+  `plan_layer` fail every object layer with a `LayerFailure` (nothing
+  drawn, exports fail), not a routing reason
+  (`scene3d_resources.rs` `unknown_primitives_fail_the_composition_scene_as_today`).
+- A legacy scene or mesh layer that does not build plans
+  `shader_layers::plan::missing_placeholder`, the checkerboard program,
+  at the extension size; `scene3d_document.rs`
+  `the_static_check_looks_inside_legacy_scenes` compares its pixels with
+  a missing-definition extension layer's for an unknown primitive, an
+  unknown light type and an absent scene.
+
+### Material maps
+
+`MapError::Unsupported` and `Error3d::Unsupported` carry the image
+feature (`crate::media::probe_image`'s), not a 3D reason; the static check
+lists it on the 3D layer as `check_media` would on an image layer.
+`map_verdicts_are_the_image_layer_verdicts` checks every still fixture
+(120 drawn, 2 unreadable, 0 unsupported): map and image layer verdicts are
+equal, and every drawn still decodes to the single RGBA8 plane a map
+uploads. The old "texture map image layout" reason is now an internal
+failure with a debug assertion; the 112-class texel test runs every
+compat output through it. Without media, a map's recorded container gets
+`stills::static_format`'s feature, as an image layer's does. The LTC
+table load failure is an internal `Failed`, not a routing reason.
+
+### glTF acceptance
+
+`gltf.md`, "Acceptance": both engine readers now accept exactly the files
+`loadGltf` loads over a 106-file boundary table, except two-parent nodes.
+A refused file is `ModelLookup::Missing` and pm-wasm's `ModelAsset::Missing`
+(the orange box), as today's asset without a scene.
+
+### cancelRender
+
+`cancelBlender` with the engine on cancels the window's Blender worker
+through `bridge().blender.cancel()` again: the worker still runs
+`scene3d.model`'s Regenerate and `.blend` import jobs, and the Model
+Inspector's Cancel relies on it. The native preview is cancelled alongside;
+`EnginePreviewUnavailable` (no native session, route not `engine`) and
+`EnginePreviewCancelled` resolve, as today's cancel always does. Tests:
+`rendering.test.ts` (a pending model job is rejected by the cancel; the
+unavailable cases resolve; other errors still reject) and the app test
+`engine-scene3d-cancel-model.spec.ts` (real Blender, engine on).
+
+### Round 6 verification (2026-10-19)
+
+- Rust: `pm-render`, `pm-geom3d`, `pm-wasm` and `pm-eval` tests pass with
+  4 threads (448 passed, 9 ignored, with `corpus_render_parity` run separately), apart from `corpus_render_parity`'s
+  five known video-class frames (`motion/blur-video`, `retime/speed`,
+  `space25d/precomps`; composite.md), which this lane does not touch; its
+  48 `3d/` rows are all within the 3D bar. All-target Clippy with warnings
+  denied passes for `pm-geom3d`, `pm-render`, `pm-wasm` and `pm-node`.
+- Blender: both `blender_snapshots` tests pass with no environment set
+  (182/182, 29 converted textures by pixels, 90 frame lists).
+- Vitest with `PM_WASM_REQUIRED=1` over core/scene3d, scene3d-geometry,
+  engine-connection, layers-3d, viewer and main/blender: 46 files, 408
+  tests pass, including the glTF acceptance table and
+  `corrupt-scenes.test.ts`.
+- App tests with Use New Engine on, under the Electron lock, one worker:
+  26 of 27 passed in the batch (scene3d, viewport3d, engine-blender,
+  blender-motion, comp-thumbnails, chrome, preview API, PNG transport, SVG
+  maps, captures, compat and import parity); the new
+  `engine-scene3d-cancel-model.spec.ts` failed there only because its
+  recipe exceeded the geometry budget, and passes with a valid recipe
+  (1/1). Chrome pixels match round 5 (max 51-52 CV only inside reference
+  MSAA edges, 0 CV outside).
+
+## Phase 3c round 7: scene metadata and compatibility decisions
+
+THREED-7 adds `FrameDescriptor.scene3dMeta`: composition/layer groups with
+the scene's warnings and optional construction error. The native render
+plan supplies the metadata, including map decode failures found while drawing,
+legacy checkerboard failures, nested compositions, and reused draws. Layers
+sharing diagnostics share one wire record, so a large scene does not repeat
+its full warning list for every object. Scene identities are weakly retained
+for decode diagnostics; this does not keep unused meshes resident.
+
+The viewer applies these records only after painting their frame. Session,
+sequence and revision checks reject stale metadata. The `uiState` patch has
+today's shape: successful scenes set `definition`, `missing: false` and
+`sceneWarnings`; failures set `definition`, `missing: true` and `sceneError`.
+Other extension metadata is retained. As in today's merging `setShaderMeta`,
+success does not erase a historical `sceneError` string. This path builds no
+three.js scene and performs no extra geometry evaluation.
+
+THREED-3 is a recorded bug fix for Jude's beta list: native scenes continue
+drawing after ordinary editing exceeds 512 objects, 16 lights, a 160-character
+display name, or 8 MB serialized scene JSON. Today's parser instead makes the
+whole composition fail. Other strict keys, ranges and scene refinements keep
+the existing refusal, for both composition scenes and legacy scene layers.
+Synthetic parser-oracle vectors are generated by today's `parseScene` and
+checked by the shared native validator.
+
+### Round 7 verification (2026-10-19)
+
+- Real-WASM 3D, viewer, connection and Blender host units: 52 files,
+  462 tests pass. The glTF differential tests include 192 generated graphs,
+  nine selected graphs and three decoded-image/cache ordering cases.
+- Rust: 241 core tests, 84 presenter tests and 172 native render tests pass.
+  Five timing-only tests remain ignored.
+  The paired Chromium/native capture passes the production 3D bar separately.
+  All-target Clippy with warnings denied passes for the changed crates.
+- Blender: 182/182 snapshots, all 29 converted textures by decoded pixels,
+  90 frame lists, and the full-depth TIFF test pass. All 224 map mip
+  comparisons are texel-exact against Chromium.
+- Under the shared Electron lock, one worker: 29/29 flag-on tests and
+  16/16 flag-off tests pass. These include viewerless, Solid and playback
+  preview captures, model cancellation, scene warnings, compatibility imports,
+  deprecated Object3D, chrome, and 28 Chromium short-input probes.
+- Chrome: zero selected/active outline-mask mismatches; X-ray exact;
+  max 0 CV outside reference MSAA edges. The paired glTF capture has max
+  2 CV and object SSIM 0.99999768 with no edge exclusion.
+- Full TypeScript checks retain nine renderer and 75 node diagnostics in
+  other lanes; no changed-lane diagnostics remain. Paired idle orbit is
+  deferred to the orchestrator's quiet, awake measurement window; no current
+  performance pass is claimed.
+
+## Phase 3c round 8: normal inputs, preview recovery and model budgets
+
+- Draw rule: skinned or env-mapped MeshBasic programs consume `NORMAL`;
+  Lambert, Phong, Standard and Physical consume it even with flat shading
+  (gltf.md, round 8's 640-capture define matrix).
+  This covers a skinned unlit glTF color draw and the native chrome's
+  Basic override draws (depth, IDs, outline mask), which today's
+  `overlay.ts` MeshBasicMaterial overrides lose for a skinned mesh with a
+  short NORMAL.
+- `DocumentSession.start()` is back to the bridge lane's semantics. A
+  refused or interrupted first resync no longer throws: a session closed
+  while starting logs no spurious warning, and a session whose first resync
+  failed stays open for a later gap or load resync. The cache preview's
+  wake (`documentWake` in `engine-connection/preview.ts`) refuses an
+  unaccepted document, with `EnginePreviewUnavailable`. Readiness now
+  tracks acceptance of the current full document, rather than the lifetime
+  count of successful resyncs. It resets before a load resync and on close,
+  and is checked again after flushing the render's revision. A refused
+  project load therefore cannot render the preceding project's cache.
+  Tests cover refusal after a prior success, recovery, closure during
+  resync and exact propagation of a synchronous flush error.
+- The deferred `() => wakeStandby()` callback fixes installation's lexical
+  initialization order. These preview fixes are in scope for THREED-6.
+  Broader session recovery belongs to the bigproject lane: pending viewer
+  state after a refused initial resync, advancing streamRevision before
+  acceptance, and queued patch handling after a refused load need that
+  owner's coverage. This round does not change their recovery policy.
+- Decision kept: with the setting on and no `PM.EngineConnection` (the
+  install returned null: no frame bridge or kernel services),
+  `renderFrame` still throws `EnginePreviewUnavailable`. Rendering it
+  through today's three.js path would be the silent legacy routing the
+  owner rules forbid; `cancelRender` resolves because there is nothing to
+  cancel.
+
+### Geometry-budget decision
+
+There is no native-only 500,000-vertex limit on imported models and no
+simplification at the budget checks. The existing 500,000 estimate applies
+to inline primitive, mesh, extrude and lathe sources in `parseScene`;
+assetId contributes zero. Imported glTF instead has today's separate
+1,000,000 predicted POSITION-vertex and 500,000-triangle file limits, and
+the runtime counts imported vertices per placement against 2,000,000.
+OBJ also retains today's 1,000,000 source-vertex and 500,000-triangle import
+limits. The native raster planner now counts OBJ source vertices in the
+placed total, matching the legacy asset store; expanded draw vertices
+would undercount a file with many unused source vertices.
+
+These legacy refusals are parser/import/runtime policy checks before the
+GPU draw, not demonstrated context loss or OOM. They do not justify any
+additional engine budget. A model accepted by today's importer remains
+eligible above the inline 500k threshold, and all of its vertices are
+retained in engine geometry and the deprecated compatibility Object3D.
+THREED-3's explicitly approved object/light/name/document-size bug fixes
+remain independent of these model limits.
+
+Round 8's paired app probe imports the same 600,000-vertex,
+200,000-triangle GLB into each route and places it three times (1.8M total).
+It checks full geometry counts and three visible image bands, then adds a
+fourth placement to compare today's two-million refusal. Sparse geometry
+isolates allocation/budget behavior; dense geometry uses 200,000 distinct
+triangles. Both keep the same complete input in each route. Native resource
+tests independently cover three 600,001-vertex glTF placements and the
+OBJ source-count boundary. Temporary model and app profile directories
+are removed with drop/finally guards.
+
+The measurement records per-process Electron memory at baseline, after
+import and after rendering, plus samples approximately every 50 ms. OS
+process-lifetime peaks and renderer JS heap are retained where available;
+sampling can miss brief allocations. Frame latency is 12 synchronous
+256×144 output/readback calls after three warmups, including IPC and
+readback. It is separate from display-present throughput and from the
+still-deferred paired idle-orbit measurement (G).
+
+The final paired sparse and dense PNGs are byte-for-byte equal: the full
+production 3D bar gives max 0 CV and object SSIM 1.0 without edge exclusions.
+Neither route loses its WebGL context or reduces the geometry. At the fourth
+placement, the legacy snapshot throws the existing two-million error; the
+native snapshot supplies a failed-scene frame with no model pixels. Actual
+composed-viewport captures independently prove the visible result: both keep
+their previous three model groups, with exactly unchanged model coverage
+across a row through the models. The probe does not claim equality between
+those two different snapshot API failure surfaces. Native capture stays at
+the viewport's resolution while the legacy export probe explicitly resizes
+its GL buffer, so composed screenshots are used for retention coverage,
+rather than a cross-route pixel bar.
+
+Final observations on the shared machine (2026-10-21):
+
+| Geometry | Route | After-import Δ MiB | After-probes Δ MiB | Output p50 ms | p95 ms | p99 ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| sparse | today | 78.1 | 214.0 | 1.50 | 5.50 | 5.50 |
+| sparse | native | 363.9 | 1108.8 | 4.30 | 12.30 | 12.30 |
+| dense | today | 79.0 | 207.1 | 1.40 | 6.50 | 6.50 |
+| dense | native | 397.9 | 825.8 | 3.70 | 5.40 | 5.40 |
+
+Memory is the sum of per-process working sets relative to each route's
+baseline; shared pages can be counted more than once. After-probes includes
+the fourth-placement failure and composed-viewport captures, not an idle
+steady-state measurement. The probe also reads the deprecated Object3D in
+both routes to verify frozen-reader compatibility. Private-byte values are
+unavailable on this platform and remain null. Native uses more working set
+and has higher median output latency in these samples; no memory or speed
+improvement is claimed. Twelve samples make p95 and p99 the observed maximum,
+and concurrent lanes prevent a quiet-window performance qualification.
+
+### Round 8 verification
+
+- Real-WASM 3D/viewer/connection/Blender units: 52 files and 466 distinct
+  tests pass. An initial five-second geometry-test timeout under load was
+  rechecked by running all 13 geometry tests with a twenty-second timeout;
+  all pass without source changes to their expectations.
+- Rust: 249 core, 124 presenter and 178 render tests pass. Five timing-only
+  tests remain ignored. Changed native crates pass all-target Clippy with
+  warnings denied; the changed Rust files pass rustfmt.
+- Blender: 182/182 snapshots, 29 converted textures by decoded pixels,
+  90 frame lists, full-depth TIFF, 112 texel-exact map classes and 224 exact
+  mip comparisons pass.
+- App checks use one worker under the Electron lease, with builds outside
+  it: 30 distinct flag-on checks pass across the native batch, preview API
+  checks and Chromium probes. The flag-off batch passes 20/20 (16 required
+  legacy checks, two Chromium probes and two paired budget cases). Final
+  budget retention assertions also pass separately for sparse and dense.
+- The 640-capture material matrix and 36 short-input probes pass in both
+  settings. Chrome has zero selected/active outline-mask mismatches and
+  zero CV outside proven reference MSAA edges; the paired shared-node glTF
+  capture has max 2 CV and object SSIM 0.99999768 without exclusions.
+- Node, bridge and WASM wrappers build separately; both native addons'
+  required exports are verified. The first preview attempt used a bridge
+  built without its node feature; rebuilding it correctly makes both mounted
+  and viewerless preview API checks pass. Renderer/node type checks retain
+  the existing 9/75 diagnostics outside the changed lane. Whole-workspace
+  formatting has existing differences; changed Rust files pass independently.
+
+
+## Phase 3c round 9: geometry ownership and capture resources
+
+Imported glTF attributes and indices now have shared CPU ownership. GLB
+readers borrow the BIN chunk while decoding, float accessors retain their
+f32 storage, and compatibility tuple decoding writes directly into f32
+arrays instead of keeping a full f64 intermediate. Integer accessors keep
+exact u32 components until normalized conversion; sparse writes, column
+padding, signed zero and the former f32/f64 NaN conversion remain covered.
+Renderer geometry references those source arrays. Generated draw indices
+and morph metadata live with one file version and are reused between
+frames and placements. GPU mesh keys also identify the file content and
+primitive, so three placements upload one mesh. Replacing or removing a
+file releases its cached previous version.
+
+The deprecated Object3D reader receives a packed binary import result:
+a small JSON header describes typed views over one owned ArrayBuffer.
+It wraps those views in BufferAttributes. The WASM input and output are
+released after transfer, and subsequent imports or memory growth cannot
+invalidate the reader's arrays. Model registration writes its header and
+payload directly into WASM input memory, avoiding another concatenation
+buffer. Model geometry is not serialized into the document. Renderer-side
+source bytes and WASM geometry support exact picking and bounds; the
+compatibility arrays support frozen readers; native geometry supports
+Blender snapshots, animation and device recovery. These are distinct
+consumers, not per-placement copies. Full model data is never simplified.
+
+Uploads write directly into mapped GPU buffers. Missing attributes use
+constant zero-stride inputs, including WebGL's fourth component of one
+for missing vec4 inputs. This removes vertex-sized default arrays for
+normals, UV channels, colors, tangents and skinning attributes. Pipeline
+keys include the constant-input layout. An indexed 600,001-vertex resource
+test verifies shared source arrays, one GPU mesh for three placements,
+and GPU storage below POSITION bytes plus 4 KiB for its tiny index list.
+
+Repeated captures retain one bounded output attachment and one device-scoped
+readback staging buffer. Every capture renders color again, copies the
+texture, maps and waits for that copy, converts its padded rows directly
+into the final RGBA8 result, and unmaps. Half and full float project
+precision both use their appropriate decoder. Revision, transparency and
+resize regressions check that attachment reuse does not retain old pixels.
+Standard-color snapshots render directly into that target in GL row order;
+their RGBA8 conversion visits mapped rows in reverse, avoiding a separate
+GPU flip pass and another intermediate target. Linear working color keeps
+its GPU encoding/flip pass. Generic renderer targets remain top-down.
+The shared depth prepass can survive independently rebuilt equivalent
+texture-free scenes, matching today's unchanged-scene reuse. Its comparison
+uses geometry content keys and evaluated camera, pose, light and material
+state, including signed-zero distinctions. Texture-bearing and instanced
+scenes keep conservative invalidation; color is always rendered afresh.
+
+Resource attribution is available through
+`engine.report('interactive').presenter.allocations` when
+`POWERMOVE_ENGINE_ALLOCATION_INVENTORY=1`; the periodic inventory is disabled
+in normal use. IOSurface values use actual allocation sizes. Other texture
+and mesh values are nominal storage sizes, and lease/cache budgets are not
+resident allocations. `engine.report(process).fontMemory` reports retained
+font payload lengths without paths or contents and deduplicates shared
+full-font backing stores. Font mappings and opaque driver/CoreText caches
+must not be equated with those payload lengths.
+
+DHAT allocation profiling of the same 600k-vertex fixture attributes the
+native parser peak to its 7.2 MB retained POSITION array: peak live bytes
+fell from 21,617,916 to 7,229,492. Packed compatibility transfer peak fell
+from 160,852,693 bytes on the previous JSON path to 15,643,899 bytes, with
+8,388,608 bytes retained by its output vector. The input fixture's 7.2 MB
+allocation precedes the profiler and is excluded from both figures. These
+are allocator measurements, separate from Electron working-set samples.
+
+The native file cache retains up to 64 current file versions, including
+geometry needed to reconstruct later frames. It does not retain previous
+versions of a replaced file, but an unused still-present file can remain
+cached until eviction. Shared ownership removes duplicate payloads; it is
+not a claim that all source geometry is released after GPU upload.
+
+Rest-pose picking builds its BVH directly from retained f32 positions,
+converting individual tuples to f64 without a second full vertex array.
+Its binned SAH, triangle order, f64 bounds and posed refit remain unchanged.
+Static point and line picks also read the retained array directly. On the
+600k fixture, DHAT measures the picker constructor's peak falling from
+46,545,705 to 32,145,705 bytes; retained memory is unchanged at 17,745,593
+bytes. Tests compare BVH fields by float bits, including signed zero and
+nonfinite inputs, and retain point/line index and tie order.
+
+### Attribution and remaining performance gate
+
+These changes do not qualify the engine for performance parity. Paired
+whole-app measurements still exceed today's import/peak working set and
+median synchronous capture time. Geometry fidelity and the accepted pixel
+comparison remain unchanged; performance failures must not be hidden by a
+smaller model, a new refusal, a lower precision format or stale capture
+pixels. Idle-orbit qualification remains deferred to the quiet window.
+
+The paired baseline measurement locates the extra working set in the two
+engine utility processes: interactive 181.7 MiB and job 73.2 MiB medians,
+against a 247.0 MiB median paired whole-app difference. Other process roles offset
+part of that difference; independent medians do not sum algebraically.
+This is engine startup architecture rather than per-placement geometry.
+At an initial empty-app inventory both utilities report zero retained font
+payloads; the interactive GPU, composer and presenter pools have not yet
+been created, and the job GPU remains uncreated. The media, text-raster and
+vector caches also measure zero. Their configured budgets are not live
+allocations. The additional utility runtime, V8/library mappings, threads,
+allocator and opaque AppKit/CoreText/driver state are not individually
+attributed by these counters. They must not be relabeled as font caches
+or a wgpu allocation without further evidence.
+
+A separate stable empty-view inventory records an 83.0 MiB allocated
+color IOSurface pool (eight RGBA16F surfaces at 1496×904), a 10.3 MiB
+working target and 9.6 MiB nominal renderer targets. After the model is
+shown at 1496×792, actual exported storage is 72.7 MiB for eight color
+surfaces, 72.7 MiB for eight depth/ID surfaces, and 72.7 MiB for eight
+selection-coverage surfaces. Working target storage is 9.0 MiB, nominal
+renderer targets 31.0 MiB, and the one shared model GPU mesh 9,600,784
+bytes. Mesh attributes and generated indices account for 9,606,645 retained
+CPU bytes across all three placements in a renderer-only DHAT run. Font
+payloads, media, text/vector rasters and material maps remain zero in this
+fixture. Exported storage can be mapped by several processes; allocated
+bytes and nominal GPU sizes are not additive with process working sets.
+
+A standalone DHAT measurement of device construction retains 88,621 Rust
+heap bytes; adding the display transform retains 171,224 bytes. That
+excludes opaque Metal and system framework allocations, and cannot explain
+or partition the app's utility-process working sets. Allocations-template
+attachment failed on this environment; DHAT provides the allocator evidence,
+while driver/pipeline/CoreText internal byte attribution remains open.
+
+A separate DHAT run draws the exact 256×144 sparse fixture with all three
+placements, ending the profile while the renderer, scene and device remain
+held. Rust heap peaks at 11,879,258 bytes and retains 11,618,869 bytes:
+9,600,000 bytes are the shared POSITION/index arrays, about 1.85 MB is
+regex-automata storage, about 68 KB is attributed to Naga and about 2 KB
+to wgpu Rust API stacks. Normal teardown leaves 1,880,235 bytes of mostly
+global caches in a separate run. This excludes C++/Metal/system allocations
+and does not explain the app's roughly 205 MiB import delta.
+
+Before removing the snapshot-only flip, a CPU sample during 2,000 fresh
+256×144 native captures places about half
+of snapshot-active stack samples in the Metal completion wait and about
+30% under command-encoder finish. Pixel conversion accounts for one sample
+out of 1,690 active samples. These are sampled CPU stack residences, not
+GPU timestamps. A separate three-run paired transport probe before that
+last change measures an
+empty capture at 2.3 ms native versus 1.5 ms today (p50), and the model at
+3.7 versus 2.0 ms. Both fixed transport overhead and native render work
+remain relevant; the readback gap cannot be assigned entirely to IPC.
+Presenter surface lifetimes and engine startup belong to the shared engine
+owners; render-pass encoding and fresh-copy/map completion need further
+renderer/presenter profiling before another change.
+
+### Final paired results
+
+Three independent fresh-app pairs per geometry use the same 600,000-vertex,
+200,000-triangle model at three placements. Legacy runs first in each pair.
+Figures are medians of per-run quantities. Peak working set is the whole-app
+sum sampled every 50 ms; after-probes delta is measured from the baseline
+and includes the refusal and viewport probes. Capture p50/p95/p99 use 12
+fresh 256×144 frames after three warmups. These are shared-machine capture
+measurements, not display-present or idle-orbit timing.
+
+| Probe | Metric | Legacy before | Native before | Legacy after | Native after | Final gate |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| sparse | Baseline MiB | 737.4 | 984.6 | 748.9 | 989.7 | — |
+| sparse | Import delta MiB | 79.6 | 377.1 | 73.6 | 204.5 | **fail** |
+| sparse | Peak MiB | 954.8 | 1432.0 | 951.8 | 1273.6 | **fail** |
+| sparse | After-probes delta MiB | 212.8 | 445.7 | 208.0 | 268.1 | — |
+| sparse | Capture p50 ms | 1.6 | 5.0 | 1.3 | 3.3 | **fail** |
+| sparse | Capture p95 ms | 5.6 | 5.9 | 5.4 | 3.8 | pass |
+| sparse | Capture p99 ms | 5.6 | 5.9 | 5.4 | 3.8 | — |
+| dense | Baseline MiB | 736.7 | 984.9 | 744.3 | 988.8 | — |
+| dense | Import delta MiB | 82.2 | 397.4 | 79.4 | 209.6 | **fail** |
+| dense | Peak MiB | 970.5 | 1456.6 | 948.0 | 1269.6 | **fail** |
+| dense | After-probes delta MiB | 244.0 | 479.8 | 209.3 | 273.7 | — |
+| dense | Capture p50 ms | 1.7 | 4.1 | 1.4 | 2.2 | **fail** |
+| dense | Capture p95 ms | 7.0 | 4.6 | 7.1 | 3.1 | pass |
+| dense | Capture p99 ms | 7.0 | 4.6 | 7.1 | 3.1 | — |
+
+The 10% memory allowance applies to import delta and peak. Capture p50
+still exceeds today in both geometries; p95 passes. Every final accepted
+model pair has max 0 CV, with all vertices retained. No performance pass
+or permission to merge follows from the reduction in allocator bytes.
+
+The final WASM profile retains 17,928,148 logical bytes in 55,771,136 bytes
+of linear memory, down from 70,189,056 linear bytes before the picking
+temporary was removed. Its measured logical allocation peak falls by
+14,400,000 bytes. The final renderer target pool is 31,057,256 nominal
+bytes, while the exported color/depth/coverage storage remains unchanged.
+
+Qualification: 457 focused TypeScript tests and all 13 real-WASM geometry
+tests pass. The latter compare 6,208 answers and measure skinned-pick p95
+at 3.34 ms against the unchanged 33 ms limit. Rust core, presenter and
+render checks pass; the 182 Blender snapshots and 224 map-mip comparisons
+retain their existing bar. The final snapshot path is rechecked with 128
+presenter units, 12 snapshot integration tests and 12 headless tests.
+
+The engine-on batch passes 29 of 30 checks on its first final attempt;
+the isolated chrome recheck passes with unchanged expectations, completing
+the 30 distinct checks. The failed chrome pair changed PNG ICC metadata
+between captures (536 bytes versus absent), changing the captured outline
+RGB. An earlier stable-profile batch passed all 30 together. Flag-off
+coverage passes 18 checks. No color or edge tolerance was relaxed.
+
+One native renderer crashed during the initial final sparse batch; the
+macOS report records EXC_BAD_ACCESS on a DedicatedWorker thread in Chromium/
+V8 frames. The cause remains unresolved. The failed worker also timed out
+during teardown; its isolated profile was removed. Three fresh sparse
+pairs then pass, as do all three dense pairs. The clean rerun is evidence
+of successful draws, not a resolution of that observed stability failure.
+
+## Phase 3c round 10: surface ownership and asynchronous snapshots
+
+Paused viewers now reserve four color slots, the protocol minimum, with
+one lossless depth/ID plane and one selection plane for each color slot.
+Playback restores the original ring plus render-ahead count before its
+transport command reaches the render thread. Pause reaches the render
+thread before the pools shrink. Transport intent survives a detached or
+not-yet-mounted viewer. A naturally ended playback conservatively keeps
+its larger pool until an explicit pause. Slot leases, held-frame checks,
+retired generations, depth precision and stage resolution are unchanged.
+
+For a 1496×792 RGBA16F stage, the nominal color/depth/selection allocation
+is 113,743,872 bytes paused instead of 227,487,744 bytes. The incremental
+depth/selection allocation at import is reduced by 75,829,248 bytes
+(72.32 MiB); color storage already exists before import. IOSurface row
+alignment, overlapping retired generations and shared process mappings
+mean these figures cannot be subtracted directly from measured working
+sets. The engine's higher idle baseline is a separate startup concern.
+
+Frame snapshots use two reusable device-scoped staging slots. The fresh
+render and texture-to-staging copy share one encoder and submission.
+`map_async` completion wakes the presenter; a dedicated completion thread
+drives the bounded GPU wait, so the presentation thread can keep serving
+viewer work. Each ticket retains its own revision, dimensions, format,
+alpha policy and row order. Completed rows convert directly into the final
+RGBA8 allocation and are then unmapped before slot reuse. Oversized copies
+run alone and release their staging allocation. Session closure cancels
+pending maps, device recovery fails old tickets, and callbacks from a
+retired device cannot mark a replacement device lost. No capture uses
+previous image content in place of a new render.
+
+The presentation worker now waits for submitted reads before acknowledging
+session close or destroying its painter. A drawn VideoFrame stays open
+through GPU completion, then closes before the native slot is returned.
+Queued, undrawn frames still close and release immediately. These lifetime
+corrections are independent of resolving the Chromium crash below.
+
+The round 9 renderer crash is symbolized against Electron 44.0.0 arm64's
+matching Breakpad module UUID. Its top frames are
+`WebGpuSharedImageWrapperCache::AcquireCachedWrapper`, wrapper leasing,
+`CreateExternalTexture`, and `GPUExternalTexture::FromVideoFrame` in the
+WebGPU presentation worker. In that Chromium source, a cached wrapper's
+`GetSharedImage()` returns null after its graphics context is lost, and
+`AcquireCachedWrapper` dereferences it without checking. The faulting read
+is at address 0x1c. This identifies the external-texture wrapper-cache
+failure, rather than a WASM worker or the frame transport worker; it does
+not establish which event lost that graphics context or prove a native
+IOSurface use-after-free. GPU-reset recovery remains a required stress
+gate; ordinary successful reruns do not resolve it.

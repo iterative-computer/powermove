@@ -1,3 +1,4 @@
+import { ChromeLeases } from './chrome-leases';
 /*
  * The viewer's engine presentation, behind "Use New Engine" (plan section
  * 18; amendments 4 and 5).
@@ -30,7 +31,8 @@
  * session; until then (and whenever the engine restarts) the current
  * engine's canvas underneath is what the viewer shows.
  */
-import { createWebGpuPainter, type FramePainter } from './gpu';
+import type { FramePainter } from './gpu';
+import { createFramePainter } from './painter';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type Presenter, type PresenterStats, type TraceRecord } from './presenter';
 import { PresentWorker, type WorkerLike } from './worker-presenter';
 import type { PresentationWarmup } from './prewarm';
@@ -209,6 +211,7 @@ export class ViewerPresentation {
   private workerUnavailable = false;
   private presenter: Presenter | null = null;
   private channel: EngineViewerChannel | null = null;
+  private chromeLeases: ChromeLeases | null = null;
   private readonly sequencer = new ViewSequencer();
   private readonly states: ViewerState[] = [];
   private params: ViewParams | null = null;
@@ -326,8 +329,8 @@ export class ViewerPresentation {
 
   /**
    * The depth and object-id surface of a frame on screen (plan section 8:
-   * r depth, g/b object id − 1, a coverage; `rgba16float`, the frame's size
-   * and placement), for the 3D viewport chrome's occlusion and outlines.
+   * `chromePlanesV1`: losslessly packed f32 depth in RGB; paired coverage
+   * and visible IDs from coverageFrame). Both surfaces use the frame size.
    * Ask for it with `ViewParams.depthId`. Null when the frame has none or
    * its import has not arrived. Close it after reading; it stays valid
    * while its frame is the one on screen.
@@ -336,6 +339,23 @@ export class ViewerPresentation {
     const depth = frame?.depthId;
     if (!depth) return null;
     return this.options.service.source.videoFrame(depth.poolGeneration, depth.poolIndex);
+  }
+
+  /** Retain this frame's native slot through the overlay's GPU read fence. */
+  retainChromeFrame(frame: PresentedFrame): ((done?: Promise<unknown>) => void) | null {
+    return this.chromeLeases?.acquire(frame.seq) ?? null;
+  }
+
+  /** Unoccluded selection coverage and visible IDs, aligned to `frame`. */
+  coverageFrame(frame: PresentedFrame | null = this.latestFrame): VideoFrame | null {
+    const depth = frame?.depthId;
+    if (depth?.encoding !== 'chromePlanesV1' || depth.coveragePoolIndex == null) return null;
+    return this.options.service.source.videoFrame(depth.poolGeneration, depth.coveragePoolIndex);
+  }
+  onChromeSurface(listener: () => void): () => void {
+    return this.options.service.source.onSurface((generation) => {
+      if (this.latestFrame?.depthId?.poolGeneration === generation) listener();
+    });
   }
 
   get state(): ViewerState | null {
@@ -415,6 +435,7 @@ export class ViewerPresentation {
   private show(frame: PresentedFrame): void {
     const fresh = this.latestFrame?.seq !== frame.seq || this.latestFrame.revision !== frame.revision || this.latestFrame.viewSeq !== frame.viewSeq;
     this.latestFrame = frame;
+    this.chromeLeases?.showing(frame.seq);
     for (const listener of this.listeners) listener(frame);
     if (fresh) this.options.service.presented?.(frame, this.qualityOf(frame));
   }
@@ -658,7 +679,7 @@ export class ViewerPresentation {
     if (this.painterFailed) return false;
     let painter: FramePainter;
     try {
-      painter = await (this.options.createPainter ?? createWebGpuPainter)(this.canvasElement);
+      painter = await (this.options.createPainter ?? createFramePainter)(this.canvasElement);
     } catch (error) {
       this.painterFailed = true;
       const message = error instanceof Error ? error.message : String(error);
@@ -679,8 +700,8 @@ export class ViewerPresentation {
   }
 
   /**
-   * The drawing's WebGPU device was lost (the GPU process restarted): a
-   * new canvas and device (a new worker when presenting from one), and the
+   * The drawing's graphics context was lost (the GPU process restarted): a
+   * new canvas and context (a new worker when presenting from one), and the
    * session carries on. Losses that keep coming back off the drawing are
    * given up after `MAX_DEVICE_LOSSES` within `DEVICE_LOSS_WINDOW_MS`, so a
    * broken GPU cannot spin the viewer; the current engine's canvas shows.
@@ -691,7 +712,7 @@ export class ViewerPresentation {
     this.losses = this.losses.filter((t) => now - t < DEVICE_LOSS_WINDOW_MS);
     this.losses.push(now);
     if (this.losses.length > MAX_DEVICE_LOSSES) {
-      this.options.log?.('error', `engine presentation stopped: the WebGPU device was lost ${this.losses.length} times in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${message})`);
+      this.options.log?.('error', `engine presentation stopped: the graphics context was lost ${this.losses.length} times in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${message})`);
       this.painterFailed = true;
       this.workerUnavailable = true;
       // A visible failure, never another engine's frames.
@@ -700,7 +721,7 @@ export class ViewerPresentation {
       return;
     }
     if (this.exclusive) this.setStatus(PRESENTATION_STATUS.reconnecting);
-    this.options.log?.('warn', `engine presentation lost its WebGPU device (${message}); drawing again on a new one`);
+    this.options.log?.('warn', `engine presentation lost its graphics context (${message}); drawing again on a new one`);
     void this.replaceDrawing();
   }
 
@@ -728,6 +749,7 @@ export class ViewerPresentation {
   private async replaceDrawing(): Promise<void> {
     const token = ++this.backendToken;
     const generation = this.presenter?.stats.generation ?? 0;
+    this.chromeLeases?.clear();
     this.presenter?.dispose();
     this.presenter = null;
     this.latestFrame = null;
@@ -744,9 +766,17 @@ export class ViewerPresentation {
   /** A presenter for `channel` on the current drawing, sent the current state. */
   private startPresenter(channel: EngineViewerChannel, generation = 0): void {
     const view = this.options.stage.ownerDocument.defaultView;
+    const leases = this.chromeLeases;
     const common = {
-      link: channel,
-      source: this.options.service.source,
+      link: {
+        sendViewerState: (state: ViewerState) => channel.sendViewerState(state),
+        release: (release: import('./protocol').FrameRelease) => leases ? leases.colorDone(release) : channel.release(release),
+      },
+      source: {
+        videoFrame: (generation: number, index: number) => this.options.service.source.videoFrame(generation, index),
+        onSurface: (listener: (generation: number, index: number) => void) => this.options.service.source.onSurface(listener),
+        retire: (generation: number) => leases ? leases.retire(generation, () => this.options.service.source.retire(generation)) : this.options.service.source.retire(generation),
+      },
       trace: this.options.trace,
       generation,
       hostOffsetUs: this.options.service.hostOffsetUs ? () => this.options.service.hostOffsetUs!() : undefined,
@@ -763,6 +793,7 @@ export class ViewerPresentation {
       // engine's canvas.
       if (this.routedSeq !== null && frame.seq <= this.routedSeq) return;
       this.routedSeq = null;
+      leases?.drawing(frame.seq);
       // A canvas that was hidden shows a frame only once the GPU finished
       // it and the display took it (the drawing's canvas and this page
       // commit separately; at a cold start the drawing's pipelines compile
@@ -808,6 +839,7 @@ export class ViewerPresentation {
           // frames (older ones still in flight too) leave the stage.
           this.routedSeq = Math.max(this.deliveredSeq, Number(message.seq) || 0);
           this.latestFrame = null;
+          this.chromeLeases?.clear();
           if (this.exclusive) {
             // "Use New Engine" on (amendment 21): nothing else draws it, so
             // the stage says why, and stays the engine's (no hand-back; the
@@ -821,7 +853,10 @@ export class ViewerPresentation {
           this.hide(this.canvasElement);
           return;
         }
-        if (message.type === 'frame') this.deliveredSeq = Math.max(this.deliveredSeq, Number(message.frame.seq) || 0);
+        if (message.type === 'frame') {
+          this.deliveredSeq = Math.max(this.deliveredSeq, Number(message.frame.seq) || 0);
+          this.chromeLeases?.track(message.frame);
+        }
         if (this.presenter) this.presenter.receive(message, arrivedMs);
         else this.hold(opened!, message, arrivedMs);
       },
@@ -830,6 +865,7 @@ export class ViewerPresentation {
     if (!channel) return;
     opened = channel;
     this.channel = channel;
+    this.chromeLeases = new ChromeLeases(release => channel.release(release));
     // A new session numbers its frames from 1.
     this.deliveredSeq = 0;
     this.routedSeq = null;
@@ -843,7 +879,11 @@ export class ViewerPresentation {
    * for the next presenter.
    */
   private hold(channel: EngineViewerChannel, message: EngineFrameMessage, arrivedMs: number): void {
-    if (message.type === 'frame') channel.release({ poolIndex: message.frame.poolIndex, seq: message.frame.seq });
+    if (message.type === 'frame') {
+      const release = { poolIndex: message.frame.poolIndex, seq: message.frame.seq };
+      if (this.chromeLeases) this.chromeLeases.colorDone(release);
+      else channel.release(release);
+    }
     else this.held.push({ message, arrivedMs });
   }
 
@@ -851,6 +891,8 @@ export class ViewerPresentation {
     if (!channel || channel !== this.channel) return;
     this.options.log?.('info', `engine viewer session ended: ${reason}`);
     this.channel = null;
+    this.chromeLeases?.clear();
+    this.chromeLeases = null;
     this.held = [];
     this.presenter?.dispose();
     this.presenter = null;
@@ -877,6 +919,7 @@ export class ViewerPresentation {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.chromeLeases?.clear();
     this.backendToken++;
     if (this.settleTimer && this.host) this.clearTimer(this.host, this.settleTimer);
     this.settleTimer = 0;

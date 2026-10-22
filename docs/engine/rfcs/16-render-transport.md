@@ -203,6 +203,28 @@ gains `svg?: SvgRasterRequest[]`; `RenderTransportOptions.svgRasters`
 (`TransportSvgRasters`: `drawSync`, `draw`, `post`); `SessionOptions.svgRasters`;
 `PM.EngineSvgRasters` (`SvgRasters`, with `stats`).
 
+#### SVG material-map uploads
+
+`SvgRasterKey.texture?: true` identifies three.js's `new Texture(img)`
+SVG upload, distinct from a 2D canvas bucket with the same content and
+size. It carries straight RGBA8 after flipY, in texture-storage order
+(bottom row first); the renderer uses no color conversion or alpha
+premultiplication. Maps keep intrinsic size up to three.js's 16,384 px
+limit, with its canvas resize above that limit. Canvas buckets keep their
+8,192 px bound. SVG input assembly and shared-memory transfers are bounded
+to 1 GiB so one full-size map fits; output snapshots retain their 512 MiB
+cap. The flag is omitted for canvas buckets (`false` is refused
+to keep key identity canonical).
+
+Snapshot upload keys append `:texture`, as do job `CompatFrame` keys;
+job answers use `rgba8Straight`. Viewer SVG-map misses return
+`SvgRastersPending` and keep the previous frame on screen while the
+existing `SvgRequests`/`SvgPixels` exchange supplies them. The presenter
+never presents a frame with an absent model in place of the missing map.
+Map textures then receive the native 3D pass's usual mip chain. The same
+request kind is supported by captured `RasterDir` inputs (`-texture`
+filename suffix); pm-cli counts its resvg map raster as an approximation.
+
 ### Depth and object-id surfaces
 
 `ViewerState.depthId: true` (the 3D viewport chrome) makes the interactive
@@ -223,7 +245,10 @@ after a GPU loss.
 
 `RenderStats { frames, timedFrames, lateSkipped, cpuUs, gpuUs, layers,
 frameUsAvg, programs, rasters, layerFailures, snapshots, snapshotUsMax,
-revision }` per session. `frameUsAvg` is today's `E.ms` average (0.85/0.15)
+revision, audio? }` per session. `audio` carries the session’s optional
+`{ error?, problems, starvedRenders, underruns, deviceOverloads }` diagnostics.
+Changes are reported even while paused and before the surface pool arrives,
+at most twice a second. `frameUsAvg` is today's `E.ms` average (0.85/0.15)
 of CPU plus GPU time.
 
 ## The TypeScript interfaces

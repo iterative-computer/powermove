@@ -2048,4 +2048,3 @@ Remaining:
   the canvas box in window coordinates; the engine snaps it in the stage's),
   and an edge exactly halfway between device pixels rounds away from zero
   (Rust's `f64::round`), which may differ from Blink on negative ties.
-

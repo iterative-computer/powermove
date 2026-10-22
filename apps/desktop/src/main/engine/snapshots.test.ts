@@ -244,6 +244,9 @@ describe('sync snapshots served by main’s session for the window', () => {
     expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: svgKey, data: new Uint8Array(4) }] }))).toBe(false);
     expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, content: 'C'.repeat(64) }, data: new Uint8Array(8) }] }))).toBe(false);
     expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, width: 9000 }, data: new Uint8Array(9000 * 4) }] }))).toBe(false);
+    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, texture: true, width: 16384 }, data: new Uint8Array(16384 * 4) }] }))).toBe(true);
+    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, texture: true, width: 16385 }, data: new Uint8Array(16385 * 4) }] }))).toBe(false);
+    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, texture: false }, data: new Uint8Array(8) }] }))).toBe(false);
   });
 
   it('snapshot main’s session, the host naming itself, with no renderer session or launch match needed', async () => {

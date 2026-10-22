@@ -30,6 +30,7 @@ export type ViewInput = {
   localView?: string[];
   /** The 3D chrome wants each frame's depth and object-id surface. */
   depthId?: boolean;
+  chromeSelection?: import('./protocol').ChromeSelection;
   /** Today's viewer canvas for this view (`todaysCanvas`, decision V1). */
   canvas?: ViewerCanvas | null;
 };
@@ -92,6 +93,7 @@ export class ViewSequencer {
       edr: input.edr,
       viewSeq: this.seq,
       ...(input.depthId ? { depthId: true } : {}),
+      ...(input.chromeSelection ? { chromeSelection: input.chromeSelection } : {}),
       ...(validCanvas(input.canvas) ? { canvas: { width: input.canvas.width, height: input.canvas.height, crop: { ...input.canvas.crop }, css: { ...input.canvas.css } } } : {})
     };
     if (this.last && sameState(this.last, candidate)) return { state: this.last, changed: false };

@@ -35,6 +35,17 @@ pub trait AssetResolver: Send + Sync {
     fn preview_decode_fallback_scale(&self, _asset: &str) -> Option<f64> {
         None
     }
+
+    /// Exact Chromium Canvas2D PNG for a Blender image map. Job and viewer
+    /// hosts obtain this from the document window through `compatFrame`;
+    /// standalone callers may provide a captured Chromium conversion.
+    fn blender_png(
+        &self,
+        _asset: &str,
+        _source: &std::path::Path,
+    ) -> Result<Option<std::sync::Arc<Vec<u8>>>, String> {
+        Ok(None)
+    }
 }
 
 /// Reads the record's `sourcePath` (linked media).

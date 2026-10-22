@@ -1319,7 +1319,7 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .ps-pagination .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 /* ── searchable reusable Library ───────────────────────── */
-#library-overlay{position:fixed;inset:0;z-index:250;display:none;align-items:center;justify-content:center;padding:32px;background:rgb(var(--ink-rgb) / .32);backdrop-filter:blur(3px)}
+#library-overlay{position:fixed;inset:0;z-index:250;display:none;align-items:center;justify-content:center;padding:44px 32px;background:rgb(var(--ink-rgb) / .32);backdrop-filter:blur(3px)}
 :root[data-theme="dark"] #library-overlay{background:rgb(0 0 0 / .5)}
 #library-overlay.on{display:flex}
 #library-overlay.dragging{opacity:0;pointer-events:none;backdrop-filter:none}
@@ -1470,7 +1470,7 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 }
 #workspace-editbar{position:fixed;z-index:245;left:50%;bottom:24px;transform:translateX(-50%);display:flex;align-items:center;gap:7px;min-width:min(760px,calc(100vw - 40px));padding:9px 10px;border:0;border-radius:var(--r-lg);background:var(--bg-float);box-shadow:var(--shadow-float)}
 #workspace-editbar>div{min-width:0;flex:1;display:flex;flex-direction:column}#workspace-editbar b{font-size:var(--fs-sm)}#workspace-editbar span{font-size:var(--fs-xs);color:var(--tx-3)}
-@media(max-width:760px){#library-overlay{padding:10px}#library-screen{width:100%;height:100%}.library-sidebar{width:176px}.library-scope{grid-template-columns:1fr}.library-top{align-items:flex-start;flex-wrap:wrap}.library-page-title{flex-basis:70%}.library-top-action{width:100%}.library-top-action .btn{width:100%}.library-grid{grid-template-columns:1fr}}
+@media(max-width:760px){#library-overlay{padding:44px 10px 10px}#library-screen{width:100%;height:100%}.library-sidebar{width:176px}.library-scope{grid-template-columns:1fr}.library-top{align-items:flex-start;flex-wrap:wrap}.library-page-title{flex-basis:70%}.library-top-action{width:100%}.library-top-action .btn{width:100%}.library-grid{grid-template-columns:1fr}}
 
 /* Motion stays optional and never becomes required interaction feedback. */
 @media (prefers-reduced-motion:reduce){

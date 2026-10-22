@@ -2165,6 +2165,7 @@ dependencies = [
  "flate2",
  "libm",
  "pm-expr",
+ "pm-geom3d",
  "pm-model",
  "pm-text",
  "pm-time",
@@ -2336,6 +2337,7 @@ dependencies = [
  "pm-text",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "wgpu",
 ]
@@ -2498,6 +2500,7 @@ dependencies = [
  "pm-edit",
  "pm-eval",
  "pm-expr",
+ "pm-geom3d",
  "pm-model",
  "pm-text",
  "pm-time",

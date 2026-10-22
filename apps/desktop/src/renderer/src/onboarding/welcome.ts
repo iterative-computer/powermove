@@ -3,7 +3,7 @@ import AgentStep from './AgentStep.svelte';
 import TimelineStep from './TimelineStep.svelte';
 import TranscriptionStep from './TranscriptionStep.svelte';
 import WorkspaceStep from './WorkspaceStep.svelte';
-import type { OnboardingAgentChoice, OnboardingTimelineMode } from '../../../shared/creative-workspace';
+import type { OnboardingAgentChoice, OnboardingChoice, OnboardingTimelineMode } from '../../../shared/creative-workspace';
 import '@powermove/tokens/tokens.css';
 import './welcome.css';
 
@@ -26,11 +26,11 @@ void window.onboarding?.appearance?.().then(theme => { document.documentElement.
 
 if (timelineStep) mount(TimelineStep, { target: timelineStep, props: {
   onback: () => show(welcome, '#begin'),
-  oncontinue: mode => { timelineMode = mode; show(agentStep, '#agent-title'); }
+  oncontinue: (mode: OnboardingTimelineMode) => { timelineMode = mode; show(agentStep, '#agent-title'); }
 } });
 if (agentStep) mount(AgentStep, { target: agentStep, props: {
   onback: () => show(timelineStep, '#timeline-title'),
-  oncontinue: choice => { agent = choice; show(transcriptionStep ?? step, transcriptionStep ? '#transcription-title' : '#workspace-title'); }
+  oncontinue: (choice: OnboardingAgentChoice) => { agent = choice; show(transcriptionStep ?? step, transcriptionStep ? '#transcription-title' : '#workspace-title'); }
 } });
 /* Optional: choosing a model starts its download in main; it outlives onboarding. */
 if (transcriptionStep) mount(TranscriptionStep, { target: transcriptionStep, props: {
@@ -40,7 +40,7 @@ if (transcriptionStep) mount(TranscriptionStep, { target: transcriptionStep, pro
 } });
 if (step) mount(WorkspaceStep, { target: step, props: {
   onback: () => show(transcriptionStep ?? agentStep, transcriptionStep ? '#transcription-title' : '#agent-title'),
-  onbegin: choice => window.onboarding.begin({ ...choice, timelineMode, agent })
+  onbegin: (choice: Pick<OnboardingChoice, 'workspaceImport'>) => window.onboarding.begin({ ...choice, timelineMode, agent })
 } });
 const mark = document.querySelector<SVGPathElement>('.welcome-mark path');
 

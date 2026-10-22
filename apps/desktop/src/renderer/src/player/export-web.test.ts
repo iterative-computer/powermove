@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createEngine } from './player';
 import { buildWebExport, inspectWebExport } from './export-web';
+import { installBridgeForTests, resetBridgeForTests } from '../kernel/bridge';
 import {createObject} from '../core/scene3d/schema';
 import {materialPreset} from '../core/scene3d/materials';
 import { zipFiles } from './archive';
@@ -89,6 +90,161 @@ describe('portable web export', () => {
     // No rendition and nothing on screen: say so instead of shipping an unplayable original.
     (PM.MediaStore as any).rendition = { get: async () => null };
     await expect(buildWebExport(PM)).rejects.toThrow('browser-playable');
+  });
+
+  describe('browser renditions without a kept copy', () => {
+    const HASH = 'b'.repeat(64), OTHER = 'd'.repeat(64);
+    const converted = new TextEncoder().encode('playable');
+    /* blob: URLs as Chromium treats them: fetch resolves the URL when it is
+       called, and a revoked URL no longer resolves. */
+    function blobURLs() {
+      const urls = new Map<string, Blob>();
+      const fetched: string[] = [];
+      vi.stubGlobal('fetch', vi.fn((url: string) => {
+        fetched.push(url);
+        const blob = urls.get(url);
+        return blob ? Promise.resolve({ blob: async () => blob }) : Promise.reject(new TypeError('Failed to fetch'));
+      }));
+      return { urls, fetched };
+    }
+    function setup(meta: Record<string, unknown>, { enabled = true } = {}) {
+      const PM = fixture();
+      PM.proj.assets = { clip: { id: 'clip', kind: 'video', name: 'A001.mov', storageKey: 'media:v2:clip', fingerprint: 'fp', rendition: true, playbackProxy: false, ...meta } };
+      PM.proj.layers.push(PM.mkLayer('video', { d: { asset: 'clip' } }, PM.proj));
+      const live = new Map<string, any>();
+      (PM as any).assets = { get: (id: string) => live.get(id) };
+      const release = vi.fn(async () => {});
+      installBridgeForTests({ media: { readPlaybackProxy: vi.fn(async () => converted), releasePlaybackProxy: release } } as any);
+      const store = {
+        enabled, keepsOriginals: enabled,
+        get: vi.fn(async (): Promise<Blob | null> => new Blob(['prores'], { type: 'video/quicktime' })),
+        convert: vi.fn(async (..._args: any[]): Promise<any> => ({ ok: true, token: 'conversion', size: converted.length, type: 'video/webm' })),
+        rendition: { get: vi.fn(async (): Promise<Blob | null> => null), put: vi.fn(async () => true) },
+      };
+      PM.MediaStore = store;
+      return { PM, live, store, release };
+    }
+    const text = async (exported: Awaited<ReturnType<typeof buildWebExport>>) => new TextDecoder().decode(exported.files.get(exported.scene.assets.clip!));
+    afterEach(() => { vi.unstubAllGlobals(); resetBridgeForTests(); });
+
+    it('with the engine off, ships the rendition the live asset shows without converting, reading or writing', async () => {
+      const { urls } = blobURLs();
+      // A restored asset carries no hash: the stored bytes it shows identify it.
+      const { PM, live, store } = setup({ contentHash: HASH }, { enabled: false });
+      urls.set('blob:shown', new Blob(['shown-vp9'], { type: 'video/webm' }));
+      live.set('clip', { id: 'clip', kind: 'video', url: 'blob:shown', storageKey: 'media:v2:clip', fingerprint: 'fp' });
+      const exported = await buildWebExport(PM);
+      expect(await text(exported)).toBe('shown-vp9');
+      expect(exported.scene.assets.clip).toMatch(/\.webm$/);
+      expect(store.convert).not.toHaveBeenCalled();
+      expect(store.get).not.toHaveBeenCalled();
+      expect(store.rendition.put).not.toHaveBeenCalled();
+    });
+
+    it('keeps the bytes on screen when the asset is relinked while the export awaits', async () => {
+      const { urls, fetched } = blobURLs();
+      const { PM, live, store } = setup({ contentHash: HASH });
+      urls.set('blob:before', new Blob(['before-relink'], { type: 'video/webm' }));
+      live.set('clip', { id: 'clip', kind: 'video', url: 'blob:before', contentHash: HASH });
+      store.rendition.get.mockImplementation(async () => {
+        // A relink lands during the export's first await: new bytes, old URL revoked.
+        urls.delete('blob:before');
+        urls.set('blob:after', new Blob(['after-relink'], { type: 'video/webm' }));
+        live.set('clip', { id: 'clip', kind: 'video', url: 'blob:after', contentHash: OTHER });
+        return null;
+      });
+      const exported = await buildWebExport(PM);
+      expect(fetched).toEqual(['blob:before']);
+      expect(await text(exported)).toBe('before-relink');
+      expect(store.convert).not.toHaveBeenCalled();
+    });
+
+    it('converts by reference, never reading a multi-gigabyte original, when the live asset shows other media', async () => {
+      const { urls, fetched } = blobURLs();
+      const { PM, live, store, release } = setup({ name: 'A001.mov', contentHash: HASH });
+      // The live asset already belongs to other content (a relink before the export began).
+      urls.set('blob:other', new Blob(['other-media'], { type: 'video/webm' }));
+      live.set('clip', { id: 'clip', kind: 'video', url: 'blob:other', contentHash: OTHER });
+      const exported = await buildWebExport(PM);
+      expect(fetched).toEqual([]);
+      expect(store.convert).toHaveBeenCalledTimes(1);
+      // The extension names the decoder; the hash, not a stale link, names the object.
+      expect(store.convert).toHaveBeenCalledWith('video', null, { hash: HASH, link: null, name: 'original.mov' });
+      expect(store.get).not.toHaveBeenCalled();
+      expect(await text(exported)).toBe('playable');
+      expect(store.rendition.put).toHaveBeenCalledWith(HASH, expect.any(Blob));
+      expect(release).toHaveBeenCalledWith('conversion');
+    });
+
+    it('requires full source identity for a hashless native rendition', async () => {
+      const { urls, fetched } = blobURLs();
+      const { PM, live, store } = setup({ contentHash: HASH });
+      urls.set('blob:collision', new Blob(['wrong-original'], { type: 'video/webm' }));
+      live.set('clip', { id: 'clip', kind: 'video', url: 'blob:collision', storageKey: 'media:v2:clip', fingerprint: 'fp' });
+      expect(await text(await buildWebExport(PM))).toBe('playable');
+      expect(fetched).toEqual([]);
+      expect(store.convert).toHaveBeenCalledWith('video', null, { hash: HASH, link: null, name: 'original.mov' });
+      expect(store.get).not.toHaveBeenCalled();
+    });
+
+    it('names the original by its format and passes the link only for linked media', async () => {
+      blobURLs();
+      const link = { path: '/Volumes/A/A001.mov', hash: HASH, size: 6 };
+      const { PM, store } = setup({ name: 'A001.mov', contentHash: HASH, link });
+      await buildWebExport(PM);
+      expect(store.convert).toHaveBeenLastCalledWith('video', null, { hash: HASH, link: null, name: 'original.mov' });
+      PM.proj.assets.clip.storage = 'linked';
+      PM.proj.assets.clip.format = 'mov';
+      await buildWebExport(PM);
+      expect(store.convert).toHaveBeenLastCalledWith('video', null, { hash: HASH, link, name: 'original.mov' });
+      expect(store.get).not.toHaveBeenCalled();
+    });
+
+    it('converts a kept TIFF still by reference into a PNG', async () => {
+      blobURLs();
+      const { PM, store } = setup({ kind: 'image', name: 'Scan.tif', format: 'tif', contentHash: HASH });
+      PM.proj.layers.at(-1).type = 'image';
+      store.convert.mockResolvedValueOnce({ ok: true, token: 'conversion', size: converted.length, type: 'image/png' });
+      const exported = await buildWebExport(PM);
+      expect(store.convert).toHaveBeenCalledWith('still', null, { hash: HASH, link: null, name: 'original.tif' });
+      expect(exported.scene.assets.clip).toMatch(/\.png$/);
+      expect(store.get).not.toHaveBeenCalled();
+    });
+
+    it('reads and uploads the original only when main has neither the object nor the file', async () => {
+      blobURLs();
+      const original = new Blob(['prores'], { type: 'video/quicktime' });
+      const { PM, store } = setup({ name: 'A001.mov', contentHash: HASH });
+      store.get.mockResolvedValue(original);
+      store.convert.mockResolvedValueOnce({ ok: false, error: 'The original file is no longer available', missing: true });
+      const exported = await buildWebExport(PM);
+      expect(store.convert.mock.calls).toEqual([
+        ['video', null, { hash: HASH, link: null, name: 'original.mov' }],
+        ['video', original, { hash: HASH, link: null, name: 'original.mov' }],
+      ]);
+      expect(await text(exported)).toBe('playable');
+      expect(store.rendition.put).toHaveBeenCalledWith(HASH, expect.any(Blob));
+      store.get.mockResolvedValue(null);
+      store.convert.mockResolvedValueOnce({ ok: false, error: 'The original file is no longer available', missing: true });
+      await expect(buildWebExport(PM)).rejects.toThrow('original media for “A001.mov” is missing');
+    });
+
+    it('keeps the shipped engine-off error when no browser copy exists', async () => {
+      blobURLs();
+      const { PM, store } = setup({ name: 'A001.mov', contentHash: HASH }, { enabled: false });
+      await expect(buildWebExport(PM)).rejects.toThrow('Open it in the viewer');
+      expect(store.convert).not.toHaveBeenCalled();
+      expect(store.get).not.toHaveBeenCalled();
+      expect(store.rendition.put).not.toHaveBeenCalled();
+    });
+
+    it('reports a conversion failure instead of shipping the original', async () => {
+      blobURLs();
+      const { PM, store } = setup({ name: 'A001.mov', contentHash: HASH });
+      store.convert.mockResolvedValueOnce({ ok: false, error: 'Could not optimize this video for playback' });
+      await expect(buildWebExport(PM)).rejects.toThrow('Could not optimize');
+      expect(store.get).not.toHaveBeenCalled();
+    });
   });
 
   it('keeps native 3D geometry while excluding packed Blender sources and explaining rendering limits',async()=>{

@@ -58,8 +58,8 @@ export function isFrameSurfaceArgs(value: unknown): value is FrameSurfaceArgs {
     v['kind'] === 'powermove-frame-surface' &&
     count(v['launch'], 2 ** 31) &&
     count(v['generation'], 2 ** 32) &&
-    count(v['poolSize'], 32) &&
-    count(v['poolIndex'], 31) &&
+    count(v['poolSize'], 64) &&
+    count(v['poolIndex'], 63) &&
     (v['poolIndex'] as number) < (v['poolSize'] as number) &&
     count(v['width'], 16384) &&
     count(v['height'], 16384) &&

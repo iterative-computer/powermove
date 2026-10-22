@@ -2,8 +2,14 @@
 
 /**
  * One raster: the SVG's bytes (SHA-256, lowercase hex) drawn at one
- * bucket. The bucket and the bytes decide the pixels; nothing else does
- * (`drawImage(img, 0, 0, width, height)` into a cleared canvas of that
- * size).
+ * bucket or material-map upload. Canvas buckets are premultiplied,
+ * top-down RGBA8; material maps use three.js's straight-alpha image
+ * upload with flipY. Source bytes, dimensions and upload kind decide the
+ * pixels.
  */
-export type SvgRasterKey = { content: string, width: number, height: number, };
+export type SvgRasterKey = { content: string, 
+/**
+ * A three.js material-map upload of the SVG image element (straight
+ * alpha, flipY), rather than a 2D premultiplied canvas bucket.
+ */
+texture?: boolean, width: number, height: number, };

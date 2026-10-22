@@ -3,8 +3,14 @@ import { chooseNativeMenu, expect, test } from './helpers/app';
 test('graph editor exposes its state and keeps value and speed navigation usable', async ({ session }, info) => {
   await session.openEditor();
   const { page } = session;
-  const viewerPixel = () => page.evaluate(() => {
-    const PM = (window as any).PM, gl = PM.GL.gl, pixel = new Uint8Array(4);
+  const viewerPixel = () => page.evaluate(async () => {
+    const PM = (window as any).PM;
+    if (PM.EngineRender) {
+      // Native presentation owns the picture; the retired internal GL buffer stays idle.
+      const frame = await PM.EngineRender.renderFrameTo(PM.time, PM.proj.w, PM.proj.h, { mblur: false });
+      return Array.from(frame.getContext('2d').getImageData(Math.floor(frame.width / 2), Math.floor(frame.height / 2), 1, 1).data);
+    }
+    const gl = PM.GL.gl, pixel = new Uint8Array(4);
     gl.readPixels(Math.floor(gl.drawingBufferWidth / 2), Math.floor(gl.drawingBufferHeight / 2), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
     return Array.from(pixel);
   });
@@ -38,14 +44,16 @@ test('graph editor exposes its state and keeps value and speed navigation usable
   await page.keyboard.press('Shift+F3');
   await expect(graph).toHaveAttribute('aria-pressed', 'true');
   const samples = await page.evaluate(() => {
-    const PM = (window as any).PM, original = PM.evP;
+    const PM = (window as any).PM;
+    const evaluator = PM.EngineDoc?.enabled && PM.EngineDoc.api ? PM.EngineDoc.api : PM;
+    const original = evaluator.evP;
     let calls = 0;
-    PM.evP = (...args: any[]) => { calls++; return original(...args); };
+    evaluator.evP = (...args: any[]) => { calls++; return original.apply(evaluator, args); };
     try {
       PM.touch(); PM.bus.emit('draw:timeline'); const cold = calls;
       calls = 0; PM.bus.emit('draw:timeline');
       return { cold, warm: calls };
-    } finally { PM.evP = original; PM.invalidate(); }
+    } finally { evaluator.evP = original; PM.invalidate(); }
   });
   expect(samples.cold).toBeGreaterThan(100);
   expect(samples.warm).toBeLessThan(samples.cold / 4);

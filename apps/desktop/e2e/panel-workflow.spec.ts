@@ -63,9 +63,10 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   expect(new Set(icons).size).toBe(icons.length);
   expect(icons).not.toContain('missing');
   expect(icons).not.toContain('panel');
-  const panelCount = await page.evaluate(() => Object.keys((window as any).PM.PANELS).filter(id => id !== 'toolbar').length);
+  const panelCount = await page.evaluate(() => Object.values((window as any).PM.PANELS).filter((panel: any) => panel.library !== false).length);
   expect(await library.locator('.library-card').count()).toBe(panelCount);
   await expect(library.locator('[data-panel-id="toolbar"]')).toHaveCount(0);
+  await expect(library.locator('[data-panel-id="agent"]')).toHaveCount(0);
   await expect(library.getByRole('button', { name: 'Edit Tools', exact: true })).toHaveCount(0);
   await expect(library.locator('.library-panel-meta')).toHaveCount(0);
   const previewLayout = await library.locator('.library-card[data-panel-id]').evaluateAll((cards) => cards.map((card) => {
@@ -102,7 +103,7 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   await expect(timelinePreview).toHaveCSS('width', '800px');
   await expect(timelinePreview).toHaveCSS('height', '440px');
   const timelineFit = await library.locator('[data-panel-id="timeline"] .library-clone').evaluate((clone) => {
-    const canvas = clone.querySelector<HTMLElement>('[data-library-source-id="tl-canvas"]');
+    const canvas = clone.querySelector<HTMLCanvasElement>('[data-library-source-id="tl-canvas"]');
     const wrap = clone.querySelector<HTMLElement>('[data-library-source-id="tl-canvas-wrap"]');
     if (!canvas || !wrap) return null;
     const canvasRect = canvas.getBoundingClientRect();

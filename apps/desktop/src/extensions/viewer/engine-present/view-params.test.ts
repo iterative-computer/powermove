@@ -51,4 +51,20 @@ describe('view parameters', () => {
     expect(material.state.view).toEqual({ camera: null, shading: 'material', xray: false, localView: [] });
     expect(material.state.viewSeq).toBe(2);
   });
+
+  it('carries the editor camera and Local View of the 3D viewport', () => {
+    const sequencer = new ViewSequencer();
+    const base = { composition: 'c', cssWidth: 100, cssHeight: 50, devicePixelRatio: 2, colorSpace: 'srgb' as const, edr: false };
+    const camera = { view: Array.from({ length: 16 }, (_, i) => (i % 5 === 0 ? 1 : 0)), projection: { kind: 'perspective' as const, fovYDegrees: 50, near: 0.01, far: 1000 } };
+    const canvas = todaysCanvas(600, 338, { width: 600, height: 338 }, null, { x: -9, y: 60.5 }, 0.61)!;
+    const editor = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', canvas, scene3d: { hasScene: true, shading: 'solid', xray: false, camera, localView: ['a', 'b'], selected: ['a'], active: 'a' } }) });
+    // The SVG canvas contract and native 3D chrome/editor view must coexist.
+    expect(editor.state.canvas).toEqual(canvas);
+    expect(editor.state.chromeSelection).toEqual({ selected: ['a'], active: ['a'] });
+    expect(editor.state.depthId).toBe(true);
+    expect(editor.state.view).toEqual({ camera, shading: 'solid', xray: false, localView: ['a', 'b'] });
+    const back = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', scene3d: { hasScene: true, shading: 'solid', xray: false, camera: null, localView: null } }) });
+    expect(back.state.view).toEqual({ camera: null, shading: 'solid', xray: false, localView: [] });
+    expect(back.changed).toBe(true);
+  });
 });

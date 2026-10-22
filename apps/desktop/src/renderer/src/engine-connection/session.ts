@@ -19,6 +19,7 @@
 import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
+import type { PreviewStatus } from './preview';
 
 /** What the session needs of the shader fallback runner (`ShaderFallbackRunner`). */
 export interface FallbackRunner {
@@ -111,6 +112,8 @@ export type SessionOptions = {
   /** The engine's presentation stats (`RenderStats`, at most 2 Hz). */
   onStats?: (stats: RenderStats) => void;
   onProxyNeeded?: (assets: string[]) => void;
+  /** One explicit paused Blender preview's progress or completion. */
+  onPreviewStatus?: (status: PreviewStatus) => void;
   /**
    * The window replaced its document (a `load` batch: another project, or
    * `PM.proj` assigned outright) and the engine has it now. The viewer's
@@ -163,6 +166,8 @@ export class DocumentSession {
   routeReason: string | null = null;
   /** The revision the engine has (acknowledged or resynced). */
   applied = 0;
+  /** Whether the latest full document resync was accepted by this session. */
+  documentAccepted = false;
   /** The latest clock sample. */
   clock: ClockSample | null = null;
   /** Frames received since the session opened, and the newest. */
@@ -302,6 +307,7 @@ export class DocumentSession {
   private async doResync(reason: string): Promise<void> {
     const id = this.id;
     if (id === null || this.closed) return;
+    this.documentAccepted = false;
     const snapshot = this.options.stream.snapshot();
     if (!snapshot) throw new Error('the document mirror has no snapshot');
     this.document = documentId(this.options.documentId());
@@ -320,8 +326,10 @@ export class DocumentSession {
     const request = { type: 'resync', document: this.document, revision: snapshot.revision, encoding: 'canonicalJsonV1', source, hash: hexBytes(snapshot.hash) } as Request;
     try {
       await this.options.connection.request(request, id);
+      if (this.closed) return;
       this.applied = snapshot.revision;
       this.resyncs++;
+      this.documentAccepted = true;
     } catch (error) {
       if (this.closed) return;
       const text = error instanceof Error ? error.message : String(error);
@@ -437,6 +445,11 @@ export class DocumentSession {
       case 'renderStats': {
         const { type: _t, ...stats } = event;
         this.options.onStats?.(stats as unknown as RenderStats);
+        return;
+      }
+      case 'previewStatus': {
+        const { type: _t, ...status } = event;
+        this.options.onPreviewStatus?.(status as PreviewStatus);
         return;
       }
       case 'patchesApplied':
@@ -699,6 +712,7 @@ export class DocumentSession {
 
   private dispose(): void {
     this.closed = true;
+    this.documentAccepted = false;
     this.definitions?.dispose();
     this.definitions = null;
     if (this.definitionRetry) clearTimeout(this.definitionRetry);

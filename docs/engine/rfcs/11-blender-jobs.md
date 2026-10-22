@@ -211,3 +211,15 @@ padding. Level 2 keeps the exact premultiplied floating-point path. Both paths
 are tested independently; existing app captures and still exports match
 today's own captures exactly (100% within 2 CV, max 0 CV), rather than being
 compared only with an ideal composite of the raw Blender surfaces.
+
+## Explicit preview during playback (THREED-6, round 7)
+
+`BlenderJobRequest.foregroundCapture` defaults to false and is valid only
+with Interactive priority. Only an explicit `scene3d.renderFrame` cache
+request sets it. Host services resume the serialized Blender worker while
+such a request is queued or running, then restore the playback pause on
+completion or cancellation. Work already ahead of it in the same FIFO may
+finish first. Automatic previews and ordinary captures keep the default
+pause policy. This prevents a caller awaiting `renderFrame` during playback
+from waiting for a pause it never requested; transport and viewport shading
+remain unchanged.

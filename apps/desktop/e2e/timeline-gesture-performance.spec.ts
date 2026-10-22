@@ -29,9 +29,12 @@ test('moving a group in a large timeline expands selection once and remains undo
     const PM = (window as any).PM;
     const timeline = PM.Kernel.services.get('timeline');
     const box = timeline.cv.getBoundingClientRect();
-    const original = PM.expandGroups;
+    // The timeline calls the active groups API, which uses the native document
+    // evaluator when enabled and the legacy helper otherwise.
+    const groups = PM.EngineDoc?.enabled && PM.EngineDoc.api ? PM.EngineDoc.api : PM;
+    const original = groups.expandGroups;
     (window as any).__gestureExpandCount = 0;
-    PM.expandGroups = function (...args: any[]) {
+    groups.expandGroups = function (...args: any[]) {
       (window as any).__gestureExpandCount++;
       return original.apply(this, args);
     };

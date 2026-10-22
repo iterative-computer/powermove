@@ -12,9 +12,9 @@ test('Settings › Project edits the live composition and its export settings', 
     const projectTab = settings.getByRole('button', { name: 'Project', exact: true });
     await expect(projectTab).toHaveAttribute('aria-current', 'location');
     expect(await settings.locator('[data-settings-tab]').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-settings-tab'))))
-      .toEqual(['project', 'general', 'accounts', 'extensions']);
+      .toEqual(['project', 'general', 'accounts', 'transcription', 'extensions']);
     expect(await settings.locator('[data-settings-page]').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-settings-page'))))
-      .toEqual(['project', 'general', 'accounts', 'extensions']);
+      .toEqual(['project', 'general', 'accounts', 'transcription', 'extensions']);
     await settings.screenshot({ path: info.outputPath('project-settings-first.png') });
 
     const panel = settings.getByRole('region', { name: 'Project', exact: true });
@@ -71,44 +71,61 @@ test('New project asks for the settings that matter before creating', async ({},
     await background.click();
     const colorPicker = page.getByRole('dialog', { name: 'Background', exact: true });
     await expect(colorPicker).toBeVisible();
+    // Measure at rest: the popover scales in from the trigger's edge first.
+    await colorPicker.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished)));
     await colorPicker.screenshot({ path: info.outputPath('background-picker.png') });
     const geometry = await colorPicker.evaluate(element => {
-      const plane = element.querySelector('.fill-sv')!;
-      const hue = element.querySelector('.fill-hue')!;
+      const plane = element.querySelector('.cp-plane')!;
+      const hue = element.querySelector('.cp-hue')!;
       const planeRect = plane.getBoundingClientRect();
       const hueRect = hue.getBoundingClientRect();
       const bounds = element.getBoundingClientRect();
+      const channels = [...element.querySelectorAll('.cp-channel input')];
+      const swatches = [...element.querySelectorAll('.cp-previous, .cp-new')];
       return {
         planeBackground: getComputedStyle(plane).backgroundImage,
         hueHeight: hueRect.height,
         hueBesidePlane: hueRect.left >= planeRect.right && Math.abs(hueRect.top - planeRect.top) < 1,
-        channelsInside: [...element.querySelectorAll('.color-channel input')].every(input => {
+        channelCount: channels.length,
+        channelsInside: channels.every(input => {
           const rect = input.getBoundingClientRect();
           return rect.width >= 30 && rect.height >= 20 && rect.left >= bounds.left && rect.right <= bounds.right;
         }),
-        swatchesVisible: [...element.querySelectorAll('.color-compare-swatch')].every(swatch => swatch.getBoundingClientRect().height >= 24)
+        swatchCount: swatches.length,
+        swatchesVisible: swatches.every(swatch => swatch.getBoundingClientRect().height >= 24)
       };
     });
     expect(geometry.planeBackground).toContain('linear-gradient');
     expect(geometry.hueHeight).toBeGreaterThanOrEqual(148);
-    expect(geometry).toMatchObject({ hueBesidePlane: true, channelsInside: true, swatchesVisible: true });
+    expect(geometry).toMatchObject({ hueBesidePlane: true, channelCount: 9, channelsInside: true, swatchCount: 2, swatchesVisible: true });
 
+    // The picker previews into the draft as a colour is chosen.
     const originalBackground = await background.textContent();
-    await colorPicker.getByRole('button', { name: '#0A84FF', exact: true }).click();
-    await expect(colorPicker.getByLabel('Background hex value')).toHaveValue('#0A84FF');
+    const hexValue = colorPicker.getByLabel('Background hex value', { exact: true });
+    await hexValue.fill('#0A84FF');
+    await hexValue.press('Tab');
+    await expect(hexValue).toHaveValue('#0A84FF / 100%');
+    await expect(background).toContainText('#0A84FF');
 
-    // Dismissing the picker must not send focus back through a native colour
-    // input and reopen it. The New project dialog remains in place.
-    await page.mouse.click(8, 8);
+    // Escape dismisses without applying. Focus going back to the trigger must
+    // not reopen the picker, and the New project dialog remains in place.
+    await page.keyboard.press('Escape');
     await expect(colorPicker).toHaveCount(0);
     await expect(dialog).toBeVisible();
     await expect(background).toHaveText(originalBackground!);
     await page.waitForTimeout(100);
     await expect(colorPicker).toHaveCount(0);
 
+    // Clicking outside applies the typed value (the picker has no OK button),
+    // with the same guarantees: no reopen, and the dialog stays.
     await background.click();
-    await colorPicker.getByLabel('Background hex value').fill('#AABBCC');
-    await colorPicker.getByRole('button', { name: 'OK', exact: true }).click();
+    await colorPicker.getByLabel('Background hex value', { exact: true }).fill('#AABBCC');
+    await page.mouse.click(8, 8);
+    await expect(colorPicker).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+    await expect(background).toContainText('#AABBCC');
+    await page.waitForTimeout(100);
+    await expect(colorPicker).toHaveCount(0);
     await dialog.getByRole('button', { name: 'Create', exact: true }).click();
 
     await expect.poll(() => page.evaluate(() => ({

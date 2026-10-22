@@ -1,7 +1,7 @@
 {
   "id": "keymap-default",
   "name": "Default keymap",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "apiVersion": 1,
   "description": "Powermove's built-in keyboard shortcuts.",
   "entry": "index.ts",

@@ -202,6 +202,7 @@ fn viewer_state(view_seq: u64) -> ViewerState {
         view_seq: Seq::new(view_seq).unwrap(),
         vsync: None,
         depth_id: None,
+        chrome_selection: None,
         canvas: None,
     }
 }

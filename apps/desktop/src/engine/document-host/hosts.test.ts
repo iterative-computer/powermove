@@ -150,6 +150,41 @@ describe.skipIf(!existsSync(WASM) || !existsSync(BRIDGE))('a document host worke
     expect(stats.dual!.mismatched).toBe(0);
   }, 120_000);
 
+  it('answers 3D geometry natively: state of selected 3D objects and group placement, with no three.js', async () => {
+    revisions.clear();
+    const host = hostServices();
+    host.seed('P3d', '3D');
+    const pool = newPool(host.services, { POWERMOVE_NATIVE_EVALUATOR: 'audit' });
+    await pool.open('P3d');
+    const object = (id: string, x: number, primitive: string) => ({
+      type: 'add_layer', id, layerType: 'extension', name: id,
+      content: { definition: 'powermove.3d.object', data: { object: { source: { primitive } } } },
+      properties: { 'position.x': x, 'rotation.y': 30 },
+    });
+    const added = await ask(pool, 'P3d', 'run-3d', 'apply_commands', { commands: [object('Obox', -1.5, 'box'), object('Osphere', 2, 'sphere'), object('Ocone', 0, 'cone'),
+      { type: 'add_layer', id: 'Lplate', layerType: 'solid', name: 'Plate', content: { w: 200, h: 120 } }], label: 'objects' });
+    expect(added.error ?? null).toBeNull();
+    const run = 'run-3d';
+    expect((await ask(pool, 'P3d', run, 'select_layers', { layerIds: ['Obox', 'Osphere'] })).error ?? null).toBeNull();
+    const state = await ask(pool, 'P3d', run, 'get_project_state', {});
+    expect(state.error ?? null).toBeNull();
+    expect(state.ok).toBe(true);
+    const grouped = await ask(pool, 'P3d', run, 'apply_commands', { commands: [
+      // A model group (3D members only) and a mixed group (3D bounds in the editor's view).
+      { type: 'group_layers', targets: ['Obox', 'Osphere'], name: 'Model' },
+      { type: 'group_layers', targets: ['Ocone', 'Lplate'], name: 'Mixed' },
+    ], label: 'group' });
+    expect(grouped.error ?? null).toBeNull();
+    expect((await ask(pool, 'P3d', run, 'get_3d_scene', {})).ok).toBe(true);
+    const stats = await pool.stats('P3d');
+    expect(stats.failures).toEqual([]);
+    expect(stats.fallbacks).toEqual({});
+    expect(stats.dual!.mismatched).toBe(0);
+    // The geometry questions were asked, and answered by pm-wasm.
+    expect(stats.dual!.comparedOps['edit.groupPlacement']).toBeGreaterThan(0);
+    expect(stats.calls).toBeGreaterThan(0);
+  }, 120_000);
+
   it('answers nested and replacement-time scopes natively in a required-engine worker', async () => {
     const project = structuredClone(FIXTURE);
     project.comps = { outer: { id: 'outer', layers: [], comps: { same: { id: 'same', fps: 24, layers: [{ id: 'Linner', type: 'solid', from: 0, dur: 10, p: { opacity: { v: 73, kf: [], expr: null } }, d: { w: 100, h: 100 } }] } } } };

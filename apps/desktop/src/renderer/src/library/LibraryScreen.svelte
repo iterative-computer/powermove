@@ -13,6 +13,7 @@
   import { panelScope } from '../panels/agent/panel-focus';
   import { deletePanel, deletedPanelIds } from './panel-deletion';
   import { panelBelongsInLibrary, panelPreviewSize } from './panel-preview';
+  import { copyClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
   import { afterEffectsExtensionIds } from './after-effects-imports';
   import { panelFrameOf } from '../kernel/panel-frame';
   import { placePanel } from '../layout/portal';
@@ -376,14 +377,7 @@
   /* cloneNode leaves canvases blank and drops live form values; copy both so
      every panel — including future generated ones — previews as-is. */
   function copyLiveState(source: Element, target: Element): void {
-    const canvases = source.querySelectorAll('canvas');
-    target.querySelectorAll('canvas').forEach((node, index) => {
-      const from = canvases[index];
-      if (!from?.width || !from?.height) return;
-      node.width = from.width;
-      node.height = from.height;
-      try { node.getContext('2d')?.drawImage(from, 0, 0); } catch { /* tainted or GL-only canvas */ }
-    });
+    copyClonedCanvasBitmaps(source, target);
     const fields = source.querySelectorAll<HTMLInputElement>('input,textarea,select');
     target.querySelectorAll<HTMLInputElement>('input,textarea,select').forEach((node, index) => {
       const from = fields[index];
@@ -674,6 +668,7 @@
     clone.style.width = `${size.width}px`;
     clone.style.height = `${size.height}px`;
     clone.style.flex = 'none';
+    const library = PM.PANELS?.[id]?.library;
     copyLiveState(element, clone);
     const frame = document.createElement('div');
     frame.className = 'library-live-frame';
@@ -682,10 +677,7 @@
     frame.appendChild(clone);
     /* Measure in place: computed styles and scroll sizes need the document. */
     host.appendChild(frame);
-    const library = PM.PANELS?.[id]?.library;
-    if (library && typeof library.render === 'function') {
-      library.render({ source: element, clone, width: size.width, height: size.height });
-    } else {
+    if (!renderLibraryCallback(library, { source: element, clone, width: size.width, height: size.height })) {
       // Snapshots cannot scroll. Unroll their scroll regions from the inside
       // out, then grow the book so the last controls and footer stay visible.
       // Canvas previews own their geometry through library.render instead.
