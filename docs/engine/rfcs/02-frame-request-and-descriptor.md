@@ -334,5 +334,21 @@ rebuilt together.
 
 `ViewerState` carries both optional fields above: `chromeSelection` (3D
 chrome) and `canvas` (decision V1). Each keeps its own meaning; neither
-depends on the other. The combined contract builds as
+depends on the other. The combined contract built as
 `protocol-50a5c6ee43a404de`.
+
+### Version note: `ViewerState.surfaceEpoch` (3D round 11, 2026-10-22)
+
+`ViewerState.surfaceEpoch?: number` (Rust `surface_epoch: Option<u32>`,
+`#[serde(default, skip_serializing_if = "Option::is_none")]`; absent is 0)
+is the viewer's surface epoch. A change replaces the view's color pool and,
+when the view asks for one, its depth/ID pool with new surfaces and new
+generations, even when size, count and format stay the same; the lease is
+charged once because the old pools are released first. A change of it is a
+new view (`viewSeq`), so a paused view draws its frame again into the new
+pool. The viewer moves it when the surfaces it imported can no longer be
+read: after a GPU process restart every `VideoFrame` of an earlier import
+fails to upload (docs/engine/scene3d.md, round 11). The same epoch in a
+later view, and transport replans, keep the pools. Absent on the wire when
+unset, so existing fixtures are unchanged. Builds as
+`protocol-7a0a3449f03f321a`.

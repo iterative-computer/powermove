@@ -443,7 +443,13 @@ impl PreviewBlender {
     /// of `key` (today's `prepareFrame` before `snapshotAsync` captures).
     /// The answer comes as [`Notice::Captured`] with `token`, unless the
     /// capture is cancelled first.
-    pub fn capture(&self, token: u64, key: Key, snapshots: Vec<Snapshot>, foreground_capture: bool) {
+    pub fn capture(
+        &self,
+        token: u64,
+        key: Key,
+        snapshots: Vec<Snapshot>,
+        foreground_capture: bool,
+    ) {
         let hashes = snapshots.iter().map(|s| s.hash().0).collect();
         self.inner.lock().captures.push_back(Capture {
             token,
@@ -764,7 +770,16 @@ fn run_capture(inner: &Inner, worker: &mut Worker, c: Capture, cancel: &AtomicBo
         c.key.1.get(),
         c.token
     ));
-    let result = render(inner, worker, c.key, &c.snapshots, &c.hashes, id, cancel, c.foreground_capture);
+    let result = render(
+        inner,
+        worker,
+        c.key,
+        &c.snapshots,
+        &c.hashes,
+        id,
+        cancel,
+        c.foreground_capture,
+    );
     let mut st = inner.lock();
     st.running = None;
     let result = match result {
@@ -1044,10 +1059,11 @@ mod tests {
                             path: a.to_string_lossy().into_owned(),
                         })),
                         Request::BlenderRender(job) => {
-                            s.lock()
-                                .unwrap()
-                                .renders
-                                .push((job.job.clone(), job.surfaces.len(), job.foreground_capture));
+                            s.lock().unwrap().renders.push((
+                                job.job.clone(),
+                                job.surfaces.len(),
+                                job.foreground_capture,
+                            ));
                             if *m.lock().unwrap() == Mode::Hold {
                                 held.push((call.token, job.job.clone()));
                                 continue;
@@ -1431,7 +1447,10 @@ mod tests {
                 "{:?}",
                 seen.renders[0].0
             );
-            assert!(seen.renders[0].2, "explicit renderFrame capture bypasses playback pause");
+            assert!(
+                seen.renders[0].2,
+                "explicit renderFrame capture bypasses playback pause"
+            );
         }
         // A capture is never a preview failure, and does not ask the view to
         // draw again.
@@ -1488,14 +1507,21 @@ mod tests {
         });
         let seen = r.host.seen.lock().unwrap();
         assert!(seen.renders[1].0.as_str().starts_with("preview-3-7"));
-        assert!(!seen.renders[0].2, "ordinary captures keep the playback pause");
-        assert!(!seen.renders[1].2, "automatic previews keep the playback pause");
+        assert!(
+            !seen.renders[0].2,
+            "ordinary captures keep the playback pause"
+        );
+        assert!(
+            !seen.renders[1].2,
+            "automatic previews keep the playback pause"
+        );
     }
 
     #[test]
     fn a_capture_failure_answers_the_capture_and_leaves_previews_running() {
         let r = rig(Mode::Missing, None, SURFACE_BYTES);
-        r.blender.capture(9, KEY, vec![final_frame(&["box"], 0.0)], false);
+        r.blender
+            .capture(9, KEY, vec![final_frame(&["box"], 0.0)], false);
         wait("failed", || !r.captured.lock().unwrap().is_empty());
         let (_, result) = r.captured.lock().unwrap().remove(0);
         match result {
@@ -1513,8 +1539,10 @@ mod tests {
     #[test]
     fn a_closed_session_drops_its_waiting_captures() {
         let r = rig(Mode::Hold, None, SURFACE_BYTES);
-        r.blender.capture(1, KEY, vec![final_frame(&["box"], 0.0)], false);
-        r.blender.capture(2, KEY, vec![final_frame(&["box"], 1.0)], false);
+        r.blender
+            .capture(1, KEY, vec![final_frame(&["box"], 0.0)], false);
+        r.blender
+            .capture(2, KEY, vec![final_frame(&["box"], 1.0)], false);
         wait("first", || r.host.seen.lock().unwrap().renders.len() == 1);
         r.blender.forget(KEY);
         wait("cancelled", || !r.captured.lock().unwrap().is_empty());

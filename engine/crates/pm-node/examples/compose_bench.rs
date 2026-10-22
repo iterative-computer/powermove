@@ -82,6 +82,7 @@ fn main() {
         depth_id: None,
         chrome_selection: None,
         canvas: None,
+        surface_epoch: None,
     };
     let gpu = pm_gpu::Gpu::new("compose bench").expect("a GPU");
     let working = WorkingTexture::new(&gpu.device, Size::new(width, height));

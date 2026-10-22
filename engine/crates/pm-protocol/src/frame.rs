@@ -655,6 +655,18 @@ pub struct ViewerState {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub canvas: Option<ViewerCanvas>,
+    /// The viewer's surface epoch: a change makes the engine replace this
+    /// view's surface pools (the frames' pool and the depth/ID pool) with
+    /// new surfaces, even when their size and format stay the same. The
+    /// viewer moves it when the imports it holds can no longer be read:
+    /// after its GPU process restarted, every `VideoFrame` of a surface
+    /// imported before the restart fails to upload, so only new imports
+    /// draw again (docs/engine/scene3d.md, round 11). Absent is epoch 0.
+    /// Added as an optional field (RFC 02 version notes); a change of it
+    /// is a new view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub surface_epoch: Option<u32>,
 }
 
 /// Today's viewer canvas for a view: the WebGL canvas the legacy viewer
@@ -877,6 +889,7 @@ mod tests {
             depth_id: Some(true),
             chrome_selection: None,
             canvas: None,
+            surface_epoch: None,
         }
     }
 

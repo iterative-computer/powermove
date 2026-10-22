@@ -394,12 +394,14 @@ impl BridgePresenter {
     }
 
     /// Sizes, formats, and charges a pool for `state`, replacing the
-    /// viewer's current pool when anything differs.
+    /// viewer's current pool when anything differs, or when `renew` (the
+    /// viewer moved its surface epoch: its imports cannot be read).
     fn plan_pool(
         &mut self,
         ctx: &mut PresentContext<'_>,
         key: Key,
         state: &ViewerState,
+        renew: bool,
     ) -> Option<PoolSpec> {
         let playing = self.playing.contains(&key);
         let count = if playing {
@@ -412,7 +414,7 @@ impl BridgePresenter {
         let current = self.views.get(&key).and_then(|m| m.pool);
         if let Some((spec, _)) = current {
             let same_format = (spec.format == SurfaceFormat::Rgba16Float) == want_f16;
-            if spec.size == size && spec.count == count && same_format {
+            if spec.size == size && spec.count == count && same_format && !renew {
                 return None;
             }
         }
@@ -463,12 +465,14 @@ impl BridgePresenter {
     /// a depth/ID and selection-coverage pair per color slot, made only
     /// while the viewer asks for them.
     /// Returns `Some(Some(spec))` for a new pool, `Some(None)` to retire the
-    /// current one, `None` when nothing changes.
+    /// current one, `None` when nothing changes. `renew` replaces a pool
+    /// that would otherwise stay (see [`Self::plan_pool`]).
     fn plan_depth(
         &mut self,
         ctx: &mut PresentContext<'_>,
         key: Key,
         state: &ViewerState,
+        renew: bool,
     ) -> Option<Option<PoolSpec>> {
         let wanted = state.headless != Some(true)
             && state.depth_id == Some(true)
@@ -483,6 +487,7 @@ impl BridgePresenter {
             && wanted
             && spec.size == size
             && spec.count == count
+            && !renew
         {
             return None;
         }
@@ -554,8 +559,8 @@ impl BridgePresenter {
         }
         ctx.release_frame_cache(self.frame_cache_reserved);
         self.frame_cache_reserved = 0;
-        let pool = self.plan_pool(ctx, key, &state);
-        let depth = self.plan_depth(ctx, key, &state);
+        let pool = self.plan_pool(ctx, key, &state, false);
+        let depth = self.plan_depth(ctx, key, &state, false);
         self.sync_frame_cache(ctx);
         if pool.is_some() || depth.is_some() {
             self.send(Command::Configure {
@@ -602,6 +607,12 @@ impl FramePresenter for BridgePresenter {
             return;
         }
         let key = (port, session);
+        // A new surface epoch: the viewer cannot read the surfaces it has
+        // (its GPU process restarted), so both pools are made again.
+        let renew = self
+            .views
+            .get(&key)
+            .is_some_and(|meta| meta.state.surface_epoch != state.surface_epoch);
         // The pool comes first (the viewer must show something); the frame
         // cache takes what the lease has left after it.
         ctx.release_frame_cache(self.frame_cache_reserved);
@@ -618,9 +629,9 @@ impl FramePresenter for BridgePresenter {
             );
             None
         } else {
-            self.plan_pool(ctx, key, &state)
+            self.plan_pool(ctx, key, &state, renew)
         };
-        let depth = self.plan_depth(ctx, key, &state);
+        let depth = self.plan_depth(ctx, key, &state, renew);
         if let Some(meta) = self.views.get_mut(&key) {
             meta.state = state.clone();
         }
@@ -986,6 +997,7 @@ mod tests {
             depth_id: Some(true),
             chrome_selection: None,
             canvas: None,
+            surface_epoch: None,
         }
     }
 
@@ -1119,6 +1131,93 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A viewer whose GPU process restarted cannot read the surfaces it
+    /// imported before: a new surface epoch replaces both pools at the
+    /// same size and format, with new generations, and charges the lease
+    /// once (the old pools are released first). The same epoch again, or a
+    /// transport replan, keeps them.
+    #[test]
+    fn a_new_surface_epoch_replaces_both_pools_at_the_same_size() {
+        let (mut p, rx) = presenter();
+        let mut budget = LeaseBudget::new(EngineProcess::Interactive);
+        let mut evict = NoEviction;
+        assert!(grant(&mut budget, 1, 4096 * MIB));
+        let port = PortId(7);
+        let session = SessionId::new(1).unwrap();
+        let key = (port, session);
+        let state = viewer_state();
+        let bytes = |count| estimated_bytes(state.size, SurfaceFormat::Rgba16Float, count);
+        p.viewer(
+            &mut PresentContext::new(&mut budget, &mut evict),
+            port,
+            session,
+            state.clone(),
+            None,
+        );
+        let first = p.views[&key].pool.unwrap().0;
+        let first_depth = p.views[&key].depth.unwrap().0;
+        rx.try_iter().for_each(drop);
+
+        let mut renewed = state.clone();
+        renewed.view_seq = Seq::new(2).unwrap();
+        renewed.surface_epoch = Some(1);
+        p.viewer(
+            &mut PresentContext::new(&mut budget, &mut evict),
+            port,
+            session,
+            renewed.clone(),
+            None,
+        );
+        let pool = p.views[&key].pool.unwrap().0;
+        let depth = p.views[&key].depth.unwrap().0;
+        assert!(pool.generation > first.generation);
+        assert!(depth.generation > first_depth.generation);
+        assert_eq!(
+            (pool.size, pool.count, pool.format),
+            (first.size, first.count, first.format)
+        );
+        assert_eq!(
+            (depth.size, depth.count),
+            (first_depth.size, first_depth.count)
+        );
+        assert_eq!(budget.used_in(Category::SurfacePool), bytes(12));
+        let configure = rx
+            .try_iter()
+            .find(|c| matches!(c, Command::Configure { .. }));
+        assert!(matches!(
+            configure,
+            Some(Command::Configure {
+                pool: Some(PoolSpec { generation, .. }),
+                depth: Some(Some(_)),
+                ..
+            }) if generation == pool.generation
+        ));
+
+        // The same epoch in a later view keeps the renewed pools.
+        let mut later = renewed;
+        later.view_seq = Seq::new(3).unwrap();
+        later.pan = [4.0, 0.0];
+        p.viewer(
+            &mut PresentContext::new(&mut budget, &mut evict),
+            port,
+            session,
+            later,
+            None,
+        );
+        assert_eq!(p.views[&key].pool.unwrap().0.generation, pool.generation);
+        assert_eq!(p.views[&key].depth.unwrap().0.generation, depth.generation);
+        assert!(matches!(
+            rx.try_iter()
+                .find(|c| matches!(c, Command::Configure { .. })),
+            Some(Command::Configure {
+                pool: None,
+                depth: None,
+                ..
+            })
+        ));
+        assert_eq!(budget.used_in(Category::SurfacePool), bytes(12));
     }
 
     #[test]

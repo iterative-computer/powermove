@@ -238,6 +238,7 @@ fn state(view_seq: u64) -> ViewerState {
         depth_id: None,
         chrome_selection: None,
         canvas: None,
+        surface_epoch: None,
     }
 }
 

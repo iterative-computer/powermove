@@ -114,6 +114,7 @@ mod tests {
             depth_id: None,
             chrome_selection: None,
             canvas: None,
+            surface_epoch: None,
         }
     }
 

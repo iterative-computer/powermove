@@ -1297,6 +1297,7 @@ pub fn events() -> Vec<Envelope> {
             depth_id: Some(true),
             chrome_selection: None,
             canvas: Some(ViewerCanvas { width: 1512, height: 982, crop: Rect { x: 0.0, y: 0.0, width: 1920.0, height: 1080.0 }, css: Rect { x: 12.5, y: 40.0, width: 756.0, height: 425.25 } }),
+            surface_epoch: None,
         })),
         event(Event::Transport(TransportCommand::Seek {
             time: ticks(-705_600_000),
