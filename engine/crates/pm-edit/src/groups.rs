@@ -16,7 +16,7 @@ use pm_eval::parenting::{AIM_KEYS, WorldPose, aim_properties3d};
 use pm_eval::space3d::IDENTITY4;
 use pm_eval::text_geom::TextMeasure;
 use pm_eval::transform::IDENTITY;
-use pm_model::{Node, NodeKind, Patch, Value};
+use pm_model::{JsString, Node, NodeKind, Patch, Value};
 
 use crate::channel::{self, at, join, key, lit, num, template};
 use crate::pose::{
@@ -252,6 +252,42 @@ const SPACE_CHANNELS: [&str; 8] = [
     "orientation.z",
 ];
 
+/// `PM.clamp(v, 0, 100)` on a group's opacity: `v < a ? a : v > b ? b : v`
+/// (NaN passes through). A group can be keyed outside the range its own
+/// compositing clamps to; ungrouping folds only the clamped value.
+fn clamp_opacity(v: f64) -> f64 {
+    if v < 0.0 {
+        0.0
+    } else if v > 100.0 {
+        100.0
+    } else {
+        v
+    }
+}
+
+/// `constantProperty(group.on, false)` (`layer-groups.ts`): a switch that is
+/// `false`, or an unexpressioned property whose value (or every key) is
+/// `false`.
+fn always_off(on: Option<&Node>) -> bool {
+    let Some(on) = on else { return false };
+    match on.kind() {
+        NodeKind::Bool(b) => !*b,
+        NodeKind::Object(_) => {
+            if node::truthy(node::member(Some(on), "expr")) {
+                return false;
+            }
+            let off = |n: Option<&Node>| matches!(n.map(Node::kind), Some(NodeKind::Bool(false)));
+            match node::member(Some(on), "kf").map(Node::kind) {
+                Some(NodeKind::Array(keys)) if !keys.is_empty() => {
+                    keys.iter().all(|k| off(node::member(Some(k), "v")))
+                }
+                _ => off(node::member(Some(on), "v")),
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Original layer positions, followed through deletions.
 struct Tracked {
     alive: Vec<usize>,
@@ -405,8 +441,9 @@ fn ungroup_each(
                     let world = s.world_pose(l, t)?;
                     let aim = s.world_aim3d(l, t)?;
                     let perspective = s.perspective_amount(l, t)?;
+                    let group_opacity = clamp_opacity(s.channel(gl, "opacity", t)?.to_number());
                     let opacity =
-                        js_sem::mul(&s.channel(l, "opacity", t)?, &s.channel(gl, "opacity", t)?)
+                        js_sem::mul(&s.channel(l, "opacity", t)?, &JsValue::Number(group_opacity))
                             / 100.0;
                     Ok(Sampled {
                         world,
@@ -443,6 +480,8 @@ fn ungroup_each(
                 Some(Value::Null)
             }
         };
+        // A group that is always hidden leaves its members hidden.
+        let invisible = always_off(node::member(Some(layer(edit, g)?), "on"));
         for &m in &members {
             edit.set(
                 join(&edit.layer_path(m), &[key("group")]),
@@ -450,6 +489,9 @@ fn ungroup_each(
             )?;
             let k = key_of(layer(edit, m)?);
             children.push(id_of(layer(edit, m)?));
+            if invisible {
+                edit.set(join(&edit.layer_path(m), &[key("on")]), Some(Value::Bool(false)))?;
+            }
             if matches!(poses.get(&k), Some(WorldPose::Space(_))) {
                 ensure_3d_channels(edit, m)?;
                 set_property(
@@ -461,7 +503,7 @@ fn ungroup_each(
             }
             let factor = edit.read(|s| {
                 let gl = &s.layers()[g];
-                Ok(s.channel(gl, "opacity", time)?.to_number() / 100.0)
+                Ok(clamp_opacity(s.channel(gl, "opacity", time)?.to_number()) / 100.0)
             })?;
             fade(edit, m, factor)?;
         }
@@ -474,7 +516,20 @@ fn ungroup_each(
                 preserve_world_aim(edit, m, aim, time, None)?;
             }
         }
-        // `PM.proj.layers = PM.proj.layers.filter(layer => layer.id !== group.id)`.
+        // Outside layers can use this group as a transform parent: it stays
+        // as a null (its coordinate space and keys kept, no grouping
+        // boundary) instead of `PM.proj.layers.filter(layer => layer.id !==
+        // group.id)`.
+        let parented = edit
+            .layers()
+            .iter()
+            .any(|l| js_sem::strict_eq(&node::get(l, b"parent").to_js(), &group_id));
+        if parented {
+            let path = edit.layer_path(g);
+            edit.set(join(&path, &[key("type")]), Some(Value::String(JsString::from("null"))))?;
+            edit.set(join(&path, &[key("solo")]), Some(Value::Bool(false)))?;
+            continue;
+        }
         let doomed: Vec<usize> = edit
             .layers()
             .iter()
