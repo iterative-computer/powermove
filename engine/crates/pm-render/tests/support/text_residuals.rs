@@ -93,49 +93,7 @@ pub const fn corpus(
 /// a value or add a row here
 /// without a new orchestrator decision; lower or remove rows (and the
 /// fixture's entries) as residuals improve.
-pub const APPROVED: [Approved; 13] = [
-    raster("caption-paper-0460", 1, 2),
-    raster("caption-paper-0461", 1, 2),
-    raster("caption-paper-0462", 1, 2),
-    raster("sdf-sizes-0004", 4, 2),
-    raster("path-stroke-0000", 154, 4),
-    raster("path-stroke-0001", 1, 64),
-    raster("real-16-Lkkauewe", 6, 64),
-    raster("real-18-Lkkauewe", 6, 64),
-    raster("real-24-L3app4ie", 2, 5),
-    corpus(
-        "real_powermove-ad-16",
-        "real/powermove-ad",
-        false,
-        16.0,
-        2,
-        39,
-    ),
-    corpus(
-        "real_powermove-ad-18",
-        "real/powermove-ad",
-        false,
-        18.0,
-        6,
-        34,
-    ),
-    corpus(
-        "real_powermove-ad-text-only-16",
-        "real/powermove-ad",
-        true,
-        16.0,
-        3,
-        44,
-    ),
-    corpus(
-        "real_powermove-ad-text-only-18",
-        "real/powermove-ad",
-        true,
-        18.0,
-        6,
-        44,
-    ),
-];
+pub const APPROVED: [Approved; 0] = [];
 
 impl Approved {
     fn key(&self) -> Key {
