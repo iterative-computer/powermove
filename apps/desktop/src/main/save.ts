@@ -139,7 +139,9 @@ export async function openProjectForWindow(
     }
     state.readers.set(opened.token, { owner: webContents, activeReads: 0 });
     watchProjectReaderOwner(ctx.projects, webContents);
-    return { ok: true, ...opened };
+    // The window parses the text itself (see ProjectFiles.open).
+    const { document: _parsed, ...reply } = opened;
+    return { ok: true, ...reply };
   } catch (error: any) {
     return { ok: false, cancelled: false, error: error.message || 'Could not open project.' };
   }

@@ -25,13 +25,15 @@ describe('external project open', () => {
     const projects = {
       open: vi.fn(async (filePath: string) => ({
         path: filePath, projectId: 'project-1', token: 'reader-1', size: 42,
-        document: { proj: {} }, media: []
+        document: { proj: {} }, documentJSON: '{"proj":{}}', media: []
       })),
       close: vi.fn()
     };
     const result = await openProjectForWindow({ projects: projects as any }, sender() as any, '/tmp/example.pmv');
 
-    expect(result).toMatchObject({ ok: true, path: '/tmp/example.pmv', token: 'reader-1' });
+    expect(result).toMatchObject({ ok: true, path: '/tmp/example.pmv', token: 'reader-1', documentJSON: '{"proj":{}}' });
+    // The parsed document is not sent: the window parses the text (OPENWRITE-1).
+    expect('document' in result).toBe(false);
   });
 
   it('returns a structured failure when opening fails', async () => {

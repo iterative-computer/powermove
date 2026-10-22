@@ -295,7 +295,11 @@ export interface ProjectSaveRequest {
 export type ProjectSaveBeginResult = { ok: true; token: string; required: string[] } | { ok: false; cancelled: boolean; error?: string };
 export type ProjectOpenResult = {
   ok: true; path: string; projectId: string; token: string; size: number;
-  document: any; media: import('./project-container').ProjectMediaRange[];
+  /** The document as JSON text (main's reader); `documentMember` names the
+   *  member holding it (a PMV3 container's header). Text crosses the context
+   *  bridge in one copy; a parsed document would be copied object by object. */
+  documentJSON: string; documentMember?: 'document';
+  media: import('./project-container').ProjectMediaRange[];
 } | { ok: true; path: string; projectId: string; data: Uint8Array }
   | { ok: false; cancelled: boolean; error?: string };
 export type CloseDecision = 'save' | 'discard' | 'cancel';

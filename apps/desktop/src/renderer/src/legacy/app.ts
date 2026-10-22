@@ -942,6 +942,14 @@ hostBridge()?.onProjectOpenExternal?.(async result => {
     PM.toast('Could not open project: ' + result.error, 6000);
   }
 });
+/** The document main read for an open, parsed here (see ProjectOpenResult). */
+function openedDocument(native: any): any {
+  if (typeof native.documentJSON !== 'string') return native.document;
+  const parsed = JSON.parse(native.documentJSON);
+  // The text is as large as the document; nothing else reads it.
+  native.documentJSON = undefined;
+  return native.documentMember === 'document' ? parsed?.document : parsed;
+}
 async function openProjectFile(file: any, association?: { path: string; projectId: string }, generation = beginOpen()) {
   if (!isCurrentOpen(generation)) { await closeUnopenedReader(file.native); return false; }
   const opening = createImportProgress('Opening project', PM);
@@ -951,8 +959,10 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     let o: any, mediaRestored = false;
     if (file.native && 'token' in file.native) {
       const bridge = hostBridge()!.projectRead!;
-      const { token, document, media } = file.native;
+      const { token, media } = file.native;
+      let document: any;
       await withProjectReader(async () => {
+        document = openedDocument(file.native);
         if (refusedByEngine(document)) throw new Error(REQUIRES_NATIVE_MESSAGE);
         await settleAssetRestores();
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),

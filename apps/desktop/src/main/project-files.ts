@@ -209,7 +209,12 @@ export class ProjectFiles {
       } finally { await unlink(temporary).catch(() => undefined); }
     });
   }
-  open(filePath: string): Promise<{ path: string; projectId: string; token: string; size: number; document: any; media: ProjectMediaRange[] }> {
+  /** `documentJSON` is the JSON text `document` was parsed from (for a PMV3
+   * container, its header's, with the document under `documentMember`). The
+   * window receives the text rather than the object: an object crossing the
+   * renderer's context bridge is copied member by member on its JavaScript
+   * thread, which took 62 to 119 s for the large private projects (C1). */
+  open(filePath: string): Promise<{ path: string; projectId: string; token: string; size: number; document: any; documentJSON: string; documentMember?: 'document'; media: ProjectMediaRange[] }> {
     return this.serial(async () => {
       const handle = await open(filePath, 'r');
       try {
@@ -225,12 +230,13 @@ export class ProjectFiles {
           return buffer;
         };
         const prefix = await readExactly(0, Math.min(9, info.size));
-        let document: any, media: ProjectMediaRange[] = [];
+        let document: any, media: ProjectMediaRange[] = [], documentJSON: string, documentMember: 'document' | undefined;
         if (isIncrementalProject(prefix)) {
           const index = await readIncrementalIndex(info.size, readExactly, nativeHash);
           const bytes = await readExactly(index.document.offset, index.document.length);
           if (await nativeHash(bytes) !== index.document.sha256) throw new Error('The project document checksum does not match.');
-          document = JSON.parse(bytes.toString('utf8')); media = index.media;
+          documentJSON = bytes.toString('utf8');
+          document = JSON.parse(documentJSON); media = index.media;
           for (const item of index.media) {
             if ((await hashHandle(handle, item.offset, item.length)).digest('hex') !== item.sha256) throw new Error('The project media checksum does not match.');
           }
@@ -238,12 +244,15 @@ export class ProjectFiles {
           if (prefix.length < 9) throw new Error('The project container is truncated.');
           const headerLength = prefix.readUInt32LE(5);
           if (headerLength < 2 || headerLength > info.size - 9) throw new Error('The project container header is invalid.');
-          const header = JSON.parse((await readExactly(9, headerLength)).toString('utf8'));
+          documentJSON = (await readExactly(9, headerLength)).toString('utf8');
+          documentMember = 'document';
+          const header = JSON.parse(documentJSON);
           ({ document, media } = projectContainerIndex(header, 9 + headerLength, info.size));
         } else {
           // Legacy JSON stores its media inside the document itself. Keep that
           // format readable alongside PMV3 and incremental PMV4.
-          document = JSON.parse((await readExactly(0, info.size)).toString('utf8'));
+          documentJSON = (await readExactly(0, info.size)).toString('utf8');
+          document = JSON.parse(documentJSON);
         }
         const project = document?.proj || document;
         // A newer build may change the document's shape; say why it cannot open.
@@ -264,7 +273,7 @@ export class ProjectFiles {
           await this.persist();
         }
         this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, busy: false });
-        return { path: filePath, projectId, token, size: info.size, document, media };
+        return { path: filePath, projectId, token, size: info.size, document, documentJSON, ...(documentMember ? { documentMember } : {}), media };
       } catch (error) { await handle.close(); throw error; }
     });
   }

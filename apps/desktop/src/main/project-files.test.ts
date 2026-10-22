@@ -24,6 +24,9 @@ describe('real project files', () => {
     const opened = await files.open(destination);
     try {
       expect(opened.document).toEqual(JSON.parse(bytes('returned to caller').toString()));
+      // The window receives the document as its JSON text (one copy across the context bridge).
+      expect(JSON.parse(opened.documentJSON)).toEqual(opened.document);
+      expect(opened.documentMember).toBeUndefined();
       // Inspect the queue's fulfilled value directly: retaining this reply
       // would keep the last open's complete document alive until another job.
       expect(await (files as unknown as { queue: Promise<unknown> }).queue).toBeUndefined();
@@ -68,6 +71,9 @@ describe('real project files', () => {
     const result = await files.open(destination);
     expect('data' in result).toBe(false);
     expect(result.media[0]!.length).toBe(length);
+    // A PMV3 document is its header's member.
+    expect(result.documentMember).toBe('document');
+    expect(JSON.parse(result.documentJSON).document).toEqual(result.document);
     try {
       expect([...await files.read(result.token, result.size - 4, 4)]).toEqual([7, 8, 9, 10]);
       await expect(files.read(result.token, 0, 1024 * 1024 + 1)).rejects.toThrow('range');
