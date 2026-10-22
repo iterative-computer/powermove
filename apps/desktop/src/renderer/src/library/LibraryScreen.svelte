@@ -13,6 +13,7 @@
   import { panelScope } from '../panels/agent/panel-focus';
   import { deletePanel, deletedPanelIds } from './panel-deletion';
   import { panelBelongsInLibrary, panelPreviewSize } from './panel-preview';
+  import { engineViewerCanvas, fillFrozenViewerCard, hideViewerPresentation, viewerCardFill } from './viewer-preview';
   import { afterEffectsExtensionIds } from './after-effects-imports';
   import { panelFrameOf } from '../kernel/panel-frame';
   import { placePanel } from '../layout/portal';
@@ -375,11 +376,12 @@
 
   /* cloneNode leaves canvases blank and drops live form values; copy both so
      every panel — including future generated ones — previews as-is. */
-  function copyLiveState(source: Element, target: Element): void {
+  function copyLiveState(source: Element, target: Element, skipViewerCanvas = false): void {
     const canvases = source.querySelectorAll('canvas');
     target.querySelectorAll('canvas').forEach((node, index) => {
       const from = canvases[index];
       if (!from?.width || !from?.height) return;
+      if (skipViewerCanvas && engineViewerCanvas(from.id)) return;
       node.width = from.width;
       node.height = from.height;
       try { node.getContext('2d')?.drawImage(from, 0, 0); } catch { /* tainted or GL-only canvas */ }
@@ -674,7 +676,10 @@
     clone.style.width = `${size.width}px`;
     clone.style.height = `${size.height}px`;
     clone.style.flex = 'none';
-    copyLiveState(element, clone);
+    const library = PM.PANELS?.[id]?.library;
+    const engineCard = viewerCardFill(id, !!PM.EngineRender, library);
+    copyLiveState(element, clone, engineCard.skipGl);
+    if (engineCard.skipGl) hideViewerPresentation(clone);
     const frame = document.createElement('div');
     frame.className = 'library-live-frame';
     frame.style.width = `${size.width}px`;
@@ -682,7 +687,6 @@
     frame.appendChild(clone);
     /* Measure in place: computed styles and scroll sizes need the document. */
     host.appendChild(frame);
-    const library = PM.PANELS?.[id]?.library;
     if (library && typeof library.render === 'function') {
       library.render({ source: element, clone, width: size.width, height: size.height });
     } else {
@@ -717,6 +721,7 @@
     const height = Math.min(fullHeight, MAX_PREVIEW_HEIGHT);
     frame.style.width = `${width}px`;
     frame.style.height = `${height}px`;
+    if (engineCard.host) fillFrozenViewerCard(PM, element, clone);
     return { stamp, frame, width, height, clipped: width < size.width || height < fullHeight };
   }
 

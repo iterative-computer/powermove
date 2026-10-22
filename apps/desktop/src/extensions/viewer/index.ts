@@ -3,6 +3,7 @@ import type { PowermoveAPI } from 'powermove';
 import { createViewerRuntime, viewerPanelOptions } from './viewer';
 import { installSourcePreview } from './source-preview';
 import { installViewportKeys } from './viewport3d/keymap';
+import { paintViewerCard, viewerCardSize, viewerCardTarget } from './library-card';
 
 const VIEWER_STYLES = `
   .canvas-text-input::selection{background:transparent;color:transparent}
@@ -53,10 +54,57 @@ export default function activate(api: PowermoveAPI): void {
   });
   api.keybindings.bind({ key: 'enter', command: 'text.editSelected' });
 
+  /* With the engine on, the live #gl's pixels belong to the engine and do not
+     copy, so the card asks for the full composition at the size the live
+     viewer renders it (its zoom, density, preview quality or fixed
+     resolution, never above the composition) and the paused live viewer's
+     motion blur (12 samples), stretched over the clone's #stage-inner.
+     `enginePreview` tells the host this callback fills the card, so the
+     host's frozen-fork fill stays out of it. The fill outlives a detached
+     clone: the Library caches it off-shelf and shows it again as is. */
+  const renderLibraryCard = Object.assign(({
+    source, clone,
+  }: { source: HTMLElement; clone: HTMLElement; width: number; height: number }) => {
+    const project = api.project.get();
+    const render = (api.render as typeof api.render & {
+      renderFrameToAsync?: (time: number, width: number, height: number, options?: Record<string, unknown>) => Promise<HTMLCanvasElement>;
+    }).renderFrameToAsync;
+    const engine = api.services.get<{ exclusive?: boolean }>('engine.viewer');
+    const target = viewerCardTarget(clone);
+    if (!project || !render || !engine?.exclusive || !target) return;
+    const size = viewerCardSize(target.inner, project, window.devicePixelRatio || 1,
+      api.transport.quality, api.transport.previewResolution);
+    if (!size) return;
+    const composition = (project as { compId?: unknown }).compId;
+    const blocked = () => api.transport.playing() || runtime.isNavigating?.();
+    const alive = () => source.isConnected && api.project.get() === project
+      && (project as { compId?: unknown }).compId === composition
+      && api.services.get('engine.viewer') === engine;
+    const pause = () => new Promise((resolve) => window.setTimeout(resolve, 200));
+    const present = async () => {
+      while (alive()) {
+        while (alive() && blocked()) await pause();
+        if (!alive()) return;
+        const time = api.transport.time();
+        const revision = api.project.revision();
+        const frame = await render(time, size.width, size.height, { mblur: true, mbSamples: 12, priority: 'idle' });
+        while (alive() && blocked()) await pause();
+        if (!alive()) return;
+        if (api.transport.time() === time && api.project.revision() === revision) {
+          paintViewerCard(clone, frame);
+          return;
+        }
+        await pause();
+      }
+    };
+    void present().catch((error) => console.warn('Viewer Library preview failed', error));
+  }, { enginePreview: true });
+
   api.panels.register({
     id: 'viewer',
     icon: 'frame',
     ...viewerPanelOptions,
+    library: { ...viewerPanelOptions.library, render: renderLibraryCard },
     build(body) {
       // Reuse the live WebGL surface during extension/HMR updates. A new canvas
       // cannot inherit the old GL context, textures, or viewer event bindings.
