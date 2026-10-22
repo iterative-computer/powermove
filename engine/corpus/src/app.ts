@@ -46,6 +46,13 @@ export interface LegacyApp {
   close(): Promise<void>;
 }
 
+// Includes an app while its launch is still in progress, so signal teardown
+// cannot miss the bridge merely because launchLegacyApp has not returned yet.
+const activeApps = new Set<LegacyApp>();
+export async function closeActiveLegacyApps(): Promise<void> {
+  await Promise.allSettled([...activeApps].map(app => app.close()));
+}
+
 class Bridge {
   private next = 1;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
@@ -99,14 +106,17 @@ export async function launchLegacyApp(options: LaunchOptions = {}): Promise<Lega
   const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-corpus-'));
   const extensions = options.extensions ?? [];
   const pageErrors: string[] = [], consoleErrors: string[] = [];
-  let bridge: Bridge;
+  let bridge: Bridge, electronPid: number | undefined;
   try {
     for (const name of extensions) {
       const source = path.join(fixturesDir, name);
       if (!existsSync(path.join(source, 'manifest.json'))) throw new Error(`No fixture extension ${name} in ${fixturesDir}`);
       await cp(source, path.join(userData, 'extensions', name), { recursive: true });
     }
-    bridge = new Bridge((event, text) => (event === 'pageerror' ? pageErrors : consoleErrors).push(text));
+    bridge = new Bridge((event, text) => {
+      if (event === 'electron-pid') { electronPid = Number(text); return; }
+      (event === 'pageerror' ? pageErrors : consoleErrors).push(text);
+    });
   } catch (error) {
     await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     throw error;
@@ -120,7 +130,7 @@ export async function launchLegacyApp(options: LaunchOptions = {}): Promise<Lega
     POWERMOVE_BACKGROUND_TEST: '1',
   };
   delete env.ELECTRON_RUN_AS_NODE;
-  let closed = false, electronPid: number | undefined;
+  let closePromise: Promise<void> | undefined;
   const legacy: LegacyApp = {
     userData, pageErrors, consoleErrors,
     evaluate: (fn, arg) => bridge.request('evaluate', { source: fn.toString(), arg }),
@@ -128,28 +138,30 @@ export async function launchLegacyApp(options: LaunchOptions = {}): Promise<Lega
     waitFor: async (fn, arg, timeout = 60_000) => { await bridge.request('waitForFunction', { source: fn.toString(), arg, timeout }); },
     evaluateMain: (fn, arg) => bridge.request('appEvaluate', { source: fn.toString(), arg }),
     setInputFiles: async (selector, files) => { await bridge.request('setInputFiles', { selector, files }); },
-    async close() {
-      if (closed) return;
-      closed = true;
-      try {
-        // The bridge force-kills Electron after 20 s; this outer limit covers a wedged bridge.
-        let confirmed = false;
-        if (!bridge.exited) {
-          const result = await withCleanupTimeout(bridge.request<{ forced: boolean } | null>('close', { exit: true, timeout: 20_000 }).catch(() => undefined), 40_000);
-          confirmed = !!result || result === null;
-        }
-        await withCleanupTimeout(bridge.process.exited, 5_000);
-        if (!bridge.exited) {
-          bridge.process.kill('SIGKILL');
+    close() {
+      return closePromise ??= (async () => {
+        try {
+          // The bridge force-kills Electron after 20 s; this outer limit covers a wedged bridge.
+          let confirmed = false;
+          if (!bridge.exited) {
+            const result = await withCleanupTimeout(bridge.request<{ forced: boolean; exited: boolean } | null>('close', { exit: true, timeout: 20_000 }).catch(() => undefined), 40_000);
+            confirmed = result === null || result?.exited === true;
+          }
           await withCleanupTimeout(bridge.process.exited, 5_000);
+          if (!bridge.exited) {
+            bridge.process.kill('SIGKILL');
+            await withCleanupTimeout(bridge.process.exited, 5_000);
+          }
+          // Without the bridge's confirmation Electron may still be running (a wedged or crashed bridge).
+          if (!confirmed && electronPid) { try { process.kill(electronPid, 'SIGKILL'); } catch { /* already gone */ } }
+        } finally {
+          try { await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+          finally { activeApps.delete(legacy); }
         }
-        // Without the bridge's confirmation Electron may still be running (a wedged or crashed bridge).
-        if (!confirmed && electronPid) { try { process.kill(electronPid, 'SIGKILL'); } catch { /* already gone */ } }
-      } finally {
-        await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-      }
+      })();
     },
   };
+  activeApps.add(legacy);
   try {
     ({ pid: electronPid } = await bridge.request<{ pid?: number }>('launch', { env, timeout: 120_000 }));
     await legacy.waitFor(() => Boolean((window as any).PM?.ProjectsScreen && (window as any).PM?.mkProject), undefined, 60_000);

@@ -79,6 +79,49 @@ class TempRootTests(unittest.TestCase):
                         process.kill()
                         process.wait()
 
+    def test_signal_waits_for_separate_session_grandchild(self):
+        with tempfile.TemporaryDirectory(prefix='pm-audio-grandchild-test-') as output:
+            report = Path(output) / 'report.json'
+            source = (
+                'import os,signal,subprocess,sys,time\n'
+                'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(100)"],start_new_session=True)\n'
+                'def stop(signum,frame):\n'
+                ' child.terminate(); child.wait(timeout=5); sys.exit(128+signum)\n'
+                'signal.signal(signal.SIGTERM,stop)\n'
+                'open(os.environ["TMPDIR"]+"ready","w").write(str(child.pid))\n'
+                'time.sleep(100)\n'
+            )
+            process = subprocess.Popen([
+                sys.executable, str(Path(__file__).with_name('temp-root.py')),
+                '--report', str(report), '--', sys.executable, '-c', source,
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                until = time.monotonic() + 5
+                ready = None
+                while time.monotonic() < until:
+                    if report.exists():
+                        try:
+                            data = json.loads(report.read_text())
+                            ready = Path(data.get('tmpdir', '/nonexistent')) / 'ready'
+                            if ready.exists():
+                                break
+                        except json.JSONDecodeError:
+                            pass
+                    time.sleep(.01)
+                self.assertTrue(ready and ready.exists())
+                grandchild = int(ready.read_text())
+                process.terminate()
+                self.assertNotEqual(process.wait(timeout=5), 0)
+                data = json.loads(report.read_text())
+                self.assertTrue(data['removed'])
+                for pid in (data['childPid'], grandchild):
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pid, 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+
 
 if __name__ == '__main__':
     unittest.main()

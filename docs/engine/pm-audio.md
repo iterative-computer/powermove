@@ -3459,12 +3459,19 @@ Blender area until both the host and worker threads have stopped. The audio
 presenter test joins decoder workers during panic unwinding.
 
 The guard uses a short owned directory and sets both `TMPDIR` and
-`MAC_CHROMIUM_TMPDIR`, covering generated test media, harness profiles and
-Chromium temporary files without exceeding macOS's socket-path limit. It
-checks for growth before reserving the device as well as at campaign exit.
+`MAC_CHROMIUM_TMPDIR` for generated test media, harness profiles and
+Chromium temporary files without exceeding macOS's socket-path limit.
+Frameworks using `NSTemporaryDirectory()` can ignore these variables;
+the guard only measures its owned tree. Actual Chromium cleanup remains
+subject to the device smoke and final campaign checks. It checks for growth
+after each paired app, before reserving, before the suites and at campaign exit.
 The report is published as running before launch and must bracket the final
 manifest's timestamps to qualify. Signal regressions verify that SIGTERM
-and SIGINT join the child and remove the owned tree. An uncatchable process
+and SIGINT join the child and remove the owned tree, including a cooperative
+child that joins a grandchild in a separate session. The app and bridge use
+one shared close operation for normal close, signals and disconnect; the
+outer owners wait for teardown before removing profiles or releasing leases.
+An uncatchable process
 kill still relies on the reservation's fixed expiry. The exclusive paired
 measurement phase releases its reservation before the sixty playback-suite
 runs, which each acquire an ordinary lease for their own duration.

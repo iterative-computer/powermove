@@ -2,7 +2,8 @@
 
 The child inherits TMPDIR/TMP/TEMP. Its temporary tree must return to the
 empty baseline on success or failure; the outer guard removes that tree even
-when the child panics, times out, or is interrupted. Reports stay outside it.
+when the child panics, times out, or is interrupted. Child commands must join
+any separate sessions they start before exiting. Reports stay outside it.
 """
 import argparse
 import json
@@ -32,6 +33,37 @@ def snapshot(root):
             files += 1
             bytes_used += info.st_size
     return {'files': files, 'directories': directories, 'bytes': bytes_used, 'entries': entries}
+
+
+def group_exists(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def wait_group(pgid, seconds):
+    deadline = time.monotonic() + seconds
+    while group_exists(pgid) and time.monotonic() < deadline:
+        time.sleep(.05)
+    return not group_exists(pgid)
+
+
+def stop_child_tree(child):
+    # Intermediate owners handle this signal by joining their own children,
+    # including Electron's separate session, before they exit.
+    deadline = time.monotonic() + 105
+    if group_exists(child.pid):
+        os.killpg(child.pid, signal.SIGTERM)
+    try:
+        child.wait(timeout=105)
+    except subprocess.TimeoutExpired:
+        pass
+    if not wait_group(child.pid, max(0, deadline - time.monotonic())):
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+        wait_group(child.pid, 5)
 
 
 def interrupted(signum, _frame):
@@ -75,28 +107,12 @@ def main():
             args.report.write_text(json.dumps(report, indent=2) + '\n')
             try:
                 code = child.wait()
-                try:
-                    os.killpg(child.pid, 0)
-                except ProcessLookupError:
-                    pass
-                else:
-                    # The direct child exited but left its own descendants.
-                    os.killpg(child.pid, signal.SIGTERM)
-                    code = code or 1
+                if not wait_group(child.pid, .25):
                     report['survivingProcessGroup'] = True
-                    time.sleep(0.1)
-                    try:
-                        os.killpg(child.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    code = code or 1
+                    stop_child_tree(child)
             except BaseException:
-                # This process group contains only this harness's child tree.
-                os.killpg(child.pid, signal.SIGTERM)
-                try:
-                    child.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    os.killpg(child.pid, signal.SIGKILL)
-                    child.wait()
+                stop_child_tree(child)
                 raise
             finally:
                 report.update(childExit=child.returncode, after=snapshot(root))

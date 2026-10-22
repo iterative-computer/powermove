@@ -22,7 +22,7 @@
  */
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { launchLegacyApp } from '../../../corpus/src/app';
+import { closeActiveLegacyApps, launchLegacyApp } from '../../../corpus/src/app';
 
 const [file, output, count = '30'] = process.argv.slice(2);
 if (!file || !output) throw new Error('wav and outside-repository output required');
@@ -38,6 +38,30 @@ if (!Number.isFinite(readyWaitMs) || readyWaitMs < 0) throw new Error('PM_AUDIO_
 const observeMs = Number(process.env.PM_AUDIO_START_OBSERVE_MS ?? 120);
 const distinct = process.env.PM_AUDIO_START_DISTINCT ?? 'none';
 const order = process.env.PM_AUDIO_START_ORDER ?? 'today-native';
+const activeStress = new Set<Bun.Subprocess>();
+let stoppingStress: Promise<void> | undefined;
+function stopStress(): Promise<void> {
+  return stoppingStress ??= (async () => {
+    const children = [...activeStress];
+    activeStress.clear();
+    for (const child of children) { try { child.kill(); } catch { /* already exited */ } }
+    await Promise.allSettled(children.map(child => child.exited));
+  })().finally(() => { stoppingStress = undefined; });
+}
+let signalCleanup = false;
+for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130], ['SIGHUP', 129]] as const) {
+  process.on(signal, () => {
+    if (signalCleanup) return;
+    signalCleanup = true;
+    void (async () => {
+      try {
+        try { await stopStress(); }
+        finally { await closeActiveLegacyApps(); }
+      }
+      finally { process.exit(code); }
+    })();
+  });
+}
 if (distinct !== 'none' && distinct !== 'trim') throw new Error('PM_AUDIO_START_DISTINCT must be none or trim');
 if (order !== 'today-native' && order !== 'native-today') throw new Error('PM_AUDIO_START_ORDER must be today-native or native-today');
 const trimStep = distinct === 'trim' ? 0.0613 : 0;
@@ -179,10 +203,9 @@ for (const native of modes) {
     }
     await assertFixture();
     await page.evaluate(() => (window as any).PM.pause());
-    const stress: Bun.Subprocess[] = [];
     let loop: any;
     try {
-      for (let i = 0; i < stressThreads; i++) stress.push(Bun.spawn(['/bin/sh', '-c', 'while :; do :; done']));
+      for (let i = 0; i < stressThreads; i++) activeStress.add(Bun.spawn(['/bin/sh', '-c', 'while :; do :; done']));
       const status = async () => native ? activeAudio(await nativeReport(), activeNativeSessionId!).audio : await page.evaluate(() => {
         const starts = (window as any).__a6starts;
         const ctx = starts.at(-1)?.ctx;
@@ -319,7 +342,7 @@ for (const native of modes) {
       const p = (q: number) => sorted[Math.ceil(sorted.length * q) - 1];
       result[native ? 'native' : 'today'] = { samples, n: samples.length, p50: p(.5), p95: p(.95), p99: p(.99), min: sorted[0], max: sorted.at(-1), pageErrors: session.pageErrors, audio };
       await writeFile(output, JSON.stringify(result, null, 2));
-    } finally { for (const p of stress) { p.kill(); await p.exited; } }
+    } finally { await stopStress(); }
   } catch (error) {
     result.failure = { error: String(error), status: await session.evaluate(() => ({
       engine: (window as any).PM.EngineConnection?.status(),
