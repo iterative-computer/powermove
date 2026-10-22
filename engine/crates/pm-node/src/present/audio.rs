@@ -21,14 +21,14 @@
 //! and the levels of what is heard go back to it about 30 times a second
 //! while playing ([`LEVELS_INTERVAL`]).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use pm_audio::playback::{ClockHandle, Playback, PlaybackConfig};
+use pm_audio::playback::{ClockHandle, CommandReceipt, Playback, PlaybackConfig};
 use pm_audio::{MixFormat, SourceCache};
 use pm_engine::document::DocumentUpdate;
 use pm_protocol::clock::{AudioLevels, SeekMode, TransportCommand, TransportState};
@@ -43,6 +43,9 @@ pub const PROJECT_INTERVAL: Duration = Duration::from_millis(30);
 /// Levels go to the renderer this often while playing (the mixer panel
 /// draws at the display rate and steps its own ballistics in between).
 pub const LEVELS_INTERVAL: Duration = Duration::from_millis(33);
+
+/// Bound queued transport answers when a producer stalls behind an earlier command.
+const MAX_PENDING_COMMANDS: usize = 64;
 
 /// Where the levels of what is heard go (the renderer's port).
 pub type LevelsSink = Box<dyn Fn(AudioLevels) + Send>;
@@ -156,6 +159,7 @@ impl AudioLink {
                     composition,
                     media,
                     playback: None,
+                    pending_commands: VecDeque::new(),
                     dirty: true,
                     broken: false,
                     loop_range: None,
@@ -225,6 +229,10 @@ struct Control {
     composition: String,
     media: MediaMap,
     playback: Option<Playback>,
+    /// Individually answered Pause, SetLoop, and exact Seek commands. Their
+    /// FIFO application is guaranteed by the producer queue even across
+    /// separate control-thread receive batches.
+    pending_commands: VecDeque<CommandReceipt>,
     /// The mixer plays an older revision, media map, or composition.
     dirty: bool,
     /// An update did not apply; wait for a resync.
@@ -303,6 +311,7 @@ impl Control {
                     return;
                 }
             }
+            self.drain_pending_commands();
             if self.playback.is_none() && self.warm {
                 if !rested || self.warm_due.is_none() {
                     // A control came: check once they rest again.
@@ -362,6 +371,9 @@ impl Control {
         if let Some(mut playback) = self.playback.take() {
             playback.shutdown();
         }
+        // Shutdown is queued after the receipts, so every earlier command has
+        // either answered or its sender disconnected by the time the join ends.
+        self.drain_pending_commands();
     }
 
     /// Returns false on shutdown.
@@ -388,13 +400,13 @@ impl Control {
             }
             AudioCtl::SetLoop(range) => {
                 self.loop_range = range;
-                self.command(TransportCommand::SetLoop { range });
+                self.enqueue_simple_command(TransportCommand::SetLoop { range });
             }
-            AudioCtl::Pause => self.command(TransportCommand::Pause),
+            AudioCtl::Pause => self.enqueue_simple_command(TransportCommand::Pause),
             AudioCtl::Warm => self.warm = true,
             AudioCtl::Seek(at) => {
                 self.paused_at = at.max(0);
-                self.command(TransportCommand::Seek {
+                self.enqueue_simple_command(TransportCommand::Seek {
                     time: Ticks::new(self.paused_at).unwrap_or(Ticks::ZERO),
                     mode: SeekMode::Exact,
                 });
@@ -510,6 +522,49 @@ impl Control {
         self.commands(&[command]);
     }
 
+    fn enqueue_simple_command(&mut self, command: TransportCommand) {
+        let Some(playback) = &self.playback else {
+            return;
+        };
+        if self.pending_commands.len() == MAX_PENDING_COMMANDS {
+            let result = self
+                .pending_commands
+                .pop_front()
+                .expect("bounded receipts")
+                .wait();
+            self.record_transport_result(result);
+        }
+        match playback.enqueue_command(command) {
+            Ok(receipt) => self.pending_commands.push_back(receipt),
+            Err(error) => {
+                self.drain_pending_commands();
+                self.record_transport_result(Err(error));
+            }
+        }
+        self.drain_pending_commands();
+    }
+
+    fn drain_pending_commands(&mut self) {
+        while let Some(result) = self
+            .pending_commands
+            .front()
+            .and_then(CommandReceipt::try_result)
+        {
+            self.pending_commands.pop_front();
+            self.record_transport_result(result);
+        }
+    }
+
+    fn record_transport_result(&self, result: pm_audio::Result<()>) {
+        if let Err(error) = result {
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            status.problems.push(format!("transport: {error}"));
+            if status.problems.len() > 16 {
+                status.problems.remove(0);
+            }
+        }
+    }
+
     fn commands(&mut self, commands: &[TransportCommand]) {
         let Some(playback) = &self.playback else {
             return;
@@ -527,13 +582,11 @@ impl Control {
         }) {
             self.watch_until = Some(Instant::now() + Duration::from_millis(1500));
         }
-        if let Err(error) = playback.commands(commands.iter().copied()) {
-            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-            status.problems.push(format!("transport: {error}"));
-            if status.problems.len() > 16 {
-                status.problems.remove(0);
-            }
-        }
+        let result = playback.commands(commands.iter().copied());
+        // This ACK is a FIFO barrier for all earlier queued simple controls;
+        // report their individual failures before this command's failure.
+        self.drain_pending_commands();
+        self.record_transport_result(result);
     }
 
     /// Opens the output device. False (and a reported error) when none opens.

@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pm_eval::Evaluator;
 use pm_model::Document;
@@ -735,6 +735,38 @@ pub struct Playback {
     ring: Arc<Ring>,
 }
 
+/// The result of an ordered transport command after the render thread applies it.
+#[doc(hidden)]
+pub struct CommandReceipt {
+    answer: std::sync::mpsc::Receiver<Result<()>>,
+    deadline: Instant,
+}
+
+impl CommandReceipt {
+    /// Waits for the render thread's answer, with the same bound as `command`.
+    pub fn wait(self) -> Result<()> {
+        if let Some(result) = self.try_result() {
+            return result;
+        }
+        self.answer
+            .recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| AudioError::Device("the render thread did not answer".into()))?
+    }
+
+    /// Takes a ready answer first; an expired or disconnected receipt is an error.
+    pub fn try_result(&self) -> Option<Result<()>> {
+        match self.answer.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < self.deadline => None,
+            Err(
+                std::sync::mpsc::TryRecvError::Empty | std::sync::mpsc::TryRecvError::Disconnected,
+            ) => Some(Err(AudioError::Device(
+                "the render thread did not answer".into(),
+            ))),
+        }
+    }
+}
+
 /// Statistics for diagnostics and tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlaybackStats {
@@ -1020,29 +1052,39 @@ impl Playback {
     /// Applies a transport command (contract 6). Returns once the render
     /// thread has applied it; the clock samples that follow are the answer.
     pub fn command(&self, command: TransportCommand) -> Result<()> {
+        self.enqueue_command(command)?.wait()
+    }
+
+    /// Queues one command in order and returns its eventual individual answer.
+    #[doc(hidden)]
+    pub fn enqueue_command(&self, command: TransportCommand) -> Result<CommandReceipt> {
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
         self.tx
             .send(Control::Command(command, reply, host_now_us()))
             .map_err(|_| AudioError::Device("playback stopped".into()))?;
-        answer
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| AudioError::Device("the render thread did not answer".into()))?
+        Ok(CommandReceipt { answer, deadline })
     }
 
     /// Applies related controls in order, without idle preparation between
     /// them. Earlier controls remain applied if a later one is invalid.
     pub fn commands(&self, commands: impl IntoIterator<Item = TransportCommand>) -> Result<()> {
+        self.enqueue_commands(commands)?.wait()
+    }
+
+    /// Queues related controls in order and returns their eventual answer.
+    #[doc(hidden)]
+    pub fn enqueue_commands(
+        &self,
+        commands: impl IntoIterator<Item = TransportCommand>,
+    ) -> Result<CommandReceipt> {
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        let commands = commands.into_iter().collect();
+        let deadline = Instant::now() + Duration::from_secs(5);
         self.tx
-            .send(Control::Commands(
-                commands.into_iter().collect(),
-                reply,
-                host_now_us(),
-            ))
+            .send(Control::Commands(commands, reply, host_now_us()))
             .map_err(|_| AudioError::Device("playback stopped".into()))?;
-        answer
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| AudioError::Device("the render thread did not answer".into()))?
+        Ok(CommandReceipt { answer, deadline })
     }
 
     /// Follows an output device the host owns: `watch` reports its id and
@@ -3160,6 +3202,120 @@ impl RenderThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_receipt_times_out_when_empty_but_keeps_a_ready_answer() {
+        let (sender, answer) = std::sync::mpsc::sync_channel(1);
+        let mut receipt = CommandReceipt {
+            answer,
+            deadline: Instant::now() + Duration::from_secs(5),
+        };
+        assert!(receipt.try_result().is_none());
+        receipt.deadline = Instant::now() - Duration::from_millis(1);
+        let error = receipt.try_result().unwrap().unwrap_err();
+        assert!(error.to_string().contains("did not answer"), "{error}");
+        let error = receipt.wait().unwrap_err();
+        assert!(error.to_string().contains("did not answer"), "{error}");
+        drop(sender);
+
+        let (sender, answer) = std::sync::mpsc::sync_channel(1);
+        sender
+            .send(Err(AudioError::invalid("producer rejected command")))
+            .unwrap();
+        let receipt = CommandReceipt {
+            answer,
+            deadline: Instant::now() - Duration::from_millis(1),
+        };
+        let error = receipt.wait().unwrap_err();
+        assert!(
+            error.to_string().contains("producer rejected command"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn queued_transport_receipts_preserve_project_order_and_individual_errors() {
+        use pm_protocol::clock::SeekMode;
+        use pm_protocol::common::{PlaybackRate, TickRange, Ticks};
+
+        struct ShutdownCache(Arc<SourceCache>);
+        impl Drop for ShutdownCache {
+            fn drop(&mut self) {
+                self.0.shutdown();
+            }
+        }
+
+        let cache = SourceCache::new(1 << 20, 0);
+        let _decode_workers = ShutdownCache(cache.clone());
+        let (mut playback, mut side) = Playback::start_headless(
+            MixFormat::stereo(48_000),
+            cache,
+            PlaybackConfig::default(),
+            48_000,
+            2,
+            0,
+        )
+        .unwrap();
+        let pause = playback.enqueue_command(TransportCommand::Pause).unwrap();
+        let seek = playback
+            .enqueue_command(TransportCommand::Seek {
+                time: Ticks::from_whole_seconds(3),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        let invalid = playback
+            .enqueue_command(TransportCommand::SetLoop {
+                range: Some(TickRange {
+                    start: Ticks::from_whole_seconds(1),
+                    end: Ticks::from_whole_seconds(1),
+                }),
+            })
+            .unwrap();
+        let valid = playback
+            .enqueue_command(TransportCommand::SetLoop { range: None })
+            .unwrap();
+
+        // The composition ends before the queued seek. FIFO Project then
+        // Play must restart at zero, even though the earlier loop was invalid.
+        let doc = Arc::new(Document::new(
+            Some(pm_model::json::parse(
+                r#"{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":30,"dur":2,"layers":[],"comps":{},"assets":{},"params":{}}"#,
+            )
+            .unwrap()),
+            1,
+        ));
+        assert!(
+            playback
+                .set_project(doc, "C", &|_| None)
+                .unwrap()
+                .is_empty()
+        );
+        playback
+            .commands([TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            }])
+            .unwrap();
+        assert!(pause.wait().is_ok());
+        assert!(seek.wait().is_ok());
+        let error = invalid.wait().unwrap_err();
+        assert!(error.to_string().contains("loop range"), "{error}");
+        assert!(valid.wait().is_ok());
+        assert_eq!(
+            playback.shared.start_timing.epoch.load(Ordering::Acquire),
+            2
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while side.queued_frames() < 512 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(side.queued_frames() >= 512);
+        side.callback(&mut [0.0; 1_024], 2, host_now_us());
+        let clock = playback.clock().expect("first queued callback");
+        assert_eq!(clock.epoch, 2);
+        assert!((0..TICKS_PER_SECOND).contains(&clock.media_time.get()));
+        assert!(playback.shutdown());
+    }
 
     #[test]
     fn control_tickets_cover_queue_deferral_and_dispatch() {
