@@ -1271,3 +1271,53 @@ V8 frames. The cause remains unresolved. The failed worker also timed out
 during teardown; its isolated profile was removed. Three fresh sparse
 pairs then pass, as do all three dense pairs. The clean rerun is evidence
 of successful draws, not a resolution of that observed stability failure.
+
+## Phase 3c round 10: surface ownership and asynchronous snapshots
+
+Paused viewers now reserve four color slots, the protocol minimum, with
+one lossless depth/ID plane and one selection plane for each color slot.
+Playback restores the original ring plus render-ahead count before its
+transport command reaches the render thread. Pause reaches the render
+thread before the pools shrink. Transport intent survives a detached or
+not-yet-mounted viewer. A naturally ended playback conservatively keeps
+its larger pool until an explicit pause. Slot leases, held-frame checks,
+retired generations, depth precision and stage resolution are unchanged.
+
+For a 1496×792 RGBA16F stage, the nominal color/depth/selection allocation
+is 113,743,872 bytes paused instead of 227,487,744 bytes. The incremental
+depth/selection allocation at import is reduced by 75,829,248 bytes
+(72.32 MiB); color storage already exists before import. IOSurface row
+alignment, overlapping retired generations and shared process mappings
+mean these figures cannot be subtracted directly from measured working
+sets. The engine's higher idle baseline is a separate startup concern.
+
+Frame snapshots use two reusable device-scoped staging slots. The fresh
+render and texture-to-staging copy share one encoder and submission.
+`map_async` completion wakes the presenter; a dedicated completion thread
+drives the bounded GPU wait, so the presentation thread can keep serving
+viewer work. Each ticket retains its own revision, dimensions, format,
+alpha policy and row order. Completed rows convert directly into the final
+RGBA8 allocation and are then unmapped before slot reuse. Oversized copies
+run alone and release their staging allocation. Session closure cancels
+pending maps, device recovery fails old tickets, and callbacks from a
+retired device cannot mark a replacement device lost. No capture uses
+previous image content in place of a new render.
+
+The presentation worker now waits for submitted reads before acknowledging
+session close or destroying its painter. A drawn VideoFrame stays open
+through GPU completion, then closes before the native slot is returned.
+Queued, undrawn frames still close and release immediately. These lifetime
+corrections are independent of resolving the Chromium crash below.
+
+The round 9 renderer crash is symbolized against Electron 44.0.0 arm64's
+matching Breakpad module UUID. Its top frames are
+`WebGpuSharedImageWrapperCache::AcquireCachedWrapper`, wrapper leasing,
+`CreateExternalTexture`, and `GPUExternalTexture::FromVideoFrame` in the
+WebGPU presentation worker. In that Chromium source, a cached wrapper's
+`GetSharedImage()` returns null after its graphics context is lost, and
+`AcquireCachedWrapper` dereferences it without checking. The faulting read
+is at address 0x1c. This identifies the external-texture wrapper-cache
+failure, rather than a WASM worker or the frame transport worker; it does
+not establish which event lost that graphics context or prove a native
+IOSurface use-after-free. GPU-reset recovery remains a required stress
+gate; ordinary successful reruns do not resolve it.

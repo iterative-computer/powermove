@@ -442,3 +442,20 @@ counts the 48 invalid controls. Vertex tangents remain active only with a
 normal map and without flat shading. No import-wide NORMAL refusal was
 added: the importer retains original short lengths, and each final color,
 shadow or chrome program decides whether it consumes the attribute.
+
+## Phase 3c round 10: picker index ownership
+
+The picker no longer materializes an unindexed primitive's predictable
+triangle triples. It derives `[3*i, 3*i+1, 3*i+2]` at traversal time.
+Fully valid indexed primitives share the model's existing index array;
+malformed indexed primitives retain the previous filtered triangle order.
+Trailing incomplete triples remain ignored. The BVH's f64 boxes, SAH,
+triangle ordering, posed refit and hit arithmetic are unchanged.
+
+On the synthetic 600,000-vertex unindexed model, DHAT retained bytes fall
+from 17,745,593 to 15,345,593, exactly 2,400,000 bytes. Constructor peak
+falls from 32,145,705 to 29,745,705 bytes. These are Rust allocator figures
+with input bytes allocated before profiling, not Electron working sets.
+Native tests compare the old explicit and new implicit BVH fields by float
+bits, including nonfinite and degenerate positions, and compare refit and
+hit results. No geometry, source precision or accepted model limit changes.
