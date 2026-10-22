@@ -303,36 +303,68 @@ rotation gate and all three changing-base gates. Worker pixel fidelity has a
 separate gate covering alpha ramps and antialiasing in sRGB and Display P3,
 requiring exact pixel and geometry equality against synchronous readback.
 
-Measured 2026-10-22: ten loaded runs per gate (two SHA256 workers, other lanes'
-Electron runs sharing the machine, load average 10 to 13), engine against
-today in the same run:
+Measured 2026-10-22 on the final tree: two campaigns of ten loaded runs per
+gate, each with two SHA256 workers. Other lanes' Electron and render runs
+shared the machine, with a load average of 10 to 27. Engine against today in
+the same run, all twenty runs:
 
 | Gate | Pass | Distinct frames | Longest gap | First frame | Last frame |
 | --- | --- | --- | --- | --- | --- |
-| Typewriter keyed 0→100% | 10/10 | 90 vs 90 | 43–50 vs 43–49 ms | 9–45 vs 96–130 ms | 3002–3019 vs 3070–3108 ms |
-| Animated ellipse size | 10/10 | 90 vs 90 | 42–59 vs 35–42 ms | 2–42 vs 95–158 ms | 3001–3018 vs 3065–3130 ms |
-| Animated path vertices | 10/10 | 90 vs 90 | 42–50 vs 35–42 ms | 8–44 vs 101–230 ms | 3002–3016 vs 3071–3205 ms |
+| Typewriter keyed 0→100% | 19/20 | 65–90 vs 90 | 44–467 (passing 44–53) vs 43–54 ms | 6–46 vs 127–230 ms | 3003–3018 vs 3110–3211 ms |
+| Animated ellipse size | 19/20 | 89–90 vs 90 | 42–84 (passing 42–75) vs 35–42 ms | 2–20 vs 128–211 ms | 3003–3020 vs 3101–3184 ms |
+| Animated path vertices | 20/20 | 90 vs 90 | 42–52 vs 35–43 ms | 1–46 vs 132–231 ms | 3002–3018 vs 3100–3198 ms |
 
-All thirty runs had zero synchronous base loads during playback, no native
-compatibility ask during playback (every frame's answer was ahead of the
-engine), and no late native skips. The paused warm-up prepared 19 to 20 bases
-before Play. During playback 71 to 94 more were prepared asynchronously.
+No run had a synchronous base load during playback. The paused warm-up
+prepared 14 to 21 bases before Play, and 71 to 95 more were prepared
+asynchronously during playback. An earlier campaign of the same renderer
+code passed 30/30, with two leftover load workers making four in all. That
+campaign predates the native schedule fix below.
 
-The same campaign on the build before the 500 ms warm-up and the
-asynchronous snapshot round passed 7/10, 9/10 and 10/10. With a 150 ms warm
-window only five bases were ready at Play. The typewriter then skipped frames
-4 and 5 at the start (89 to 167 ms gaps). Once a synchronous base load came
-from a snapshot round, and the native presenter skipped two late frames once.
-The unloaded public set passed 34 gates. These are the 30 original gates
-plus the readback gate and the three changing-base gates. One skip is
-expected: the C1 private-setup gate, named, with the private corpus variable
-unset.
+The two failures are not compatibility misses:
 
-Open: Play pressed within a few frames of a seek starts before the paused
-warm-up fills. On a typewriter-class wrapper the first frames are then
-expected to skip, as in the 150 ms runs. No gate measures this case yet. Today's first frame is itself 90 to 230 ms late. A
-native preroll that holds the clock until the first answers are ready would
-close it. That is a playback-clock change outside this lane.
+- Typewriter (one run): a stall of the whole pipeline from frame 44 to 58,
+  with a 467 ms gap. The engine asked for 14 answers, its schedule skipped 5
+  late frames and the presenter dropped 8 late ones. No renderer task ran
+  past 50 ms. Today's run, measured minutes apart, did not meet a stall.
+- Animated size (one run): one frame near frame 73 was dropped late, and the
+  engine asked for no answer. In 5 of the 20 runs, the failing one included,
+  one frame between 67 and 73 was lost; the passing four stayed within the
+  one-frame allowance. It is not explained yet. Bounding the lookahead to the
+  composition's span did not remove it (reverted, see the history).
+
+A loaded campaign before the schedule fix showed a worse collapse: one
+render took 530 ms of GPU time. The playback schedule's cost estimate then
+exceeded the whole lead window, so every later frame was skipped at its due
+time. Nothing rendered again, and the estimate never recovered: one frame in
+three seconds, 191 skipped. This is the "1 or 2 frames" collapse from the
+round-five review. `pm-node` `present/schedule.rs` now skips on the estimate
+only while a frame rendered at its due time could still be shown.
+Otherwise it renders, and the measured costs bring the estimate back.
+Frames whose interval passed are still skipped.
+
+The campaign on the build before the 500 ms warm-up and the asynchronous
+snapshot round passed 7/10, 9/10 and 10/10. With a 150 ms warm window only
+five bases were ready at Play, and the typewriter skipped frames 4 and 5 at
+the start (89 to 167 ms gaps). The public set on the final tree passed 34
+gates: the 30 original gates, the readback gate and the three changing-base
+gates. One skip is expected: the C1 private-setup gate, which is named and
+skips with the private corpus variable unset.
+
+Open:
+
+- Play pressed within a few frames of a seek starts before the paused
+  warm-up fills. On a typewriter-class wrapper the first frames are then
+  expected to skip, as in the 150 ms runs. No gate measures this case yet.
+  Today's first frame is itself 90 to 230 ms late. A native preroll that
+  holds the clock until the first answers are ready would close it.
+- The lookahead prepares up to 24 frames past the composition's end before
+  a loop wraps. That work is wasted, and the first frames after the wrap are
+  prepared only after it. Bounding the horizon needs the gates' answer counts
+  to include answers posted during the warm-up first.
+- Base rasters are drawn and read back on the native render thread. A slow
+  GPU readback there delays view frames. Moving compatibility base rasters
+  off that thread would remove the remaining source of whole-pipeline
+  stalls.
 
 ### Earlier measurements (2026-10-19, before round-three integration)
 
