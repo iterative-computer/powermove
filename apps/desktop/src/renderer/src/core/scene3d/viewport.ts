@@ -18,6 +18,9 @@ function state(PM:any):ViewState {
 }
 export const getViewportMode=(PM:any):ViewMode=>state(PM).mode;
 export const viewportRevision=(PM:any):number=>revisions.get(PM)||0;
+/* Every mode and pose change notifies `onViewportChange` listeners (the
+   kernel's `scene3d.onViewChange`): the native engine's viewer re-sends its
+   editor camera on each (extensions/viewer/viewer.ts). */
 function changed(PM:any){revisions.set(PM,viewportRevision(PM)+1);for(const listener of listeners.get(PM)||[])listener(getViewportMode(PM));PM.invalidate?.('render');}
 export function onViewportChange(PM:any,listener:(mode:ViewMode)=>void):()=>void {
   let set=listeners.get(PM);if(!set){set=new Set();listeners.set(PM,set);}set.add(listener);
@@ -34,6 +37,29 @@ function initialize(PM:any,entry:ViewState):void {
 /** The editor camera is transient. Render/export callers keep the runtime camera. */
 export function viewportCamera(PM:any,renderCamera:ViewCamera):ViewCamera {
   const entry=state(PM);return entry.mode==='editor'&&entry.camera?entry.camera:renderCamera;
+}
+/** The editor camera as the native engine's view override takes it
+ *  (contract 2 `EditorCamera`): the world-to-camera matrix, column-major,
+ *  and a perspective camera's vertical field of view with three.js's zoom
+ *  folded in (the engine's editor camera has no zoom), or an orthographic
+ *  camera's half-height. Null in the Camera view. */
+export type EngineEditorCamera={
+  view:number[];
+  projection:{kind:'perspective';fovYDegrees:number;near:number;far:number}|{kind:'orthographic';halfHeight:number;near:number;far:number};
+};
+export function viewportEngineCamera(PM:any):EngineEditorCamera|null {
+  const entry=state(PM),camera=entry.camera;
+  if(entry.mode!=='editor'||!camera)return null;
+  camera.updateMatrixWorld(true);
+  const view=new THREE.Matrix4().copy(camera.matrixWorld).invert().toArray();
+  const zoom=camera.zoom>0?camera.zoom:1;
+  if((camera as THREE.OrthographicCamera).isOrthographicCamera){
+    const o=camera as THREE.OrthographicCamera;
+    return {view,projection:{kind:'orthographic',halfHeight:(o.top-o.bottom)/(2*zoom),near:o.near,far:o.far}};
+  }
+  const p=camera as THREE.PerspectiveCamera;
+  const fovYDegrees=THREE.MathUtils.radToDeg(2*Math.atan(Math.tan(THREE.MathUtils.degToRad(p.fov)/2)/zoom));
+  return {view,projection:{kind:'perspective',fovYDegrees,near:p.near,far:p.far}};
 }
 export function viewportPose(PM:any):ViewPose {
   const entry=state(PM);if(entry.mode==='camera'||!entry.camera)initialize(PM,entry);

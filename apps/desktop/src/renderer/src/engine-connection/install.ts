@@ -33,6 +33,7 @@ import { EngineRenderTransport } from './render-transport';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
 import { installAppCaptures } from './app-captures';
+import { viewportEngineCamera } from '../core/scene3d/viewport';
 // The presentation is platform code hosted in the viewer's folder; the
 // kernel's `render.gl.init` binding uses it for viewers that do not present
 // by themselves (old forks of the viewer).
@@ -410,6 +411,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     presented: (frame, quality) => presentedEvents.push(frame, quality),
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     hostOffsetUs: () => hostClock.offsetUs(),
+    editorCamera: () => viewportEngineCamera(PM),
     revision: () => {
       const barrier = PM.EngineDoc?.barrier;
       if (!barrier) return null;

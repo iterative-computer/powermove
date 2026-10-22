@@ -34,7 +34,7 @@ import { createWebGpuPainter, type FramePainter } from './gpu';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type Presenter, type PresenterStats, type TraceRecord } from './presenter';
 import { PresentWorker, type WorkerLike } from './worker-presenter';
 import type { PresentationWarmup } from './prewarm';
-import type { EngineFrameMessage, EngineRouteMessage, OverlayGeometry, PathCommand, Quad, ViewerState, VsyncHint } from './protocol';
+import type { EditorCamera, EngineFrameMessage, EngineRouteMessage, OverlayGeometry, PathCommand, Quad, ViewerState, VsyncHint } from './protocol';
 import { canvasColorSpace, displayIsEdr, ViewSequencer, type ViewInput } from './view-state';
 
 /** The service name the kernel's engine connection registers. */
@@ -83,6 +83,9 @@ export interface EngineViewerService {
   /** The document revision the engine's frames are tagged with, now (the
    *  overlay draws the geometry of the revision on screen). */
   revision?(): number | null;
+  /** The 3D editor camera (the Editor view of a 3D composition), or null in
+   *  the Camera view: the view override's camera. */
+  editorCamera?(): EditorCamera | null;
   /** The refresh rate of the display showing `view`, when main knows it. */
   displayHz?(view: Window): number | null;
   /** Record per-frame timings in the viewer's presentation (the S1

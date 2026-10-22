@@ -838,11 +838,10 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // state until the engine's first frame.
     if (presentation.exclusive && V.el) V.el.style.visibility = 'hidden';
   }
-  // The 3D editor no longer has viewport shading or X-ray (Blender viewport
-  // removed on main), so the view override carries no 3D state.
+  // The 3D editor's Editor view renders through its own camera.
+  const editorCamera = api.scene3d?.getView?.() === 'editor' ? engineService?.editorCamera?.() ?? null : null;
   enginePresentation.update(viewParamsFor({
-    shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution,
-    scene3d: null,
+    shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution, editorCamera,
   }), stage);
 };
 /** The engine frame on screen: its tags and overlay geometry in stage CSS pixels. */
@@ -1146,6 +1145,11 @@ const onEngineViewerChanged = () => syncEnginePresentation();
 window.addEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged);
 eventOffs.push(() => window.removeEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged));
 listen('layout', scheduleLayout);
+// The 3D editor's view: Camera or Editor, and each editor camera pose
+// (orbit, pan, dolly, frame) is part of the engine's view override. The
+// stage keeps the size the last layout measured (a resize lays out again).
+const viewChange = api.scene3d?.onViewChange?.(() => syncEnginePresentation(stageGeometry ?? undefined));
+if (viewChange) eventOffs.push(() => viewChange.dispose());
 listen('selection', () => { invalidate('render'); drawOverlay(); scheduleHover(); });
 let observedQuality = api.transport.quality;
 listen('time', () => {
