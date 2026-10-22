@@ -121,12 +121,39 @@ struct PipelineKey {
     samples: u32,
     state: DrawState,
     color4: bool,
-    constant_attributes: u8,
+    constant_attributes: u16,
 }
 
-fn constant_attributes(geometry: &super::model::Geometry3d) -> u8 {
-    u8::from(geometry.geometry.normals().len() < geometry.geometry.vertex_count() * 3)
-        | (u8::from(geometry.geometry.uvs().is_empty()) << 1)
+fn constant_attribute_bit(name: &str) -> u16 {
+    match name {
+        "normal" => 1 << 0,
+        "uv" => 1 << 1,
+        "tangent" => 1 << 2,
+        "color" => 1 << 3,
+        "uv1" => 1 << 4,
+        "uv2" => 1 << 5,
+        "uv3" => 1 << 6,
+        "skinIndex" => 1 << 7,
+        "skinWeight" => 1 << 8,
+        _ => 0,
+    }
+}
+
+fn constant_attributes(geometry: &super::model::Geometry3d) -> u16 {
+    [
+        "normal",
+        "uv",
+        "tangent",
+        "color",
+        "uv1",
+        "uv2",
+        "uv3",
+        "skinIndex",
+        "skinWeight",
+    ]
+    .into_iter()
+    .filter(|name| super::gltf::gpu::constant_attribute(geometry, name))
+    .fold(0, |bits, name| bits | constant_attribute_bit(name))
 }
 
 /// The vertex inputs a program reads, by location.
@@ -185,6 +212,52 @@ struct PrepassKey {
     scene: Arc<Scene3d>,
     depth_set: Vec<usize>,
     samples: u32,
+    generation: u64,
+    cross_frame_safe: bool,
+}
+
+impl PrepassKey {
+    fn reusable(
+        &self,
+        scene: &Arc<Scene3d>,
+        depth_set: &[usize],
+        samples: u32,
+        generation: u64,
+        cross_frame_safe: bool,
+    ) -> bool {
+        if self.depth_set != depth_set || self.samples != samples {
+            return false;
+        }
+        if Arc::ptr_eq(&self.scene, scene) {
+            // Preserve the existing within-frame reuse between layers. A
+            // file-backed texture can change before a later frame even if
+            // that frame happens to retain the same scene Arc.
+            return self.generation == generation || (self.cross_frame_safe && cross_frame_safe);
+        }
+        // Scene3d's equality compares content-keyed geometry rather than
+        // vertex arrays. External maps can change at the same path, while
+        // instance array equality would scan every placement each frame.
+        // Restrict cross-scene reuse to texture-free, uninstanced scenes.
+        if !self.cross_frame_safe || !cross_frame_safe {
+            return false;
+        }
+        // `PartialEq` covers camera, canvas, lights, materials, transforms,
+        // pose and morph influences. Debug's round-trip float formatting
+        // distinguishes signed zero, which numeric equality would conflate.
+        self.scene.as_ref() == scene.as_ref() && format!("{:?}", self.scene) == format!("{scene:?}")
+    }
+}
+
+fn cross_scene_prepass_safe(scene: &Scene3d) -> bool {
+    scene.objects.iter().all(|object| {
+        object.meshes.iter().all(|mesh| {
+            mesh.gltf.as_ref().is_none_or(|ext| ext.instances.is_none())
+                && mesh.materials.iter().all(|material| {
+                    material.maps.all().iter().all(|(_, map)| map.is_none())
+                        && material.ext.as_ref().is_none_or(|ext| ext.maps.is_empty())
+                })
+        })
+    })
 }
 
 const DEPTH_SURFACE_WGSL: &str = r#"
@@ -251,6 +324,7 @@ pub struct Scene3dRenderer {
     attachments: Option<Attachments>,
     shadows: HashMap<usize, ShadowTarget>,
     prepass: Option<PrepassKey>,
+    prepass_recordings: u64,
     depth_surface: Option<DepthSurface>,
     chrome: Option<chrome::Targets>,
     textures: Textures,
@@ -278,6 +352,7 @@ impl Default for Scene3dRenderer {
             attachments: None,
             shadows: HashMap::new(),
             prepass: None,
+            prepass_recordings: 0,
             depth_surface: None,
             chrome: None,
             textures: Textures::default(),
@@ -410,6 +485,12 @@ impl Scene3dRenderer {
         }
     }
 
+    /// Number of shared depth prepasses recorded by this renderer. Useful
+    /// for checking whether repeated scene plans avoid another depth draw.
+    pub fn prepass_recordings(&self) -> u64 {
+        self.prepass_recordings
+    }
+
     /// Loads every map of `scene` before anything draws. A map that no
     /// longer loads (deleted or unreadable since the plan) is dropped with
     /// a `Missing texture` warning, as today's runtime draws a model whose
@@ -498,6 +579,7 @@ impl Scene3dRenderer {
     pub fn set_math_mode(&mut self, math: MathMode) {
         self.math = math;
         self.by_parameters.clear();
+        self.prepass = None;
     }
 
     /// The math mode the programs compile with on `device` (fast when the
@@ -1010,12 +1092,10 @@ impl Scene3dRenderer {
                 let (_, stride, instance) = super::gltf::gpu::attribute_format(name, extra)
                     .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
                 Some(wgpu::VertexBufferLayout {
-                    // Missing WebGL attributes have a constant zero value.
-                    // Zero stride repeats one tuple without a vertex-sized
-                    // zero allocation, including skinning and env-map reads.
-                    array_stride: if (*name == "normal" && constant_attributes & 1 != 0)
-                        || (*name == "uv" && constant_attributes & 2 != 0)
-                    {
+                    // Missing WebGL attributes have a constant (0, 0, 0, 1)
+                    // value. Zero stride repeats one tuple without a
+                    // vertex-sized allocation.
+                    array_stride: if constant_attributes & constant_attribute_bit(name) != 0 {
                         0
                     } else {
                         stride
@@ -1719,6 +1799,18 @@ impl Scene3dRenderer {
         background: bool,
         depth_surface: bool,
     ) -> Result<Rendered3d, Error3d> {
+        // Layers of one plan share immutable scene Arcs. Reuse the safety
+        // decision too, so a many-layer scene does not scan every mesh once
+        // per layer. Match both sides of map resolution: a failed map may
+        // have been removed from its resolved scene.
+        let cross_frame_safe = match (&self.prepass, &self.resolved) {
+            (Some(key), Some((source, resolved)))
+                if Arc::ptr_eq(source, scene) && Arc::ptr_eq(resolved, &key.scene) =>
+            {
+                key.cross_frame_safe
+            }
+            _ => cross_scene_prepass_safe(scene),
+        };
         let scene = &self.resolve_maps(device, queue, encoder, scene)?;
         let (w, h) = scene.canvas();
         self.attachments(device, w, h);
@@ -1728,18 +1820,35 @@ impl Scene3dRenderer {
             depth_set,
             background,
         };
-        let cached = matches!(&self.prepass, Some(k) if Arc::ptr_eq(&k.scene, scene)
-            && k.depth_set == depth_set && k.samples == self.samples);
-        if !cached {
+        let cached = self.prepass.as_ref().is_some_and(|key| {
+            key.reusable(
+                scene,
+                depth_set,
+                self.samples,
+                self.generation,
+                cross_frame_safe,
+            )
+        });
+        if cached {
+            // The next layer of this frame can take the pointer fast path;
+            // the prior frame's evaluated scene need not stay retained.
+            let key = self.prepass.as_mut().expect("reusable prepass");
+            key.scene = scene.clone();
+            key.generation = self.generation;
+            key.cross_frame_safe = cross_frame_safe;
+        } else {
             self.prepass = None;
             self.keep_shadows(scene);
             for pass in describe::prepass(&layer)? {
                 self.record(device, queue, encoder, scene, &pass, None)?;
             }
+            self.prepass_recordings += 1;
             self.prepass = Some(PrepassKey {
                 scene: scene.clone(),
                 depth_set: depth_set.to_vec(),
                 samples: self.samples,
+                generation: self.generation,
+                cross_frame_safe,
             });
         }
         let out = self.output(device, pool, w, h);
@@ -2024,5 +2133,221 @@ impl Prepared {
         }
         pass.set_index_buffer(self.index.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(self.range.clone(), 0, 0..self.instances);
+    }
+}
+
+#[cfg(test)]
+mod constant_attribute_tests {
+    use super::*;
+    use pm_geom3d::gltf::Mode;
+
+    fn extra() -> super::super::gltf::VertexExtra {
+        super::super::gltf::VertexExtra {
+            tangent: None,
+            color: None,
+            uv1: None,
+            uv2: None,
+            uv3: None,
+            skin_index: None,
+            skin_weight: None,
+            mode: Mode::Triangles,
+            has_normal: true,
+            has_uv: true,
+            short_attributes: Vec::new(),
+            fetched_vertices: 2,
+            morph: None,
+        }
+    }
+
+    fn geometry(extra: super::super::gltf::VertexExtra) -> super::super::model::Geometry3d {
+        super::super::model::Geometry3d {
+            key: 7,
+            geometry: super::super::model::GeometryPayload::Standard(Arc::new(
+                pm_geom3d::Geometry {
+                    positions: vec![0.; 6],
+                    normals: vec![0.; 6],
+                    uvs: vec![0.; 4],
+                    indices: vec![0, 1],
+                    indexed: true,
+                    groups: vec![],
+                },
+            )),
+            sphere: ([0.; 3], 0.),
+            extra: Some(Arc::new(extra)),
+        }
+    }
+
+    #[test]
+    fn missing_and_present_extras_select_distinct_pipeline_layouts() {
+        let absent = constant_attributes(&geometry(extra()));
+        let all_extra_bits = [
+            "tangent",
+            "color",
+            "uv1",
+            "uv2",
+            "uv3",
+            "skinIndex",
+            "skinWeight",
+        ]
+        .into_iter()
+        .fold(0, |bits, name| bits | constant_attribute_bit(name));
+        assert_eq!(absent, all_extra_bits);
+
+        let mut present = extra();
+        present.tangent = Some(Arc::new(vec![0.; 8]));
+        present.color = Some((Arc::new(vec![0.; 6]), 3));
+        present.uv1 = Some(Arc::new(vec![0.; 4]));
+        present.uv2 = Some(Arc::new(vec![0.; 4]));
+        present.uv3 = Some(Arc::new(vec![0.; 4]));
+        present.skin_index = Some(Arc::new(vec![0.; 8]));
+        present.skin_weight = Some(Arc::new(vec![0.; 8]));
+        assert_eq!(constant_attributes(&geometry(present)), 0);
+
+        let mut short = extra();
+        short.tangent = Some(Arc::new(vec![0.; 7]));
+        assert_eq!(constant_attributes(&geometry(short)), all_extra_bits);
+    }
+}
+
+#[cfg(test)]
+mod prepass_reuse_tests {
+    use super::super::model::{
+        Geometry3d, GeometryPayload, Material3d, Materials, Mesh3d, Object3d, Texture3d,
+    };
+    use super::*;
+    use pm_geom3d::{Geometry, gltf::Mode};
+
+    fn scene() -> Scene3d {
+        let mut scene = Scene3d::empty(160, 90);
+        scene.objects.push(Object3d {
+            id: "object".into(),
+            visible: true,
+            origin: [0.; 3],
+            meshes: vec![Mesh3d {
+                geometry: Geometry3d {
+                    key: 17,
+                    geometry: GeometryPayload::Standard(Arc::new(Geometry {
+                        positions: vec![0.; 9],
+                        normals: vec![0.; 9],
+                        uvs: vec![0.; 6],
+                        indices: vec![0, 1, 2],
+                        indexed: true,
+                        groups: vec![],
+                    })),
+                    sphere: ([0.; 3], 0.),
+                    extra: None,
+                },
+                world: crate::three::math::IDENTITY,
+                materials: Materials::Single(Box::new(Material3d::standard_default())),
+                cast_shadow: false,
+                receive_shadow: false,
+                gltf: Some(Arc::new(super::super::gltf::MeshExt {
+                    mode: Mode::Triangles,
+                    skinning: None,
+                    instances: None,
+                    influences: vec![0.],
+                    sphere: None,
+                    skinned: false,
+                    id: 1,
+                })),
+            }],
+            layer_opacity: 1.,
+            occludes: true,
+            missing: false,
+        });
+        scene
+    }
+
+    #[test]
+    fn independent_equal_scenes_reuse_and_depth_inputs_invalidate() {
+        let original = Arc::new(scene());
+        let key = PrepassKey {
+            scene: original.clone(),
+            depth_set: vec![0],
+            samples: 4,
+            generation: 1,
+            cross_frame_safe: true,
+        };
+        let rebuilt = Arc::new(scene());
+        assert!(!Arc::ptr_eq(&original, &rebuilt));
+        assert!(key.reusable(&rebuilt, &[0], 4, 2, true));
+        assert!(!key.reusable(&rebuilt, &[], 4, 2, true));
+        assert!(!key.reusable(&rebuilt, &[0], 1, 2, true));
+
+        let mut changed = scene();
+        changed.camera.world[12] = 1.;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.objects[0].meshes[0].world[12] = 1.;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.objects[0].meshes[0]
+            .gltf
+            .as_mut()
+            .map(Arc::make_mut)
+            .unwrap()
+            .influences[0] = 1.;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.width += 1;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.shadows = true;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.objects[0].meshes[0].world[12] = -0.;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.objects[0].meshes[0].world[12] = f64::NAN;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+    }
+
+    #[test]
+    fn external_maps_and_instances_refuse_cross_scene_reuse() {
+        let mut mapped = scene();
+        let Materials::Single(material) = &mut mapped.objects[0].meshes[0].materials else {
+            unreachable!()
+        };
+        material.maps.color = Some(Texture3d {
+            asset: "image".into(),
+            path: "image.png".into(),
+            svg: None,
+            srgb: true,
+            transform: [0.; 9],
+        });
+        let mapped = Arc::new(mapped);
+        let key = PrepassKey {
+            scene: mapped.clone(),
+            depth_set: vec![0],
+            samples: 4,
+            generation: 1,
+            cross_frame_safe: false,
+        };
+        assert!(key.reusable(&mapped, &[0], 4, 1, false));
+        assert!(!key.reusable(&mapped, &[0], 4, 2, false));
+        assert!(!key.reusable(&Arc::new(mapped.as_ref().clone()), &[0], 4, 2, false));
+
+        let mut instanced = scene();
+        instanced.objects[0].meshes[0]
+            .gltf
+            .as_mut()
+            .map(Arc::make_mut)
+            .unwrap()
+            .instances = Some((
+            1,
+            Arc::new(pm_geom3d::gltf::Instances {
+                matrices: vec![[0.; 16]],
+                colors: None,
+            }),
+        ));
+        let instanced = Arc::new(instanced);
+        let key = PrepassKey {
+            scene: instanced.clone(),
+            depth_set: vec![0],
+            samples: 4,
+            generation: 1,
+            cross_frame_safe: false,
+        };
+        assert!(!key.reusable(&Arc::new(instanced.as_ref().clone()), &[0], 4, 2, false));
     }
 }
