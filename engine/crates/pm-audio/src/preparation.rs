@@ -1137,7 +1137,26 @@ struct Done {
     /// The history was claimed elsewhere or retired by the producer while
     /// this task was yielded. Clear pending without updating the mix slot.
     claimed: bool,
+    /// Only a real source miss may defer a new attempt. The epoch was
+    /// sampled before the read, so a publication during this job is visible.
+    retry_after: Option<RetryAfterPublication>,
     profile: crate::profile::Profile,
+}
+
+struct RetryAfterPublication {
+    cache: Arc<crate::source::SourceCache>,
+    observed: u64,
+}
+impl RetryAfterPublication {
+    fn waiting(&self) -> bool {
+        self.cache.publication_epoch() == self.observed
+    }
+}
+struct MissingJob {
+    retry: RetryAfterPublication,
+    // Pin the history while its start is deferred: a loop wrap may evict and
+    // recreate the same start, and pointer identity must never be reused.
+    history: Arc<Mutex<crate::stretch::StretchRun>>,
 }
 #[derive(Default)]
 pub(crate) struct SchedulingCounters {
@@ -1180,6 +1199,7 @@ pub(crate) struct Preparation {
     make: Evaluators,
     static_content: bool,
     pending: HashSet<(i64, usize)>,
+    missing: HashMap<(i64, usize), MissingJob>,
     tx: Sender<Done>,
     rx: Receiver<Done>,
 }
@@ -1200,6 +1220,7 @@ impl Preparation {
             make: Arc::new(Evaluator::new),
             static_content: true,
             pending: HashSet::new(),
+            missing: HashMap::new(),
             tx,
             rx,
         }
@@ -1223,6 +1244,7 @@ impl Preparation {
     pub(crate) fn invalidate(&mut self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.pending.clear();
+        self.missing.clear();
         Executor::shared().unpark_all();
     }
     pub(crate) fn evaluators(&mut self, make: Evaluators, static_content: bool) {
@@ -1241,11 +1263,15 @@ impl Preparation {
         target: Option<i64>,
     ) {
         self.poll(mixer);
+        self.missing.retain(|(start, voice), missing| {
+            missing.retry.waiting()
+                && mixer.preparation_matches(*start, *voice, Arc::as_ptr(&missing.history) as usize)
+        });
         let mut batch: Vec<Job> = Vec::new();
         for (priority, &start) in starts.iter().enumerate() {
             let pending = &self.pending;
             let jobs = mixer.preparation_work_except(start, target.unwrap_or(start), |vi| {
-                pending.contains(&(start, vi))
+                pending.contains(&(start, vi)) || self.missing.contains_key(&(start, vi))
             });
             for work in jobs {
                 if !self.pending.insert((start, work.vi)) {
@@ -1253,6 +1279,7 @@ impl Preparation {
                 }
                 let voice = work.vi;
                 let history = work.history();
+                let cache = work.cache();
                 let generation = self.generation.load(Ordering::Relaxed);
                 let current = self.generation.clone();
                 let make = self.make.clone();
@@ -1294,6 +1321,7 @@ impl Preparation {
                                 history: history.clone(),
                                 ready: Ok(false),
                                 claimed: true,
+                                retry_after: None,
                                 profile: Default::default(),
                             });
                             trace.log(generation, start, voice, "claimed-elsewhere");
@@ -1329,6 +1357,7 @@ impl Preparation {
                             #[cfg(test)]
                             scheduling.jobs_started.fetch_add(1, Ordering::Relaxed);
                         }
+                        let publication_before = cache.publication_epoch();
                         let outcome = task.as_mut().expect("owned voice").step(cancelled);
                         let work_us = work_at.map(elapsed_us).unwrap_or(0);
                         let cpu_us = cpu_before.map_or(0, |start| {
@@ -1369,6 +1398,7 @@ impl Preparation {
                                     history: history.clone(),
                                     ready: Ok(false),
                                     claimed: true,
+                                    retry_after: None,
                                     profile: trace.profile,
                                 });
                                 trace.log(generation, start, voice, "retired");
@@ -1383,6 +1413,10 @@ impl Preparation {
                                     history: history.clone(),
                                     ready: Ok(ready),
                                     claimed: false,
+                                    retry_after: (!ready).then(|| RetryAfterPublication {
+                                        cache: cache.clone(),
+                                        observed: publication_before,
+                                    }),
                                     profile: trace.profile,
                                 });
                                 trace.log(
@@ -1403,6 +1437,7 @@ impl Preparation {
                                         history: history.clone(),
                                         ready: Err(error),
                                         claimed: false,
+                                        retry_after: None,
                                         profile: trace.profile,
                                     });
                                 }
@@ -1420,7 +1455,8 @@ impl Preparation {
     }
     fn accept(&mut self, mixer: &mut Mixer, done: Done) {
         if done.generation == self.generation.load(Ordering::Relaxed) {
-            self.pending.remove(&(done.start, done.voice));
+            let key = (done.start, done.voice);
+            self.pending.remove(&key);
             if done.claimed {
                 return;
             }
@@ -1430,6 +1466,17 @@ impl Preparation {
                 Arc::as_ptr(&done.history) as usize,
             ) {
                 return;
+            }
+            if let Some(retry) = done.retry_after {
+                self.missing.insert(
+                    key,
+                    MissingJob {
+                        retry,
+                        history: done.history.clone(),
+                    },
+                );
+            } else {
+                self.missing.remove(&key);
             }
             match done.ready {
                 Ok(ready) => mixer.prepared_voice(done.start, done.voice, ready),
@@ -1459,6 +1506,10 @@ impl Preparation {
     pub(crate) fn pending(&self) -> &HashSet<(i64, usize)> {
         &self.pending
     }
+
+    pub(crate) fn missing_count(&self) -> usize {
+        self.missing.len()
+    }
 }
 impl Drop for Preparation {
     fn drop(&mut self) {
@@ -1471,6 +1522,84 @@ impl Drop for Preparation {
 mod tests {
     use super::*;
     use std::os::unix::thread::JoinHandleExt;
+
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn missing_input_waits_for_decode_publication_and_cannot_lose_an_early_publication() {
+        struct DecodeGuard(Arc<crate::source::SourceCache>, Arc<crate::source::Source>);
+        impl Drop for DecodeGuard {
+            fn drop(&mut self) {
+                self.0.set_decode_blocked(&self.1, false);
+                self.0.shutdown();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.wav");
+        let samples = (crate::source::BLOCK + 8) as u32;
+        let data_bytes = samples * 2;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&96_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        wav.resize(44 + data_bytes as usize, 0);
+        std::fs::write(&path, wav).unwrap();
+
+        let cache = crate::source::SourceCache::new(2 * 1024 * 1024, 1);
+        let source = cache.open(&path, None).unwrap();
+        let _guard = DecodeGuard(cache.clone(), source.clone());
+        cache.set_decode_blocked(&source, true);
+        let observed = cache.publication_epoch();
+        cache.prefetch_span(&source, 0, crate::source::BLOCK);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while cache.blocked_decoders() == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(cache.blocked_decoders(), 1);
+        let retry = RetryAfterPublication {
+            cache: cache.clone(),
+            observed,
+        };
+        for _ in 0..128 {
+            assert!(cache.block(&source, 0, false).unwrap().is_none());
+            assert!(
+                retry.waiting(),
+                "duplicate misses do not permit a CPU retry"
+            );
+        }
+        cache.set_decode_blocked(&source, false);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while retry.waiting() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!retry.waiting());
+        assert!(cache.block(&source, 0, false).unwrap().is_some());
+        // The job may report its miss after the block was published. Its
+        // pre-read epoch still permits the next attempt immediately.
+        let late_done = RetryAfterPublication {
+            cache: cache.clone(),
+            observed,
+        };
+        assert!(!late_done.waiting());
+
+        cache.set_decode_failing(&source, true);
+        let before_error = cache.publication_epoch();
+        cache.prefetch_span(&source, crate::source::BLOCK as i64, 8);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while cache.publication_epoch() == before_error && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_ne!(cache.publication_epoch(), before_error);
+        assert!(cache.block(&source, 1, false).is_err());
+    }
 
     struct PrivatePool(Arc<Executor>);
     impl Drop for PrivatePool {

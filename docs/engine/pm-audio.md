@@ -3572,3 +3572,16 @@ work starving ordinary decoding; off-CPU wall time can also include I/O and
 page faults, so the trace does not attribute all of it to scheduling.
 Both receipt regression tests and the node control/shutdown regression passed
 under ordinary leases, with their owned temporary trees empty and removed.
+
+Preparation now gates a failed missing-input attempt on the source cache's
+publication epoch. Both decoded blocks and memoized decode errors advance
+it; duplicate reads do not. A job samples the epoch before its step, so a
+publication before its completion message cannot leave the voice asleep.
+The producer retains the gate only while the same prepared history still
+exists, and clears gates on graph invalidation. This bounds CPU retries by
+cache progress rather than the preroll polling rate. Decoder threads remain
+ordinary, and the 120 ms A3 bound, canonical preroll, lead and head sizes
+are unchanged. New regressions hold a real decoder while repeatedly
+scheduling preparation, then release it and compare 8192 output frames
+exactly with the reference; they also cover early and error publications.
+Runtime verification and final device qualification are still pending.

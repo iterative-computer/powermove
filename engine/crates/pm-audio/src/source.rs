@@ -219,6 +219,9 @@ pub struct SourceCache {
     hits: AtomicU64,
     misses: AtomicU64,
     evicted: AtomicU64,
+    /// Advances when a decoded block or a memoized decode error becomes
+    /// visible. Missing-input preparation waits for progress, not a timer.
+    publication_epoch: AtomicU64,
     stop: AtomicBool,
     workers: Mutex<Vec<JoinHandle<()>>>,
     profile: bool,
@@ -268,6 +271,7 @@ impl SourceCache {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             evicted: AtomicU64::new(0),
+            publication_epoch: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             workers: Mutex::default(),
             profile,
@@ -370,6 +374,10 @@ impl SourceCache {
             evicted_blocks: self.evicted.load(Ordering::Relaxed),
             bytes: lock(&self.blocks).bytes,
         }
+    }
+
+    pub(crate) fn publication_epoch(&self) -> u64 {
+        self.publication_epoch.load(Ordering::Acquire)
     }
 
     /// Opens (or returns the open) audio stream of a file; `stream` is the
@@ -551,6 +559,7 @@ impl SourceCache {
                     Err(e)
                 }
             };
+            self.publication_epoch.fetch_add(1, Ordering::Release);
             self.ready.notify_all();
             drop(b);
             if self.profile {
@@ -756,6 +765,7 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
                 blocks.errors.insert(key, memo(&e));
             }
         }
+        c.publication_epoch.fetch_add(1, Ordering::Release);
         c.ready.notify_all();
         drop(blocks);
         if c.profile {

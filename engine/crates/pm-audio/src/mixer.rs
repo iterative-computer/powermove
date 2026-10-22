@@ -322,6 +322,9 @@ impl PrepareVoice {
     pub(crate) fn history(&self) -> Arc<std::sync::Mutex<StretchRun>> {
         self.run.clone()
     }
+    pub(crate) fn cache(&self) -> Arc<SourceCache> {
+        self.cache.clone()
+    }
     /// Claims this job for a worker or paused preparation. False when another
     /// thread already owns its history.
     pub(crate) fn claim(&self) -> bool {
@@ -2547,6 +2550,9 @@ mod prepared_tests {
     }
     impl Fixture {
         fn new() -> Self {
+            Self::with_preload(true)
+        }
+        fn with_preload(preload: bool) -> Self {
             let dir = tempfile::Builder::new()
                 .prefix("pm-audio-prepared-")
                 .tempdir()
@@ -2571,8 +2577,10 @@ mod prepared_tests {
             w.finish().unwrap();
             let cache = SourceCache::new(64 << 20, 0);
             let source = cache.open(&dir.path().join("tone.wav"), None).unwrap();
-            for b in 0..9 {
-                cache.block(&source, b, true).unwrap();
+            if preload {
+                for b in 0..9 {
+                    cache.block(&source, b, true).unwrap();
+                }
             }
             Self { cache, dir }
         }
@@ -2629,6 +2637,97 @@ mod prepared_tests {
             workers.wait(m, std::time::Duration::from_millis(10));
         }
         assert!(m.prepared_ready(&[start]), "worker preparation at {start}");
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn a_blocked_decoder_does_not_restart_preparation_until_publication() {
+        let f = Fixture::with_preload(false);
+        f.cache.ensure_workers(1);
+        let source = f.cache.open(&f.dir.path().join("tone.wav"), None).unwrap();
+        f.cache.set_decode_blocked(&source, true);
+        let doc = Arc::new(Document::new(
+            Some(parse(r#"{"id":"P","compId":"C","fps":30,"dur":10,"layers":[{"id":"v","type":"audio","from":0,"dur":8,"on":true,"d":{"asset":"s","gain":0.3,"trim":0,"fadeIn":0,"fadeOut":0,"speed":1.5}}],"comps":{}}"#).unwrap()),
+            1,
+        ));
+        let graph = Arc::new(
+            MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
+                Some(f.dir.path().join("tone.wav"))
+            })
+            .unwrap(),
+        );
+        let make_mix = || {
+            Mixer::new(
+                MixFormat::stereo(48_000),
+                doc.clone(),
+                graph.clone(),
+                Evaluator::new(),
+                f.cache.clone(),
+            )
+        };
+        let start = 0;
+        let mut actual = make_mix();
+        let mut workers = crate::preparation::Preparation::new();
+        workers.evaluators(Arc::new(Evaluator::new), false);
+        workers.schedule(&mut actual, &[start], true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while (workers.missing_count() != 1 || !workers.pending().is_empty())
+            && std::time::Instant::now() < deadline
+        {
+            workers.wait(&mut actual, std::time::Duration::from_millis(1));
+            workers.schedule(&mut actual, &[start], true);
+        }
+        assert_eq!(workers.missing_count(), 1);
+        assert!(workers.pending().is_empty());
+        while f.cache.blocked_decoders() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(f.cache.blocked_decoders(), 1);
+        let started = workers.scheduling.jobs_started.load(Ordering::Relaxed);
+        assert_eq!(started, 1);
+        for _ in 0..64 {
+            workers.schedule(&mut actual, &[start], true);
+            workers.wait(&mut actual, std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            workers.scheduling.jobs_started.load(Ordering::Relaxed),
+            started
+        );
+        assert_eq!(workers.missing_count(), 1);
+        assert!(!actual.prepared_ready(&[start]));
+
+        f.cache.set_decode_blocked(&source, false);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !actual.prepared_ready(&[start]) && std::time::Instant::now() < deadline {
+            workers.schedule(&mut actual, &[start], true);
+            workers.wait(&mut actual, std::time::Duration::from_millis(2));
+        }
+        assert!(actual.prepared_ready(&[start]));
+        actual.use_prepared(start);
+        let mut reference = make_mix();
+        let options = RenderOptions {
+            wait: true,
+            ..Default::default()
+        };
+        let mut a = vec![vec![]; 2];
+        let mut b = vec![vec![]; 2];
+        for offset in (0..8192).step_by(256) {
+            actual
+                .render(start + offset, 256, &mut a, &options)
+                .unwrap();
+            reference
+                .render(start + offset, 256, &mut b, &options)
+                .unwrap();
+            assert_eq!(
+                a.iter()
+                    .flat_map(|channel| channel.iter().map(|sample| sample.to_bits()))
+                    .collect::<Vec<_>>(),
+                b.iter()
+                    .flat_map(|channel| channel.iter().map(|sample| sample.to_bits()))
+                    .collect::<Vec<_>>(),
+                "mapped PCM after decode at {offset}"
+            );
+        }
     }
 
     #[test]
