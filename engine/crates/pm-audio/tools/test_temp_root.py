@@ -1,5 +1,6 @@
 """The campaign guard must detect leaks and remove its tree on every exit."""
 import json
+import importlib.util
 import os
 import signal
 import time
@@ -8,9 +9,20 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 class TempRootTests(unittest.TestCase):
+    def test_permission_probe_requires_a_matching_process_group(self):
+        spec = importlib.util.spec_from_file_location('audio_temp_guard', Path(__file__).with_name('temp-root.py'))
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        with patch.object(guard.os, 'killpg', side_effect=PermissionError), \
+                patch.object(guard.subprocess, 'check_output', return_value=' 17\n 23\n'):
+            self.assertFalse(guard.group_exists(42))
+            with self.assertRaises(PermissionError):
+                guard.group_exists(23)
+
     def run_child(self, source):
         with tempfile.TemporaryDirectory(prefix='pm-audio-guard-test-') as output:
             report = Path(output) / 'report.json'

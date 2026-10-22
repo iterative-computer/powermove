@@ -41,6 +41,14 @@ def group_exists(pgid):
         return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # Darwin can return EPERM after a reaped session leader even when
+        # its process group is gone. Check the process table before treating
+        # that as a surviving child; never signal an unverified group here.
+        groups = subprocess.check_output(['ps', '-axo', 'pgid='], text=True)
+        if pgid not in {int(group) for group in groups.split()}:
+            return False
+        raise
 
 
 def wait_group(pgid, seconds):
