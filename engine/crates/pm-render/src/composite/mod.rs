@@ -42,7 +42,7 @@ use pm_protocol::color::BlendMode;
 
 use crate::plan::{CompPlan, Draw};
 
-pub use color::{ColorSettings, project_color};
+pub use color::{ColorSettings, color_depth_float32, project_color};
 pub use effects::{
     EffectHost, EffectPasses, Padding, PreparedEffects, PreparedTransition, TransitionPasses,
 };

@@ -1138,6 +1138,27 @@ impl Renderer {
         self.vector.last_backend
     }
 
+    /// The precision a render of this project uses: [`effective_precision`],
+    /// raised to 32-bit float when the current app's Color depth asks for it
+    /// and the device has it (otherwise 16, as the current compositor falls
+    /// back). An 8-bit Color depth still renders 16-bit float intermediates.
+    fn project_precision(
+        &self,
+        root: &pm_model::Node,
+        request: Precision,
+        project: Precision,
+    ) -> Precision {
+        let precision = effective_precision(request, project);
+        if precision == Precision::Float16
+            && crate::composite::color_depth_float32(root)
+            && self.supports_precision(Precision::Float32)
+        {
+            Precision::Float32
+        } else {
+            precision
+        }
+    }
+
     fn supports_precision(&self, precision: Precision) -> bool {
         precision == Precision::Float16
             || self
@@ -1156,9 +1177,12 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let precision = match document.root().map(project_settings) {
-            Some(Ok(c)) => effective_precision(request.precision, c.precision),
-            _ => request.precision,
+        let precision = match document.root() {
+            Some(root) => match project_settings(root) {
+                Ok(c) => self.project_precision(root, request.precision, c.precision),
+                Err(_) => request.precision,
+            },
+            None => request.precision,
         };
         let target = Target::new(
             &self.device,
@@ -1336,7 +1360,7 @@ impl Renderer {
             .root()
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
-        let precision = effective_precision(request.precision, color.precision);
+        let precision = self.project_precision(root, request.precision, color.precision);
         if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
                 "32-bit precision on a device without rgba32float filtering and blending",
