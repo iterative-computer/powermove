@@ -658,6 +658,12 @@ values before applying them to its isolated document, retaining each parameter's
 definition. Existing definition snapshots, host fonts and Blender service remain
 in the native CLI; a missing WebGL runner remains a named headless failure.
 
+Agent exports, frame batches and contact sheets wait, bounded at 45 s, for a
+starting or restarting job engine (the longest crash backoff is 30 s), then
+fail as `The job engine is not running.`; a stopped engine fails at once.
+Frames requested as PNG are labelled `image/png`. Native `save_project`
+validates its (empty) arguments with today's strict schema and message.
+
 Targeted tests cover native failures before/after job acceptance and during
 recovery; pinning and playback isolation; incomplete frames; media binding
 lifetimes; PMV3 byte equality, missing originals, MIME, Undo and exclusive naming; CLI argument boundaries;
@@ -671,7 +677,8 @@ The macOS native hidden host now embeds host services and the production
 per-project document workers. Its render jobs, batches and saves use the same
 `NativeEngine` and `AgentJobs` as the desktop, over Node child-process ports.
 The desktop persists its probe namespace beside the per-machine shader cache;
-the hidden host, Node render command and direct bundled `pm-cli` read it. Unknown
+the hidden host, Node render command and direct bundled `pm-cli` read it, read
+only: their first-use decisions stay in memory (hidden-host.md). Unknown
 and pinned user programs request the desktop's WebGL runner in on-demand
 Chromium. This is the shader runner only; composition frames remain native.
 The hidden tabs present CPU snapshots from `pm-node`.

@@ -36,7 +36,7 @@ No changes to `docs/rust-engine.md` were made by this lane.
 | `apps/desktop/src/main/engine/profile-definitions.test.ts` | Atomically persist and test the profile’s winning definitions for CLI user extensions and overrides. |
 | `apps/desktop/src/main/engine/profile-definitions.ts` | Atomically persist and test the profile’s winning definitions for CLI user extensions and overrides. |
 | `apps/desktop/src/main/engine/shader-environment.test.ts` | Share and test the desktop’s persisted per-machine shader probe namespace with hidden hosts and CLI renders. |
-| `apps/desktop/src/main/engine/shader-environment.ts` | Share and test the desktop’s persisted per-machine shader probe namespace with hidden hosts and CLI renders. |
+| `apps/desktop/src/main/engine/shader-environment.ts` | Share the desktop’s persisted per-machine shader probe namespace with hidden hosts and CLI renders, read only (`cliProbeEnvironment`). |
 | `apps/desktop/src/main/media-store/store.test.ts` | Stage read-only input as a private writable file before fsync; regression protects host imports without changing originals. |
 | `apps/desktop/src/main/media-store/store.ts` | Stage read-only input as a private writable file before fsync; regression protects host imports without changing originals. |
 | `apps/desktop/src/preload/index.ts` | Minimal bridge-owner hook exposing the existing agent batch IPC to renderer callers. |
@@ -54,7 +54,7 @@ No changes to `docs/rust-engine.md` were made by this lane.
 | `apps/desktop/src/renderer/src/legacy/assistant/media-management.test.ts` | Accept host-supplied file bytes through today’s agent importer, with the same validation and durable import behavior. |
 | `apps/desktop/src/renderer/src/legacy/assistant/media-management.ts` | Accept host-supplied file bytes through today’s agent importer, with the same validation and durable import behavior. |
 | `apps/desktop/src/renderer/src/legacy/core/project-file.ts` | Share the existing linked-original and Undo asset enumeration with the host packer; keep today’s serialization. |
-| `apps/desktop/src/renderer/src/legacy/gl/raster.ts` | The original asset-identity extraction was reverted in 1a566f27; the editor importer again owns metadata construction (media owner hot file). |
+| `apps/desktop/src/renderer/src/legacy/gl/raster.ts` | The asset-identity extraction was reverted in 1a566f27. One behaviour change remains in `ingestAsset` (1033fa0a5): after the commit and the host binding flush, the guard checks only project/epoch (message `… inspect the imported media before retrying`) instead of also running the caller's `assertCurrent`, whose revision check the import's own write always failed. Pre-commit checks still run `assertCurrent`. Main has no post-commit check. Covered by `legacy/__tests__/import-post-commit-guard.test.ts` (media owner hot file). |
 | `apps/desktop/src/shared/engine-ipc.ts` | Typed agent frame/save and hidden-host integration payloads shared by main, preload, renderer and Node host. |
 | `apps/desktop/src/shared/engine-protocol/AudioFacts.ts` | Generated numeric audio-probe facts and protocol build identity used by native imports; generated from pm-protocol. |
 | `apps/desktop/src/shared/engine-protocol/MediaFacts.ts` | Generated numeric audio-probe facts and protocol build identity used by native imports; generated from pm-protocol. |
@@ -71,7 +71,10 @@ No changes to `docs/rust-engine.md` were made by this lane.
 | `engine/crates/pm-protocol/src/samples.rs` | Add numeric audio facts and codec samples for the host’s import metadata; mirrored generated TypeScript is listed separately. |
 | `engine/crates/pm-render/src/effects/exec.rs` | Configure the shared shader reference/cache from CLI and refuse unverified native user programs when no reference exists. |
 | `engine/crates/pm-render/src/effects/mod.rs` | Configure the shared shader reference/cache from CLI and refuse unverified native user programs when no reference exists. |
-| `engine/crates/pm-render/src/renderer.rs` | Configure the shared shader reference/cache from CLI and refuse unverified native user programs when no reference exists. |
+| `engine/crates/pm-render/src/renderer.rs` | Configure the shared shader reference/cache from CLI and refuse unverified native user programs when no reference exists; read `POWERMOVE_ENGINE_PARITY_STORE` and expose `read_only_shader_reference` so hidden/CLI hosts never write the desktop's probe decisions. |
+| `engine/crates/pm-render/src/effects/parity.rs` | Read-only probe store: honour persisted runner pins and native verifications, keep a foreign browser's first-use decisions in memory (`ProbeStore`, `set_read_only`), with unit tests. |
+| `engine/crates/pm-render/tests/effects_fallback.rs` | GPU test that a read-only first probe leaves no marker and the desktop still probes the program. |
+| `apps/desktop/src/renderer/src/legacy/__tests__/import-post-commit-guard.test.ts` | Test of the `raster.ts` post-commit guard change listed above. |
 | `engine/crates/pm-render/src/shader_layers/exec.rs` | Configure the shared shader reference/cache from CLI and refuse unverified native user programs when no reference exists. |
 | `engine/third_party/ffmpeg/README.md` | Cross-build and verify x86_64 with the same component selection and LGPL policy as ARM64; record architecture in the manifest. |
 | `engine/third_party/ffmpeg/build.sh` | Cross-build and verify x86_64 with the same component selection and LGPL policy as ARM64; record architecture in the manifest. |

@@ -72,7 +72,21 @@ Hidden engines and CLI renders read this namespace and the same `angle-parity`
 pins. A hidden profile with its own desktop probe copy uses it; otherwise the
 host reads this machine’s desktop store. `POWERMOVE_ENGINE_SHADER_CACHE` selects
 an explicit cache for isolated hosts. A profile without desktop probes uses a fresh namespace: user programs
-must pass through ANGLE before native verification. The browser module uses
+must pass through ANGLE before native verification.
+
+Only the desktop writes that namespace. Its decisions compare native output
+with Electron's WebGL runner; the hidden host and both CLI entry points compare
+with Playwright's Chromium, which can be a different ANGLE revision or
+SwiftShader under launchd or ssh. Their engines therefore open it read only
+(`POWERMOVE_ENGINE_PARITY_STORE=read-only`, set by `cliProbeEnvironment` for
+the hidden host and `powermove render`, and forced in code for every `pm-cli`
+renderer). They honour the desktop's runner pins and native verifications, so
+a desktop-verified program draws natively everywhere and a desktop-pinned one
+uses the runner. A program the desktop has not decided is probed against the
+host's own Chromium on first use, decided in memory for that process, and
+leaves no `.native` or `.runner` marker that the desktop would trust. The
+desktop still probes it against Electron. A different `STORE` value also
+fails closed as read only. The browser module uses
 `ShaderFallbackRunner`, with the desktop's F16 texture, uniform and watchdog
 contract. `powermove render` starts an authenticated loopback service; direct
 bundled `pm-cli` starts the same Node helper and closes it on stdin EOF.
@@ -129,7 +143,15 @@ not change login or authorized-key settings.
 
 The same parity fixture renders through both CLI entry points. A simultaneous
 native verification must lose to the persisted runner pin; removing only that
-pin must produce different native pixels. A missing browser must fail by name.
+pin must produce different native pixels. With every desktop decision removed,
+first probes by both CLI entry points and by a hidden host on a fresh profile
+copy must match the desktop's pixels and leave `angle-parity` empty. A missing
+browser must fail by name. `cargo test -p pm-cli --test definitions`
+(`a_cli_first_probe_leaves_no_decision_in_the_desktop_namespace`) covers an
+exactly matching program, which a writable store would have recorded as
+`.native`, and pm-render's `effects_fallback` and `effects::parity` tests cover
+the read-only store directly. Without `POWERMOVE_ANGLE_HELPER` the helper
+gates print a skip reason; gate runs set `POWERMOVE_REQUIRE_ANGLE_HELPER=1`.
 The Rust definitions gate retains its original successful override and blue-pixel
 assertions, with the production ANGLE helper enabled. Child-supervision tests
 kill real pm-node children, check in-flight asset attribution and the two-crash
