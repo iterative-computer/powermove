@@ -100,7 +100,7 @@ fn rational(num: i64, den: i64) -> ff::AVRational {
 /// matrix with floating-point UNORM8 writes, including a 2×2 chroma sample.
 /// This matches measured GPU readback codes for paired solid and varied-color
 /// fixtures; gradients and transparency need separate parity measurements.
-fn canvas_rgba_to_i420(
+pub(crate) fn canvas_rgba_to_i420(
     rgba: &[u8],
     width: u32,
     height: u32,

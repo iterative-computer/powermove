@@ -9,7 +9,7 @@
  * the engines' host requests (native-engine.ts).
  */
 import { existsSync, statSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,6 +36,8 @@ import { SnapshotService } from './snapshots';
 import { WindowSnapshotSessions } from './window-sessions';
 import { CompatFrames } from './compat-frames';
 import { ShaderFallbackRelay } from './shader-fallback-relay';
+import { ExportEncoders } from './export-encoder';
+import { openEncoderWindow } from './export-encoder-window';
 import type { ChildLike, PortLike } from './ports';
 
 export { FONT_CLIENT_ID, JOB_FONT_CLIENT_ID } from '../engine-fonts';
@@ -318,8 +320,20 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!options.isTrustedSender(event)) return;
     if (!compatFrames.answer(event.sender.id, answer)) log('warn', `window ${event.sender.id} sent a compatibility answer nobody asked for`);
   });
+  // The job engine's WebM exports go through Chromium's WebCodecs encoders,
+  // as today's exporter's do (decision EXPORT-1), in a hidden encoder window.
+  const rendererUrl = !options.isPackaged ? env['ELECTRON_RENDERER_URL']?.replace(/\/$/, '') : undefined;
+  const exportEncoders = new ExportEncoders({
+    openWindow: () => openEncoderWindow({
+      preload: path.join(options.mainDirectory, '../preload/exportEncoder.js'),
+      url: `${rendererUrl ?? 'app://powermove'}/export-encoder.html`
+    }),
+    writeOutput: (file, bytes) => writeFile(file, bytes)
+  });
   engine = new NativeEngine({
     compatFrame: (request) => compatFrames.serve(request),
+    exportEncoders,
+    takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null,
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
       const child = utilityProcess.fork(script, [], {
@@ -678,6 +692,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     snapshots,
     attachWindow,
     dispose: async () => {
+      exportEncoders.dispose();
       removeSnapshotIpc();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
       windowSessions.dispose();

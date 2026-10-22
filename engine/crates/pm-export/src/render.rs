@@ -1203,7 +1203,16 @@ where
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
 /// FFmpeg (WebM), or the engine's PNG writer.
 pub fn sink_for(plan: &ExportPlan) -> Result<crate::OutputSink, JobError> {
-    let mut sink = crate::OutputSink::for_job(&plan.spec)?;
+    sink_for_with(plan, None)
+}
+
+/// [`sink_for`] with the host's WebCodecs encoders, which the desktop app's
+/// job engine has for the WebM exports today's exporter encodes with them.
+pub fn sink_for_with(
+    plan: &ExportPlan,
+    encoder: Option<Box<dyn crate::webcodecs::EncodeHost>>,
+) -> Result<crate::OutputSink, JobError> {
+    let mut sink = crate::OutputSink::for_job_with(&plan.spec, encoder)?;
     if let (crate::OutputSink::Png(png), Some(name)) = (&mut sink, &plan.sequence_name) {
         png.set_stem(name);
     }

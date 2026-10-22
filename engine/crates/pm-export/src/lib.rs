@@ -32,6 +32,7 @@ pub mod render;
 pub mod settings;
 pub mod timescale;
 pub mod verify;
+pub mod webcodecs;
 pub mod webm;
 
 #[cfg(target_os = "macos")]
@@ -59,6 +60,8 @@ pub enum OutputSink {
     #[cfg(target_os = "macos")]
     LegacyVideo(Box<mac::legacy_video::LegacyVideoSink>),
     Webm(Box<webm::WebmSink>),
+    /// Opaque WebM through the host's Chromium WebCodecs encoders.
+    WebCodecs(Box<webcodecs::WebCodecsSink>),
     Png(Box<png::PngSink>),
 }
 
@@ -80,6 +83,21 @@ impl OutputSink {
             )));
         }
         Self::new(spec)
+    }
+
+    /// [`OutputSink::for_job`], with the host's WebCodecs encoders for the
+    /// WebM exports today's exporter encodes with them
+    /// ([`webcodecs::uses_host`]).
+    pub fn for_job_with(
+        spec: &ExportSpec,
+        encoder: Option<Box<dyn webcodecs::EncodeHost>>,
+    ) -> Result<OutputSink, Error> {
+        match encoder {
+            Some(host) if webcodecs::uses_host(spec) => Ok(OutputSink::WebCodecs(Box::new(
+                webcodecs::WebCodecsSink::new(spec, host)?,
+            ))),
+            _ => Self::for_job(spec),
+        }
     }
 
     /// Opens the encoder, muxer, and temporary output `spec` asks for.
@@ -115,6 +133,7 @@ impl Sink for OutputSink {
             #[cfg(target_os = "macos")]
             OutputSink::LegacyVideo(s) => s.video_rgba(index, frame),
             OutputSink::Webm(s) => s.video_rgba(index, frame),
+            OutputSink::WebCodecs(s) => s.video_rgba(index, frame),
             _ => Ok(false),
         }
     }
@@ -126,6 +145,7 @@ impl Sink for OutputSink {
             #[cfg(target_os = "macos")]
             OutputSink::LegacyVideo(s) => s.video(index, input),
             OutputSink::Webm(s) => s.video(index, input),
+            OutputSink::WebCodecs(s) => s.video(index, input),
             OutputSink::Png(s) => s.video(index, input),
         }
     }
@@ -137,6 +157,7 @@ impl Sink for OutputSink {
             #[cfg(target_os = "macos")]
             OutputSink::LegacyVideo(s) => s.audio(interleaved),
             OutputSink::Webm(s) => s.audio(interleaved),
+            OutputSink::WebCodecs(s) => s.audio(interleaved),
             OutputSink::Png(s) => s.audio(interleaved),
         }
     }
@@ -148,6 +169,7 @@ impl Sink for OutputSink {
             #[cfg(target_os = "macos")]
             OutputSink::LegacyVideo(s) => s.finish(),
             OutputSink::Webm(s) => s.finish(),
+            OutputSink::WebCodecs(s) => s.finish(),
             OutputSink::Png(s) => s.finish(),
         }
     }
@@ -159,6 +181,7 @@ impl Sink for OutputSink {
             #[cfg(target_os = "macos")]
             OutputSink::LegacyVideo(s) => s.finish_with_cancel(cancel),
             OutputSink::Webm(s) => s.finish(),
+            OutputSink::WebCodecs(s) => s.finish(),
             OutputSink::Png(s) => s.finish(),
         }
     }
