@@ -529,8 +529,18 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     onChange: broadcastQueue
   });
   engine.listen({
-    status: (status) => { if (status.job.state === 'ready') renderQueue?.engineReady(); }
+    // The job engine starts on demand: a queue that was running at quit
+    // resumes once the engines come up, and its first job starts it.
+    status: (status) => { if (status.job.state === 'ready' || status.interactive.state === 'ready') renderQueue?.engineReady(); }
   });
+
+  /** Starts a cold job utility while the user answers the offline message
+   *  and the save panel, so the export does not wait for its launch. */
+  const prepareJobEngine = (): void => {
+    void engine?.ensureReady('job').catch((error: unknown) => {
+      log('warn', `the job engine did not start ahead of an export: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
 
   /** The offline message before an interactive export (section 14.8).
    *  Resolves the options to export with, or the outcome to answer. */
@@ -558,6 +568,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!agentJobs.available) return { status: 'unavailable', reason: 'The job engine is not running.' };
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || window.isDestroyed()) throw new Error('Export window is unavailable');
+    prepareJobEngine();
     const project = JSON.parse(request.project);
     const checked = await checkOffline(window, event.sender, project, request);
     if ('status' in checked) return checked;
@@ -594,6 +605,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!validExportRequest(request)) throw new Error('A queued export names a project and its settings.');
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || window.isDestroyed()) throw new Error('Export window is unavailable');
+    prepareJobEngine();
     const queueRequest = request as EngineQueueRequest;
     const format = migrateFormat(queueRequest.options.format);
     const delivery = normalizeDelivery(queueRequest.options.delivery ?? {});

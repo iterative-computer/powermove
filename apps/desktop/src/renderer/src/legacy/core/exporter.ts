@@ -668,7 +668,10 @@ function locateMedia(assets: string[]): void {
 async function exportThroughEngine(opts: any): Promise<any | null> {
   const engine = (hostBridge() as any)?.nativeEngine;
   const status = await engine.status().catch(() => null);
-  if (!status?.enabled || status.processes?.job?.state !== 'ready') return null;
+  // The job engine starts on demand and exits when unused: a stopped one is
+  // not a reason to route. Main starts it and answers `unavailable` only
+  // when it cannot run.
+  if (!status?.enabled) return null;
   const p: any = PM.proj;
   const [t0, t1]: any = range(opts);
   // Statuses can arrive before the start answer; keep them until the job id is known.
