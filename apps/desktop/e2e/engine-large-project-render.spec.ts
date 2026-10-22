@@ -79,7 +79,7 @@ async function openFile(session: LaunchedApp, file: string): Promise<number> {
   return (Date.now() - started) / 1000;
 }
 
-type Run = { frames: number; distinct: number; scrubP95: number; scrubP50: number };
+type Run = { frames: number; distinct: number; distinctPlayheads: number; scrubP95: number; scrubP50: number };
 
 /** Presented frames over PLAY_SECONDS from 0, then SEEKS seeks to a presented frame. */
 async function measure(page: Page): Promise<Run> {
@@ -91,13 +91,21 @@ async function measure(page: Page): Promise<Run> {
   });
   const play = await page.evaluate(async (seconds) => {
     const PM = (window as any).PM;
+    // The time of the picture each event announces (today's compositor
+    // and the engine's presentation both name the frame drawn), and the
+    // playhead when it came (logged: the engine's worker can put two frames
+    // up within one of the playhead's steps).
     const times: number[] = [];
-    const off = PM.bus.on('preview:presented', () => times.push(PM.time));
+    const playheads: number[] = [];
+    const off = PM.bus.on('preview:presented', (payload: { time?: number } | undefined) => {
+      times.push(Number.isFinite(payload?.time) ? Number(payload!.time) : PM.time);
+      playheads.push(PM.time);
+    });
     PM.play();
     await new Promise((r) => setTimeout(r, seconds * 1000));
     PM.pause();
     if (typeof off === 'function') off();
-    return { frames: times.length, distinct: new Set(times).size };
+    return { frames: times.length, distinct: new Set(times).size, distinctPlayheads: new Set(playheads).size };
   }, PLAY_SECONDS);
   const scrub = await page.evaluate(async ({ seeks, duration }) => {
     const PM = (window as any).PM; const ms: number[] = [];
@@ -113,7 +121,7 @@ async function measure(page: Page): Promise<Run> {
     return { p50: sorted[Math.floor(sorted.length / 2)]!, p95: sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]!, all: ms.map(v => Math.round(v)) };
   }, { seeks: SEEKS, duration: DURATION });
   console.log(`seeks (ms, in order): ${JSON.stringify(scrub.all)}`);
-  return { frames: play.frames, distinct: play.distinct, scrubP50: scrub.p50, scrubP95: scrub.p95 };
+  return { frames: play.frames, distinct: play.distinct, distinctPlayheads: play.distinctPlayheads, scrubP50: scrub.p50, scrubP95: scrub.p95 };
 }
 
 async function run(mode: 'today' | 'engine', file: string): Promise<Run> {
