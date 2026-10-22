@@ -55,6 +55,7 @@ remote-layer = ["pm-gpu/remote-layer"]
 test-hooks = []
 
 [dev-dependencies]
+dhat = "0.3"
 pm-model = { path = "../pm-model" }
 # The audio status test holds and fails decoders (pm-audio's test hooks).
 pm-audio = { path = "../pm-audio", features = ["test-hooks"] }
