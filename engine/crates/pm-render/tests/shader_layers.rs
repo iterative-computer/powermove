@@ -532,3 +532,36 @@ fn parse_uniforms_matches_the_app() {
     }
     assert!(cases >= 40, "{cases} cases");
 }
+
+#[test]
+fn a_constant_table_indexed_per_pixel_draws_its_entries() {
+    // A glyph-table pattern (a user effect's 1,104-entry bitmap table):
+    // read from program constants (pm_glsl::const_tables), every entry the
+    // program indexes is the table's own.
+    let n = 1104usize;
+    let values: Vec<u64> = (0..n as u64).map(|i| (i * 2_654_435_761) % 4_294_967_291).collect();
+    let table = values.iter().map(|v| format!("{v}u")).collect::<Vec<_>>().join(",");
+    let code = format!(
+        "const uint glyphBits[{n}] = uint[]({table});\nvoid main(){{ int i = int(gl_FragCoord.x) + 160 * int(gl_FragCoord.y); uint b = glyphBits[i % {n}]; fragColor = vec4(float(b & 255u) / 255.0, float((b >> 8u) & 255u) / 255.0, float((b >> 16u) & 255u) / 255.0, 1.0); }}"
+    );
+    let mut d = shader(&code, json!({}));
+    d["w"] = json!(160);
+    d["h"] = json!(90);
+    let doc = document(160, 90, 24.0, vec![layer("L", "shader", d, 0.0, 4.0)]);
+    let mut r = Renderer::headless().unwrap();
+    let (px, failures) = render(&mut r, &doc, (160, 90), 0.5).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    let mut checked = 0;
+    for y in 0..90usize {
+        for x in 0..160usize {
+            // gl_FragCoord is bottom-up; the frame is top-down.
+            let i = (x + 160 * (89 - y)) % n;
+            let b = values[i];
+            let want = [(b & 255) as f32 / 255.0, ((b >> 8) & 255) as f32 / 255.0, ((b >> 16) & 255) as f32 / 255.0, 1.0];
+            let at = (y * 160 + x) * 4;
+            assert!(close(&px[at..at + 4], want), "pixel {x},{y}: {:?} vs {want:?}", &px[at..at + 4]);
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 160 * 90);
+}

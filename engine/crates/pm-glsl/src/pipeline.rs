@@ -400,6 +400,13 @@ fn naga_module(words: &[u32]) -> Result<naga::Module, Failure> {
     };
     derivative_uniformity_off(&mut module);
     naga_validate(&module).map_err(|e| Failure::new(FailureStage::NagaValidate, e))?;
+    // Constant tables indexed at run time read from the constants
+    // (`crate::const_tables`); a module the validator refuses afterwards
+    // stays as it was.
+    let mut hoisted = module.clone();
+    if crate::const_tables::hoist(&mut hoisted) > 0 && naga_validate(&hoisted).is_ok() {
+        module = hoisted;
+    }
     Ok(module)
 }
 
