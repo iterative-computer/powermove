@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { canonicalStringify, jsonClone } from './canonical-json';
-import { canonicalChunks, jsonCloneAsync } from './canonical-async';
+import { canonicalChunks, jsonCloneAsync, jsonCloneSliced } from './canonical-async';
 
 async function text(value: any, chunkBytes?: number): Promise<string> {
   const decoder = new TextDecoder();
@@ -147,5 +147,62 @@ describe('cooperative JSON', () => {
     const queued = new Promise<void>(resolve => setTimeout(() => { serviced = true; resolve(); }, 0));
     await jsonCloneAsync(Array.from({ length: 5000 }, (_, i) => i), { yieldTask: () => queued });
     expect(serviced).toBe(true);
+  });
+});
+
+describe('jsonCloneSliced', () => {
+  /** Members, order, values and own-property flags, as a comparable tree. */
+  const shape = (value: any): any => value === null || typeof value !== 'object' ? (Object.is(value, -0) ? '-0' : value)
+    : Array.isArray(value) ? ['array', value.length, ...Array.from(value, shape)]
+      : ['object', Object.getPrototypeOf(value) === Object.prototype, ...Object.keys(value).map(key => [key, shape(value[key])])];
+  function random(seed: number) { return () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 4294967296; }; }
+  class Hooked { constructor(readonly n: number) {} toJSON(key: string) { return { key, n: this.n, nested: { toJSON: () => [key] } }; } }
+  function value(next: () => number, depth: number): any {
+    const pick = Math.floor(next() * (depth > 8 ? 8 : 13));
+    switch (pick) {
+      case 0: return null;
+      case 1: return [0, -0, NaN, Infinity, 1.5, 2 ** 60][Math.floor(next() * 6)];
+      case 2: return ['', 'text', '😀', '\ud800'][Math.floor(next() * 4)];
+      case 3: return undefined;
+      case 4: return () => 1;
+      case 5: return next() < 0.5;
+      case 6: return [new Date(0), new Hooked(depth), Object(4), Object('s'), { toJSON() { return this; }, kept: depth }][Math.floor(next() * 5)];
+      case 7: return Math.floor(next() * 100);
+      case 8: case 9: { const big = depth < 3 && next() < 0.3; return Array.from({ length: big ? 70 + Math.floor(next() * 60) : Math.floor(next() * 4) }, () => value(next, depth + 1)); }
+      default: {
+        const object: any = {};
+        const members = depth < 3 && next() < 0.2 ? 70 : Math.floor(next() * 4);
+        for (let i = 0; i < members; i++) object[next() < 0.2 ? String(i) : `k${i}`] = value(next, depth + 1);
+        if (next() < 0.05) Object.defineProperty(object, '__proto__', { value: { inner: 1 }, enumerable: true, configurable: true, writable: true });
+        return object;
+      }
+    }
+  }
+
+  it('copies exactly what jsonCloneAsync copies', async () => {
+    for (let seed = 1; seed <= 300; seed++) {
+      const next = random(seed);
+      const input = { root: value(next, 0), deep: [[[[[[[value(next, 0), Array.from({ length: 90 }, () => value(next, 7))]]]]]]] };
+      const expected = await jsonCloneAsync(input, { yieldTask: async () => {} });
+      const actual = await jsonCloneSliced(input, { yieldTask: async () => {} });
+      expect(shape(actual)).toEqual(shape(expected));
+    }
+    for (const input of [undefined, null, 3, 'x', [undefined, () => 1], new Date(0), { toJSON: () => undefined }]) {
+      expect(shape(await jsonCloneSliced(input))).toEqual(shape(await jsonCloneAsync(input)));
+    }
+  });
+
+  it('shares strings, rejects cycles at any depth, and yields on large inputs', async () => {
+    const text = 'shared '.repeat(100);
+    const copy = await jsonCloneSliced({ a: [[[[[[{ text }]]]]]] });
+    expect(copy.a[0][0][0][0][0][0].text).toBe(text);
+    const shallow: any = { a: {} }; shallow.a.back = shallow;
+    await expect(jsonCloneSliced(shallow)).rejects.toThrow(TypeError);
+    const deep: any = [[[[[[[{}]]]]]]]; deep[0][0][0][0][0][0][0].up = deep[0][0];
+    await expect(jsonCloneSliced(deep)).rejects.toThrow(TypeError);
+    let yields = 0;
+    const big = Array.from({ length: 200_000 }, (_, i) => ({ t: i, v: [i, i + 1] }));
+    expect((await jsonCloneSliced(big, { yieldTask: async () => { yields++; } })).length).toBe(200_000);
+    expect(yields).toBeGreaterThan(0);
   });
 });

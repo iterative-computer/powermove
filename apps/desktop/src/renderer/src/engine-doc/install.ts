@@ -1,5 +1,5 @@
 import { canonicalProject } from '../../../shared/canonical-json';
-import { jsonCloneAsync } from '../../../shared/canonical-async';
+import { jsonCloneSliced } from '../../../shared/canonical-async';
 import { ConsistencyHash } from './consistency-hash';
 import { ingestDocumentText, RemotePmWasm, remoteCanonicalHash } from './remote';
 import { documentId } from '../../../shared/engine-document-id';
@@ -569,7 +569,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       }
     }
     const began = performance.now();
-    const shadow = await jsonCloneAsync(canonicalProject(project));
+    const shadow = await jsonCloneSliced(canonicalProject(project));
     const cloned = performance.now();
     // Main hashes the canonical stream as it arrives, and the utility derives
     // the canonical hash of the tree it parsed from it; ingestion fails unless

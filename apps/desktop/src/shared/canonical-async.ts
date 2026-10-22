@@ -144,6 +144,102 @@ export async function jsonCloneAsync(value: unknown, options: JsonAsyncOptions =
   return runClone(value, options, false);
 }
 
+/**
+ * jsonCloneAsync's result (the same members in the same order, hooks applied
+ * once, absent members dropped and absent elements null, non-finite numbers
+ * null and -0 as 0, strings shared), several times faster: containers near
+ * the root and large arrays are walked with an explicit cursor that yields
+ * between slices, and every other subtree is copied by one tight recursive
+ * call. A subtree that deep and small costs microseconds; the large private
+ * project's preparation spent most of its clone in per-value generator steps.
+ */
+export async function jsonCloneSliced(value: unknown, options: JsonAsyncOptions = {}): Promise<any> {
+  const task = options.yieldTask ?? yieldJsonTask;
+  const ancestors = new Set<object>();
+  type Cursor = { source: any; target: any; keys: string[] | null; index: number; depth: number };
+  const walked = (source: any, depth: number) =>
+    depth < CLONE_WALK_DEPTH || Array.isArray(source) && source.length > CLONE_WALK_MEMBERS;
+  const cursorOf = (source: any, depth: number): Cursor => {
+    if (ancestors.has(source)) throw new TypeError('Converting circular structure to JSON');
+    ancestors.add(source);
+    const array = Array.isArray(source);
+    return { source, target: array ? new Array(source.length) : {}, keys: array ? null : jsonKeys(source), index: 0, depth };
+  };
+  const root = prepareJson(value, '');
+  if (root === JSON_ABSENT) return undefined;
+  if (root === null || typeof root !== 'object') return root;
+  if (!walked(root, 0)) return cloneSubtree(root, ancestors);
+  const first = cursorOf(root, 0);
+  const stack: Cursor[] = [first];
+  let deadline = performance.now() + 2, steps = 0;
+  while (stack.length) {
+    const cursor = stack[stack.length - 1]!;
+    const length = cursor.keys ? cursor.keys.length : cursor.target.length;
+    if (cursor.index >= length) {
+      ancestors.delete(cursor.source);
+      stack.pop();
+    } else {
+      const index = cursor.index++;
+      const key = cursor.keys ? cursor.keys[index]! : String(index);
+      const prepared = prepareJson(cursor.source[key], key);
+      if (prepared !== JSON_ABSENT || !cursor.keys) {
+        let child: any = prepared === JSON_ABSENT ? null : prepared;
+        if (child !== null && typeof child === 'object') {
+          if (walked(child, cursor.depth + 1)) {
+            // Its copy goes in now and fills as it is walked.
+            const next = cursorOf(child, cursor.depth + 1);
+            stack.push(next);
+            child = next.target;
+          } else child = cloneSubtree(child, ancestors);
+        }
+        if (key === '__proto__' && cursor.keys) Object.defineProperty(cursor.target, key, { value: child, enumerable: true, configurable: true, writable: true });
+        else cursor.target[cursor.keys ? key : index] = child;
+      }
+    }
+    if ((++steps & 15) === 0 && performance.now() >= deadline) {
+      await task();
+      deadline = performance.now() + 2;
+    }
+  }
+  return first.target;
+}
+
+const CLONE_WALK_DEPTH = 5;
+const CLONE_WALK_MEMBERS = 64;
+
+function jsonKeys(value: object): string[] {
+  const keys: string[] = [];
+  for (const key in value) if (Object.prototype.hasOwnProperty.call(value, key)) keys.push(key);
+  return keys;
+}
+
+/** A prepared container's JSON copy, recursively (see jsonCloneSliced). */
+function cloneSubtree(source: any, ancestors: Set<object>): any {
+  if (ancestors.has(source)) throw new TypeError('Converting circular structure to JSON');
+  ancestors.add(source);
+  let copy: any;
+  if (Array.isArray(source)) {
+    const length = source.length;
+    copy = new Array(length);
+    for (let index = 0; index < length; index++) {
+      const prepared = prepareJson(source[index], String(index));
+      copy[index] = prepared === JSON_ABSENT ? null : prepared !== null && typeof prepared === 'object' ? cloneSubtree(prepared, ancestors) : prepared;
+    }
+  } else {
+    copy = {};
+    for (const key in source) {
+      if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+      const prepared = prepareJson(source[key], key);
+      if (prepared === JSON_ABSENT) continue;
+      const child = prepared !== null && typeof prepared === 'object' ? cloneSubtree(prepared, ancestors) : prepared;
+      if (key === '__proto__') Object.defineProperty(copy, key, { value: child, enumerable: true, configurable: true, writable: true });
+      else copy[key] = child;
+    }
+  }
+  ancestors.delete(source);
+  return copy;
+}
+
 /** @internal Canonical hook visitation order for sameJson's serialization fallback. */
 export async function jsonCloneCanonicalAsync(value: unknown, options: JsonAsyncOptions = {}): Promise<any> {
   return runClone(value, options, true);
