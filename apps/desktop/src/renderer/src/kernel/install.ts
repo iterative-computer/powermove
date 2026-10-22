@@ -404,6 +404,35 @@ function rasterHost(PM: LegacyPM): RasterHost {
   };
 }
 
+/**
+ * The identity of a layer's base pixels for the raster override's cache, or
+ * null when they may change with time alone. Today's raster cache
+ * (`legacy/gl/raster.ts` `PM.raster`) keys plain text and plain shapes by
+ * their resolved content and density, never by composition time, and hands
+ * every caller the same surface: a rotating shape or a typewriter's
+ * unchanged source text is rasterized once. Paths, text animators and
+ * styles, and font anchoring depend on time beyond the content, and
+ * captions on the cue, so they are never cached. A layer of the document
+ * is keyed by its composition and id as well; a detached copy a wrapper
+ * rasterizes (a typed prefix) by its content alone, as today.
+ */
+export function rasterContentKey(PM: LegacyPM, layer: any, scale: number, time: number, crop?: { x: number; y: number; width: number; height: number } | null): string | null {
+  const d = layer?.d;
+  if (!d || typeof d !== 'object') return null;
+  if (layer.type === 'shape') { if (d.paths?.length) return null; }
+  else if (layer.type === 'text') { if (d.animators?.length || d.styles?.length || d.fontAnchorBounds || d.paths?.length) return null; }
+  else return null;
+  const evaluator = native(PM);
+  if (!evaluator) return null;
+  const where = rasterHost(PM).locate(layer);
+  const owner = where.own ? ['own', where.composition, String(layer.id ?? '')] : ['detached'];
+  try {
+    return JSON.stringify([layer.type, owner, evaluator.resolveContent(layer, time), scale, crop ?? null]);
+  } catch {
+    return null;
+  }
+}
+
 /** The engine's raster in today's shape, or null (logged) when it fails. */
 function engineRasterBase(PM: LegacyPM, engine: NonNullable<ReturnType<typeof engineRender>>, args: Parameters<RenderAPI['raster']>): ReturnType<RenderAPI['raster']> {
   // Today's `PM.raster(L, scale = 1, ...)` uses any other scale as given
@@ -961,13 +990,7 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
       const engine = engineRender(PM);
       return engine ? engineRasterBase(PM, engine, [layer as Layer, scale, time, undefined, crop as RasterWindow | undefined]) : null;
     },
-    rasterKey: (layer, scale, time, crop) => {
-      // The legacy shape cache also keys pixels by resolved content rather
-      // than composition time: rotation alone never repaints its base.
-      if (layer?.type !== 'shape' || layer.d?.paths?.length) return null;
-      const evaluator = native(PM);
-      return evaluator ? JSON.stringify([evaluator.resolveContent(layer, time), scale, crop ?? null]) : null;
-    },
+    rasterKey: (layer, scale, time, crop) => rasterContentKey(PM, layer, scale, time, crop),
     engineRasterAsync: async (layer, scale, time, crop) => {
       const engine = engineRender(PM);
       if (!engine) return null;

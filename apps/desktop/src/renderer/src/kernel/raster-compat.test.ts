@@ -55,6 +55,68 @@ describe('the raster override producer', () => {
     expect(engineRasterAsync).toHaveBeenCalledTimes(1);
   });
 
+  it('reuses a detached copy\'s content-identical base across frames instead of a synchronous engine raster each frame', async () => {
+    // A typewriter: the source layer (prepared) and a detached typed prefix
+    // rasterized through the service. Today's cache keys both by content.
+    const key = (layer: any, scale: number, _time: number, crop?: any) => JSON.stringify([layer.id === 'title' ? 'own' : 'detached', layer.d, scale, crop ?? null]);
+    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true, key);
+    const original = services.get<any>('raster');
+    const prefix = (time: number) => (time < 1 ? 'He' : 'Hel');
+    services.register('raster', (layer: any, scale: number, time: number, ...rest: any[]) => {
+      if (layer.id !== 'title') return original(layer, scale, time, ...rest);
+      const full = original(layer, scale, time, ...rest);
+      const typed = original({ ...layer, id: `title:typed`, d: { ...layer.d, text: prefix(time) } }, scale, time, ...rest);
+      return { ...full, cv: { width: full.cv.width + typed.cv.width, height: full.cv.height }, key: `typed:${time}` };
+    });
+    for (const time of [0.2, 0.4, 0.6]) {
+      await compat.prepare(need('title', time), 4);
+      expect(compat.answer(need('title', time), 4, { prepared: true })).toMatchObject({ kind: 'raster', key: `typed:${time}` });
+    }
+    // The source text was prepared once; the unchanged prefix 'He' was drawn once.
+    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+    expect(engineRaster).toHaveBeenCalledTimes(1);
+    expect(engineRaster.mock.calls[0]![0]).toMatchObject({ d: { text: 'He' } });
+    // A new prefix is new content: it is drawn, the source still is not.
+    await compat.prepare(need('title', 1.2), 4);
+    compat.answer(need('title', 1.2), 4, { prepared: true });
+    expect(engineRaster).toHaveBeenCalledTimes(2);
+    expect(engineRaster.mock.calls[1]![0]).toMatchObject({ d: { text: 'Hel' } });
+    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+    expect(compat.stats).toMatchObject({ syncLoads: 2, asyncLoads: 1 });
+    // A new revision draws everything again.
+    await compat.prepare(need('title', 1.4), 5);
+    compat.answer(need('title', 1.4), 5, { prepared: true });
+    expect(engineRasterAsync).toHaveBeenCalledTimes(2);
+    expect(engineRaster).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not prepare a layer the chain passed through untouched, and prepares it again once the chain reads it', async () => {
+    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true);
+    const original = services.get<any>('raster');
+    let tint = false;
+    services.register('raster', (layer: any, ...rest: any[]) => {
+      const base = original(layer, ...rest);
+      return tint ? { ...base, cv: base.cv, key: 'tinted' } : base;
+    });
+    await compat.prepare(need('box', 0.2), 4);
+    expect(compat.answer(need('box', 0.2), 4, { prepared: true })).toEqual({ kind: 'native' });
+    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+    // Passed through: the next frames prepare nothing.
+    await compat.prepare(need('box', 0.4), 4);
+    expect(compat.answer(need('box', 0.4), 4, { prepared: true })).toEqual({ kind: 'native' });
+    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+    expect(compat.stats.passThroughSkips).toBe(1);
+    // The wrapper starts reading it: one synchronous base, then prepared again.
+    tint = true;
+    await compat.prepare(need('box', 0.6), 4);
+    expect(compat.answer(need('box', 0.6), 4, { prepared: true })).toMatchObject({ kind: 'raster', key: 'tinted' });
+    expect(engineRaster).toHaveBeenCalledTimes(1);
+    await compat.prepare(need('box', 0.8), 4);
+    expect(compat.answer(need('box', 0.8), 4, { prepared: true })).toMatchObject({ kind: 'raster', key: 'tinted' });
+    expect(engineRasterAsync).toHaveBeenCalledTimes(2);
+    expect(engineRaster).toHaveBeenCalledTimes(1);
+  });
+
   it('prepares fresh pixels when evaluated content changes with time', async () => {
     const { services, compat, engineRasterAsync, need } = setup(true, (_layer, scale, time) => `${scale}:${time >= 1 ? 'blue' : 'red'}`);
     const original = services.get<any>('raster');

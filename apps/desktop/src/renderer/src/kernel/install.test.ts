@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetExtensionsStore } from './extensions.svelte';
-import { bootExtensions, installKernel, type InstalledKernel } from './install';
+import { bootExtensions, installKernel, rasterContentKey, type InstalledKernel } from './install';
 import { RUNTIME_GLOBAL, runtimeGlobals } from './runtime-globals';
 import { doc } from '../state/document.svelte';
 import { sel } from '../state/selection.svelte';
@@ -892,4 +892,43 @@ it('reads durable text assets larger than 64 MB', async () => {
   PM.MediaStore = { get: vi.fn(async () => new Blob([text])) };
   installed = installKernel(PM);
   expect(await installed.api('models').assets.readText('large')).toBe(text);
+});
+
+describe('the raster override base cache key (today\'s raster cache identity)', () => {
+  const resolve = (layer: any, time: number) => {
+    const d = { ...layer.d };
+    for (const k of Object.keys(d)) if (d[k] && typeof d[k] === 'object' && Array.isArray(d[k].kf)) d[k] = time < 1 ? d[k].kf[0][1] : d[k].kf[1][1];
+    return d;
+  };
+  const host = (layers: any[]) => ({ proj: { id: 'P', compId: 'P', layers, comps: {} }, EngineDoc: { enabled: true, api: { resolveContent: resolve } } });
+
+  it('keys plain text and shapes by resolved content and density, not time', () => {
+    const title = { id: 'title', type: 'text', d: { text: 'Hello', size: 40 }, fx: [] };
+    const box = { id: 'box', type: 'shape', d: { shape: 'rect', w: { v: 10, kf: [[0, 10], [2, 30]] }, h: 20 }, fx: [] };
+    const PM = host([title, box]);
+    expect(rasterContentKey(PM, title, 2, 0.1)).toBe(rasterContentKey(PM, title, 2, 2.9));
+    expect(rasterContentKey(PM, title, 2, 0.1)).not.toBe(rasterContentKey(PM, title, 1, 0.1));
+    expect(rasterContentKey(PM, title, 2, 0.1, { x: 0, y: 0, width: 4, height: 4 })).not.toBe(rasterContentKey(PM, title, 2, 0.1));
+    // Content that changes with time changes the key.
+    expect(rasterContentKey(PM, box, 1, 0.5)).not.toBe(rasterContentKey(PM, box, 1, 1.5));
+  });
+
+  it('keys a detached copy by its content alone, never sharing a document layer\'s entry', () => {
+    const title = { id: 'title', type: 'text', d: { text: 'Hello' }, fx: [] };
+    const PM = host([title]);
+    const copyA = { ...title, id: 'title:typed:3', d: { text: 'Hel' } };
+    const copyB = { ...title, id: 'title:typed:3', d: { text: 'Hel' } };
+    expect(rasterContentKey(PM, copyA, 1, 0)).toBe(rasterContentKey(PM, copyB, 1, 0.5));
+    expect(rasterContentKey(PM, { ...title }, 1, 0)).not.toBe(rasterContentKey(PM, title, 1, 0));
+  });
+
+  it('never caches what changes with time beyond its content, or without the native evaluator', () => {
+    const PM = host([]);
+    expect(rasterContentKey(PM, { id: 'a', type: 'text', d: { text: 'x', animators: [{}] } }, 1, 0)).toBeNull();
+    expect(rasterContentKey(PM, { id: 'b', type: 'text', d: { text: 'x', styles: [{}] } }, 1, 0)).toBeNull();
+    expect(rasterContentKey(PM, { id: 'c', type: 'text', d: { text: 'x', fontAnchorBounds: { x: 0 } } }, 1, 0)).toBeNull();
+    expect(rasterContentKey(PM, { id: 'd', type: 'shape', d: { paths: [{}] } }, 1, 0)).toBeNull();
+    expect(rasterContentKey(PM, { id: 'e', type: 'captions', d: {} }, 1, 0)).toBeNull();
+    expect(rasterContentKey({ proj: { layers: [] } }, { id: 'f', type: 'text', d: { text: 'x' } }, 1, 0)).toBeNull();
+  });
 });
