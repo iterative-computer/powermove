@@ -774,6 +774,11 @@ describe('native Powermove agent tool bridge', () => {
     expect(engineJobs.saveProject).toHaveBeenCalledWith(project, { proj: project, history: { entries: [] } });
     const plans = () => owner.requests.filter((request) => request.tool === '__engine_save_plan').map((request) => request.arguments);
     expect(plans()).toEqual([{}, { saved: true }]);
+    // Extra arguments fail with today's strict schema message, before any plan.
+    const { z } = await import('zod');
+    const today = (() => { try { z.object({}).strict().parse({ name: 'x' }); } catch (error) { return (error as Error).message; } })();
+    await expect(bridge.callTool(session, 'save_project', { name: 'x' })).rejects.toThrow(today);
+    expect(plans()).toEqual([{}, { saved: true }]);
     fail = true;
     await expect(bridge.callTool(session, 'save_project', {})).rejects.toThrow('mediaChanged');
     // A failed save never records the project as saved.

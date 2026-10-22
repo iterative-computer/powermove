@@ -1,4 +1,5 @@
 import { withAgentExport } from '../agent-export';
+import { z } from 'zod';
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import net, { type Server, type Socket } from 'node:net';
@@ -586,7 +587,8 @@ export class PowermoveAgentToolBridge {
       // The normal provider connection owns this session; no separate MCP setup.
       await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
       if (this.options.engineJobs) {
-        if (Object.keys(args).length) throw new Error('save_project does not take arguments.');
+        // Today's renderer tool validates with this exact strict schema (mcp-project-tools.ts).
+        z.object({}).strict().parse(args);
         const plan = await this.rendererValue(session, '__engine_save_plan', {});
         if (plan?.home === true) throw new Error('Open a project before saving.');
         if (!this.options.engineJobs.saveProject) throw new Error('project-save-unavailable: The host project packer is unavailable.');
