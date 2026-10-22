@@ -488,9 +488,10 @@ fn check_composition(
                 feature: Feature::Scene3d(issue.1),
             });
         }
-        if node::member(Some(comp), "render3d")
-            .and_then(|r| node::member(Some(r), "enabled"))
-            .is_some_and(|e| node::truthy(Some(e)))
+        if !crate::blender::retired()
+            && node::member(Some(comp), "render3d")
+                .and_then(|r| node::member(Some(r), "enabled"))
+                .is_some_and(|e| node::truthy(Some(e)))
         {
             out.insert(Unsupported {
                 composition: Some(comp_id.to_owned()),

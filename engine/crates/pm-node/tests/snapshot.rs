@@ -1647,6 +1647,8 @@ fn child_blender() {
     if std::env::var(CHILD_ENV).is_err() {
         return;
     }
+    // Blender is retired in the app; this child runs its stage.
+    pm_render::blender::enable_for_tests();
     let mut c = Child::start();
     let session = c.session;
     let mut host = StandInHost::new();

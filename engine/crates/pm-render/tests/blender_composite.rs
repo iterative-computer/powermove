@@ -175,11 +175,15 @@ fn max_diff(a: &[f32], b: &[f64]) -> f64 {
 
 #[test]
 fn surfaces_composite_exactly_per_layer_at_level2() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     check_surfaces(2);
 }
 
 #[test]
 fn level1_matches_the_straight_imagebitmap_upload_including_zero_alpha_rgb() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     check_surfaces(1);
 }
 
@@ -259,6 +263,8 @@ fn check_surfaces(compat: u8) {
 
 #[test]
 fn a_missing_surface_fails_the_layer_and_native_shading_needs_no_blender() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let doc = load(&scene(true));
     let mut r = Renderer::headless().expect("a Metal device");
     let assets = MapResolver::default();
@@ -324,6 +330,8 @@ impl PreviewSurfaces for Preview {
 
 #[test]
 fn the_paused_preview_draws_what_it_has_and_asks_for_the_rest() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let doc = load(&scene(false));
     let mut r = Renderer::headless().expect("a Metal device");
     let assets = MapResolver::default();
@@ -423,6 +431,8 @@ fn the_paused_preview_draws_what_it_has_and_asks_for_the_rest() {
 
 #[test]
 fn nested_compositions_are_their_own_frames() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let mut doc = project(W, H, 2.0, solid_fill("#000000"), vec![]);
     let mut inner = scene(true);
     let layers = inner["layers"].take().as_array().unwrap().clone();

@@ -241,6 +241,8 @@ fn png_files(dir: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn an_export_with_blender_layers_composites_todays_level1_upload_exactly() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let dir = scratch("e2e");
     let Some(backend) = local(&dir) else { return };
     let mut renderer = Renderer::headless().unwrap();
@@ -377,6 +379,8 @@ fn an_export_with_blender_layers_composites_todays_level1_upload_exactly() {
 
 #[test]
 fn batched_and_per_layer_surfaces_are_equal_and_byte_stable() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let dir = scratch("batch");
     let Some(mut backend) = local(&dir) else {
         return;
@@ -459,6 +463,8 @@ fn pm_blender_chunks(png: &[u8]) -> Vec<String> {
 
 #[test]
 fn cancel_stops_blender() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let dir = scratch("cancel");
     let Some(backend) = local(&dir) else { return };
     let mut renderer = Renderer::headless().unwrap();
@@ -551,6 +557,8 @@ impl BlenderBackend for Dropping {
 
 #[test]
 fn a_missing_blender_or_surface_fails_the_export_and_nothing_is_routed() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let dir = scratch("missing");
     let mut renderer = Renderer::headless().unwrap();
     let doc = scene(1.0, "eevee", 4);
@@ -588,6 +596,8 @@ fn a_missing_blender_or_surface_fails_the_export_and_nothing_is_routed() {
 
 #[test]
 fn cycles_devices_are_resolved_and_recorded_per_job() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let dir = scratch("devices");
     let Some(backend) = local(&dir) else { return };
     let mut renderer = Renderer::headless().unwrap();

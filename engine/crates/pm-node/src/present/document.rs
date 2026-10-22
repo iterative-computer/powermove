@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn blender_compositions_are_drawn_by_the_engine_in_the_viewer() {
+    fn retired_blender_settings_change_nothing() {
         let object = r#"{"id":"o","type":"extension","on":true,"from":0,"dur":2,"blend":"normal","fx":[],"masks":[],"threeD":true,"p":{},"d":{"definition":"powermove.3d.object","version":1,"w":64,"h":36,"params":{},"data":{"object":{"source":{"primitive":"box","parameters":{}},"material":{"p":{},"maps":{},"doubleSided":true},"useSourceMaterials":false,"slots":[],"castShadow":true,"receiveShadow":true}}}}"#;
         let doc = |render3d: &str| {
             format!(
@@ -418,13 +418,14 @@ mod tests {
         let mut blender = ViewDocument::default();
         let with = doc(r#""render3d":{"enabled":true,"engine":"eevee","samples":8},"#);
         blender.update(&replace(&with, 1)).unwrap();
-        // The static check lists Blender for exports ...
+        // Blender is retired (main 2b1fa379a): `render3d` is inert, so the
+        // static check never lists it, and the viewer routes the
+        // composition exactly as the same scene without.
         assert!(
-            pm_render::unsupported(blender.document(), "c")
+            !pm_render::unsupported(blender.document(), "c")
                 .iter()
                 .any(|u| u.feature == pm_render::Feature::Blender)
         );
-        // ... and the viewer routes it exactly as the same scene without.
         assert_eq!(blender.route("c"), native.route("c"));
         if let Route::Legacy(reasons) = blender.route("c") {
             assert!(

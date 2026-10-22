@@ -88,6 +88,8 @@ struct Totals {
 
 #[test]
 fn snapshots_equal_todays_render_snapshot() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let capture = match std::env::var("PM_ENGINE_CORPUS") {
         Ok(p) => Some(std::path::PathBuf::from(p.split(',').next().unwrap())),
         Err(_) => newest_capture("v1-"),

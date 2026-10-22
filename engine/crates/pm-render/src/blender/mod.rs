@@ -32,6 +32,14 @@
 //! composition, at the plan's own times and sizes, so lookups always
 //! match). [`frames`] is the port of today's `blenderFrameRequests` (shutter
 //! samples included), checked against the corpus.
+//!
+//! **Retired.** Main removed the Blender integration (2b1fa379a): a
+//! composition's `render3d` is inert there and its 3D layers draw with
+//! three.js. The engine matches it: `render3d` plans no Blender stage
+//! ([`blender_enabled`] is false, the static check never lists
+//! [`crate::Feature::Blender`]), and every mode draws the native 3D pass.
+//! The stage stays for its own tests, which turn it back on per process
+//! with [`enable_for_tests`].
 
 pub mod frames;
 pub(crate) mod gpu;
@@ -39,6 +47,7 @@ pub mod snapshot;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use pm_blender::snapshot::{BlenderFrame, FrameKey, Render3dSettings, Snapshot};
 use pm_blender::{DecodedSurface, job::Surfaces};
@@ -173,9 +182,25 @@ pub(crate) enum Planned {
     Fail(String),
 }
 
-/// Whether the composition renders with Blender (`render3d.enabled`).
+static STAGE_FOR_TESTS: AtomicBool = AtomicBool::new(false);
+
+/// Turns the retired Blender stage back on for this process: tests of the
+/// stage only, never the app.
+#[doc(hidden)]
+pub fn enable_for_tests() {
+    STAGE_FOR_TESTS.store(true, Ordering::Relaxed);
+}
+
+/// Whether Blender is retired (see the module notes): always, outside the
+/// stage's own tests.
+pub fn retired() -> bool {
+    !STAGE_FOR_TESTS.load(Ordering::Relaxed)
+}
+
+/// Whether the composition renders with Blender (`render3d.enabled`):
+/// never while Blender is retired.
 pub fn blender_enabled(comp: &pm_eval::Comp<'_>) -> bool {
-    pm_eval::node::truthy(pm_eval::node::member(comp.member("render3d"), "enabled"))
+    !retired() && pm_eval::node::truthy(pm_eval::node::member(comp.member("render3d"), "enabled"))
 }
 
 /// The size of a preview frame: today's preview renders each composition at
@@ -256,6 +281,10 @@ pub(crate) fn plan_object<'d>(
     height: u32,
     in_samples: bool,
 ) -> JsResult<Option<Planned>> {
+    // Retired: no surfaces in any mode, and no previews asked for.
+    if retired() {
+        return Ok(None);
+    }
     let comp_id = scope.comp.id().to_string_lossy();
     let enabled = blender_enabled(scope.comp);
     let id = js::layer_id(layer);
