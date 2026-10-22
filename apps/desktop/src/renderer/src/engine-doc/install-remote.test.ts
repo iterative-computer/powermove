@@ -141,19 +141,36 @@ it('advances activation past edits to the still-published native document while 
   expect(bridge.calls.filter(call => call.op === 'activate').at(-1)!.args).toMatchObject({ revision: editedRevision + 1, preparedRevision });
 });
 
-it('cancels a prepared snapshot whose integrity differs from the source and retains the published project', async () => {
+it('refuses a prepared snapshot whose tree differs from its stream and retains the published project', async () => {
   const setup = await editor(), { PM, doc, bridge } = setup;
   const live = await publishLarge(setup);
   const revision = doc.barrier!.revision;
-  bridge.corruptIntegrity = true;
-  await expect(doc.prepare(project(PM, 'bad-source', 99, true))).rejects.toThrow('differs from the source snapshot');
+  bridge.corruptHash = true;
+  await expect(doc.prepare(project(PM, 'bad-source', 99, true))).rejects.toThrow('does not match its canonical hash');
   expect(PM.proj).toBe(live);
   expect(doc.barrier!.revision).toBe(revision);
   expect(doc.api!.ev(live.layers[0], 'position.x', 0)).toBe(42);
   expect(bridge.hasPrepared).toBe(false);
   expect(bridge.streams.size).toBe(0);
-  expect(bridge.calls.map(call => call.op)).toContain('cancel');
   expect(doc.ready).toBe(true);
+});
+
+it('finds a prepared tree whose integrity digest disagrees at its first check after publication, and repairs it', async () => {
+  // Preparation no longer digests the shadow before publication (OPENWRITE-1
+  // round: a third whole-document pass); the canonical hash round trip still
+  // gates ingestion, and the first check compares the integrity digests.
+  const setup = await editor(), { PM, doc, bridge } = setup;
+  await publishLarge(setup);
+  bridge.corruptIntegrity = true;
+  const next = project(PM, 'unverified-integrity', 77, true);
+  await doc.prepare(next);
+  PM.proj = next;
+  bridge.corruptIntegrity = false;
+  const first = await doc.checkAsync('after-open');
+  expect(first?.ok).toBe(false);
+  const second = await doc.checkAsync('after-repair');
+  expect(second?.ok).toBe(true);
+  expect(doc.api!.ev(next.layers[0], 'position.x', 0)).toBe(77);
 });
 
 it('releases a superseded preparation without canceling a newer in-flight tree', async () => {

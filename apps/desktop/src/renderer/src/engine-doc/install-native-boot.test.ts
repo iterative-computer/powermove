@@ -110,14 +110,14 @@ it('rechecks a restored project assigned while the small boot module is loading'
 it('reports a failed native boot and retries natively without a large WASM fallback', async () => {
   const { bridge, PM, install, loadModule } = await bootSetup();
   const raw = project(PM, 'retry-native-boot', 37); PM.proj = raw;
-  bridge.corruptIntegrity = true;
+  bridge.corruptHash = true;
   const doc = install();
   expect(await doc.whenReady).toBe(false);
   expect(doc.ready).toBe(false); expect(doc.wasm).toBeNull();
   expect(PM.proj).toBe(raw); expect(bridge.hasPrepared).toBe(false);
   expect(doc.failures()).toEqual([expect.objectContaining({ code: 'pm-wasm-unavailable', retry: true })]);
   expect(loadModule).not.toHaveBeenCalled();
-  bridge.corruptIntegrity = false;
+  bridge.corruptHash = false;
   expect(await doc.retry()).toBe(true);
   expect(doc.wasm).toBeInstanceOf(RemotePmWasm);
   expect(doc.api!.ev(raw.layers[0], 'position.x', 0)).toBe(37);

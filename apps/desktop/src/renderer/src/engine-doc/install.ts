@@ -540,6 +540,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
   const startup = { startedAt: performance.now(), moduleMs: 0, instantiateMs: 0, mirrorMs: 0, readyMs: 0 };
+  let preparationTiming: { cloneMs: number; ingestMs: number } | null = null;
   function discardPrepared(project?: any): void {
     if (!preparedProject || (project !== undefined && preparedProject.project !== unwrap(project))) return;
     const unused = preparedProject; preparedProject = null;
@@ -567,15 +568,18 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
         await new Promise(resolve => setTimeout(resolve, 250));
       }
     }
+    const began = performance.now();
     const shadow = await jsonCloneAsync(canonicalProject(project));
-    const integrity = new ConsistencyHash();
-    const expected = await integrity.digestAsync(shadow, (value, prefix) => remoteCanonicalHash(native, value, prefix), instructions => native.digestBatch(instructions));
+    const cloned = performance.now();
+    // Main hashes the canonical stream as it arrives, and the utility derives
+    // the canonical hash of the tree it parsed from it; ingestion fails unless
+    // they agree, so the tree is exactly the shadow's canonical JSON. The
+    // renderer's integrity digests (a third pass over the whole document, and
+    // a round trip per batch) are no longer computed before publication: the
+    // first consistency check fills them and compares them with the tree's.
     const receipt = await ingestDocument(native, shadow, documentId(project.id), Math.max(barrier?.revision ?? 0, barrier?.recoveryRevision ?? 0, wasm?.revision() ?? 0) + 1);
-    if (receipt.integrity !== expected) {
-      native.call('{"op":"cancel"}');
-      throw new Error('The native document differs from the source snapshot');
-    }
-    return { shadow, integrity, instance: new RemotePmWasm(native, receipt) };
+    preparationTiming = { cloneMs: cloned - began, ingestMs: performance.now() - cloned };
+    return { shadow, integrity: new ConsistencyHash(), instance: new RemotePmWasm(native, receipt) };
   }
 
   async function rebuildNative(): Promise<void> {
@@ -694,6 +698,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       return {
         mode: mode.name, ready: state.ready,
         startup: { ...startup, ...moduleCompileTiming() },
+        preparation: preparationTiming,
         barrier: barrier ? { revision: barrier.revision, ...barrier.stats } : null,
         native: api.stats,
         fontCensus: typeof document === 'undefined' ? null : fontCensusStats(document),
