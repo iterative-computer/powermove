@@ -182,8 +182,11 @@ describe('FrameBridge', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(timers).toHaveLength(0);
     expect(sends).toHaveLength(3);
-    expect(sends.every((s) => s.texture === sends[0]!.texture)).toBe(true);
     expect(launch.status()).toMatchObject({ sendFailures: 2, sendRetries: 2, undelivered: 0 });
+    // Each retry sent a fresh import of the same surface: a transfer that
+    // timed out took its import, which Electron never delivers again.
+    expect(new Set(sends.map((s) => s.texture)).size).toBe(3);
+    expect(launch.status()).toMatchObject({ reimports: 2 });
   });
 
   it('keeps offering an undelivered import at the last interval while it lives, and never retries a released one', async () => {

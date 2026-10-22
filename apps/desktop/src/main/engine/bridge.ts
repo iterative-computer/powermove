@@ -174,6 +174,11 @@ export function importColorSpace(format: 'bgra' | 'rgbaf16'): { primaries: 'bt70
 
 type Import = {
   imported: ImportedTextureLike;
+  /** Imports the surface again (a transfer that timed out consumed the
+   *  last import: Electron never delivers it on a later send). */
+  reimport: (() => ImportedTextureLike) | null;
+  /** Imports replaced after a failed send. */
+  reimports: number;
   clientPort: number;
   args: SurfaceArgs;
   sent: number;
@@ -203,6 +208,8 @@ export type BridgeLaunchStats = {
   /** Sends repeated after a failure; imports that never reached a window. */
   sendRetries: number;
   undelivered: number;
+  /** Surfaces imported again for a send after a failed one. */
+  reimports: number;
   retired: number;
   allReleased: number;
   /** Surfaces dropped after their receiver went away without releasing them. */
@@ -225,6 +232,7 @@ export class BridgeLaunch {
     sendFailures: 0,
     sendRetries: 0,
     undelivered: 0,
+    reimports: 0,
     retired: 0,
     allReleased: 0,
     reclaimed: 0,
@@ -383,9 +391,8 @@ export class BridgeLaunch {
     const key = `${generation}:${poolIndex}`;
     const previous = this.imports.get(key);
     if (previous) this.releaseImport(previous);
-    let imported: ImportedTextureLike;
-    try {
-      imported = this.sharedTexture.importSharedTexture({
+    const importOnce = (): ImportedTextureLike => {
+      const imported: ImportedTextureLike = this.sharedTexture.importSharedTexture({
         textureInfo: { pixelFormat: format, codedSize: { width, height }, colorSpace: importColorSpace(format), handle: { ioSurface } },
         allReferencesReleased: () => {
           const entry = this.imports.get(key);
@@ -396,6 +403,11 @@ export class BridgeLaunch {
           this.host.releaseSurface(generation, poolIndex);
         }
       });
+      return imported;
+    };
+    let imported: ImportedTextureLike;
+    try {
+      imported = importOnce();
     } catch (error) {
       // Main still holds the IOSurface; nothing will release it through
       // Chromium, so drop it here.
@@ -404,7 +416,7 @@ export class BridgeLaunch {
     }
     this.stats.imports++;
     const args: SurfaceArgs = { kind: 'powermove-frame-surface', launch: this.id, generation, poolIndex, poolSize, width, height, format };
-    const entry: Import = { imported, clientPort, args, sent: 0, sendFailures: 0, retries: 0, retry: null, released: false, owner: null, receiverGone: false, reclaim: null };
+    const entry: Import = { imported, reimport: importOnce, reimports: 0, clientPort, args, sent: 0, sendFailures: 0, retries: 0, retry: null, released: false, owner: null, receiverGone: false, reclaim: null };
     this.imports.set(key, entry);
     this.send(entry);
   }
@@ -424,6 +436,20 @@ export class BridgeLaunch {
       return;
     }
     entry.owner = receiver.owner;
+    // A send that failed took its import with it: offer a fresh import of
+    // the same surface (the page drops a stale one it still gets).
+    if (entry.sendFailures > 0 && entry.reimport && entry.reimports < entry.sendFailures) {
+      try {
+        const fresh = entry.reimport();
+        const stale = entry.imported;
+        entry.imported = fresh;
+        entry.reimports = entry.sendFailures;
+        this.stats.reimports++;
+        try { stale.release(); } catch { /* already gone with its transfer */ }
+      } catch (error) {
+        this.log('warn', `frame bridge: importing ${what} again failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     entry.sent++;
     this.stats.sends++;
     this.sharedTexture.sendSharedTexture({ frame: frame as never, importedSharedTexture: entry.imported }, entry.args).catch((error: unknown) => {
