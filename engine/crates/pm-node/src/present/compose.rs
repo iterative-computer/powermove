@@ -768,6 +768,71 @@ impl Composer {
         self.compose_with_depth(doc, composition, media, time, state, working, None)
     }
 
+    /// The render request of a viewer frame at `place` (its visible
+    /// `region`).
+    fn viewer_request(
+        &self,
+        place: &Placement,
+        region: PixelRect,
+        state: &ViewerState,
+        depth: bool,
+    ) -> RenderRequest {
+        RenderRequest {
+            output_size: place.output,
+            scale: place.scale,
+            origin: place.origin,
+            region: Some(region),
+            precision: Precision::Float16,
+            depth_id: depth,
+            background: true,
+            export: false,
+            // The viewer's override: editor camera, Wireframe and
+            // X-ray looks, Local View, and the shading Blender uses.
+            view: state.view.clone(),
+            blender: self.blender.clone(),
+            // Today's viewer: 6 samples while playing, 12 when paused;
+            // the playback resampler while playing.
+            motion_blur: pm_render::motion::MotionBlur::Kind(if self.playing {
+                pm_protocol::frame::MotionBlurKind::PreviewPlaying
+            } else {
+                pm_protocol::frame::MotionBlurKind::PreviewPaused
+            }),
+            sampling: if self.playing {
+                pm_render::sampling::Sampling::Playback
+            } else {
+                pm_render::sampling::Sampling::Final
+            },
+            video_end: pm_render::VideoEnd::Preview,
+        }
+    }
+
+    /// The raster-override answers the viewer frame at `time` lacks (its
+    /// plan only, `Renderer::compat_needs`), with the compatibility answers
+    /// the caller set on the renderer.
+    pub fn compat_needs_at(
+        &mut self,
+        doc: &pm_model::Document,
+        composition: &str,
+        media: &MediaMap,
+        time: Ticks,
+        state: &ViewerState,
+    ) -> Vec<pm_protocol::snapshot::CompatNeed> {
+        let Ok(comp) = pm_eval::Comp::resolve(doc, composition) else {
+            return Vec::new();
+        };
+        let number = |key: &str| {
+            let v = pm_eval::node::to_number(comp.member(key));
+            if v.is_finite() && v > 0.0 { v } else { 1.0 }
+        };
+        let place = placement(state, number("w"), number("h"));
+        let Some(region) = place.region else {
+            return Vec::new();
+        };
+        let request = self.viewer_request(&place, region, state, false);
+        self.renderer
+            .compat_needs(doc, composition, time, &request, media)
+    }
+
     /// [`Self::compose`], also writing the frame's depth and object-id
     /// surface (r depth, g/b id − 1, a coverage; plan section 8) into
     /// `depth`, a `rgbaf16` texture of the working texture's size, placed
@@ -799,33 +864,7 @@ impl Composer {
         let mut stand_ins = Vec::new();
         let mut svg_misses = Vec::new();
         if let Some(region) = place.region {
-            let request = RenderRequest {
-                output_size: place.output,
-                scale: place.scale,
-                origin: place.origin,
-                region: Some(region),
-                precision: Precision::Float16,
-                depth_id: depth.is_some(),
-                background: true,
-                export: false,
-                // The viewer's override: editor camera, Wireframe and
-                // X-ray looks, Local View, and the shading Blender uses.
-                view: state.view.clone(),
-                blender: self.blender.clone(),
-                // Today's viewer: 6 samples while playing, 12 when paused;
-                // the playback resampler while playing.
-                motion_blur: pm_render::motion::MotionBlur::Kind(if self.playing {
-                    pm_protocol::frame::MotionBlurKind::PreviewPlaying
-                } else {
-                    pm_protocol::frame::MotionBlurKind::PreviewPaused
-                }),
-                sampling: if self.playing {
-                    pm_render::sampling::Sampling::Playback
-                } else {
-                    pm_render::sampling::Sampling::Final
-                },
-                video_end: pm_render::VideoEnd::Preview,
-            };
+            let request = self.viewer_request(&place, region, state, depth.is_some());
             let reuse = self
                 .scratch
                 .as_ref()

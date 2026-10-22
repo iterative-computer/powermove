@@ -1502,6 +1502,64 @@ impl Renderer {
         )
     }
 
+    /// The raster-override answers a frame at `time` lacks, from its plan
+    /// alone (nothing is recorded, the draw reuse is left alone): a viewer
+    /// waiting for one frame's answers asks for the next frames' too, so
+    /// they arrive while it waits (bigrender round 2). Empty when the frame
+    /// lacks none or cannot be planned.
+    pub fn compat_needs(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+    ) -> Vec<crate::compat::CompatNeed> {
+        if self.compat.is_none() || request.validate().is_err() {
+            return Vec::new();
+        }
+        let Ok(comp) = Comp::resolve(document, composition) else {
+            return Vec::new();
+        };
+        let Some(root) = document.root() else {
+            return Vec::new();
+        };
+        let open = capability::open_composition_id(root);
+        let project = open
+            .as_deref()
+            .and_then(|id| Comp::resolve(document, id).ok())
+            .unwrap_or_else(|| comp.clone());
+        let seconds = comp.seconds_at(time.get());
+        let (w, h) = (request.output_size.width, request.output_size.height);
+        let scale = request
+            .scale
+            .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
+        let options3d = self.options3d.for_request(request);
+        let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        let (_, build) = plan::build_blender(
+            &mut self.evaluator,
+            &comp,
+            &project,
+            seconds,
+            w,
+            h,
+            scale,
+            assets,
+            effect_host(&self.effect_host, &self.effects),
+            options3d,
+            Some(&mut self.text),
+            build_options(&comp, request, self.shaders.fallback_runner),
+            blender,
+            self.compat.as_deref(),
+            None,
+        );
+        if build.unsupported.is_empty() {
+            build.compat_missing
+        } else {
+            Vec::new()
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_into_once(
         &mut self,

@@ -451,3 +451,40 @@ fn text_rows(precision: Precision) {
         }
     }
 }
+
+/// Bigrender round 2: a viewer waiting for one frame's answers asks for the
+/// next frames' from their plans alone (`Renderer::compat_needs`): the same
+/// needs the frame itself names when it is drawn, at its own time, with
+/// nothing recorded.
+#[test]
+fn a_frame_s_needs_from_its_plan_alone_are_the_ones_its_render_names() {
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Missing)));
+    let doc_value = doc(250.0);
+    let document = load(&doc_value);
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+    for t in [1.0 / 30.0, 0.5, 1.25] {
+        let planned = renderer.compat_needs(
+            &document,
+            "Ptest-root",
+            ticks(t),
+            &request,
+            &MapResolver::default(),
+        );
+        let Err(RenderError::CompatPending(drawn)) = render(&mut renderer, &doc_value, t) else {
+            panic!("expected CompatPending at {t}");
+        };
+        assert_eq!(planned, drawn, "at {t}");
+        assert_eq!(planned[0].time.get(), ticks(t).get());
+    }
+    // A pass-through producer: nothing to ask.
+    renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Native)));
+    assert!(renderer
+        .compat_needs(&document, "Ptest-root", ticks(0.5), &request, &MapResolver::default())
+        .is_empty());
+    // No producer: nothing to ask either.
+    renderer.set_compat_rasters(None);
+    assert!(renderer
+        .compat_needs(&document, "Ptest-root", ticks(0.5), &request, &MapResolver::default())
+        .is_empty());
+}

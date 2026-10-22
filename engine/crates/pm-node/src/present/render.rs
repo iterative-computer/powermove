@@ -468,6 +468,9 @@ pub struct Stats {
     pub compat_asked: u64,
     /// Viewer frames that waited for producer answers.
     pub compat_waits: u64,
+    /// Planning time spent asking the next frames' compatibility needs
+    /// while a playing frame waited for its own (µs).
+    pub compat_asked_ahead_us: u64,
     /// Where viewer frames' render-thread time went, summed over frames
     /// (docs/engine/host-processes.md, "Large projects, rendering").
     pub stages: StageTotals,
@@ -702,6 +705,11 @@ struct Thread {
 /// long even when some are still out (a renderer that skipped a stale need
 /// answers the clock's frame instead).
 const COMPAT_WAIT_REPLAN: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Frames past a playing frame that waits for compatibility answers whose
+/// needs are asked with it, and the most planning time spent on them.
+const COMPAT_ASK_AHEAD: i64 = 3;
+const COMPAT_ASK_AHEAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(30);
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -3790,9 +3798,43 @@ impl Thread {
                     if k < 0 {
                         view.dirty = false;
                     }
-                    let fresh =
-                        self.compat_store()
-                            .to_ask(key, revision, needs, std::time::Instant::now());
+                    let mut fresh = self
+                        .compat
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .to_ask(key, revision, needs, std::time::Instant::now());
+                    // Playing: while the window answers this frame, the
+                    // next frames' needs go with it (their plans only), so
+                    // their answers are in when they are drawn instead of
+                    // each frame waiting a round trip of its own.
+                    if k >= 0 {
+                        let asking = std::time::Instant::now();
+                        let compat = self::compat_view(&self.compat, key, revision);
+                        composer.renderer().set_compat_rasters(compat);
+                        let f = view.clock.frame_ticks();
+                        for ahead in 1..=COMPAT_ASK_AHEAD {
+                            if asking.elapsed() > COMPAT_ASK_AHEAD_BUDGET {
+                                break;
+                            }
+                            let at = view.clock.wrap((k + ahead) * f);
+                            let later = composer.compat_needs_at(
+                                doc.document(),
+                                &composition,
+                                doc.media(),
+                                Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
+                                &view.state,
+                            );
+                            fresh.extend(self.compat.lock().unwrap_or_else(|e| e.into_inner()).to_ask(
+                                key,
+                                revision,
+                                later,
+                                std::time::Instant::now(),
+                            ));
+                        }
+                        composer.renderer().set_compat_rasters(None);
+                        self.stats().compat_asked_ahead_us +=
+                            asking.elapsed().as_micros() as u64;
+                    }
                     for chunk in fresh.chunks(pm_protocol::snapshot::MAX_COMPAT_NEEDS) {
                         let envelope = super::compat::needs_event(key.1, revision, chunk.to_vec());
                         if let Ok(bytes) = codec::encode(&envelope) {
