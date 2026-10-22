@@ -114,6 +114,7 @@ impl Sink for OutputSink {
         match self {
             #[cfg(target_os = "macos")]
             OutputSink::LegacyVideo(s) => s.video_rgba(index, frame),
+            OutputSink::Webm(s) => s.video_rgba(index, frame),
             _ => Ok(false),
         }
     }

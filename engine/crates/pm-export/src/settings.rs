@@ -366,7 +366,8 @@ pub enum AudioCodec {
     /// bitrate and edit list (the desktop exporter's settings); otherwise
     /// AudioToolbox at 128 kbps per channel with an edit list.
     Aac,
-    /// Opus through libopus at 48 kHz (WebM), 96 kbps per channel.
+    /// Opus through libopus at 48 kHz (WebM), 160 kbps for the stream with
+    /// Chromium WebCodecs' AudioEncoder settings (20 ms, VBR, complexity 9).
     Opus,
 }
 
