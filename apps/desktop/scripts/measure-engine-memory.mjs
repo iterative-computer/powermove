@@ -38,12 +38,44 @@ for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
   void app?.evaluate(({ app }) => app.exit(0)).catch(() => {});
 });
 
+const settleMs = Number(process.env.PM_MEMORY_SETTLE_MS ?? 3000);
+const seriesEveryMs = 500;
+
+// Physical footprint and owned graphics bytes per process (one footprint call).
+async function footprints(pids) {
+  const file = path.join(output, 'series-footprint.json');
+  let json;
+  try {
+    await exec('footprint', [...pids.flatMap(p => ['-p', String(p.pid)]), '-f', 'bytes', '-j', file], { timeout: 30_000, maxBuffer: 16 * 1024 ** 2 });
+    json = JSON.parse(await readFile(file, 'utf8'));
+  } catch {
+    return [];
+  } finally {
+    await rm(file, { force: true });
+  }
+  return pids.map(p => {
+    const f = json.processes?.find(f => f.pid === p.pid);
+    const graphics = f ? Object.entries(f.categories).filter(([k]) => k.includes('(graphics)')).reduce((n, [, c]) => n + c.dirty, 0) : null;
+    return { pid: p.pid, role: p.role, footprintBytes: f?.footprint ?? null, graphicsBytes: graphics };
+  });
+}
+
 async function capture(state, prefix, first) {
   // Match the quiescent editor and force the same GC on both paths.
   const page = app.windows()[0];
   const cdp = await page.context().newCDPSession(page);
   try { await cdp.send('HeapProfiler.collectGarbage'); } finally { await cdp.detach(); }
-  await page.waitForTimeout(1000);
+  // Any Metal submission charges a process ~160-400 MiB of owned graphics
+  // memory until about 1.5 s after its last GPU work (docs/engine/memory.md,
+  // "Active GPU context"). A series shows whether a process is still active
+  // when the capture is taken; settle long enough for rest to be at rest.
+  const series = [];
+  const seriesStart = performance.now();
+  while (performance.now() - seriesStart < settleMs) {
+    const pids = await app.evaluate(({ app }) => app.getAppMetrics().map(m => ({ pid: m.pid, role: m.serviceName || m.type })));
+    series.push({ ms: Math.round(performance.now() - seriesStart), processes: await footprints(pids) });
+    await page.waitForTimeout(seriesEveryMs);
+  }
   const processes = await app.evaluate(({ app }) => app.getAppMetrics().map(m => ({
     pid: m.pid, role: m.serviceName || m.type, workingSetBytes: m.memory.workingSetSize * 1024
   })));
@@ -85,7 +117,7 @@ async function capture(state, prefix, first) {
     if (process) process.role = `Powermove ${kind} engine`;
   }
   // footprint's combined summary accounts shared regions across these PIDs.
-  return { state, load: loadavg(), processes, engine,
+  return { state, load: loadavg(), processes, engine, settleMs, series,
     workingSetBytes: processes.reduce((n, p) => n + p.workingSetBytes, 0),
     physicalFootprintBytes: footprint['total footprint'],
     summedProcessFootprintBytes: processes.reduce((n, p) => n + p.physicalFootprintBytes, 0),
@@ -145,6 +177,13 @@ for (let round = 0; round < count; round++) {
         return { ms: performance.now() - start, encodedBytes: image.length };
       });
       states.push(await capture('corpus', prefix, round === 0));
+      if (process.env.PM_MEMORY_CLOSED === '1') {
+        // Back to an empty project: what the corpus project leaves behind.
+        await page.evaluate(() => { window.PM.replaceProject(window.PM.mkProject({ name: 'Memory measurement' })); });
+        if (variant !== 'off') await page.waitForFunction(() => window.PM.EngineConnection?.status().route === 'engine', undefined, { timeout: 60_000 });
+        await page.waitForTimeout(1500);
+        states.push(await capture('closed', prefix, round === 0));
+      }
       const firstJobReadyMs = variant === 'off' ? null : await app.evaluate(async () => {
         const start = performance.now();
         await globalThis.__powermoveNativeEngine.engine.ensureReady('job');
