@@ -101,9 +101,18 @@ async function piecesOf(text: string, write: (piece: string) => void): Promise<v
   }
 }
 
+/* The last text fingerprinted: an open fingerprints the same checkpointed
+   text as its unsaved baseline and as the opened file's hash. */
+let last: { text: string; digest: Promise<string> } | null = null;
+
 /** The fingerprint of JSON text. */
 export async function projectFingerprint(projectJSON: string): Promise<string> {
-  return fingerprint(write => piecesOf(projectJSON, write));
+  if (last && last.text.length === projectJSON.length && last.text === projectJSON) return last.digest;
+  const entry = { text: projectJSON, digest: fingerprint(write => piecesOf(projectJSON, write)) };
+  last = entry;
+  // Hold the text only until its digest is known.
+  void entry.digest.then(() => { if (last === entry) last = null; }, () => { if (last === entry) last = null; });
+  return entry.digest;
 }
 
 /** `projectFingerprint(JSON.stringify(value))`, without building the string or a long task. */

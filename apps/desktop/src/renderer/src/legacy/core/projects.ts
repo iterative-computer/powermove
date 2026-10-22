@@ -125,9 +125,25 @@ let announced = 0;
 for (const event of ['layers', 'project', 'library', 'assets', 'comps', 'history:project-patch']) PM.bus?.on?.(event, () => { announced++; });
 const changeToken = () => `${announced}:${PM.animVersion?.() ?? 0}`;
 
+/* The JSON this window just wrote for a project, for the rest of the writing
+   task while nothing announced a change: opening and switching projects
+   fingerprint the document right after checkpointing it. */
+let justWritten: { project: object; token: string; text: string } | null = null;
+R.writtenJSON = (proj: any): string | null => {
+  const entry = justWritten;
+  if (!entry || entry.project !== proj || entry.token !== changeToken() || typeof proj?.toJSON === 'function') return null;
+  const prefix = `{"v":${JSON.stringify(PM.version || '1.0.0')},"proj":`;
+  return entry.text.startsWith(prefix) && entry.text.endsWith('}') ? entry.text.slice(prefix.length, -1) : null;
+};
+
 function writeSlot(proj: any) {
   const envelope = { v: PM.version || '1.0.0', proj };
   if (PM.store.set(R.SLOT + proj.id, envelope) === false) throw new Error('Project storage is unavailable or full');
+  const text = typeof PM.store.writtenText === 'function' ? PM.store.writtenText(R.SLOT + proj.id) : null;
+  if (text) {
+    const entry = justWritten = { project: proj, token: changeToken(), text };
+    queueMicrotask(() => { if (justWritten === entry) justWritten = null; });
+  }
   PM.store.del(R.JOURNAL + proj.id);
   if (written?.id === proj.id) written = null;
   const digest = typeof PM.store.writtenDigest === 'function' ? PM.store.writtenDigest(R.SLOT + proj.id) : null;

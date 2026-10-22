@@ -70,7 +70,7 @@ function fileState(id = PM.proj.id): FileState {
     if (project) {
       const initialState = state;
       // The baseline is this moment's document: serialized now, digested later.
-      initialState.baselineReady = projectFingerprint(JSON.stringify(project)).then(hash => {
+      initialState.baselineReady = projectFingerprint(PM.Projects.writtenJSON?.(project) ?? JSON.stringify(project)).then(hash => {
         initialState.baselineHash = hash;
         rememberFile(id, initialState);
       });
@@ -1024,7 +1024,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     switchProject(project, o.history || { version: 1, index: -1, entries: [] }, undefined, true);
     const state = fileState(project.id);
     state.path = association?.path;
-    const savedHash = association ? await projectFingerprint(JSON.stringify(project)) : undefined;
+    const savedHash = association ? await projectFingerprint(PM.Projects.writtenJSON?.(project) ?? JSON.stringify(project)) : undefined;
     checkCurrent();
     state.savedHash = savedHash;
     rememberFile(project.id, state);

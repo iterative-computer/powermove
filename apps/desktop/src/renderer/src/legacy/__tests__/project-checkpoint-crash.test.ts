@@ -226,6 +226,24 @@ describe('open-time project checkpoints', () => {
     }
   });
 
+  it('offers the JSON it just wrote only for the rest of that task and until a change is announced', async () => {
+    const store = createStore(await temporaryDirectory(), { writeDelayMs: 0 });
+    await store.load();
+    const PM: any = openWindow(store);
+    const project = largeProject('W');
+    PM.proj = project;
+    PM.Projects.put(project);
+    expect(PM.Projects.writtenJSON(project)).toBe(JSON.stringify(project));
+    expect(PM.Projects.writtenJSON({ ...project })).toBeNull();
+    await Promise.resolve();
+    expect(PM.Projects.writtenJSON(project)).toBeNull();
+    project.name = 'changed';
+    PM.Projects.put(project);
+    PM.bus.emit('layers');
+    expect(PM.Projects.writtenJSON(project)).toBeNull();
+    await settle(PM, store);
+  });
+
   it('writes a small project directly at each checkpoint, as before', async () => {
     const directory = await temporaryDirectory();
     const log: Op[] = [];

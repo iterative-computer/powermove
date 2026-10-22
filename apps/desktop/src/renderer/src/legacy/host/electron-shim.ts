@@ -475,6 +475,10 @@ export function install(PM: PMRegistry): void {
     writtenDigest(key: string): Promise<string | null> | null {
       return digests.get(serviceKey(key))?.digest ?? null;
     },
+    /** That text while it is still on its way to main (in practice, the rest of the writing task). */
+    writtenText(key: string): string | null {
+      return posted.get(serviceKey(key)) ?? null;
+    },
     /** The length in UTF-16 units of that text (0 when unknown). */
     writtenChars(key: string): number {
       return digests.get(serviceKey(key))?.chars ?? 0;
