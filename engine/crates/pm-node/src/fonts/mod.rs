@@ -302,6 +302,11 @@ impl FontService {
         self.generation_base + self.layout.resolver().generation()
     }
 
+    /// Retained registry payload lengths, excluding CoreText's opaque caches.
+    pub fn memory_usage(&self) -> pm_text::registry::FontMemoryUsage {
+        self.layout.resolver().memory_usage()
+    }
+
     /// Handles one message from the font port and returns the reply.
     pub fn handle(&mut self, bytes: &[u8]) -> Vec<u8> {
         let request = match wire::decode_request(bytes) {

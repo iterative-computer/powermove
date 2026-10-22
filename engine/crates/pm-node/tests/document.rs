@@ -101,22 +101,27 @@ fn the_engine_draws_the_document_follows_its_patches_routes_and_recovers() {
         "child did not finish:\n{stdout}\n{stderr}"
     );
     let events = main.join().unwrap();
-    // Two generations: the first pool, and the one made after the device loss.
-    let generations: std::collections::BTreeSet<u32> = events
-        .iter()
-        .filter_map(|e| match e {
-            HostEvent::Surface { info, .. } => Some(info.generation),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(generations.len(), 2, "{events:?}");
+    // Four generations: the paused pool (the protocol minimum of four
+    // slots), the playback ring made before Play, the paused pool again
+    // after Pause, and the pool made after the device loss.
+    let mut sizes: std::collections::BTreeMap<u32, u32> = Default::default();
+    for e in &events {
+        if let HostEvent::Surface { info, .. } = e {
+            sizes.insert(info.generation, info.pool_size);
+        }
+    }
+    let sizes: Vec<u32> = sizes.into_values().collect();
+    assert_eq!(sizes.len(), 4, "{events:?}");
+    assert_eq!(sizes[0], 4, "{events:?}");
+    assert!(sizes[1] > 4, "the playback ring is larger: {events:?}");
+    assert_eq!(&sizes[2..], &[4, 4], "{events:?}");
     let retired = events
         .iter()
         .filter(|e| matches!(e, HostEvent::Retire { client_port, .. } if *client_port == WINDOW.0))
         .count();
     assert_eq!(
-        retired, 2,
-        "the lost pool and the last one are retired: {events:?}"
+        retired, 4,
+        "each replaced pool, the lost pool and the last one are retired: {events:?}"
     );
 }
 
@@ -570,7 +575,9 @@ fn state(view_seq: u64) -> ViewerState {
         view_seq: Seq::new(view_seq).unwrap(),
         vsync: None,
         depth_id: None,
+        chrome_selection: None,
         canvas: None,
+        surface_epoch: None,
     }
 }
 

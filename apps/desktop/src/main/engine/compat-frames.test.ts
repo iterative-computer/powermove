@@ -27,6 +27,21 @@ function setup(windowIds: number[]) {
 const pixels = (ask: number, w = 2, h = 2) => ({ ask, status: 'pixels' as const, key: 'k', width: w, height: h, format: 'rgba8Premultiplied' as const, origin: [0, 0] as [number, number], scale: 1, data: new Uint8Array(w * h * 4).fill(9) });
 
 describe('CompatFrames', () => {
+  it('carries a complete Blender PNG and checks its header dimensions', async () => {
+    const png = new Uint8Array(33);
+    png.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    png.set([73, 72, 68, 82], 12);
+    png[19] = 1; png[23] = 1;
+    const { frames, asks } = setup([1]);
+    const source = { ...request, source: 'blenderPng' as const, blender: { asset: 'a1', content: new Uint8Array(32) } };
+    const result = frames.serve(source as CompatFrameRequest);
+    const reply = { ask: asks.get(1)![0]!.ask, status: 'pixels', key: 'k', width: 1, height: 1,
+      format: 'png', origin: [0, 0], scale: 1, data: png };
+    expect(validCompatAnswer(reply)).toBe(true);
+    expect(validCompatAnswer({ ...reply, width: 2 })).toBe(false);
+    frames.answer(1, reply);
+    expect(await result).toMatchObject({ format: 'png', payload: { kind: 'inline', bytes: png } });
+  });
   it('asks every window and takes the first pixels', async () => {
     const { frames, asks } = setup([1, 2]);
     const answer = frames.serve(request);

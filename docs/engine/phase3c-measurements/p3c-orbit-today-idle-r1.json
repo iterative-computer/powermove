@@ -1,0 +1,126 @@
+{
+  "run": "p3c-orbit-today-idle-r1",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "orbit"
+    ],
+    "synthetic": {
+      "layers": 0,
+      "scene3d": true
+    }
+  },
+  "synthetic": {
+    "layers": 11,
+    "w": 1920,
+    "h": 1080,
+    "objects": 9,
+    "shadows": true
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "displayState": {
+    "before": {
+      "asleep": false,
+      "locked": false
+    },
+    "after": {
+      "asleep": false,
+      "locked": false
+    }
+  },
+  "machineLoad": {
+    "before": [
+      29.064453125,
+      22.1533203125,
+      15.9951171875
+    ],
+    "after": [
+      23.40478515625,
+      21.3447265625,
+      15.87939453125
+    ]
+  },
+  "project": {
+    "name": "3D orbit (shadows)",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 10,
+    "layers": 11
+  },
+  "clock": {
+    "rttUs": 55,
+    "offsetUs": 553347321045.5
+  },
+  "load": null,
+  "bridge": null,
+  "latency": {
+    "orbit": {
+      "events": 2401,
+      "dispatches": 2089,
+      "draws": 2089,
+      "unmatched": 0,
+      "unpresented": 56,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2345,
+        "p50": 25.74,
+        "p95": 38.5,
+        "p99": 42.59,
+        "max": 59.32
+      },
+      "pointerToPixelWithDropsMs": {
+        "n": 2401,
+        "p50": 25.75,
+        "p95": 38.54,
+        "p99": 46.87,
+        "max": 75.93
+      },
+      "hopsMs": {
+        "inputToHandled": {
+          "n": 2345,
+          "p50": 5.29,
+          "p95": 11.07,
+          "p99": 14.75,
+          "max": 31.54
+        },
+        "handledToRaf": {
+          "n": 2345,
+          "p50": -0.5,
+          "p95": -0.2,
+          "p99": -0.1,
+          "max": -0.1
+        },
+        "rafToPresent": {
+          "n": 2345,
+          "p50": 19.91,
+          "p95": 36.54,
+          "p99": 37,
+          "max": 44.88
+        }
+      }
+    }
+  }
+}

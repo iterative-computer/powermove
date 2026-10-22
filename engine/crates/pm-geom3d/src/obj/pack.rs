@@ -11,9 +11,9 @@
 //! stored as PNG, and multi-material objects get per-group indices.
 
 use super::loader::{self, Kind, Phong, TextureParams};
+use crate::js;
 use crate::model_import::glb::GlbWriter;
 use crate::model_import::{Error, Result};
-use crate::js;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
@@ -98,7 +98,10 @@ pub fn bump_normals(img: &image::RgbaImage, strength: f64) -> image::RgbaImage {
     };
     let (wi, hi) = (i64::from(w), i64::from(h));
     let sample = |x: i64, y: i64| -> f64 {
-        let p = src.get_pixel((((x + wi) % wi) as u32).min(w - 1), (((y + hi) % hi) as u32).min(h - 1));
+        let p = src.get_pixel(
+            (((x + wi) % wi) as u32).min(w - 1),
+            (((y + hi) % hi) as u32).min(h - 1),
+        );
         (f64::from(p[0]) + f64::from(p[1]) + f64::from(p[2])) / 765.0
     };
     let mut out = image::RgbaImage::new(w, h);
@@ -191,8 +194,16 @@ impl Exporter<'_> {
         // flipY: drawn bottom-up into the export canvas.
         let flipped = image::imageops::flip_vertical(&drawn);
         let view = self.w.view(&png(&flipped), None);
-        self.images.push(json!({ "mimeType": "image/png", "bufferView": view }));
-        self.image_cache.insert(source.clone(), self.images.len() - 1);
+        let mut image = json!({ "mimeType": "image/png", "bufferView": view });
+        if let TexSource::File(file) = source {
+            // The compatibility exporter must use the selected HTML image,
+            // not this intermediate PNG. JPEG/WebP color conversion through
+            // a second ImageBitmap decode changes Chromium's final PNG bytes.
+            image["extras"] = json!({ "__pmSourceFile": file });
+        }
+        self.images.push(image);
+        self.image_cache
+            .insert(source.clone(), self.images.len() - 1);
         self.images.len() - 1
     }
 
@@ -204,7 +215,8 @@ impl Exporter<'_> {
             "wrapS": t.wrap,
             "wrapT": t.wrap,
         }));
-        self.textures.push(json!({ "sampler": self.samplers.len() - 1, "source": source }));
+        self.textures
+            .push(json!({ "sampler": self.samplers.len() - 1, "source": source }));
         let mut def = Map::new();
         def.insert("index".into(), json!(self.textures.len() - 1));
         def.insert("texCoord".into(), json!(0));
@@ -217,7 +229,10 @@ impl Exporter<'_> {
             transform.insert("scale".into(), json!(t.repeat));
         }
         if !transform.is_empty() {
-            def.insert("extensions".into(), json!({ "KHR_texture_transform": transform }));
+            def.insert(
+                "extensions".into(),
+                json!({ "KHR_texture_transform": transform }),
+            );
             self.transform_used = true;
         }
         Value::Object(def)
@@ -253,6 +268,24 @@ impl Exporter<'_> {
             if let Some(t) = &m.normal_map {
                 let t = self.texture(t);
                 def.insert("normalTexture".into(), t);
+            }
+            // The intermediate GLB is imported back into the compatibility
+            // Object3D before final Chromium export. Mark only oversized bump
+            // sources so Chromium can perform the exact canvas resize used by
+            // today's prepareImport; image::Triangle has different pixels.
+            if let Some(Tex {
+                source: TexSource::Bump(file, strength, _),
+                ..
+            }) = &m.normal_map
+                && let Some(image) = self.decoded.get(file)
+                && (image.width() > MAX_BUMP || image.height() > MAX_BUMP)
+            {
+                def.insert(
+                    "extras".into(),
+                    json!({"__pmBumpSource":{
+                        "file":file,"strength":f64::from_bits(*strength)
+                    }}),
+                );
             }
         }
         if m.transparent {
@@ -322,7 +355,10 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
     let source = text(&files[model].bytes);
     // Validate geometry before allocating it.
     super::parse_obj(&source).map_err(Error)?;
-    let mtls: Vec<&ImportFile> = files.iter().filter(|f| ends_with_ci(&f.name, &[".mtl"])).collect();
+    let mtls: Vec<&ImportFile> = files
+        .iter()
+        .filter(|f| ends_with_ci(&f.name, &[".mtl"]))
+        .collect();
     if mtls.is_empty() {
         return err("Include the OBJ material (.mtl) file with its textures");
     }
@@ -333,7 +369,11 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
             return err(format!("Duplicate file name: {}", f.name));
         }
     }
-    let mtl_text = mtls.iter().map(|f| text(&f.bytes)).collect::<Vec<_>>().join("\n");
+    let mtl_text = mtls
+        .iter()
+        .map(|f| text(&f.bytes))
+        .collect::<Vec<_>>()
+        .join("\n");
     let infos = loader::parse_mtl(&mtl_text);
     // MaterialCreator.preload(): every material, every texture it names.
     let mut phongs: Vec<Phong> = vec![];
@@ -349,7 +389,10 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
     let mut decoded = HashMap::new();
     for &f in texture_files.values() {
         if let std::collections::hash_map::Entry::Vacant(e) = decoded.entry(f) {
-            e.insert(decode(&files[f].bytes).ok_or_else(|| Error("A selected texture could not be decoded".into()))?);
+            e.insert(
+                decode(&files[f].bytes)
+                    .ok_or_else(|| Error("A selected texture could not be decoded".into()))?,
+            );
         }
     }
     let objects = loader::parse_obj(&source);
@@ -391,7 +434,9 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
                 if normal_map.is_none()
                     && let Some(b) = map_of("bumpMap")
                 {
-                    let TexSource::File(f) = b.source else { unreachable!() };
+                    let TexSource::File(f) = b.source else {
+                        unreachable!()
+                    };
                     normal_map = Some(Tex {
                         source: TexSource::Bump(f, p.bump_scale.to_bits(), conversions),
                         wrap: CLAMP,
@@ -423,7 +468,11 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
                     double_sided: false,
                     roughness: 1.0,
                     emissive: [0.0; 3],
-                    map: if o.kind == Kind::Points { map_of("map") } else { None },
+                    map: if o.kind == Kind::Points {
+                        map_of("map")
+                    } else {
+                        None
+                    },
                     emissive_map: None,
                     normal_map: None,
                 }
@@ -439,10 +488,16 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
             attributes.insert("NORMAL".into(), json!(ex.w.floats(&n, false)));
         }
         if !o.colors.is_empty() {
-            attributes.insert("COLOR_0".into(), json!(ex.w.floats(&items::<3>(&o.colors), false)));
+            attributes.insert(
+                "COLOR_0".into(),
+                json!(ex.w.floats(&items::<3>(&o.colors), false)),
+            );
         }
         if o.has_uv_indices {
-            attributes.insert("TEXCOORD_0".into(), json!(ex.w.floats(&items::<2>(&o.uvs), false)));
+            attributes.insert(
+                "TEXCOORD_0".into(),
+                json!(ex.w.floats(&items::<2>(&o.uvs), false)),
+            );
         }
         let mode = match o.kind {
             Kind::Mesh => 4,
@@ -485,14 +540,29 @@ pub fn prepare_import(files: &[ImportFile]) -> Result<Prepared> {
         doc.insert("extensionsUsed".into(), json!(["KHR_texture_transform"]));
     }
     doc.insert("scene".into(), json!(0));
-    doc.insert("scenes".into(), json!([{ "name": "AuxScene", "nodes": [0] }]));
+    doc.insert(
+        "scenes".into(),
+        json!([{ "name": "AuxScene", "nodes": [0] }]),
+    );
     doc.insert("nodes".into(), Value::Array(nodes));
     doc.insert("meshes".into(), Value::Array(meshes));
-    doc.insert("materials".into(), Value::Array(std::mem::take(&mut ex.materials)));
+    doc.insert(
+        "materials".into(),
+        Value::Array(std::mem::take(&mut ex.materials)),
+    );
     if !ex.images.is_empty() {
-        doc.insert("images".into(), Value::Array(std::mem::take(&mut ex.images)));
-        doc.insert("textures".into(), Value::Array(std::mem::take(&mut ex.textures)));
-        doc.insert("samplers".into(), Value::Array(std::mem::take(&mut ex.samplers)));
+        doc.insert(
+            "images".into(),
+            Value::Array(std::mem::take(&mut ex.images)),
+        );
+        doc.insert(
+            "textures".into(),
+            Value::Array(std::mem::take(&mut ex.textures)),
+        );
+        doc.insert(
+            "samplers".into(),
+            Value::Array(std::mem::take(&mut ex.samplers)),
+        );
     }
     let bytes = ex.w.finish(doc);
     let name = files[model].name.clone();
@@ -536,7 +606,9 @@ mod tests {
     }
 
     fn png_of(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
-        png(&image::RgbaImage::from_fn(w, h, |x, y| image::Rgba(f(x, y))))
+        png(&image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba(f(x, y))
+        }))
     }
 
     const QUAD: &str = "mtllib m.mtl\no Card\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nusemtl Paper\nf 1/1 2/2 3/3 4/4\n";
@@ -549,14 +621,24 @@ mod tests {
             e(&[file("a.obj", b"v"), file("b.glb", b"")]),
             "Choose one model at a time with its material and texture files"
         );
-        assert_eq!(prepare_import(&[file("a.obj", QUAD.as_bytes())]).unwrap(), Prepared::Unchanged(0));
-        assert_eq!(prepare_import(&[file("x.png", b""), file("a.GLB", b"")]).unwrap(), Prepared::Unchanged(1));
+        assert_eq!(
+            prepare_import(&[file("a.obj", QUAD.as_bytes())]).unwrap(),
+            Prepared::Unchanged(0)
+        );
+        assert_eq!(
+            prepare_import(&[file("x.png", b""), file("a.GLB", b"")]).unwrap(),
+            Prepared::Unchanged(1)
+        );
         assert_eq!(
             e(&[file("a.obj", QUAD.as_bytes()), file("t.png", b"")]),
             "Include the OBJ material (.mtl) file with its textures"
         );
         assert_eq!(
-            e(&[file("a.obj", QUAD.as_bytes()), file("m.mtl", b""), file("dir/M.mtl", b"")]),
+            e(&[
+                file("a.obj", QUAD.as_bytes()),
+                file("m.mtl", b""),
+                file("dir/M.mtl", b"")
+            ]),
             "Duplicate file name: dir/M.mtl"
         );
         let mtl = b"newmtl Paper\nmap_Kd textures/paper.png\n";
@@ -565,11 +647,18 @@ mod tests {
             "Select the missing texture file: textures/paper.png"
         );
         assert_eq!(
-            e(&[file("a.obj", QUAD.as_bytes()), file("m.mtl", b"newmtl P\nmap_Kd https://x/a.png\n")]),
+            e(&[
+                file("a.obj", QUAD.as_bytes()),
+                file("m.mtl", b"newmtl P\nmap_Kd https://x/a.png\n")
+            ]),
             "Model texture references must be selected local files"
         );
         assert_eq!(
-            e(&[file("a.obj", QUAD.as_bytes()), file("m.mtl", mtl), file("paper.png", b"not a png")]),
+            e(&[
+                file("a.obj", QUAD.as_bytes()),
+                file("m.mtl", mtl),
+                file("paper.png", b"not a png")
+            ]),
             "A selected texture could not be decoded"
         );
         assert_eq!(
@@ -580,24 +669,44 @@ mod tests {
 
     #[test]
     fn packs_textures_flipped_with_their_transform() {
-        let paper = png_of(2, 2, |_, y| if y == 0 { [255, 0, 0, 255] } else { [0, 0, 255, 255] });
+        let paper = png_of(2, 2, |_, y| {
+            if y == 0 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            }
+        });
         let mtl = b"newmtl Paper\nKd 1 1 1\nNs 0\nmap_Kd -o 0.25 0 0 paper.png\n";
-        let out = prepare_import(&[file("card.obj", QUAD.as_bytes()), file("m.mtl", mtl), file("PAPER.png", &paper)]).unwrap();
-        let Prepared::Glb { name, bytes } = out else { panic!("packed") };
+        let out = prepare_import(&[
+            file("card.obj", QUAD.as_bytes()),
+            file("m.mtl", mtl),
+            file("PAPER.png", &paper),
+        ])
+        .unwrap();
+        let Prepared::Glb { name, bytes } = out else {
+            panic!("packed")
+        };
         assert_eq!(name, "card.glb");
+        let json = gltf::json_of(&bytes).unwrap();
+        assert_eq!(json["images"][0]["extras"]["__pmSourceFile"], 2);
         let (model, scene, facts) = gltf::import(&bytes).unwrap();
         assert_eq!((facts.vertices, facts.triangles), (6, 2));
         assert_eq!(scene.objects[0].name, "AuxScene");
         let card = scene.objects.iter().find(|o| o.name == "Card").unwrap();
         let m = gltf::material_facts(&model, card).unwrap();
-        assert_eq!((m.class, m.side, m.roughness), ("MeshStandardMaterial", 2, Some(1.0)));
+        assert_eq!(
+            (m.class, m.side, m.roughness),
+            ("MeshStandardMaterial", 2, Some(1.0))
+        );
         assert_eq!(m.maps, vec![("map", 0)]);
         let mat = &model.materials[0];
         let t = mat.base_color_texture.as_ref().unwrap();
         assert_eq!(t.transform.unwrap().offset, [0.25, 0.0]);
         assert_eq!(model.textures[0].sampler.wrap_s, REPEAT);
         // The image is stored flipped: blue (OBJ's bottom row) first.
-        let img = image::load_from_memory(&model.images[0].bytes).unwrap().to_rgba8();
+        let img = image::load_from_memory(&model.images[0].bytes)
+            .unwrap()
+            .to_rgba8();
         assert_eq!(img.get_pixel(0, 0).0, [0, 0, 255, 255]);
         assert_eq!(img.get_pixel(0, 1).0, [255, 0, 0, 255]);
     }
@@ -610,17 +719,45 @@ mod tests {
             [v, v, v, 255]
         });
         let mtl = b"newmtl Paper\nbump -bm 2 b.png\n";
-        let out = prepare_import(&[file("card.obj", QUAD.as_bytes()), file("m.mtl", mtl), file("b.png", &bump)]).unwrap();
-        let Prepared::Glb { bytes, .. } = out else { panic!("packed") };
+        let out = prepare_import(&[
+            file("card.obj", QUAD.as_bytes()),
+            file("m.mtl", mtl),
+            file("b.png", &bump),
+        ])
+        .unwrap();
+        let Prepared::Glb { bytes, .. } = out else {
+            panic!("packed")
+        };
         let (model, _, _) = gltf::import(&bytes).unwrap();
         let mat = &model.materials[0];
         assert!(mat.normal_texture.is_some() && mat.base_color_texture.is_none());
         assert_eq!(model.textures[0].sampler.wrap_s, CLAMP);
-        let img = image::load_from_memory(&model.images[0].bytes).unwrap().to_rgba8();
+        let img = image::load_from_memory(&model.images[0].bytes)
+            .unwrap()
+            .to_rgba8();
         // x = 1: samples 0 and 120 → dx = −120 / 255 · 2.
         let dx = (0.0 - 120.0 / 255.0) * 2.0f64;
         let len = (dx * dx + 1.0).sqrt();
         let want = |c: f64| js::u8_clamp((c * (1.0 / len) * 0.5 + 0.5) * 255.0);
         assert_eq!(img.get_pixel(1, 0).0, [want(dx), 128, want(1.0), 255]);
+    }
+
+    #[test]
+    fn oversized_bump_carries_private_chromium_resize_source() {
+        let bump = png_of(2050, 2, |x, _| [(x % 256) as u8, 0, 0, 255]);
+        let out = prepare_import(&[
+            file("card.obj", QUAD.as_bytes()),
+            file("m.mtl", b"newmtl Paper\nmap_bump -bm 0.6 height.png\n"),
+            file("height.png", &bump),
+        ])
+        .unwrap();
+        let Prepared::Glb { bytes, .. } = out else {
+            panic!("packed")
+        };
+        let json = gltf::json_of(&bytes).unwrap();
+        assert_eq!(
+            json["materials"][0]["extras"]["__pmBumpSource"],
+            json!({"file":2,"strength":0.6})
+        );
     }
 }

@@ -42,9 +42,10 @@ pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
 /// render parity cases, `engine/corpus/src/projects/render.ts`), the
 /// newest `effects-*` capture (`render-effects.ts`), the newest
 /// `composite-*` capture (`engine/corpus/src/projects/composite.ts`), the
-/// newest `motion-*` capture (`motion.ts`), and the compositing closure
+/// newest `motion-*` capture (`motion.ts`), the compositing closure
 /// captures `compclose-*`, `compclose2-*` and `compclose3-*`
-/// (`compclose.ts`).
+/// (`compclose.ts`), and the newest `threed-*` capture (`space.ts`:
+/// `3d/model-group`, `3d/group-roles`, `3d/maps-level1`).
 pub fn corpus_dirs() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("PM_ENGINE_CORPUS") {
         return p.split(',').map(PathBuf::from).collect();
@@ -58,6 +59,7 @@ pub fn corpus_dirs() -> Vec<PathBuf> {
         "compclose-",
         "compclose2-",
         "compclose3-",
+        "threed-",
     ]
     .iter()
     .filter_map(|p| newest_capture(p))

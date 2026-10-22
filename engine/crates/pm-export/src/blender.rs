@@ -37,6 +37,9 @@ fn routed(why: &str) -> bool {
 pub struct ExportBlender {
     pub stage: BlenderStage,
     pub backend: Box<dyn BlenderBackend + Send>,
+    /// The job host's exact Chromium conversions, installed for each frozen
+    /// export document before its first snapshot is built.
+    pub converted_assets: Option<Arc<dyn AssetResolver>>,
 }
 
 /// Progress of the stage for the job's status (surfaces done, total).
@@ -44,7 +47,11 @@ pub type BlenderProgress<'a> = &'a mut dyn FnMut(u32, u32);
 
 impl ExportBlender {
     pub fn new(stage: BlenderStage, backend: Box<dyn BlenderBackend + Send>) -> ExportBlender {
-        ExportBlender { stage, backend }
+        ExportBlender {
+            stage,
+            backend,
+            converted_assets: None,
+        }
     }
 
     /// The surfaces of frame `time`, or `None` when it has no Blender frames.
@@ -65,7 +72,7 @@ impl ExportBlender {
             composition,
             time,
             request,
-            media,
+            self.converted_assets.as_deref().unwrap_or(media),
             false,
             SnapshotOptions::default(),
         )?;
