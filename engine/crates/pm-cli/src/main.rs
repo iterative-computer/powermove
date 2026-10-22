@@ -83,6 +83,11 @@ const USAGE: &str = "usage:
       --param NAME=JSON (repeatable; validates against the parameter definition)
       --ui-scale S  the editor's display scale factor, which fixes how its
                     renderer measures system-ui text (default 2)
+      --approximate-svg  level 1 SVG images are rasterized by the Chromium
+               helper (`powermove render` starts it; a bundled pm-cli starts
+               native-angle-child.cjs). Without one, a project that draws
+               them fails (svg-chromium-unavailable) unless this flag accepts
+               resvg's approximation, named in a notice
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
                        [--real FILE.pmv] [--no-definitions] [--determinism]
                        [--svg-rasters DIR]
@@ -105,6 +110,7 @@ const USAGE: &str = "usage:
       captured frame): waveform.png, parade.png, vectorscope.png, scope.json
       --time S  --composition ID  --size WxH | --scale S  --media ASSET=FILE
       --motion-blur off|export|N (default export)  --transparent  --columns N
+      --approximate-svg (as for render)
       --ui-scale S (default 2)";
 
 fn list(v: &str) -> Vec<String> {
@@ -235,6 +241,7 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
             "--timecode" => o.timecode = Some(value(args, &mut i, a)?.into()),
             "--reel" => o.reel = Some(value(args, &mut i, a)?.into()),
             "--no-captions" => o.no_captions = true,
+            "--approximate-svg" => o.approximate_svg = true,
             "--param" => o
                 .parameters
                 .push(parameters::parse(value(args, &mut i, a)?)?),
@@ -290,6 +297,7 @@ fn parse_scope(args: &[String]) -> Result<scope::Options, String> {
             }
             "--motion-blur" => o.motion_blur = Some(value(args, &mut i, a)?.into()),
             "--transparent" => o.transparent = true,
+            "--approximate-svg" => o.approximate_svg = true,
             "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             "--columns" => {
                 let v = value(args, &mut i, a)?;

@@ -92,6 +92,9 @@ pub struct Options {
     pub ui_scale: Option<f32>,
     /// Parameter values supplied by the CLI user, parsed as JSON.
     pub parameters: Vec<(String, Value)>,
+    /// With no Chromium helper, draw level 1 SVG images with resvg (an
+    /// approximation, named in a notice) instead of failing.
+    pub approximate_svg: bool,
 }
 
 fn usage(m: impl Into<String>) -> Failure {
@@ -639,9 +642,10 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         &mut renderer,
         options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
     );
-    // No Chromium here: level 1 SVG images are drawn by resvg (decision S1),
-    // an approximation of the app's, reported below.
-    renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
+    // Level 1 SVG images (decision S1): the helper's on-demand Chromium, as
+    // the hidden host draws them; with no helper, a named failure unless
+    // --approximate-svg accepts resvg's approximation (reported below).
+    crate::angle::configure_svg(&mut renderer, angle_host.as_ref(), options.approximate_svg);
     let (definitions, source) = definitions(options)?;
     if options.definitions.is_none() {
         warn_built_in(&job.document, &job.composition);

@@ -1,6 +1,9 @@
-//! The Node CLI's on-demand ANGLE service. The renderer's existing FallbackHost
-//! contract keeps unknown/pinned programs off the unverified native path.
+//! The Node CLI's on-demand Chromium service. The renderer's existing
+//! FallbackHost contract keeps unknown/pinned programs off the unverified
+//! native path, and its level 1 SVG images are rasterized by the same
+//! Chromium (decision S1), as the hidden host's on-demand Chromium does.
 use pm_render::shader_layers::{FallbackFailure, FallbackHost, FallbackJob, FallbackPixels};
+use pm_render::vector::svg_rasters::{SvgRasterNeed, SvgRasterSource, SvgRasterizer};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -120,17 +123,33 @@ impl AngleHost {
             .enumerate()
             .map(|(i, _)| serde_json::json!({"$bin": i}))
             .collect();
-        let header =
-            serde_json::to_vec(&serde_json::json!({"request": job.request, "textures": bins}))
-                .map_err(|e| e.to_string())?;
-        let mut body = Vec::new();
-        body.extend_from_slice(&(header.len() as u32).to_be_bytes());
-        body.extend_from_slice(&header);
-        for texture in &job.textures {
-            let bytes = pm_render::shader_layers::fallback::half_bytes(&texture.rgba16f);
-            body.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-            body.extend_from_slice(&bytes);
+        let textures: Vec<Vec<u8>> = job
+            .textures
+            .iter()
+            .map(|t| pm_render::shader_layers::fallback::half_bytes(&t.rgba16f))
+            .collect();
+        let body = frame(
+            &serde_json::json!({"request": job.request, "textures": bins}),
+            &textures,
+        )?;
+        let expected = (job.request.width as usize)
+            .checked_mul(job.request.height as usize)
+            .and_then(|n| n.checked_mul(8))
+            .ok_or("ANGLE target is too large")?;
+        if expected > 512 * 1024 * 1024 {
+            return Err("ANGLE target exceeds 512 MB".into());
         }
+        let bytes = self.post("/", &body, expected)?;
+        decode(
+            &bytes,
+            &job.request.key,
+            job.request.width,
+            job.request.height,
+        )
+    }
+
+    /// One authenticated request to the service: the reply's body.
+    fn post(&self, path: &str, body: &[u8], expected: usize) -> Result<Vec<u8>, String> {
         let mut stream = TcpStream::connect_timeout(&self.endpoint, Duration::from_secs(10))
             .map_err(|e| e.to_string())?;
         stream
@@ -139,15 +158,8 @@ impl AngleHost {
         stream
             .set_write_timeout(Some(Duration::from_secs(30)))
             .map_err(|e| e.to_string())?;
-        write!(stream, "POST / HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", self.endpoint, self.token, body.len()).map_err(|e| e.to_string())?;
-        stream.write_all(&body).map_err(|e| e.to_string())?;
-        let expected = (job.request.width as usize)
-            .checked_mul(job.request.height as usize)
-            .and_then(|n| n.checked_mul(8))
-            .ok_or("ANGLE target is too large")?;
-        if expected > 512 * 1024 * 1024 {
-            return Err("ANGLE target exceeds 512 MB".into());
-        }
+        write!(stream, "POST {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", self.endpoint, self.token, body.len()).map_err(|e| e.to_string())?;
+        stream.write_all(body).map_err(|e| e.to_string())?;
         let mut bytes = Vec::new();
         stream
             .take((expected + 1024 * 1024 + 1) as u64)
@@ -161,12 +173,62 @@ impl AngleHost {
         if !bytes.starts_with(b"HTTP/1.1 200 ") {
             return Err("ANGLE service refused the request".into());
         }
-        decode(
-            &bytes[start..],
-            &job.request.key,
-            job.request.width,
-            job.request.height,
+        bytes.drain(..start);
+        Ok(bytes)
+    }
+
+    /// A level 1 SVG raster drawn by the service's Chromium with the app's
+    /// module (`svg-rasters.ts`: `decodeSvg`, then `SvgRasterCanvas`, today's
+    /// `rasterSvgAsset` and `texFor` upload read back): premultiplied RGBA8,
+    /// top-down. The page checks the bytes still hash to the planned content.
+    fn svg_raster(&self, need: &SvgRasterNeed) -> Result<Vec<u8>, String> {
+        let key = &need.request.key;
+        let failed = |why: String| {
+            format!(
+                "Chromium could not rasterize the level 1 SVG image {} ({}x{}) of layer {}: {why}",
+                need.path.display(),
+                key.width,
+                key.height,
+                need.layer
+            )
+        };
+        let svg = std::fs::read(&need.path).map_err(|e| failed(e.to_string()))?;
+        let expected = usize::try_from(key.bytes()).map_err(|_| failed("too large".into()))?;
+        if expected > 512 * 1024 * 1024 {
+            return Err(failed("the raster exceeds 512 MB".into()));
+        }
+        let body = frame(
+            &serde_json::json!({
+                "key": { "content": key.content, "width": key.width, "height": key.height },
+                "svg": { "$bin": 0 },
+            }),
+            &[svg],
         )
+        .map_err(failed)?;
+        let reply = self.post("/svg", &body, expected).map_err(failed)?;
+        let (header, mut bins) = unframe(&reply).map_err(failed)?;
+        if header["ok"] != true {
+            return Err(failed(format!(
+                "{}: {}",
+                header["reason"].as_str().unwrap_or("unavailable"),
+                header["message"]
+                    .as_str()
+                    .unwrap_or("the SVG raster failed")
+            )));
+        }
+        if header["pixels"]["$bin"] != 0 || bins.len() != 1 {
+            return Err(failed("invalid SVG pixel slot".into()));
+        }
+        let pixels = bins.remove(0);
+        if pixels.len() != expected {
+            return Err(failed(format!(
+                "{} bytes for a {}x{} raster",
+                pixels.len(),
+                key.width,
+                key.height
+            )));
+        }
+        Ok(pixels)
     }
 }
 impl Drop for AngleHost {
@@ -186,6 +248,111 @@ impl Drop for AngleHost {
         let _ = child.wait();
     }
 }
+impl SvgRasterSource for AngleHost {
+    fn fetch(&self, need: &SvgRasterNeed) -> Result<Vec<u8>, String> {
+        self.svg_raster(need)
+    }
+}
+
+/// The named error of a level 1 SVG image with no Chromium to draw it.
+pub const SVG_CHROMIUM_UNAVAILABLE: &str = "svg-chromium-unavailable";
+
+/// Level 1 SVG rasters when this pm-cli has no Chromium helper at all: every
+/// frame that draws one fails with [`SVG_CHROMIUM_UNAVAILABLE`]. Exports are
+/// atomic, so nothing is written.
+struct NoChromium;
+
+impl SvgRasterSource for NoChromium {
+    fn fetch(&self, need: &SvgRasterNeed) -> Result<Vec<u8>, String> {
+        Err(format!(
+            "{SVG_CHROMIUM_UNAVAILABLE}: layer {} of {} draws the level 1 SVG image {}. The app \
+             rasterizes SVG images with Chromium, and this pm-cli has no Chromium helper \
+             (native-angle-child.cjs beside its distribution, POWERMOVE_ANGLE_HELPER, or \
+             POWERMOVE_ANGLE_ENDPOINT). Render with `powermove render`, or pass \
+             --approximate-svg to draw it with resvg, an approximation of the app's pixels.",
+            need.layer,
+            need.composition,
+            need.path.display()
+        ))
+    }
+}
+
+/// Who draws level 1 SVG images for a pm-cli renderer (decision S1): the
+/// helper's on-demand Chromium whenever there is one; with none, resvg only
+/// when the user accepted an approximation (`--approximate-svg`, reported by
+/// [`crate::render::approximate_svg_notice`]); otherwise a named failure.
+pub fn configure_svg(
+    renderer: &mut pm_render::Renderer,
+    host: Option<&std::sync::Arc<AngleHost>>,
+    approximate: bool,
+) {
+    match host {
+        Some(host) => {
+            renderer.set_svg_rasterizer(SvgRasterizer::Chromium);
+            renderer.set_svg_source(Some(host.clone()));
+        }
+        None if approximate => {
+            renderer.set_svg_rasterizer(SvgRasterizer::Resvg);
+            renderer.set_svg_source(None);
+        }
+        None => {
+            renderer.set_svg_rasterizer(SvgRasterizer::Chromium);
+            renderer.set_svg_source(Some(std::sync::Arc::new(NoChromium)));
+        }
+    }
+}
+
+/// The service's wire frame (`shared/wire.ts` `encodeFrame`): a big-endian
+/// length and the JSON header, then each binary slot with its length.
+fn frame(header: &serde_json::Value, bins: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let header = serde_json::to_vec(header).map_err(|e| e.to_string())?;
+    let mut body =
+        Vec::with_capacity(header.len() + 4 + bins.iter().map(|b| b.len() + 4).sum::<usize>());
+    body.extend_from_slice(&(header.len() as u32).to_be_bytes());
+    body.extend_from_slice(&header);
+    for bin in bins {
+        body.extend_from_slice(
+            &u32::try_from(bin.len())
+                .map_err(|_| "a slot over 4 GB")?
+                .to_be_bytes(),
+        );
+        body.extend_from_slice(bin);
+    }
+    Ok(body)
+}
+
+/// [`frame`]'s inverse (`decodeFrame`), with a 1 MB header limit.
+fn unframe(bytes: &[u8]) -> Result<(serde_json::Value, Vec<Vec<u8>>), String> {
+    let length =
+        u32::from_be_bytes(bytes.get(..4).ok_or("truncated reply")?.try_into().unwrap()) as usize;
+    if length > 1024 * 1024 {
+        return Err("reply header exceeds 1 MB".into());
+    }
+    let header: serde_json::Value =
+        serde_json::from_slice(bytes.get(4..4 + length).ok_or("truncated reply header")?)
+            .map_err(|e| e.to_string())?;
+    let mut at = 4 + length;
+    let mut bins = Vec::new();
+    while at < bytes.len() {
+        let size = u32::from_be_bytes(
+            bytes
+                .get(at..at + 4)
+                .ok_or("truncated reply slot table")?
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        at += 4;
+        bins.push(
+            bytes
+                .get(at..at + size)
+                .ok_or("truncated reply slot")?
+                .to_vec(),
+        );
+        at += size;
+    }
+    Ok((header, bins))
+}
+
 impl FallbackHost for AngleHost {
     fn run(&self, job: &FallbackJob) -> Result<FallbackPixels, FallbackFailure> {
         let result = self.request(job).map_err(|failure| failure.0);
@@ -267,6 +434,40 @@ mod tests {
         let failure = decode(&bytes, "a", 1, 1).unwrap_err().0;
         assert_eq!(failure.reason, "compile");
         assert_eq!(failure.message, "fixture compile failure");
+    }
+    #[test]
+    fn svg_frames_round_trip_the_wire_format() {
+        let body = frame(
+            &serde_json::json!({"key": {"content": "c", "width": 2, "height": 1}, "svg": {"$bin": 0}}),
+            &[b"<svg/>".to_vec()],
+        )
+        .unwrap();
+        let (header, bins) = unframe(&body).unwrap();
+        assert_eq!(header["svg"]["$bin"], 0);
+        assert_eq!(bins, [b"<svg/>".to_vec()]);
+        assert!(unframe(&body[..body.len() - 1]).is_err());
+    }
+    #[test]
+    fn without_a_helper_a_level_1_svg_fails_by_name() {
+        let need = SvgRasterNeed {
+            request: pm_protocol::svg_raster::SvgRasterRequest {
+                key: pm_protocol::svg_raster::SvgRasterKey {
+                    content: "0".repeat(64),
+                    width: 4,
+                    height: 4,
+                },
+                asset: "a".into(),
+            },
+            path: "/tmp/art.svg".into(),
+            composition: "P-root".into(),
+            layer: "L1".into(),
+        };
+        let error = NoChromium.fetch(&need).unwrap_err();
+        assert!(
+            error.starts_with("svg-chromium-unavailable: layer L1 of P-root"),
+            "{error}"
+        );
+        assert!(error.contains("--approximate-svg"), "{error}");
     }
     #[test]
     fn accepts_exact_binary16_and_rejects_truncation_or_extra_pixels() {

@@ -60,6 +60,9 @@ pub struct Options {
     pub output: PathBuf,
     /// The editor's display scale factor (`crate::fonts`).
     pub ui_scale: Option<f32>,
+    /// With no Chromium helper, draw level 1 SVG images with resvg
+    /// (`crate::angle::configure_svg`).
+    pub approximate_svg: bool,
 }
 
 /// Y′, Cb, Cr (BT.709, full range) of E-encoded R′G′B′.
@@ -506,7 +509,11 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
             &mut renderer,
             options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
         );
-        renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
+        // Level 1 SVG images as `render` draws them (crate::angle).
+        let angle_host = crate::angle::AngleHost::from_environment()
+            .map_err(Failure::Failed)?
+            .map(std::sync::Arc::new);
+        crate::angle::configure_svg(&mut renderer, angle_host.as_ref(), options.approximate_svg);
         let issues = renderer.unsupported_with_media(doc, &loaded.composition, &loaded.media);
         if !issues.is_empty() {
             return Err(Failure::Unsupported(
