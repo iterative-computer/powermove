@@ -22,6 +22,7 @@
 pub mod edit;
 pub mod engine;
 pub mod expr;
+pub mod kernel;
 mod queries;
 pub mod reply;
 

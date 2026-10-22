@@ -92,15 +92,75 @@ struct Buffered<'a, S: Sink> {
 }
 
 impl<S: Sink> Buffered<'_, S> {
-    fn push(&mut self, s: &str) {
-        self.buf.push_str(s);
-        if self.buf.len() >= 8192 {
-            self.flush();
+    fn push(&mut self, mut s: &str) {
+        while !s.is_empty() {
+            let available = 8192usize.saturating_sub(self.buf.len());
+            let mut end = available.min(s.len());
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == 0 {
+                self.flush();
+                continue;
+            }
+            self.buf.push_str(&s[..end]);
+            s = &s[end..];
+            if self.buf.len() >= 8192 {
+                self.flush();
+            }
         }
     }
 
     fn push_char(&mut self, c: char) {
         self.buf.push(c);
+        if self.buf.len() >= 8192 {
+            self.flush();
+        }
+    }
+
+    fn unicode_escape(&mut self, unit: u32) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        self.push("\\u");
+        for shift in [12, 8, 4, 0] {
+            self.push_char(HEX[((unit >> shift) & 0xf) as usize] as char);
+        }
+    }
+
+    fn escaped_char(&mut self, c: char) {
+        match c {
+            '"' => self.push("\\\""),
+            '\\' => self.push("\\\\"),
+            '\u{8}' => self.push("\\b"),
+            '\t' => self.push("\\t"),
+            '\n' => self.push("\\n"),
+            '\u{c}' => self.push("\\f"),
+            '\r' => self.push("\\r"),
+            c if (c as u32) < 0x20 => self.unicode_escape(c as u32),
+            c => self.push_char(c),
+        }
+    }
+
+    fn quoted(&mut self, text: &JsString) {
+        self.push_char('"');
+        if let Some(text) = text.as_str() {
+            let mut start = 0;
+            for (i, &b) in text.as_bytes().iter().enumerate() {
+                if b < 0x20 || b == b'"' || b == b'\\' {
+                    self.push(&text[start..i]);
+                    self.escaped_char(b as char);
+                    start = i + 1;
+                }
+            }
+            self.push(&text[start..]);
+        } else {
+            for cp in text.code_points() {
+                match char::from_u32(cp) {
+                    Some(c) => self.escaped_char(c),
+                    None => self.unicode_escape(cp),
+                }
+            }
+        }
+        self.push_char('"');
     }
 
     fn flush(&mut self) {
@@ -123,7 +183,7 @@ fn write_tree<T: JsonTree, S: Sink>(value: &T, out: &mut Buffered<'_, S>) {
                 out.push("null");
             }
         }
-        View::String(s) => push_quoted(s, &mut out.buf),
+        View::String(s) => out.quoted(s),
         View::Array(items) => {
             out.push_char('[');
             for (i, item) in items.iter().enumerate() {
@@ -142,7 +202,7 @@ fn write_tree<T: JsonTree, S: Sink>(value: &T, out: &mut Buffered<'_, S>) {
                     out.push_char(',');
                 }
                 first = false;
-                push_quoted(key, &mut out.buf);
+                out.quoted(key);
                 out.push_char(':');
                 write_tree(child, out);
             };
@@ -221,6 +281,54 @@ fn push_unicode_escape(unit: u32, out: &mut String) {
 mod tests {
     use super::super::parse;
     use super::*;
+
+    #[derive(Default)]
+    struct Chunked {
+        text: String,
+        peak: usize,
+    }
+    impl Sink for Chunked {
+        fn push_str(&mut self, text: &str) {
+            self.peak = self.peak.max(text.len());
+            self.text.push_str(text);
+        }
+    }
+
+    #[test]
+    fn streams_giant_utf8_values_and_keys_in_bounded_chunks() {
+        let text = JsString::from(format!(
+            "{}{}\"\\\0\u{2028}",
+            "x".repeat(8191),
+            "😀".repeat(512 * 1024)
+        ));
+        let mut expected = String::new();
+        push_quoted(&text, &mut expected);
+        let mut sink = Chunked::default();
+        write_canonical(&Value::String(text.clone()), &mut sink);
+        assert_eq!(sink.text, expected);
+        assert!(
+            sink.peak <= 8192 + 32,
+            "large string scratch escaped the chunk bound: {}",
+            sink.peak
+        );
+        let mut map = super::super::Map::new();
+        map.insert(text, Value::Number(1.0));
+        let mut sink = Chunked::default();
+        write_canonical(&Value::Object(map), &mut sink);
+        assert_eq!(sink.text, format!("{{{expected}:1}}"));
+        assert!(sink.peak <= 8192 + 32);
+    }
+
+    #[test]
+    fn streamed_wtf8_quoting_preserves_every_utf16_unit() {
+        let text = JsString::from_utf16_units(&(0..=u16::MAX).collect::<Vec<_>>());
+        let mut expected = String::new();
+        push_quoted(&text, &mut expected);
+        let mut sink = Chunked::default();
+        write_canonical(&Value::String(text), &mut sink);
+        assert_eq!(sink.text, expected);
+        assert!(sink.peak <= 8192 + 32);
+    }
 
     #[test]
     fn writes_json_stringify_bytes_with_sorted_keys() {

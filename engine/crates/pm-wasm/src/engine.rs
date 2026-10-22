@@ -416,6 +416,35 @@ impl Engine {
         &self.doc
     }
 
+    /// Installs a tree and its warmed integrity cache prepared away from the
+    /// host event loop. Containers stay shared with native viewer sessions.
+    /// A replacement starts a new history, so no evaluator plan survives it.
+    pub fn adopt_document(
+        &mut self,
+        document: Document,
+        consistency: pm_model::consistency::ConsistencyHash,
+    ) {
+        self.doc = document;
+        self.consistency = consistency;
+        self.ev.reset();
+        self.detached.clear();
+        self.last = JsValue::Undefined;
+        self.last_kind = ValueKind::Number;
+        self.stats.resyncs += 1;
+    }
+
+    /// Refresh caches from a worker clone of this exact tree, without resetting
+    /// evaluator state. The native owner validates revision and root identity.
+    pub fn refresh_document(
+        &mut self,
+        document: Document,
+        consistency: pm_model::consistency::ConsistencyHash,
+    ) {
+        debug_assert_eq!(document.revision(), self.doc.revision());
+        self.doc = document;
+        self.consistency = consistency;
+    }
+
     /// Replaces the mirror with the canonical project JSON at `revision`
     /// (contract 5, `Resync` with `canonicalJsonV1`). The revision may be
     /// any value: a resync starts a new history (the evaluator notices a

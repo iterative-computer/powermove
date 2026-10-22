@@ -25,6 +25,7 @@ pub mod present;
 pub mod jobs;
 
 pub mod fonts;
+pub mod kernel;
 
 /// Parses `"interactive"` or `"job"`.
 pub fn parse_process(text: &str) -> Result<EngineProcess, String> {
@@ -89,6 +90,7 @@ pub struct EngineHost {
     /// Where the engine's rendering threads ask the font service for
     /// registry answers and full fonts (`fonts::render`).
     broker: fonts::render::FontBroker,
+    kernels: kernel::NativeKernels,
 }
 
 impl EngineHost {
@@ -171,6 +173,7 @@ impl EngineHost {
             font_ports: Default::default(),
             font_hub,
             broker,
+            kernels: kernel::NativeKernels::new(process),
         })
     }
 
@@ -264,6 +267,7 @@ impl EngineHost {
             return self.attach_fonts(port);
         }
         let actions = self.engine.attach(PortId(port), parse_peer(peer)?);
+        self.engine.set_document_owner(PortId(port), owner);
         self.font_hub.set_port_owner(port, owner);
         Ok(actions)
     }
@@ -401,6 +405,22 @@ impl EngineHost {
 
     pub fn engine_mut(&mut self) -> &mut Engine {
         &mut self.engine
+    }
+
+    /// Owner-scoped synchronous evaluator RPC; large ingestion is queued on
+    /// the native document reader and adopted only by explicit activation.
+    pub fn document_kernel(&mut self, owner: u32, request: &str) -> String {
+        self.kernels.call(&mut self.engine, owner, request)
+    }
+
+    pub fn document_kernel_bytes(
+        &mut self,
+        owner: u32,
+        request: &str,
+        data: Option<&[u8]>,
+    ) -> String {
+        self.kernels
+            .call_bytes(&mut self.engine, owner, request, data)
     }
 }
 
