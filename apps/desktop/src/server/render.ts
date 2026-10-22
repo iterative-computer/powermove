@@ -1,5 +1,5 @@
 import { angleService } from './native/angle';
-import { readShaderEnvironment } from '../main/engine/shader-environment';
+import { cliProbeEnvironment } from '../main/engine/shader-environment';
 import { profileDefinitionsPath } from '../main/engine/profile-definitions';
 import { homedir } from 'node:os';
 /** The user-facing native renderer. The user chooses both paths, so unlike
@@ -34,10 +34,9 @@ export async function renderProject(argv: string[], distDir: string, env: NodeJS
   const invocation = renderInvocation(argv, distDir, env);
   const userData = profileOf(env);
   const cache = path.join(userData, 'Engine Cache', 'Shader Cache');
-  const parityEnvironment = env['POWERMOVE_ENGINE_PARITY_ENV'] ?? readShaderEnvironment(cache);
+  const probes = cliProbeEnvironment(cache, env);
   const runner = await angleService(distDir, env);
-  const child = spawn(invocation.file, invocation.args, { stdio: 'inherit', windowsHide: true, env: { ...env, ...runner.env,
-    POWERMOVE_ENGINE_PARITY_ENV: parityEnvironment, POWERMOVE_ENGINE_SHADER_CACHE: cache } });
+  const child = spawn(invocation.file, invocation.args, { stdio: 'inherit', windowsHide: true, env: { ...env, ...runner.env, ...probes } });
   const forward = (signal: NodeJS.Signals) => { if (child.exitCode === null && child.signalCode === null) child.kill(signal); };
   const interrupt = () => forward('SIGINT'), terminate = () => forward('SIGTERM');
   process.on('SIGINT', interrupt); process.on('SIGTERM', terminate);

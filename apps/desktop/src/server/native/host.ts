@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { SnapshotService } from '../../main/engine/snapshots';
 import { WindowSnapshotSessions } from '../../main/engine/window-sessions';
 import type { EngineSnapshotRequest, EngineSnapshotReply } from '../../shared/engine-ipc';
-import { readShaderEnvironment, shaderCacheDirectory } from '../../main/engine/shader-environment';
+import { cliProbeEnvironment, shaderCacheDirectory } from '../../main/engine/shader-environment';
 /** macOS hidden host: in-process host services, supervised native engines and
  * one production document worker per project. Chromium is a lazy DOM service. */
 import { existsSync } from 'node:fs';
@@ -105,8 +105,9 @@ export class NativeHiddenHost {
     this.media = new MediaStoreService({ root: path.join(userData, STORE_DIRECTORY), userData, executor: this.hashes, enabled: true, ...options.mediaConversions });
     this.snapshotBridge = new NativeSnapshotBridge(loaded, log);
     const spawn = (role: 'interactive' | 'job', env: Record<string, string> = {}) => transport.spawn(path.join(distDir, 'native-engine-child.cjs'), addon, log, {
-      POWERMOVE_ENGINE_PARITY_ENV: process.env['POWERMOVE_ENGINE_PARITY_ENV'] ?? readShaderEnvironment(probeDirectory),
-      POWERMOVE_ENGINE_SHADER_CACHE: probeDirectory, ...env
+      // Read only: this host's ANGLE reference is Playwright's Chromium, not
+      // the desktop's Electron runner its pins were decided against.
+      ...env, ...cliProbeEnvironment(probeDirectory)
     })(role);
     this.engine = new NativeEngine({ spawn: role => role === 'interactive'
       ? this.snapshotBridge.spawn(env => spawn(role, env)) : spawn(role), channel: transport.channel,

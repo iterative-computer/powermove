@@ -1,5 +1,10 @@
 /** The desktop's browser/driver probe namespace, shared by native CLI hosts.
- * Unknown installations get a separate namespace and must use ANGLE. */
+ * Unknown installations get a separate namespace and must use ANGLE.
+ *
+ * Only the desktop writes to it: its decisions compare native output with
+ * Electron's WebGL runner. The hidden MCP host and the CLIs compare with
+ * Playwright's Chromium (SwiftShader without a GUI session), so they read it
+ * and keep their own first-use decisions in memory (`cliProbeEnvironment`). */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -31,4 +36,15 @@ export function shaderCacheDirectory(userData: string, env: NodeJS.ProcessEnv = 
   if (existsSync(path.join(local, FILE))) return local;
   const desktop = path.join(desktopProfile, 'Engine Cache', 'Shader Cache');
   return existsSync(path.join(desktop, FILE)) ? desktop : local;
+}
+
+/** The environment a hidden-host engine or CLI render needs to honour the
+ * desktop's persisted runner pins and native verifications without ever
+ * writing a decision the desktop would trust (pm-render `effects::parity`). */
+export function cliProbeEnvironment(directory: string, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  return {
+    POWERMOVE_ENGINE_PARITY_ENV: env['POWERMOVE_ENGINE_PARITY_ENV'] ?? readShaderEnvironment(directory),
+    POWERMOVE_ENGINE_SHADER_CACHE: directory,
+    POWERMOVE_ENGINE_PARITY_STORE: 'read-only'
+  };
 }
