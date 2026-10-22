@@ -287,7 +287,18 @@ export class StoreEngine {
     if (operation === undefined) return;
     this.pending.delete(key);
 
-    const previous = this.queues.get(key) ?? Promise.resolve();
+    let previous = this.queues.get(key) ?? Promise.resolve();
+    /* A project's recovery journal is relative to its slot: deleting it after
+       a checkpoint, or writing entries made after one, must reach disk only
+       once that checkpoint has. Otherwise a crash in between (the slot is a
+       large write, the journal a small one) recovered the older slot with no
+       journal, or with entries meant for the newer one. */
+    const slot = key.startsWith('projectJournal.') ? `project.${key.slice('projectJournal.'.length)}` : null;
+    if (slot) {
+      if (this.pending.has(slot)) this.enqueuePending(slot);
+      const checkpoint = this.queues.get(slot);
+      if (checkpoint) { const own = previous; previous = Promise.all([own, checkpoint]).then(() => undefined); }
+    }
     const current = previous
       .then(() => this.persist(key, operation))
       .then(() => { if (operation.id) this.reply({ type: 'written', id: operation.id, key }); })
