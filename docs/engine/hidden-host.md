@@ -28,6 +28,8 @@ existing supervisor.
 
 ## Media, jobs and persistence
 
+A native DOM tab joins the worker document immediately but holds outgoing edits during extension boot. After definitions settle, it pulls the authoritative document again before enabling writes. Temporary hydration placeholders cannot mark a valid saved effect missing in the worker.
+
 Agent imports run today's editor importer in the project's on-demand tab. The
 tab uses the desktop's host media-store protocol: uploads finish only after the
 host verifies their bytes, with the same content hashes, originals, conversions,
