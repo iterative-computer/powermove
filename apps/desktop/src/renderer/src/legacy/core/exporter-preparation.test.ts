@@ -70,3 +70,46 @@ it.each([false, true])('cancels before submission and closes preparation (queue=
   expect(f.PM.Export.busy).toBe(false);
   expect(document.querySelector('.export-progress')).toBeNull();
 });
+
+it.each([false, true])('adds to the queue while a foreground export is busy without changing its cancellation (cancel=%s)', async cancelled => {
+  const f = fixture(true);
+  f.PM.Export.busy = true;
+  f.PM.Export.cancel = cancelled;
+  f.submit.mockResolvedValue({ status: 'added' });
+  const run = f.run();
+  await vi.waitFor(() => expect(f.flushBindings).toHaveBeenCalled());
+  expect(document.body.textContent).toContain('Preparing media…');
+  expect(f.PM.Export.busy).toBe(true);
+  expect(f.PM.Export.cancel).toBe(cancelled);
+  f.finish();
+  expect(await run).toEqual({ status: 'added' });
+  expect(f.submit).toHaveBeenCalledOnce();
+  expect(f.PM.Export.busy).toBe(true);
+  expect(f.PM.Export.cancel).toBe(cancelled);
+  expect(f.PM.toast).not.toHaveBeenCalledWith('Export already running');
+});
+
+it('cancels queue preparation without cancelling the foreground export', async () => {
+  const f = fixture(true);
+  f.PM.Export.busy = true;
+  const run = f.run();
+  await vi.waitFor(() => expect(f.flushBindings).toHaveBeenCalled());
+  f.cancel(); f.finish();
+  expect(await run).toEqual({ status: 'cancelled' });
+  expect(f.submit).not.toHaveBeenCalled();
+  expect(f.PM.Export.busy).toBe(true);
+  expect(f.PM.Export.cancel).toBe(false);
+  expect(document.querySelector('.export-progress')).toBeNull();
+});
+
+it('keeps foreground cancellation while queue preparation is in flight', async () => {
+  const f = fixture(true);
+  f.PM.Export.busy = true;
+  const run = f.run();
+  await vi.waitFor(() => expect(f.flushBindings).toHaveBeenCalled());
+  f.PM.Export.cancel = true;
+  f.finish(); await run;
+  expect(f.submit).toHaveBeenCalledOnce();
+  expect(f.PM.Export.busy).toBe(true);
+  expect(f.PM.Export.cancel).toBe(true);
+});
