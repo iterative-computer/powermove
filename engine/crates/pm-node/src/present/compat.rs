@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pm_protocol::common::{CompositionId, LayerId, PixelRect, Revision, Ticks};
-use pm_protocol::snapshot::{CompatFormat, CompatKey, CompatMessage, CompatNeed, CompatSource};
+use pm_protocol::snapshot::{
+    CompatFormat, CompatKey, CompatMessage, CompatNeed, CompatSource, SnapshotClass,
+};
 
 use super::render::Key;
 
@@ -98,6 +100,15 @@ struct Answer {
     revision: Revision,
     /// The raster drawn; `None`: the layer passed through.
     raster: Option<CompatKey>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Asked {
+    revision: Revision,
+    at: Instant,
+    /// Only a need returned to a capture can be its next round's posted
+    /// answer. A later viewer re-ask cannot keep that capture waiting.
+    snapshot: Option<SnapshotClass>,
 }
 
 /// How long an ask waits before it is sent again (a renderer that missed
@@ -221,7 +232,7 @@ pub struct CompatStore {
     answers: HashMap<AnswerId, Answer>,
     /// Needs sent to a renderer and not answered yet, with when and at
     /// which revision.
-    asked: HashMap<AnswerId, (Revision, Instant)>,
+    asked: HashMap<AnswerId, Asked>,
     /// The rasters as the renderer draws them, made once per raster.
     drawn: HashMap<(Key, CompatKey), Arc<pm_render::compat::CompatRaster>>,
 }
@@ -684,9 +695,21 @@ impl CompatStore {
                     n.crop,
                 );
                 match self.asked.get(&id) {
-                    Some((r, at)) if *r >= revision && now.duration_since(*at) < ASK_AGAIN => false,
+                    Some(asked)
+                        if asked.revision >= revision
+                            && now.duration_since(asked.at) < ASK_AGAIN =>
+                    {
+                        false
+                    }
                     _ => {
-                        self.asked.insert(id, (revision, now));
+                        self.asked.insert(
+                            id,
+                            Asked {
+                                revision,
+                                at: now,
+                                snapshot: None,
+                            },
+                        );
                         true
                     }
                 }
@@ -704,6 +727,7 @@ impl CompatStore {
         needs: Vec<CompatNeed>,
         uploaded: &[CompatNeed],
         now: Instant,
+        class: SnapshotClass,
     ) -> Vec<CompatNeed> {
         needs
             .into_iter()
@@ -717,8 +741,25 @@ impl CompatStore {
                     need.scale,
                     need.crop,
                 );
-                self.asked.insert(id, (revision, now));
-                !uploaded.contains(need)
+                // A completion (including a rejected reuse) removed the
+                // earlier ask. Do not recreate it from the caller's marker:
+                // no pixels are on their way after that terminal message.
+                // A viewer ask made meanwhile is a separate dependency too.
+                let waiting = uploaded.contains(need)
+                    && self.asked.get(&id).is_some_and(|asked| {
+                        asked.snapshot == Some(class) && asked.revision == revision
+                    });
+                if !waiting {
+                    self.asked.insert(
+                        id,
+                        Asked {
+                            revision,
+                            at: now,
+                            snapshot: Some(class),
+                        },
+                    );
+                }
+                !waiting
             })
             .collect()
     }
@@ -1058,21 +1099,42 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            store.snapshot_needs(s, revision, vec![need.clone()], &[], now),
+            store.snapshot_needs(
+                s,
+                revision,
+                vec![need.clone()],
+                &[],
+                now,
+                SnapshotClass::Sync
+            ),
             vec![need.clone()]
         );
         // Only an exact need posted by this capture may wait for the
         // client port. A different scale/window/time does not qualify.
         assert!(
             store
-                .snapshot_needs(s, revision, vec![need.clone()], &[need.clone()], now)
+                .snapshot_needs(
+                    s,
+                    revision,
+                    vec![need.clone()],
+                    &[need.clone()],
+                    now,
+                    SnapshotClass::Sync
+                )
                 .is_empty()
         );
         assert!(store.outstanding(&CompatStore::tag(s, &need)));
         let mut other = need.clone();
         other.scale = 1.0;
         assert_eq!(
-            store.snapshot_needs(s, revision, vec![need.clone()], &[other], now),
+            store.snapshot_needs(
+                s,
+                revision,
+                vec![need.clone()],
+                &[other],
+                now,
+                SnapshotClass::Sync
+            ),
             vec![need.clone()]
         );
         store.apply(
@@ -1088,6 +1150,148 @@ mod tests {
             }),
         );
         assert!(!store.outstanding(&CompatStore::tag(s, &need)));
+    }
+
+    #[test]
+    fn a_settled_upload_is_reasked_even_after_another_consumer_asks() {
+        for reuse in [false, true] {
+            for other in 0..4 {
+                let mut store = CompatStore::with_limit(1024);
+                let s = session(1);
+                let revision = Revision::new(4).unwrap();
+                let now = Instant::now();
+                let need = CompatNeed {
+                    composition: "c".into(),
+                    layer: "L0".into(),
+                    time: Ticks::ZERO,
+                    source: CompatSource::RasterOverride,
+                    scale: 1.0,
+                    crop: None,
+                };
+                // A cached surface was evicted before this capture.
+                store.apply(s, band(id("L0", "k"), 16, 16, 0, 16, 1));
+                store.apply(s, band(id("L1", "k"), 16, 16, 0, 16, 2));
+                assert!(store.get(s, &id("L0", "k")).is_none());
+                assert_eq!(
+                    store.snapshot_needs(
+                        s,
+                        revision,
+                        vec![need.clone()],
+                        &[],
+                        now,
+                        SnapshotClass::Sync
+                    ),
+                    vec![need.clone()]
+                );
+                if reuse {
+                    assert_eq!(
+                        store.apply(
+                            s,
+                            CompatMessage::Reuse {
+                                id: id("L0", "k"),
+                                scale: 1.0,
+                                revision,
+                                crop: None,
+                            }
+                        ),
+                        Applied::Evicted
+                    );
+                } else {
+                    // Fresh pixels can also settle and be evicted before
+                    // the marked retry reaches the render thread.
+                    let CompatMessage::Pixels(mut pixels) = band(id("L0", "k"), 16, 16, 0, 16, 3)
+                    else {
+                        unreachable!()
+                    };
+                    pixels.revision = revision;
+                    store.apply(s, CompatMessage::Pixels(pixels));
+                    store.apply(s, band(id("L1", "next"), 16, 16, 0, 16, 4));
+                    assert!(store.get(s, &id("L0", "k")).is_none());
+                }
+                assert!(!store.outstanding(&CompatStore::tag(s, &need)));
+                match other {
+                    0 => {}
+                    1 => {
+                        assert_eq!(
+                            store.to_ask(s, revision, vec![need.clone()], now),
+                            vec![need.clone()]
+                        );
+                    }
+                    2 | 3 => {
+                        let class = if other == 2 {
+                            SnapshotClass::Async
+                        } else {
+                            SnapshotClass::Idle
+                        };
+                        assert_eq!(
+                            store.snapshot_needs(s, revision, vec![need.clone()], &[], now, class),
+                            vec![need.clone()]
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                // The old upload marker must never turn a settled/rejected
+                // answer, or another consumer's new ask, back into a wait.
+                assert_eq!(
+                    store.snapshot_needs(
+                        s,
+                        revision,
+                        vec![need.clone()],
+                        &[need.clone()],
+                        now,
+                        SnapshotClass::Sync
+                    ),
+                    vec![need.clone()],
+                    "reuse={reuse}, other={other}"
+                );
+                // A newly returned need in this capture class still waits
+                // for genuinely in-flight pixels on the other port.
+                assert!(
+                    store
+                        .snapshot_needs(
+                            s,
+                            revision,
+                            vec![need.clone()],
+                            &[need.clone()],
+                            now,
+                            SnapshotClass::Sync
+                        )
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_snapshot_upload_marker_cannot_wait_at_a_new_document_revision() {
+        let mut store = CompatStore::default();
+        let s = session(1);
+        let now = Instant::now();
+        let need = CompatNeed {
+            composition: "c".into(),
+            layer: "L0".into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            scale: 1.0,
+            crop: None,
+        };
+        let r3 = Revision::new(3).unwrap();
+        let r4 = Revision::new(4).unwrap();
+        assert_eq!(
+            store.snapshot_needs(s, r3, vec![need.clone()], &[], now, SnapshotClass::Sync),
+            vec![need.clone()]
+        );
+        assert_eq!(
+            store.snapshot_needs(
+                s,
+                r4,
+                vec![need.clone()],
+                &[need.clone()],
+                now,
+                SnapshotClass::Sync
+            ),
+            vec![need.clone()]
+        );
     }
 
     #[test]

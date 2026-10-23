@@ -6206,6 +6206,7 @@ impl Thread {
                     needs,
                     &job.request.compat_uploaded,
                     std::time::Instant::now(),
+                    job.request.class,
                 );
                 if fresh.is_empty() {
                     let mut job = job;

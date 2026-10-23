@@ -2430,7 +2430,7 @@ fn child_compat() {
 #[ignore = "run by sync_snapshots_return_raster_needs_already_asked_by_the_viewer"]
 fn child_compat_viewer_pending() {
     use pm_protocol::snapshot::{
-        CompatFormat, CompatKey, CompatMessage, CompatPixels, CompatSource,
+        CompatFormat, CompatKey, CompatMessage, CompatNative, CompatPixels, CompatSource,
     };
     if std::env::var(CHILD_ENV).is_err() {
         return;
@@ -2490,14 +2490,63 @@ fn child_compat_viewer_pending() {
     };
     assert_eq!(snapshot_needs, viewer_needs);
 
+    // A renderer can first reuse a surface the store already evicted. That
+    // terminal rejection must return a fresh need even when the snapshot's
+    // retry says it posted the old answer. The viewer may re-ask meanwhile.
+    c.event(Event::Compat(CompatMessage::Reuse {
+        id: CompatKey {
+            composition: need.composition.clone(),
+            layer: need.layer.clone(),
+            time: need.time,
+            source: need.source,
+            key: "evicted-surface".into(),
+        },
+        scale: need.scale,
+        revision: Revision::new(1).unwrap(),
+        crop: None,
+    }));
+    // A pass-through for an undrawn identity is a renderer-port barrier:
+    // observing it guarantees the earlier rejected reuse has been applied.
+    c.event(Event::Compat(CompatMessage::Native(CompatNative {
+        composition: need.composition.clone(),
+        layer: "upload-barrier".into(),
+        time: need.time,
+        source: need.source,
+        scale: need.scale,
+        revision: Revision::new(1).unwrap(),
+        crop: None,
+    })));
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
+        if status["presenter"]["compatAnswers"].as_u64().unwrap_or(0) > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "renderer-port barrier did not arrive: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut retry = frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000);
+    retry.compat_uploaded = snapshot_needs.clone();
+    c.snapshot(41, retry, Some(1), WINDOW, session);
+    let snapshot_needs = match c.inbox.wait(Duration::from_secs(20), answer(41)) {
+        Ok(SnapshotOutcome::NeedsRenderer { compat, .. }) => compat,
+        other => {
+            panic!("rejected reuse must be re-asked, not wait for nonexistent pixels: {other:?}")
+        }
+    };
+    assert_eq!(snapshot_needs, viewer_needs);
+
     // The marked retry waits instead of returning the same need while
     // its pixel message travels independently through the renderer port.
     let mut retry = frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000);
     retry.compat_uploaded = snapshot_needs;
-    c.snapshot(41, retry, Some(1), WINDOW, session);
+    c.snapshot(42, retry, Some(1), WINDOW, session);
     assert!(
         c.inbox
-            .try_wait(Duration::from_millis(200), &mut answer(41))
+            .try_wait(Duration::from_millis(200), &mut answer(42))
             .is_none(),
         "the uploaded answer is still in flight"
     );
@@ -2522,7 +2571,7 @@ fn child_compat_viewer_pending() {
         uv: None,
         crop: None,
     })));
-    let result = rendered(c.inbox.wait(Duration::from_secs(20), answer(41)));
+    let result = rendered(c.inbox.wait(Duration::from_secs(20), answer(42)));
     let pixels = pixels_of(&result);
     assert_eq!(at(&pixels, 320, 60, 60), [255, 0, 0, 255]);
     assert_eq!(at(&pixels, 320, 30, 60), BACKGROUND);
