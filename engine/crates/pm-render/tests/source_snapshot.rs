@@ -326,10 +326,42 @@ fn source_scrub_reuses_decoded_video_and_counts_work() {
 
 #[test]
 fn source_batch_matches_individual_video_frames_in_order() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+    assert_eq!(Renderer::source_batch_limit(Size::new(160, 90)), 16);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("moving.mp4");
+    let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("source engine/env.sh")
+        .join("bin/ffmpeg");
+    let status = std::process::Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x90:rate=30:duration=2",
+            "-an",
+            "-c:v",
+            "h264_videotoolbox",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "30",
+            "-threads",
+            "2",
+            "-f",
+            "mp4",
+            "-y",
+        ])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
     let size = Size::new(160, 90);
-    let times = [0, 13, 27, 40, 13, 53, 0]
+    let times = [0, 13, 27, 40, 13, 53, 0, 21, 2, 57, 30, 16, 35, 5, 59, 42]
         .map(|frame| Ticks::new(frame * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap());
     let mut individual = Renderer::headless().unwrap();
     let expected: Vec<_> = times
@@ -340,6 +372,8 @@ fn source_batch_matches_individual_video_frames_in_order() {
                 .unwrap()
         })
         .collect();
+    assert_ne!(expected[0], expected[1], "the fixture must show motion");
+    assert_ne!(expected[1], expected[2], "the fixture must show motion");
     let decode = individual.source_scrub_stats();
     assert_eq!(decode.stand_ins, 0);
     assert_eq!(decode.workers, 1, "adjacent seeks share one decoder worker");

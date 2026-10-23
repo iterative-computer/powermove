@@ -379,9 +379,22 @@ fn filmstrip(
                 })
                 .map(|pixels| vec![pixels])
         } else if count == 1 {
-            renderer
-                .source_rgba8_export(source, times[index], size, fit, interpretation.as_ref())
-                .map(|pixels| vec![pixels])
+            let frame = if times.len() == 1 && !gate.gate.is_playing() {
+                // A real one-frame preparation also warms the same exact
+                // Export decoder/cache used by interactive source seeks.
+                // A playback slice of a larger strip remains direct: its
+                // CPU look-ahead must not escape the job's admission.
+                renderer.source_rgba8(source, times[index], size, fit, interpretation.as_ref())
+            } else {
+                renderer.source_rgba8_export(
+                    source,
+                    times[index],
+                    size,
+                    fit,
+                    interpretation.as_ref(),
+                )
+            };
+            frame.map(|pixels| vec![pixels])
         } else {
             renderer.source_rgba8_batch(
                 source,
@@ -402,7 +415,7 @@ fn filmstrip(
             let pixels = if svg.is_some() {
                 pixels
             } else {
-                crate::present::snapshot::encode_rgba8_unorm(&pixels, SnapshotPixels::Straight)
+                straight_source_pixels(pixels)
             };
             encode += stage.elapsed();
             let stage = Instant::now();
@@ -432,6 +445,18 @@ fn filmstrip(
         );
     }
     Ok(bytes)
+}
+
+/// Video pixels are ordinarily opaque, so their premultiplied and straight
+/// encodings are byte-identical. Avoid a second full frame allocation and
+/// float conversion; retain the existing Canvas2D unpremultiplication for
+/// any source with alpha.
+fn straight_source_pixels(pixels: Vec<u8>) -> Vec<u8> {
+    if pixels.chunks_exact(4).all(|pixel| pixel[3] == 255) {
+        pixels
+    } else {
+        crate::present::snapshot::encode_rgba8_unorm(&pixels, SnapshotPixels::Straight)
+    }
 }
 
 fn ffmpeg() -> PathBuf {
@@ -603,6 +628,17 @@ fn browser_rendition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_opaque_fast_path_and_alpha_match_snapshot_encoding() {
+        let opaque = vec![0, 45, 255, 255, 138, 100, 21, 255];
+        assert_eq!(straight_source_pixels(opaque.clone()), opaque);
+        let alpha = vec![128, 0, 0, 128, 10, 20, 30, 0, 0, 0, 0, 255];
+        assert_eq!(
+            straight_source_pixels(alpha.clone()),
+            crate::present::snapshot::encode_rgba8_unorm(&alpha, SnapshotPixels::Straight)
+        );
+    }
 
     fn run(command: &mut Command) {
         let output = command.output().unwrap();

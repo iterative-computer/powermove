@@ -74,6 +74,27 @@ fn source_export_worker_is_exact_and_warms_neighbours_after_a_jump() {
     };
     let svc = service();
     let viewer = ViewerDecode::with_purpose(svc.clone(), DecodePurpose::Export);
+    let first_gop = src.index.sync_for(src.index.frames[7].sample);
+    let gop_end = (8..src.index.frames.len())
+        .find(|&n| src.index.sync_for(src.index.frames[n].sample) != first_gop)
+        .unwrap_or(src.index.frames.len());
+    let warmed = (gop_end - 1).min(7 + 64);
+    let first = viewer.fetch(&src, 1, 7, Want::Exact).unwrap();
+    assert!(first.exact);
+    eventually("bounded source GOP is cached", || {
+        svc.cache().contains(&pm_media::cache::FrameKey {
+            source: src.id,
+            sample: src.index.frames[warmed].sample,
+            purpose: DecodePurpose::Export,
+        })
+    });
+    if gop_end < src.index.frames.len() {
+        assert!(!svc.cache().contains(&pm_media::cache::FrameKey {
+            source: src.id,
+            sample: src.index.frames[gop_end].sample,
+            purpose: DecodePurpose::Export,
+        }));
+    }
     for (index, n) in [7, 28, 9, 28].into_iter().enumerate() {
         let frame = viewer.fetch(&src, 1, n, Want::Exact).unwrap();
         assert!(frame.exact);

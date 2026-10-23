@@ -22,7 +22,7 @@
 //! decodes ahead in the direction of motion into the frame cache (the GOP
 //! neighbourhood, within the cache's lease share), a stride at a time;
 //! the display worker does nothing after a jump. The source-only Export
-//! worker warms two adjacent frames after a jump.
+//! worker may warm the rest of a bounded GOP after a jump.
 
 use super::service::{DecodeService, InstanceId, MediaSource};
 use super::session::{DEFAULT_WINDOW, Progress};
@@ -82,6 +82,10 @@ pub struct ScrubStats {
 
 /// Frames decoded ahead of a target in the direction of motion.
 const AHEAD: usize = 8;
+/// Source monitor seeks can be scattered within a short GOP. Warm only
+/// contiguous presented frames of the same GOP, bounded by the decoder
+/// lease and this count; a new exact request always preempts look-ahead.
+const SOURCE_GOP_AHEAD: usize = 64;
 /// While scrubbing backward, one seek from the GOP start serves the
 /// reverse steps of up to this many presented frames before its target:
 /// every reference picture on the way and the unreferenced ones at the
@@ -89,8 +93,8 @@ const AHEAD: usize = 8;
 /// the frame cache).
 const KEEP_BEFORE: usize = 32;
 /// Moves of more frames than this are jumps (a click on the ruler, a
-/// random seek), not drags. Only the source Export worker warms nearby
-/// frames after them.
+/// random seek), not drags. Only the source Export worker warms the bounded
+/// remainder of the current GOP after them.
 const MAX_STRIDE: i64 = 16;
 /// An idle worker exits after this long; the next request starts another.
 pub const IDLE_EXIT: Duration = Duration::from_secs(30);
@@ -588,7 +592,7 @@ impl Shared {
     /// time in the direction of motion: [`AHEAD`] steps forward within half
     /// its part of the frame cache, or one reverse neighbourhood
     /// ([`ViewerDecode`]'s reverse reach). The source Export worker may
-    /// warm two forward neighbours after a jump; composition does not.
+    /// warm a bounded same-GOP run after a jump; composition does not.
     fn ahead(&self, st: &mut State) -> Option<usize> {
         let from = st.ahead_from?;
         let stride = st.stride;
@@ -599,7 +603,7 @@ impl Shared {
         // Reverse steps need a seek from the GOP start for every
         // neighbourhood, so they look as far ahead as one neighbourhood.
         let count = if stride == 0 {
-            2.min(self.cache_frames(st))
+            SOURCE_GOP_AHEAD.min(self.cache_frames(st))
         } else if stride < 0 {
             (self.reverse_reach(st) as i64 / -stride).max(1) as usize
         } else {
@@ -607,12 +611,25 @@ impl Shared {
         };
         let frames = self.source.index.frames.len() as i64;
         let cache = self.service.cache();
+        let source_gop = (stride == 0).then(|| {
+            self.source
+                .index
+                .sync_for(self.source.index.frames[from].sample)
+        });
         for i in 1..=count as i64 {
             let m = from as i64 + i * if stride == 0 { 1 } else { stride };
             if m < 0 || m >= frames {
                 break;
             }
             let m = m as usize;
+            if source_gop.is_some_and(|gop| {
+                self.source
+                    .index
+                    .sync_for(self.source.index.frames[m].sample)
+                    != gop
+            }) {
+                break;
+            }
             if !cache.contains(&self.key(m)) {
                 return Some(m);
             }

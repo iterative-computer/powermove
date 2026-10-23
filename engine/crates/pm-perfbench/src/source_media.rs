@@ -36,6 +36,16 @@ fn times(scattered: bool) -> Vec<i64> {
     (0..FRAMES).map(|k| time(k, scattered).get()).collect()
 }
 
+// Match the source job's owned RGBA output path: opaque premultiplied bytes
+// are already straight, while translucent frames use the snapshot encoder.
+fn straight_source_pixels(pixels: Vec<u8>) -> Vec<u8> {
+    if pixels.chunks_exact(4).all(|pixel| pixel[3] == 255) {
+        pixels
+    } else {
+        pm_node::present::snapshot::encode_rgba8_unorm(&pixels, SnapshotPixels::Straight)
+    }
+}
+
 fn report(
     name: &str,
     unit: &'static str,
@@ -139,7 +149,7 @@ fn filmstrip_24(prepared: bool, batched: bool) -> BenchReport {
     let mut renderer = Renderer::headless().expect("filmstrip renderer");
     if prepared {
         renderer
-            .source_rgba8_export(&path, Ticks::ZERO, STRIP, SourceFit::Stretch, None)
+            .source_rgba8(&path, Ticks::ZERO, STRIP, SourceFit::Stretch, None)
             .expect("prepare real source frame");
         renderer.trim(64 << 20);
     }
@@ -158,10 +168,7 @@ fn filmstrip_24(prepared: bool, batched: bool) -> BenchReport {
                 .source_rgba8_batch(&path, &ticks, STRIP, SourceFit::Stretch, None)
                 .expect("bounded source batch");
             for (offset, frame) in frames.into_iter().enumerate() {
-                let straight = pm_node::present::snapshot::encode_rgba8_unorm(
-                    &frame,
-                    SnapshotPixels::Straight,
-                );
+                let straight = straight_source_pixels(frame);
                 assert_eq!(straight.len(), frame_bytes);
                 writer.write_all(&straight).expect("write filmstrip frame");
                 fingerprint = fingerprint
@@ -181,8 +188,7 @@ fn filmstrip_24(prepared: bool, batched: bool) -> BenchReport {
             let frame = renderer
                 .source_rgba8_export(&path, time(k, false), STRIP, SourceFit::Stretch, None)
                 .expect("filmstrip source frame");
-            let straight =
-                pm_node::present::snapshot::encode_rgba8_unorm(&frame, SnapshotPixels::Straight);
+            let straight = straight_source_pixels(frame);
             assert_eq!(straight.len(), frame_bytes);
             writer.write_all(&straight).expect("write filmstrip frame");
             wall_ms.push(began.elapsed().as_secs_f64() * 1_000.0);

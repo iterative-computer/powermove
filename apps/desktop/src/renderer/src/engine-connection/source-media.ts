@@ -264,6 +264,8 @@ export class SourceMonitor extends EventTarget {
   private frameAbort: AbortController | null = null;
   private readonly cancel = new AbortController();
   private readonly resize: ResizeObserver;
+  private cssWidth = 0;
+  private cssHeight = 0;
   private imageUrl: string | null = null;
   private fail(error: unknown): void {
     if (this.disposed) return;
@@ -282,8 +284,16 @@ export class SourceMonitor extends EventTarget {
     this.surface = meta?.kind === 'image' ? document.createElement('img') : this.canvas;
     if (this.surface instanceof HTMLImageElement) this.surface.alt = '';
     this.canvas.width = this.canvas.height = 1;
-    this.resize = new ResizeObserver(() => void this.paint());
-    this.resize.observe(this.surface);
+    this.resize = new ResizeObserver(entries => {
+      if (!entries.some(entry => entry.target === this.surface)) return;
+      // Measure after layout, preserving client rounding and override CSS
+      // padding, without flushing unrelated layout on every source seek.
+      const width = this.surface.clientWidth, height = this.surface.clientHeight;
+      if (width === this.cssWidth && height === this.cssHeight) return;
+      this.cssWidth = width; this.cssHeight = height;
+      void this.paint();
+    });
+    this.resize.observe(this.surface, { box: 'border-box' });
     void this.command(false);
     queueMicrotask(() => { if (this.surface.isConnected) void this.paint(); });
   }
@@ -356,13 +366,15 @@ export class SourceMonitor extends EventTarget {
     try {
       const meta = this.host.project().assets?.[this.asset];
       const dpr = devicePixelRatio || 1;
-      const width = Math.max(1, Math.round((this.surface.clientWidth || meta?.w || 1) * dpr));
-      const height = Math.max(1, Math.round((this.surface.clientHeight || meta?.h || 1) * dpr));
+      const width = Math.max(1, Math.round((this.cssWidth || meta?.w || 1) * dpr));
+      const height = Math.max(1, Math.round((this.cssHeight || meta?.h || 1) * dpr));
       const snapshot = await this.source.frame(this.asset, this.currentTime, width, height, { fit: 'contain', signal: AbortSignal.any([this.cancel.signal, controller.signal]) });
       if (this.disposed || this.requested !== generation) return;
       if (this.canvas.width !== width) this.canvas.width = width;
       if (this.canvas.height !== height) this.canvas.height = height;
-      this.canvas.getContext('2d')?.putImageData(new ImageData(new Uint8ClampedArray(snapshot.data), width, height), 0, 0);
+      const pixels = snapshot.data.buffer instanceof ArrayBuffer
+        ? snapshot.data as Uint8ClampedArray<ArrayBuffer> : new Uint8ClampedArray(snapshot.data);
+      this.canvas.getContext('2d')?.putImageData(new ImageData(pixels, width, height), 0, 0);
       if (this.surface instanceof HTMLImageElement) {
         const blob = await new Promise<Blob | null>(resolve => this.canvas.toBlob(resolve, 'image/png'));
         if (!blob) throw new Error('The source image could not be presented.');

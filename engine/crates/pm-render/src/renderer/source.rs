@@ -3,6 +3,7 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::time::Instant;
 
 use pm_gpu::Target;
 use pm_media::interpret::Interpretation;
@@ -21,7 +22,7 @@ use super::Renderer;
 /// the small output surface and staging buffer for adjacent seeks/filmstrip
 /// frames; a large one-off snapshot does not pin an oversized allocation.
 const MAX_REUSED_SOURCE_BYTES: u64 = 16 << 20;
-const MAX_SOURCE_BATCH: usize = 8;
+const MAX_SOURCE_BATCH: usize = 16;
 
 #[derive(Default)]
 pub(super) struct SourceReuse {
@@ -88,6 +89,7 @@ impl Renderer {
         interpretation: Option<&Interpretation>,
         exact_worker: bool,
     ) -> Result<Vec<u8>, String> {
+        let started = Instant::now();
         let mut head = [0u8; 512];
         let n = std::fs::File::open(path)
             .and_then(|mut f| f.read(&mut head))
@@ -105,7 +107,16 @@ impl Renderer {
             });
         let source =
             self.source_texture(path, time, interpretation, kind, &mut encoder, exact_worker)?;
-        self.draw_source_target(source, output, fit, encoder)
+        let record_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        let result = self.draw_source_target(source, output, fit, encoder);
+        if std::env::var_os("PM_SOURCE_PROFILE").is_some() {
+            eprintln!(
+                "pm source frame exact_worker={exact_worker} record_ms={record_ms:.3} draw_read_ms={:.3} total_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1_000.0 - record_ms,
+                started.elapsed().as_secs_f64() * 1_000.0,
+            );
+        }
+        result
     }
 
     fn source_texture(
@@ -202,6 +213,7 @@ impl Renderer {
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
     ) -> Result<Vec<Vec<u8>>, String> {
+        let started = Instant::now();
         if times.is_empty() || times.len() > Self::source_batch_limit(output) {
             return Err("The source batch exceeds its bounded readback size".into());
         }
@@ -263,6 +275,7 @@ impl Renderer {
                 },
             );
         }
+        let record_ms = started.elapsed().as_secs_f64() * 1_000.0;
         self.queue.submit([encoder.finish()]);
         self.media.flush();
         let (signal, ready) = std::sync::mpsc::channel();
@@ -276,6 +289,7 @@ impl Renderer {
             .recv()
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
+        let map_ms = started.elapsed().as_secs_f64() * 1_000.0 - record_ms;
         let mapped = buffer
             .slice(..size)
             .get_mapped_range()
@@ -294,6 +308,14 @@ impl Renderer {
         buffer.unmap();
         self.source_reuse.batch_buffer = Some((buffer, capacity));
         self.keep_source_target(target);
+        if std::env::var_os("PM_SOURCE_PROFILE").is_some() {
+            eprintln!(
+                "pm source batch frames={} record_ms={record_ms:.3} submit_map_ms={map_ms:.3} copy_ms={:.3} total_ms={:.3}",
+                times.len(),
+                started.elapsed().as_secs_f64() * 1_000.0 - record_ms - map_ms,
+                started.elapsed().as_secs_f64() * 1_000.0,
+            );
+        }
         Ok(frames)
     }
 

@@ -161,6 +161,29 @@ describe('engine source consumers', () => {
     f.source.dispose();
   });
 
+  it('uses observed CSS size without forcing layout on each source seek', async () => {
+    let resized!: ResizeObserverCallback;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) { resized = callback; }
+      observe() {} disconnect() {}
+    });
+    const f = fixture();
+    try {
+      const monitor = f.source.monitor('clip');
+      vi.spyOn(monitor.canvas, 'getContext').mockReturnValue(null);
+      const width = vi.spyOn(monitor.surface, 'clientWidth', 'get').mockReturnValue(160);
+      const height = vi.spyOn(monitor.surface, 'clientHeight', 'get').mockReturnValue(90);
+      resized([{ target: monitor.surface } as unknown as ResizeObserverEntry], {} as ResizeObserver);
+      await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalled());
+      await Promise.resolve(); await Promise.resolve();
+      width.mockClear(); height.mockClear();
+      monitor.currentTime = 3;
+      await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledWith(expect.objectContaining({ time: 3,
+        width: Math.round(160 * devicePixelRatio), height: Math.round(90 * devicePixelRatio) }), 'async'));
+      expect(width).not.toHaveBeenCalled(); expect(height).not.toHaveBeenCalled();
+    } finally { f.source.dispose(); vi.unstubAllGlobals(); }
+  });
+
   it('preserves image-element compositing for native stills', () => {
     const f = fixture(); f.project.assets.clip.kind = 'image';
     const monitor = f.source.monitor('clip');
