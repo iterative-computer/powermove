@@ -28,8 +28,7 @@
  * worker script.
  */
 import { createWebGpuPainter, type FramePainter, type PaintTarget } from './gpu';
-import { encodeEnvelope, envelope, eventMessage } from '../../../main/engine/protocol';
-import type { Event } from '../../../shared/engine-protocol';
+import { releaseEnvelope } from './release-envelope';
 import { EnginePresenter, type PresentedFrame, type PresenterStats, type TraceRecord } from './presenter';
 import type { ClockSample, FrameDescriptor, FrameRelease, SurfacePool, VsyncHint } from './protocol';
 
@@ -291,7 +290,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         const engineSession = message.engineSession;
         s.direct = (release) => {
           try {
-            port.postMessage(encodeEnvelope(envelope(eventMessage({ type: 'releaseFrame', ...release } as unknown as Event), engineSession)));
+            port.postMessage(releaseEnvelope(engineSession, release));
           } catch {
             // The engine's port is gone (a restart): the session ends with it.
           }
