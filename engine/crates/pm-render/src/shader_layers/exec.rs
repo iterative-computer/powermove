@@ -485,7 +485,7 @@ impl crate::exec::Exec<'_> {
         if !span.builtin && self.effects.watchdog.hold(&span.subject) {
             return Err(Missed::Held);
         }
-        let probe_code = if self.shaders.fallback_runner && self.effects.parity.enabled() {
+        let probe_code = if self.effects.parity.enabled() {
             match &source.program {
                 ProgramRef::Code { source, .. } => Some(source.to_string()),
                 ProgramRef::Definition { id, .. } => {
@@ -537,6 +537,12 @@ impl crate::exec::Exec<'_> {
             }
             Some((verdict, request))
         });
+        if let Some((verdict, _)) = &probe
+            && *verdict != crate::effects::parity::Verdict::NativeVerified
+            && !self.shaders.fallback_runner
+        {
+            return Err(Missed::NeedsFallback(source.layer.to_string()));
+        }
         if let Some((verdict, request)) = &probe
             && (*verdict != crate::effects::parity::Verdict::Unknown
                 || self

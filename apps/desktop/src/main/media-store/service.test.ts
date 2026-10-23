@@ -47,6 +47,18 @@ const service = (options: Partial<ConstructorParameters<typeof MediaStoreService
   ...options
 });
 
+it('freezes a host save’s blob MIME with its content, even if its key is replaced', async () => {
+  const svc = service(), file = path.join(media, 'converted.bin');
+  await settledFile(file, bytes(1000, 1));
+  const first = await svc.store.putFile(file, { key: 'media:converted', type: 'video/webm' });
+  await svc.bindJob(10, { id: 'P', assets: { a: { id: 'a', storageKey: first.key } } });
+  expect(await svc.resolveAsset('a', { process: 'job', session: 10 })).toMatchObject({ path: svc.store.objectPath(first.hash), type: 'video/webm' });
+  await settledFile(file, bytes(1000, 2));
+  await svc.store.putFile(file, { key: first.key, type: 'image/png' });
+  expect(await svc.resolveAsset('a', { process: 'job', session: 10 })).toMatchObject({ path: svc.store.objectPath(first.hash), type: 'video/webm' });
+  await svc.bindJob(10, null);
+});
+
 describe('ImportClassifier', () => {
   it('links ordinary files, copies agent workspace and app files, and copies camera media', async () => {
     const classifier = new ImportClassifier({ userData, diskInfo: async () => null, mountPoint: async () => '/' });

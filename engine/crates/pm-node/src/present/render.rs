@@ -495,6 +495,16 @@ pub struct FrameTrace {
     pub revisions: Vec<[i64; 3]>,
 }
 
+/// Work counters as `{ name: count }` (the non-zero ones).
+fn work_counters<S: serde::Serializer>(c: &pm_perf::Counters, s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    let mut m = s.serialize_map(None)?;
+    for (counter, n) in c.nonzero() {
+        m.serialize_entry(counter.name(), &n)?;
+    }
+    m.end()
+}
+
 /// Counters the engine reports in its status.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -547,6 +557,14 @@ pub struct Stats {
     pub document_frames: u64,
     pub compose_us_max: i64,
     pub compose_us_total: i64,
+    /// The render thread's work counters (`pm_perf`: passes, draws, GPU
+    /// allocations, uploads, readbacks, heap allocations when counted,
+    /// cache hits) over every document frame's compose (planning, encoding,
+    /// submission), and over the last one.
+    #[serde(serialize_with = "work_counters")]
+    pub work: pm_perf::Counters,
+    #[serde(serialize_with = "work_counters")]
+    pub work_last: pm_perf::Counters,
     /// Frames that failed to render (logged), and layer failures.
     pub render_errors: u64,
     pub layer_failures: u64,
@@ -4289,6 +4307,8 @@ impl Thread {
         let mut stand_in_shown = None;
         let mut preview_candidate: Option<PreviewCandidate> = None;
         let mut preview_failure: Option<String> = None;
+        // The frame's work on this thread (docs/engine/perfbench.md).
+        let work = pm_perf::Scope::begin();
         if document {
             let doc = self.docs.get_mut(&key)?;
             let composer = gpu.composer_with(&self.config, self.frame_cache);
@@ -4457,6 +4477,9 @@ impl Thread {
                     }
                     let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
                     stats.document_frames += 1;
+                    stats.work_last = work.finish();
+                    let last = stats.work_last;
+                    stats.work.accumulate(&last);
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
                     stats.compose_us_total += composed.cpu_us;
                     stats.layer_failures += composed.failures.len() as u64;

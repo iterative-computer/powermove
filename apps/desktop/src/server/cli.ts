@@ -85,6 +85,7 @@ const HELP = `powermove — run the Powermove host on this machine and use it fr
 
 Usage:
   powermove serve [options]      Run the host in this terminal (try it: npx powermove-cli@latest serve)
+  powermove render <project> <output> [options]  Render through the native engine to any output path
   powermove mcp [options]        MCP server with a hidden editor; create and export videos without opening the app
   powermove mcp --connect --user-data <dir>   Connect MCP to an already running desktop app or host profile
   powermove mcp-install-browser  Install the hidden Chromium renderer once
@@ -201,6 +202,12 @@ function hostAppPath(layout: CliLayout): string {
 }
 
 export async function main(argv: string[], layout: CliLayout): Promise<void> {
+  if (argv[0] === 'render') {
+    const { renderProject } = await import('./render');
+    process.exitCode = await renderProject(argv.slice(1), layout.distDir);
+    return;
+  }
+
   let parsed;
   try { parsed = parseArgs(argv); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(2); }
   if (parsed.help || parsed.command === 'help') { process.stdout.write(HELP); return; }

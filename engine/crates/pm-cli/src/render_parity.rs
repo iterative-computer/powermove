@@ -568,6 +568,8 @@ pub fn run(options: &Options) -> Result<Report, String> {
         );
     }
     let mut renderer = Renderer::headless().map_err(|e| e.to_string())?;
+    // Never write into the desktop's probe namespace (crate::angle).
+    renderer.read_only_shader_reference();
     // Level 1 SVG images (decision S1): Chromium's captured rasters, or
     // resvg's approximation; never a frame drawn without one.
     renderer.set_svg_wait(true);

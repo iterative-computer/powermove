@@ -720,6 +720,8 @@ export interface PowermoveBridge {
   versions: { electron: string; chrome: string; node: string };
   /** True when the page is served by `powermove serve` and the host is another machine. */
   remote?: boolean;
+  /** Local native hidden host: authenticated HTTP CPU snapshots. */
+  nativeHidden?: boolean;
   /** Wraps the renderer's media store so imports reach the host and misses are filled from it. */
   wrapMediaStore?<T extends object>(store: T, onChange?: () => void): T;
   /** Agent runs the host owns: they keep going without this tab. */

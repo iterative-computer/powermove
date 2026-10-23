@@ -1,3 +1,4 @@
+import { nativeHiddenBridge } from './hidden-bridge';
 /*
  * The browser's stand-in for the Electron preload. When the app is served by
  * `powermove serve`, there is no contextBridge; this module speaks the same
@@ -273,6 +274,8 @@ export function createBridge(link: ReconnectingLink, hello: WebHello, storeSnaps
     },
     ping: () => link.invoke<string>(IPC.ping),
     remote: true,
+    nativeHidden: hello.nativeHidden === true,
+    ...(hello.nativeHidden ? nativeHiddenBridge(link) : {}),
     wrapMediaStore: (store, onChange) => attachRemoteMedia(link, store as never, onChange) as never,
     remoteRuns: {
       list: (projectId) => link.invoke<RemoteRunRecord[]>(WEB.runsList, projectId),

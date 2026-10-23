@@ -180,6 +180,9 @@ export class MediaStore {
           if (attempt < 3) { await rm(temporary, { force: true }); continue; }
           throw new MediaStoreError(`“${path.basename(source)}” kept changing while it was copied.`, 'changed');
         }
+        // copyFile preserves the source's mode, including immutable store objects.
+        // Only the private staging copy needs write access for fsync.
+        await chmod(temporary, 0o600);
         const handle = await open(temporary, 'r+');
         try { await syncFile(handle); } finally { await handle.close(); }
         const identity = await hashFile(this.options.executor, temporary, { settleMs: 0, ...(options.progress ? { progress: options.progress } : {}) });

@@ -1121,7 +1121,15 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
     if (relinkedLayers) PM.bus.emit('layers');
   }
   await PM.HostMedia?.flushBindings?.(targetProject);
-  assertCurrentProject();
+  // The import committed above and touched the document. The caller's
+  // pre-import revision is now stale because of this successful write.
+  // Keep the project/epoch guard across the binding await; pre-commit
+  // checks still enforce the caller's revision and run cancellation.
+  if (PM.proj !== targetProject || assetEpoch !== targetEpoch) {
+    const error = new Error('Import stopped because you switched projects · inspect the imported media before retrying');
+    (error as any).code = 'STALE_MEDIA_IMPORT';
+    throw error;
+  }
   return result;
 }
 async function recoverSourceAsset(meta: any, file: File, current: () => boolean) {

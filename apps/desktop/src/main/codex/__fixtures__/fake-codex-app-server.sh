@@ -18,6 +18,9 @@ while IFS= read -r line; do
     *'"method":"account/login/start"'*)
       printf '{"id":%s,"result":{"type":"chatgpt","loginId":"login-e2e","authUrl":"https://chatgpt.com/auth/powermove-e2e"}}\n' "$id"
       ;;
+    *'"method":"model/list"'*)
+      printf '{"id":%s,"result":{"data":[],"nextCursor":null}}\n' "$id"
+      ;;
     *'"method":"account/logout"'*)
       status=disconnected
       printf '{"id":%s,"result":{}}\n' "$id"

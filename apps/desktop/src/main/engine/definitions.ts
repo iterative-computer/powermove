@@ -155,6 +155,13 @@ export class DefinitionRelay {
     return this.windows.get(windowId)?.fullUpdate(generation) ?? null;
   }
 
+  /** The window's set as a pm-cli `--definitions` snapshot (profile-definitions.ts). */
+  snapshotSet(windowId: number): { generation: number; definitions: DefinitionSnapshot[]; missing: string[] } | null {
+    const set = this.windows.get(windowId);
+    if (!set || set.generation === null) return null;
+    return { generation: set.generation, definitions: set.fullUpdate(set.generation).upserts, missing: set.missingIds() };
+  }
+
   /** The window's own definitions generation (it changes with every
    *  update the window pushes), or null before its first. */
   generationOf(windowId: number): number | null {

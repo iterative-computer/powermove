@@ -1144,6 +1144,7 @@ pub fn responses() -> Vec<Envelope> {
             24,
             Response::MediaFacts(Box::new(crate::media::MediaFacts {
                 kind: crate::media::MediaKind::Video,
+                audio: None,
                 facts: vec![crate::media::FactLine {
                     label: "Codec".into(),
                     value: "ProRes 422 HQ".into(),

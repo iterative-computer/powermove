@@ -28,12 +28,14 @@ OUT="${PM_MEDIA_NATIVE_DIR:-$CACHE/out}"
 WORK="${PM_MEDIA_NATIVE_WORK:-$CACHE/work}"
 DOWNLOADS="${PM_MEDIA_NATIVE_DOWNLOADS:-$CACHE/downloads}"
 JOBS="${PM_MEDIA_NATIVE_JOBS:-4}"
+ARCH="${PM_MEDIA_NATIVE_ARCH:-arm64}"
+case "$ARCH" in arm64) RUST_TARGET=aarch64-apple-darwin ;; x86_64) RUST_TARGET=x86_64-apple-darwin ;; *) echo "Unsupported media architecture: $ARCH" >&2; exit 1 ;; esac
 DEPLOYMENT_TARGET="13.0"
 
 log() { printf '\n==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-[[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] || die "builds on macOS arm64 only"
+[[ "$(uname -s)" == "Darwin" ]] || die "builds on macOS only"
 for tool in clang clang++ cmake ninja python3 curl shasum tar xz xcrun; do
   command -v "$tool" >/dev/null 2>&1 || die "missing build tool: $tool"
 done
@@ -51,7 +53,7 @@ unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LIBS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_P
 export PKG_CONFIG_LIBDIR="/nonexistent" PKG_CONFIG_PATH=""
 export LC_ALL=C TZ=UTC MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" ZERO_AR_DATE=1
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$NINJA"):$(dirname "$CMAKE")"
-BASE_FLAGS="-arch arm64 -mmacosx-version-min=$DEPLOYMENT_TARGET -ffile-prefix-map=$WORK=/pm-media-native"
+BASE_FLAGS="-arch $ARCH -mmacosx-version-min=$DEPLOYMENT_TARGET -ffile-prefix-map=$WORK=/pm-media-native"
 
 NAMES=(); VERSIONS=(); SHAS=(); DIRS=(); URLS=()
 while read -r name version sha dir license url rest; do
@@ -86,7 +88,7 @@ extract() {
 
 # Content only (no paths), so every worktree computes the same stamp; build.rs
 # compares it to decide whether to run this script.
-STAMP="$(cat "$LOCK" "$HERE/build.sh" "$HERE/crabby.Cargo.lock" | shasum -a 256 | cut -d' ' -f1)"
+STAMP="$( { cat "$LOCK" "$HERE/build.sh" "$HERE/crabby.Cargo.lock"; printf '%s' "$ARCH"; } | shasum -a 256 | cut -d' ' -f1)"
 if [[ -f "$OUT/stamp" && "$(cat "$OUT/stamp")" == "$STAMP" ]]; then
   log "up to date: $OUT"
   exit 0
@@ -98,11 +100,30 @@ mkdir -p "$WORK/src" "$WORK/prefix"
 for n in "${NAMES[@]}"; do fetch "$n"; extract "$n"; done
 PREFIX="$WORK/prefix"
 
+MESON_CROSS=()
+if [[ "$ARCH" != "$(uname -m)" ]]; then
+  cat > "$WORK/cross.ini" <<EOF
+[binaries]
+c = ['clang', '-arch', '$ARCH']
+cpp = ['clang++', '-arch', '$ARCH']
+ar = 'ar'
+strip = 'strip'
+pkg-config = 'pkg-config'
+[host_machine]
+system = 'darwin'
+cpu_family = '$ARCH'
+cpu = '$ARCH'
+endian = 'little'
+[properties]
+needs_exe_wrapper = false
+EOF
+  MESON_CROSS+=(--cross-file="$WORK/cross.ini")
+fi
 log "build dav1d"
-CFLAGS="$BASE_FLAGS" LDFLAGS="-arch arm64 -mmacosx-version-min=$DEPLOYMENT_TARGET" \
+CFLAGS="$BASE_FLAGS" LDFLAGS="-arch $ARCH -mmacosx-version-min=$DEPLOYMENT_TARGET" \
   "$PYTHON" -I "$(src_of meson)/meson.py" setup "$WORK/build/dav1d" "$(src_of dav1d)" \
   --prefix="$PREFIX" --libdir=lib --buildtype=release --default-library=static \
-  --wrap-mode=nofallback -Db_ndebug=true -Db_staticpic=true \
+  ${MESON_CROSS[@]+"${MESON_CROSS[@]}"} --wrap-mode=nofallback -Db_ndebug=true -Db_staticpic=true \
   -Denable_tools=false -Denable_tests=false -Denable_examples=false -Denable_docs=false -Denable_asm=true
 "$PYTHON" -I "$(src_of meson)/meson.py" compile -C "$WORK/build/dav1d" -j "$JOBS"
 "$PYTHON" -I "$(src_of meson)/meson.py" install -C "$WORK/build/dav1d"
@@ -112,7 +133,7 @@ log "build OpenEXRCore"
 # FetchContent's source override (no network); deflate, zstd, and OpenJPH are
 # OpenEXR's vendored copies.
 CFLAGS="-O2 $BASE_FLAGS" CXXFLAGS="-O2 $BASE_FLAGS" "$CMAKE" -S "$(src_of openexr)" -B "$WORK/build/openexr" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$ARCH" -DCMAKE_SYSTEM_NAME=Darwin -DCMAKE_SYSTEM_PROCESSOR="$ARCH" -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
   -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" -DCMAKE_FIND_FRAMEWORK=LAST \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF \
   -DOPENEXR_BUILD_TOOLS=OFF -DOPENEXR_BUILD_EXAMPLES=OFF -DOPENEXR_BUILD_PYTHON=OFF -DOPENEXR_INSTALL=OFF \
@@ -124,7 +145,7 @@ CFLAGS="-O2 $BASE_FLAGS" CXXFLAGS="-O2 $BASE_FLAGS" "$CMAKE" -S "$(src_of openex
 log "build libjpeg-turbo"
 # Static TurboJPEG API with the NEON SIMD extensions; no tools or Java.
 CFLAGS="-O2 $BASE_FLAGS" "$CMAKE" -S "$(src_of libjpeg-turbo)" -B "$WORK/build/libjpeg-turbo" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$ARCH" -DCMAKE_SYSTEM_NAME=Darwin -DCMAKE_SYSTEM_PROCESSOR="$ARCH" -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
   -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON \
   -DWITH_JAVA=OFF -DWITH_TOOLS=OFF -DWITH_TESTS=OFF -DWITH_SIMD=ON
@@ -132,7 +153,7 @@ CFLAGS="-O2 $BASE_FLAGS" "$CMAKE" -S "$(src_of libjpeg-turbo)" -B "$WORK/build/l
 
 log "build libyuv (Chromium 152)"
 CFLAGS="-O2 $BASE_FLAGS" CXXFLAGS="-O2 $BASE_FLAGS" "$CMAKE" -S "$(src_of libyuv)" -B "$WORK/build/libyuv" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$ARCH" -DCMAKE_SYSTEM_NAME=Darwin -DCMAKE_SYSTEM_PROCESSOR="$ARCH" -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
   -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" -DLIBYUV_BUILD_TESTS=OFF -DLIBYUV_BUILD_TOOLS=OFF
 "$CMAKE" --build "$WORK/build/libyuv" --target yuv -j "$JOBS"
@@ -155,10 +176,10 @@ log "build CrabbyAvif (Chromium 152)"
 # rust-lang/rust#157750: stripped build-time proc macros fail to load on
 # macOS 27. Keep their debug info; the shipped archive uses release code.
 cp "$HERE/crabby.Cargo.lock" "$(src_of crabbyavif)/Cargo.lock"
-PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" PKG_CONFIG_ALL_STATIC=1 \
+PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" PKG_CONFIG_ALL_STATIC=1 PKG_CONFIG_ALLOW_CROSS=1 \
   CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=1 \
   RUSTC="$RUSTC_BIN" RUSTC_WRAPPER="" CARGO_BUILD_JOBS="$JOBS" CARGO_TARGET_DIR="$WORK/build/crabby" \
-  "$CARGO" build --locked --release --manifest-path "$(src_of crabbyavif)/Cargo.toml" \
+  "$CARGO" build --locked --release --target "$RUST_TARGET" --manifest-path "$(src_of crabbyavif)/Cargo.toml" \
   --lib --no-default-features --features capi,dav1d,libyuv
 
 log "build skcms (Chromium 152)"
@@ -176,7 +197,7 @@ cp "$WORK/build/skcms/libskcms.a" "$OUT.partial/lib/"
 mkdir -p "$OUT.partial/include/skcms/src"
 cp "$(src_of skcms)/skcms.h" "$OUT.partial/include/skcms/"
 cp "$(src_of skcms)/src/skcms_public.h" "$OUT.partial/include/skcms/src/"
-cp "$WORK/build/crabby/release/libcrabby_avif.a" "$OUT.partial/lib/"
+cp "$WORK/build/crabby/$RUST_TARGET/release/libcrabby_avif.a" "$OUT.partial/lib/"
 cp -R "$(src_of crabbyavif)/include/avif" "$OUT.partial/include/"
 cp "$PREFIX/lib/libdav1d.a" "$OUT.partial/lib/"
 cp -R "$PREFIX/include/dav1d" "$OUT.partial/include/"
@@ -214,6 +235,10 @@ cp "$(src_of libjpeg-turbo)/src/spng/zlib/LICENSE" "$OUT.partial/share/licenses/
 cp "$(src_of crabbyavif)/LICENSE" "$OUT.partial/share/licenses/crabbyavif/"
 cp "$(src_of libyuv)/LICENSE" "$OUT.partial/share/licenses/libyuv/"
 cp "$HERE/skcms.LICENSE" "$OUT.partial/share/licenses/skcms/LICENSE"
+for archive in "$OUT.partial/lib/"*.a; do
+  [[ "$(lipo -archs "$archive")" == "$ARCH" ]] || die "wrong architecture: $archive"
+done
+printf '%s\n' "$RUST_TARGET" > "$OUT.partial/target"
 ls "$OUT.partial/lib" > "$OUT.partial/libs.txt"
 echo "$STAMP" > "$OUT.partial/stamp"
 rm -rf "$OUT"
