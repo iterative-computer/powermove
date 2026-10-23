@@ -9,7 +9,7 @@ use kurbo::{Affine, Rect};
 use pm_text::render::{
     bitmap::Rgba8,
     color::Rgba,
-    scene::{Item, ItemContent, PathGlyph, PathRasterizer},
+    scene::{Item, ItemContent, PathDraw, PathGlyph, PathRasterizer},
 };
 use std::sync::Arc;
 
@@ -24,12 +24,16 @@ impl PathRasterizer for Rasterizer {
         color: Rgba,
         opacity: f64,
         blur: f64,
+        multisample_pass: bool,
     ) -> Option<Item> {
         // A filtered draw can contribute ink from beyond the canvas edge.
         // Its save layer covers the canvas outset by the kernel bounds.
         let pad = pm_text::render::scene::blur_radius(blur);
         let mut cx = Context::new(viewport.0 + 2 * pad, viewport.1 + 2 * pad);
         cx.retain_native_paths();
+        if multisample_pass {
+            cx.multisample_pass();
+        }
         let alpha = (color[3] * opacity) as f32;
         let paint = Paint::Solid([
             color[0] as f32 * alpha,
@@ -113,6 +117,13 @@ impl PathRasterizer for Rasterizer {
         Some(Item {
             content: ItemContent::Graphite {
                 raster: Arc::new(cx.graphite_region(r)?),
+                paths: Some(Arc::new(PathDraw {
+                    glyphs: paths.to_vec(),
+                    viewport,
+                    color,
+                    opacity,
+                    blur,
+                })),
                 image: Arc::new(Rgba8 {
                     width: (r[2] - r[0]) as u32,
                     height: (r[3] - r[1]) as u32,
@@ -137,6 +148,119 @@ impl PathRasterizer for Rasterizer {
 mod tests {
     use super::super::skpath::SkPath;
     use super::*;
+
+    fn polygon(points: &[(f32, f32)]) -> Arc<pm_skia_path::Path> {
+        let mut b = pm_skia_path::PathBuilder::new();
+        b.move_to(points[0].0, points[0].1);
+        for p in &points[1..] {
+            b.line_to(p.0, p.1);
+        }
+        b.close();
+        Arc::new(b.finish().unwrap())
+    }
+
+    /// The premultiplied pixels of unfiltered items composited source-over
+    /// into an RGBA8 canvas (the items here never overlap).
+    fn composite(items: &[Item], size: (u32, u32)) -> Vec<u8> {
+        let mut out = vec![0u8; (size.0 * size.1 * 4) as usize];
+        for item in items {
+            let ItemContent::Graphite { image, transform, .. } = &item.content else {
+                panic!("a Graphite item")
+            };
+            let [.., tx, ty] = transform.as_coeffs();
+            for y in 0..image.height as usize {
+                for x in 0..image.width as usize {
+                    let s = &image.data[(y * image.width as usize + x) * 4..][..4];
+                    if s[3] == 0 {
+                        continue;
+                    }
+                    let (dx, dy) = (x + tx as usize, y + ty as usize);
+                    let d = &mut out[(dy * size.0 as usize + dx) * 4..][..4];
+                    assert_eq!(d[3], 0, "items overlap at {dx},{dy}");
+                    d.copy_from_slice(s);
+                }
+            }
+        }
+        out
+    }
+
+    // Graphite multisamples a whole render pass once one of its draws needs
+    // MSAA. A skewed rectangular glyph (Arial `l`, an analytic draw) drawn by
+    // its own `fillText` next to a tessellated glyph (`H`) must cover samples
+    // at its acute corners, exactly as when both are in one call.
+    #[test]
+    fn a_multisampled_pass_redraws_earlier_analytic_glyphs_per_sample() {
+        let viewport = (420, 120);
+        let skew = [1.875f32, 0.0, -3.247_595_3, 1.875, 0.0, 0.0];
+        let at = |x: f32| {
+            let mut m = skew;
+            m[4] = x;
+            m[5] = 100.0;
+            m
+        };
+        // `l`: a rectangle (analytic). `H`: a concave outline (stencil and
+        // cover, MSAA). Canonical 64 px units, y down.
+        let l = PathGlyph {
+            path: polygon(&[(4.4, -45.8), (10.1, -45.8), (10.1, 0.0), (4.4, 0.0)]),
+            matrix: at(240.3),
+            stroke: None,
+        };
+        let h = PathGlyph {
+            path: polygon(&[
+                (5.0, -45.8),
+                (11.1, -45.8),
+                (11.1, -27.0),
+                (34.9, -27.0),
+                (34.9, -45.8),
+                (41.0, -45.8),
+                (41.0, 0.0),
+                (34.9, 0.0),
+                (34.9, -21.6),
+                (11.1, -21.6),
+                (11.1, 0.0),
+                (5.0, 0.0),
+            ]),
+            matrix: at(10.1),
+            stroke: None,
+        };
+        let color = [0.0627, 0.0627, 0.0627, 1.0];
+        let call = |glyphs: &[PathGlyph], msaa: bool| {
+            RASTERIZER
+                .raster(glyphs, viewport, color, 1.0, 0.0, msaa)
+                .unwrap()
+        };
+        let multisampled = |item: &Item| match &item.content {
+            ItemContent::Graphite { raster, .. } => raster.multisampled,
+            _ => unreachable!(),
+        };
+        let one_call = composite(&[call(&[l.clone(), h.clone()], false)], viewport);
+
+        // Separate calls: the rectangle alone resolves pixel centers.
+        let mut items = vec![call(std::slice::from_ref(&l), false), call(std::slice::from_ref(&h), false)];
+        assert!(!multisampled(&items[0]) && multisampled(&items[1]));
+        let separate = composite(&items, viewport);
+        let corners = one_call.iter().zip(&separate).filter(|(a, b)| a != b).count();
+        assert!(corners > 0, "the corner samples must matter for this test");
+
+        pm_text::render::scene::multisample_pass(&mut items, &RASTERIZER, false);
+        assert!(multisampled(&items[0]));
+        assert_eq!(composite(&items, viewport), one_call);
+
+        // A filtered draw renders in its own save layer's pass.
+        let blurred = RASTERIZER
+            .raster(std::slice::from_ref(&l), viewport, color, 1.0, 1.5, false)
+            .unwrap();
+        let mut pair = vec![blurred, call(std::slice::from_ref(&h), false)];
+        pm_text::render::scene::multisample_pass(&mut pair, &RASTERIZER, false);
+        assert!(!multisampled(&pair[0]));
+        // A pass made multisampled by a draw outside the items (a caption
+        // box) redraws them too; alone, nothing changes.
+        let mut alone = vec![call(std::slice::from_ref(&l), false)];
+        pm_text::render::scene::multisample_pass(&mut alone, &RASTERIZER, false);
+        assert!(!multisampled(&alone[0]));
+        pm_text::render::scene::multisample_pass(&mut alone, &RASTERIZER, true);
+        assert!(multisampled(&alone[0]));
+    }
 
     // A crop must not act like a smaller backing canvas. In particular,
     // near-grid vertices retain the original viewport's rounding.

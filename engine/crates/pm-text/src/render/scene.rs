@@ -59,6 +59,10 @@ pub enum ItemContent {
         image: Arc<Rgba8>,
         transform: Affine,
         raster: Arc<super::graphite::Raster>,
+        /// The canonical glyph paths this raster draws, when it came from
+        /// the [`PathRasterizer`]: [`Painter::multisample_pass`] redraws
+        /// them when another draw of the canvas pass needs MSAA.
+        paths: Option<Arc<PathDraw>>,
     },
 }
 
@@ -304,9 +308,34 @@ pub struct PathGlyph {
     pub stroke: Option<f32>,
 }
 
+/// One `fillText`/`strokeText` call's canonical glyph paths, as the
+/// [`PathRasterizer`] received them.
+#[derive(Clone)]
+pub struct PathDraw {
+    pub glyphs: Vec<PathGlyph>,
+    pub viewport: (u32, u32),
+    pub color: Rgba,
+    pub opacity: f64,
+    pub blur: f64,
+}
+
+impl std::fmt::Debug for PathDraw {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PathDraw")
+            .field("glyphs", &self.glyphs.len())
+            .field("viewport", &self.viewport)
+            .field("blur", &self.blur)
+            .finish()
+    }
+}
+
 /// The host's Canvas2D path renderer. Kept at this seam because pm-vector
 /// also consumes pm-text; text must not acquire a reverse dependency.
 pub trait PathRasterizer {
+    /// Draws `paths` into a pass of their own. `multisample_pass`: another
+    /// draw of the same Graphite render pass needs MSAA, so the pass is
+    /// multisampled even when none of these draws needs it (Graphite
+    /// decides per render pass, `DrawList`'s MSAA requirement).
     fn raster(
         &self,
         paths: &[PathGlyph],
@@ -314,6 +343,7 @@ pub trait PathRasterizer {
         color: Rgba,
         opacity: f64,
         blur: f64,
+        multisample_pass: bool,
     ) -> Option<Item>;
 }
 
@@ -1043,7 +1073,7 @@ impl Painter<'_> {
         if !canonical_glyphs.is_empty() {
             if let (Some(renderer), Some(viewport)) = (self.path_rasterizer, self.viewport) {
                 if let Some(item) =
-                    renderer.raster(&canonical_glyphs, viewport, color, opacity, blur)
+                    renderer.raster(&canonical_glyphs, viewport, color, opacity, blur, false)
                 {
                     out.push(item);
                 }
@@ -1182,7 +1212,7 @@ impl Painter<'_> {
         }
         if !canonical_glyphs.is_empty()
             && let (Some(renderer), Some(viewport)) = (self.path_rasterizer, self.viewport)
-            && let Some(item) = renderer.raster(&canonical_glyphs, viewport, color, opacity, 0.0)
+            && let Some(item) = renderer.raster(&canonical_glyphs, viewport, color, opacity, 0.0, false)
         {
             out.push(item);
         }
@@ -1197,6 +1227,70 @@ impl Painter<'_> {
                 blur: 0.0,
                 bounds,
             });
+        }
+    }
+}
+
+impl Painter<'_> {
+    /// Resolves the canvas's Graphite render pass after all of its draws
+    /// are recorded. Graphite multisamples a whole render pass once any of
+    /// its draws needs MSAA (`DrawList` tracks the requirement per pass;
+    /// `DrawContext::flush` picks the pass's sample count). Every unfiltered
+    /// draw of one Canvas2D raster shares that pass: Chromium replays the
+    /// canvas's recording and snaps it once, at the read. A filtered draw
+    /// renders in its save layer's own pass, which only its own draws decide.
+    ///
+    /// Each path draw was rasterized in a pass of its own. When the canvas
+    /// pass is multisampled (`multisampled`: by a draw outside `out`, such
+    /// as a caption box, or by any unfiltered path draw in `out`), every
+    /// unfiltered path draw that was rasterized single-sampled is redrawn
+    /// multisampled. Analytic draws then cover samples, not pixel centers,
+    /// at their mesh edges: an animator's rectangular glyphs (Arial `l`
+    /// and `.`) next to tessellated glyphs drawn as paths.
+    ///
+    /// Direct-mask quads are pixel aligned and distance-field quads end
+    /// two texels outside the field's padded ink, so their pixels do not
+    /// depend on the pass's sample count; they are not redrawn.
+    pub fn multisample_pass(&self, out: &mut [Item], multisampled: bool) {
+        if let Some(renderer) = self.path_rasterizer {
+            multisample_pass(out, renderer, multisampled);
+        }
+    }
+}
+
+/// [`Painter::multisample_pass`] with an explicit path renderer.
+pub fn multisample_pass(out: &mut [Item], renderer: &dyn PathRasterizer, multisampled: bool) {
+    let unfiltered = |item: &Item| item.blur <= 0.0;
+    let multisampled = multisampled
+        || out.iter().any(|item| {
+            unfiltered(item)
+                && matches!(&item.content, ItemContent::Graphite { raster, .. } if raster.multisampled)
+        });
+    if !multisampled {
+        return;
+    }
+    for item in out.iter_mut().filter(|item| unfiltered(item)) {
+        let ItemContent::Graphite {
+            raster,
+            paths: Some(paths),
+            ..
+        } = &item.content
+        else {
+            continue;
+        };
+        if raster.multisampled {
+            continue;
+        }
+        let paths = paths.clone();
+        if let Some(redrawn) = renderer.raster(
+            &paths.glyphs,
+            paths.viewport,
+            paths.color,
+            paths.opacity,
+            paths.blur,
+            true,
+        ) {
+            *item = redrawn;
         }
     }
 }
@@ -1555,6 +1649,7 @@ fn native_sdf_item(
             data,
         }),
         transform: Affine::translate((item.bounds.x0, item.bounds.y0)),
+        paths: None,
         raster: Arc::new(super::graphite::Raster {
             width: width + 2 * pad,
             height: height + 2 * pad,
@@ -2143,6 +2238,7 @@ mod tests {
                 _: Rgba,
                 _: f64,
                 _: f64,
+                _: bool,
             ) -> Option<Item> {
                 self.0.borrow_mut().push(paths.len());
                 None
@@ -2262,6 +2358,7 @@ mod tests {
                 _: Rgba,
                 _: f64,
                 _: f64,
+                _: bool,
             ) -> Option<Item> {
                 self.0.borrow_mut().push(paths.len());
                 None

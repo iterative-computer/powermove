@@ -672,6 +672,7 @@ impl TextContext {
                         blur,
                     );
                 }
+                painter.multisample_pass(&mut scene.items, false);
                 unsupported.append(&mut painter.unsupported);
                 let anchor = (raster.anchor_x, raster.anchor_y);
                 return Ok(self
@@ -715,6 +716,7 @@ impl TextContext {
             let refs = run_refs(&runs, &faces);
             painter.fill_text(&mut scene.items, &refs, origin, m, fill, 1.0, 0.0);
         }
+        painter.multisample_pass(&mut scene.items, false);
         unsupported.append(&mut painter.unsupported);
         Ok(self
             .finish(scene, true)
@@ -882,6 +884,8 @@ impl TextContext {
         // The style each word's `save()` restores: the box fill once the box
         // is drawn, else the canvas default, black.
         let mut restored = color::BLACK;
+        // The box's tessellated fill makes the canvas pass multisampled.
+        let mut box_msaa = false;
         if style.boxed && style.box_opacity > 0.0 {
             // A rejected box color fills with the canvas default, black.
             let fill = hex_to_rgba(
@@ -900,6 +904,7 @@ impl TextContext {
             // With platform masks (Canvas2D's look), the box is filled as
             // the GPU canvas fills paths: 4× multisampled.
             let item = if self.masks.is_some() && self.profile == Profile::CANVAS2D {
+                box_msaa = true;
                 pm_text::render::scene::fill_rounded_rect_msaa(
                     (
                         0.0,
@@ -989,6 +994,7 @@ impl TextContext {
                 painter.fill_text(&mut scene.items, &refs, (x, y), m, fill, state.alpha, 0.0);
             }
         }
+        painter.multisample_pass(&mut scene.items, box_msaa);
         unsupported.append(&mut painter.unsupported);
     }
 }

@@ -128,6 +128,9 @@ enum Op {
 /// A Canvas2D context on a `width` × `height` canvas.
 pub struct Context {
     native_paths: bool,
+    /// The render pass is multisampled for a draw recorded outside this
+    /// context (see [`Context::multisample_pass`]).
+    pass_msaa: bool,
     width: u32,
     height: u32,
     ops: Vec<Op>,
@@ -164,6 +167,7 @@ impl Context {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             native_paths: false,
+            pass_msaa: false,
             width,
             height,
             ops: Vec::new(),
@@ -180,6 +184,18 @@ impl Context {
 
     pub fn retain_native_paths(&mut self) {
         self.native_paths = true;
+    }
+
+    /// Graphite multisamples a whole render pass once any draw in it needs
+    /// MSAA. A caller that records only part of a pass whose other draws
+    /// tessellate marks the pass multisampled here, so analytic draws are
+    /// rasterized per sample like the rest.
+    pub fn multisample_pass(&mut self) {
+        self.pass_msaa = true;
+    }
+
+    fn multisampled(&self) -> bool {
+        self.pass_msaa || self.ops.iter().any(needs_msaa)
     }
 
     pub fn restore(&mut self) {
@@ -594,7 +610,7 @@ impl Context {
     /// (the tessellating renderers); otherwise every draw is rasterized once
     /// per pixel at its center.
     pub fn finish(&self) -> Vec<u8> {
-        render_ops(self.width, self.height, &self.ops)
+        render_ops(self.width, self.height, &self.ops, self.pass_msaa)
     }
 
     /// Resolve a device-space crop of primitive path draws, retaining the
@@ -612,7 +628,7 @@ impl Context {
         }) {
             return None;
         }
-        let pattern = if self.ops.iter().any(needs_msaa) {
+        let pattern = if self.multisampled() {
             &SAMPLES_4X[..]
         } else {
             &SAMPLES_1X[..]
@@ -696,7 +712,7 @@ impl Context {
             width: self.width,
             height: self.height,
             crop: rect.map(|v| v as u32),
-            multisampled: self.ops.iter().any(needs_msaa),
+            multisampled: self.multisampled(),
             draws,
         })
     }
@@ -789,8 +805,8 @@ fn needs_msaa(o: &Op) -> bool {
         Op::Analytic { .. } | Op::Layer { .. } | Op::Bitmap { .. } => false,
     }
 }
-fn render_ops(width: u32, height: u32, ops: &[Op]) -> Vec<u8> {
-    let pattern = if ops.iter().any(needs_msaa) {
+fn render_ops(width: u32, height: u32, ops: &[Op], pass_msaa: bool) -> Vec<u8> {
+    let pattern = if pass_msaa || ops.iter().any(needs_msaa) {
         &SAMPLES_4X[..]
     } else {
         &SAMPLES_1X[..]
@@ -903,7 +919,7 @@ fn render_op_region(
             blur,
             linear,
         } => {
-            let mut pixels = render_ops(target.width, target.height, ops);
+            let mut pixels = render_ops(target.width, target.height, ops, false);
             if blur[0] > 0.0 || blur[1] > 0.0 {
                 if *linear {
                     linear_rgb(&mut pixels, false);

@@ -92,5 +92,6 @@ pub fn text_raster<R: FontResolver>(
         );
         painter.fill_text(&mut scene.items, &runs, origin, m, color, 1.0, 0.0);
     }
+    painter.multisample_pass(&mut scene.items, false);
     scene
 }
