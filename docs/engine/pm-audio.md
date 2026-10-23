@@ -238,49 +238,118 @@ them; fades are computed per sample from the clip's local time. Linear time maps
 every sample exactly. Today's engine schedules gain ramps between points one composition
 frame apart.
 
-**Allowed differences from the legacy engine** (each a fix):
+**Differences from the legacy engine.** Decisions AUDIO-5 and AUDIO-6 (2026-10-22)
+require today's mix sample for sample; the earlier list of "allowed differences" no
+longer stands. What remains, with its status:
 
-1. Speed and time remapping are followed (appendix A item 10: today speed is ignored and
-   remapped clips are silent). Source time is `pm_eval`'s `sourceTime` at every level, so
-   audio stays with the picture; pitch follows speed (pitch preservation is Phase 3b).
-2. A negative layer start plays from the right source time (the legacy walk clamps `from`
-   to 0, shifting the clip against its picture).
-3. Animated `audioMuted`, precomposition `on`, and groups around a precomposition are
-   evaluated over time, not only when static.
-4. Animated `trim` follows `sourceTime` over time (the legacy mixer reads it once, at the
-   playhead or at the range start).
-5. Keyframed levels follow their curve at 3 kHz instead of straight segments one frame
-   apart.
-6. The export has round(duration × sr) samples (section 2); today's has
-   ceil(duration × 48000).
-7. The mix runs at `audioSampleRate` (default 48 kHz); today's export always mixes at
-   48 kHz after decoding at the live AudioContext's rate.
-8. Layouts Web Audio mixes discretely fold by BS.775 (above).
-9. In-points of resampled and time-mapped clips are exact (the Grid and Free readers
-   place them to the sub-sample). Sources already at the project rate are read by the
-   Copy reader, which rounds the in-point to a whole sample as today's export does.
-   Today's export plays each clip from a whole sample of its 48 kHz decode
-   (`AudioBufferSourceNode.start` rounds the offset), so a trim that is not a whole
-   number of samples plays up to half a sample early or late: on the real project
-   0.4, −0.2, and −0.4 samples for its three clips, measured as a phase slope of
-   0.0525 rad at 1 kHz (−26 dB residual at 1 kHz, −10 dB at 6 kHz). With the in-points
-   rounded the same way the residual falls from −42.7 to −71.6 dBFS (−94 dB at 1 kHz).
-10. Switches (`on` of layers and groups) cut on their sample (through the 16-sample
-    control interpolation); today's envelope samples them one composition frame apart,
-    so a switch becomes a one-frame linear ramp: over the frame after a switch off and
-    the frame before a switch on (`mute-groups`: −11 to −15 dBFS residual in those
-    frames, bit-identical everywhere else, guarded by the parity test).
-11. Resampling is flat to 0.45 fs of the source and rejects images by more than 120 dB.
-    Chromium's decode resampler (today's path for sources not at 48 kHz) rolls off from
-    about 17 kHz and leaves images near −72 dBFS between 21 and 24 kHz on the real
-    project; a 44.1 kHz click differs from today's in its last 3 kHz only (−58 dBFS).
-12. The bus stays stereo. Today's master `GainNode` takes the widest input's channel
-    count, so while a 5.1 source plays, every mono source is up-mixed to the center and
-    folds back to L and R at √½ (−3 dB); without one, mono plays at unity in both
-    channels. pm-audio plays mono at unity always (`layouts`: with the mono layer's
-    level times √½, as today's bus plays it, ours matches today's to −96.6 dBFS, guarded
-    by the parity test; the `mono` project confirms unity today for plain, center-masked,
-    unmasked, 22.05 kHz WAV, AAC, Opus, and FLAC mono).
+1. Speed and time remapping are followed (appendix A item 10: today ignores speed, so
+   audio drifts from retimed video, and remapped clips are silent). Kept by decision
+   AUDIO-4 (a bug fix, on the beta list). Such voices play through the engine's own
+   readers and stretch, not today's model.
+2. A negative layer start plays from the right source time (today clamps `from` to 0
+   and shifts the clip against its picture). Not covered by today's model; open.
+3. An animated `trim` follows `sourceTime` over time (today reads it once at the range
+   start). Not covered by today's model; open.
+4. AAC and Opus decode about −93 dBFS from today's (FFmpeg 9.0.2 against Chromium's
+   FFmpeg fork and libopus). See "Decoders" below; open.
+
+Everything else matches today exactly (below): automation stepping and ramps, the
+decode resampler, in-points and starts between samples, switches, channel folds and
+the wide bus, the playback alignment, and MP3, FLAC and PCM decoding.
+
+## Today's export model (`today`, decisions AUDIO-5 and AUDIO-6)
+
+A voice whose time map is linear (no speed, remap, or conformed rate on its path, no
+negative start, a static trim) plays through `pm_audio::today`, a port of the chain
+today's exporter builds in an `OfflineAudioContext` (`legacy/core/audio.ts`
+`renderOffline`), with the arithmetic of the Chromium 152 sources Electron 44 ships:
+
+- **Decode resampling.** `decodeAudioData` resamples a file not at the context rate
+  with Blink's `SincResampler` (`AudioBus::CreateBySampleRateConverting`): 32 taps of
+  a Blackman-windowed sinc at 0.9 of the lower Nyquist, 32 kernel offsets blended
+  linearly, a running `f64` source index wrapped every 512 frames, the scalar
+  summation order, `floor(frames / ratio)` frames. `Conversion` keeps the running
+  index at every block start, so any frame is computed exactly without resampling
+  from the file's start; the graph prepares it for the project rate and for 48 kHz.
+- **The source node.** `start(at, offset, duration)`: the offset rounded to a frame
+  (`TimeToSampleFrame`, at 1024× first), the start rounded up, a start between frames
+  played by linear interpolation in `f64` from its fraction, the duration counted in
+  128-frame render quanta.
+- **The gain envelope.** `envelopePoints`: the clip's start and end, points one
+  composition frame apart (at least 30 a second) when any level input is a channel,
+  keyframes, fade corners; `gainAt` at each as `f32`; `setValueAtTime` then
+  `linearRampToValueAtTime`, each frame `v1 + x × (v2 − v1)` with Chromium's `f32`
+  `x`, from the event whose time rounded up is at or before the frame.
+- **The bus.** Today's master takes the widest connected clip's channel count from
+  the start of the render until a quantum after that clip's source node finishes
+  (measured: the `wide-*` captures), up-mixes every clip into it by Web Audio's
+  channel-count rules (`AudioBus::SumFromByUpMixing`), applies the master there and
+  folds to stereo at the destination (`SumFromByDownMixing`, with the fused
+  multiply-adds Chromium's NEON `Vsma` compiles to). So beside a 5.1 file, mono plays
+  through the center at −3 dB; beside a quad, at −6 dB; beside 7.1 (folded
+  discretely), on the left only; a lone 3, 5, 7 or 8 channel file keeps its first two
+  channels. All of these are today's behaviour; dropping channels of discrete
+  layouts is a candidate bug fix for the orchestrator (LAYOUT-1), not made here.
+- **Ranges.** An export's context starts at its range (`Mixer::set_today_range`). In
+  playback, each producer run (Play, a seek, a loop wrap) starts today's model at the
+  playhead, as today's `sync(time, true)` schedules every clip and envelope from it
+  (`Mixer::set_today_playback`; clips connect a second ahead, `LIVE_LOOKAHEAD`).
+  Decode reads are bounded independently of the run, with two frames of margin, so
+  ahead-of-time decoding serves any start.
+
+The order in which today's bus sums its clips is a pointer hash set's
+(`AudioSummingJunction::outputs_`). Where three or more clips feed one bus channel at
+once, today's own captures differ from each other by an ulp: two captures of
+`corpus-media-audio` measure −149.2 dBFS apart. That spread is the parity ceiling for
+such projects; the engine sums in clip order.
+
+### Decoders
+
+Chromium 152 does not decode every format with FFmpeg (`media/filters/
+audio_file_reader.cc`): MP3 and FLAC go to Symphonia (`kSymphoniaMp3Decoding`,
+`kSymphoniaAudioDecoding`, on by default on macOS); AAC to the native decoder of
+Chromium's FFmpeg fork (revision `2b68d2b`, FFmpeg 8.0), Opus to that fork's libopus
+wrapper with float output. Decoded floats are clipped to [−1, 1] (NaN to 0).
+
+| Codec | Engine | Against today's `decodeAudioData` |
+|---|---|---|
+| PCM, FLAC | FFmpeg | identical |
+| MP3 | Symphonia 0.6.0 (Chromium's pin, `src/mp3.rs`) | identical (a fixture and a real 87 s file, all 127 blocks) |
+| AAC (M4A, MP4, MOV) | FFmpeg 9.0.2 | −93.7 dBFS, peak 9.6e-4 |
+| Opus | FFmpeg 9.0.2 | −93.2 dBFS, peak 1.2e-3 |
+
+MP3 blocks decode from an anchored seek with 12 frames of preroll, which equals the
+sequential decode (`tests/sources.rs`). AAC and Opus can be made identical; measured
+outside the repository on `tone.m4a`, `h264-aac.mp4`, `h264-aac.mov` and `tone.opus`:
+Electron's own `libffmpeg.dylib` gives today's samples bit for bit (AAC and Opus),
+and so does Chromium's fork built from source with its component set and
+`-ffp-contract=off` (AAC; the default contraction leaves 1-ulp differences, −163.6
+dBFS). What that needs in the engine: a second, symbol-isolated decoder library built
+from the fork (`ld -r` with an exported-symbols list beside our FFmpeg), Chromium's
+libopus revision, the fork's discard rules (`AudioDiscardHelper`, the AAC final-frame
+trim), and the build and release plumbing for it. Not done in this round.
+
+### Measured (2026-10-22, `tests/legacy_parity.rs`)
+
+Capture `audio-20261023-015202-824ea344` (built legacy app, same machine) and the
+earlier capture with the real project, residual rms against today's float mix:
+
+| Project | Residual |
+|---|---|
+| clicks-30, clicks-2997, clicks-44k, gain-fades, precomp-nesting, solo, mute-groups | −240 (identical) |
+| app-channels, eased-24, eased-60, fractional, rates, layouts, wide-51 | −240 (identical) |
+| real project (87.4 s, a 44.1 kHz MP3 in three clips, a keyframed fade) | −240 (identical; was −71.7) |
+| wide-quad, wide-71 | −168.6, −166.0 (summation order, below today's own −149) |
+| mono (seven sources, two lossy) | −156.3 (AAC, Opus) |
+| embedded (AAC soundtrack) | −110.9 (AAC) |
+| corpus-media-audio (five codecs) | −93.6 (AAC, Opus) |
+
+Export encoding parity e2e (`e2e/export-encoding-parity.spec.ts`, rebuilt app):
+`basic` and `automation` identical in all four formats (decoded audio, the WAV and f32
+captures, AAC and Opus stream bytes). `advanced` differs only by its nested clip at
+speed 1.2 (AUDIO-4). The nested-composition silence (a precomposition's `trim`
+channel read as a number, NaN through the mix) is fixed with a regression test
+(`tests/mixer.rs`).
 
 ## Pitch (`conform`, `stretch`, `pm-stretch`)
 
