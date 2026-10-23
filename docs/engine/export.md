@@ -735,6 +735,26 @@ captured at both encoder boundaries in hidden test launches.
 
 ## GPU WebM transport and user-export scheduling (EXPORT-1 / EXPORTQOS-1)
 
+`PM_EXPORT_PROFILE=1` adds aggregate stage timings to `[export timing]`
+diagnostics, emitted once per completed WebM encode. The host reports
+window wait, command round trips, bounded-pipeline backpressure and output
+write time. The encoder reports surface arrival wait, `getVideoFrame`,
+texture upload, GPU-copy completion, canvas blit and `VideoFrame`
+construction, encoder enqueue and queue wait, maximum queue depth, video
+flush, audio preparation, Opus, mux and Blob read time. It adds no
+per-frame IPC. Enqueue time is not codec execution time, and overlapping
+round-trip totals must not be added to export wall time.
+
+Transport diagnostics are explicitly process cumulative: surface import
+count and synchronous `importSharedTexture` call time, send count, delivery
+promise time and failures. Compare snapshots around an isolated export;
+concurrent or aborted exports never reset another session's counters.
+Imports happen once per five-slot pool generation; `getVideoFrame` happens
+per frame. Surface-arrival wait only measures a command that reaches the
+encoder before its import. The send-promise timer measures delivery through
+Electron, while the Rust conversion timer includes pool allocation and
+Mach announcements on the first frame.
+
 The desktop's opaque WebM path now keeps encoder frames on the GPU. The
 job renderer retains its owned working target (or assembles sliced bands on
 the GPU) and pipelines it to the encoder thread. That thread byte-quantizes
