@@ -683,7 +683,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
    the cold-boot copy, #boot-ghost, which has to paint before this sheet. */
 .project-ghost{position:fixed;z-index:34;pointer-events:none;opacity:0;animation:project-ghost-in var(--dur-3) var(--ease) 150ms forwards}
 .project-ghost.generic{display:grid;grid-template:"left center right" minmax(0,1fr) "bottom bottom right" min(300px,40%) / 250px minmax(0,1fr) 300px;gap:var(--gap);padding:0 var(--pad) 4px}
-body:has(#projects-screen.on) :is(.project-ghost,#boot-ghost),body:has(#settings-screen.on) :is(.project-ghost,#boot-ghost){visibility:hidden}
+body:has(> #projects-screen.on) :is(.project-ghost,#boot-ghost),body:has(> #settings-screen.on) :is(.project-ghost,#boot-ghost){visibility:hidden}
 .pg-tile{position:absolute;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:var(--bg-panel);border-radius:var(--r-lg);corner-shape:var(--ui-corner-smoothing);box-shadow:var(--shadow-panel)}
 .project-ghost.generic .pg-tile{position:relative}
 .pg-head{flex:none;height:var(--hdr-h);display:flex;align-items:center;padding:0 14px}
@@ -779,7 +779,7 @@ body:has(#projects-screen.on) :is(.project-ghost,#boot-ghost),body:has(#settings
 #palette{--pal-gutter:8px;--pal-r:24px;top:14vh;left:50%;transform:translateX(-50%);width:min(620px,92vw);max-height:64vh;
   padding:0 var(--pal-gutter) var(--pal-gutter);border-radius:var(--pal-r)}
 #palette{background:color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid));animation:none}
-body:has(#palette) #scrim.on{animation:none}
+body:has(> #palette) #scrim.on{animation:none}
 #palette .field{flex:none;height:46px;border-radius:0;box-shadow:none;background:transparent;padding:0 12px;gap:10px;font-size:var(--fs-lg)}
 #palette .field:focus-within{background:transparent;box-shadow:none}
 #palette .field .psearch{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;color:var(--tx-4)}

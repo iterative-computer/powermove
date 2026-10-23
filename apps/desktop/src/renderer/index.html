@@ -20,7 +20,7 @@
   gap:var(--gap,10px);padding:0 var(--pad,12px) 4px;
   opacity:0;animation:boot-ghost-in 160ms cubic-bezier(.22,1,.36,1) 150ms forwards;
 }
-body:has(#projects-screen.on) #boot-ghost,body:has(#settings-screen.on) #boot-ghost{visibility:hidden}
+body:has(> #projects-screen.on) #boot-ghost,body:has(> #settings-screen.on) #boot-ghost{visibility:hidden}
 /* Until the shell mounts and applies the saved appearance, follow the system's. */
 @media (prefers-color-scheme:dark){
   #app:not(:has(> #titlebar[data-svelte-shell])) ~ #boot-ghost{
