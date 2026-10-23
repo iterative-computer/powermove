@@ -2573,6 +2573,7 @@ fn child_compat_ahead() {
     // batch per message), every frame handed back. Records when each ask
     // and each playing frame arrived.
     let mut asks: Vec<(Instant, i64)> = Vec::new();
+    let warm_asks = std::cell::RefCell::new(std::collections::BTreeSet::new());
     let mut frames: Vec<(Instant, i64)> = Vec::new();
     let mut serve = |c: &mut Child, for_: Duration, playing: bool| {
         let until = Instant::now() + for_;
@@ -2596,6 +2597,8 @@ fn child_compat_ahead() {
                     if playing {
                         let latest = needs.iter().map(|n| n.time.get()).max().unwrap_or(0);
                         asks.push((Instant::now(), latest));
+                    } else {
+                        warm_asks.borrow_mut().extend(needs.iter().map(|n| n.time.get()));
                     }
                     c.event(Event::Compat(CompatMessage::Answers {
                         natives: needs
@@ -2627,7 +2630,11 @@ fn child_compat_ahead() {
         }
     };
     // The paused frame, answered.
-    serve(&mut c, Duration::from_millis(1500), false);
+    serve(&mut c, Duration::from_millis(3000), false);
+    assert!(
+        (1..=48).all(|k| warm_asks.borrow().contains(&(k * FRAME))),
+        "the idle window did not receive the first play's needs: {warm_asks:?}"
+    );
     let before = presenter_stats(&c);
     c.event(Event::Transport(TransportCommand::Play {
         rate: PlaybackRate::NORMAL,

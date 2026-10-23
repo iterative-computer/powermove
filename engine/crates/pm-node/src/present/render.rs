@@ -2205,6 +2205,11 @@ impl Thread {
                     && let Some(view) = self.views.get_mut(&key)
                 {
                     let ready = match (&view.compat_waiting, applied) {
+                        // An answer for a future frame cannot change the
+                        // complete frame already shown. In particular, an
+                        // idle warm-up must not redraw the paused frame
+                        // and restart its idle deadline for every answer.
+                        (None, super::compat::Applied::Answered | super::compat::Applied::Complete) => false,
                         (Some((revision, needs, since, _)), super::compat::Applied::Answered | super::compat::Applied::Complete) => {
                             since.elapsed() >= COMPAT_WAIT_REPLAN
                                 || self
@@ -4689,9 +4694,10 @@ impl Thread {
             .renderer()
             .set_compat_rasters(self::compat_view(&self.compat, key, revision));
         let time = view.clock.wrap(next * f);
-        // The needs are not asked: the window answers a paused frame's at
-        // once, and a play asks for its own.
-        let _ = composer.plan_ahead_at(
+        // A first play needs both the native rasters and the window's
+        // wrapper answers. Ask while idle too: these are only text,
+        // captions and shapes, never a media frame or a decoder seek.
+        let needs = composer.plan_ahead_at(
             doc.document(),
             &composition,
             doc.media(),
@@ -4699,6 +4705,18 @@ impl Thread {
             &view.state,
         );
         composer.renderer().set_compat_rasters(None);
+        let fresh = self.compat.lock().unwrap_or_else(|e| e.into_inner()).to_ask(
+            key,
+            revision,
+            needs,
+            std::time::Instant::now(),
+        );
+        for chunk in fresh.chunks(pm_protocol::snapshot::MAX_COMPAT_NEEDS) {
+            let envelope = super::compat::needs_event(key.1, revision, chunk.to_vec());
+            if let Ok(bytes) = codec::encode(&envelope) {
+                (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+            }
+        }
         view.warmed = Some((revision, epoch, from, next + 1));
         let ahead = composer.renderer().vector_ahead_stats();
         let mut stats = self.stats();
