@@ -871,7 +871,8 @@ SVG text. It avoids a circular dependency and keeps a single path renderer.
 Canonical glyphs of a draw share one recorded pass. Resolving each glyph
 separately was wrong for analytic rectangular glyphs next to curved paths:
 the curved draw requests MSAA for the pass, including the rectangle's
-triangle coverage at its corners. Device-space region rendering keeps the
+triangle coverage at its corners (textexact2 round 3 extends this to every
+unfiltered path draw of the canvas). Device-space region rendering keeps the
 full canvas's viewport round trip before cropping; its regression test
 compares a crop byte for byte with the full canvas for curved fills,
 rectangles and round strokes. Canonical fake-bold outlines are framed at
@@ -1774,14 +1775,9 @@ text-transformed-<stamp>` rasterizes them with today's app
 | 100 px, skew 20° | 239.7 | distance fields | 0 (1 CV) | 0 (1 CV) |
 
 The gate is confirmed: Chromium draws both path-size cases as paths, and
-without the gate the engine differs on about 2650 pixels. The cases are
-not within the strict 1 CV text raster bound, so the capture is not one
-of the gated sets. The remaining path-case pixels are single pixels on
-horizontal stem edges (the tops of `H`, `i` and `l`, and the baseline),
-where the 4× multisampled fill of a skewed canonical path crosses a
-sample row. The 55° control has 3 pixels at 2 CV in the distance-field
-path. Neither residual is retired here; the FONTS-R policy allows no new
-ratchet entries.
+without the gate the engine differs on about 2650 pixels. The residuals
+in the table were closed in round 3 (below), and the capture set is now
+gated; the table records the state before round 3.
 
 The exactness wording for the thirteen retired cases: eight are
 byte-identical, and five are within their original strict bounds but not
@@ -1838,11 +1834,9 @@ close took 55–774 ms and profile cleanup 4–10 ms. The roughly 30 s
 teardowns seen at load 53–67 were not reproduced at this load, so their
 cause remains undiagnosed.
 
-None of the text captures has a rotated or skewed glyph. The raster
-captures contain no rotation or skew keys, and the composed corpus shows
-no change. The two new gates are therefore covered by the source-derived
-regression tests above, not by captured Chromium pixels for a skewed
-glyph beyond the atlas.
+Before round 3, none of the gated captures had a rotated or skewed glyph.
+Round 3 adds the `text-transformed-*` set, which covers both gates with
+captured Chromium pixels (below).
 
 
 All thirteen previous FONTS-R residuals meet their original strict bounds
@@ -1866,14 +1860,14 @@ textexact2 lane report. Every case retains its original strict bound.
   four pages fill, preserving already-encoded texture reads; it does not
   reproduce Chromium's complete memory-pressure eviction/draw-token policy.
   Those oversized and eviction paths lack independent captured parity.
-- Skewed, rotated or non-uniformly scaled canvas text now follows Skia's
-  `ApproximateTransformedTextSize` and `fitsInAtlasDirect` gates (round 2).
-  The size gate has a Chromium capture (skew animators at 2x, sizes 262.7
-  and 265.9): it confirms the path route, but 6 and 7 pixels on
-  horizontal stem edges remain over 1 CV (max 24), so it is not
-  pixel-qualified to the strict bound. No captured Chromium pixels exist
-  for a glyph beyond the atlas (`fitsInAtlasDirect`); that path is
-  source-ported and regression-tested.
+- Skewed, rotated or non-uniformly scaled canvas text follows Skia's
+  `ApproximateTransformedTextSize` and `fitsInAtlasDirect` gates (round 2),
+  pixel-qualified at 1 CV by the gated `text-transformed-*` capture
+  (round 3). Within a box around pixels where an item drawn between two
+  path draws of the same canvas has ink under the later one, the path
+  draws keep separate passes; per-sample blending of such an item with
+  two path draws that share an edge pixel inside that box is not modelled
+  (no capture reaches it).
 - The CPU SDF reference retains its earlier half-precision draw emulation;
   native GPU rendering uses the f32 Dawn shader. CPU-only SDF parity has
   not been newly qualified by this round.
@@ -1931,7 +1925,120 @@ textexact2 lane report. Every case retains its original strict bound.
 - Textexact2's release gates and native addons use the shipping thin-LTO
   profile; earlier rounds' non-LTO results remain historical.
 
+### Textexact2 round 3: one render pass per canvas
+
+Review of round 2 found the transformed-size capture outside the gated
+sets: two path-size cases failed the strict bound (6 and 7 pixels, up to
+24 CV) and the 55° distance-field control had 3 pixels at 2 CV. A
+glyph beyond the atlas under a rotation or skew had no captured pixels.
+
+**Cause of the path residuals.** Every pixel over the bound was on a glyph
+drawn as an analytic rectangle: Arial `l` and `.` are rectangles, so
+`Device::drawPath` sends their canonical paths to `AnalyticRRectRenderStep`
+(`SkPath::isRect`). The tessellated glyphs (`H`, `i`) need MSAA. Chromium
+replays the canvas into one Graphite render pass, and Graphite picks one
+sample count per pass: `DrawList` records whether any draw needs MSAA and
+`DrawContext::flush` multisamples the whole pass. The rectangles of an
+animator's per-glyph `fillText` calls are therefore rasterized per sample
+at their mesh edges. The engine rasterized each call's paths in a pass of
+its own, so a call holding only rectangles resolved pixel centers: the
+acute corners of the skewed rectangles lost samples (for example alpha 62
+instead of 79, and 0 instead of 18 below a baseline corner). Forcing
+those passes multisampled made both cases exact before any other change.
+
+**Fix.** `scene::resolve_canvas_pass` runs after a canvas's draws are
+recorded (animated text, plain text, captions, `render::text_raster`):
+
+- The pass is multisampled when any unfiltered path draw needs MSAA, or
+  when the caller says so (a caption box is a tessellated fill).
+- Unfiltered path draws are drawn again together, in order, into one
+  target (`PathRasterizer::raster_pass`; `Context::multisample_pass`
+  marks a pass multisampled for draws recorded elsewhere). Overlapping
+  draws then blend per sample before the resolve, as in Chromium. The
+  Zapfino capture below needs this: two rotated `g`s share edge pixels
+  whose samples they cover between them (alpha 223 per item composite,
+  255 per sample).
+- The merged pass takes the place of the first draw. Where an item drawn
+  between them (a direct mask, an image) has ink under a later path
+  draw, the draws keep their own places and passes inside the box around
+  those pixels; the rest of the merged pass is emitted as crops of the
+  same viewport around that box. A filtered or vector-coverage item
+  within reach of a later draw ends the group.
+- A filtered `fillText` keeps its save layer's own pass.
+- Direct-mask quads are pixel aligned and distance-field quads end two
+  texels outside the field's padded ink, so neither depends on the pass's
+  sample count; they keep their items.
+
+**Distance-field control.** The 55° residual is atlas history. The app
+capture of round 2 loaded the project visibly, so its preview drew the
+text into Chromium's shared glyph atlas before `PM.raster` ran. All three
+pixels sit on the right edge of `H`'s field quad, where the derivative of
+the distance uses a helper pixel that samples beyond the field, into
+whatever the atlas holds next to it. `source.ts --hide-layers` now loads
+the project with every layer hidden, so the atlas holds only the captured
+rasters, in capture order, as `text_raster` replays them. With hidden
+layers the 55° case is within 1 CV. Captured again without hiding (the
+preview variant, kept outside the corpus), the same 3 pixels at 2 CV
+return: the difference follows Chromium's history, not the shader.
+Reordering the engine's own history moves three other pixels of that case
+by 1 CV and leaves these three unchanged.
+
+**Capture.** `capture/transformed-project.ts` now writes eight layers:
+the four Arial cases, Arial at 75 px under 80° (`text_gpu`'s skew80),
+and Zapfino "gag" at 50 px rotated 45°, skewed 30° and rotated 1°. At
+2x the Zapfino sizes are 100 and 133 px, below the distance-field range;
+each `g` is a direct mask whose transformed image exceeds 256 px, so it
+draws as its canonical path (`fitsInAtlasDirect`), while each `a` stays a
+mask. The 1° control keeps every mask. `text-transformed-*` is now one of
+`text_raster`'s gated sets.
+
+Chromium reference: 2026-10-23, Apple M4 Max, Electron 44 / Chromium 152,
+`source.ts --hide-layers` under `pm-electron-lock`. Release (thin-LTO)
+`text_raster`, strict 1 CV, no ratchet entries:
+
+| Case | Route | Before round 3 | Round 3 |
+|---|---|---|---|
+| Arial 60 px, skew 60° | paths (size 262.7) | 6 px (19 CV) | 0 (max 1) |
+| Arial 60 px, skew 55° | distance fields | 3 px (2 CV), visible preview | 0 (max 1) |
+| Arial 100 px, skew 30° | paths (size 265.9) | 7 px (24 CV) | 0 (max 0) |
+| Arial 100 px, skew 20° | distance fields | 0 (max 1) | 0 (max 1) |
+| Arial 75 px, skew 80° | paths (size gate) | not captured | 0 (max 1) |
+| Zapfino 50 px, rotated 45° | `g` paths, `a` mask | not captured; 2 px (32 CV) with per-item passes | 0 (max 1) |
+| Zapfino 50 px, skew 30° | `g` paths, `a` mask | not captured | 0 (max 1) |
+| Zapfino 50 px, rotated 1° | masks | not captured | 0 (max 0) |
+
+Regression tests (pm-vector `canvas2d::text`):
+
+- `a_multisampled_pass_draws_earlier_analytic_glyphs_per_sample`: a
+  skewed rectangle and an `H` outline drawn by separate calls differ from
+  one call at the rectangle's corners; after `resolve_canvas_pass` they
+  are byte-identical to one call. A filtered call keeps its own pass; a
+  caller-multisampled pass redraws a lone rectangle.
+- `overlapping_draws_of_a_pass_blend_per_sample`: two concave halves with
+  a slanted seam composite with a lighter seam per item, and exactly as
+  one pass after resolution.
+- `a_pass_keeps_the_order_of_items_between_its_draws`: an image between
+  two path draws merges them when it is disjoint from the later one; under
+  an opaque later draw the result equals the one-pass draw; under a
+  translucent one, the image's box keeps the original order pixel for
+  pixel and the rest is the merged pass.
+
+The CPU primitive images of Graphite items (kept for viewports beyond the
+GPU texture limit) are not exact. Forcing them for every case: the main
+set still passes; `sdf-sizes-0004` (4 px, 2 CV), `path-stroke-0000`
+(154 px, 4 CV), the three source textures (2 px each, up to 13 CV) and five
+transformed cases (up to 32 CV) fail. Only the native executor is
+qualified; those viewports remain an open gap, unchanged by this round.
+
 ## Changes outside the lane
+
+2026-10-23 (lane ne-textexact2, round 3):
+
+- `pm-vector/src/canvas2d/context.rs` (shared Canvas2D): `multisample_pass`
+  marks a context's pass multisampled for draws recorded elsewhere; the
+  existing per-op MSAA decision is unchanged otherwise.
+- `pm-vector/Cargo.toml`: `pm-skia-path` as a dev-dependency (test paths).
+- `pm-render/tests/text_raster.rs`: the `text-transformed-*` gated set.
 
 2026-10-22 (lane ne-textexact2, round 2):
 
