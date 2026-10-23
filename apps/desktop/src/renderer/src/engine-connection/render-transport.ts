@@ -1206,6 +1206,7 @@ export class EngineRenderTransport {
         const reply = await native.snapshot(request);
         this.trace.record('snapshot round trip', Number(request.revision ?? 0), request.snapshot.time, began);
         if (reply.status === 'rendered') {
+          this.trace.record('snapshot main', reply.revision, request.snapshot.time, began, Math.round(reply.mainMs * 1000));
           this.trace.record('snapshot native wait', reply.revision, request.snapshot.time, began, reply.waitedUs);
           this.trace.record('snapshot native render', reply.revision, request.snapshot.time, began, reply.renderUs);
         }
