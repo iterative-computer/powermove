@@ -2057,6 +2057,7 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
+ "sha2",
  "symphonia",
  "symphonia-bundle-mp3",
  "symphonia-core",

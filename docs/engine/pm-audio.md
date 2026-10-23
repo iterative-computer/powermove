@@ -250,8 +250,6 @@ longer stands. What remains, with its status:
    and shifts the clip against its picture). Not covered by today's model; open.
 3. An animated `trim` follows `sourceTime` over time (today reads it once at the range
    start). Not covered by today's model; open.
-4. AAC and Opus decode about −93 dBFS from today's (FFmpeg 9.0.2 against Chromium's
-   FFmpeg fork and libopus). See "Decoders" below; open.
 
 **Beta list (bug fixes against today, orchestrator decisions):**
 
@@ -320,27 +318,46 @@ such projects; the engine sums in clip order.
 
 Chromium 152 does not decode every format with FFmpeg (`media/filters/
 audio_file_reader.cc`): MP3 and FLAC go to Symphonia (`kSymphoniaMp3Decoding`,
-`kSymphoniaAudioDecoding`, on by default on macOS); AAC to the native decoder of
-Chromium's FFmpeg fork (revision `2b68d2b`, FFmpeg 8.0), Opus to that fork's libopus
-wrapper with float output. Decoded floats are clipped to [−1, 1] (NaN to 0).
+`kSymphoniaAudioDecoding`, on by default on macOS); AAC, Opus and Vorbis to the FFmpeg
+fork Chromium ships (revision `2b68d2b`; Opus through its libopus wrapper, float
+output). Decoded floats are clipped to [−1, 1] (NaN to 0).
 
 | Codec | Engine | Against today's `decodeAudioData` |
 |---|---|---|
-| PCM, FLAC | FFmpeg | identical |
+| PCM, FLAC | our FFmpeg | identical |
 | MP3 | Symphonia 0.6.0 (Chromium's pin, `src/mp3.rs`) | identical (a fixture and a real 87 s file, all 127 blocks) |
-| AAC (M4A, MP4, MOV) | FFmpeg 9.0.2 | −93.7 dBFS, peak 9.6e-4 |
-| Opus | FFmpeg 9.0.2 | −93.2 dBFS, peak 1.2e-3 |
+| AAC (M4A, MP4, MOV, ADTS), Opus (Ogg, WebM), Vorbis | Electron's own `libffmpeg.dylib` (`src/chromium.rs`) | identical (9 files, SHA-256 of every sample) |
 
-MP3 blocks decode from an anchored seek with 12 frames of preroll, which equals the
-sequential decode (`tests/sources.rs`). AAC and Opus can be made identical; measured
-outside the repository on `tone.m4a`, `h264-aac.mp4`, `h264-aac.mov` and `tone.opus`:
-Electron's own `libffmpeg.dylib` gives today's samples bit for bit (AAC and Opus),
-and so does Chromium's fork built from source with its component set and
-`-ffp-contract=off` (AAC; the default contraction leaves 1-ulp differences, −163.6
-dBFS). What that needs in the engine: a second, symbol-isolated decoder library built
-from the fork (`ld -r` with an exported-symbols list beside our FFmpeg), Chromium's
-libopus revision, the fork's discard rules (`AudioDiscardHelper`, the AAC final-frame
-trim), and the build and release plumbing for it. Not done in this round.
+`src/chromium.rs` uses the very library today runs. The Electron Framework links it,
+so it is already mapped into the engine's utility process in development
+(`node_modules/.../Electron.app`) and in the packaged app
+(`Powermove.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/
+libffmpeg.dylib`): the decoder finds it among the loaded images (suffix
+`/Libraries/libffmpeg.dylib`; `POWERMOVE_CHROMIUM_FFMPEG` overrides), opens it with
+`RTLD_NOW | RTLD_LOCAL` and resolves every function by `dlsym` on that handle, so no
+symbol binds by name and our LGPL FFmpeg never clashes with it. It is used only when
+its libavcodec/libavformat/libavutil majors equal our bindings' (63/63/61 today), so
+our struct layouts describe its objects. Electron's libffmpeg contains Chromium's
+libopus; no separate libopus revision is needed. Outside Electron (the CLI, a test
+without the checkout's Electron) the source falls back to our FFmpeg (−93 dBFS for AAC
+and Opus).
+
+Chromium's rules: the first audio stream; other streams' packets skipped; a custom
+memory I/O; float output requested; FFmpeg's skip side data dropping priming and end
+padding (the fork's own handling, what today hears); the decoded length is today's
+buffer length (counted by one whole decode when the source opens, which also sets
+the clip's audible end). Blocks equal the sequential decode: the decoder moves forward
+and restarts from the file's start only to go back, keeping the last 8 blocks it
+passed. Verified: `tests/chromium.rs` (fixtures, last block first), outside the
+repository odd lengths (ADTS mono 2.71 s, M4A 44.1 kHz 3.317 s, MOV 6.1 s, Ogg and
+WebM Opus) against captures from the app, and the export encoding parity e2e with
+`PM_PARITY_FIXTURE=tone.m4a` and `tone.opus` in the app (all four formats identical).
+
+Today's summing bus copies the first playing clip into a silent bus
+(`AudioChannel::SumFrom`), so its signed zeros survive: the mixer starts its sums at
+−0, mixes zero-gain stretches of playing clips (±0 by the sample's sign), and makes
++0 the frames where no clip's source node plays (`Mixer::signed_zeros`). The parity
+test compares bits for every identical project.
 
 ### Measured (2026-10-22, `tests/legacy_parity.rs`)
 
@@ -354,9 +371,8 @@ earlier capture with the real project, residual rms against today's float mix:
 | real project (87.4 s, a 44.1 kHz MP3 in three clips, a keyframed fade) | −240 (identical; was −71.7) |
 | wide-quad | −168.6 (summation order, below today's own −149) |
 | wide-71 | −240 outside its 7.1 clip; inside, LAYOUT-1's fold by design |
-| mono (seven sources, two lossy) | −156.3 (AAC, Opus) |
-| embedded (AAC soundtrack) | −110.9 (AAC) |
-| corpus-media-audio (five codecs) | −93.6 (AAC, Opus) |
+| mono (seven sources, two lossy), embedded (AAC soundtrack) | −240 (identical, with today's FFmpeg) |
+| corpus-media-audio (six clips at once) | −149.3 (today's own summation order; two captures of today: −149.2) |
 
 Export encoding parity e2e (`e2e/export-encoding-parity.spec.ts`, rebuilt app):
 `basic` and `automation` identical in all four formats (decoded audio, the WAV and f32

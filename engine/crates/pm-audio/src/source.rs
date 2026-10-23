@@ -30,13 +30,15 @@ pub struct Source {
 enum Decoder {
     Ffmpeg(Box<AudioDecoder>),
     Mp3(Box<crate::mp3::Mp3Decoder>, u64),
+    /// Electron's own FFmpeg ([`crate::chromium`]).
+    Chromium(Box<crate::chromium::ChromiumDecoder>, u64),
 }
 
 impl Decoder {
     fn packets_decoded(&self) -> u64 {
         match self {
             Decoder::Ffmpeg(d) => d.packets_decoded(),
-            Decoder::Mp3(_, n) => *n,
+            Decoder::Mp3(_, n) | Decoder::Chromium(_, n) => *n,
         }
     }
 
@@ -44,6 +46,7 @@ impl Decoder {
         match self {
             Decoder::Ffmpeg(d) => Ok(d.seek_anchored(index)?),
             Decoder::Mp3(d, _) => d.seek_anchored(index),
+            Decoder::Chromium(d, _) => d.seek_anchored(index),
         }
     }
 
@@ -53,6 +56,11 @@ impl Decoder {
             Decoder::Mp3(d, n) => {
                 let got = d.read(out, frames)?;
                 *n += got.div_ceil(1152) as u64;
+                Ok(got)
+            }
+            Decoder::Chromium(d, n) => {
+                let got = d.read(out, frames)?;
+                *n += got.div_ceil(1024) as u64;
                 Ok(got)
             }
         }
@@ -421,13 +429,29 @@ impl SourceCache {
             return Ok(s.clone());
         }
         let decoder = AudioDecoder::open(path, stream)?;
-        let info = decoder.info().clone();
+        let mut info = decoder.info().clone();
         // The FFmpeg probe gives the stream's facts (layout, length, priming);
         // MP3 samples come from today's decoder.
         let decoder = if info.codec == "mp3" {
             match crate::mp3::Mp3Decoder::open(path, info.channels()) {
                 Ok(mp3) => Decoder::Mp3(Box::new(mp3), 0),
                 Err(_) => Decoder::Ffmpeg(Box::new(decoder)),
+            }
+        } else if crate::chromium::decodes(&info.codec) {
+            // Today's own FFmpeg where this process has it (the app's
+            // engine processes); our FFmpeg elsewhere (the CLI, tests).
+            match crate::chromium::ChromiumDecoder::open(path, info.channels()) {
+                Ok(Some(mut d)) => match d.count_frames() {
+                    Ok(frames) => {
+                        // Today's buffer: its own priming and padding rules.
+                        info.length = Some(frames);
+                        info.priming = 0;
+                        info.extra_priming = 0;
+                        Decoder::Chromium(Box::new(d), 0)
+                    }
+                    Err(_) => Decoder::Ffmpeg(Box::new(decoder)),
+                },
+                _ => Decoder::Ffmpeg(Box::new(decoder)),
             }
         } else {
             Decoder::Ffmpeg(Box::new(decoder))

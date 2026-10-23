@@ -21,6 +21,7 @@
 //!
 //! See docs/rust-engine.md section 16 and docs/engine/pm-audio.md.
 
+pub mod chromium;
 pub mod clock;
 pub mod conform;
 pub mod device;

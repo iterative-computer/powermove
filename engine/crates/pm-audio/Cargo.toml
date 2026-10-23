@@ -35,3 +35,4 @@ test-hooks = []
 proptest.workspace = true
 pm-audio = { path = ".", features = ["test-hooks"] }
 tempfile = "3.27"
+sha2 = { workspace = true, features = ["std"] }

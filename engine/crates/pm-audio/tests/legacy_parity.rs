@@ -114,17 +114,39 @@ enum Ceiling {
     Outside(f64, &'static [(f64, f64)]),
 }
 
+/// Electron's own FFmpeg for AAC and Opus (`src/chromium.rs`): the app's
+/// engine processes find it loaded; this test finds the checkout's.
+fn locate_todays_ffmpeg() -> bool {
+    if std::env::var_os("POWERMOVE_CHROMIUM_FFMPEG").is_none() {
+        let modules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../node_modules/.bun");
+        let found = std::fs::read_dir(modules).ok().and_then(|d| {
+            d.flatten().find_map(|e| {
+                let lib = e.path().join("node_modules/electron/dist/Electron.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/libffmpeg.dylib");
+                (e.file_name().to_string_lossy().starts_with("electron@") && lib.is_file())
+                    .then_some(lib)
+            })
+        });
+        if let Some(lib) = found {
+            // SAFETY: set before any source opens in this test process.
+            unsafe { std::env::set_var("POWERMOVE_CHROMIUM_FFMPEG", lib) };
+        }
+    }
+    std::env::var_os("POWERMOVE_CHROMIUM_FFMPEG").is_some()
+}
+
 /// Each project's residual ceiling (dBFS). Today's export model
 /// (`pm_audio::today`, decisions AUDIO-5 and AUDIO-6) makes the mix
 /// bit-identical to today's (−240 dBFS here) wherever both decode the same
 /// samples and the bus stays stereo.
-fn ceiling(name: &str) -> Ceiling {
+fn ceiling(name: &str, todays_ffmpeg: bool) -> Ceiling {
     match name {
-        // Lossy decoders: FFmpeg revisions round differently from
-        // Chromium's (AAC, MP3, Opus, the H.264 file's AAC soundtrack).
-        "corpus-media-audio" => Ceiling::Mix(-90.0),
-        "embedded" => Ceiling::Mix(-105.0),
-        "mono" => Ceiling::Mix(-150.0),
+        // AAC and Opus decode through today's own FFmpeg when it is here;
+        // otherwise through ours, which rounds differently (−93 dBFS).
+        // `corpus-media-audio` mixes six clips at once: today's own
+        // summation order spreads it (below).
+        "corpus-media-audio" => Ceiling::Mix(if todays_ffmpeg { -145.0 } else { -90.0 }),
+        "embedded" if !todays_ffmpeg => Ceiling::Mix(-105.0),
+        "mono" if !todays_ffmpeg => Ceiling::Mix(-150.0),
         // Today's bus sums its clips in the order of a pointer hash set
         // (`AudioSummingJunction::outputs_`), so where three or more clips
         // feed one bus channel at once its own captures differ by an ulp
@@ -150,6 +172,10 @@ fn offline_mixes_match_todays_export_audio() {
         eprintln!("no audio parity capture (run tools/legacy-mix.ts); skipping");
         return;
     };
+    let todays_ffmpeg = locate_todays_ffmpeg();
+    if !todays_ffmpeg {
+        eprintln!("no Electron libffmpeg: AAC and Opus decode through our FFmpeg");
+    }
     let manifest = parse(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
     let mut results = Vec::new();
     let mut failures = Vec::new();
@@ -317,7 +343,7 @@ fn offline_mixes_match_todays_export_audio() {
         }
         // Residual ceilings: what is left once the allowed differences
         // (docs/engine/pm-audio.md) are accounted for, as regression guards.
-        let (residual, ceiling) = match ceiling(&name) {
+        let (residual, ceiling) = match ceiling(&name, todays_ffmpeg) {
             Ceiling::Mix(db) => (m.rms_diff_db, db),
             Ceiling::Outside(ceil, spans) => {
                 let mut e = 0f64;
@@ -337,6 +363,20 @@ fn offline_mixes_match_todays_export_audio() {
             }
         };
         m.guarded_db = residual;
+        // Identical means the same bits, signed zeros included.
+        if ceiling <= -240.0 {
+            let unequal = (0..2)
+                .map(|c| {
+                    let l = &legacy[c.min(lc - 1)];
+                    (0..n)
+                        .filter(|&i| ours[c][i].to_bits() != l[i].to_bits())
+                        .count()
+                })
+                .sum::<usize>();
+            if unequal > 0 {
+                failures.push(format!("{name}: {unequal} samples differ in their bits"));
+            }
+        }
         if residual > ceiling {
             failures.push(format!(
                 "{name}: residual {residual:.1} dBFS above its {ceiling:.0} dBFS ceiling"

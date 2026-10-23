@@ -77,7 +77,9 @@ async function project(session: LaunchedApp, fixture: Fixture): Promise<void> {
     PM.bus.emit('project');
     PM.bus.emit('layers');
   }, fixture);
-  await importFixture(session.page, 'tone.wav');
+  // PM_PARITY_FIXTURE=tone.m4a|tone.opus runs the same projects on a lossy
+  // source (decoded by today's own FFmpeg in the engine, src/chromium.rs).
+  await importFixture(session.page, process.env.PM_PARITY_FIXTURE ?? 'tone.wav');
   await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((layer: any) => layer.type === 'audio'));
   await session.page.evaluate(({ advanced, speed, dur }) => {
     const PM = (window as any).PM;

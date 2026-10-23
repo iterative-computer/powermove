@@ -276,6 +276,8 @@ pub struct Mixer {
     bus: usize,
     /// The voice whose layout names the wide band's channels.
     bus_lead: Option<usize>,
+    /// Scratch for [`Self::signed_zeros`].
+    zero_state: Vec<u8>,
     /// Scratch for wide bands.
     wide_out: Vec<Vec<f32>>,
     band_out: Vec<Vec<f32>>,
@@ -872,6 +874,7 @@ impl Mixer {
             today_src: vec![],
             bus: 0,
             bus_lead: None,
+            zero_state: vec![],
             wide_out: vec![],
             band_out: vec![],
             band_strips: vec![],
@@ -1842,7 +1845,8 @@ impl Mixer {
         let end = start + frames as i64;
         let doc = self.doc.clone();
         let graph = self.graph.clone();
-        let spans = if self.format.channels() == 2 && frames > 0 {
+        let wide = graph.voices.iter().any(|v| v.source.channels() > 2);
+        let spans = if wide && self.format.channels() == 2 && frames > 0 {
             let comps = graph.resolve(&doc)?;
             self.wide_spans(&comps)?
         } else {
@@ -2011,9 +2015,13 @@ impl Mixer {
         monitor_solo: Option<&HashSet<String>>,
         channels: usize,
     ) -> Result<RenderReport> {
+        // Sums start at −0, the exact additive identity: today's summing
+        // bus copies the first playing clip's samples into a silent bus
+        // (`AudioChannel::SumFrom`), so a −0 sample stays −0. `signed_zeros`
+        // makes frames where no clip plays +0 afterwards.
         for c in out.iter_mut() {
             c.clear();
-            c.resize(frames, 0.0);
+            c.resize(frames, -0.0);
         }
         let mut report = RenderReport::default();
         let strips = self.graph.strips.len();
@@ -2022,7 +2030,7 @@ impl Mixer {
             s.resize_with(channels, Vec::new);
             for c in s.iter_mut() {
                 c.clear();
-                c.resize(frames, 0.0);
+                c.resize(frames, -0.0);
             }
         }
         if frames == 0 {
@@ -2081,6 +2089,7 @@ impl Mixer {
                 }
             }
         }
+        self.signed_zeros(start, frames, out);
         let master = self.master_gain;
         if master != 1.0 {
             for o in out.iter_mut() {
@@ -2090,6 +2099,54 @@ impl Mixer {
             }
         }
         Ok(report)
+    }
+
+    /// Today's signs of zero: a frame where no clip's source node plays is
+    /// +0 (a silent bus), and a clip whose node plays in the frame's render
+    /// quantum but has no sample there (before its start, after its end)
+    /// adds an explicit +0 (the node zero-fills its quantum).
+    fn signed_zeros(&mut self, start: i64, frames: usize, out: &mut [Vec<f32>]) {
+        // 0 silent, 1 playing, 2 adds a +0. Scratch: no allocation once warm.
+        let mut state = std::mem::take(&mut self.zero_state);
+        state.clear();
+        state.resize(frames, 0);
+        let end = start + frames as i64;
+        let mut mark = |a: i64, b: i64, v: u8| {
+            for f in a.max(start)..b.min(end) {
+                let s = &mut state[(f - start) as usize];
+                *s = (*s).max(v);
+            }
+        };
+        let p = self.format.sample_rate as f64;
+        for (vi, plan) in self.graph.voices.iter().enumerate() {
+            let voice = &self.voices[vi];
+            match &voice.today {
+                Today::On(t) => {
+                    let Some(clip) = &t.clip else { continue };
+                    let o = self.today_range.origin;
+                    let first = clip.read.start_frame + o;
+                    let last = first + clip.read.frames;
+                    // Quanta are counted in the context's frames.
+                    let q0 = o + (first - o).div_euclid(128) * 128;
+                    let q1 = o + clip.read.disconnected();
+                    mark(q0, first, 2);
+                    mark(first, last, 1);
+                    mark(last, q1, 2);
+                }
+                _ => {
+                    let (a, b) = voice_bounds(&voice.reader, plan, p);
+                    mark(a, b, 1);
+                }
+            }
+        }
+        for (i, s) in state.iter().enumerate() {
+            match s {
+                0 => out.iter_mut().for_each(|c| c[i] = 0.0),
+                2 => out.iter_mut().for_each(|c| c[i] += 0.0),
+                _ => {}
+            }
+        }
+        self.zero_state = state;
     }
 
     /// Mixes one voice into its strip. `Ok(None)` when it is silent in the
@@ -2438,9 +2495,8 @@ impl Mixer {
             &mut self.ev,
             comps,
         )?;
-        if self.gains.iter().all(|&g| g == 0.0) {
-            return Ok(None);
-        }
+        // A zero gain still multiplies today's samples (a ±0 by their sign),
+        // so silent stretches of a playing clip are mixed, not skipped.
         // The decoded buffer frames these outputs read (one either side for
         // the interpolation and its extrapolation at the end).
         let k0 = a - first;
