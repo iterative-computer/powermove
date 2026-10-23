@@ -13,16 +13,18 @@
  *
  * - the page's main-thread work in the step (CDP Performance.getMetrics
  *   TaskDuration, minus the rig's own calibrated round trip),
- * - the engine's render-thread work for the step (its stats: compose CPU and
- *   GPU time, and the pm-perf work counters),
+ * - the engine's render-thread work for the step (its stats: each frame's
+ *   span from the start of its compose to its GPU completion, the compose's
+ *   CPU within it, and the pm-perf work counters),
  * - the page's messages posted and received and their structured-clone bytes
  *   (estimated by walking the payload), and today's WebGL calls (draws,
  *   framebuffer binds, uploads and their bytes, readbacks, programs, shader
  *   compiles) through prototype hooks installed before the app boots,
  * - the step's wall time from the request to the presentation.
  *
- * A step fits the budget when its main-thread work and (engine) render-thread
- * CPU + GPU time are each within 8.33 ms; frames presented, frames over
+ * A step fits the budget when its main-thread work and (engine) the
+ * render thread's frame time (compose through GPU completion) are each within
+ * 8.33 ms; frames presented, frames over
  * budget ("dropped" at 120 Hz), and per-step distributions are reported.
  *
  * Fixtures: the synthetic project (public, generated in the page) and, when
@@ -200,7 +202,14 @@ function pageStep(spec: StepSpec): Promise<{ ms: number | null; counts: Record<s
   });
 }
 
-type StepRecord = { ms: number | null; mainMs: number; engineCpuMs: number; engineGpuMs: number; page: Record<string, number>; work: Record<string, number> };
+/**
+ * The engine's numbers per step, from its stats: `engineComposeMs`, the
+ * compose's CPU (planning and encoding); `engineFrameMs`, each frame from
+ * the start of its compose until its GPU work finished (the stats'
+ * `gpuUsTotal`, which includes the compose: the render thread's time for
+ * the frame); `engineFrames`, frames drawn in the step.
+ */
+type StepRecord = { ms: number | null; mainMs: number; engineComposeMs: number; engineFrameMs: number; engineFrames: number; page: Record<string, number>; work: Record<string, number> };
 
 function dist(xs: number[]): { n: number; p50?: number; p95?: number; p99?: number; max?: number } {
   if (!xs.length) return { n: 0 };
@@ -246,6 +255,18 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[]): Pr
     await cdp.send('Profiler.setSamplingInterval', { interval: 250 });
     await cdp.send('Profiler.start');
   }
+  // $PM_PERFBENCH_RIG_TRACE=<dir>: a Chromium trace of the page over the
+  // measured steps (layout, style, paint, and what invalidated layout, with
+  // stacks), for finding forced layouts.
+  const traceDir = process.env.PM_PERFBENCH_RIG_TRACE;
+  if (traceDir) {
+    await cdp.send('Tracing.start', {
+      transferMode: 'ReturnAsStream',
+      traceConfig: {
+        includedCategories: ['devtools.timeline', 'disabled-by-default-devtools.timeline', 'disabled-by-default-devtools.timeline.invalidationTracking', 'disabled-by-default-devtools.timeline.stack', 'blink.user_timing', 'v8.execute']
+      }
+    } as any);
+  }
   let report = mode === 'engine' ? await engineReport(session) : null;
   let counts = await page.evaluate(() => (window as any).__pmRig.counts());
   for (const spec of specs) {
@@ -256,8 +277,9 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[]): Pr
     steps.push({
       ms: r.ms,
       mainMs: Math.max(0, (m1.TaskDuration! - m0.TaskDuration!) * 1000 - calibrationMs),
-      engineCpuMs: next && report ? (next.composeUsTotal - report.composeUsTotal) / 1000 : 0,
-      engineGpuMs: next && report ? (next.gpuUsTotal - report.gpuUsTotal) / 1000 : 0,
+      engineComposeMs: next && report ? (next.composeUsTotal - report.composeUsTotal) / 1000 : 0,
+      engineFrameMs: next && report ? (next.gpuUsTotal - report.gpuUsTotal) / 1000 : 0,
+      engineFrames: next && report ? next.frames - report.frames : 0,
       page: diff(counts, r.counts),
       work: next && report ? diff(report.work ?? {}, next.work ?? {}) : {}
     });
@@ -270,6 +292,21 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[]): Pr
     await mkdir(profileDir, { recursive: true });
     await writeFile(path.join(profileDir, `rig-${mode}-${Date.now()}.cpuprofile`), JSON.stringify(profile));
   }
+  if (traceDir) {
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    const complete = new Promise<string>((resolve) => cdp.once('Tracing.tracingComplete' as any, (e: any) => resolve(e.stream)));
+    await cdp.send('Tracing.end');
+    const stream = await complete;
+    const parts: string[] = [];
+    for (;;) {
+      const chunk: any = await cdp.send('IO.read' as any, { handle: stream, size: 1 << 20 } as any);
+      parts.push(chunk.base64Encoded ? Buffer.from(chunk.data, 'base64').toString('utf8') : chunk.data);
+      if (chunk.eof) break;
+    }
+    await cdp.send('IO.close' as any, { handle: stream } as any);
+    await mkdir(traceDir, { recursive: true });
+    await writeFile(path.join(traceDir, `rig-${mode}-${Date.now()}.trace.json`), parts.join(''));
+  }
   await cdp.detach().catch(() => undefined);
   return { steps, calibrationMs, beginFrame };
 }
@@ -277,7 +314,12 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[]): Pr
 function summarize(row: string, mode: Mode, run: { steps: StepRecord[]; calibrationMs: number; beginFrame: string }, extra: Record<string, unknown>) {
   const s = run.steps;
   const presented = s.filter((x) => x.ms !== null);
-  const fits = s.filter((x) => x.ms !== null && x.mainMs <= BUDGET_MS && x.engineCpuMs + x.engineGpuMs <= BUDGET_MS);
+  // The render thread's time is the frame's span from its compose to its
+  // GPU completion (`engineFrameMs`). Before 2026-10-23 the rig added the
+  // compose CPU to that span a second time (`engineRenderMsDoubleCounted`,
+  // kept for comparison with older rows).
+  const fits = s.filter((x) => x.ms !== null && x.mainMs <= BUDGET_MS && x.engineFrameMs <= BUDGET_MS);
+  const fitsDoubleCounted = s.filter((x) => x.ms !== null && x.mainMs <= BUDGET_MS && x.engineComposeMs + x.engineFrameMs <= BUDGET_MS);
   const totals = sum(s.map((x) => x.page));
   const work = sum(s.map((x) => x.work));
   const per = (o: Record<string, number>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, +(v / Math.max(1, s.length)).toFixed(2)]));
@@ -292,7 +334,11 @@ function summarize(row: string, mode: Mode, run: { steps: StepRecord[]; calibrat
     overBudget: s.length - fits.length,
     notPresented: s.length - presented.length,
     mainThreadMs: dist(s.map((x) => x.mainMs)),
-    engineRenderMs: mode === 'engine' ? dist(s.map((x) => x.engineCpuMs + x.engineGpuMs)) : null,
+    engineRenderMs: mode === 'engine' ? dist(s.map((x) => x.engineFrameMs)) : null,
+    engineComposeMs: mode === 'engine' ? dist(s.map((x) => x.engineComposeMs)) : null,
+    engineFramesPerStep: mode === 'engine' ? dist(s.map((x) => x.engineFrames)) : null,
+    engineRenderMsDoubleCounted: mode === 'engine' ? dist(s.map((x) => x.engineComposeMs + x.engineFrameMs)) : null,
+    fitBudgetDoubleCounted: mode === 'engine' ? fitsDoubleCounted.length : null,
     stepLatencyMs: dist(presented.map((x) => x.ms!)),
     pagePerFrame: per(totals),
     enginePerFrame: per(work),
