@@ -421,6 +421,9 @@ pub struct Evaluator {
     /// The address of the root of the document last seen by id.
     last_root: usize,
     stats: CacheStats,
+    /// `ev` answers' time-independent part, per layer and channel, while a
+    /// renderer has it open (`crate::channel_memo`).
+    channel_memo: crate::channel_memo::ChannelMemo,
 }
 
 impl Default for Evaluator {
@@ -482,6 +485,7 @@ impl Evaluator {
             last_revision: 0,
             last_root: 0,
             stats: CacheStats::default(),
+            channel_memo: Default::default(),
         }
     }
 
@@ -507,6 +511,7 @@ impl Evaluator {
         self.errors.clear();
         self.last_revision = 0;
         self.last_root = 0;
+        self.channel_memo.clear();
     }
 
     /// Follows the document the by-id API is called with: a lower revision or
@@ -659,6 +664,30 @@ impl Evaluator {
         crate::keyframes::evaluate(kf, t, interpolate_color, &mut self.springs)
     }
 
+    /// Keeps what `ev` finds for the layers of `doc` from now until
+    /// [`Evaluator::close_channel_memo`], and gives it back while `doc`'s
+    /// edition is the same (`crate::channel_memo`): a renderer opens it
+    /// around a frame's plan. Every answer is the one `ev` computes without
+    /// it.
+    pub fn open_channel_memo(&mut self, doc: &Document) {
+        self.channel_memo.open(doc);
+    }
+
+    /// Stops consulting the memo (its entries stay for the same edition).
+    pub fn close_channel_memo(&mut self) {
+        self.channel_memo.close();
+    }
+
+    /// Forgets the memo's entries.
+    pub fn clear_channel_memo(&mut self) {
+        self.channel_memo.clear();
+    }
+
+    /// The memo's hits and misses so far.
+    pub fn channel_memo_stats(&self) -> (u64, u64) {
+        (self.channel_memo.hits, self.channel_memo.misses)
+    }
+
     /// `PM.ev(L, key, T)`: one channel of `L.p` at composition time `T`.
     pub fn ev(
         &mut self,
@@ -672,6 +701,120 @@ impl Evaluator {
         {
             return r;
         }
+        if let Some(l) = layer
+            && let Some((value, clear)) = self.memo_answer(cx, l, key.as_bytes(), time)
+        {
+            if clear {
+                self.clear_error(cx, layer, key);
+            }
+            return Ok(value);
+        }
+        self.ev_ordinary(cx, layer, key, time)
+    }
+
+    /// `PM.ev(L, key, T)` for a literal key: [`Evaluator::ev`] without
+    /// making the key a string when the channel memo answers.
+    pub fn ev_key(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: Option<&Node>,
+        key: &str,
+        time: f64,
+    ) -> JsResult<JsValue> {
+        if !self.hooks.overrides_channels()
+            && let Some(l) = layer
+            && let Some((value, clear)) = self.memo_answer(cx, l, key.as_bytes(), time)
+        {
+            if clear {
+                self.clear_error(cx, layer, &JsString::from(key));
+            }
+            return Ok(value);
+        }
+        self.ev(cx, layer, &JsString::from(key), time)
+    }
+
+    /// The channel memo's answer for `layer`'s channel `key` at `time`, and
+    /// whether the ordinary path would forget the channel's expression
+    /// error there; `None`: the ordinary path answers (`crate::channel_memo`).
+    fn memo_answer(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        key: &[u8],
+        time: f64,
+    ) -> Option<(JsValue, bool)> {
+        use crate::channel_memo::Found;
+        if !self.channel_memo.is_open() {
+            return None;
+        }
+        let answer = |found: &Found| match found {
+            Found::Zero => Some((JsValue::Number(0.0), false)),
+            Found::Static(v) => Some((v.clone(), true)),
+            Found::Track { from, track } => {
+                let tl = time - from;
+                tl.is_finite().then(|| (track.value(tl), true))
+            }
+            Found::Ordinary => None,
+        };
+        if let Some(found) = self.channel_memo.get(cx, layer, key) {
+            return answer(found);
+        }
+        let found = self.find_channel(layer, key);
+        let result = answer(&found);
+        self.channel_memo.insert(cx, layer, key, found);
+        result
+    }
+
+    /// What `ev` reads for `layer`'s channel `key` that does not depend on
+    /// the time, read for read as [`Evaluator::ev_ordinary`] reads it
+    /// (`crate::channel_memo`).
+    fn find_channel(&mut self, layer: &Node, key: &[u8]) -> crate::channel_memo::Found {
+        use crate::channel_memo::Found;
+        let Ok(p) = node::get_checked(Some(layer), b"p") else {
+            return Found::Ordinary;
+        };
+        let prop = match p {
+            Got::Node(p) => match node::get_checked(Some(p), key) {
+                Ok(prop) => prop,
+                Err(_) => return Found::Ordinary,
+            },
+            _ => return Found::Ordinary,
+        };
+        if !prop.truthy() {
+            return Found::Zero;
+        }
+        let expr = match &prop {
+            Got::Node(n) => node::get(n, b"expr"),
+            _ => Got::Undefined,
+        };
+        if expr.truthy() {
+            return Found::Ordinary;
+        }
+        if kf_length_truthy(&prop) {
+            let Ok(from) = node::get_checked(Some(layer), b"from") else {
+                return Found::Ordinary;
+            };
+            let from = from.to_js().to_number();
+            let kf = prop.node().and_then(|p| node::member(Some(p), "kf"));
+            return match PreparedTrack::prepare(kf, &mut self.springs) {
+                PreparedTrack::Temporal(track) => Found::Track { from, track },
+                _ => Found::Ordinary,
+            };
+        }
+        Found::Static(match prop {
+            Got::Node(p) => node::get(p, b"v").to_js(),
+            _ => JsValue::Undefined,
+        })
+    }
+
+    /// `ev` without the memo.
+    fn ev_ordinary(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: Option<&Node>,
+        key: &JsString,
+        time: f64,
+    ) -> JsResult<JsValue> {
         let p = node::get_checked(layer, b"p")?;
         let prop = match p {
             Got::Node(p) => node::get_checked(Some(p), key.as_bytes())?,
