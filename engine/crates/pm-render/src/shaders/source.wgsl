@@ -22,7 +22,7 @@ struct Params {
     b: vec4<u32>,
     // chroma plane width, height; quantize to f16; convert primaries.
     c: vec4<u32>,
-    // chroma origin on the luma grid (xy).
+    // chroma origin (xy); optional compatibility YUV scale and C bias (zw).
     origin: vec4<f32>,
     // Y′CbCr → R′G′B′ columns.
     m0: vec4<f32>,
@@ -194,11 +194,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (P.a.x == 1u) {
         let cbcr = chroma_sample(id.x, id.y);
         let m = mat3x3<f32>(P.m0.xyz, P.m1.xyz, P.m2.xyz);
-        let ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
+        var ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
+        if (P.origin.z != 0.0) {
+            ycc = ycc * P.origin.z + vec3<f32>(P.hdr.z, P.origin.w, P.origin.w);
+        }
         if (P.hdr.y == 1.0) { stored = vec4<f32>(bt2020_cl_rgb(ycc), v.a); }
         else { stored = vec4<f32>(m * ycc, v.a); }
     } else {
         stored = v;
+    }
+    if (P.hdr.w != 0.0) {
+        stored = vec4<f32>(round(clamp(stored.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0) / 255.0, stored.a);
     }
     var w: vec4<f32>;
     switch P.a.w {

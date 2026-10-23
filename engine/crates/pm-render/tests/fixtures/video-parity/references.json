@@ -1,0 +1,113 @@
+[
+  {
+    "source": "h264-709-limited",
+    "sample": 0,
+    "rgbaSha256": "cbc9ad20a178e39e841c666525f24c0dd1470f72970e337a6110352d1df06231"
+  },
+  {
+    "source": "h264-709-limited",
+    "sample": 1,
+    "rgbaSha256": "d976a6466097c4ddeafff3e0c91395840b5ee3d9caaefcf62a12fed5a7de3c1e"
+  },
+  {
+    "source": "h264-709-limited",
+    "sample": 2,
+    "rgbaSha256": "37e0475914250e970efc3fccbb0b30c46e47a32031780fb36388d775dbd680d3"
+  },
+  {
+    "source": "h264-709-matrix-only",
+    "sample": 0,
+    "rgbaSha256": "1976b805b8aa5840d90982e6479ad49196abc6c2f875313d37236f5683b368bf"
+  },
+  {
+    "source": "h264-709-matrix-only",
+    "sample": 1,
+    "rgbaSha256": "37fb8169f7c1c2b00c2786f393e2943b98ada5216d7eb3b5a0af43135df58123"
+  },
+  {
+    "source": "h264-709-matrix-only",
+    "sample": 2,
+    "rgbaSha256": "68c548ab1146498d6444246ddeba2448de965d28a3139f7d471e2f89e4a587d3"
+  },
+  {
+    "source": "vp9-untagged",
+    "sample": 0,
+    "rgbaSha256": "bab560881d1bbdb3fcce4065c45fdaeb5db049dc708ebab3b028c60fd6641800"
+  },
+  {
+    "source": "vp9-untagged",
+    "sample": 1,
+    "rgbaSha256": "cb5b2be3207d5603f80a0b6f1f276900ac0c007165cedd2c96c80c87f3e996fe"
+  },
+  {
+    "source": "vp9-untagged",
+    "sample": 2,
+    "rgbaSha256": "1e96a9d120bbeaf84bb04bcf53b2d85267cc8fddcb5d9d0709cd26eab0d0fbdc"
+  },
+  {
+    "source": "hevc10-709-limited",
+    "sample": 0,
+    "rgbaSha256": "6aa9c4105bac5cd8879d4b4191893ed2ad30cbec5ed886995e24c20a5bf0d9e4"
+  },
+  {
+    "source": "hevc10-709-limited",
+    "sample": 1,
+    "rgbaSha256": "116f35b5681ecf6e56149f0ed860ac719cfe92723054dffbf617d055d8d1fb31"
+  },
+  {
+    "source": "hevc10-709-limited",
+    "sample": 2,
+    "rgbaSha256": "494f956cc792c1930a75259e737321ab04b6ebac714142a19ed743b3b3c0ed2c"
+  },
+  {
+    "source": "h264-709-full",
+    "sample": 0,
+    "rgbaSha256": "8c142f52256b3c564db2874bc3e6ab774174fed88f71dfee716785acd156c63b"
+  },
+  {
+    "source": "h264-709-full",
+    "sample": 1,
+    "rgbaSha256": "f48bb66c6bfe686f19f36a089628f3c7551513848ffbf109d1d98c4263395d72"
+  },
+  {
+    "source": "h264-709-full",
+    "sample": 2,
+    "rgbaSha256": "4b64da462a1887a7f8969393d401e7448c14fb9afe1938a708da83a38df0904a"
+  },
+  {
+    "source": "h264-2020-limited",
+    "sample": 0,
+    "kind": "canvas",
+    "rgbaSha256": "e1c93df22b7027820e928de124ed1bfd84b4bfd86a2be64ca124f3895ee8b72a"
+  },
+  {
+    "source": "h264-2020-limited",
+    "sample": 0,
+    "kind": "rgba",
+    "rgbaSha256": "9c8faab44e6501a072b789058d0ee39e35d86f200aeffb4c77b07318edaeefbc"
+  },
+  {
+    "source": "h264-2020-limited",
+    "sample": 1,
+    "kind": "canvas",
+    "rgbaSha256": "964d4b321e361e3585985b2767313a437c4e1621cc87a3cedad9ef343ac7cb53"
+  },
+  {
+    "source": "h264-2020-limited",
+    "sample": 1,
+    "kind": "rgba",
+    "rgbaSha256": "d73547b5e43feb756e3e6375f15253af57f34e61ef29b8dc90c9310d9a5ec39c"
+  },
+  {
+    "source": "h264-2020-limited",
+    "sample": 2,
+    "kind": "canvas",
+    "rgbaSha256": "dfe5a0004de9bd34bd44eac09bcf2b8decb6749eca1a3ec4cda30ee3b8844261"
+  },
+  {
+    "source": "h264-2020-limited",
+    "sample": 2,
+    "kind": "rgba",
+    "rgbaSha256": "6ec8774a8f6f7eae3ee30174f88066eead323e97516400bf4f2a7062f44cae53"
+  }
+]

@@ -37,6 +37,9 @@ use crate::footage::{Geometry, Orient, Pick, Timing};
 use crate::pipelines::{Pipelines, SourceUniform, bytes_of};
 pub use crate::stills::StillReader;
 
+#[path = "media/video_compat.rs"]
+mod video_compat;
+
 /// Why a media file cannot be drawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeIssue {
@@ -527,7 +530,8 @@ pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
 /// the renderer can draw it ([`video_drawable`]), and it shows nothing
 /// whose look the renderer has not matched with today's viewer (section 25:
 /// a feature leaves `pm_render::unsupported` only with a parity test).
-/// Rec.709 and BT.601 primaries are matched; these are drawn only when the
+/// Rec.709, BT.601 and the measured BT.2020 H.264 upload are matched;
+/// these other readings are drawn only when the
 /// asset carries Interpret Footage overrides, which only this engine reads:
 ///
 /// - HDR (PQ, HLG): section 9 tone maps with BT.2446 Method A, but today's
@@ -537,9 +541,8 @@ pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
 ///   woven frame);
 /// - display rotations, non-square pixels, and a cropping clean aperture
 ///   (exact, but not compared with today's viewer);
-/// - wide-gamut SDR footage (Display P3, BT.2020), which converts without
-///   clipping where today's viewer clips at upload, the same open decision
-///   as Display P3 stills.
+/// - other wide-gamut SDR footage. The measured BT.2020 H.264 class clips
+///   and quantizes at today's upload boundary before Canvas gamut conversion.
 ///
 /// Answers are kept per file, size, and modification time: capability
 /// routing asks at every document revision, and opening a source indexes
@@ -638,7 +641,8 @@ fn video_supported(src: &MediaSource) -> Result<(), String> {
     if !matches!(
         c.primaries,
         Primaries::Bt709 | Primaries::Bt601_525 | Primaries::Bt601_625
-    ) {
+    ) && !video_compat::bt2020_upload(v)
+    {
         return Err(format!(
             "{:?} primaries (wide-gamut footage is {WHEN})",
             c.primaries
@@ -842,6 +846,7 @@ pub(crate) fn convert(
         factors,
         reuse,
         working_format(precision),
+        false,
     )
 }
 
@@ -861,6 +866,7 @@ fn convert_format(
     factors: Factors,
     reuse: Option<Target>,
     format: wgpu::TextureFormat,
+    compatibility_p010: bool,
 ) -> Target {
     let (luma, chroma, chroma_info) = match normalized {
         Normalized::Rgb { rgba } => (rgba, None, None),
@@ -888,6 +894,7 @@ fn convert_format(
         // Store the f32 conversion directly: an intermediate half-float
         // rounding can change which side of an 8-bit boundary it lands on.
         uniform.c[2] = 0;
+        uniform.hdr[3] = u32::from(color.primaries == Primaries::Bt2020) as f32;
         if let Some((factors, _, _)) = chroma_info {
             // Chromium's Skia video upload treats subsampled chroma as
             // centered and reconstructs it bilinearly before the RGBA8
@@ -896,6 +903,15 @@ fn convert_format(
             uniform.b[3] = u32::from(factors.y > 1);
             uniform.origin[0] = (factors.x - 1) as f32 * 0.5;
             uniform.origin[1] = (factors.y - 1) as f32 * 0.5;
+        }
+        if compatibility_p010 {
+            // Chromium samples MSB-aligned P010 R16Unorm planes with
+            // Skia's 8-bit matrix. Re-express that source upload after
+            // native 10-bit normalization, keeping the decoder untouched.
+            let scale = 65280.0f64 / 65535.0;
+            uniform.origin[2] = scale as f32;
+            uniform.origin[3] = ((128.0 / 224.0) * (scale - 1.0)) as f32;
+            uniform.hdr[2] = ((16.0 / 219.0) * (scale - 1.0)) as f32;
         }
     }
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1065,6 +1081,9 @@ pub struct MediaCache {
     /// Scrub frames: a video whose exact frame is not decoded yet shows
     /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
     pub scrub: bool,
+    /// Paused/scrub/final frames use today's Canvas video snapshot; live
+    /// playback uploads directly. Both readings partition the frame cache.
+    pub canvas_video: bool,
     /// The frame (presented index in its source) of each video layer drawn
     /// with a stand-in since the list was reset.
     pub stand_ins: Vec<usize>,
@@ -1112,6 +1131,7 @@ impl MediaCache {
             viewer: ViewerDecode::new(service.clone()),
             service,
             scrub: false,
+            canvas_video: true,
             stand_ins: Vec::new(),
             retired_frames: Vec::new(),
             free_frames: Vec::new(),
@@ -1344,7 +1364,11 @@ impl MediaCache {
         let reading_key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            format!("{interp:?}{composition:?}{sequence}{compat}").hash(&mut h);
+            format!(
+                "{interp:?}{composition:?}{sequence}{compat}{}",
+                self.canvas_video
+            )
+            .hash(&mut h);
             self.interpretations
                 .get(path)
                 .map(|c| format!("{c:?}"))
@@ -1408,7 +1432,26 @@ impl MediaCache {
             return Ok(Some(t.clone()));
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
-        let bitmap = if sequence
+        let full_range_bitmap = compat
+            && self.canvas_video
+            && !sequence
+            && working == WorkingEncoding::Standard
+            && v.codec.codec == "h264"
+            && v.color.tagged.primaries == Some(1)
+            && v.color.tagged.transfer == Some(1)
+            && v.color.tagged.matrix == Some(1)
+            && frame.format.bits == 8
+            && frame.format.range == pm_protocol::color::Range::Full
+            && !frame.format.has_alpha()
+            && !interprets_video_color(interp)
+            && fields.is_none()
+            && !self.interpretations.contains_key(path);
+        let bitmap = if full_range_bitmap {
+            Some(
+                pm_media::compat_video::full_range_709_bitmap(&frame, &self.pool)
+                    .map_err(|e| MediaFailure::Failed(e.to_string()))?,
+            )
+        } else if sequence
             && compat
             && !interprets_video_reading(interp)
             && fields.is_none()
@@ -1420,7 +1463,7 @@ impl MediaCache {
         } else {
             None
         };
-        let sequence_bitmap = bitmap.is_some();
+        let source_bitmap = bitmap.is_some();
         let frame = bitmap.unwrap_or(frame);
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));
@@ -1478,6 +1521,22 @@ impl MediaCache {
             None if interprets_video_reading(interp) => reading.color,
             None => frame.color.unwrap_or(reading.color),
         };
+        if compat
+            && !sequence
+            && working == WorkingEncoding::Standard
+            && !frame.format.has_alpha()
+            && !interprets_video_color(interp)
+            && !self.interpretations.contains_key(path)
+            && fields.is_none()
+            && !matches!(desc.transfer, Transfer::Pq | Transfer::Hlg)
+        {
+            desc = video_compat::color(v, desc);
+            if !self.canvas_video && video_compat::bt2020_upload(v) {
+                // texImage2D keeps encoded RGB; Canvas2D additionally
+                // converts from the video's primaries into its sRGB canvas.
+                desc.primaries = Primaries::Bt709;
+            }
+        }
         // raster.ts encodes image sequences as untagged BT.601 VP9, even
         // at HD sizes. Honor explicit file or Interpret Footage matrices.
         if sequence
@@ -1508,7 +1567,7 @@ impl MediaCache {
                 _ => None,
             },
         };
-        let color = if sequence_bitmap {
+        let color = if source_bitmap {
             SourceColor {
                 transfer: pm_protocol::color::Transfer::DisplayE,
                 primaries: pm_protocol::color::Primaries::Bt709,
@@ -1523,7 +1582,7 @@ impl MediaCache {
         // texImage2D uploads ordinary opaque legacy video into RGBA8.
         // Clip/quantize each source texel before the layer samples it, so
         // saturated out-of-range RGB cannot bleed across a filtered edge.
-        // The sequence path keeps its separate Chromium/libyuv conversion;
+        // The Canvas export and sequence paths keep their libyuv conversion;
         // Level 2, alpha files, colour interpretations (Interpret Footage's
         // colour members or a file's colour override), and HDR retain
         // native precision. Overrides that only choose or place frames
@@ -1539,8 +1598,9 @@ impl MediaCache {
             && fields.is_none()
             && color.tone_map.is_none()
             && !matches!(color.transfer, Transfer::Pq | Transfer::Hlg)
-            && matches!(color.primaries, Primaries::Bt709 | Primaries::Unspecified);
-        let format = if compatibility_bitmap {
+            && (matches!(color.primaries, Primaries::Bt709 | Primaries::Unspecified)
+                || video_compat::bt2020_upload(v));
+        let format = if compatibility_bitmap || full_range_bitmap {
             wgpu::TextureFormat::Rgba8Unorm
         } else {
             working_format(precision)
@@ -1565,6 +1625,7 @@ impl MediaCache {
             factors,
             reuse,
             format,
+            compatibility_bitmap && v.codec.codec == "hevc" && frame.format.label == "x420",
         );
         let importer = self.importer()?;
         if fields.is_none() {

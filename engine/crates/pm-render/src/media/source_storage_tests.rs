@@ -3,6 +3,130 @@
 use super::*;
 use pm_gpu::readback::{f32_to_half, half_to_f32, read_f32, read_raw};
 
+#[test]
+fn chromium_sdr_video_readings_match_detailed_captures() {
+    use std::io::Read;
+    let gpu = pm_gpu::Gpu::new("Chromium video source parity").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let mut media = MediaCache::new(&gpu.device);
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video-parity");
+    for (name, extension) in [
+        ("h264-709-limited", "mp4"),
+        ("h264-709-matrix-only", "mp4"),
+        ("vp9-untagged", "webm"),
+        ("hevc10-709-limited", "mp4"),
+        ("h264-709-full", "mp4"),
+        ("h264-2020-limited", "mp4"),
+    ] {
+        let path = fixtures.join(format!("{name}.{extension}"));
+        for (i, seconds) in [0.125, 0.625, 1.125].into_iter().enumerate() {
+            let compressed = std::fs::read(fixtures.join(format!("{name}-{i}.rgba.zlib"))).unwrap();
+            let mut reference = Vec::new();
+            flate2::read::ZlibDecoder::new(&compressed[..])
+                .read_to_end(&mut reference)
+                .unwrap();
+            assert_eq!(reference.len(), 256 * 144 * 4);
+            assert!(
+                reference
+                    .chunks_exact(4)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    > 1000
+            );
+            for precision in [Precision::Float16, Precision::Float32] {
+                let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                let target = media
+                    .video(
+                        &gpu.device,
+                        &gpu.queue,
+                        &pipelines,
+                        &mut encoder,
+                        &path,
+                        1,
+                        seconds,
+                        true,
+                        WorkingEncoding::Standard,
+                        precision,
+                        None,
+                        pm_time::Rate::FPS_30,
+                        false,
+                        true,
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(target.format(), wgpu::TextureFormat::Rgba8Unorm);
+                gpu.queue.submit([encoder.finish()]);
+                let actual = read_raw(&gpu.device, &gpu.queue, &target.texture).unwrap();
+                assert_eq!(actual.len(), reference.len());
+                let max = actual
+                    .iter()
+                    .zip(&reference)
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap();
+                // Stricter than the corpus's 2 CV video bound. The remaining
+                // half-code GPU rounding differences are documented, not exact.
+                let bound = if name == "h264-709-full" { 0 } else { 1 };
+                assert!(max <= bound, "{name} sample {i} {precision:?}: max {max}");
+                media.flush();
+            }
+        }
+    }
+}
+
+#[test]
+fn wide_video_canvas_and_live_uploads_do_not_share_converted_pixels() {
+    use std::io::Read;
+    let gpu = pm_gpu::Gpu::new("video Canvas/live cache parity").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let mut media = MediaCache::new(&gpu.device);
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video-parity");
+    let path = fixtures.join("h264-2020-limited.mp4");
+    for i in 0..3 {
+        for canvas in [true, false, true] {
+            media.canvas_video = canvas;
+            let suffix = if canvas { "" } else { ".live" };
+            let compressed =
+                std::fs::read(fixtures.join(format!("h264-2020-limited-{i}{suffix}.rgba.zlib")))
+                    .unwrap();
+            let mut reference = Vec::new();
+            flate2::read::ZlibDecoder::new(&compressed[..])
+                .read_to_end(&mut reference)
+                .unwrap();
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let target = media
+                .video(
+                    &gpu.device,
+                    &gpu.queue,
+                    &pipelines,
+                    &mut encoder,
+                    &path,
+                    1,
+                    [0.125, 0.625, 1.125][i],
+                    true,
+                    WorkingEncoding::Standard,
+                    Precision::Float32,
+                    None,
+                    pm_time::Rate::FPS_30,
+                    false,
+                    true,
+                )
+                .unwrap()
+                .unwrap();
+            gpu.queue.submit([encoder.finish()]);
+            let actual = read_raw(&gpu.device, &gpu.queue, &target.texture).unwrap();
+            let max = actual
+                .iter()
+                .zip(&reference)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(max <= 1, "sample {i}, Canvas={canvas}: {max}");
+        }
+        media.flush();
+    }
+}
+
 /// Exercise the production source compute pass with normalized f32 RGB.
 /// Keeping the input at f32 makes an accidental half-float conversion
 /// before RGBA8 storage observable independently of a video decoder.
@@ -69,6 +193,7 @@ fn source(
         Factors { x: 1, y: 1 },
         None,
         format,
+        false,
     );
     gpu.queue.submit([encoder.finish()]);
     target
@@ -395,6 +520,7 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
             Factors { x: 2, y: 2 },
             None,
             format,
+            false,
         );
         gpu.queue.submit([encoder.finish()]);
         target
