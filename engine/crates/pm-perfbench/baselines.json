@@ -109,13 +109,13 @@
       "gpu.uploads": 69
     },
     "inspector_edit_500": {
-      "cache.draw_reuse.misses": 31020,
+      "cache.draw_reuse.misses": 60,
       "cache.frame_prefix.hits": 60,
       "cache.target_pool.hits": 60,
-      "cpu.heap_alloc_bytes": 136142348,
-      "cpu.heap_allocs": 2703306,
+      "cpu.heap_alloc_bytes": 71735048,
+      "cpu.heap_allocs": 845886,
       "engine.comp_passes": 1800,
-      "engine.layers_planned": 33000,
+      "engine.layers_planned": 2040,
       "gpu.bind_group_binds": 180,
       "gpu.bind_group_creations": 240,
       "gpu.buffer_alloc_bytes": 15360,

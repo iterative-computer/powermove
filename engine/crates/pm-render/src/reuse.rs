@@ -229,7 +229,8 @@ impl DrawReuse {
     }
 
     /// Whether `comp`'s own fields (and the root's, and the open
-    /// composition's) are unchanged since the stamp.
+    /// composition's) are unchanged since the stamp, the layer lists and
+    /// the project's provenance aside.
     fn fields_unchanged(&mut self, scope: &Scope<'_, '_>) -> bool {
         let stamp = self.stamp;
         let mut check = |node: &Node, skip: &[&[u8]]| -> bool {
@@ -246,9 +247,13 @@ impl DrawReuse {
             self.fields_unchanged.push((address, ok));
             ok
         };
-        check(scope.comp.node(), &[b"layers", b"comps"])
-            && check(scope.project.node(), &[b"layers", b"comps"])
-            && check(scope.comp.root(), &[b"layers", b"comps"])
+        // The project's provenance (`revision`, the `edits` log), which every
+        // editor edit writes (`legacy/core/editing.ts`), is read by nothing
+        // that draws: an inspector edit keeps the other layers' draws.
+        const SKIP: &[&[u8]] = &[b"layers", b"comps", b"revision", b"edits"];
+        check(scope.comp.node(), SKIP)
+            && check(scope.project.node(), SKIP)
+            && check(scope.comp.root(), SKIP)
     }
 }
 
