@@ -125,6 +125,9 @@ counters! {
     RasterRequests = "engine.raster_requests",
     /// Of those, answered.
     RasterAnswers = "engine.raster_answers",
+    /// Media files' size and modification time read from the file system
+    /// (a `stat` each).
+    FileStats = "engine.file_stats",
     /// Layers planned (drawn from scratch) in a composition pass.
     LayersPlanned = "engine.layers_planned",
     /// Compositions evaluated and planned (passes built).

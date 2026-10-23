@@ -2,9 +2,10 @@
   "about": "Highest allowed pm-perf counts per bench (docs/engine/perfbench.md). Lowered by PM_PERF_RATCHET=update; raised only by hand with the change that needs it.",
   "benches": {
     "drag_500": {
-      "cpu.heap_alloc_bytes": 99380799,
+      "cpu.heap_alloc_bytes": 99370093,
       "cpu.heap_allocs": 908445,
       "engine.comp_passes": 1800,
+      "engine.file_stats": 240,
       "engine.layers_planned": 2040,
       "gpu.bind_group_binds": 19907,
       "gpu.bind_group_creations": 649,
@@ -16,9 +17,10 @@
       "gpu.uploads": 1272
     },
     "edit_playback_500": {
-      "cpu.heap_alloc_bytes": 171973440,
+      "cpu.heap_alloc_bytes": 171964200,
       "cpu.heap_allocs": 2442241,
       "engine.comp_passes": 1800,
+      "engine.file_stats": 240,
       "engine.layers_planned": 33000,
       "gpu.bind_group_binds": 36840,
       "gpu.bind_group_creations": 240,
@@ -31,8 +33,9 @@
     },
     "export_120": {
       "cpu.heap_alloc_bytes": 4322530808,
-      "cpu.heap_allocs": 4618285,
+      "cpu.heap_allocs": 4618284,
       "engine.comp_passes": 3600,
+      "engine.file_stats": 242,
       "engine.layers_planned": 66000,
       "gpu.bind_group_binds": 73560,
       "gpu.bind_group_creations": 420,
@@ -46,7 +49,7 @@
       "gpu.uploads": 3722
     },
     "import_3d_600k": {
-      "cpu.heap_alloc_bytes": 50871009,
+      "cpu.heap_alloc_bytes": 50870987,
       "cpu.heap_allocs": 109866,
       "engine.comp_passes": 11,
       "engine.layers_planned": 33,
@@ -62,9 +65,10 @@
       "gpu.uploads": 69
     },
     "inspector_edit_500": {
-      "cpu.heap_alloc_bytes": 71641448,
+      "cpu.heap_alloc_bytes": 71631848,
       "cpu.heap_allocs": 845166,
       "engine.comp_passes": 1800,
+      "engine.file_stats": 240,
       "engine.layers_planned": 2040,
       "gpu.bind_group_binds": 180,
       "gpu.bind_group_creations": 180,
@@ -76,9 +80,10 @@
       "gpu.uploads": 180
     },
     "open_large_2000": {
-      "cpu.heap_alloc_bytes": 149728796,
+      "cpu.heap_alloc_bytes": 149728274,
       "cpu.heap_allocs": 880286,
       "engine.comp_passes": 117,
+      "engine.file_stats": 4,
       "engine.layers_planned": 2196,
       "gpu.bind_group_binds": 2418,
       "gpu.bind_group_creations": 238,
@@ -92,9 +97,10 @@
       "gpu.uploads": 121
     },
     "playback_500": {
-      "cpu.heap_alloc_bytes": 341476800,
+      "cpu.heap_alloc_bytes": 341465520,
       "cpu.heap_allocs": 4584241,
       "engine.comp_passes": 3600,
+      "engine.file_stats": 240,
       "engine.layers_planned": 66000,
       "gpu.bind_group_binds": 73680,
       "gpu.bind_group_creations": 480,
@@ -109,6 +115,7 @@
       "cpu.heap_alloc_bytes": 1489762,
       "cpu.heap_allocs": 14208,
       "engine.comp_passes": 24,
+      "engine.file_stats": 24,
       "engine.layers_planned": 48,
       "gpu.bind_group_binds": 190,
       "gpu.bind_group_creations": 141,
