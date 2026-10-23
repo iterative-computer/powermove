@@ -450,6 +450,106 @@ What remains:
   engine RSS is the same (504 to 557 MiB against 467 to 548 MiB on PMV3),
   because clipped rasters are small. The four-worker cap stays.
 
+### Round 3 (2026-10-22 to 23)
+
+Round 2 left the window's main thread as the cause: every engine frame
+needed turns of it (its raster-override answers, then its presentation),
+and the window's own animation-frame work (an extension drawing a graph,
+the panels' rounded scroll, the mixer) filled it. Round 3 keeps the
+window's `requestAnimationFrame` callbacks at display rate, as today, and
+takes the engine's per-frame work off that thread or down to one turn per
+animation frame.
+
+| Cause | Where | Fix |
+|---|---|---|
+| Each `needs` message was answered in its own task, and every answer was its own message (about 300 a frame on a large project); a 4 ms timer polled the lookahead | `render-transport.ts`, `pm-protocol` `CompatMessage::Answers` | While playing, needs wait for the window's next animation frame (where today's compositor ran the `raster` chain); that turn answers every need asked since the last one, each once, then the lookahead, and posts the pass-throughs and reuses as one `answers` message per session. Paused needs, seeks and Play still answer in their own task, batched |
+| The lookahead followed at most 256 layers: on a large project a layer the engine asked for again came back with nothing sent and its whole horizon was answered again, every animation frame | `render-transport.ts` | 4096 layers, least recently asked first out. The scripted 300-layer playback posted 385 KB of answers a frame; now 24 KB |
+| The engine asked again for needs the window's lookahead had already answered | `present/compat.rs` (`to_ask`) | Needs with a drawable answer (a pass-through, or a raster still held) are not asked. The public regression's engine asked 252 needs instead of 6,538 |
+| A frame waited a turn of the window for its own answers | `present/render.rs` | The engine plans the frames it will draw next and asks for their needs ahead. It plans them only in the render thread's slack (the schedule waits for the next slot) and only as many as the slack holds at their measured cost: planning after every frame cost PMV3 15 to 80 ms a frame and made it skip frames |
+| The presentation worker's frame releases and GPU completions crossed the window's main thread | `present-worker.ts`, `worker-presenter.ts`, `engine-process.ts`, `connection.ts` | The window offers the engine a release port over its own port; the worker hands frames back on it (its own envelope encoder, `release-envelope.ts`, byte-checked against the protocol's). The page keeps its last `VideoFrame` reference per slot (Electron's release callback must run on its thread) and closes it when the slot comes back. GPU completions cross only while a reveal waits on them |
+| Frames the engine drew a frame or two ahead arrived after their interval when the window's main thread was late handing them over, and were dropped | `jitter-buffer.ts`, `presenter.ts` | The newest such frame, newer than the one on screen and at most 250 ms late, is drawn when nothing on time is there, as today's frame loop draws the playhead's frame as late as the page's work before it (`shownLate`) |
+| New and animated shapes were rasterized (the exact CPU emulation of today's canvas) on the playing frame's own turn: up to 400 ms a frame on PMV3 | `pm-render` `vector/cache.rs` (`prefetch_ahead`), `Renderer::plan_ahead` | The plan of a frame the view will draw next has its level 1 shape and path rasters drawn on threads of their own; the frame takes them, or waits for one still being drawn. Same rasterizer, source and key: byte for byte the frame that drew its own (`rasters_drawn_ahead_of_a_frame_are_taken_by_it_and_draw_the_same_pixels`). At most 128 MiB held; what is not taken within 32 frames, or a seek leaves, is dropped |
+| An export frame asked the window for each wrapped layer in its own IPC round trip (762,081 asks for one PMV3 export), and the background fetch ran in turns of 8 | `compat-frames.ts`, `preload/index.ts`, `jobs/compat.rs` | Main posts the asks it has at once to each window in one message, the window answers them in one task and returns the answers together; up to 128 in flight, the background fetch in turns of 96 |
+| An autosave write whose debounce ended during playback wrote at once if the edit was more than 15 s old, and the idle consistency check (a hash of the whole document) ran during playback at its idle timeout | `legacy/app.ts`, `engine-doc/install.ts` | The hold counts from when the write first met playback; the idle check waits for playback to stop. Saves and exports still check at once |
+
+Counted, not timed: `PM.EngineCounters` (`main-thread-counters.ts`) counts
+the engine path's entries into the window's main thread by kind (port
+messages, turns, frame events, export asks), messages and bytes each way,
+and frames presented; the viewer's stats count the presentation worker's
+messages and late frames; the engine counts `compatKeptAhead`,
+`rastersAhead`, `rastersAheadTaken` and `rastersAheadWaited`.
+`main-thread-budget.test.ts` scripts a 300-layer pass-through playback over
+the real wire and holds its per-frame counts to
+`main-thread-budget.baseline.json` (2.17 main-thread entries, 0.98 messages
+and 24 KB to the engine, one turn a frame; before round 3, about 300
+messages a frame and a polling timer), lowered with `RATCHET_UPDATE=1`. The
+format moves to the perfbench lane's ratchet when it lands. In the engine,
+`rasters_drawn_ahead_of_a_frame_are_taken_by_it_and_draw_the_same_pixels`
+and `child_warm` hold the rasters drawn ahead to being taken (every one,
+and 38 of 42 in the warm-up's play), and `child_compat_ahead` holds a
+playing view's frames to at most one wait for answers in four frames.
+
+Measured on the private projects, today and the engine back to back on
+fresh profiles with the user's 39 extensions (release build; load average
+10 to 30 from other lanes; medians of two pairs; each run plays twice, cold
+then warm). "Frames" are `preview:presented` events, which both today and
+the engine emit at most once per page animation frame; "drawn" is what the
+presentation worker put on screen, which is not tied to the page's frames.
+
+| | today | engine, round 2 | engine, round 3 (answers, presentation) | engine, round 3 (+ rasters ahead, slack planning) |
+|---|---|---|---|---|
+| PMV3 frames in 8 s, warm play (drawn) | 131 to 136 | 19 to 44 | 72 (75) | 145.5 (155.5) |
+| PMV3 frames in 8 s, first play (drawn) | 83 to 144 | | 34.5 (36.5) | 102.5 (112.5) |
+| PMV3 first moving frame | 82 to 98 ms | 159 ms | 499 ms | 138 ms |
+| PMV3 scrub p95, warm / cold | 84 to 134 / 100 ms | 522 ms | 131 / 489 ms | 123 / 362 ms |
+| PMV3 scrub p50, warm / cold | 43 / 38 ms | | 75 / 96 ms | 52 / 89 ms |
+| PMV3 export, MP4 half size | 104 s | 287 s | 227 s (one run) | 168 s |
+| PMV4 frames in 8 s, warm play (drawn) | 189 to 211 | 88 | 166.5 (200) | 175 (204) |
+| PMV4 frames in 8 s, first play (drawn) | 191 to 196 | | 107 (127) | 105 (145) |
+| PMV4 scrub p95, warm / cold | 44 to 51 / 63 ms | 131 ms | 70 / 165 ms | 63 / 168 ms |
+| PMV4 scrub p50, warm / cold | 44 / 36 ms | | 45 / 65 ms | 34 / 46 ms |
+
+The window's main thread, in the CPU profiles of the same runs (V8
+sampling over the 10 to 13 s of a play): the engine path (the engine
+connection, the presentation's page side, the transport and the `raster`
+override's producer, which runs the user's wrapper chain as today's
+compositor did) took 58 ms per presented frame on PMV3 before round 3 and
+5.4 ms after, against 22 ms for today's frame draw. On PMV4 it is 1.5 s per
+play against today's 1.6 s (19 ms per presented frame, 14.6 per frame drawn,
+against 7.6): most of it is the user's wrapper chain, as in today's draw,
+and the rest is base rasters fetched synchronously and wrapper results read
+back for posting. The rest of the window's time is the page's own work,
+the same as today's (an extension's graph, the panels' scroll edges).
+
+Memory: the window's JavaScript heap no longer grows while scrubbing (PMV4,
+garbage collected: 1,080 MiB before and 1,081 after 48 seeks, against
+today's 1,142 and 1,144). The pm-wasm document mirror holds 1.24 GB of
+wasm memory for PMV4 throughout (bigopen), and total RSS stays above
+today's (PMV4 idle 10.2 GB against 6.0 GB: the window 6.1 GB against 3.4,
+the engine process 1.3 GB).
+
+What remains:
+
+- **First play and first scrub.** The first play after an open meets every
+  text layout and shape raster cold: the engine emulates Chromium's canvas
+  on the CPU exactly, where today's Chromium draws on the GPU. A paused,
+  idle view now plans the 48 frames after its playhead and draws their
+  rasters ahead (no media decoded, no frame drawn; measured below once the
+  last batch lands). A seek to a place not yet visited still pays them on
+  its turn (PMV3 cold scrub p95 362 ms against 100).
+- **PMV4's first play.** The engine waits for the window's answers on most
+  frames (376 waits in 155 frames): the user's wrapper reads base pixels the
+  window fetches from the engine, and the window answers once per page
+  animation frame. Today runs that chain inside its draw.
+- **Export.** PMV3 takes 168 s against 104 s: 62% of the export thread
+  waits for the window's answers (`JobCompat::fetch`), now batched but still
+  one window round trip per frame the background fetch did not reach.
+- **The window's own work** (extensions drawing every animation frame,
+  layout reads) is the same as today's and is not the engine's to change
+  (decision: the window's `requestAnimationFrame` stays at display rate).
+- **Memory** above today on PMV4 (bigopen: the in-window document mirror,
+  the engine's document tree).
+
 ## Resync
 
 `resync` with `canonicalJsonV1` installs a `pm-model` mirror after checking
