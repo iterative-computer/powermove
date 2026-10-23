@@ -35,6 +35,31 @@ and generated media.
 | `CancelJobs`, `JobsCancelled` | Cancel one job, or every job of an agent run (the run was cancelled or rolled back) |
 | `AgentExportMode`, `AgentExportReply`, `agent_export_reply` | `export_video` `mode: "wait" \| "async"` (default `wait`) and the reply rule below |
 
+## Source jobs
+
+`sourceFilmstrip { session, asset, times, outputSize, fit, color }` draws one
+asset from a frozen job snapshot. Times are non-negative source ticks, in
+requested order, with one to 64 frames. Each frame is top-down straight
+RGBA8, concatenated without a header. The protocol's batch limit is 512 MiB;
+the app additionally caps each frame at 16 MiB and each edge at 8192 pixels.
+Fit and color follow RFC 16's source target. SVG
+sources request Chromium rasters through `CompatFrame`, using the frozen
+document id to find the owning editor window.
+
+`browserRendition { session, asset, format }` converts the frozen original
+to `png` or `webm` with today's browser-rendition converter flags. It does
+not render a composition. Its output follows EXPORT-1: decoded image,
+video, and audio content must match the current converter. Both jobs use
+the existing job scheduler, output capabilities, terminal status events,
+and cancellation. Converter cancellation terminates the child process.
+
+The app opens a dedicated session and a private scratch destination for
+each request, binds its frozen media before resync, and removes the session,
+bindings, listeners, and scratch directory on success, failure, or cancel.
+Window reload and close cancel the sender's outstanding requests. Source
+requests never change composition playback or silently call the legacy
+capture/conversion surface.
+
 ## Invariants
 
 1. **Class order and placement** (tested):

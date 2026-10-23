@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-use crate::common::{HostMicros, PlaybackRate, Seq, TICKS_PER_SECOND, TickRange, Ticks};
+use crate::common::{AssetId, HostMicros, PlaybackRate, Seq, TICKS_PER_SECOND, TickRange, Ticks};
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
@@ -170,6 +170,24 @@ pub enum AudioMessage {
     /// today's engine: `peaks_per_second` buckets a second of the source,
     /// each the largest magnitude over every channel), or why there is none.
     Peaks(AudioPeaks),
+    /// Renderer → engine: source monitor transport, isolated from the composition.
+    SourceMonitor {
+        asset: Option<AssetId>,
+        time: Ticks,
+        playing: bool,
+        generation: u32,
+    },
+    /// Engine → renderer: source monitor clock/status.
+    SourceStatus {
+        asset: AssetId,
+        time: Ticks,
+        playing: bool,
+        generation: u32,
+        levels: ChannelLevels,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        error: Option<String>,
+    },
 }
 
 /// Linear levels per bus channel (peak magnitude and RMS over the last
@@ -232,6 +250,28 @@ impl Validate for AudioMessage {
                     .all(|v| v.is_finite() && *v >= 0.0)
         };
         match self {
+            AudioMessage::SourceMonitor {
+                asset,
+                time,
+                playing,
+                ..
+            } => ensure(
+                time.get() >= 0
+                    && asset.as_ref().is_none_or(AssetId::is_valid)
+                    && (!playing || asset.is_some()),
+                C,
+                || "invalid source monitor state".into(),
+            ),
+            AudioMessage::SourceStatus {
+                asset,
+                time,
+                levels,
+                ..
+            } => ensure(
+                asset.is_valid() && time.get() >= 0 && finite(levels),
+                C,
+                || "invalid source status".into(),
+            ),
             AudioMessage::Monitor { solo } => ensure(solo.len() <= MAX_LEVEL_STRIPS, C, || {
                 "too many solo strips".into()
             }),
@@ -294,6 +334,39 @@ impl Validate for TransportCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_audio_generation_and_levels_round_trip() {
+        let wanted = AudioMessage::SourceMonitor {
+            asset: Some("a".into()),
+            time: Ticks::from_whole_seconds(2),
+            playing: true,
+            generation: 4,
+        };
+        assert!(wanted.validate().is_ok());
+        let bytes = rmp_serde::to_vec_named(&wanted).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<AudioMessage>(&bytes).unwrap(),
+            wanted
+        );
+        let status = AudioMessage::SourceStatus {
+            asset: "a".into(),
+            time: Ticks::from_whole_seconds(2),
+            playing: true,
+            generation: 4,
+            levels: ChannelLevels {
+                peak: vec![0.5, 0.25],
+                rms: vec![0.2, 0.1],
+            },
+            error: None,
+        };
+        assert!(status.validate().is_ok());
+        let bytes = rmp_serde::to_vec_named(&status).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<AudioMessage>(&bytes).unwrap(),
+            status
+        );
+    }
 
     fn sample(rate: PlaybackRate) -> ClockSample {
         ClockSample {

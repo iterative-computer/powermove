@@ -17,6 +17,7 @@ use crate::common::{
 use crate::error::EngineError;
 use crate::host::CapabilityHandle;
 use crate::host::OutputChoice;
+use crate::snapshot::{SourceColor, SourceFit};
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
@@ -708,6 +709,29 @@ pub enum JobSpec {
         format: ProxyFormat,
         size: ProxySize,
     },
+    /// Frames in request order, tightly packed RGBA8, one output file.
+    SourceFilmstrip {
+        session: SessionId,
+        asset: AssetId,
+        times: Vec<Ticks>,
+        output_size: Size,
+        fit: SourceFit,
+        color: SourceColor,
+    },
+    /// Browser-compatible rendition of one frozen source.
+    BrowserRendition {
+        session: SessionId,
+        asset: AssetId,
+        format: BrowserRenditionFormat,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub enum BrowserRenditionFormat {
+    Png,
+    Webm,
 }
 
 /// Submit a job to the job engine (host → job engine).
@@ -784,6 +808,46 @@ impl Validate for SubmitJob {
                 ensure(self.output.is_none(), C, || {
                     "generated media goes to the generated-media store, not an output".into()
                 })
+            }
+            JobSpec::SourceFilmstrip {
+                asset,
+                times,
+                output_size,
+                ..
+            } => {
+                ensure(asset.is_valid(), C, || "invalid source asset id".into())?;
+                ensure(
+                    !times.is_empty() && times.len() <= 64 && times.iter().all(|t| t.get() >= 0),
+                    C,
+                    || "filmstrip needs 1 to 64 nonnegative source times".into(),
+                )?;
+                ensure(
+                    !output_size.is_empty()
+                        && output_size.width <= 16_384
+                        && output_size.height <= 16_384
+                        && u64::from(output_size.width)
+                            * u64::from(output_size.height)
+                            * 4
+                            * times.len() as u64
+                            <= 512 * 1024 * 1024,
+                    C,
+                    || "filmstrip output exceeds 512 MiB".into(),
+                )?;
+                ensure(
+                    self.class == PriorityClass::UserJob && self.output.is_some(),
+                    C,
+                    || "filmstrip needs a user-job output".into(),
+                )
+            }
+            JobSpec::BrowserRendition { asset, .. } => {
+                ensure(asset.is_valid(), C, || {
+                    "invalid browser-rendition asset id".into()
+                })?;
+                ensure(
+                    self.class == PriorityClass::UserJob && self.output.is_some(),
+                    C,
+                    || "browser rendition needs a user-job output".into(),
+                )
             }
         }
     }
@@ -910,6 +974,48 @@ pub fn agent_export_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_jobs_validate_and_round_trip() {
+        let output = Some(OutputChoice::UserChosen {
+            destination: CapabilityHandle::from_random_bytes([7; 16]),
+        });
+        let mut submit = SubmitJob {
+            job: "source-job".into(),
+            class: PriorityClass::UserJob,
+            run: None,
+            spec: JobSpec::SourceFilmstrip {
+                session: SessionId::new(9).unwrap(),
+                asset: "a".into(),
+                times: vec![Ticks::ZERO, Ticks::from_whole_seconds(2)],
+                output_size: Size::new(160, 90),
+                fit: SourceFit::Cover,
+                color: SourceColor::Display,
+            },
+            output: output.clone(),
+        };
+        assert!(submit.validate().is_ok());
+        let bytes = rmp_serde::to_vec_named(&submit).unwrap();
+        assert_eq!(rmp_serde::from_slice::<SubmitJob>(&bytes).unwrap(), submit);
+        if let JobSpec::SourceFilmstrip { times, .. } = &mut submit.spec {
+            times.clear();
+        }
+        assert!(submit.validate().is_err());
+        submit.spec = JobSpec::BrowserRendition {
+            session: SessionId::new(9).unwrap(),
+            asset: "a".into(),
+            format: BrowserRenditionFormat::Webm,
+        };
+        assert!(submit.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(&submit.spec).unwrap(),
+            serde_json::json!({
+                "kind": "browserRendition", "session": 9, "asset": "a", "format": "webm"
+            })
+        );
+        submit.output = None;
+        assert!(submit.validate().is_err());
+    }
 
     #[test]
     fn class_order_matches_section_4_and_17() {

@@ -38,11 +38,21 @@ for all of that.
 `SnapshotRequest { composition, time (ticks), outputSize, target, pixels,
 class, viewSeq, waitMs, blenderWaitMs?, captionsHidden?, uploaded }`:
 
-- `target`: `frame { motionBlurSamples, background, draft3d }` or
+- `target`: `frame { motionBlurSamples, background, draft3d }`,
+  `source { asset, fit, color }`, or
   `layer { layer, scale, crop, content? }`. `content` is the layer object
   the caller passed, as canonical JSON (at most 4 MiB), when it is not the
   document's own (a raster wrapper's modified copy): the engine draws it in
   the composition in place of layer `layer`.
+- A `source` target reads the asset at non-negative source `time`, independent
+  of the composition, captions, layers, effects, and project color settings.
+  `fit` is `stretch`, `contain`, or `cover`; unused pixels are transparent.
+  `color: display` matches the browser source surface, including its stored
+  browser rendition through the session-scoped `sourceRead` capability.
+  `interpreted` reads the frozen original and applies its source interpretation.
+  Source SVGs use the Chromium raster exchange below at the actual draw size.
+  Missing sources and required renditions fail by name; no composition or
+  legacy frame substitutes for them.
 - `pixels`: the RGBA8 encoding of the result, rows top-down: `opaque`
   (premultiplied over black, alpha 255: today's `renderOpaqueFrame` and the
   input of `toDataURL('image/jpeg')`), `premultiplied`, `straight` (canvas
@@ -141,6 +151,32 @@ the buffer to the renderer in shared memory again (Mojo big buffers).
    running), `refused` (main's caps), and `needsDocument` (see below).
    `render.snapshot` returns `''` only then, and throws today's error for
    `blenderFailed` as today's capture does.
+
+### Source request cancellation
+
+The asynchronous IPC request may carry a window-scoped `requestId`.
+`engine:snapshot-cancel` cancels only that sender's request, forwarded as the
+protocol's existing `Message::Cancel` for the native request id. Queued
+snapshots are removed and answered `cancelled`. A decode or readback already
+executing finishes before the render thread handles the next command. Source
+monitor seeks cancel the previous frame and reject stale completions before
+painting; closing the monitor cancels its frame and audio voice.
+
+The renderer source service keeps at most 64 MiB of completed frame pixels,
+keyed by project, source content identity and interpretation, source time,
+size, fit, and color. Replacing the source changes the identity; loading a
+project clears frames and poster URLs. Native decoding uses the existing
+renderer media cache.
+
+### Source monitor audio
+
+Session-bound `AudioMessage::SourceMonitor { asset, time, playing, generation }`
+controls an isolated engine source voice. `asset: null` closes it.
+`SourceStatus { asset, time, playing, generation, levels, error? }` reports the
+heard time, channel levels, natural end, and named failures. The renderer
+ignores older generations. Silent video uses an engine host clock; sources
+with audio use the engine output clock. The source monitor and composition
+playback remain mutually exclusive in the existing viewer controls.
 
 ### Sync snapshots the window's session cannot serve
 

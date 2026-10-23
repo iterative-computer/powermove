@@ -107,6 +107,9 @@ pub enum CacheKind {
 pub enum CapabilityKind {
     /// Read an asset's bytes (original, linked file, or media-store copy).
     MediaRead { asset: AssetId },
+    /// Read the source monitor's browser-visible rendition, or the original
+    /// when no separate rendition exists.
+    SourceRead { asset: AssetId },
     /// Read and write one cache area.
     Cache { cache: CacheKind },
     /// Write one job output (a temporary file in the destination folder).
@@ -155,6 +158,7 @@ impl CapabilityKind {
     pub const fn access(&self) -> HandleAccess {
         match self {
             CapabilityKind::MediaRead { .. }
+            | CapabilityKind::SourceRead { .. }
             | CapabilityKind::ProjectStore
             | CapabilityKind::ExtensionBundle => HandleAccess::Read,
             CapabilityKind::Cache { .. } => HandleAccess::ReadWrite,

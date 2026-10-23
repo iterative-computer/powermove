@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::common::{
-    ByteSize, Bytes, CompositionId, Count, DocumentId, LayerId, PixelRect, Revision, Seq,
+    AssetId, ByteSize, Bytes, CompositionId, Count, DocumentId, LayerId, PixelRect, Revision, Seq,
     SessionId, Size, Ticks,
 };
 use crate::frame::{FrameQuality, MAX_OUTPUT_DIMENSION};
@@ -130,6 +130,29 @@ pub enum SnapshotTarget {
         #[cfg_attr(feature = "ts", ts(optional = nullable))]
         content: Option<Bytes>,
     },
+    /// A source frame at `SnapshotRequest::time`, independently of the composition.
+    Source {
+        asset: AssetId,
+        fit: SourceFit,
+        color: SourceColor,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub enum SourceFit {
+    Stretch,
+    Contain,
+    Cover,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub enum SourceColor {
+    Display,
+    Interpreted,
 }
 
 /// One snapshot of a composition (or one layer of it) at one time.
@@ -240,6 +263,11 @@ impl Validate for SnapshotRequest {
             || "too many uploaded keys".into(),
         )?;
         match &self.target {
+            SnapshotTarget::Source { asset, .. } => {
+                ensure(asset.is_valid() && self.time.get() >= 0, C, || {
+                    "source snapshots need an asset and nonnegative source time".into()
+                })
+            }
             SnapshotTarget::Frame {
                 motion_blur_samples,
                 ..
@@ -914,6 +942,29 @@ mod tests {
             captions_hidden: false,
             uploaded: Vec::new(),
         }
+    }
+
+    #[test]
+    fn source_target_keeps_source_time_fit_and_color_on_the_wire() {
+        let mut source = request(160, 90);
+        source.time = Ticks::from_whole_seconds(7);
+        source.target = SnapshotTarget::Source {
+            asset: "source-a".into(),
+            fit: SourceFit::Contain,
+            color: SourceColor::Interpreted,
+        };
+        assert!(source.validate().is_ok());
+        let bytes = rmp_serde::to_vec_named(&source).unwrap();
+        let read: SnapshotRequest = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(read, source);
+        assert_eq!(
+            serde_json::to_value(&source.target).unwrap(),
+            serde_json::json!({
+                "kind": "source", "asset": "source-a", "fit": "contain", "color": "interpreted"
+            })
+        );
+        source.time = Ticks::new(-1).unwrap();
+        assert!(source.validate().is_err());
     }
 
     fn quality() -> FrameQuality {
