@@ -666,24 +666,35 @@ document that never existed. It is replaced by one owner and one invariant
   right for whichever slot and journal a crash leaves, including a new slot
   with a journal not yet rewritten. Slots without a number (written before
   SAVE-1, or by an older build) replay every entry, as before.
-- Once an entry is refused (main's journal is at the store's 32 MiB value
-  limit, or the entry is malformed), the journal is closed: every later entry
-  is refused too, until a slot write numbered after the last refused entry
-  lands. A slot posted earlier, even one landing later, does not hold the
-  refused edits and does not reopen it. Accepting a later, smaller entry
-  instead left a gap: a document that never existed (review recheck 3).
+- SAVE-1b: an entry that does not end in an acknowledged write leaves an edit
+  missing from the journal, and a later, smaller entry accepted over it
+  recovers a document that never existed (reviews recheck 3 and 4). One
+  place decides this: main's FileStore (`storage.ts`) closes the project's
+  journal at the request id of the latest such edit whenever an append is
+  refused for its size there (it never reaches the worker), refused by the
+  worker (its journal at the 32 MiB value limit, malformed, or the project
+  unreadable in a replacement worker), lost because the worker stopped before
+  answering it, or its journal write fails or cannot be replayed. While it is
+  closed main refuses every later entry itself, moving the close point past
+  each, and the worker refuses entries already on their way (it closes the
+  journal itself the moment it refuses one or cannot read the project for
+  one). Only a slot write posted after the close point, once it has landed,
+  reopens it; main tells the worker. A slot posted earlier, even one landing
+  later, does not hold the missing edits and does not reopen it.
 - Before the journal shrinks after a slot lands, the slot file and its
   directory are synced (an ordering barrier, one per checkpoint). On macOS
   libuv's fsync is `fcntl(F_FULLFSYNC)`, falling back to `F_BARRIERFSYNC` and
   then `fsync`; the temporary file is synced the same way before its rename.
-  Windows cannot open a directory to sync it and relies on NTFS journaling
-  the rename.
+  On Windows a file is flushed through a handle opened for writing (`r+`; a
+  read-only one fails with EPERM), and the directory is not synced (it cannot
+  be opened to); NTFS journals the rename. No Windows build ships yet.
 - A replacement storage worker reads a project's slot head and journal from
-  disk before it touches the project; main replays what had not reached disk
-  in the order it was first made (request ids), not map order, and then
-  tells it which journals are closed (after every other replay, so a replayed
-  slot does not reopen one). A replay it cannot apply is reported as not
-  saved.
+  disk before it touches the project. Main first tells it which journals are
+  closed, then replays what had not reached disk in the order it was first
+  made (request ids), not map order. A replayed slot reopens a closed journal
+  only if it was first posted after the close point (main compares the
+  original request id). A replay it cannot apply is reported as not saved,
+  and closes the journal if it was the journal's.
 - A bare project (a slot that is not a `{v, proj}` envelope; nothing writes
   one today) is not numbered; when it lands, the entries posted after it
   are kept, and recovery replays them over it.
@@ -738,27 +749,42 @@ replay every entry, and data without them is read as before.
 **What is proven.** `main/project-durability.model.test.ts` is a model check
 of the real FileStore, store engine and durability module on an in-memory
 file system where every rename into place and every unlink waits for the
-checker; the window is a script that keeps every edit in its document. For
-every arrangement of 3 slot writes and 4 journal patches (35 scripts), it
-explores every order of the window's posts and the pending disk operations
-with at most one injected fault: a disk operation that fails, a slot write or
-a journal entry the engine refuses, or the storage worker replaced (its
-pending operations abandoned before or after they landed). For every
-arrangement of 2 slot writes and 3 patches it allows any two faults (a
-refused entry then a replacement worker, both slot writes failing, and so
-on). States reached twice are explored once. 146,262 schedules with one fault and 36,630 with two (about 19 min at load average 30 to 40). Every disk state of every
-schedule (each a crash point) recovers a state the document had, never older
-than an earlier crash point, with every patch the engine had acknowledged as
-written; and once every write has settled (quiescence), disk recovers the
-final document or main's failing keys name the project. It catches each of
-these deliberate bugs: a failed slot write that shrinks the journal, recovery
-that ignores sequence numbers, a journal shrunk before its slot is on disk, a
-replacement worker that does not read the journal first, an entry accepted
-after a refused one (the code before recheck 3), a journal reopened by a slot
-older than the refusal, a replacement worker that forgets a closed journal
-(two faults), and a journal write silently skipped (only quiescence sees it).
-The window's own rules (when it checkpoints, keeps its copy, or reports) are
-covered by the crash tests, not the model.
+checker; the window is a script that keeps every edit in its document. The
+checker chooses, at every step, among: posting the window's next operation,
+or its next two in one task (so the second is on its way before any reply to
+the first); completing or failing any pending disk operation; and the
+faults. The faults are a disk operation that fails, a slot write or a journal
+entry the worker refuses (alone, or with the next operation already on its
+way), an entry main refuses for its size before posting it, the worker
+replaced (its pending operations abandoned before or after they landed), an
+entry lost in flight as the worker stops (then replaced), and a replacement
+worker whose first read of the project fails. For every arrangement of 3
+slot writes and 4 journal patches (35 scripts) it explores every such
+schedule with at most one fault; for every arrangement of 2 slot writes and
+3 patches, with any two. States reached twice are explored once (the key
+holds main's and the worker's state and what the check has seen). 304,150
+schedules with one fault and 101,959 with two, 0 violations (about 21 min at
+load average 20 to 40). Every disk state of every schedule (each a crash
+point, for a crash of the whole app) recovers a state the document had, never
+older than an earlier crash point, with every patch the worker had
+acknowledged as written; and once every write has settled (quiescence), disk
+recovers the final document or main's failing keys name the project.
+
+Each of these deliberate bugs is caught: a failed slot write that shrinks the
+journal; recovery that ignores sequence numbers; a journal shrunk before its
+slot is on disk; a replacement worker that does not read the journal first;
+a journal write silently skipped (only quiescence sees it); and, for the
+closed journal, an entry accepted after a refused one, a journal reopened by
+a slot older than the close point, a journal left open after an entry main
+refused for its size, after one lost as the worker stopped, or after one the
+worker refused or could not read the project for (with the next entry on its
+way), and a replayed slot judged by its replay's request id. Two bugs the
+two-fault sweep found in this design are fixed and have named tests in
+`main/storage.test.ts`: a replacement worker that could not replay a slot
+reused its sequence numbers, and a slot replayed by a second replacement was
+judged by the first replay's id. Not covered: power loss (the model's fsync
+does nothing), more than two faults, and the window's own rules (when it
+checkpoints, keeps its copy, or reports), which the crash tests cover.
 
 The dirty check's fingerprints (twice per autosave and per open) are now
 serialized in slices and hashed on a worker (`project-fingerprint.ts`, the
