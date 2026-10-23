@@ -1,6 +1,21 @@
 {
-  "about": "Highest allowed pm-perf counts per bench (docs/engine/perfbench.md). Lowered by PM_PERF_RATCHET=update; raised only by hand with the change that needs it.",
+  "about": "Highest allowed deterministic counts per bench, for the recorded units (docs/engine/perfbench.md). The runner owns validation; PM_PERF_RATCHET=update lowers counts only. Raise them by hand with the change that needs it.",
   "benches": {
+    "desktop/playback-300-passthrough-layers": {
+      "runner": "desktop-vitest",
+      "units": 48,
+      "unit": "frames",
+      "thread": {
+        "main_thread.entries": 96,
+        "main_thread.port_entries": 48,
+        "main_thread.turns": 48,
+        "main_thread.posted": 47,
+        "main_thread.posted_bytes": 1169736,
+        "main_thread.received": 56,
+        "main_thread.received_bytes": 14468
+      },
+      "all_threads": {}
+    },
     "drag_500": {
       "units": 60,
       "unit": "moves",

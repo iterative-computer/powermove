@@ -2,8 +2,7 @@
  * The engine path's main-thread work per presented frame, counted on a
  * scripted playback (deterministic: real wire encoding, a frozen clock for
  * the lookahead's time budget, animation frames run by hand), held to the
- * checked-in baseline (main-thread-budget.baseline.json). A count above its
- * baseline fails; `RATCHET_UPDATE=1` writes lower counts back.
+ * shared perfbench baseline. `PM_PERF_RATCHET=update` lowers exact counts.
  *
  * The bench is a large project's playback as the engine drives it: each
  * frame the engine asks for the raster override's layers of a frame ahead
@@ -21,11 +20,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_BUILD, type CompatNeed, type Envelope } from '../../../shared/engine-protocol';
 import { decodeEnvelope, encodeEnvelope, envelope, localRanges } from '../../../main/engine/protocol';
 import { EngineConnection, type PortLike } from './connection';
-import { MainThreadCounters, perFrame } from './main-thread-counters';
+import { MainThreadCounters } from './main-thread-counters';
+import { compareAndLowerMainThread, type PerfBaselines } from './main-thread-ratchet';
 import { EngineRenderTransport, type TransportSession } from './render-transport';
 
-const BASELINE = path.join(__dirname, 'main-thread-budget.baseline.json');
-type Baseline = { format: string; note: string; benches: Record<string, Record<string, number>> };
+const BASELINE = path.resolve(__dirname, '../../../../../../engine/crates/pm-perfbench/baselines.json');
+const BENCH = 'desktop/playback-300-passthrough-layers';
 
 class Port implements PortLike {
   private listeners: ((e: { data: unknown }) => void)[] = [];
@@ -52,7 +52,7 @@ class Port implements PortLike {
 const SESSION = 5;
 const FRAME = 705_600_000 / 24;
 
-async function playback(layers: number, frames: number): Promise<Record<string, number>> {
+async function playback(layers: number, frames: number): Promise<{ frames: number; counts: Record<string, number> }> {
   const counters = new MainThreadCounters(() => 0);
   // What the engine holds answers for (its compat store): it asks only for
   // the rest (`CompatStore::to_ask`).
@@ -84,12 +84,10 @@ async function playback(layers: number, frames: number): Promise<Record<string, 
   const needs = (k: number): CompatNeed[] => names.map((layer) => ({ composition: 'root', layer, time: k * FRAME, source: 'rasterOverride', scale: 1 }));
   const envelopeOf = (body: unknown): Envelope => ({ ...envelope({ kind: 'event', body } as never, SESSION), revision: 3 });
   const event = (body: unknown) => port.deliver(envelopeOf(body));
-  const warmup = counters.snapshot();
   // The run's first frame: everything up to the engine's ask-ahead.
   event({ type: 'compat', compat: 'needs', revision: 3, needs: [0, 1, 2, 3, 4, 5, 6, 7, 8].flatMap(needs) });
   for (const fn of rafs.splice(0)) fn();
   const before = counters.snapshot();
-  void warmup;
   for (let k = 0; k < frames; k++) {
     state.time = k * FRAME;
     // The engine keeps the frame eight ahead asked (what it has no answer
@@ -108,35 +106,39 @@ async function playback(layers: number, frames: number): Promise<Record<string, 
     const tail = port.sent.slice(-12).map((m) => { const b = (m.message as any).body; return b?.compat === 'answers' ? `answers ${b.natives.length}/${b.reuses.length} times ${[...new Set(b.natives.map((n: any) => n.time / FRAME))].join(',')}` : `${b?.type}:${b?.compat ?? ''}`; });
     console.log(tail.join('\n'));
   }
-  return perFrame(before, counters.snapshot())!;
+  const after = counters.snapshot();
+  return {
+    frames: after.presented - before.presented,
+    counts: {
+      'main_thread.entries': Object.keys(after.entries).reduce((sum, k) => sum + after.entries[k as keyof typeof after.entries] - before.entries[k as keyof typeof before.entries], 0),
+      'main_thread.port_entries': after.entries.port - before.entries.port,
+      'main_thread.turns': after.entries.turn - before.entries.turn,
+      'main_thread.posted': after.posted - before.posted,
+      'main_thread.posted_bytes': after.postedBytes - before.postedBytes,
+      'main_thread.received': after.received - before.received,
+      'main_thread.received_bytes': after.receivedBytes - before.receivedBytes
+    }
+  };
 }
 
 describe('the engine path\'s main-thread budget', () => {
   it('a 300-layer pass-through project costs the window at most its baseline per presented frame', async () => {
     const now = vi.spyOn(performance, 'now').mockReturnValue(0);
     try {
-      const measured = await playback(300, 48);
-      const { ms: _ms, frames, ...counts } = measured;
+      const { frames, counts } = await playback(300, 48);
       expect(frames).toBe(48);
-      const baseline = JSON.parse(readFileSync(BASELINE, 'utf8')) as Baseline;
-      const bench = 'playback-300-passthrough-layers';
-      const held = baseline.benches[bench] ?? {};
+      const baseline = JSON.parse(readFileSync(BASELINE, 'utf8')) as PerfBaselines;
       // The structural bounds, whatever the baseline: one turn per animation
       // frame and one answers message per turn.
-      if (process.env['BUDGET_DEBUG']) console.log('main-thread budget', JSON.stringify(measured));
-      expect(counts['turns']).toBeLessThanOrEqual(1);
-      expect(counts['posted']).toBeLessThanOrEqual(1);
+      if (process.env['BUDGET_DEBUG']) console.log('main-thread budget', JSON.stringify({ frames, counts }));
+      expect(counts['main_thread.turns']).toBeLessThanOrEqual(frames);
+      expect(counts['main_thread.posted']).toBeLessThanOrEqual(frames);
       // One task for what the engine sent in its turn for the frame.
-      expect(counts['portEntries']).toBeLessThanOrEqual(1);
-      const over = Object.entries(counts).filter(([k, v]) => held[k] !== undefined && v > held[k]!);
-      if (process.env['RATCHET_UPDATE'] === '1') {
-        const lowered = { ...held };
-        for (const [k, v] of Object.entries(counts)) if (lowered[k] === undefined || v < lowered[k]!) lowered[k] = v;
-        baseline.benches[bench] = lowered;
-        writeFileSync(BASELINE, `${JSON.stringify(baseline, null, 2)}\n`);
-      }
-      expect(over, `above the baseline: ${JSON.stringify(counts)}`).toEqual([]);
-      expect(Object.keys(held).sort()).toEqual(Object.keys(counts).sort());
+      expect(counts['main_thread.port_entries']).toBeLessThanOrEqual(frames);
+      const update = process.env['PM_PERF_RATCHET'] === 'update';
+      const { next, regressions } = compareAndLowerMainThread(baseline, BENCH, frames, counts, update);
+      if (update) writeFileSync(BASELINE, `${JSON.stringify(next, null, 2)}\n`);
+      expect(regressions, `above the baseline: ${JSON.stringify(counts)}`).toEqual([]);
     } finally {
       now.mockRestore();
     }

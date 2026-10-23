@@ -200,6 +200,15 @@ frames, 24 seeks, ...) and the highest count allowed of every gated counter on
 two scopes: the bench thread (`thread`: the engine's render thread or the
 export's thread) and every thread (`all_threads`: decode, encoder and pool
 threads too, so work moved off the bench thread still counts).
+The desktop's deterministic 300-layer main-thread playback test shares this
+file as `desktop/playback-300-passthrough-layers` with
+`runner: "desktop-vitest"`. Its `thread` values are exact integer totals over
+48 presented frames, including port entries, turns, messages, and wire bytes;
+`all_threads` is empty because the test measures only the window's main
+thread. The Rust whole-set run preserves that bench and requires only its own
+benches; the desktop test validates the desktop bench. Run it with
+`bun run --cwd apps/desktop test:unit src/renderer/src/engine-connection/main-thread-budget.test.ts`.
+
 `cargo test -p pm-perfbench` (and so `cargo test --workspace`) runs every bench
 in the test profile and fails when:
 
@@ -234,6 +243,11 @@ a rename cannot record the new name at whatever level it runs: renaming,
 removing or re-unit-ing a bench, or raising a baseline, is a hand edit reviewed
 with the change that needs it. The baselines are for the test profile (debug
 assertions allocate); release counts differ in `cpu.*` only.
+
+The same update flag works with the desktop test. It lowers existing desktop
+counts but does not raise them, add a new metric to an existing bench, or
+change its units. The desktop test checks one engine turn and one port entry
+per presented frame independently of the baseline.
 
 **Where the ratchet runs.** Locally only, today. It needs Metal (on other
 platforms the test prints that it is macOS-only and passes), and no CI workflow

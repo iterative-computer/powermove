@@ -19,6 +19,8 @@
 //! changes a bench's units, and refuses while a bench in the file did not
 //! run (a rename is a hand edit). Raising a baseline is a hand edit of the
 //! file, reviewed with the change that needs it.
+//! Benches owned by another `runner` share the file but are preserved during
+//! Rust whole-set comparisons and updates; their harness validates them.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -61,8 +63,10 @@ impl Scope {
 }
 
 /// One bench's baseline.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BenchBaseline {
+    /// The harness that owns this bench. The Rust ratchet only runs `pm-perfbench`.
+    pub runner: String,
     /// Units of work the counts are for, and what a unit is.
     pub units: u32,
     pub unit: String,
@@ -123,6 +127,7 @@ impl Baselines {
         if let Some(benches) = v["benches"].as_object() {
             for (bench, b) in benches {
                 let mut entry = BenchBaseline {
+                    runner: b["runner"].as_str().unwrap_or("pm-perfbench").to_owned(),
                     units: b["units"]
                         .as_u64()
                         .and_then(|u| u32::try_from(u).ok())
@@ -173,6 +178,9 @@ impl Baselines {
         let mut benches = Map::new();
         for (bench, b) in &self.benches {
             let mut m = Map::new();
+            if b.runner != "pm-perfbench" {
+                m.insert("runner".into(), json!(b.runner));
+            }
             m.insert("units".into(), json!(b.units));
             m.insert("unit".into(), json!(b.unit));
             for scope in Scope::ALL {
@@ -195,7 +203,7 @@ impl Baselines {
             e[Self::tolerance_key(*scope, name)] = json!({ "relative": rel, "reason": reason });
         }
         json!({
-            "about": "Highest allowed pm-perf counts per bench, on the bench thread (thread) and every thread (all_threads), for the recorded units (docs/engine/perfbench.md). Lowered by PM_PERF_RATCHET=update; raised only by hand with the change that needs it.",
+            "about": "Highest allowed deterministic counts per bench, for the recorded units (docs/engine/perfbench.md). The runner owns validation; PM_PERF_RATCHET=update lowers counts only. Raise them by hand with the change that needs it.",
             "benches": benches,
             "tolerance": tolerance,
             "ungated": self.ungated,
@@ -348,6 +356,9 @@ pub fn compare(baselines: &Baselines, reports: &[BenchReport], whole_set: bool) 
     }
     if whole_set {
         for bench in baselines.benches.keys() {
+            if baselines.benches[bench].runner != "pm-perfbench" {
+                continue;
+            }
             if !reports.iter().any(|r| &r.name == bench) {
                 out.regressions.push(Regression {
                     bench: bench.clone(),
@@ -373,6 +384,7 @@ pub fn lowered(
         let missing: Vec<&String> = baselines
             .benches
             .keys()
+            .filter(|b| baselines.benches[*b].runner == "pm-perfbench")
             .filter(|b| !reports.iter().any(|r| &r.name == *b))
             .collect();
         if !missing.is_empty() {
@@ -389,6 +401,7 @@ pub fn lowered(
             .benches
             .entry(r.name.clone())
             .or_insert_with(|| BenchBaseline {
+                runner: "pm-perfbench".to_owned(),
                 units: r.units,
                 unit: r.unit.to_owned(),
                 counts: BTreeMap::new(),
@@ -452,6 +465,7 @@ mod tests {
         b.benches.insert(
             "a".into(),
             BenchBaseline {
+                runner: "pm-perfbench".to_owned(),
                 units: 1,
                 unit: "frames".into(),
                 counts: BTreeMap::from([
@@ -580,5 +594,36 @@ mod tests {
             compare(&b, &[], false).regressions.is_empty(),
             "nothing ran, nothing asked"
         );
+    }
+
+    #[test]
+    fn another_harness_bench_survives_whole_run_and_update() {
+        let mut b = baselines();
+        b.benches.insert(
+            "desktop/playback".into(),
+            BenchBaseline {
+                runner: "desktop-vitest".into(),
+                units: 48,
+                unit: "frames".into(),
+                counts: BTreeMap::from([
+                    (
+                        Scope::Thread,
+                        BTreeMap::from([("main_thread.posted".into(), 47)]),
+                    ),
+                    (Scope::AllThreads, BTreeMap::new()),
+                ]),
+            },
+        );
+        let reports = [report("a", 8, 100)];
+        assert!(compare(&b, &reports, true).regressions.is_empty());
+        let next = lowered(&b, &reports, true).unwrap();
+        assert_eq!(
+            next.benches["desktop/playback"],
+            b.benches["desktop/playback"]
+        );
+        let dir = crate::fixtures::TempDir::new("ratchet-external-roundtrip");
+        let path = dir.path().join("b.json");
+        next.write(&path);
+        assert_eq!(Baselines::read(&path).benches, next.benches);
     }
 }
