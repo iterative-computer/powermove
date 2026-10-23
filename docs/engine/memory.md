@@ -47,8 +47,10 @@ the final tab actually closes. A Projects overlay with an open tab does not
 qualify. The presentation object, worker, WebGL context and program remain
 warm. Suspension hides stale pixels and closes the native channel. GPU drain
 precedes shrinking the hidden painter's upload texture and drawing buffer to
-1 × 1. Import release and native pool retirement separately wait for chrome
-readers to release their leases. A token prevents a late trim from racing a resumed presentation.
+1 × 1. Preload import release waits for chrome readers; native headless
+retirement proceeds independently, and backing can remain until main and
+Chromium release their references. A token prevents a late trim from racing
+a resumed presentation.
 Reopen renews the surface epoch and channel on the warm worker and painter.
 Crash handling remains separate and preserves the last frame.
 
