@@ -37,6 +37,7 @@ import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQ
 import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAsk, type EngineCompatEvent, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
 import { SnapshotSlots } from './snapshot-slots';
+import { mainThreadCounters, type MainThreadCounters } from './main-thread-counters';
 
 /** Repetitions of the same unresolved dependency set before a snapshot fails. */
 export const MAX_ROUNDS = 3;
@@ -224,6 +225,12 @@ export const COMPAT_LOOKAHEAD = 16;
 export const STALE_FRAMES = 12;
 /** Main-thread time one lookahead turn may take (ms); the rest waits for the next frame. */
 const LOOKAHEAD_BUDGET_MS = 10;
+/** Layers the lookahead follows (a layer of a composition, per source):
+ *  a large project's frame names hundreds, and one evicted while it is
+ *  still asked for comes back with nothing sent, answering its whole
+ *  horizon again (256 made a 300-layer project answer 15 frames of every
+ *  layer each animation frame). The least recently asked goes first. */
+export const MAX_AHEAD_LAYERS = 4096;
 /** Most answers in one batched message (pm_protocol MAX_COMPAT_ANSWERS). */
 export const MAX_COMPAT_ANSWERS = 4096;
 /** Preparations (engine base rasters) started per turn; answers the
@@ -294,6 +301,8 @@ export type RenderTransportOptions = {
    * timer (no window).
    */
   nextFrame?: (fn: () => void) => void;
+  /** Where the turns are counted (default: the window's counters). */
+  counters?: MainThreadCounters;
 };
 
 /** What draws the level 1 SVG rasters a snapshot names (SvgRasters). */
@@ -496,7 +505,7 @@ export class EngineRenderTransport {
     this.turnPending = true;
     const run = (): void => {
       this.turnPending = false;
-      if (!this.disposed) this.turn();
+      if (!this.disposed) (this.options.counters ?? mainThreadCounters).entry('turn', () => this.turn());
     };
     if (this.options.nextFrame) this.options.nextFrame(run);
     else setTimeout(run, LOOKAHEAD_POLL_MS);
@@ -764,8 +773,9 @@ export class EngineRenderTransport {
       entry.clockCursor = clock ? Math.floor(clock.time / frame) * frame : null;
     }
     if (answered) entry.sent.add(need.time);
+    this.ahead.delete(tag);
     this.ahead.set(tag, entry);
-    if (this.ahead.size > 256) this.ahead.delete(this.ahead.keys().next().value!);
+    if (this.ahead.size > MAX_AHEAD_LAYERS) this.ahead.delete(this.ahead.keys().next().value!);
   }
 
   /** Draws one need with its producer and posts the answer; false when there was none. */
@@ -1341,7 +1351,11 @@ export class EngineRenderTransport {
     };
   }
 
-  private async answerAsk(ask: EngineCompatAsk): Promise<void> {
+  private answerAsk(ask: EngineCompatAsk): Promise<void> {
+    return (this.options.counters ?? mainThreadCounters).entry('ipc', () => this.answerAskNow(ask));
+  }
+
+  private async answerAskNow(ask: EngineCompatAsk): Promise<void> {
     const answer = this.options.native.answerCompat;
     if (!answer) return;
     const no = (message: string) => answer({ ask: ask.ask, status: 'unavailable', message });

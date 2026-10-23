@@ -50,10 +50,16 @@ export class PresentWorker {
   /** The worker's device was lost: it draws nothing more. */
   private lostReason: string | null = null;
   private readonly timers: Timers;
+  /** Messages from and to the worker (the page's tasks for it). */
+  messagesIn = 0;
+  messagesOut = 0;
 
   constructor(private readonly options: PresentWorkerOptions) {
     this.timers = options.timers ?? { set: (fn, ms) => setTimeout(fn, ms) as unknown as number, clear: (id) => clearTimeout(id) };
-    options.worker.addEventListener('message', (event) => this.onMessage(event.data));
+    options.worker.addEventListener('message', (event) => {
+      this.messagesIn++;
+      this.onMessage(event.data);
+    });
     options.worker.addEventListener('error', (event) => this.crashed(`presentation worker error: ${(event as ErrorEvent).message ?? 'unknown'}`));
     options.worker.postMessage({ type: 'init', canvas: options.canvas, pageTimeOrigin: options.timeOrigin ?? performance.timeOrigin }, [options.canvas]);
   }
@@ -70,6 +76,7 @@ export class PresentWorker {
 
   post(message: ToWorker, transfer?: Transferable[]): void {
     if (this.disposed || this.dead) return;
+    this.messagesOut++;
     this.options.worker.postMessage(message, transfer);
   }
 
@@ -251,7 +258,9 @@ export class WorkerPresenter implements Presenter {
       staleGeneration: this.local.staleGeneration,
       maxQueued: r?.maxQueued ?? 0,
       generation: this.generation,
-      shownLate: r?.shownLate ?? 0
+      shownLate: r?.shownLate ?? 0,
+      workerMessagesIn: this.options.host.messagesIn,
+      workerMessagesOut: this.options.host.messagesOut
     };
   }
 

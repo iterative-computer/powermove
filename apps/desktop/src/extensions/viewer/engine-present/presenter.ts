@@ -170,6 +170,11 @@ export type PresenterStats = {
   generation: number;
   /** Frames drawn after their interval, within the late grace. */
   shownLate?: number;
+  /** Messages between the page's main thread and a presentation worker
+   *  (each one a task of the receiving thread): the page's main-thread
+   *  cost of presenting from a worker. */
+  workerMessagesIn?: number;
+  workerMessagesOut?: number;
 };
 
 export type TraceRecord = {

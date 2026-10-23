@@ -32,6 +32,7 @@ import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
 import { EngineRenderTransport, EngineSnapshotError } from './render-transport';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
+import { mainThreadCounters } from './main-thread-counters';
 import { EngineCanvasBinding } from './canvas-binding';
 import { resolveFrameRate, TICKS_PER_SECOND } from '../../../shared/frame-rate';
 import { installAppCaptures, usesBlender } from './app-captures';
@@ -173,15 +174,18 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     if (barrier) versions.note(barrier.revision, PM.animVersion?.());
   };
   const presentedEvents = new PresentedEvents(
-    (frame, quality) => {
+    (frame, quality) => mainThreadCounters.entry('presented', () => {
+      mainThreadCounters.presentedFrame();
       PM.CompatContext?.selectFrame?.(frame);
       emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj });
-    },
+    }),
     (fn) => target.requestAnimationFrame(fn)
   );
   /** Engine stats for the status bar and the performance panel. */
   const stats = new EngineStatsView();
   (PM as any).EngineStats = stats;
+  // The engine path's main-thread work, counted (main-thread-counters.ts).
+  (PM as any).EngineCounters = mainThreadCounters;
   (PM as any).EnginePresentedEvents = presentedEvents;
   PM.setTransportDriver?.(transport);
 

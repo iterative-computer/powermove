@@ -13,6 +13,7 @@ import { MAX_MESSAGE_BYTES } from '../../../main/engine/msgpack';
 import { completeWelcome, decodeEnvelope, encodeEnvelope, engineRole, envelope, eventMessage, localRanges, Outstanding, requestMessage } from '../../../main/engine/protocol';
 import { coalesce, type ApplyPatches } from './patch-coalesce';
 import { RELEASE_PORT_OFFER } from '../../../shared/release-port';
+import { mainThreadCounters, type MainThreadCounters } from './main-thread-counters';
 
 /** The part of a `MessagePort` the connection uses (a fake in tests). */
 export interface PortLike {
@@ -46,9 +47,10 @@ export class EngineConnection {
     readonly generation: number,
     private readonly port: PortLike,
     private readonly log: Log,
-    private readonly now: () => number = () => performance.now()
+    private readonly now: () => number = () => performance.now(),
+    private readonly counters: MainThreadCounters = mainThreadCounters
   ) {
-    port.addEventListener('message', (event) => this.receive(event.data));
+    port.addEventListener('message', (event) => counters.entry('port', () => this.receive(event.data)));
     port.addEventListener('close', () => this.close('the engine port closed'));
     port.start();
   }
@@ -164,7 +166,9 @@ export class EngineConnection {
 
   private send(message: Envelope): void {
     try {
-      this.port.postMessage(encodeEnvelope(message));
+      const bytes = encodeEnvelope(message);
+      this.port.postMessage(bytes);
+      this.counters.posted(bytes.byteLength);
     } catch (error) {
       this.log('warn', `engine message not sent: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -175,6 +179,7 @@ export class EngineConnection {
     const arrived = this.now();
     const bytes = data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : null;
     if (!bytes) return;
+    this.counters.received(bytes.byteLength);
     let message: Envelope;
     try {
       message = decodeEnvelope(bytes);

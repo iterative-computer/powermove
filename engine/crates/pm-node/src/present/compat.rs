@@ -675,9 +675,23 @@ impl CompatStore {
         CompatAnswer::Raster(drawn)
     }
 
-    /// Of a frame's needs, the ones to send now: not asked yet at
-    /// `revision` or newer, or asked longer than [`ASK_AGAIN`] ago. They
-    /// are recorded as asked.
+    /// Whether the need has an answer at `revision` or newer the renderer
+    /// can draw (a pass-through, or a raster the store still holds).
+    fn answered(&self, key: Key, id: &AnswerId, revision: Revision) -> bool {
+        self.answers.get(id).is_some_and(|a| {
+            a.revision >= revision
+                && a.raster
+                    .as_ref()
+                    .is_none_or(|r| self.complete.contains_key(&(key, r.clone())))
+        })
+    }
+
+    /// Of a frame's needs, the ones to send now: not answered (drawably)
+    /// and not asked yet at `revision` or newer, or asked longer than
+    /// [`ASK_AGAIN`] ago. They are recorded as asked. The window's
+    /// lookahead answers most of a playing view's needs before the engine
+    /// plans them: asking those again had the window answer every layer of
+    /// a frame twice.
     pub fn to_ask(
         &mut self,
         key: Key,
@@ -685,27 +699,28 @@ impl CompatStore {
         needs: Vec<CompatNeed>,
         now: Instant,
     ) -> Vec<CompatNeed> {
-        let fresh = needs
-            .into_iter()
-            .filter(|n| {
-                let id = answer_id(
-                    key,
-                    &n.composition,
-                    &n.layer,
-                    n.time,
-                    n.source,
-                    n.scale,
-                    n.crop,
-                );
-                match self.asked.get(&id) {
-                    Some((r, at)) if *r >= revision && now.duration_since(*at) < ASK_AGAIN => false,
-                    _ => {
-                        self.asked.insert(id, (revision, now));
-                        true
-                    }
+        let mut fresh = Vec::new();
+        for n in needs {
+            let id = answer_id(
+                key,
+                &n.composition,
+                &n.layer,
+                n.time,
+                n.source,
+                n.scale,
+                n.crop,
+            );
+            if self.answered(key, &id, revision) {
+                continue;
+            }
+            match self.asked.get(&id) {
+                Some((r, at)) if *r >= revision && now.duration_since(*at) < ASK_AGAIN => {}
+                _ => {
+                    self.asked.insert(id, (revision, now));
+                    fresh.push(n);
                 }
-            })
-            .collect::<Vec<_>>();
+            }
+        }
         if self.asked.len() > MAX_ASKED {
             // Asks the renderer skipped (frames behind its clock): any frame
             // that still needs one asks it again.
@@ -1092,6 +1107,44 @@ mod tests {
             ),
             Applied::Ignored
         );
+    }
+
+    #[test]
+    fn needs_the_window_answered_ahead_are_not_asked_again() {
+        // 1 KiB rasters in a 1 KiB store: a second evicts the first.
+        let mut store = CompatStore::with_limit(1024);
+        let r3 = Revision::new(3).unwrap();
+        let now = Instant::now();
+        let need = |layer: &str| CompatNeed {
+            composition: "c".into(),
+            layer: layer.into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            scale: 1.0,
+            crop: None,
+        };
+        // Answered by the window's lookahead before the engine planned it.
+        store.apply(
+            session(1),
+            CompatMessage::Native(pm_protocol::snapshot::CompatNative {
+                composition: "c".into(),
+                layer: "A".into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale: 1.0,
+                revision: r3,
+                crop: None,
+            }),
+        );
+        store.apply(session(1), band(id("B", "k"), 16, 16, 0, 16, 0));
+        assert!(store.to_ask(session(1), r3, vec![need("A"), need("B")], now).is_empty());
+        // At a newer revision they are asked.
+        let r4 = Revision::new(4).unwrap();
+        assert_eq!(store.to_ask(session(1), r4, vec![need("A")], now).len(), 1);
+        // A raster answer whose pixels were evicted is asked again.
+        store.apply(session(1), band(id("C", "k"), 16, 16, 0, 16, 0));
+        assert!(store.get(session(1), &id("B", "k")).is_none(), "evicted");
+        assert_eq!(store.to_ask(session(1), r3, vec![need("B")], now).len(), 1);
     }
 
     #[test]
