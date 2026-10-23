@@ -527,7 +527,11 @@ impl Thread {
         }
         let pixels = match painted {
             Ok(Some(pixels)) => {
-                super::super::snapshot::encode_rgba8_unorm(&pixels, job.request.pixels)
+                if svg_request.is_some() {
+                    super::super::snapshot::encode_straight_rgba8_unorm(&pixels, job.request.pixels)
+                } else {
+                    super::super::snapshot::encode_rgba8_unorm(&pixels, job.request.pixels)
+                }
             }
             Ok(None) => unreachable!("handled missing source SVG above"),
             Err(error) => {

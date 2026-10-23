@@ -537,6 +537,28 @@ pub fn encode_rgba8_unorm(rgba: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
     }
 }
 
+/// A final Canvas2D `getImageData` raster is straight already. Keep those
+/// exact bytes for source snapshots; only premultiply when that encoding was
+/// requested, without a lossy premultiply/unpremultiply round trip.
+pub fn encode_straight_rgba8_unorm(rgba: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
+    if pixels == SnapshotPixels::Straight {
+        return rgba.to_vec();
+    }
+    let mut out = Vec::with_capacity(rgba.len());
+    for px in rgba.chunks_exact(4) {
+        let a = u32::from(px[3]);
+        for &channel in &px[..3] {
+            out.push(((u32::from(channel) * a + 127) / 255) as u8);
+        }
+        out.push(if pixels == SnapshotPixels::Opaque {
+            255
+        } else {
+            px[3]
+        });
+    }
+    out
+}
+
 fn push_rgba8(out: &mut Vec<u8>, [r, g, b, a]: [f32; 4], pixels: SnapshotPixels) {
     let unorm = |v: f32| -> u8 {
         let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
@@ -982,6 +1004,15 @@ mod tests {
         assert_eq!(
             encode_rgba8_unorm(&premultiplied, SnapshotPixels::Straight),
             [255, 0, 0, 128, 0, 0, 0, 0],
+        );
+        let chromium = [255, 129, 64, 128, 0, 0, 0, 0];
+        assert_eq!(
+            encode_straight_rgba8_unorm(&chromium, SnapshotPixels::Straight),
+            chromium
+        );
+        assert_eq!(
+            encode_straight_rgba8_unorm(&chromium, SnapshotPixels::Premultiplied),
+            [128, 65, 32, 128, 0, 0, 0, 0],
         );
     }
 

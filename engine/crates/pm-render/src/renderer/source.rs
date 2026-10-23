@@ -84,6 +84,7 @@ impl Renderer {
                     pm_time::Rate::new(30, 1).expect("30 fps"),
                     false,
                     interpretation.is_none(),
+                    true,
                 )
                 .map_err(media_error)?
                 .ok_or_else(|| "No source frame at this time".to_owned())?
@@ -110,22 +111,16 @@ impl Renderer {
             }
             digest.update(&chunk[..n]);
         }
-        let (ow, oh) = (output.width as f64, output.height as f64);
         let (sw, sh) = intrinsic;
         if !(sw.is_finite() && sh.is_finite() && sw > 0.0 && sh > 0.0) {
             return Err("The source SVG has no valid intrinsic size".into());
         }
-        let scale = match fit {
-            SourceFit::Stretch => None,
-            SourceFit::Contain => Some((ow / sw).min(oh / sh)),
-            SourceFit::Cover => Some((ow / sw).max(oh / sh)),
-        };
-        let (rw, rh) = scale.map_or((ow, oh), |s| (sw * s, sh * s));
         let key = SvgRasterKey {
             content: format!("{:x}", digest.finalize()),
             texture: None,
-            width: rw.round().max(1.0) as u32,
-            height: rh.round().max(1.0) as u32,
+            source_fit: Some(fit),
+            width: output.width,
+            height: output.height,
         };
         key.validate()
             .map_err(|e| format!("Source SVG raster: {e}"))?;
@@ -135,8 +130,9 @@ impl Renderer {
         })
     }
 
-    /// Composites a Chromium-decoded source SVG that arrived through the
-    /// existing S1 raster path. Missing rasters are reported to the caller.
+    /// The source SVG's final Canvas2D pixels, already straight RGBA8. The
+    /// Chromium host drew the fitted image directly into the output canvas;
+    /// a second GPU fit would move fractional edges and unpremultiply twice.
     pub fn source_svg_rgba8(
         &mut self,
         key: &SvgRasterKey,
@@ -149,43 +145,13 @@ impl Renderer {
                 "A source SVG interpretation cannot be applied to the Chromium raster".into(),
             );
         }
+        if key.source_fit != Some(fit) || key.width != output.width || key.height != output.height {
+            return Err("The source SVG raster has another output size or fit".into());
+        }
         let Some(pixels) = self.vector.svg.get(key) else {
             return Ok(None);
         };
-        let texture = Target::new(
-            &self.device,
-            "pm source svg",
-            key.width,
-            key.height,
-            wgpu::TextureFormat::Rgba8Unorm,
-            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        );
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(key.width * 4),
-                rows_per_image: Some(key.height),
-            },
-            wgpu::Extent3d {
-                width: key.width,
-                height: key.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("pm source svg snapshot"),
-            });
-        self.draw_source_target(texture, output, fit, encoder)
-            .map(Some)
+        Ok(Some(pixels.as_ref().clone()))
     }
 
     fn draw_source_target(

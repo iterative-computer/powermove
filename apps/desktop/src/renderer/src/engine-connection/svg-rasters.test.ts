@@ -45,13 +45,32 @@ async function setup() {
 
 const request = (content: string, width = 4, height = 2, asset = 'a1'): SvgRasterRequest => ({ key: { content, width, height }, asset });
 
+describe('SvgRasterCanvas source fit', () => {
+  it('draws once into the final canvas at a fractional rectangle and keeps straight bytes', () => {
+    const drawImage = vi.fn();
+    const bytes = new Uint8ClampedArray([255, 129, 64, 128, 0, 0, 0, 0]);
+    const context = {
+      clearRect: vi.fn(), drawImage,
+      getImageData: vi.fn(() => ({ data: bytes }))
+    };
+    const canvas = { width: 0, height: 0, getContext: vi.fn(() => context) };
+    const raster = new SvgRasterCanvas({ createCanvas: () => canvas as unknown as HTMLCanvasElement });
+    const image = { naturalWidth: 200, naturalHeight: 100 } as HTMLImageElement;
+    expect(raster.draw(image, 317, 181, 'contain')).toEqual(new Uint8Array(bytes));
+    expect(drawImage).toHaveBeenCalledOnce();
+    expect(drawImage).toHaveBeenCalledWith(image, 0, 11.25, 317, 158.5);
+    expect(context.getImageData).toHaveBeenCalledWith(0, 0, 317, 181);
+    expect(canvas).toMatchObject({ width: 0, height: 0 });
+  });
+});
+
 describe('SvgRasters', () => {
   it('hashes the bytes the asset decoded and draws the bucket asked for', async () => {
     const { rasters, draw, posted, target, contentA } = await setup();
     expect(contentA).toMatch(/^[0-9a-f]{64}$/);
     await rasters.answer(target, [request(contentA, 6, 3)]);
     expect(draw).toHaveBeenCalledOnce();
-    expect(draw.mock.calls[0]!.slice(1)).toEqual([6, 3]);
+    expect(draw.mock.calls[0]!.slice(1)).toEqual([6, 3, undefined]);
     expect(rasters.asks).toEqual([{ asset: 'a1', width: 6, height: 3 }]);
     expect(posted).toHaveLength(1);
     expect(posted[0]).toMatchObject({ type: 'compat', compat: 'svgPixels', key: { content: contentA, width: 6, height: 3 }, row: 0, rows: 3 });
@@ -69,6 +88,17 @@ describe('SvgRasters', () => {
     expect(produced.key).toBe(`${contentA}:4x2:texture`);
     expect(produced.format).toBe('rgba8Straight');
     expect(rasters.drawSync(map)[0]).toBe(17);
+  });
+
+  it('keeps source fits distinct and reports their straight pixels to the job engine', async () => {
+    const { rasters, draw, contentA } = await setup();
+    const source = { ...request(contentA, 317, 181), key: { ...request(contentA, 317, 181).key, sourceFit: 'contain' as const } };
+    const answer = await rasters.produce({ svg: source } as any);
+    expect(answer).toMatchObject({ key: `${contentA}:317x181:source:contain`, width: 317, height: 181, format: 'rgba8Straight' });
+    expect(draw).toHaveBeenCalledWith(expect.anything(), 317, 181, 'contain');
+    const cover = { ...source, key: { ...source.key, sourceFit: 'cover' as const } };
+    expect((await rasters.produce({ svg: cover } as any)).key).toBe(`${contentA}:317x181:source:cover`);
+    await expect(rasters.produce({ svg: { ...source, key: { ...source.key, texture: true } } } as any)).rejects.toThrow(/invalid fit/);
   });
 
   it('never draws another version of the file under the engine’s content', async () => {

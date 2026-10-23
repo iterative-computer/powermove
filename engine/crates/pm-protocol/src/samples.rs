@@ -861,6 +861,7 @@ pub fn svg_request() -> crate::svg_raster::SvgRasterRequest {
     crate::svg_raster::SvgRasterRequest {
         key: crate::svg_raster::SvgRasterKey {
             texture: None,
+            source_fit: None,
             content: "9f".repeat(32),
             width: 2,
             height: 2,

@@ -1321,6 +1321,7 @@ impl MediaCache {
         composition: pm_time::Rate,
         sequence: bool,
         compat: bool,
+        source_display: bool,
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
         let none = Interpretation::default();
@@ -1345,6 +1346,9 @@ impl MediaCache {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             format!("{interp:?}{composition:?}{sequence}{compat}").hash(&mut h);
+            // Source display's VP9 bitmap must never alias a composition's
+            // converted frame, without changing the old formatted key.
+            source_display.hash(&mut h);
             self.interpretations
                 .get(path)
                 .map(|c| format!("{c:?}"))
@@ -1408,7 +1412,16 @@ impl MediaCache {
             return Ok(Some(t.clone()));
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
-        let bitmap = if sequence
+        // Chromium's VP9 software decoder presents untagged I420 through
+        // libyuv before Canvas2D sees it. Browser renditions of ProRes are
+        // VP9 too, not just image-sequence videos. Keep explicit matrices,
+        // Interpret Footage and native colour overrides on their own path.
+        let chromium_i420 = sequence
+            || (source_display
+                && v.codec.codec == "vp9"
+                && v.color.tagged.primaries.is_none()
+                && v.color.tagged.transfer.is_none());
+        let bitmap = if chromium_i420
             && compat
             && !interprets_video_reading(interp)
             && fields.is_none()
@@ -1420,7 +1433,7 @@ impl MediaCache {
         } else {
             None
         };
-        let sequence_bitmap = bitmap.is_some();
+        let chromium_bitmap = bitmap.is_some();
         let frame = bitmap.unwrap_or(frame);
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));
@@ -1508,7 +1521,7 @@ impl MediaCache {
                 _ => None,
             },
         };
-        let color = if sequence_bitmap {
+        let color = if chromium_bitmap {
             SourceColor {
                 transfer: pm_protocol::color::Transfer::DisplayE,
                 primaries: pm_protocol::color::Primaries::Bt709,
@@ -1523,7 +1536,7 @@ impl MediaCache {
         // texImage2D uploads ordinary opaque legacy video into RGBA8.
         // Clip/quantize each source texel before the layer samples it, so
         // saturated out-of-range RGB cannot bleed across a filtered edge.
-        // The sequence path keeps its separate Chromium/libyuv conversion;
+        // The I420 path keeps its separate Chromium/libyuv conversion;
         // Level 2, alpha files, colour interpretations (Interpret Footage's
         // colour members or a file's colour override), and HDR retain
         // native precision. Overrides that only choose or place frames

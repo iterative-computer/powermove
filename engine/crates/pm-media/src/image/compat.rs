@@ -524,7 +524,8 @@ unsafe fn canonicalize_trc(profile: &mut crate::sys::skcms::skcms_ICCProfile) {
 
 /// Chromium's software I420 video upload uses libyuv's nearest-chroma,
 /// clipped RGBA8 bitmap before the canvas filters it. Existing sequence
-/// renditions are 8-bit limited-range I420, optionally with straight alpha.
+/// videos and VP9 browser renditions are 8-bit limited-range I420,
+/// optionally with straight alpha.
 /// Other source readings keep the native video conversion.
 pub fn video_bitmap(
     frame: &crate::frame::DecodedFrame,

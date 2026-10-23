@@ -354,6 +354,7 @@ impl Exec<'_> {
                             *composition_rate,
                             *sequence,
                             !*level2,
+                            false,
                         ) {
                             Ok(Some(t)) => {
                                 r.view = Some(t.view.clone());

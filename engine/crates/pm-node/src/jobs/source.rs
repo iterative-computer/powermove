@@ -336,8 +336,11 @@ fn filmstrip(
             renderer.source_rgba8(source, time, size, fit, interpretation.as_ref())
         };
         gate.finished(pass, 1, started.elapsed().as_micros() as f64);
-        let pixels =
-            crate::present::snapshot::encode_rgba8_unorm(&pixels?, SnapshotPixels::Straight);
+        let pixels = if svg.is_some() {
+            pixels?
+        } else {
+            crate::present::snapshot::encode_rgba8_unorm(&pixels?, SnapshotPixels::Straight)
+        };
         file.write_all(&pixels).map_err(|e| e.to_string())?;
         bytes += pixels.len() as u64;
         shared.status(host, job, |r| {

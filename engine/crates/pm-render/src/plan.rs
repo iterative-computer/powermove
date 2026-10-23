@@ -1323,6 +1323,7 @@ fn native_content_quad<'d>(
                         source: Source::Vector(Box::new(crate::vector::VectorSource::SvgImage {
                             key: pm_protocol::svg_raster::SvgRasterKey {
                                 texture: None,
+                                source_fit: None,
                                 content,
                                 width,
                                 height,

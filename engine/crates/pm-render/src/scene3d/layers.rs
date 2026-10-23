@@ -164,6 +164,7 @@ impl TextureSource for DocumentTextures<'_> {
             key: pm_protocol::svg_raster::SvgRasterKey {
                 content: crate::vector::svg::content_hash(&path).ok()?,
                 texture: Some(true),
+                source_fit: None,
                 width,
                 height,
             },

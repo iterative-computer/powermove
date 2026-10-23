@@ -179,6 +179,7 @@ fn video_storage_keeps_compatibility_and_native_cache_entries_separate() {
                     pm_time::Rate::FPS_30,
                     false,
                     compat,
+                    false,
                 )
                 .unwrap()
                 .unwrap();
@@ -203,6 +204,7 @@ fn video_storage_keeps_compatibility_and_native_cache_entries_separate() {
                     pm_time::Rate::FPS_30,
                     false,
                     compat,
+                    false,
                 )
                 .unwrap()
                 .unwrap();
@@ -210,6 +212,32 @@ fn video_storage_keeps_compatibility_and_native_cache_entries_separate() {
                 cached.texture, target.texture,
                 "identical request cache hit"
             );
+            if compat && working == WorkingEncoding::Standard && interpretation.is_none() {
+                let source = media
+                    .video(
+                        &gpu.device,
+                        &gpu.queue,
+                        &pipelines,
+                        &mut encoder,
+                        &path,
+                        1,
+                        second,
+                        true,
+                        working,
+                        Precision::Float32,
+                        interpretation,
+                        pm_time::Rate::FPS_30,
+                        false,
+                        compat,
+                        true,
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert_ne!(
+                    source.texture, target.texture,
+                    "source display and composition have distinct cache identities"
+                );
+            }
             gpu.queue.submit([encoder.finish()]);
             assert!(
                 !read_f32(&gpu.device, &gpu.queue, &target.texture)
@@ -241,6 +269,7 @@ fn video_storage_keeps_compatibility_and_native_cache_entries_separate() {
                 pm_time::Rate::FPS_30,
                 false,
                 true,
+                false,
             )
             .unwrap()
             .unwrap();

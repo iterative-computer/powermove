@@ -96,6 +96,7 @@ fn source_svg_uses_exact_size_chromium_raster() {
         Renderer::source_svg_request(&path, "asset-1", output, SourceFit::Stretch, (2.0, 2.0))
             .unwrap();
     assert_eq!((request.key.width, request.key.height), (3, 2));
+    assert_eq!(request.key.source_fit, Some(SourceFit::Stretch));
     assert_eq!(request.asset, "asset-1");
     assert!(
         renderer
@@ -125,7 +126,9 @@ fn source_svg_uses_exact_size_chromium_raster() {
         (2.0, 1.0),
     )
     .unwrap();
-    assert_eq!((contain.key.width, contain.key.height), (5, 3));
+    assert_eq!((contain.key.width, contain.key.height), (5, 5));
+    assert_eq!(contain.key.source_fit, Some(SourceFit::Contain));
+    assert_ne!(contain.key.upload_key(), request.key.upload_key());
 }
 
 #[test]
@@ -134,6 +137,7 @@ fn source_svg_rejects_an_interpreted_color_override() {
     let key = pm_protocol::svg_raster::SvgRasterKey {
         content: "a".repeat(64),
         texture: None,
+        source_fit: Some(SourceFit::Stretch),
         width: 1,
         height: 1,
     };
@@ -153,6 +157,71 @@ fn source_svg_rejects_an_interpreted_color_override() {
         error.contains("interpretation cannot be applied"),
         "{error}"
     );
+}
+
+#[test]
+fn untagged_vp9_browser_rendition_uses_chromiums_i420_bitmap() {
+    // The public ProRes fixture is solid red. Today's Canvas2D view of its
+    // VP9 browser rendition is (254, 0, 0, 255), while a direct floating YUV
+    // conversion clips red to 255. Use the same converter flags as import.
+    let dir = tempfile::tempdir().unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../apps/desktop/e2e/fixtures/prores422.mov");
+    let proxy = dir.path().join("browser.webm");
+    let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("source engine/env.sh")
+        .join("bin/ffmpeg");
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+        .arg(&source)
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuva420p",
+            "-b:v",
+            "0",
+            "-crf",
+            "18",
+            "-g",
+            "15",
+            "-deadline",
+            "good",
+            "-cpu-used",
+            "4",
+            "-row-mt",
+            "1",
+            "-threads",
+            "4",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "192k",
+            "-f",
+            "webm",
+            "-y",
+        ])
+        .arg(&proxy)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let pixels = Renderer::headless()
+        .unwrap()
+        .source_rgba8(
+            &proxy,
+            Ticks::ZERO,
+            Size::new(160, 90),
+            SourceFit::Stretch,
+            None,
+        )
+        .unwrap();
+    assert_eq!(pixels.len(), 160 * 90 * 4);
+    assert!(pixels.chunks_exact(4).all(|p| p == [254, 0, 0, 255]));
 }
 
 #[test]
