@@ -328,7 +328,8 @@ fn render_bands(
     let size = request.output_size;
     let (w, h) = (size.width, size.height);
     let total_units = h.div_ceil(BAND_ROWS);
-    let mut rgba = vec![0f32; w as usize * h as usize * 4];
+    // Allocated by the first band unless it is the whole frame.
+    let mut rgba = Vec::new();
     let mut failures = Vec::new();
     let mut y = 0u32;
     while y < h {
@@ -356,7 +357,7 @@ fn render_bands(
                 height: band,
             });
         }
-        let frame = match renderer.render(document, composition, time, &req, media) {
+        let mut frame = match renderer.render(document, composition, time, &req, media) {
             Ok(frame) => frame,
             Err(e) => {
                 // Whatever the failed render submitted finishes before the
@@ -382,11 +383,20 @@ fn render_bands(
             .and_then(|s| s.read_us(renderer.device(), renderer.queue()));
         let units = if whole { total_units } else { admitted };
         admission.finish(units, gpu_us.unwrap_or(wall_us), gpu_us.is_some());
-        let pixels = renderer.read_rgba(&frame)?;
+        let pixels = renderer.read_rgba_reusing(&frame)?;
         let row = w as usize * 4;
         let at = y as usize * row;
-        rgba[at..at + pixels.len()].copy_from_slice(&pixels);
-        failures.extend(frame.failures);
+        if whole {
+            // One band is the whole frame: its pixels are the frame.
+            rgba = pixels;
+        } else {
+            if rgba.is_empty() {
+                rgba = vec![0f32; w as usize * h as usize * 4];
+            }
+            rgba[at..at + pixels.len()].copy_from_slice(&pixels);
+        }
+        failures.append(&mut frame.failures);
+        renderer.recycle(frame);
         y += band;
     }
     Ok(ReadFrame {
@@ -1019,6 +1029,26 @@ where
 /// Blender surfaces are prepared before it renders (`crate::blender`).
 #[allow(clippy::too_many_arguments)]
 pub fn run_export_with_blender<S: Sink + Send>(
+    renderer: &mut Renderer,
+    job: &ExportJob,
+    plan: ExportPlan,
+    sink: S,
+    gate: &dyn GpuGate,
+    cancel: &AtomicBool,
+    progress: &mut (dyn FnMut(Progress) + Send),
+    blender: Option<&mut crate::blender::ExportBlender>,
+) -> Result<S::Output, JobError>
+where
+    S::Output: Send,
+{
+    let result = export_frames(renderer, job, plan, sink, gate, cancel, progress, blender);
+    // The frames' staging buffer and target are kept only while exporting.
+    renderer.release_frame_reuse();
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_frames<S: Sink + Send>(
     renderer: &mut Renderer,
     job: &ExportJob,
     plan: ExportPlan,

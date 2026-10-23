@@ -277,6 +277,17 @@ pub struct Renderer {
     /// Where a waiting frame gets missing level 1 SVG rasters itself (the
     /// job engine's host services; [`Renderer::set_svg_source`]).
     svg_source: Option<Arc<dyn crate::vector::svg_rasters::SvgRasterSource>>,
+    /// Frames read back one after another (exports): the staging buffer and
+    /// a frame target given back with [`Renderer::recycle`]
+    /// (docs/engine/perfbench.md).
+    frame_reuse: FrameReuse,
+}
+
+/// See [`Renderer::read_rgba_reusing`] and [`Renderer::recycle`].
+#[derive(Default)]
+struct FrameReuse {
+    readback: pm_gpu::readback::Readback,
+    target: Option<Target>,
 }
 
 impl Renderer {
@@ -325,6 +336,7 @@ impl Renderer {
             svg_wait: false,
             svg_skip_failed: false,
             svg_source: None,
+            frame_reuse: FrameReuse::default(),
         }
     }
 
@@ -1212,14 +1224,23 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let target = Target::new(
-            &self.device,
-            "pm frame",
-            size.width,
-            size.height,
-            Self::target_format(document, request),
-            pm_gpu::target::working_usage(),
-        );
+        let format = Self::target_format(document, request);
+        // A target a finished frame gave back (`recycle`), when it fits.
+        let target = match self.frame_reuse.target.take() {
+            Some(t)
+                if t.width() == size.width && t.height() == size.height && t.format() == format =>
+            {
+                t
+            }
+            _ => Target::new(
+                &self.device,
+                "pm frame",
+                size.width,
+                size.height,
+                format,
+                pm_gpu::target::working_usage(),
+            ),
+        };
         let depth_id = request.depth_id.then(|| {
             Target::new(
                 &self.device,
@@ -1856,6 +1877,32 @@ impl Renderer {
             &self.queue,
             &frame.color.texture,
         )?)
+    }
+
+    /// [`Self::read_rgba`] through a staging buffer the renderer keeps for
+    /// the next read (an export reads every frame): the same values, without
+    /// a new GPU buffer and a packed byte copy per frame.
+    pub fn read_rgba_reusing(&mut self, frame: &Frame) -> Result<Vec<f32>, RenderError> {
+        Ok(self
+            .frame_reuse
+            .readback
+            .read_f32(&self.device, &self.queue, &frame.color.texture)?)
+    }
+
+    /// Gives a finished frame's color target back: the next [`Self::render`]
+    /// of the same size and format draws into it instead of allocating one.
+    /// The frame is consumed, so nothing can read the target after the next
+    /// render overwrites it.
+    pub fn recycle(&mut self, frame: Frame) {
+        if frame.depth_id.is_none() {
+            self.frame_reuse.target = Some(frame.color);
+        }
+    }
+
+    /// Drops what [`Self::read_rgba_reusing`] and [`Self::recycle`] kept
+    /// (at the end of an export).
+    pub fn release_frame_reuse(&mut self) {
+        self.frame_reuse = FrameReuse::default();
     }
 
     /// Reads the depth and id surface back (r depth, g/b id − 1, a coverage).
