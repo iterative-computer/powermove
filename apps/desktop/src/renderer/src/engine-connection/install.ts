@@ -125,7 +125,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     else if (level === 'warn') console.warn(line);
     else console.info(line);
   };
-  const drawingWarmup = new PresentationWarmup(target.document, () => new Worker(new URL('../../../extensions/viewer/engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' }));
+  const presentationWorker = (): Worker => new Worker(new URL('../../../extensions/viewer/engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' });
+  const drawingWarmup = new PresentationWarmup(target.document, presentationWorker);
   drawingWarmup.warm();
   const hostClock = new HostClock(() => native.hostTime());
   hostClock.start();
@@ -510,7 +511,16 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     service: () => service,
     composition: () => (PM.proj ? { w: Number(PM.proj.w) || 0, h: Number(PM.proj.h) || 0 } : null),
     quality: () => Number(PM.quality ?? 1),
-    present: (options) => new ViewerPresentation({ ...options, log: (level, message) => log(level, message) })
+    // A bound viewer (a fork or override of the built-in one from before the
+    // engine) presents exactly as the built-in viewer does: in a
+    // presentation worker. Its canvas is then a placeholder the page reads
+    // back like the built-in one (the Library card copies its pixels), and
+    // playback keeps its cadence while the main thread is busy.
+    present: (options) => new ViewerPresentation({
+      ...options,
+      log: (level, message) => log(level, message),
+      createWorker: options.service.offMainThread === false ? undefined : presentationWorker
+    })
   });
   (PM as any).EngineCanvas = canvasBinding;
 
