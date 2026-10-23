@@ -44,6 +44,7 @@ class Source implements FrameSource {
 class Painter implements FramePainter {
   draws = 0;
   disposed = false;
+  trims = 0;
   /** Pool generations whose frames cannot be read (imports from before a GPU restart). */
   unreadable = new Set<number>();
   private generation = 0;
@@ -65,6 +66,7 @@ class Painter implements FramePainter {
   workDone(): Promise<void> {
     return Promise.resolve();
   }
+  trim(): void { this.trims++; }
   dispose(): void {
     this.disposed = true;
   }
@@ -240,6 +242,71 @@ const settleLong = async (): Promise<void> => {
 };
 
 describe('ViewerPresentation', () => {
+  it('suspends only the viewer channel, trims after draining, and reopens a fresh surface epoch on the same drawing', async () => {
+    const service = new Service();
+    const painter = new Painter();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => painter });
+    await settle();
+    presentation.update(PARAMS);
+    const originalCanvas = presentation.canvas;
+    const first = service.channels[0]!;
+    first.handlers.message({ type: 'surfacePool', pool: { generation: 8, surfaces: [{ poolIndex: 0, size: { width: 1280, height: 720 }, format: 'rgba16Float' }] } }, performance.now());
+    expect((await presentation.memoryStats()).announcedNominalBytes).toBe(1280 * 720 * 8);
+    presentation.suspend();
+    await settle();
+    expect(first.closed).toBe(true);
+    expect(service.source.retired).toEqual([8]);
+    expect(painter.trims).toBe(1);
+    expect(painter.disposed).toBe(false);
+    expect(await presentation.memoryStats()).toMatchObject({ suspended: true, channelOpen: false, announcedNominalBytes: 0, pendingDrains: 0 });
+    service.fireReady();
+    await settle();
+    expect(service.channels).toHaveLength(1);
+    presentation.resume();
+    await settle();
+    expect(presentation.canvas).toBe(originalCanvas);
+    expect(service.channels).toHaveLength(2);
+    expect(service.channels[1]!.states[0]).toMatchObject({ surfaceEpoch: 1, viewSeq: 2 });
+    presentation.dispose();
+  });
+
+  it('keeps a worker alive and trims only after the worker GPU fence drains', async () => {
+    const service = new Service();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    offscreenCanvases(window as unknown as Window);
+    const painter = new Painter();
+    let finish: () => void = () => {};
+    painter.workDone = () => new Promise<void>(resolve => { finish = resolve; });
+    const worker = inProcessWorker(painter);
+    try {
+      const presentation = new ViewerPresentation({ service, stage, before: overlay, createWorker: () => worker, createPainter: async () => new Painter() });
+      await settleLong();
+      presentation.update(PARAMS);
+      const first = service.channels[0]!;
+      first.handlers.message({ type: 'surfacePool', pool: { generation: 7, surfaces: [] } }, performance.now());
+      first.handlers.message({ type: 'frame', frame: desc(1, 1, 7) }, performance.now());
+      await settleLong();
+      expect(painter.draws).toBe(1);
+      presentation.suspend();
+      await settleLong();
+      expect(painter.trims).toBe(0);
+      expect(worker.terminated).toBe(false);
+      finish();
+      await settleLong();
+      expect(painter.trims).toBe(1);
+      expect(service.source.retired).toEqual([7]);
+      expect((await presentation.memoryStats()).worker?.sessionOpen).toBe(false);
+      presentation.resume();
+      await settleLong();
+      expect(worker.terminated).toBe(false);
+      expect(service.channels[1]!.states[0]).toMatchObject({ surfaceEpoch: 1 });
+      presentation.dispose();
+      await settleLong();
+    } finally {
+      delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+    }
+  });
   it('retires both active imports only when the final viewer is disposed', async () => {
     const service = new Service();
     const { stage, overlay } = stageIn(window as unknown as Window);

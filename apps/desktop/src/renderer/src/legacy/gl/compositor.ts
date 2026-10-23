@@ -851,6 +851,28 @@ GL.memoryStats = () => ({
   framebuffers: { entries: GL.pool.length, bytes: poolBytes, maxBytes: MAX_FBO_BYTES },
   textures: { entries: GL.texes.size, bytes: textureBytes, maxBytes: MAX_TEXTURE_BYTES },
 });
+/** On-demand comparison with the native viewer painter. Never touch GL.gl:
+ * its compatibility getter allocates a context when native mode is on. */
+GL.allocationStats = () => {
+  const gl = glContext;
+  const attrs = gl?.getContextAttributes() ?? null;
+  const width = gl?.drawingBufferWidth ?? 0;
+  const height = gl?.drawingBufferHeight ?? 0;
+  const format = (gl as (WebGL2RenderingContext & { drawingBufferFormat?: number }) | null)?.drawingBufferFormat ?? null;
+  const bytesPerPixel = gl && format === gl.RGBA16F ? 8 : 4;
+  return {
+    initialized: gl !== null,
+    deferred: deferredCanvas !== null,
+    canvas: GL.canvas ? { width: GL.canvas.width, height: GL.canvas.height } : null,
+    drawingBuffer: gl ? { width, height, format, bytesPerPixel, nominalBytes: width * height * bytesPerPixel } : null,
+    contextAttributes: attrs ? { alpha: attrs.alpha, premultipliedAlpha: attrs.premultipliedAlpha, antialias: attrs.antialias, preserveDrawingBuffer: attrs.preserveDrawingBuffer, depth: attrs.depth, stencil: attrs.stencil } : null,
+    channelBits: gl ? { red: gl.getParameter(gl.RED_BITS), green: gl.getParameter(gl.GREEN_BITS), blue: gl.getParameter(gl.BLUE_BITS), alpha: gl.getParameter(gl.ALPHA_BITS) } : null,
+    framebuffers: { entries: GL.pool.length, bytes: poolBytes, busy: GL.pool.filter((f: any) => f.busy).length },
+    textures: { entries: GL.texes.size, bytes: textureBytes },
+    presentedFrame: presentedFrame ? { width: presentedFrame.w, height: presentedFrame.h, bytes: presentedFrame.bytes ?? null } : null,
+    compositorBuffers: 'unknown' as const
+  };
+};
 PM.Memory?.register?.('framebuffers', {
   bytes: () => poolBytes,
   entries: () => GL.pool.length,

@@ -83,6 +83,9 @@ export interface EngineConnectionHandle {
    * viewer opens a new presentation with it.
    */
   setTrace(on: boolean): void;
+  /** Experimental renderer memory gate. Only the actual final-tab
+   * transition can pause native presentation; measurements can disable it. */
+  setHomeSuspendForDiagnostics(on: boolean): void;
   /** The engine's audio for the mixer panel and waveforms. */
   audio: EngineAudio;
   /** Every clock sample of every session (the measurements). */
@@ -430,8 +433,31 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   /** Whether a first engine frame arrived (the cold start mark). */
   let firstFrame = false;
   let trace = false;
+  let homeSuspendEnabled = true;
+  let visitedRealProject = false;
+  let mayPresent = true;
+  const reconcileHomePresentation = (): void => {
+    // The home placeholder is present at initial startup too; keep that
+    // eager path. A confirmed project tab must first have been on screen.
+    if (PM.Tabs?.active) visitedRealProject = true;
+    const closedLastTab = visitedRealProject && PM.isHomeProject?.() === true && PM.Tabs?.list?.().length === 0;
+    const next = !(homeSuspendEnabled && closedLastTab);
+    if (next === mayPresent) return;
+    mayPresent = next;
+    target.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
+  };
+  const offHomeProject = PM.bus?.on?.('project', reconcileHomePresentation) ?? (() => {});
+  const offHomeTabs = PM.bus?.on?.('projects:open', reconcileHomePresentation) ?? (() => {});
+  // A restored project may precede connection installation; remember it so
+  // its later final close still qualifies without changing startup home.
+  reconcileHomePresentation();
   const makeService = (): EngineViewerService & { trace?: boolean } => ({
     trace,
+    mayPresent: () => mayPresent,
+    importStats: () => {
+      const { launch, held, received, released, videoFrames } = source.stats();
+      return { launch, held, received, released, videoFrames };
+    },
     source,
     exclusive: true,
     drawingWarmup,
@@ -529,6 +555,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     audio,
     render: renderTransport,
     session: () => current,
+    setHomeSuspendForDiagnostics: (on) => {
+      homeSuspendEnabled = on === true;
+      reconcileHomePresentation();
+    },
     setTrace: (on) => {
       if (on === trace) return;
       trace = on;
@@ -564,6 +594,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offShaderFallback();
       offPending();
       offEager();
+      offHomeProject();
+      offHomeTabs();
       offAssets();
       follower.dispose();
       unprovideSvg();

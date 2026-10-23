@@ -844,6 +844,10 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     commitPendingResize();
   }
   engineService = service;
+  if (service?.mayPresent?.() === false) {
+    enginePresentation?.suspend();
+    return;
+  }
   if (!enginePresentation) {
     if (!service) return;
     const presentation = new ViewerPresentation({
@@ -878,7 +882,7 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // start, not while the engine restarts); the presentation shows its
     // state until the engine's first frame.
     if (presentation.exclusive && V.el) V.el.style.visibility = 'hidden';
-  }
+  } else enginePresentation.resume();
   const scene = api.scene3d?.viewport?.state?.();
   enginePresentation.update(viewParamsFor({
     shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution, canvas: engineCanvas,

@@ -10,8 +10,8 @@
  * `VideoFrame` the moment it arrives, so a frame the engine rendered ahead
  * is already in the worker when the page's main thread stalls.
  */
-import type { FromWorker, ToWorker } from './present-worker';
-import type { FrameLink, FrameSource, Presenter, PresentedFrame, PresenterStats, TraceRecord } from './presenter';
+import type { FromWorker, ToWorker, WorkerMemoryStats } from './present-worker';
+import type { FrameLink, FrameSource, Presenter, PresenterMemory, PresentedFrame, PresenterStats, TraceRecord } from './presenter';
 import type { EngineFrameMessage, FrameDescriptor, FrameRelease, ViewerState, VsyncHint } from './protocol';
 
 /** The slice of `Worker` used here (a fake in tests). */
@@ -50,6 +50,8 @@ export class PresentWorker {
   /** The worker's device was lost: it draws nothing more. */
   private lostReason: string | null = null;
   private readonly timers: Timers;
+  private readonly memoryRequests = new Map<number, { resolve: (stats: WorkerMemoryStats | null) => void; timer: number }>();
+  private nextMemoryRequest = 1;
 
   constructor(private readonly options: PresentWorkerOptions) {
     this.timers = options.timers ?? { set: (fn, ms) => setTimeout(fn, ms) as unknown as number, clear: (id) => clearTimeout(id) };
@@ -71,6 +73,25 @@ export class PresentWorker {
   post(message: ToWorker, transfer?: Transferable[]): void {
     if (this.disposed || this.dead) return;
     this.options.worker.postMessage(message, transfer);
+  }
+
+  /** Ask the retained worker for painter allocations only when diagnostics
+   * are requested. A failed worker answers null without leaving a timer. */
+  memoryStats(): Promise<WorkerMemoryStats | null> {
+    if (this.disposed || this.dead) return Promise.resolve(null);
+    const id = this.nextMemoryRequest++;
+    return new Promise(resolve => {
+      const timer = this.timers.set(() => {
+        this.memoryRequests.delete(id);
+        resolve(null);
+      }, 1000);
+      this.memoryRequests.set(id, { resolve, timer });
+      this.post({ type: 'memoryStats', id });
+    });
+  }
+
+  trim(): void {
+    this.post({ type: 'trim' });
   }
 
   /** Opens a session for `link`; the worker's presenter starts at once. */
@@ -102,6 +123,14 @@ export class PresentWorker {
       case 'disposed':
         this.terminate();
         return;
+      case 'memoryStats': {
+        const request = this.memoryRequests.get(message.id);
+        if (!request) return;
+        this.memoryRequests.delete(message.id);
+        this.timers.clear(request.timer);
+        request.resolve(message.stats);
+        return;
+      }
       case 'closed':
         // Its releases came before this: what it still held (frames it drew
         // whose GPU work had not finished when it closed, or every frame of
@@ -151,6 +180,11 @@ export class PresentWorker {
 
   private terminate(): void {
     this.options.worker.terminate();
+    for (const request of this.memoryRequests.values()) {
+      this.timers.clear(request.timer);
+      request.resolve(null);
+    }
+    this.memoryRequests.clear();
     // As on a worker crash, termination ends its GPU context. The viewer may
     // keep its engine session on a replacement drawing, so return ownership.
     for (const presenter of this.sessions.values()) presenter.releaseHeld();
@@ -241,6 +275,10 @@ export class WorkerPresenter implements Presenter {
       maxQueued: r?.maxQueued ?? 0,
       generation: this.generation
     };
+  }
+
+  memoryStats(): PresenterMemory {
+    return { localVideoFrames: this.inWorker.size, workerCloneUpperBound: this.inWorker.size, queuedFrames: 0, parkedDescriptors: this.parked.length, submittedFences: 0 };
   }
 
   setViewerState(state: ViewerState): void {

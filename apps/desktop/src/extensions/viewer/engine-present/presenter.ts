@@ -194,7 +194,11 @@ export interface Presenter {
   dispose(): void;
   /** Settles after every frame submitted before disposal has finished GPU use. */
   drained?(): Promise<void>;
+  /** Live VideoFrame references at this presenter, read only on request. */
+  memoryStats?(): PresenterMemory;
 }
+
+export type PresenterMemory = { localVideoFrames: number; workerCloneUpperBound: number; queuedFrames: number; parkedDescriptors: number; submittedFences: number };
 
 export class EnginePresenter implements Presenter {
   private readonly buffer = new JitterBuffer<Payload>();
@@ -630,6 +634,10 @@ export class EnginePresenter implements Presenter {
   /** After dispose, resolves only when every submitted surface was released. */
   async drained(): Promise<void> {
     await Promise.all(this.submitted);
+  }
+
+  memoryStats(): PresenterMemory {
+    return { localVideoFrames: this.buffer.size + this.submitted.size, workerCloneUpperBound: 0, queuedFrames: this.buffer.size, parkedDescriptors: this.parked.length, submittedFences: this.submitted.size };
   }
 
   dispose(cancelFrame: (id: number) => void = this.cancelFrame): void {
