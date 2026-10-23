@@ -33,6 +33,9 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn new() -> Ctx {
+        // The benches report every thread's counts too (the ratchet gates
+        // them: work moved to another thread still counts).
+        pm_perf::count_globally(true);
         Ctx {
             gpu: pm_gpu::Gpu::new("perfbench").expect("a GPU"),
         }

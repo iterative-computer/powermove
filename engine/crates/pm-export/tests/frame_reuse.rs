@@ -101,7 +101,7 @@ fn frames(
 ) -> Vec<Vec<f32>> {
     (0..8)
         .map(|n| {
-            render_frame(
+            render_frame_reusing(
                 renderer,
                 doc,
                 "Ptest-root",
@@ -151,7 +151,68 @@ fn reused_targets_and_staging_draw_what_a_fresh_renderer_draws() {
                     "frame {n} ({precision:?}) differs from a fresh renderer's"
                 );
             }
+            assert!(
+                reused.frame_reuse_bytes() > 0,
+                "an export's frames keep their staging"
+            );
             reused.release_frame_reuse();
+            assert_eq!(reused.frame_reuse_bytes(), 0);
         }
     }
+}
+
+/// A one-off frame (an agent still, a parity frame) and a trim leave nothing
+/// kept for a next frame: no staging buffer, target or pixels idle in a job
+/// renderer.
+#[test]
+fn one_off_frames_and_trims_keep_nothing() {
+    let doc = document(solid_fill("#14161C"));
+    let request = RenderRequest::sized(Size::new(320, 180), Precision::Float16);
+    let mut renderer = Renderer::headless().unwrap();
+    let one_off = |renderer: &mut Renderer, n: u32| {
+        render_frame(
+            renderer,
+            &doc,
+            "Ptest-root",
+            seconds(f64::from(n) * 0.25),
+            &request,
+            &MediaPaths::default(),
+            &Unrestricted,
+            1,
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    };
+    one_off(&mut renderer, 0);
+    assert_eq!(renderer.frame_reuse_bytes(), 0, "after a one-off frame");
+    let mut stills = StillRouting::default();
+    render_still(
+        &mut renderer,
+        &doc,
+        "Ptest-root",
+        seconds(0.5),
+        320,
+        &MediaPaths::default(),
+        &mut stills,
+        &Unrestricted,
+        7,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(renderer.frame_reuse_bytes(), 0, "after an agent still");
+    render_frame_reusing(
+        &mut renderer,
+        &doc,
+        "Ptest-root",
+        seconds(0.75),
+        &request,
+        &MediaPaths::default(),
+        &Unrestricted,
+        1,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(renderer.frame_reuse_bytes() > 0);
+    renderer.trim(u64::MAX);
+    assert_eq!(renderer.frame_reuse_bytes(), 0, "after a trim");
 }
