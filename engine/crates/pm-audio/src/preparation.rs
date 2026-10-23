@@ -564,6 +564,9 @@ pub(crate) enum IdleArmOutcome {
 
 impl IdleLeaseHandle {
     pub(crate) fn set_schedule(&self, schedule: &crate::realtime::AudioSchedule) {
+        // Idle workers must already hold the nonaudible preparation policy;
+        // waking for a start must not wait out a different callback window.
+        let schedule = schedule.preparation();
         let period_ns = schedule.period_ns();
         let mut leases = self
             .executor
@@ -1619,11 +1622,12 @@ mod tests {
         schedule: &crate::realtime::AudioSchedule,
         realtime: bool,
     ) {
+        let expected = schedule.preparation();
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let priority = crate::realtime::thread_priority(thread);
             let actual = if realtime {
-                crate::realtime::thread_has_constraint(thread, schedule)
+                crate::realtime::thread_has_constraint(thread, &expected)
             } else {
                 crate::realtime::thread_is_timeshare(thread)
                     && priority.is_some_and(|base| (47..80).contains(&base))

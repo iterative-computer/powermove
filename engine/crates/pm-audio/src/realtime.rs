@@ -779,11 +779,15 @@ impl AudioSchedule {
     /// CPU reservation over a longer Mach period. This is a separate policy:
     /// it never changes the callback/producer's period or earlier deadline.
     pub(crate) fn preparation(&self) -> Self {
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut schedule = self.mach_only();
         #[cfg(target_os = "macos")]
         {
             let inner = Arc::get_mut(&mut schedule.inner).expect("private preparation policy");
-            inner.period_ns = inner.period_ns.max(10_666_666);
+            inner.period_ns = inner
+                .period_ns
+                .saturating_mul(2)
+                .clamp(10_666_666, 40_000_000);
             inner.computation_ns = inner.period_ns * 19 / 20;
             let (period, computation, _) =
                 mac::constraint_ticks(inner.period_ns, inner.computation_ns, inner.period_ns);
@@ -3725,42 +3729,51 @@ mod preparation_period_tests {
     use super::*;
     #[test]
     fn nonaudible_preparation_does_not_change_the_playing_producer_policy() {
-        let playing = AudioSchedule::new(48_000, 64, None);
-        let original = (
-            playing.inner.period,
-            playing.inner.period_ns,
-            playing.inner.producer_computation,
-            playing.inner.producer_constraint,
-            playing.inner.producer_computation_ns,
-            playing.inner.producer_constraint_ns,
-        );
-        let preparation = playing.preparation();
-        assert_eq!(preparation.period_ns(), 10_666_666);
-        assert!(preparation.inner.computation_ns > playing.inner.computation_ns);
-        assert_ne!(preparation.inner.id, playing.inner.id);
-        std::thread::spawn(move || {
-            let worker = preparation.enter();
-            assert_ne!(worker.status().method, ScheduleMethod::Unavailable);
-        })
-        .join()
-        .unwrap();
-        assert_eq!(
-            (
+        for callback in [64, 512] {
+            let playing = AudioSchedule::new(48_000, callback, None);
+            let original = (
                 playing.inner.period,
                 playing.inner.period_ns,
                 playing.inner.producer_computation,
                 playing.inner.producer_constraint,
                 playing.inner.producer_computation_ns,
-                playing.inner.producer_constraint_ns
-            ),
-            original
-        );
-        std::thread::spawn(move || {
-            let producer = playing.enter_producer();
-            assert_ne!(producer.status().method, ScheduleMethod::Unavailable);
-            assert!(mac::verify_constraint(original.0, original.2, original.3).is_ok());
-        })
-        .join()
-        .unwrap();
+                playing.inner.producer_constraint_ns,
+            );
+            let preparation = playing.preparation();
+            assert_eq!(
+                preparation.period_ns(),
+                if callback == 64 {
+                    10_666_666
+                } else {
+                    21_333_332
+                }
+            );
+            assert!(preparation.inner.computation_ns > playing.inner.computation_ns);
+            assert_ne!(preparation.inner.id, playing.inner.id);
+            std::thread::spawn(move || {
+                let worker = preparation.enter();
+                assert_ne!(worker.status().method, ScheduleMethod::Unavailable);
+            })
+            .join()
+            .unwrap();
+            assert_eq!(
+                (
+                    playing.inner.period,
+                    playing.inner.period_ns,
+                    playing.inner.producer_computation,
+                    playing.inner.producer_constraint,
+                    playing.inner.producer_computation_ns,
+                    playing.inner.producer_constraint_ns
+                ),
+                original
+            );
+            std::thread::spawn(move || {
+                let producer = playing.enter_producer();
+                assert_ne!(producer.status().method, ScheduleMethod::Unavailable);
+                assert!(mac::verify_constraint(original.0, original.2, original.3).is_ok());
+            })
+            .join()
+            .unwrap();
+        }
     }
 }
