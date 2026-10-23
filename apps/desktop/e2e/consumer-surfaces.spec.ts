@@ -1,38 +1,6 @@
-import { execFile } from 'node:child_process';
 import type { Page } from 'playwright';
-import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import { promisify } from 'node:util';
-import { test, expect, repoRoot } from './helpers/app';
-
-const exec = promisify(execFile);
-// Frozen before the consumer rewrite: this viewer has no Library render callback.
-const FROZEN_VIEWER = '8d772dac8';
-
-async function installFrozenViewer(userData: string): Promise<void> {
-  const prefix = 'apps/desktop/src/extensions/viewer/';
-  const gitRoot = path.resolve(repoRoot, '../..');
-  const { stdout } = await exec('git', ['ls-tree', '-r', '--name-only', FROZEN_VIEWER, '--', prefix], { cwd: gitRoot });
-  const root = path.join(userData, 'extensions', 'consumer-viewer-fork');
-  // Publish the whole fork at once; the loader must never see a manifest
-  // while its source tree is only partly copied.
-  const staging = await mkdtemp(path.join(userData, 'consumer-viewer-'));
-  try {
-    for (const file of stdout.trim().split('\n').filter(file => !file.endsWith('.test.ts'))) {
-      const { stdout: source } = await exec('git', ['show', `${FROZEN_VIEWER}:${file}`], { cwd: gitRoot, maxBuffer: 4 * 1024 * 1024 });
-      const destination = path.join(staging, file.slice(prefix.length));
-      await mkdir(path.dirname(destination), { recursive: true });
-      await writeFile(destination, source);
-    }
-    const { stdout: manifest } = await exec('git', ['show', `${FROZEN_VIEWER}:${prefix}manifest.json`], { cwd: gitRoot });
-    const parsed = JSON.parse(manifest);
-    await writeFile(path.join(staging, 'manifest.json'), JSON.stringify({ ...parsed, id: 'consumer-viewer-fork', replaces: ['viewer'], forkedFrom: `viewer@${parsed.version}` }));
-    await mkdir(path.dirname(root), { recursive: true });
-    await rename(staging, root);
-  } finally {
-    await rm(staging, { recursive: true, force: true });
-  }
-}
+import { test, expect } from './helpers/app';
+import { VIEWER_VARIANTS, useViewer } from './helpers/viewer-fork';
 
 async function clearViewerHover(page: Page): Promise<void> {
   const outside = await page.evaluate(() => {
@@ -52,15 +20,12 @@ const LAYER = { left: 40, top: 30, right: 160, bottom: 110 };
 const ZOOM = 2;
 const PAN: [number, number] = [-30, 16];
 
-for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
-  test(`Library viewer card at 200% with a selection in ${theme}, ${frozen ? 'frozen fork' : 'current viewer'}`, async ({ session }, testInfo) => {
+for (const theme of ['light', 'dark']) for (const variant of VIEWER_VARIANTS) {
+  test(`Library viewer card at 200% with a selection in ${theme}, ${variant.name}`, async ({ session }, testInfo) => {
     await session.openEditor();
     const { page } = session;
     const engine = await page.evaluate(() => !!(window as any).PM.EngineRender);
-    if (frozen) {
-      await installFrozenViewer(session.userData);
-      await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds().includes('consumer-viewer-fork')), { timeout: 30_000 }).toBe(true);
-    }
+    await useViewer(page, session.userData, variant);
     await page.evaluate(({ theme, zoom, pan, comp, layer }) => {
       const PM = (window as any).PM;
       PM.theme.apply(theme);
@@ -96,16 +61,18 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
           hash = Math.imul(hash ^ data[index]!, 16777619) >>> 0;
           if (index % 4 === 3 && data[index]) visible = true;
         }
-        if (!engine) return { hash, visible, picture: true };
-        const native = stage.querySelector<HTMLCanvasElement>('#engine-present');
+        /* The composition on screen: the engine's presentation (at the stage
+           for the current viewer, over a fork's own canvas inside
+           stage-inner), or today's WebGL canvas with the engine off. */
+        const native = engine ? stage.querySelector<HTMLCanvasElement>('#engine-present') : inner.querySelector<HTMLCanvasElement>(':scope > #gl');
         if (!native || getComputedStyle(native).visibility !== 'visible') return { hash, visible, picture: false };
         const copy = document.createElement('canvas'); copy.width = native.width; copy.height = native.height;
         const ctx = copy.getContext('2d')!;
         ctx.drawImage(native, 0, 0);
-        const css = native.getBoundingClientRect();
+        const css = native.getBoundingClientRect(), innerBox = inner.getBoundingClientRect();
         const pixel = (x: number, y: number) => {
-          const sx = Math.floor((parseFloat(inner.style.left) + x * zoom) * copy.width / css.width);
-          const sy = Math.floor((parseFloat(inner.style.top) + y * zoom) * copy.height / css.height);
+          const sx = Math.floor((innerBox.left + x * zoom - css.left) * copy.width / css.width);
+          const sy = Math.floor((innerBox.top + y * zoom - css.top) * copy.height / css.height);
           return Array.from(ctx.getImageData(sx, sy, 1, 1).data);
         };
         const inside = pixel(layer.left + 3, layer.top + 20);
@@ -121,10 +88,14 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
     }, { engine, layer: LAYER, zoom: ZOOM });
     await expect.poll(stableViewer, { timeout: 10_000 }).toBe(true);
 
-    /* The live viewer's geometry, overlay, and native bitmap from its DOM. */
-    const live = () => page.evaluate(() => {
+    /* The live viewer's geometry, overlay, and composition bitmap from its
+       DOM. The picture canvas is the engine's presentation with the engine
+       on (at the stage for the current viewer, over a fork's own canvas
+       inside stage-inner), and today's WebGL canvas with it off. */
+    const live = () => page.evaluate(({ engine, layer, zoom }) => {
       const PM = (window as any).PM;
       const panel = PM.panelInst.viewer.el as HTMLElement;
+      const stage = panel.querySelector<HTMLElement>('#stage')!;
       const inner = panel.querySelector<HTMLElement>('#stage-inner')!;
       const overlay = panel.querySelector<HTMLCanvasElement>('#overlay')!;
       const hashCanvas = (canvas: HTMLCanvasElement) => {
@@ -133,43 +104,58 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
         for (let index = 0; index < data.length; index++) hash = Math.imul(hash ^ data[index]!, 16777619) >>> 0;
         return hash;
       };
-      const native = panel.querySelector<HTMLCanvasElement>('#engine-present');
+      const stageBox = stage.getBoundingClientRect(), innerBox = inner.getBoundingClientRect();
+      /* The selection outline on the overlay as drawn now: the first painted
+         pixel within 3 CSS px of the layer's left edge, on a row clear of the
+         handles (stage CSS px; null when none is drawn there). */
+      const overlayBox = overlay.getBoundingClientRect();
+      const density = overlay.width / overlayBox.width;
+      const edge = innerBox.left - overlayBox.left + layer.left * zoom;
+      const row = innerBox.top - overlayBox.top + (layer.top + 20) * zoom;
+      const rowData = overlay.getContext('2d')!.getImageData(0, Math.round(row * density), overlay.width, 1).data;
+      let outline: number | null = null;
+      for (let x = Math.floor((edge - 3) * density); x <= Math.ceil((edge + 3) * density); x++) {
+        if (x >= 0 && x < overlay.width && rowData[x * 4 + 3]! > 0) { outline = x / density; break; }
+      }
+      const native = engine ? stage.querySelector<HTMLCanvasElement>('#engine-present') : inner.querySelector<HTMLCanvasElement>(':scope > #gl');
       let present = null;
       if (native && getComputedStyle(native).visibility === 'visible') {
         const bitmap = document.createElement('canvas'); bitmap.width = native.width; bitmap.height = native.height;
         bitmap.getContext('2d')!.drawImage(native, 0, 0);
-        const css = getComputedStyle(native);
-        present = { width: native.width, height: native.height, css: [css.width, css.height], hash: hashCanvas(bitmap) };
+        const css = getComputedStyle(native), box = native.getBoundingClientRect();
+        present = {
+          width: native.width, height: native.height, css: [css.width, css.height], hash: hashCanvas(bitmap),
+          parent: native.parentElement?.id,
+          // Where it sits in the stage, in stage CSS px.
+          offset: [box.left - stageBox.left, box.top - stageBox.top],
+        };
       }
       return {
         inner: [inner.style.left, inner.style.top, inner.style.width, inner.style.height],
         overlay: { width: overlay.width, height: overlay.height, css: [overlay.style.width, overlay.style.height], parent: overlay.parentElement?.id, hash: hashCanvas(overlay) },
+        outline: outline === null ? null : Math.round((outline - edge) * density),
         present,
         zoom: PM.Kernel.services.get('viewer').shown,
       };
-    });
+    }, { engine, layer: LAYER, zoom: ZOOM });
     if (engine) await expect(page.locator('#panel-viewer #engine-present')).toHaveCSS('visibility', 'visible');
+    if (engine && variant.ref) {
+      // A fork's presentation runs in the presentation worker, as the
+      // built-in viewer's does: its page canvas is a transferred placeholder.
+      expect(await page.evaluate(() => {
+        const native = document.querySelector<HTMLCanvasElement>('#panel-viewer #engine-present')!;
+        try { native.getContext('2d'); return 'page'; } catch { return 'worker'; }
+      })).toBe('worker');
+    }
     const liveArtifact = testInfo.outputPath('viewer-live.png');
     await page.locator('#panel-viewer #stage').screenshot({ path: liveArtifact });
     await testInfo.attach('Live viewer', { path: liveArtifact, contentType: 'image/png' });
-    if (engine) {
-      // Record whether a paused presentation canvas can be cloned directly.
-      // The readback is diagnostic; the card assertions below remain unchanged.
-      const readback = await page.evaluate(() => {
-        const source = document.querySelector<HTMLCanvasElement>('#panel-viewer #engine-present')!;
-        const copy = document.createElement('canvas'); copy.width = source.width; copy.height = source.height;
-        try {
-          copy.getContext('2d')!.drawImage(source, 0, 0);
-          return { png: copy.toDataURL(), error: null };
-        } catch (error) { return { png: null, error: String(error) }; }
-      });
-      if (readback.png) await testInfo.attach('Native canvas copy', { body: Buffer.from(readback.png.split(',')[1]!, 'base64'), contentType: 'image/png' });
-      else await testInfo.attach('Native canvas copy error', { body: readback.error ?? 'No readback', contentType: 'text/plain' });
-    }
-    /* Compare two fresh drawings of the overlay. Chromium can move a 2D canvas
-       that is read back (the samples above) to another rasterizer, and a
-       presented engine frame redraws the overlay, so an old drawing and a
-       new one of the same state can differ in edge coverage alone. */
+    /* Hashes compare two fresh drawings of the overlay. Chromium can move a
+       2D canvas that is read back (the samples above) to another rasterizer,
+       and a presented engine frame redraws the overlay, so an old drawing and
+       a new one of the same state can differ in edge coverage alone. The
+       drawing kept while the Library opens is checked by its outline
+       position before the redraw. */
     const redrawOverlay = () => page.evaluate(() => new Promise<void>(resolve => {
       (window as any).PM.bus.emit('overlay');
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
@@ -183,6 +169,8 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
     expect(before.zoom).toBe(ZOOM);
     expect(before.inner[2]).toBe(`${COMP.w * ZOOM}px`);
     expect(before.inner[3]).toBe(`${COMP.h * ZOOM}px`);
+    expect(before.present).not.toBeNull();
+    expect(before.outline).not.toBeNull();
 
     await page.evaluate(() => (window as any).PM.LibraryUI.open());
     const card = page.locator('.library-card[data-panel-id="viewer"]');
@@ -194,18 +182,25 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
     await clearViewerHover(page);
     await page.evaluate(() => document.fonts.ready);
     await expect.poll(stableViewer, { timeout: 10_000 }).toBe(true);
-    // The live viewer kept its zoom, pan and overlay while the Library opened.
+    // The live viewer kept its overlay while the Library opened: the drawing
+    // it holds now has the outline where the fresh one before had it.
+    const kept = await live();
+    await attachOverlay('Live overlay kept with the Library open');
+    expect(kept.outline).not.toBeNull();
+    expect(Math.abs(kept.outline! - before.outline!)).toBeLessThanOrEqual(1);
+    expect({ ...kept, overlay: { ...kept.overlay, hash: 0 }, outline: 0 }).toEqual({ ...before, overlay: { ...before.overlay, hash: 0 }, outline: 0 });
+    // And its zoom, pan, picture and overlay are today's, pixel for pixel.
     await redrawOverlay();
     const after = await live();
     await attachOverlay('Live overlay with the Library open');
     expect(after).toEqual(before);
 
-    const clone = await card.evaluate((cardElement, { layer, zoom }) => {
+    const clone = await card.evaluate((cardElement, { engine, layer, zoom, comp }) => {
       const root = cardElement.querySelector<HTMLElement>('.library-clone')!;
       const stage = root.querySelector<HTMLElement>('[data-library-source-id="stage"]')!;
       const inner = root.querySelector<HTMLElement>('[data-library-source-id="stage-inner"]')!;
       const overlay = root.querySelector<HTMLCanvasElement>('[data-library-source-id="overlay"]')!;
-      const present = root.querySelector<HTMLCanvasElement>('canvas[data-library-source-id="engine-present"]');
+      const present = root.querySelector<HTMLCanvasElement>(engine ? 'canvas[data-library-source-id="engine-present"]' : 'canvas[data-library-source-id="gl"]');
       const data = overlay.getContext('2d')!.getImageData(0, 0, overlay.width, overlay.height).data;
       let hash = 2166136261;
       for (let index = 0; index < data.length; index++) hash = Math.imul(hash ^ data[index]!, 16777619) >>> 0;
@@ -220,10 +215,13 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
       for (let x = Math.floor((edge - 3) * density); x <= Math.ceil((edge + 3) * density); x++) {
         if (x >= 0 && x < overlay.width && rowData[x * 4 + 3]! > 0) { outline = x / density; break; }
       }
+      const innerBox = inner.getBoundingClientRect();
+      /* A composition point on a copied canvas, through the card's boxes
+         (the card scales the whole clone). */
       const pixel = (canvas: HTMLCanvasElement, compX: number, compY: number) => {
-        const cssWidth = parseFloat(canvas.style.width), cssHeight = parseFloat(canvas.style.height);
-        const x = Math.floor((parseFloat(inner.style.left) + compX * zoom) * canvas.width / cssWidth);
-        const y = Math.floor((parseFloat(inner.style.top) + compY * zoom) * canvas.height / cssHeight);
+        const r = canvas.getBoundingClientRect();
+        const x = Math.floor((innerBox.left + compX / comp.w * innerBox.width - r.left) * canvas.width / r.width);
+        const y = Math.floor((innerBox.top + compY / comp.h * innerBox.height - r.top) * canvas.height / r.height);
         return Array.from(canvas.getContext('2d')!.getImageData(x, y, 1, 1).data);
       };
       const hashCanvas = (canvas: HTMLCanvasElement) => {
@@ -239,8 +237,9 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
         presentBox: present && box(present),
         present: present && {
           width: present.width, height: present.height,
-          css: [present.style.width, present.style.height],
+          css: [getComputedStyle(present).width, getComputedStyle(present).height],
           hash: hashCanvas(present),
+          parent: present.parentElement?.dataset.librarySourceId,
           visibility: getComputedStyle(present).visibility,
           inside: pixel(present, layer.left + 3, layer.top + 20),
           outside: pixel(present, layer.left - 3, layer.top + 20),
@@ -248,7 +247,7 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
         },
         edge, outline,
       };
-    }, { layer: LAYER, zoom: ZOOM });
+    }, { engine, layer: LAYER, zoom: ZOOM, comp: COMP });
 
     // No refit: the clone's stage-inner is the live one, and the copied overlay is the live overlay, pixel for pixel.
     expect(clone.inner).toEqual(after.inner);
@@ -257,32 +256,34 @@ for (const theme of ['light', 'dark']) for (const frozen of [false, true]) {
     // The selection outline sits on the layer's left edge in stage coordinates.
     expect(clone.outline).not.toBeNull();
     expect(Math.abs(clone.outline! - clone.edge)).toBeLessThanOrEqual(3);
-    if (engine) {
-      const present = clone.present!;
-      expect(present).not.toBeNull();
-      expect(present.visibility).toBe('visible');
-      expect({ width: present.width, height: present.height, css: present.css, hash: present.hash }).toEqual(after.present);
-      // Stage-level presentation pixels retain the source stage's CSS box,
-      // even though the Library card itself has a different fixed size.
-      expect(clone.presentBox!.left).toBeCloseTo(clone.stage.left, 1);
-      expect(clone.presentBox!.top).toBeCloseTo(clone.stage.top, 1);
-      const cardScale = clone.innerBox.width / (COMP.w * ZOOM);
-      expect(clone.presentBox!.width).toBeCloseTo(parseFloat(after.present!.css[0]) * cardScale, 1);
-      expect(clone.presentBox!.height).toBeCloseTo(parseFloat(after.present!.css[1]) * cardScale, 1);
-      // Picture and selected outline agree at the live zoom and pan.
-      expect(present.inside[2]).toBeGreaterThan(180);
-      expect(present.inside[0]).toBeLessThan(80);
-      expect(present.outside[0] + present.outside[1] + present.outside[2]).toBeLessThan(60);
-      expect(present.center[2]).toBeGreaterThan(180);
-      // The layer is visible in the card, not cropped away.
-      const scale = clone.innerBox.width / (COMP.w * ZOOM);
-      const point = { x: clone.innerBox.left + (LAYER.left + LAYER.right) / 2 * ZOOM * scale, y: clone.innerBox.top + (LAYER.top + LAYER.bottom) / 2 * ZOOM * scale };
-      for (const bounds of [clone.stage, clone.frameBox] as Box[]) {
-        expect(point.x).toBeGreaterThan(bounds.left);
-        expect(point.x).toBeLessThan(bounds.left + bounds.width);
-        expect(point.y).toBeGreaterThan(bounds.top);
-        expect(point.y).toBeLessThan(bounds.top + bounds.height);
-      }
+    // The composition is in the card, with the engine on or off and for
+    // every viewer: the live picture, pixel for pixel, where the live viewer
+    // shows it.
+    const present = clone.present!;
+    expect(present).not.toBeNull();
+    expect(present.visibility).toBe('visible');
+    const shown = after.present!;
+    expect({ width: present.width, height: present.height, css: present.css, hash: present.hash, parent: present.parent })
+      .toEqual({ width: shown.width, height: shown.height, css: shown.css, hash: shown.hash, parent: shown.parent });
+    // The picture keeps its place in the source stage's CSS box, even though
+    // the Library card itself has a different fixed size.
+    const cardScale = clone.innerBox.width / (COMP.w * ZOOM);
+    expect(clone.presentBox!.left - clone.stage.left).toBeCloseTo(shown.offset[0]! * cardScale, 1);
+    expect(clone.presentBox!.top - clone.stage.top).toBeCloseTo(shown.offset[1]! * cardScale, 1);
+    expect(clone.presentBox!.width).toBeCloseTo(parseFloat(shown.css[0]!) * cardScale, 1);
+    expect(clone.presentBox!.height).toBeCloseTo(parseFloat(shown.css[1]!) * cardScale, 1);
+    // Picture and selected outline agree at the live zoom and pan.
+    expect(present.inside[2]).toBeGreaterThan(180);
+    expect(present.inside[0]).toBeLessThan(80);
+    expect(present.outside[0]! + present.outside[1]! + present.outside[2]!).toBeLessThan(60);
+    expect(present.center[2]).toBeGreaterThan(180);
+    // The layer is visible in the card, not cropped away.
+    const point = { x: clone.innerBox.left + (LAYER.left + LAYER.right) / 2 * ZOOM * cardScale, y: clone.innerBox.top + (LAYER.top + LAYER.bottom) / 2 * ZOOM * cardScale };
+    for (const bounds of [clone.stage, clone.frameBox] as Box[]) {
+      expect(point.x).toBeGreaterThan(bounds.left);
+      expect(point.x).toBeLessThan(bounds.left + bounds.width);
+      expect(point.y).toBeGreaterThan(bounds.top);
+      expect(point.y).toBeLessThan(bounds.top + bounds.height);
     }
     const artifact = testInfo.outputPath('library.png');
     await card.screenshot({ path: artifact });
