@@ -34,22 +34,25 @@ use pm_engine::Action;
 use pm_engine::engine::testing::hello;
 use pm_node::EngineHost;
 use pm_node::present::{BRIDGE_ENV, HOST_CLOCK_ENV, SOURCE_ENV};
-use pm_protocol::clock::{TransportCommand, TransportState};
+use pm_protocol::clock::{SeekMode, TransportCommand, TransportState};
 use pm_protocol::codec;
 use pm_protocol::color::{ProjectColor, ViewerColorSpace};
 use pm_protocol::common::{
-    Bytes, ContentHash, PlaybackRate, RequestId, Revision, Seq, SessionId, Size, Ticks,
+    Bytes, ContentHash, PlaybackRate, Rect, RequestId, Revision, Seq, SessionId, Size, Ticks,
 };
 use pm_protocol::envelope::{
     Envelope, Event, Message, OpenSession, Request, Response, SessionRole,
 };
 use pm_protocol::error::{EngineProcess, ErrorCode};
-use pm_protocol::frame::{FrameRelease, MediaPreference, PreviewResolution, ViewerState};
+use pm_protocol::frame::{
+    EditorCamera, FrameRelease, MediaPreference, PreviewResolution, Projection, Shading3d,
+    ViewOverride, ViewerCanvas, ViewerState,
+};
 use pm_protocol::host::PortId;
 use pm_protocol::patch::{DocumentEncoding, Resync, ResyncSource};
 use pm_protocol::snapshot::{
     HostSnapshot, PixelPayload, SnapshotClass, SnapshotOutcome, SnapshotPixels, SnapshotRequest,
-    SnapshotResult, SnapshotTarget,
+    SnapshotResult, SnapshotTarget, SnapshotViewer,
 };
 use pm_protocol::version::PeerRole;
 use serde_json::{Value, json};
@@ -114,6 +117,16 @@ fn run_child_with(child: &str, envs: &[(&str, &str)]) -> String {
 #[test]
 fn snapshots_render_the_session_document_at_its_revision() {
     run_child("child_snapshots");
+}
+
+#[test]
+fn viewer_snapshots_render_the_pinned_canvas_without_changing_the_live_view() {
+    run_child("child_viewer_snapshot");
+}
+
+#[test]
+fn viewer_snapshots_apply_the_pinned_editor_camera_and_local_view() {
+    run_child("child_viewer_camera_snapshot");
 }
 
 #[test]
@@ -432,6 +445,7 @@ fn frame_request(
         pixels,
         class,
         view_seq: Some(Seq::new(4).unwrap()),
+        viewer: None,
         wait_ms,
         blender_wait_ms: 0,
         captions_hidden: false,
@@ -778,6 +792,184 @@ fn child_snapshots() {
     // Six frames and three layer rasters.
     assert_eq!(presenter["snapshots"], 9, "{presenter}");
     assert_eq!(presenter["snapshotShared"], 2, "{presenter}");
+    println!("CHILD-OK");
+}
+
+#[test]
+#[ignore = "run by viewer_snapshots_render_the_pinned_canvas_without_changing_the_live_view"]
+fn child_viewer_snapshot() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    c.resync(2, 1, &project(100.0));
+    c.event(Event::Viewer(viewer_state()));
+    let initial = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::Frame(d),
+            } if port == WINDOW => Some(d.clone()),
+            _ => None,
+        });
+    assert_eq!(initial.view_seq, Seq::new(1).unwrap());
+    c.event(Event::ReleaseFrame(FrameRelease {
+        pool_index: initial.pool_index,
+        seq: initial.seq,
+    }));
+    let mut pinned = frame_request(
+        SnapshotClass::Sync,
+        Size::new(320, 180),
+        SnapshotPixels::Opaque,
+        5_000,
+    );
+    pinned.view_seq = None;
+    pinned.viewer = Some(SnapshotViewer {
+        view: None,
+        canvas: ViewerCanvas {
+            width: 320,
+            height: 180,
+            crop: Rect {
+                x: 80.0,
+                y: 40.0,
+                width: 160.0,
+                height: 90.0,
+            },
+            css: Rect {
+                x: 17.0,
+                y: 23.0,
+                width: 640.0,
+                height: 360.0,
+            },
+        },
+        view_seq: Seq::new(5).unwrap(),
+    });
+    c.snapshot(50, pinned, Some(1), WINDOW, c.session);
+    let pinned = rendered(c.inbox.wait(Duration::from_secs(20), answer(50)));
+    assert_eq!(pinned.view_seq, Some(Seq::new(5).unwrap()));
+    assert_eq!((pinned.width, pinned.height), (320, 180));
+    let pixels = pixels_of(&pinned);
+    assert_eq!(at(&pixels, 320, 80, 60), BOX);
+    assert_eq!(at(&pixels, 320, 0, 0), BACKGROUND);
+
+    // A later live frame still belongs to the original viewer state.
+    c.event(Event::Transport(TransportCommand::Seek {
+        time: Ticks::from_whole_seconds(1),
+        mode: SeekMode::Exact,
+    }));
+    let later = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::Frame(d),
+            } if port == WINDOW && d.seq != initial.seq => Some(d.clone()),
+            _ => None,
+        });
+    assert_eq!(later.view_seq, Seq::new(1).unwrap());
+    c.event(Event::ReleaseFrame(FrameRelease {
+        pool_index: later.pool_index,
+        seq: later.seq,
+    }));
+
+    // The next ordinary capture still uses the full composition and its
+    // legacy sequence.
+    c.snapshot(
+        51,
+        frame_request(
+            SnapshotClass::Sync,
+            Size::new(320, 180),
+            SnapshotPixels::Opaque,
+            5_000,
+        ),
+        Some(1),
+        WINDOW,
+        c.session,
+    );
+    let ordinary = rendered(c.inbox.wait(Duration::from_secs(20), answer(51)));
+    assert_eq!(ordinary.view_seq, Some(Seq::new(4).unwrap()));
+    let pixels = pixels_of(&ordinary);
+    assert_eq!(at(&pixels, 320, 120, 70), BOX);
+    assert_eq!(at(&pixels, 320, 80, 60), BACKGROUND);
+    println!("CHILD-OK");
+}
+
+#[test]
+#[ignore = "run by viewer_snapshots_apply_the_pinned_editor_camera_and_local_view"]
+fn child_viewer_camera_snapshot() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    c.resync(2, 1, &blender_project());
+    let size = Size::new(320, 180);
+    let mut capture = frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000);
+    capture.target = SnapshotTarget::Frame {
+        motion_blur_samples: 0,
+        background: true,
+        draft_3d: true,
+    };
+    capture.view_seq = None;
+    capture.viewer = Some(SnapshotViewer {
+        view: Some(ViewOverride {
+            camera: None,
+            shading: Shading3d::Solid,
+            xray: false,
+            local_view: vec![],
+        }),
+        canvas: ViewerCanvas {
+            width: size.width,
+            height: size.height,
+            crop: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+            css: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+        },
+        view_seq: Seq::new(7).unwrap(),
+    });
+    c.snapshot(60, capture.clone(), Some(1), WINDOW, c.session);
+    let default = rendered(c.inbox.wait(Duration::from_secs(20), answer(60)));
+    assert_eq!(default.view_seq, Some(Seq::new(7).unwrap()));
+    let default_pixels = pixels_of(&default);
+
+    let selected = capture.viewer.as_mut().unwrap();
+    selected.view_seq = Seq::new(8).unwrap();
+    selected.view.as_mut().unwrap().camera = Some(EditorCamera {
+        view: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -10.0, 1.0,
+        ],
+        projection: Projection::Orthographic {
+            half_height: 0.6,
+            near: 0.01,
+            far: 100.0,
+        },
+    });
+    c.snapshot(61, capture.clone(), Some(1), WINDOW, c.session);
+    let editor = rendered(c.inbox.wait(Duration::from_secs(20), answer(61)));
+    assert_eq!(editor.view_seq, Some(Seq::new(8).unwrap()));
+    assert_ne!(
+        pixels_of(&editor),
+        default_pixels,
+        "the editor camera changes the frame"
+    );
+
+    let selected = capture.viewer.as_mut().unwrap();
+    selected.view_seq = Seq::new(9).unwrap();
+    selected.view.as_mut().unwrap().local_view = vec!["cam".into()];
+    c.snapshot(62, capture, Some(1), WINDOW, c.session);
+    let local = rendered(c.inbox.wait(Duration::from_secs(20), answer(62)));
+    assert_ne!(
+        pixels_of(&local),
+        pixels_of(&editor),
+        "Local View hides the object"
+    );
     println!("CHILD-OK");
 }
 

@@ -5,6 +5,7 @@ import type { Size } from "./Size";
 import type { SnapshotClass } from "./SnapshotClass";
 import type { SnapshotPixels } from "./SnapshotPixels";
 import type { SnapshotTarget } from "./SnapshotTarget";
+import type { SnapshotViewer } from "./SnapshotViewer";
 import type { Ticks } from "./Ticks";
 
 /**
@@ -21,6 +22,11 @@ outputSize: Size, target: SnapshotTarget, pixels: SnapshotPixels, class: Snapsho
  * the result so a consumer can tie it to what was on screen.
  */
 viewSeq: Seq | null, 
+/**
+ * A frozen viewer's original canvas and preview view. When present,
+ * render that canvas before its CSS box is scaled into the stage.
+ */
+viewer?: SnapshotViewer | null, 
 /**
  * Longest the engine waits for the envelope's revision and for its
  * turn before it answers `timeout` (milliseconds, 1 to

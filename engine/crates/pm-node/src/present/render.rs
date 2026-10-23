@@ -5457,7 +5457,12 @@ impl Thread {
         costs.1 = costs.1.max(render_us);
         let result = SnapshotResult {
             revision,
-            view_seq: job.request.view_seq,
+            view_seq: job
+                .request
+                .viewer
+                .as_ref()
+                .map(|v| v.view_seq)
+                .or(job.request.view_seq),
             width,
             height,
             pixels: job.request.pixels,
@@ -5530,10 +5535,37 @@ impl Thread {
         // Today's capture of a Blender composition draws Blender's surfaces
         // for its frame, never native shading labelled final; native
         // shading is only for `draft3d` captures (thumbnails, posters).
-        let needs_blender = !draft_3d
+        let needs_blender = job.request.viewer.is_none()
+            && !draft_3d
             && pm_render::unsupported(doc.document(), job.request.composition.as_str())
                 .iter()
                 .any(|u| u.feature == pm_render::Feature::Blender);
+        let viewer_grid = if let Some(viewer) = &job.request.viewer {
+            let comp =
+                match pm_eval::Comp::resolve(doc.document(), job.request.composition.as_str()) {
+                    Ok(comp) => comp,
+                    Err(_) => {
+                        self.stats().snapshot_failures += 1;
+                        self.snapshot_error(
+                            &job,
+                            ErrorCode::InvalidMessage,
+                            "The viewer snapshot has no composition.",
+                        );
+                        return;
+                    }
+                };
+            let number = |key: &str| {
+                let v = pm_eval::node::to_number(comp.member(key));
+                if v.is_finite() && v > 0.0 { v } else { 1.0 }
+            };
+            Some(super::compose::canvas_render_grid(
+                &viewer.canvas,
+                number("w"),
+                number("h"),
+            ))
+        } else {
+            None
+        };
         let (composer, readback, snapshot_target) =
             gpu.composer_and_snapshot_resources(&self.config, self.frame_cache);
         // The session's definitions, without consuming the re-registrations
@@ -5556,22 +5588,46 @@ impl Thread {
             output_size: job.request.output_size,
             // Today's capture derives the scale from the composition size
             // (`W / comp.w`, `H / comp.h`).
-            scale: None,
+            scale: viewer_grid.and_then(|grid| grid.0),
             region: None,
             precision: pm_protocol::color::Precision::Float16,
             depth_id: false,
-            background,
-            export: purpose == pm_protocol::frame::FramePurpose::Export,
-            view: None,
-            blender: pm_render::blender::BlenderRender::Native,
-            motion_blur: if motion_blur == 0 {
+            background: if job.request.viewer.is_some() {
+                true
+            } else {
+                background
+            },
+            export: job.request.viewer.is_none()
+                && purpose == pm_protocol::frame::FramePurpose::Export,
+            view: job.request.viewer.as_ref().and_then(|v| v.view.clone()),
+            blender: job
+                .request
+                .viewer
+                .as_ref()
+                .and_then(|v| {
+                    let view = v.view.as_ref()?;
+                    super::blender::blender_shading(Some(view))?;
+                    Some(pm_render::blender::BlenderRender::Preview(
+                        self.blender.as_ref()?.host(view),
+                    ))
+                })
+                .unwrap_or(pm_render::blender::BlenderRender::Native),
+            motion_blur: if job.request.viewer.is_some() {
+                pm_render::motion::MotionBlur::Kind(
+                    pm_protocol::frame::MotionBlurKind::PreviewPaused,
+                )
+            } else if motion_blur == 0 {
                 pm_render::motion::MotionBlur::Off
             } else {
                 pm_render::motion::MotionBlur::Samples(motion_blur)
             },
             sampling: pm_render::sampling::Sampling::Final,
-            video_end: pm_render::VideoEnd::of(purpose),
-            origin: None,
+            video_end: if job.request.viewer.is_some() {
+                pm_render::VideoEnd::Preview
+            } else {
+                pm_render::VideoEnd::of(purpose)
+            },
+            origin: viewer_grid.and_then(|grid| grid.1),
         };
         if needs_blender {
             match blender_frames(renderer, doc, &job, &request, self.blender.as_deref()) {

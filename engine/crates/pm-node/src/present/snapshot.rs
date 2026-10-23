@@ -627,6 +627,7 @@ mod tests {
                 pixels: SnapshotPixels::Opaque,
                 class,
                 view_seq: None,
+                viewer: None,
                 wait_ms: 1_000,
                 blender_wait_ms: 0,
                 captions_hidden: false,

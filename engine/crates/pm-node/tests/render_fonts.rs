@@ -311,6 +311,7 @@ mod child {
                         pixels,
                         class: SnapshotClass::Sync,
                         view_seq: None,
+                        viewer: None,
                         wait_ms: 20_000,
                         blender_wait_ms: 0,
                         captions_hidden: false,
