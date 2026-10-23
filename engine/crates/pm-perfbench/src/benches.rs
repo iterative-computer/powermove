@@ -48,6 +48,36 @@ impl Default for Ctx {
 /// A bench: its name and how to run it.
 pub type Bench = (&'static str, fn(&Ctx) -> BenchReport);
 
+/// The correlation set (docs/engine/perfbench.md, "Correlation"): the
+/// workloads at several sizes and with the viewer's reuse on and off, so
+/// every counter moves across them.
+pub fn correlation() -> Vec<(String, Box<dyn Fn(&Ctx) -> BenchReport>)> {
+    let mut out: Vec<(String, Box<dyn Fn(&Ctx) -> BenchReport>)> = Vec::new();
+    for layers in [125usize, 250, 500, 1000] {
+        let n = format!("playback_{layers}");
+        out.push((n.clone(), Box::new(move |c| playback(c, &n, layers, 60))));
+    }
+    for layers in [250usize, 500, 1000] {
+        for reuse in [true, false] {
+            let n = format!("drag_{layers}_{}", if reuse { "reuse" } else { "noreuse" });
+            out.push((n.clone(), Box::new(move |c| drag(c, &n, layers, 40, reuse))));
+        }
+    }
+    for layers in [100usize, 500] {
+        let n = format!("export_{layers}");
+        out.push((n.clone(), Box::new(move |c| export(c, &n, layers, 30))));
+    }
+    for vertices in [150_000usize, 600_000] {
+        let n = format!("import_3d_{vertices}");
+        out.push((n.clone(), Box::new(move |c| import_3d(c, &n, vertices))));
+    }
+    out.push(("edit_playback_500".into(), Box::new(edit_playback_500)));
+    out.push(("scrub_24".into(), Box::new(scrub_24)));
+    out.push(("typing_60".into(), Box::new(typing_60)));
+    out.push(("open_large_2000".into(), Box::new(open_large_2000)));
+    out
+}
+
 /// Every bench, in report order.
 pub fn all() -> Vec<Bench> {
     vec![
@@ -239,7 +269,13 @@ fn leaf_set(index: usize, path: &[&str], value: pm_model::Value) -> pm_model::Pa
 
 /// Playback: 120 consecutive frames of the 500-layer synthetic project.
 pub fn playback_500(ctx: &Ctx) -> BenchReport {
-    let f = fixtures::synthetic(Synthetic::new(500));
+    playback(ctx, "playback_500", 500, 120)
+}
+
+/// Playback of `frames` consecutive frames of the `layers`-layer synthetic
+/// project (after two warm-up frames).
+pub fn playback(ctx: &Ctx, name: &str, layers: usize, frames: u32) -> BenchReport {
+    let f = fixtures::synthetic(Synthetic::new(layers));
     let mut v = Viewer::new(ctx, &f.doc, &f.media);
     v.composer.set_playing(true);
     let fps = 30.0;
@@ -247,23 +283,31 @@ pub fn playback_500(ctx: &Ctx) -> BenchReport {
         v.frame(ticks(f64::from(k) / fps));
     }
     let scope = Scope::begin();
-    let wall = (2..122)
+    let wall = (2..2 + frames)
         .map(|k| v.frame(ticks(f64::from(k) / fps)))
         .collect();
-    report("playback_500", "frames", &scope, wall, f.summary.clone())
+    report(name, "frames", &scope, wall, f.summary.clone())
 }
 
 /// A layer drag, paused: 60 moves of one solid, each a new revision drawn
 /// at the same time (the D6 row).
 pub fn drag_500(ctx: &Ctx) -> BenchReport {
-    let f = fixtures::synthetic(Synthetic::new(500));
+    drag(ctx, "drag_500", 500, 60, true)
+}
+
+/// `moves` moves of the 150th solid of the `layers`-layer synthetic
+/// project; `reuse`: the viewer's draw reuse and frame prefix (on in the
+/// app).
+pub fn drag(ctx: &Ctx, name: &str, layers: usize, moves: u32, reuse: bool) -> BenchReport {
+    let f = fixtures::synthetic(Synthetic::new(layers));
     let layer = nth_solid(&f.doc, 150);
     let mut v = Viewer::new(ctx, &f.doc, &f.media);
+    v.composer.set_draw_reuse(reuse);
     let at = ticks(1.0);
     v.frame(at);
     v.frame(at);
     let scope = Scope::begin();
-    let wall = (0..60)
+    let wall = (0..moves)
         .map(|k| {
             v.patch(vec![
                 leaf_set(
@@ -281,11 +325,11 @@ pub fn drag_500(ctx: &Ctx) -> BenchReport {
         })
         .collect();
     report(
-        "drag_500",
+        name,
         "moves",
         &scope,
         wall,
-        json!({ "fixture": f.summary, "layer": layer }),
+        json!({ "fixture": f.summary, "layer": layer, "reuse": reuse }),
     )
 }
 
@@ -343,6 +387,11 @@ pub fn scrub_24(ctx: &Ctx) -> BenchReport {
 /// Export: 120 frames of the 500-layer synthetic project to H.264 at
 /// 1920 × 1080 (VideoToolbox; the file is written and removed).
 pub fn export_120(ctx: &Ctx) -> BenchReport {
+    export(ctx, "export_120", 500, 120)
+}
+
+/// Export of `frames` frames of the `layers`-layer synthetic project.
+pub fn export(ctx: &Ctx, name: &str, layers: usize, frames: u32) -> BenchReport {
     use pm_export::render::*;
     use pm_export::*;
     use pm_protocol::color::{OutputColor, Precision, QuickTimeTag};
@@ -350,7 +399,7 @@ pub fn export_120(ctx: &Ctx) -> BenchReport {
     use pm_protocol::priority::{
         AlphaOutput as WireAlpha, ExportFormat, ExportSettings, QualityTier,
     };
-    let f = fixtures::synthetic(Synthetic::new(500));
+    let f = fixtures::synthetic(Synthetic::new(layers));
     let dir = fixtures::TempDir::new("export");
     let mut media = MediaPaths::default();
     for (k, p) in &f.media {
@@ -367,7 +416,7 @@ pub fn export_120(ctx: &Ctx) -> BenchReport {
             frame_rate: FrameRate::new(30, 1),
             range: TickRange {
                 start: Ticks::ZERO,
-                end: ticks(4.0),
+                end: ticks(f64::from(frames) / 30.0),
             },
             audio: false,
             motion_blur: false,
@@ -409,13 +458,13 @@ pub fn export_120(ctx: &Ctx) -> BenchReport {
     drop(delivered);
     let total = start.elapsed().as_secs_f64() * 1e3;
     BenchReport {
-        name: "export_120".into(),
-        units: 120,
+        name: name.into(),
+        units: frames,
         unit: "frames",
         counters,
         global,
         // Per frame on average: progress reports are not one per frame.
-        wall_ms: vec![total / 120.0; 120],
+        wall_ms: vec![total / f64::from(frames); frames as usize],
         notes: json!({ "fixture": f.summary, "size": "1920x1080", "format": "h264", "progress_reports": stamps.len() }),
     }
 }
@@ -542,9 +591,15 @@ pub fn open_large_2000(ctx: &Ctx) -> BenchReport {
 /// Importing a 600,000-vertex model: the first frame of a 3D scene that
 /// places it (parse, upload, shadow pass), then 10 frames turning it.
 pub fn import_3d_600k(ctx: &Ctx) -> BenchReport {
+    import_3d(ctx, "import_3d_600k", 600_000)
+}
+
+/// The first frame of a scene placing a `vertices`-vertex model, then 10
+/// frames turning it.
+pub fn import_3d(ctx: &Ctx, name: &str, vertices: usize) -> BenchReport {
     let dir = fixtures::TempDir::new("model");
     let path = dir.path().join("model.glb");
-    fixtures::write_glb(&path, 600_000);
+    fixtures::write_glb(&path, vertices);
     let doc = fixtures::model_doc();
     let media = std::collections::BTreeMap::from([("model".to_owned(), path)]);
     let mut v = Viewer::new(ctx, &doc, &media);
@@ -553,10 +608,10 @@ pub fn import_3d_600k(ctx: &Ctx) -> BenchReport {
         .map(|k| v.frame(ticks(f64::from(k) / 30.0)))
         .collect();
     report(
-        "import_3d_600k",
+        name,
         "frames",
         &scope,
         wall,
-        json!({ "vertices": 600_000, "first": "import" }),
+        json!({ "vertices": vertices, "first": "import" }),
     )
 }

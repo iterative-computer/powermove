@@ -336,8 +336,10 @@ pub fn alloc_counting_installed() -> bool {
     ALLOC_INSTALLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Counts one heap allocation of `bytes` on this thread: what
+/// [`CountingAlloc`] does, for allocators that wrap their own (profilers).
 #[inline]
-fn count_alloc(bytes: usize) {
+pub fn count_alloc(bytes: usize) {
     add(Counter::HeapAllocs, 1);
     add(Counter::HeapAllocBytes, bytes as u64);
     let _ = INSTALLED.try_with(|i| {
