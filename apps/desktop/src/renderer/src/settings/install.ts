@@ -9,10 +9,9 @@ import type { PMRegistry } from '../legacy/registry';
 import { viewerService } from '../legacy/core/services';
 import type { CompositionPatch, ProjectSettingsBridge } from '../legacy/ui/project-settings';
 import SettingsScreen from './SettingsScreen.svelte';
+import type { SettingsPage } from './pages';
 import { writeDocument } from '../engine-doc/write';
 import { applyProjectColor, projectColorSettings } from './project-color';
-
-type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'project';
 
 function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
   return {
