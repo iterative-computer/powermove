@@ -118,6 +118,58 @@ fn canvas_bytes(frame: &WorkingFrame) -> Vec<u8> {
     out
 }
 
+/// The GPU encoder receives the whole texture; verification only reads the
+/// nine small, aligned blocks. Each block begins and ends on a 2×2 chroma
+/// boundary, so converting its crop yields exactly the same I420 samples as
+/// converting the entire frame before sampling that block.
+fn cropped_verification_blocks(
+    frame: &WorkingFrame,
+    index: u64,
+) -> Result<Vec<BlockSample>, Error> {
+    let regions = verify::block_regions(frame.width, frame.height);
+    // WebM validates even frame dimensions. Keep the original full-frame
+    // conversion if a malformed frame or future block placement crosses a
+    // 2×2 chroma boundary.
+    if !frame.width.is_multiple_of(2)
+        || !frame.height.is_multiple_of(2)
+        || frame.rgba.len() != frame.width as usize * frame.height as usize * 4
+        || regions.iter().any(|r| {
+            !r.x.is_multiple_of(2)
+                || !r.y.is_multiple_of(2)
+                || !r.width.is_multiple_of(2)
+                || !r.height.is_multiple_of(2)
+        })
+    {
+        let rgba = canvas_bytes(frame);
+        let input = crate::webm::canvas_rgba_to_i420(&rgba, frame.width, frame.height, false)?;
+        return Ok(verify::block_means(&input, index));
+    }
+    let mut blocks = Vec::new();
+    for region in regions {
+        let mut crop = Vec::with_capacity(region.width as usize * region.height as usize * 4);
+        for y in region.y..region.y + region.height {
+            let start = ((y as usize * frame.width as usize) + region.x as usize) * 4;
+            crop.extend_from_slice(&frame.rgba[start..start + region.width as usize * 4]);
+        }
+        let cropped = WorkingFrame {
+            width: region.width,
+            height: region.height,
+            rgba: &crop,
+        };
+        let rgba = canvas_bytes(&cropped);
+        let input = crate::webm::canvas_rgba_to_i420(&rgba, region.width, region.height, false)?;
+        // A region is at most 16×16, so its own grid has exactly one block.
+        let mut block = verify::block_means(&input, index)
+            .into_iter()
+            .next()
+            .expect("a nonempty verification crop has one block");
+        block.x = region.x;
+        block.y = region.y;
+        blocks.push(block);
+    }
+    Ok(blocks)
+}
+
 /// The sink: renders go to the host's encoders, then the file is verified.
 pub struct WebCodecsSink {
     host: Box<dyn EncodeHost>,
@@ -188,9 +240,8 @@ impl Sink for WebCodecsSink {
         if self.sampled.contains(&index) {
             let frame =
                 frame.ok_or_else(|| Error::InvalidFrame("missing verification sample".into()))?;
-            let rgba = canvas_bytes(frame);
-            let input = crate::webm::canvas_rgba_to_i420(&rgba, frame.width, frame.height, false)?;
-            self.blocks.extend(verify::block_means(&input, index));
+            self.blocks
+                .extend(cropped_verification_blocks(frame, index)?);
         }
         // The GPU input capture is read from Chromium's actual encoder canvas,
         // not a parallel CPU conversion of the working frame.
@@ -376,6 +427,53 @@ mod tests {
             height: 8,
         };
         assert_eq!(canvas_bytes(&frame), crate::render::to_rgba8(&rgba));
+    }
+
+    #[test]
+    fn cropped_gpu_verification_matches_full_canvas_i420_blocks_exactly() {
+        // 2×2 has one block, 50×18 has an odd count of three, 18×34
+        // deduplicates placements, and the larger rectangles cover nine.
+        for (width, height, count) in [
+            (2, 2, 1),
+            (18, 34, 2),
+            (50, 18, 3),
+            (48, 70, 9),
+            (96, 64, 9),
+        ] {
+            let values = [
+                -0.25f32,
+                0.0,
+                0.5 / 255.0,
+                0.5,
+                127.5 / 255.0,
+                1.0,
+                1.25,
+                f32::NAN,
+            ];
+            let rgba: Vec<f32> = (0..width * height)
+                .flat_map(|i| {
+                    let x = i % width;
+                    let y = i / width;
+                    [
+                        values[((x * 3 + y * 5) as usize) % values.len()],
+                        values[((x * 7 + y * 11 + 3) as usize) % values.len()],
+                        values[((x * 13 + y * 17 + 5) as usize) % values.len()],
+                        [0.0, 0.125, 0.5, 1.0][((x + y * 3) % 4) as usize],
+                    ]
+                })
+                .collect();
+            let frame = WorkingFrame {
+                width,
+                height,
+                rgba: &rgba,
+            };
+            let full = canvas_bytes(&frame);
+            let full = crate::webm::canvas_rgba_to_i420(&full, width, height, false).unwrap();
+            let expected = verify::block_means(&full, 7);
+            assert_eq!(expected.len(), count, "{width}×{height} grid");
+            let actual = cropped_verification_blocks(&frame, 7).unwrap();
+            assert_eq!(actual, expected, "{width}×{height}");
+        }
     }
 
     #[test]

@@ -79,10 +79,7 @@ pub enum EncodeStep {
     /// Frame `index`: top-down RGBA8, `width × height × 4` bytes,
     /// premultiplied and over black where the picture is transparent (the
     /// compositor canvas's bytes).
-    Video {
-        index: Count,
-        pixels: PixelPayload,
-    },
+    Video { index: Count, pixels: PixelPayload },
     /// A completed BGRA8 IOSurface from the job engine's authenticated
     /// export bridge. Five slots rotate with at most four earlier window
     /// commands unanswered; before a slot is reused, Chromium has completed
@@ -93,9 +90,7 @@ pub enum EncodeStep {
         pool_index: u32,
     },
     /// The next interleaved little-endian `f32` samples of the mix.
-    Audio {
-        samples: Bytes,
-    },
+    Audio { samples: Bytes },
     /// Flushes the encoders, muxes, and writes the output.
     Finish,
     /// Abandons the encode; nothing is written.
@@ -252,7 +247,11 @@ mod tests {
     fn gpu_surface_steps_validate_and_round_trip() {
         let surface = |generation, pool_index| HostEncode {
             job: JobId::from("job-1"),
-            step: EncodeStep::VideoSurface { index: Count::new(12).unwrap(), generation, pool_index },
+            step: EncodeStep::VideoSurface {
+                index: Count::new(12).unwrap(),
+                generation,
+                pool_index,
+            },
         };
         assert!(surface(17, 4).validate().is_ok());
         assert!(surface(0, 0).validate().is_err());

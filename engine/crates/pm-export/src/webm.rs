@@ -1154,12 +1154,24 @@ pub fn verify_webm(
     })
 }
 
-/// Decodes the sampled frames: seek to the keyframe before each, decode up to it.
+/// Decodes the sampled frames. Nearby samples share the decoder cursor; distant
+/// samples seek to a keyframe so verification stays bounded for long exports.
 fn decode_sampled(
     fmt: *mut ff::AVFormatContext,
     vst: *mut ff::AVStream,
     spec: &ExportSpec,
     alpha: bool,
+) -> Result<Vec<(u64, EncoderInput)>, Error> {
+    let key_interval = (2.0 * spec.rate.to_f64()).round().max(1.0) as u64;
+    decode_sampled_with_gap(fmt, vst, spec, alpha, key_interval)
+}
+
+fn decode_sampled_with_gap(
+    fmt: *mut ff::AVFormatContext,
+    vst: *mut ff::AVStream,
+    spec: &ExportSpec,
+    alpha: bool,
+    max_sequential_gap: u64,
 ) -> Result<Vec<(u64, EncoderInput)>, Error> {
     let name = match spec.codec {
         Codec::Vp9 { .. } => "libvpx-vp9",
@@ -1172,58 +1184,70 @@ fn decode_sampled(
     let mut frame = unsafe { ff::av_frame_alloc() };
     let mut out = vec![];
     let result = (|| -> Result<(), Error> {
+        let mut previous = None;
+        let mut eof = false;
         for n in verify::sampled_frames(spec.frames) {
             let target = unsafe { ff::av_rescale_q(n as i64, codec_tb, vtb) };
-            unsafe {
-                check(
-                    "seek",
-                    ff::av_seek_frame(fmt, vindex, target, ff::AVSEEK_FLAG_BACKWARD as c_int),
-                )
-                .map_err(|e| Error::Verify(e.to_string()))?;
-                ff::avcodec_flush_buffers(dec.0);
+            if previous.is_none_or(|p: u64| n - p > max_sequential_gap) {
+                unsafe {
+                    check(
+                        "seek",
+                        ff::av_seek_frame(fmt, vindex, target, ff::AVSEEK_FLAG_BACKWARD as c_int),
+                    )
+                    .map_err(|e| Error::Verify(e.to_string()))?;
+                    ff::avcodec_flush_buffers(dec.0);
+                }
+                eof = false;
             }
             let mut found = None;
-            let mut eof = false;
             while found.is_none() {
                 unsafe {
-                    let sent = if eof {
-                        ff::avcodec_send_packet(dec.0, ptr::null_mut())
-                    } else if ff::av_read_frame(fmt, packet) >= 0 {
+                    // A packet can yield more than one frame. Drain pending
+                    // output before feeding the next packet, including after
+                    // the previous sampled frame ended this loop early.
+                    let r = ff::avcodec_receive_frame(dec.0, frame);
+                    if r == 0 {
+                        if (*frame).best_effort_timestamp == target {
+                            found = Some(frame_input(&*frame, alpha)?);
+                        }
+                        continue;
+                    }
+                    if r == ff::AVERROR_EOF || eof && r == -EAGAIN {
+                        return Err(Error::Verify(format!("frame {n} is missing")));
+                    }
+                    if r != -EAGAIN {
+                        check("decode", r).map_err(|e| Error::Verify(e.to_string()))?;
+                    }
+                    let sent = loop {
+                        let read = ff::av_read_frame(fmt, packet);
+                        if read < 0 {
+                            if read != ff::AVERROR_EOF {
+                                return Err(Error::Verify(format!(
+                                    "read frame {n}: {}",
+                                    pm_media::ff::err_str(read)
+                                )));
+                            }
+                            eof = true;
+                            break ff::avcodec_send_packet(dec.0, ptr::null_mut());
+                        }
                         if (*packet).stream_index != vindex {
                             ff::av_packet_unref(packet);
                             continue;
                         }
-                        let r = ff::avcodec_send_packet(dec.0, packet);
+                        let sent = ff::avcodec_send_packet(dec.0, packet);
                         ff::av_packet_unref(packet);
-                        r
-                    } else {
-                        eof = true;
-                        ff::avcodec_send_packet(dec.0, ptr::null_mut())
+                        break sent;
                     };
-                    if sent < 0 && sent != ff::AVERROR_EOF {
+                    if sent < 0 {
                         return Err(Error::Verify(format!(
                             "decode frame {n}: {}",
                             pm_media::ff::err_str(sent)
                         )));
                     }
-                    loop {
-                        let r = ff::avcodec_receive_frame(dec.0, frame);
-                        if r == -EAGAIN {
-                            break;
-                        }
-                        if r == ff::AVERROR_EOF {
-                            return Err(Error::Verify(format!("frame {n} is missing")));
-                        }
-                        check("decode", r).map_err(|e| Error::Verify(e.to_string()))?;
-                        let pts = (*frame).best_effort_timestamp;
-                        if pts == target {
-                            found = Some(frame_input(&*frame, alpha)?);
-                            break;
-                        }
-                    }
                 }
             }
             out.push((n, found.expect("set above")));
+            previous = Some(n);
         }
         Ok(())
     })();
@@ -1299,5 +1323,181 @@ mod canvas_conversion_tests {
         assert_eq!(input.planes[0].u8().unwrap(), &[100; 4]);
         assert_eq!(input.planes[1].u8().unwrap(), &[126]);
         assert_eq!(input.planes[2].u8().unwrap(), &[203]);
+    }
+}
+
+#[cfg(test)]
+mod sampled_decode_tests {
+    use super::*;
+    use crate::settings::{ColorTags, Dither, WorkingEncoding};
+    use pm_time::Rate;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "pm-webm-samples-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn decoded_samples(
+        path: &Path,
+        spec: &ExportSpec,
+        max_sequential_gap: u64,
+    ) -> Vec<(u64, EncoderInput)> {
+        let p = cstr(&path.to_string_lossy());
+        let input = unsafe {
+            let mut fmt = ptr::null_mut();
+            check(
+                "open test WebM",
+                ff::avformat_open_input(&mut fmt, p.as_ptr(), ptr::null(), ptr::null_mut()),
+            )
+            .unwrap();
+            let input = Demuxer(fmt);
+            check(
+                "read test WebM",
+                ff::avformat_find_stream_info(input.0, ptr::null_mut()),
+            )
+            .unwrap();
+            input
+        };
+        let vst = unsafe {
+            (0..(*input.0).nb_streams as usize)
+                .map(|i| *(*input.0).streams.add(i))
+                .find(|&st| (*(*st).codecpar).codec_type == ff::AVMEDIA_TYPE_VIDEO)
+                .unwrap()
+        };
+        decode_sampled_with_gap(
+            input.0,
+            vst,
+            spec,
+            spec.alpha != AlphaOutput::None,
+            max_sequential_gap,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cursor_reuse_matches_seek_each_sample_for_vp8_vp9_and_alpha() {
+        // At 30 fps the forced keyframe interval is 60 frames. The 60-frame
+        // cases share a GOP, while the 100-frame cases cross the keyframe at 60.
+        let scratch = Scratch::new();
+        for (name, codec, alpha, frames) in [
+            (
+                "vp8",
+                Codec::Vp8 {
+                    bitrate_bps: 2_000_000,
+                },
+                false,
+                60,
+            ),
+            (
+                "vp9-alpha",
+                Codec::Vp9 {
+                    bitrate_bps: 2_000_000,
+                },
+                true,
+                60,
+            ),
+            (
+                "vp8-alpha",
+                Codec::Vp8 {
+                    bitrate_bps: 2_000_000,
+                },
+                true,
+                100,
+            ),
+            (
+                "vp9",
+                Codec::Vp9 {
+                    bitrate_bps: 2_000_000,
+                },
+                false,
+                100,
+            ),
+        ] {
+            let spec = ExportSpec {
+                width: 32,
+                height: 32,
+                rate: Rate::FPS_30,
+                frames,
+                codec,
+                container: Container::Webm,
+                tags: if alpha {
+                    ColorTags::Rec709Broadcast
+                } else {
+                    ColorTags::Rec709QuickTime
+                },
+                alpha: if alpha {
+                    AlphaOutput::Straight
+                } else {
+                    AlphaOutput::None
+                },
+                working: WorkingEncoding::Standard,
+                dither: Dither::Default,
+                audio: None,
+                timecode: None,
+                destination: scratch.0.join(format!("{name}.webm")),
+                overwrite: Overwrite::Fail,
+                mode: None,
+            };
+            let mut sink = WebmSink::new(&spec).unwrap();
+            for n in 0..frames {
+                let mut rgba = Vec::with_capacity((spec.width * spec.height * 4) as usize);
+                for y in 0..spec.height {
+                    for x in 0..spec.width {
+                        let a = if alpha {
+                            ((x + y + n as u32) % 25) as f32 / 24.0
+                        } else {
+                            1.0
+                        };
+                        rgba.extend([
+                            ((x + n as u32) % 32) as f32 / 31.0 * a,
+                            ((y + n as u32) % 32) as f32 / 31.0 * a,
+                            (x ^ y) as f32 / 31.0 * a,
+                            a,
+                        ]);
+                    }
+                }
+                sink.video_rgba(
+                    n,
+                    &WorkingFrame {
+                        width: spec.width,
+                        height: spec.height,
+                        rgba: &rgba,
+                    },
+                )
+                .unwrap();
+            }
+            let delivered = sink.finish().unwrap();
+            let gap = (2.0 * spec.rate.to_f64()).round().max(1.0) as u64;
+            let reused = decoded_samples(&delivered.path, &spec, gap);
+            let sought = decoded_samples(&delivered.path, &spec, 0);
+            assert_eq!(reused, sought, "{name}");
+            assert_eq!(
+                reused.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+                verify::sampled_frames(frames),
+                "{name}"
+            );
+        }
     }
 }

@@ -27,6 +27,17 @@ pub struct BlockSample {
     pub mean: [f64; 4],
 }
 
+/// One of the verification blocks in full-frame, top-down coordinates.
+/// WebCodecs can convert just these pixels without changing the sampled
+/// locations used by the decoded-file check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BlockRegion {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// The frames whose pixels are checked: first, middle, last.
 pub fn sampled_frames(frames: u64) -> Vec<u64> {
     let mut v = vec![0, frames / 2, frames.saturating_sub(1)];
@@ -34,11 +45,10 @@ pub fn sampled_frames(frames: u64) -> Vec<u64> {
     v
 }
 
-/// Block means at a 3 × 3 grid (block corners aligned to 16 pixels).
-pub fn block_means(input: &EncoderInput, frame: u64) -> Vec<BlockSample> {
-    let (w, h) = (input.width, input.height);
-    let size_x = BLOCK.min(w);
-    let size_y = BLOCK.min(h);
+/// The deduplicated 3 × 3 grid, in the same order as the block means.
+pub(crate) fn block_regions(width: u32, height: u32) -> Vec<BlockRegion> {
+    let size_x = BLOCK.min(width);
+    let size_y = BLOCK.min(height);
     let place = |extent: u32, size: u32, i: u32| -> u32 {
         let c = (extent - size) * i / 2;
         (c / BLOCK * BLOCK).min(extent - size)
@@ -46,29 +56,44 @@ pub fn block_means(input: &EncoderInput, frame: u64) -> Vec<BlockSample> {
     let mut out = vec![];
     for j in 0..3 {
         for i in 0..3 {
-            let (x0, y0) = (place(w, size_x, i), place(h, size_y, j));
-            if out.iter().any(|b: &BlockSample| b.x == x0 && b.y == y0) {
+            let (x, y) = (place(width, size_x, i), place(height, size_y, j));
+            if out.iter().any(|b: &BlockRegion| b.x == x && b.y == y) {
                 continue;
             }
+            out.push(BlockRegion {
+                x,
+                y,
+                width: size_x,
+                height: size_y,
+            });
+        }
+    }
+    out
+}
+
+/// Block means at a 3 × 3 grid (block corners aligned to 16 pixels).
+pub fn block_means(input: &EncoderInput, frame: u64) -> Vec<BlockSample> {
+    block_regions(input.width, input.height)
+        .into_iter()
+        .map(|region| {
             let mut sum = [0.0; 4];
-            for y in y0..y0 + size_y {
-                for x in x0..x0 + size_x {
+            for y in region.y..region.y + region.height {
+                for x in region.x..region.x + region.width {
                     let s = sample_ycbcra(input, x as usize, y as usize);
                     for k in 0..4 {
                         sum[k] += s[k];
                     }
                 }
             }
-            let n = (size_x * size_y) as f64;
-            out.push(BlockSample {
+            let n = (region.width * region.height) as f64;
+            BlockSample {
                 frame,
-                x: x0,
-                y: y0,
+                x: region.x,
+                y: region.y,
                 mean: sum.map(|v| v / n),
-            });
-        }
-    }
-    out
+            }
+        })
+        .collect()
 }
 
 /// What the export asked for and handed the encoder.
