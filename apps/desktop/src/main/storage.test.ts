@@ -1025,6 +1025,49 @@ describe('file store', () => {
     expect(recoverProject(slot, journal).name).toBe('After bare');
   });
 
+  it('refuses a slot from a window that does not have the project while its journal is open (model mutant M1)', async () => {
+    const { directory, recovered } = await gapProject();
+    const store = createStore(directory, { writeDelayMs: 0, journalEntryBytes: 4096 });
+    store.setOwnership!(() => 'A');
+    await store.load();
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1), 'A');
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+    // Window B's stored copy lacks A's raw (unjournaled) changes: landing it would undo them under A's next entries.
+    await expect(store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'renamed', f: { one: 1 } } }), 'B')).rejects.toThrow(/open in another window/);
+    await store.appendJournal!('projectJournal.P', named(3, 'two', 2), 'A');
+    await store.flushAll();
+    expect(await recovered()).toMatchObject({ name: 'A', f: { one: 1, two: 2 } });
+    expect(store.failingKeys!()).toEqual([]);
+  });
+
+  it('numbers an entry after a replacement merged a journal that had an entry its disk lacked (model mutant M2)', async () => {
+    const { directory, recovered } = await gapProject();
+    // The first journal write never lands: the stopped worker's rename hangs.
+    let journalRenames = 0;
+    const disk = { ...fs, rename: (async (from: any, to: any) => {
+      if (String(to).endsWith('projectJournal.P.json') && ++journalRenames === 1) return new Promise(() => {});
+      return fs.rename(from, to);
+    }) };
+    const { channel, die, restart } = restartableChannel(disk);
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    // E1 is committed (seq 2) but not on disk when the worker stops; the replacement reads a disk without it.
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1));
+    await tick();
+    die(); restart();
+    await tick();
+    // The replay brings E1 back; the next entry must be numbered after it.
+    await store.appendJournal!('projectJournal.P', named(3, 'two', 2));
+    await store.flushAll();
+    const journal = JSON.parse(await fs.readFile(path.join(directory, 'projectJournal.P.json'), 'utf8'));
+    const seqs = journal.map((item: any) => item.seq);
+    expect(new Set(seqs).size).toBe(seqs.length);
+    expect(seqs).toEqual([...seqs].sort((a: number, b: number) => a - b));
+    expect((await recovered()).f).toEqual({ one: 1, two: 2 });
+    expect(store.failingKeys!()).toEqual([]);
+  });
+
   it('refuses a delete from a window that does not have the project, so its slot and journal stay (review recheck 6, R6e)', async () => {
     const { directory, recovered } = await gapProject();
     let owner: string | null = 'A';
