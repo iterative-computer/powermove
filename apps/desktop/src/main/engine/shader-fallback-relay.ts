@@ -26,11 +26,11 @@ import { isHandle, isSafeUint, ProtocolError } from './protocol';
 
 /** A window's answer (`ENGINE_IPC.shaderFallbackResult`). */
 export type ShaderFallbackResult =
-  | { ok: true; rgba16f: Uint16Array }
+  | { ok: true; rgba16f: Uint16Array; rgba32f?: Float32Array }
   | { ok: false; reason: string; message: string };
 
 /** main → renderer (`ENGINE_IPC.shaderFallback`). */
-export type ShaderFallbackJob = { id: number; request: ShaderFallbackRequest; textures: Uint16Array[] };
+export type ShaderFallbackJob = { id: number; request: ShaderFallbackRequest; textures: (Uint16Array | Float32Array)[] };
 
 export type ShaderFallbackRelayOptions = {
   /** Posts a job to a window; false when the window is gone. */
@@ -60,7 +60,7 @@ export class ShaderFallbackRelay {
 
   /** Runs `request` in a window's runner: the job's owner first, then
    *  any other window, passing over windows that do not acknowledge it. */
-  async run(session: number, request: ShaderFallbackRequest, textures: Uint16Array[]): Promise<ShaderFallbackResult> {
+  async run(session: number, request: ShaderFallbackRequest, textures: (Uint16Array | Float32Array)[]): Promise<ShaderFallbackResult> {
     const windows = this.options.windows();
     const owner = this.options.ownerOf(session);
     const order = owner !== null && windows.includes(owner) ? [owner, ...windows.filter((w) => w !== owner)] : windows;
@@ -120,8 +120,8 @@ export class ShaderFallbackRelay {
       waiting.ack = null;
       return;
     }
-    if (m['ok'] === true && m['rgba16f'] instanceof Uint16Array) {
-      waiting.resolve({ ok: true, rgba16f: m['rgba16f'] });
+    if (m['ok'] === true && m['rgba16f'] instanceof Uint16Array && (m['rgba32f'] === undefined || m['rgba32f'] instanceof Float32Array)) {
+      waiting.resolve({ ok: true, rgba16f: m['rgba16f'], ...(m['rgba32f'] instanceof Float32Array ? { rgba32f: m['rgba32f'] } : {}) });
     } else {
       waiting.resolve({ ok: false, reason: String(m['reason'] ?? 'unavailable'), message: String(m['message'] ?? '').slice(0, 1024) });
     }
@@ -157,7 +157,7 @@ export function fallbackErrorCode(reason: string): 'shaderCompile' | 'watchdogTi
 export async function serveHostFallback(
   body: HostShaderFallback,
   resolveArea: (handle: string) => { kind: CapabilityKind; path: string },
-  run: ((request: ShaderFallbackRequest, textures: Uint16Array[]) => Promise<ShaderFallbackResult>) | null
+  run: ((request: ShaderFallbackRequest, textures: (Uint16Array | Float32Array)[]) => Promise<ShaderFallbackResult>) | null
 ): Promise<void> {
   const { request } = body;
   if (!isHandle(body.area) || !Array.isArray(body.textures) || !body.textures.every(fallbackFileNameOk) || !fallbackFileNameOk(body.output)
@@ -166,11 +166,12 @@ export async function serveHostFallback(
   }
   const area = resolveArea(body.area);
   if (area.kind.kind !== 'cache' || area.kind.cache !== 'scratch') throw new ProtocolError('capabilityRejected', 'fallback files live in the scratch cache area');
-  const bytes = request.width * request.height * 8;
+  const float32 = request.colorDepth === 32;
+  const bytes = request.width * request.height * (float32 ? 16 : 8);
   const textures = await Promise.all(body.textures.map(async (name) => {
     const data = await readFile(path.join(area.path, name));
     if (data.byteLength !== bytes) throw new ProtocolError('invalidMessage', `texture ${name} has ${data.byteLength} bytes, not ${bytes}`);
-    const values = new Uint16Array(bytes / 2);
+    const values = float32 ? new Float32Array(bytes / 4) : new Uint16Array(bytes / 2);
     new Uint8Array(values.buffer).set(data);
     return values;
   }));
@@ -182,6 +183,9 @@ export async function serveHostFallback(
     // runner's own reason (`contextLost`, `deadline`, ...) stays in the message.
     throw new ProtocolError(code, code === 'unsupported' ? `${result.reason}: ${result.message || result.reason}` : result.message || result.reason);
   }
-  if (result.rgba16f.length * 2 !== bytes) throw new ProtocolError('unsupported', 'the runner answered pixels of another size');
-  await writeFile(path.join(area.path, body.output), new Uint8Array(result.rgba16f.buffer, result.rgba16f.byteOffset, result.rgba16f.byteLength), { mode: 0o600 });
+  const values = float32 ? result.rgba32f : result.rgba16f;
+  if (!values || values.byteLength !== bytes || (float32 && result.rgba16f.byteLength !== 0) || (!float32 && result.rgba32f !== undefined)) {
+    throw new ProtocolError('unsupported', 'the runner answered pixels of another size or format');
+  }
+  await writeFile(path.join(area.path, body.output), new Uint8Array(values.buffer, values.byteOffset, values.byteLength), { mode: 0o600 });
 }

@@ -3,7 +3,8 @@ import type { Bytes } from "./Bytes";
 
 /**
  * Rows `row .. row + rows` of a request's result: four u16 slots per
- * pixel, byte codes at depth 8 or binary16 bits otherwise. Little-endian,
+ * pixel, byte codes at depth 8 or binary16 bits at 16. At depth 32,
+ * `rgba16f` is empty and `rgba32f` carries binary32 values. Little-endian,
  * rows in GL order (row 0 at the bottom).
  */
-export type ShaderFallbackPixels = { key: string, width: number, height: number, row: number, rows: number, rgba16f: Bytes, };
+export type ShaderFallbackPixels = { key: string, width: number, height: number, row: number, rows: number, rgba16f: Bytes, rgba32f?: Bytes, };

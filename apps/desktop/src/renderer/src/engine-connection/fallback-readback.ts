@@ -29,7 +29,7 @@ export class FallbackReadback {
   }
 
   /** Called after ready(), with the output framebuffer bound. */
-  async read(width: number, height: number, colorDepth: 8 | 16 = 16): Promise<Uint16Array> {
+  async read(width: number, height: number, colorDepth: 8 | 16 | 32 = 16): Promise<Uint16Array | Float32Array> {
     if (this.disposed || this.active >= CAPACITY) throw new Error('Fallback readback has no free slot');
     const gl = this.gl;
     const half = colorDepth === 16 && this.half();
@@ -66,7 +66,9 @@ export class FallbackReadback {
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, pixels);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       if (gl.getError() !== gl.NO_ERROR) throw new Error('Cannot copy fallback pixel readback');
-      return colorDepth === 8 ? Uint16Array.from(pixels as Uint8Array) : half ? pixels as Uint16Array : toHalfArray(pixels as Float32Array);
+      return colorDepth === 8 ? Uint16Array.from(pixels as Uint8Array)
+        : colorDepth === 32 ? pixels as Float32Array
+        : half ? pixels as Uint16Array : toHalfArray(pixels as Float32Array);
     } finally {
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       if (fence) gl.deleteSync(fence);

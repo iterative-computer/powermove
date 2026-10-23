@@ -140,6 +140,14 @@ impl Parity {
         verdict
     }
 
+    /// Verdict for a shader's source at the working precision used by the
+    /// renderer. Callers with an unscoped GLSL source use this rather than
+    /// reconstructing the storage key; internal callers already holding a
+    /// scoped source can use [`Self::verdict`].
+    pub fn verdict_at_precision(&mut self, source: &str, precision: Precision) -> Verdict {
+        self.verdict(&scoped_source(source, precision))
+    }
+
     /// Diagnostic corpus sweeps exercise every parameter set. Re-probe a
     /// verified program there; a pin is monotonic. Production uses first use.
     pub fn recheck(&mut self, source: &str) {
@@ -227,6 +235,8 @@ impl Parity {
     ) -> Verdict {
         let same = if source.starts_with("working-depth-v1:unorm8\0") {
             matches_rgba8(native, angle)
+        } else if source.starts_with("working-depth-v1:float32\0") {
+            matches_rgba32(native, angle)
         } else {
             matches(native, angle)
         };
@@ -307,6 +317,17 @@ fn matches_rgba8(native: &FallbackPixels, angle: &FallbackPixels) -> bool {
         && native.rgba16f.iter().all(|code| *code <= 255)
 }
 
+fn matches_rgba32(native: &FallbackPixels, angle: &FallbackPixels) -> bool {
+    native.width == angle.width
+        && native.height == angle.height
+        && native.rgba16f.is_empty()
+        && angle.rgba16f.is_empty()
+        && native.rgba32f.as_ref().is_some_and(|bits| {
+            bits.len() == native.width as usize * native.height as usize * 4
+                && angle.rgba32f.as_ref() == Some(bits)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +342,18 @@ mod tests {
         let full = scoped_source(source, Precision::Float32);
         parity.judge(&half, &pixels(0.5), &pixels(0.5));
         assert_eq!(parity.verdict(&half), Verdict::NativeVerified);
+        assert_eq!(
+            parity.verdict_at_precision(source, Precision::Float16),
+            Verdict::NativeVerified
+        );
+        assert_eq!(
+            parity.verdict_at_precision(source, Precision::Unorm8),
+            Verdict::Unknown
+        );
+        assert_eq!(
+            parity.verdict_at_precision(source, Precision::Float32),
+            Verdict::Unknown
+        );
         assert_eq!(parity.verdict(&rgba8), Verdict::Unknown);
         assert_eq!(parity.verdict(&full), Verdict::Unknown);
         parity.pin(&rgba8);
@@ -334,6 +367,7 @@ mod tests {
         parity.configure(Some("byte-parity".into()), None);
         let source = scoped_source("byte probe", Precision::Unorm8);
         let frame = |code| FallbackPixels {
+            rgba32f: None,
             width: 1,
             height: 1,
             rgba16f: vec![code; 4],
@@ -355,8 +389,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rgba32_parity_requires_exact_float_bits() {
+        let mut parity = Parity::default();
+        parity.configure(Some("float32-bits".into()), None);
+        let source = scoped_source("full precision probe", Precision::Float32);
+        let frame = |code| FallbackPixels {
+            rgba32f: Some(vec![code; 4]),
+            width: 1,
+            height: 1,
+            rgba16f: vec![],
+        };
+        assert_eq!(
+            parity.judge(&source, &frame(0x3f80_0008), &frame(0x3f80_0000)),
+            Verdict::Runner
+        );
+        let matching = scoped_source("matching full precision probe", Precision::Float32);
+        assert_eq!(
+            parity.judge(&matching, &frame(0x3f80_0008), &frame(0x3f80_0008)),
+            Verdict::NativeVerified
+        );
+    }
+
     fn pixels(v: f32) -> FallbackPixels {
         FallbackPixels {
+            rgba32f: None,
             width: 1,
             height: 1,
             rgba16f: vec![pm_gpu::readback::f32_to_half(v); 4],
@@ -448,6 +505,7 @@ mod tests {
         assert!(!matches(
             &pixels(0.5),
             &FallbackPixels {
+                rgba32f: None,
                 width: 2,
                 ..pixels(0.5)
             }

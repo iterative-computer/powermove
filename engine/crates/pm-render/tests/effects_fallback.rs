@@ -155,6 +155,7 @@ impl FallbackHost for Cpu {
             })
             .collect();
         Ok(FallbackPixels {
+            rgba32f: None,
             width: r.width,
             height: r.height,
             rgba16f,
@@ -877,6 +878,7 @@ impl FallbackHost for Instant0 {
             .is_none_or(|p| (p.width, p.height) != (r.width, r.height))
         {
             *cached = Some(FallbackPixels {
+                rgba32f: None,
                 width: r.width,
                 height: r.height,
                 rgba16f: vec![0x3800; (r.width * r.height * 4) as usize],
@@ -1004,19 +1006,26 @@ fn parity_probe_presents_angle_then_verifies_or_pins_across_restart() {
     let pixels = r.fallback_textures(&first.key).unwrap()[0].as_ref().clone();
     r.put_fallback_pixels(first.key.clone(), pixels);
     assert_eq!(
-        r.effects_mut().parity.verdict(&code),
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::NativeVerified,
         "the reply is judged immediately, before a paused redraw or a later playback frame"
     );
     let angle_frame = render(&mut r, &doc).unwrap();
     assert_eq!(
-        r.effects_mut().parity.verdict(&code),
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::NativeVerified
     );
     assert_eq!(render(&mut r, &doc).unwrap(), angle_frame);
     let mut restarted = make("version A");
     assert_eq!(
-        restarted.effects_mut().parity.verdict(&code),
+        restarted
+            .effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::NativeVerified
     );
     assert_eq!(render(&mut restarted, &doc).unwrap(), angle_frame);
@@ -1039,7 +1048,10 @@ fn parity_probe_presents_angle_then_verifies_or_pins_across_restart() {
         .unwrap();
     assert_eq!(advancing.read_rgba(&frame).unwrap(), angle_frame);
     assert_eq!(
-        advancing.effects_mut().parity.verdict(&code),
+        advancing
+            .effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::NativeVerified
     );
     // An independent driver/browser generation must be probed again.
@@ -1057,10 +1069,18 @@ fn parity_probe_presents_angle_then_verifies_or_pins_across_restart() {
         pinned_frame, angle_frame,
         "presents ANGLE even on a native discrepancy"
     );
-    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Runner);
+    assert_eq!(
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
+        Verdict::Runner
+    );
     let mut restarted = make("version B");
     assert_eq!(
-        restarted.effects_mut().parity.verdict(&code),
+        restarted
+            .effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::Runner
     );
     assert_eq!(pending(&mut restarted).key, request.key);
@@ -1136,6 +1156,7 @@ fn parity_probe_covers_transitions_and_fragment_layers() {
             other => panic!("{kind} must hold its first frame: {other:?}"),
         };
         let pixels = FallbackPixels {
+            rgba32f: None,
             width: request.width,
             height: request.height,
             rgba16f: (0..request.width * request.height)
@@ -1145,7 +1166,9 @@ fn parity_probe_covers_transitions_and_fragment_layers() {
         r.put_fallback_pixels(request.key, pixels);
         render(&mut r, &doc).unwrap();
         assert_eq!(
-            r.effects_mut().parity.verdict(&code),
+            r.effects_mut()
+                .parity
+                .verdict_at_precision(&code, Precision::Float16),
             Verdict::NativeVerified,
             "{kind}"
         );
@@ -1214,7 +1237,12 @@ fn an_effect_whose_parity_reference_fails_for_good_is_pinned_and_skipped_as_toda
         panic!("the probed frame waits for its reference")
     };
     assert_eq!(r.put_fallback_failure(&q[0].key, refused()), None);
-    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Runner);
+    assert_eq!(
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
+        Verdict::Runner
+    );
     for _ in 0..3 {
         assert_eq!(
             render(&mut r, &doc).unwrap(),
@@ -1233,7 +1261,10 @@ fn an_effect_whose_parity_reference_fails_for_good_is_pinned_and_skipped_as_toda
     assert_eq!(r.fallback_retry_at(), None, "never asked for again");
     let mut restarted = make("refused");
     assert_eq!(
-        restarted.effects_mut().parity.verdict(&code),
+        restarted
+            .effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::Runner,
         "the pin persists"
     );
@@ -1251,7 +1282,12 @@ fn an_effect_whose_parity_reference_fails_for_good_is_pinned_and_skipped_as_toda
     assert_eq!(render(&mut job, &doc).unwrap(), without);
     assert_eq!(render(&mut job, &doc).unwrap(), without);
     assert_eq!(host.seen.lock().unwrap().len(), 1, "not asked for again");
-    assert_eq!(job.effects_mut().parity.verdict(&code), Verdict::Runner);
+    assert_eq!(
+        job.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
+        Verdict::Runner
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1286,7 +1322,12 @@ fn an_effect_whose_parity_reference_fails_transiently_is_retried_with_backoff() 
         r.put_fallback_failure(&q[0].key, lost()),
         Some(std::time::Duration::ZERO)
     );
-    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Unknown);
+    assert_eq!(
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
+        Verdict::Unknown
+    );
     let Err(RenderError::ShaderFallbackPending(again)) = render(&mut r, &doc) else {
         panic!("asked for again at once")
     };
@@ -1305,7 +1346,12 @@ fn an_effect_whose_parity_reference_fails_transiently_is_retried_with_backoff() 
     let reports = r.watchdog_reports(true);
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0].code, ErrorCode::NotHeadlessRenderable);
-    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Unknown);
+    assert_eq!(
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
+        Verdict::Unknown
+    );
     offset.store(250, std::sync::atomic::Ordering::Relaxed);
     let Err(RenderError::ShaderFallbackPending(third)) = render(&mut r, &doc) else {
         panic!("asked for again after the backoff")
@@ -1319,7 +1365,9 @@ fn an_effect_whose_parity_reference_fails_transiently_is_retried_with_backoff() 
     }
     r.put_fallback_pixels(third[0].key.clone(), reference);
     assert_eq!(
-        r.effects_mut().parity.verdict(&code),
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::NativeVerified
     );
     let drawn = render(&mut r, &doc).unwrap();
@@ -1343,7 +1391,12 @@ fn an_effect_whose_parity_reference_fails_transiently_is_retried_with_backoff() 
         }
         other => panic!("expected a named failure, got {:?}", other.map(|_| ())),
     }
-    assert_eq!(job.effects_mut().parity.verdict(&code), Verdict::Unknown);
+    assert_eq!(
+        job.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
+        Verdict::Unknown
+    );
 }
 
 /// A shader layer (and a transition) whose probe reference fails: for
@@ -1375,7 +1428,12 @@ fn a_layer_and_a_transition_whose_parity_reference_fails_follow_the_runner() {
         panic!("the probed layer waits for its reference")
     };
     assert_eq!(r.put_fallback_failure(&q[0].key, refused()), None);
-    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Runner);
+    assert_eq!(
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
+        Verdict::Runner
+    );
     for _ in 0..3 {
         assert_eq!(render(&mut r, &doc).unwrap(), empty, "draws nothing");
     }
@@ -1409,12 +1467,18 @@ fn a_layer_and_a_transition_whose_parity_reference_fails_follow_the_runner() {
         );
     }
     assert_eq!(r.watchdog_reports(true).len(), 1);
-    assert_eq!(r.effects_mut().parity.verdict(&code), Verdict::Unknown);
+    assert_eq!(
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
+        Verdict::Unknown
+    );
     offset.store(250, std::sync::atomic::Ordering::Relaxed);
     let Err(RenderError::ShaderFallbackPending(third)) = render(&mut r, &doc) else {
         panic!("asked for again after the backoff")
     };
     let reference = FallbackPixels {
+        rgba32f: None,
         width: third[0].width,
         height: third[0].height,
         rgba16f: (0..third[0].width * third[0].height)
@@ -1425,7 +1489,9 @@ fn a_layer_and_a_transition_whose_parity_reference_fails_follow_the_runner() {
     let drawn = render(&mut r, &doc).unwrap();
     assert_ne!(drawn, empty);
     assert_eq!(
-        r.effects_mut().parity.verdict(&code),
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::NativeVerified
     );
     assert_eq!(render(&mut r, &doc).unwrap(), drawn);
@@ -1458,7 +1524,12 @@ fn a_layer_and_a_transition_whose_parity_reference_fails_follow_the_runner() {
         panic!("the probed transition waits for its reference")
     };
     assert_eq!(r.put_fallback_failure(&q[0].key, refused()), None);
-    assert_eq!(r.effects_mut().parity.verdict(&fade), Verdict::Runner);
+    assert_eq!(
+        r.effects_mut()
+            .parity
+            .verdict_at_precision(&fade, Precision::Float16),
+        Verdict::Runner
+    );
     render(&mut r, &doc).unwrap();
     render(&mut r, &doc).unwrap();
     let reports = r.watchdog_reports(true);

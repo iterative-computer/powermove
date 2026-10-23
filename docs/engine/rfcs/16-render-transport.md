@@ -261,7 +261,7 @@ answerCompat?(answer: EngineCompatAnswer): void;
 type EngineSnapshotRequest = {
   generation: number; session: number | null; revision: number | null; snapshot: SnapshotRequest;
   document?: { id: string; revision: number; hash?: string | null; json?: Uint8Array | null }; // with session: null
-  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];   // document requests only
+  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array; rgba32f?: Uint8Array }[]; // document requests only; rgba16f empty at depth 32
 };
 type EngineSnapshotReply =
   | { status: 'rendered'; revision; viewSeq; width; height; pixels; data: Uint8Array; origin: [number, number];

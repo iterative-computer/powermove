@@ -15,7 +15,7 @@
 //! The engine describes the draw as a [`FallbackRequest`]: the compositor's
 //! vertex shader, the wrapped fragment program, the target size, and the
 //! uniform calls in issue order (the runner replays them with GL's own type
-//! rules). The runner draws into the project's RGBA8 or RGBA16F target
+//! rules). The runner draws into the project's RGBA8, RGBA16F, or RGBA32F target
 //! cleared to transparent with blending off, reads it back in GL row order (no flip, like the
 //! engine's legacy-GLSL targets), and uploads [`FallbackPixels`]; the
 //! renderer keeps them in its [`FallbackStore`] under the request's key and
@@ -35,6 +35,14 @@ pub use pm_protocol::shader_fallback::{
     ShaderFallbackPixels as FallbackBand, ShaderFallbackRequest as FallbackRequest,
     ShaderFallbackUnit as FallbackUnit,
 };
+
+pub(crate) fn color_depth(precision: pm_protocol::color::Precision) -> u8 {
+    match precision {
+        pm_protocol::color::Precision::Unorm8 => 8,
+        pm_protocol::color::Precision::Float16 => 16,
+        pm_protocol::color::Precision::Float32 => 32,
+    }
+}
 
 /// The runner's form of one uniform call (the shader corpus's format,
 /// `tools/effects/webgl.ts`).
@@ -121,6 +129,23 @@ pub fn halves(bytes: &[u8]) -> Vec<u16> {
         .collect()
 }
 
+/// Binary32 bit patterns as little-endian bytes without rounding or changing
+/// NaN payloads.
+pub fn float_bytes(values: &[u32]) -> Vec<u8> {
+    let mut out = vec![0u8; values.len() * 4];
+    for (dst, bits) in out.chunks_exact_mut(4).zip(values) {
+        dst.copy_from_slice(&bits.to_le_bytes());
+    }
+    out
+}
+
+pub fn float_bits(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
 /// Feeds binary16 values to a hash as their little-endian bytes, a block at
 /// a time (the digest of feeding them one by one).
 fn hash_halves(h: &mut blake3::Hasher, values: &[u16]) {
@@ -129,6 +154,17 @@ fn hash_halves(h: &mut blake3::Hasher, values: &[u16]) {
         let bytes = &mut block[..chunk.len() * 2];
         for (dst, v) in bytes.chunks_exact_mut(2).zip(chunk) {
             dst.copy_from_slice(&v.to_le_bytes());
+        }
+        h.update(&*bytes);
+    }
+}
+
+fn hash_floats(h: &mut blake3::Hasher, values: &[u32]) {
+    let mut block = [0u8; 64 * 1024];
+    for chunk in values.chunks(block.len() / 4) {
+        let bytes = &mut block[..chunk.len() * 4];
+        for (dst, bits) in bytes.chunks_exact_mut(4).zip(chunk) {
+            dst.copy_from_slice(&bits.to_le_bytes());
         }
         h.update(&*bytes);
     }
@@ -159,6 +195,40 @@ fn texture_digest(values: &[u16]) -> [u8; 32] {
                     scope.spawn(move || {
                         let mut h = blake3::Hasher::new();
                         hash_halves(&mut h, part);
+                        *slot = *h.finalize().as_bytes();
+                    });
+                }
+            });
+        }
+        out
+    };
+    let mut h = blake3::Hasher::new();
+    h.update(&(values.len() as u64).to_le_bytes());
+    for d in &digests {
+        h.update(d);
+    }
+    *h.finalize().as_bytes()
+}
+
+fn texture_digest32(values: &[u32]) -> [u8; 32] {
+    let parts: Vec<&[u32]> = values.chunks(PART).collect();
+    let digests: Vec<[u8; 32]> = if parts.len() <= 1 {
+        parts
+            .iter()
+            .map(|p| {
+                let mut h = blake3::Hasher::new();
+                hash_floats(&mut h, p);
+                *h.finalize().as_bytes()
+            })
+            .collect()
+    } else {
+        let mut out = vec![[0u8; 32]; parts.len()];
+        for (group, slots) in parts.chunks(4).zip(out.chunks_mut(4)) {
+            std::thread::scope(|scope| {
+                for (part, slot) in group.iter().zip(slots.iter_mut()) {
+                    scope.spawn(move || {
+                        let mut h = blake3::Hasher::new();
+                        hash_floats(&mut h, part);
                         *slot = *h.finalize().as_bytes();
                     });
                 }
@@ -215,7 +285,13 @@ pub fn request_with_textures(
     for t in textures {
         h.update(&t.width.to_le_bytes());
         h.update(&t.height.to_le_bytes());
-        h.update(&texture_digest(&t.rgba16f));
+        if let Some(bits) = &t.rgba32f {
+            h.update(&[32]);
+            h.update(&texture_digest32(bits));
+        } else {
+            // Preserve the established 8/16-bit request keys and their cached corpus pixels.
+            h.update(&texture_digest(&t.rgba16f));
+        }
     }
     let key = h
         .finalize()
@@ -274,7 +350,7 @@ pub fn program_id(request: &FallbackRequest) -> String {
 /// Splits pixels into row bands that fit a message, at most `max_bytes`
 /// each: `(row, rows, bytes)`.
 pub fn bands(pixels: &FallbackPixels, max_bytes: usize) -> Vec<(u32, u32, Vec<u8>)> {
-    let row_bytes = pixels.width as usize * 8;
+    let row_bytes = pixels.width as usize * if pixels.rgba32f.is_some() { 16 } else { 8 };
     let per = (max_bytes / row_bytes.max(1)).max(1) as u32;
     let mut out = Vec::new();
     let mut row = 0;
@@ -282,7 +358,14 @@ pub fn bands(pixels: &FallbackPixels, max_bytes: usize) -> Vec<(u32, u32, Vec<u8
         let rows = per.min(pixels.height - row);
         let start = row as usize * pixels.width as usize * 4;
         let end = (row + rows) as usize * pixels.width as usize * 4;
-        out.push((row, rows, half_bytes(&pixels.rgba16f[start..end])));
+        out.push((
+            row,
+            rows,
+            match &pixels.rgba32f {
+                Some(bits) => float_bytes(&bits[start..end]),
+                None => half_bytes(&pixels.rgba16f[start..end]),
+            },
+        ));
         row += rows;
     }
     out
@@ -353,38 +436,47 @@ impl Bands {
     /// A band whose size disagrees with earlier ones restarts the request.
     pub fn add(&mut self, band: &FallbackBand) -> Option<(String, FallbackPixels)> {
         let (w, h) = (band.width, band.height);
-        let entry = self.partial.entry(band.key.clone()).or_insert_with(|| {
+        let float32 = band.rgba32f.is_some();
+        let fresh = || {
             (
                 FallbackPixels {
                     width: w,
                     height: h,
-                    rgba16f: vec![0; w as usize * h as usize * 4],
+                    rgba16f: if float32 {
+                        Vec::new()
+                    } else {
+                        vec![0; w as usize * h as usize * 4]
+                    },
+                    rgba32f: float32.then(|| vec![0; w as usize * h as usize * 4]),
                 },
                 vec![false; h as usize],
             )
-        });
-        if entry.0.width != w || entry.0.height != h {
-            *entry = (
-                FallbackPixels {
-                    width: w,
-                    height: h,
-                    rgba16f: vec![0; w as usize * h as usize * 4],
-                },
-                vec![false; h as usize],
-            );
+        };
+        let entry = self
+            .partial
+            .entry(band.key.clone())
+            .or_insert_with(|| fresh());
+        if entry.0.width != w || entry.0.height != h || entry.0.rgba32f.is_some() != float32 {
+            *entry = fresh();
         }
         let row_values = w as usize * 4;
         let start = band.row as usize * row_values;
-        let values = band.rgba16f.0.len() / 2;
+        let values = if float32 {
+            band.rgba32f.as_ref()?.0.len() / 4
+        } else {
+            band.rgba16f.0.len() / 2
+        };
         let end = start + values;
         if band.row + band.rows > h
             || values != band.rows as usize * row_values
-            || end > entry.0.rgba16f.len()
+            || end > w as usize * h as usize * 4
         {
             return None;
         }
-        for (i, pair) in band.rgba16f.0.chunks_exact(2).enumerate() {
-            entry.0.rgba16f[start + i] = u16::from_le_bytes([pair[0], pair[1]]);
+        if let Some(bits) = &mut entry.0.rgba32f {
+            bits[start..end].copy_from_slice(&float_bits(&band.rgba32f.as_ref()?.0));
+        } else {
+            entry.0.rgba16f[start..end].copy_from_slice(&halves(&band.rgba16f.0));
         }
         for r in band.row..band.row + band.rows {
             entry.1[r as usize] = true;
@@ -413,17 +505,18 @@ impl Bands {
 }
 
 /// The runner's result: binary16 bits at depth 16, exact byte codes in u16
-/// slots at depth 8, `width × height × 4` values in GL row order.
+/// slots at depth 8, or binary32 bit patterns at depth 32, in GL row order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FallbackPixels {
     pub width: u32,
     pub height: u32,
     pub rgba16f: Vec<u16>,
+    pub rgba32f: Option<Vec<u32>>,
 }
 
 impl FallbackPixels {
     pub fn bytes(&self) -> u64 {
-        self.rgba16f.len() as u64 * 2
+        self.rgba16f.len() as u64 * 2 + self.rgba32f.as_ref().map_or(0, |v| v.len() as u64 * 4)
     }
 
     /// The first invalid RGBA8 code, if this request carries byte codes in
@@ -437,9 +530,18 @@ impl FallbackPixels {
 
     /// Checks the size against a request.
     pub fn fits(&self, request: &FallbackRequest) -> bool {
+        let channels = u64::from(self.width) * u64::from(self.height) * 4;
         self.width == request.width
             && self.height == request.height
-            && self.rgba16f.len() as u64 == u64::from(self.width) * u64::from(self.height) * 4
+            && if request.color_depth == 32 {
+                self.rgba16f.is_empty()
+                    && self
+                        .rgba32f
+                        .as_ref()
+                        .is_some_and(|bits| bits.len() as u64 == channels)
+            } else {
+                self.rgba32f.is_none() && self.rgba16f.len() as u64 == channels
+            }
             && self.invalid_rgba8_code(request).is_none()
     }
 }
@@ -620,8 +722,94 @@ mod tests {
         assert_ne!(texture_digest(&big[..big.len() - 1]), d);
     }
 
+    #[test]
+    fn float32_bits_survive_wire_bytes_and_partition_texture_keys() {
+        let bits = [0x3f80_0008, 0xc010_0000, 0x38d1_b717, 0x3f80_0000];
+        let bytes = float_bytes(&bits);
+        assert_eq!(float_bits(&bytes), bits);
+        let mut expected = blake3::Hasher::new();
+        expected.update(&bytes);
+        let mut actual = blake3::Hasher::new();
+        hash_floats(&mut actual, &bits);
+        assert_eq!(actual.finalize(), expected.finalize());
+        let f16 = request(
+            "layer".into(),
+            "void main() {}".into(),
+            1,
+            1,
+            &[],
+            &crate::effects::exec::parity_failure(),
+        );
+        let f32 = at_color_depth(&f16, 32);
+        let pixels = FallbackPixels {
+            width: 1,
+            height: 1,
+            rgba16f: vec![],
+            rgba32f: Some(bits.to_vec()),
+        };
+        assert!(pixels.fits(&f32));
+        assert!(!pixels.fits(&f16));
+        assert_ne!(f16.key, f32.key);
+        let mut changed = pixels.clone();
+        changed.rgba32f.as_mut().unwrap()[0] ^= 1;
+        let key = |p: &FallbackPixels| {
+            request_with_textures(
+                "layer".into(),
+                "void main() {}".into(),
+                1,
+                1,
+                &[],
+                vec![],
+                &[p],
+                &crate::effects::exec::parity_failure(),
+            )
+            .key
+        };
+        assert_ne!(key(&pixels), key(&changed));
+
+        let large: Vec<u32> = (0..PART + 1).map(|i| i as u32).collect();
+        let digest = texture_digest32(&large);
+        let mut changed = large.clone();
+        changed[PART] ^= 1;
+        assert_ne!(texture_digest32(&changed), digest);
+    }
+
+    #[test]
+    fn half_texture_request_key_matches_the_legacy_hash() {
+        let pixels = FallbackPixels {
+            width: 1,
+            height: 1,
+            rgba16f: vec![0x3c00, 0, 0, 0x3c00],
+            rgba32f: None,
+        };
+        let fragment = "void main() {}";
+        let request = request_with_textures(
+            "layer".into(),
+            fragment.into(),
+            1,
+            1,
+            &[],
+            vec![],
+            &[&pixels],
+            &crate::effects::exec::parity_failure(),
+        );
+        let mut legacy = blake3::Hasher::new();
+        legacy.update(b"pm-render shader fallback with textures 3\0");
+        legacy.update(pm_glsl::VERTEX.as_bytes());
+        legacy.update(&[0]);
+        legacy.update(fragment.as_bytes());
+        legacy.update(&[0]);
+        legacy.update(&1u32.to_le_bytes());
+        legacy.update(&1u32.to_le_bytes());
+        legacy.update(&pixels.width.to_le_bytes());
+        legacy.update(&pixels.height.to_le_bytes());
+        legacy.update(&texture_digest(&pixels.rgba16f));
+        assert_eq!(request.key, legacy.finalize().to_hex().to_string());
+    }
+
     fn pixels(n: u32) -> FallbackPixels {
         FallbackPixels {
+            rgba32f: None,
             width: n,
             height: 1,
             rgba16f: vec![0; n as usize * 4],
@@ -687,6 +875,7 @@ mod tests {
             row,
             rows,
             rgba16f: pm_protocol::common::Bytes(vec![v; 2 * rows as usize * 8]),
+            rgba32f: None,
         };
         let mut bands = Bands::default();
         assert!(bands.add(&band(2, 1, 3)).is_none());

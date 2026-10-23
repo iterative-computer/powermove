@@ -69,7 +69,7 @@ export interface ShaderFallbackRequest {
   width: number;
   height: number;
   /** 8 stores exact byte codes in the existing Uint16 wire slots. */
-  colorDepth?: 8 | 16;
+  colorDepth?: number;
   calls: FallbackCall[];
   stage: string;
   message: string;
@@ -81,7 +81,8 @@ export interface ShaderFallbackRequest {
 }
 
 /** The runner's answer: binary16 bits or byte codes in u16 slots, GL row order. */
-export interface ShaderFallbackPixels { key: string; width: number; height: number; rgba16f: Uint16Array }
+export interface ShaderFallbackPixels { key: string; width: number; height: number; rgba16f: Uint16Array; rgba32f?: Float32Array }
+export type FallbackTexture = Uint16Array | Float32Array;
 
 export class ShaderFallbackError extends Error {
   constructor(readonly key: string, readonly reason: 'compile' | 'deadline' | 'contextLost' | 'unavailable' | 'size' | 'tooLarge' | 'watchdog', message: string) {
@@ -165,7 +166,7 @@ export class ShaderFallbackRunner {
 
   /** Renders requests one at a time (one context). `textures` are the
    *  request's (binary16 RGBA, GL row order, `width × height × 4` each). */
-  render(request: ShaderFallbackRequest, textures: Uint16Array[] = []): Promise<ShaderFallbackPixels> {
+  render(request: ShaderFallbackRequest, textures: FallbackTexture[] = []): Promise<ShaderFallbackPixels> {
     const attempt = (): Promise<ShaderFallbackPixels> => {
       let submitted!: () => void;
       const gate = new Promise<void>(resolve => { submitted = resolve; });
@@ -193,7 +194,7 @@ export class ShaderFallbackRunner {
    * elapsed draw deadline is checked before delivering pixels. A context lost
    * under it is made again and the request drawn once more, as `render`.
    */
-  renderSync(request: ShaderFallbackRequest, textures: Uint16Array[] = []): ShaderFallbackPixels {
+  renderSync(request: ShaderFallbackRequest, textures: FallbackTexture[] = []): ShaderFallbackPixels {
     try {
       return this.runSync(request, textures);
     } catch (error) {
@@ -412,15 +413,15 @@ export class ShaderFallbackRunner {
     return error;
   }
 
-  private async run(request: ShaderFallbackRequest, textures: Uint16Array[], submitted: () => void): Promise<ShaderFallbackPixels> {
-    const { gl, id } = this.prepare(request, textures);
+  private async run(request: ShaderFallbackRequest, textures: FallbackTexture[], submitted: () => void): Promise<ShaderFallbackPixels> {
+    const { gl, id, colorDepth } = this.prepare(request, textures);
     // Real WebGL2 supports PBO readback. Minimal GL doubles in protocol
     // tests use the same synchronous read pair after their pass fences.
     const readback = typeof gl.getBufferSubData === 'function' ? (this.readback ??= new FallbackReadback(gl)) : null;
     await readback?.ready();
     const program = await this.program(gl, request);
     if (gl !== this.gl || this.lost || gl.isContextLost()) throw this.fail(id, request, 'contextLost', 'the WebGL context was replaced before drawing');
-    const steps = this.draw(gl, program, id, request, textures, readback);
+    const steps = this.draw(gl, program, id, request, textures, colorDepth, readback);
     for (let step = steps.next(); ; step = steps.next()) {
       if (step.done) {
         submitted();
@@ -438,9 +439,9 @@ export class ShaderFallbackRunner {
     }
   }
 
-  private runSync(request: ShaderFallbackRequest, textures: Uint16Array[]): ShaderFallbackPixels {
-    const { gl, id } = this.prepare(request, textures);
-    const steps = this.draw(gl, this.programSync(gl, request), id, request, textures);
+  private runSync(request: ShaderFallbackRequest, textures: FallbackTexture[]): ShaderFallbackPixels {
+    const { gl, id, colorDepth } = this.prepare(request, textures);
+    const steps = this.draw(gl, this.programSync(gl, request), id, request, textures, colorDepth);
     for (let step = steps.next(); ; step = steps.next()) {
       if (step.done) return step.value as ShaderFallbackPixels;
       try {
@@ -453,7 +454,7 @@ export class ShaderFallbackRunner {
   }
 
   /** Checks a request against its textures and the context's limit. */
-  private prepare(request: ShaderFallbackRequest, textures: Uint16Array[]): { gl: GL; id: string } {
+  private prepare(request: ShaderFallbackRequest, textures: FallbackTexture[]): { gl: GL; id: string; colorDepth: 8 | 16 | 32 } {
     const { width, height } = request;
     if (!(Number.isInteger(width) && Number.isInteger(height) && width >= 1 && height >= 1)) {
       throw new ShaderFallbackError(request.key, 'size', `target ${width}×${height} is not a size`);
@@ -464,20 +465,26 @@ export class ShaderFallbackRunner {
     }
     const id = `${request.vertex}\u0000${request.fragment}`;
     const gl = this.context();
-    if (request.colorDepth !== undefined && request.colorDepth !== 8 && request.colorDepth !== 16) {
+    if (request.colorDepth !== undefined && request.colorDepth !== 8 && request.colorDepth !== 16 && request.colorDepth !== 32) {
       throw new ShaderFallbackError(request.key, 'size', `unsupported color depth ${request.colorDepth}`);
     }
     if (request.colorDepth !== 8 && !gl.getExtension('EXT_color_buffer_float')) {
       throw new ShaderFallbackError(request.key, 'unavailable', 'EXT_color_buffer_float is not available');
     }
+    if (request.colorDepth === 32 && !gl.getExtension('OES_texture_float_linear')) {
+      throw new ShaderFallbackError(request.key, 'unavailable', 'OES_texture_float_linear is not available for RGBA32F sampling');
+    }
     if (request.colorDepth === 8 && textures.some(t => t.some(v => v > 255))) {
       throw new ShaderFallbackError(request.key, 'size', 'an RGBA8 input contains a code above 255');
+    }
+    if (textures.some(t => request.colorDepth === 32 ? !(t instanceof Float32Array) : !(t instanceof Uint16Array))) {
+      throw new ShaderFallbackError(request.key, 'size', 'the fallback texture format does not match the requested color depth');
     }
     const max = this.options.maxSize ?? Number(gl.getParameter(gl.MAX_TEXTURE_SIZE));
     if (width > max || height > max) {
       throw new ShaderFallbackError(request.key, 'tooLarge', `target ${width}×${height} is larger than this GPU's ${max} px WebGL texture limit`);
     }
-    return { gl, id };
+    return { gl, id, colorDepth: request.colorDepth ?? 16 };
   }
 
   /**
@@ -487,9 +494,8 @@ export class ShaderFallbackRunner {
    * target is bound again before the read: a synchronous request may run
    * on the context between an asynchronous request's passes.
    */
-  private *draw(gl: GL, p: Program, id: string, request: ShaderFallbackRequest, textures: Uint16Array[], readback: FallbackReadback | null = null): Generator<void, ShaderFallbackPixels | Promise<ShaderFallbackPixels>, void> {
+  private *draw(gl: GL, p: Program, id: string, request: ShaderFallbackRequest, textures: FallbackTexture[], colorDepth: 8 | 16 | 32, readback: FallbackReadback | null = null): Generator<void, ShaderFallbackPixels | Promise<ShaderFallbackPixels>, void> {
     const { width, height } = request;
-    const colorDepth = request.colorDepth === 8 ? 8 : 16;
     const surfaces = this.surfaces!;
     const leases: SurfaceLease[] = [];
     const framebuffers: WebGLFramebuffer[] = [];
@@ -537,14 +543,24 @@ export class ShaderFallbackRunner {
       if (readback) {
         // Enqueues readPixels into its own PBO before returning/yielding.
         // Deleting these textures is safe after the read command is queued.
-        return readback.read(width, height, colorDepth).then(rgba16f => ({ key: request.key, width, height, rgba16f }));
+        return readback.read(width, height, colorDepth).then(values => colorDepth === 32
+          ? { key: request.key, width, height, rgba16f: new Uint16Array(0), rgba32f: values as Float32Array }
+          : { key: request.key, width, height, rgba16f: values as Uint16Array });
       }
       // The target's binary16 values as stored: read as half floats when
       // the implementation reads RGBA16F that way (ANGLE does), else as
       // floats, which convert back exactly.
       const values = width * height * 4;
       let rgba16f: Uint16Array;
-      if (colorDepth === 8) {
+      if (colorDepth === 32) {
+        const rgba32f = new Float32Array(values);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, rgba32f);
+        if (this.lost || gl.isContextLost()) {
+          this.lost = true;
+          throw this.fail(id, request, 'contextLost', 'the WebGL context was lost while the program was drawn');
+        }
+        return { key: request.key, width, height, rgba16f: new Uint16Array(0), rgba32f };
+      } else if (colorDepth === 8) {
         const pixels = new Uint8Array(values);
         gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
         rgba16f = Uint16Array.from(pixels);

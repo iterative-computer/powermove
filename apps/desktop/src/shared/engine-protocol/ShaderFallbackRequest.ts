@@ -5,7 +5,7 @@ import type { ShaderFallbackUnit } from "./ShaderFallbackUnit";
 /**
  * What the runner draws for one layer at one frame: the compositor's vertex
  * shader, the wrapped fragment program, the target size, and the uniform
- * calls, into an RGBA8 or RGBA16F target cleared to transparent with blending off.
+ * calls, into an RGBA8, RGBA16F, or RGBA32F target cleared to transparent with blending off.
  * Textures (when `textures` > 0) share the target's format and size, sampled
  * linear with clamp-to-edge; units not named sample nothing (0, 0, 0, 1).
  */
@@ -17,6 +17,7 @@ key: string, layer: string, vertex: string, fragment: string, width: number, hei
 /**
  * The compositor's color buffer depth. Omitted by older clients (16).
  * At 8, each `rgba16f` wire slot carries an exact byte code 0..255.
+ * At 32, bands use `rgba32f` little-endian IEEE754 bytes.
  */
 colorDepth?: number, calls: Array<ShaderFallbackCall>, 
 /**

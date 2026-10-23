@@ -64,7 +64,7 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
     if (json) plain.document.json = json;
   }
   if (Array.isArray(request?.fallbackPixels)) {
-    plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0) }));
+    plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0), ...(p?.rgba32f !== undefined ? { rgba32f: bytes(p.rgba32f) ?? new Uint8Array(0) } : {}) }));
   }
   if (Array.isArray(request?.svgPixels)) {
     plain.svgPixels = request.svgPixels.map((p) => ({ key: { content: String(p?.key?.content), width: Number(p?.key?.width), height: Number(p?.key?.height) }, data: bytes(p?.data) ?? new Uint8Array(0) }));
@@ -636,13 +636,13 @@ const bridge: PowermoveBridge = {
     // The job engine's fallback requests, run in this window's runner
     // (main/engine/shader-fallback-relay.ts).
     onShaderFallback: (run) => {
-      const handler = (_event: Electron.IpcRendererEvent, job: { id: number; request: never; textures: Uint16Array[] }) => {
+      const handler = (_event: Electron.IpcRendererEvent, job: { id: number; request: never; textures: (Uint16Array | Float32Array)[] }) => {
         // Acknowledged at once: main passes over a window that does not.
         ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, received: true });
         void Promise.resolve()
           .then(() => run({ request: job.request, textures: job.textures }))
           .then(
-            (rgba16f) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, ok: true, rgba16f }),
+            (pixels) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, ok: true, ...pixels }),
             (error: { reason?: unknown; message?: unknown }) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, {
               id: job.id, ok: false, reason: String(error?.reason ?? 'unavailable'), message: String(error?.message ?? error)
             })

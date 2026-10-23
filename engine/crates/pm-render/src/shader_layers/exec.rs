@@ -258,7 +258,7 @@ pub(crate) fn draw_program(
     pass.draw(0..4, 0..1);
 }
 
-/// Uploads runner pixels (RGBA16F, GL row order) as a sampled texture.
+/// Uploads runner pixels at their working depth, in GL row order.
 pub(crate) fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -271,10 +271,10 @@ pub(crate) fn upload(
         "pm shader fallback pixels",
         pixels.width,
         pixels.height,
-        if rgba8 {
-            wgpu::TextureFormat::Rgba8Unorm
-        } else {
-            wgpu::TextureFormat::Rgba16Float
+        match color_depth {
+            8 => wgpu::TextureFormat::Rgba8Unorm,
+            32 => wgpu::TextureFormat::Rgba32Float,
+            _ => wgpu::TextureFormat::Rgba16Float,
         },
         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
     );
@@ -284,6 +284,8 @@ pub(crate) fn upload(
             .iter()
             .map(|code| u8::try_from(*code).expect("RGBA8 fallback code"))
             .collect()
+    } else if color_depth == 32 {
+        super::fallback::float_bytes(pixels.rgba32f.as_ref().expect("RGBA32F fallback bits"))
     } else {
         super::fallback::half_bytes(&pixels.rgba16f)
     };
@@ -292,7 +294,14 @@ pub(crate) fn upload(
         &bytes,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(pixels.width * if rgba8 { 4 } else { 8 }),
+            bytes_per_row: Some(
+                pixels.width
+                    * match color_depth {
+                        8 => 4,
+                        32 => 16,
+                        _ => 8,
+                    },
+            ),
             rows_per_image: Some(pixels.height),
         },
         wgpu::Extent3d {
@@ -342,11 +351,7 @@ impl crate::exec::Exec<'_> {
         if let ProgramRef::Fallback(request) = &source.program {
             let request = super::fallback::at_color_depth(
                 request,
-                if self.precision == pm_protocol::color::Precision::Unorm8 {
-                    8
-                } else {
-                    16
-                },
+                crate::shader_layers::fallback::color_depth(self.precision),
             );
             // A program the runner could not draw draws nothing, as one
             // WebGL refuses, and is reported once (a draw past the
@@ -503,11 +508,7 @@ impl crate::exec::Exec<'_> {
                     &source.calls,
                     &crate::effects::exec::parity_failure(),
                 ),
-                if self.precision == pm_protocol::color::Precision::Unorm8 {
-                    8
-                } else {
-                    16
-                },
+                crate::shader_layers::fallback::color_depth(self.precision),
             ));
             if verdict == crate::effects::parity::Verdict::Unknown {
                 let program = super::fallback::program_id(&request);
@@ -614,11 +615,7 @@ impl crate::exec::Exec<'_> {
                     &source.calls,
                     &failure,
                 ),
-                if self.precision == pm_protocol::color::Precision::Unorm8 {
-                    8
-                } else {
-                    16
-                },
+                crate::shader_layers::fallback::color_depth(self.precision),
             ));
             if self.reject_invalid_fallback_code(&request, &source.layer) {
                 return Err(Missed::Disabled);
@@ -672,11 +669,7 @@ impl crate::exec::Exec<'_> {
                 device,
                 queue,
                 &out,
-                if self.precision == pm_protocol::color::Precision::Unorm8 {
-                    8
-                } else {
-                    16
-                },
+                crate::shader_layers::fallback::color_depth(self.precision),
             ) {
                 Ok(native) => self.effects.parity.start(
                     &request.key,
@@ -820,6 +813,7 @@ mod tests {
         r.put_fallback_pixels(
             request.key.clone(),
             FallbackPixels {
+                rgba32f: None,
                 width: 16,
                 height: 8,
                 rgba16f: px,
@@ -888,6 +882,7 @@ mod tests {
         r.put_fallback_pixels(
             third[0].key.clone(),
             FallbackPixels {
+                rgba32f: None,
                 width: 16,
                 height: 8,
                 rgba16f: px,

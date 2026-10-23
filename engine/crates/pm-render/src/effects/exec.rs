@@ -103,8 +103,7 @@ fn runner_param_calls(params: &[Param], calls: &mut Vec<(String, Call)>) {
     }
 }
 
-/// A target's pixels in GL row order. At color depth 8 each u16 carries an
-/// exact RGBA8 code; at other depths it carries binary16 bits.
+/// A target's pixels in GL row order, preserving the requested working depth.
 pub(crate) fn read_half(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -114,48 +113,69 @@ pub(crate) fn read_half(
     let raw =
         pm_gpu::readback::read_raw(device, queue, &target.texture).map_err(|e| e.to_string())?;
     let code8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u16;
-    let rgba16f: Vec<u16> = match target.format() {
-        wgpu::TextureFormat::Rgba8Unorm => raw
-            .iter()
-            .map(|b| {
-                if color_depth == 8 {
-                    u16::from(*b)
-                } else {
-                    pm_gpu::readback::f32_to_half(f32::from(*b) / 255.0)
-                }
-            })
-            .collect(),
-        wgpu::TextureFormat::Rgba16Float => crate::shader_layers::fallback::halves(&raw)
-            .into_iter()
-            .map(|h| {
-                if color_depth == 8 {
-                    code8(pm_gpu::readback::half_to_f32(h))
-                } else {
-                    h
-                }
-            })
-            .collect(),
-        wgpu::TextureFormat::Rgba32Float => raw
-            .chunks_exact(4)
-            .map(|c| {
-                let value = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                if color_depth == 8 {
-                    code8(value)
-                } else {
-                    pm_gpu::readback::f32_to_half(value)
-                }
-            })
-            .collect(),
-        other => return Err(format!("format {other:?}")),
+    let rgba32f = if color_depth == 32 {
+        Some(match target.format() {
+            wgpu::TextureFormat::Rgba32Float => crate::shader_layers::fallback::float_bits(&raw),
+            wgpu::TextureFormat::Rgba16Float => crate::shader_layers::fallback::halves(&raw)
+                .into_iter()
+                .map(|h| pm_gpu::readback::half_to_f32(h).to_bits())
+                .collect(),
+            wgpu::TextureFormat::Rgba8Unorm => raw
+                .iter()
+                .map(|b| (f32::from(*b) / 255.0).to_bits())
+                .collect(),
+            other => return Err(format!("format {other:?}")),
+        })
+    } else {
+        None
+    };
+    let rgba16f: Vec<u16> = if color_depth == 32 {
+        Vec::new()
+    } else {
+        match target.format() {
+            wgpu::TextureFormat::Rgba8Unorm => raw
+                .iter()
+                .map(|b| {
+                    if color_depth == 8 {
+                        u16::from(*b)
+                    } else {
+                        pm_gpu::readback::f32_to_half(f32::from(*b) / 255.0)
+                    }
+                })
+                .collect(),
+            wgpu::TextureFormat::Rgba16Float => crate::shader_layers::fallback::halves(&raw)
+                .into_iter()
+                .map(|h| {
+                    if color_depth == 8 {
+                        code8(pm_gpu::readback::half_to_f32(h))
+                    } else {
+                        h
+                    }
+                })
+                .collect(),
+            wgpu::TextureFormat::Rgba32Float => raw
+                .chunks_exact(4)
+                .map(|c| {
+                    let value = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                    if color_depth == 8 {
+                        code8(value)
+                    } else {
+                        pm_gpu::readback::f32_to_half(value)
+                    }
+                })
+                .collect(),
+            other => return Err(format!("format {other:?}")),
+        }
     };
     Ok(FallbackPixels {
         width: target.width(),
         height: target.height(),
         rgba16f,
+        rgba32f,
     })
 }
 
-/// Writes the runner's binary16 pixels into a working target (before the
+/// Writes the runner's pixels into a working target (before the
 /// rest of the frame's commands run: they are submitted after it).
 fn write_half(queue: &wgpu::Queue, target: &Target, pixels: &FallbackPixels) {
     let (bytes, texel): (Vec<u8>, u32) = match target.format() {
@@ -168,15 +188,30 @@ fn write_half(queue: &wgpu::Queue, target: &Target, pixels: &FallbackPixels) {
             4,
         ),
         wgpu::TextureFormat::Rgba32Float => (
-            pixels
-                .rgba16f
-                .iter()
-                .flat_map(|h| pm_gpu::readback::half_to_f32(*h).to_le_bytes())
-                .collect(),
+            pixels.rgba32f.as_ref().map_or_else(
+                || {
+                    pixels
+                        .rgba16f
+                        .iter()
+                        .flat_map(|h| pm_gpu::readback::half_to_f32(*h).to_le_bytes())
+                        .collect()
+                },
+                |bits| crate::shader_layers::fallback::float_bytes(bits),
+            ),
             16,
         ),
         _ => (
-            crate::shader_layers::fallback::half_bytes(&pixels.rgba16f),
+            pixels.rgba32f.as_ref().map_or_else(
+                || crate::shader_layers::fallback::half_bytes(&pixels.rgba16f),
+                |bits| {
+                    crate::shader_layers::fallback::half_bytes(
+                        &bits
+                            .iter()
+                            .map(|v| pm_gpu::readback::f32_to_half(f32::from_bits(*v)))
+                            .collect::<Vec<_>>(),
+                    )
+                },
+            ),
             8,
         ),
     };
@@ -856,11 +891,7 @@ impl<'c> Gpu<'c> {
                 device,
                 queue,
                 t,
-                if self.precision == Precision::Unorm8 {
-                    8
-                } else {
-                    16
-                },
+                crate::shader_layers::fallback::color_depth(self.precision),
             ) {
                 Ok(p) => pixels.push(Arc::new(p)),
                 Err(e) => {
@@ -885,11 +916,7 @@ impl<'c> Gpu<'c> {
         );
         let request = crate::shader_layers::fallback::at_color_depth(
             &request,
-            if self.precision == Precision::Unorm8 {
-                8
-            } else {
-                16
-            },
+            crate::shader_layers::fallback::color_depth(self.precision),
         );
         if let Some(native) = native {
             if let Some(probed_frame) = self.effects.parity.take_present(&parity_source) {
@@ -905,11 +932,7 @@ impl<'c> Gpu<'c> {
                     device,
                     queue,
                     native,
-                    if self.precision == Precision::Unorm8 {
-                        8
-                    } else {
-                        16
-                    },
+                    crate::shader_layers::fallback::color_depth(self.precision),
                 ) {
                     Ok(pixels) => self
                         .effects

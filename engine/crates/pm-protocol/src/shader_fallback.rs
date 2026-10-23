@@ -38,7 +38,7 @@ use crate::version::ContractId;
 /// Shader layers reach the runner already capped at 4,096 px by the engine
 /// (`pm_render::shader_layers`, the compositor's own cap on them).
 pub const MAX_EDGE: u32 = 16_384;
-/// Largest pixel band in one message (binary16 RGBA bytes).
+/// Largest pixel band in one message (binary16 or binary32 RGBA bytes).
 pub const MAX_BAND_BYTES: usize = 8 * 1024 * 1024;
 /// Largest wrapped program (`definitions::limits::WRAPPED_SOURCE_BYTES`).
 pub const MAX_SOURCE_BYTES: usize = 512 * 1024;
@@ -85,7 +85,7 @@ pub struct ShaderFallbackUnit {
 
 /// What the runner draws for one layer at one frame: the compositor's vertex
 /// shader, the wrapped fragment program, the target size, and the uniform
-/// calls, into an RGBA8 or RGBA16F target cleared to transparent with blending off.
+/// calls, into an RGBA8, RGBA16F, or RGBA32F target cleared to transparent with blending off.
 /// Textures (when `textures` > 0) share the target's format and size, sampled
 /// linear with clamp-to-edge; units not named sample nothing (0, 0, 0, 1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,6 +101,7 @@ pub struct ShaderFallbackRequest {
     pub height: u32,
     /// The compositor's color buffer depth. Omitted by older clients (16).
     /// At 8, each `rgba16f` wire slot carries an exact byte code 0..255.
+    /// At 32, bands use `rgba32f` little-endian IEEE754 bytes.
     #[serde(
         default = "default_color_depth",
         skip_serializing_if = "is_default_color_depth"
@@ -130,8 +131,9 @@ const fn is_default_color_depth(value: &u8) -> bool {
 }
 
 /// Rows `row .. row + rows` of texture `texture` of a request: four u16
-/// slots per pixel. At depth 8 each slot is an exact byte code; otherwise
-/// it is binary16. Little-endian, rows in GL order (row 0 at the bottom).
+/// slots per pixel. At depth 8 each slot is an exact byte code; at 16 it is
+/// binary16. At 32, `rgba16f` is empty and `rgba32f` carries four binary32
+/// values per pixel. Little-endian, rows in GL order (row 0 at the bottom).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -143,12 +145,16 @@ pub struct ShaderFallbackInput {
     pub row: u32,
     pub rows: u32,
     pub rgba16f: Bytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub rgba32f: Option<Bytes>,
 }
 
 /// Job engine → host (contract 14): run `request` in a window's runner.
 /// `area` is a `cache {scratch}` handle of the job's session; `textures`
-/// (one file per texture) and `output` name files in it: raw binary16 RGBA,
-/// little-endian, rows in GL order, `width × height × 8` bytes. The host
+/// (one file per texture) and `output` name files in it: raw binary16 RGBA
+/// at 8/16 or binary32 RGBA at 32, little-endian, rows in GL order,
+/// `width × height × (8 or 16)` bytes. The host
 /// answers `ack` once `output` is written, or an error: `shaderCompile`
 /// (WebGL refuses the program), `watchdogTimeout` (its draw passed the
 /// runner's deadline), `unsupported` (no runner is available).
@@ -179,7 +185,7 @@ fn request_ok(r: &ShaderFallbackRequest) -> Result<(), Violation> {
     ensure(size_ok(r.width, r.height), c, || {
         format!("fallback target {}×{}", r.width, r.height)
     })?;
-    ensure(matches!(r.color_depth, 8 | 16), c, || {
+    ensure(matches!(r.color_depth, 8 | 16 | 32), c, || {
         "invalid fallback color depth".into()
     })?;
     ensure(
@@ -246,7 +252,8 @@ impl Validate for HostShaderFallback {
 }
 
 /// Rows `row .. row + rows` of a request's result: four u16 slots per
-/// pixel, byte codes at depth 8 or binary16 bits otherwise. Little-endian,
+/// pixel, byte codes at depth 8 or binary16 bits at 16. At depth 32,
+/// `rgba16f` is empty and `rgba32f` carries binary32 values. Little-endian,
 /// rows in GL order (row 0 at the bottom).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
@@ -258,6 +265,9 @@ pub struct ShaderFallbackPixels {
     pub row: u32,
     pub rows: u32,
     pub rgba16f: Bytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub rgba32f: Option<Bytes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -295,6 +305,20 @@ fn size_ok(width: u32, height: u32) -> bool {
     (1..=MAX_EDGE).contains(&width) && (1..=MAX_EDGE).contains(&height)
 }
 
+fn band_bytes_ok(width: u32, rows: u32, rgba16f: &Bytes, rgba32f: Option<&Bytes>) -> bool {
+    match rgba32f {
+        Some(bytes) => {
+            rgba16f.0.is_empty()
+                && bytes.0.len() as u64 == u64::from(width) * u64::from(rows) * 16
+                && bytes.0.len() <= MAX_BAND_BYTES
+        }
+        None => {
+            rgba16f.0.len() as u64 == u64::from(width) * u64::from(rows) * 8
+                && rgba16f.0.len() <= MAX_BAND_BYTES
+        }
+    }
+}
+
 impl Validate for ShaderFallbackMessage {
     fn validate(&self) -> Result<(), Violation> {
         let c = ContractId::Definitions;
@@ -316,11 +340,10 @@ impl Validate for ShaderFallbackMessage {
                     c,
                     || format!("rows {} + {} of {}", p.row, p.rows, p.height),
                 )?;
-                let expected = u64::from(p.width) * u64::from(p.rows) * 8;
                 ensure(
-                    p.rgba16f.0.len() as u64 == expected && p.rgba16f.0.len() <= MAX_BAND_BYTES,
+                    band_bytes_ok(p.width, p.rows, &p.rgba16f, p.rgba32f.as_ref()),
                     c,
-                    || format!("{} texture bytes for {} rows", p.rgba16f.0.len(), p.rows),
+                    || format!("invalid texture bytes for {} rows", p.rows),
                 )
             }
             ShaderFallbackMessage::Pixels(p) => {
@@ -333,18 +356,10 @@ impl Validate for ShaderFallbackMessage {
                     c,
                     || format!("rows {} + {} of {}", p.row, p.rows, p.height),
                 )?;
-                let expected = u64::from(p.width) * u64::from(p.rows) * 8;
                 ensure(
-                    p.rgba16f.0.len() as u64 == expected && p.rgba16f.0.len() <= MAX_BAND_BYTES,
+                    band_bytes_ok(p.width, p.rows, &p.rgba16f, p.rgba32f.as_ref()),
                     c,
-                    || {
-                        format!(
-                            "{} pixel bytes for {} rows of {}",
-                            p.rgba16f.0.len(),
-                            p.rows,
-                            p.width
-                        )
-                    },
+                    || format!("invalid pixel bytes for {} rows of {}", p.rows, p.width),
                 )
             }
             ShaderFallbackMessage::Failed { key, .. } => {
@@ -371,6 +386,7 @@ mod tests {
             row: 2,
             rows: 2,
             rgba16f: Bytes(vec![0; 4 * 2 * 8]),
+            rgba32f: None,
         });
         assert!(ok.validate().is_ok());
         let past = ShaderFallbackMessage::Pixels(ShaderFallbackPixels {
@@ -380,6 +396,7 @@ mod tests {
             row: 3,
             rows: 2,
             rgba16f: Bytes(vec![0; 4 * 2 * 8]),
+            rgba32f: None,
         });
         assert!(past.validate().is_err());
         let short = ShaderFallbackMessage::Pixels(ShaderFallbackPixels {
@@ -389,6 +406,7 @@ mod tests {
             row: 0,
             rows: 1,
             rgba16f: Bytes(vec![0; 8]),
+            rgba32f: None,
         });
         assert!(short.validate().is_err());
     }
@@ -444,8 +462,23 @@ mod tests {
                 requests: vec![eight]
             }
             .validate()
-            .is_err()
+            .is_ok()
         );
+        let float_band = ShaderFallbackMessage::Pixels(ShaderFallbackPixels {
+            key: key(),
+            width: 2,
+            height: 1,
+            row: 0,
+            rows: 1,
+            rgba16f: Bytes(Vec::new()),
+            rgba32f: Some(Bytes(vec![0; 2 * 16])),
+        });
+        assert!(float_band.validate().is_ok());
+        let ShaderFallbackMessage::Pixels(mut bad) = float_band else {
+            unreachable!()
+        };
+        bad.rgba16f = Bytes(vec![0; 2 * 8]);
+        assert!(ShaderFallbackMessage::Pixels(bad).validate().is_err());
         let mut effect = request(8, vec![call("1i", 1)]);
         effect.textures = 2;
         effect.units = vec![
@@ -519,6 +552,7 @@ mod tests {
             row: 4000,
             rows: 1,
             rgba16f: Bytes(vec![0; 7680 * 8]),
+            rgba32f: None,
         });
         assert!(band.validate().is_ok());
         assert!(host(vec!["../x", "in-1"]).validate().is_err());

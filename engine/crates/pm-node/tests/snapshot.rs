@@ -1074,6 +1074,7 @@ fn bands(request: &pm_protocol::shader_fallback::ShaderFallbackRequest, value: u
         .into_iter()
         .map(|(from, rows)| {
             Event::ShaderFallback(ShaderFallbackMessage::Pixels(ShaderFallbackPixels {
+                rgba32f: None,
                 key: request.key.clone(),
                 width: request.width,
                 height: request.height,

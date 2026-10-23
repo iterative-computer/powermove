@@ -328,6 +328,7 @@ impl pm_render::shader_layers::FallbackHost for EffectRunner {
         let r = &job.request;
         if let Some(rgba16f) = read_f16(&self.dir.join("pixels").join(format!("{}.f16", r.key))) {
             return Ok(pm_render::shader_layers::FallbackPixels {
+                rgba32f: None,
                 width: r.width,
                 height: r.height,
                 rgba16f,
@@ -374,10 +375,22 @@ fn settle_user_verdict(
         if def.is_some_and(|d| via_runner.effects().angle_only(d.kind, d.id.as_str())) {
             "runner (static seed)".to_owned()
         } else {
-            format!("{:?}", via_runner.effects_mut().parity.verdict(frag))
+            format!(
+                "{:?}",
+                via_runner
+                    .effects_mut()
+                    .parity
+                    .verdict_at_precision(frag, Precision::Float16)
+            )
         }
     } else {
-        format!("{:?}", renderer.effects_mut().parity.verdict(frag))
+        format!(
+            "{:?}",
+            renderer
+                .effects_mut()
+                .parity
+                .verdict_at_precision(frag, Precision::Float16)
+        )
     };
     if verdict == "Unknown" {
         tally.failures.push(format!(
@@ -681,6 +694,7 @@ fn every_shader_matches_webgl() {
                             Some(px) => renderer.put_fallback_pixels(
                                 r.key.clone(),
                                 FallbackPixels {
+                                    rgba32f: None,
                                     width: r.width,
                                     height: r.height,
                                     rgba16f: px,
@@ -1125,6 +1139,7 @@ fn layers_needing_the_runner_are_not_headless_renderable() {
     renderer.put_fallback_pixels(
         r.key.clone(),
         FallbackPixels {
+            rgba32f: None,
             width: 64,
             height: 36,
             rgba16f: px,
@@ -1182,6 +1197,7 @@ fn a_user_program_the_probe_never_judged_fails_the_gate() {
         "private ids stay out of the output"
     );
     let px = FallbackPixels {
+        rgba32f: None,
         width: 1,
         height: 1,
         rgba16f: vec![0; 4],

@@ -157,8 +157,10 @@ programs, rather than the only way a program reaches ANGLE.
 
 An unknown program holds presentation, draws through both pipelines with
 identical parameters and input texels, and presents the runner's result.
-Every binary16 channel is compared at an absolute bound of 1/255,
-including HDR values: one channel beyond it pins the program to ANGLE.
+Verdicts include working depth in their identity. Depth 8 compares exact byte
+codes, depth 32 compares exact binary32 bits, and every binary16 channel keeps
+the existing absolute bound of 1/255, including HDR values. A failed comparison
+pins the program to ANGLE.
 Matching programs become native-verified. No pixel-count allowance or
 perturbation exemption participates in this decision. Effects compare
 before `clamp`, and every ping-pong pass is included. A failed comparison
@@ -565,7 +567,7 @@ machine) runs in the renderer's own WebGL2 runner
 (`engine-connection/shader-fallback.ts`), the same ANGLE that draws it today:
 
 1. **Engine** (`effects/fallback.rs`, `effects/exec.rs`). The frame's commands
-   so far are submitted, the step's textures are read back as binary16 RGBA in
+   so far are submitted, the step's textures are read back at project depth in
    GL row order (an effect's input, its original with `keepOrig`, its backdrop;
    a transition's two frames), and a `FallbackRequest` is built with the
    wrapped program, the compositor's uniform calls for every pass
@@ -737,9 +739,10 @@ stops naming the program (`effects_fallback`
 keeps retrying with backoff.
 
 The runner (`ShaderFallbackRunner.render(request, textures)`) uploads each
-texture as RGBA16F (linear, clamp to edge, as the compositor's `grab`
+texture as RGBA8, RGBA16F or RGBA32F according to project Color depth
+(linear, clamp to edge, as the compositor's `grab`
 buffers), leaves units no request names empty (samplers read (0, 0, 0, 1),
-as in the compositor), draws each pass into a fresh RGBA16F target cleared
+as in the compositor), draws each pass into a matching target cleared
 to transparent with blending off, and fences every pass under the draw
 deadline (the runner's watchdog, above).
 
