@@ -10,10 +10,11 @@ ARM64, with Skia pinned to `b6d106297ff9ef2ff8094033695d045e87775581`.
 The original 32 Canvas source captures now match at **max 0**, without changing
 those reference bytes. Six actual app-imported ProRes rendition captures and
 24 additional matrix/range/alpha captures also match exactly: 62 frames in
-all, tested in both Float16 and Float32 compositions. The six original
+all, tested at Unorm8, Float16 and Float32 after the colordepth integration.
+The six original
 full-range BT.709 and limited BT.2020 direct-upload samples now also match
 exactly. The transformed midtone witness matches the actual app's raw float
-readback and exported byte mapping at both captured times and both available
+readback and exported byte mapping at both captured times and all three
 working precisions. Round 3 adds 48 fresh frames from 16 recipes: all 36
 SDR Canvas frames are exact, bringing the source total to 98. Of the 36 new
 SDR live frames, all 36 are exact. Round 4's six HEVC SDR P3/BT.2020 control
@@ -167,8 +168,8 @@ padding differs with the crop geometry. No fixed zero-edge rule is used.
 All 16 recipes decode in today's app, including HEVC alpha, deep VP9/AV1,
 full-range 8-bit BT.601/709/2020, BT.2020 PQ/HLG and P3 PQ.
 
-The registered Round 3 test compares Canvas and live at both precisions for
-every captured case, then aggregates all failures. All 192 comparisons are
+The registered Round 3 test compares Canvas and live at all three precisions for
+every captured case, then aggregates all failures. All 288 comparisons are
 exact, including HDR. It has no skipped or ignored case. The separate
 alpha-interpretation regression verifies compatibility
 cannot change the native reading's pixels or visible sampling domain.
@@ -177,7 +178,7 @@ Round 4 adds seven HDR/P3 controls at three timestamps, including six new
 HEVC SDR frames with BT.709 matrices and either Display P3 or BT.2020
 primaries. Their live path keeps encoded RGB; Canvas crosses its RGBA8 source
 store, decodes with Skia's sRGB transfer, applies the pinned named-gamut D50
-matrix, and re-encodes. All 24 new SDR reading/precision comparisons match
+matrix, and re-encodes. All 36 new SDR reading/precision comparisons match
 exactly. Every frame also retains independent CPU/GPU Canvas captures in
 sRGB and Display P3, with actual context attributes and hash-bound rasters.
 All 60 reused main rasters are unchanged from Round 3.
@@ -296,18 +297,35 @@ miss and 720 upload bytes; software H.264 imports three planes instead of
 two. Planar alpha uses a lazy additional pipeline and texture binding; opaque
 and HEVC uploads retain the original seven-entry bind group. Making that
 binding universal had added about four allocations per converted frame.
-After isolation, all nine pm-perfbench ratchets pass their unchanged bounds;
+Before integration, all nine pm-perfbench ratchets passed unchanged bounds;
 `scrub_24` records 13,013 thread and 15,430 all-thread heap allocations,
 within the existing 15,507 allowance. No baseline is relaxed.
 
-Browser and native captures were taken in separate runs. A controlled
-comparison with corrected converter priming and sustained-playback
-measurement remain required. Raw run metadata, binary hashes, every sample
-and earlier runs stay outside Git.
+The final consecutive browser/native pair above includes corrected converter
+priming. Sustained-playback measurement remains integration work. Raw run
+metadata, binary hashes, every sample and earlier runs stay outside Git.
+
+The post-colordepth full ratchet ran all nine benches against unchanged
+bounds. Five pass; four exceed eleven counters: `export_120` thread heap
+bytes (+523,458), `typing_60` texture bytes (+73,247,656 in both scopes),
+`open_large_2000` heap counts (+3,583) and bytes (+508,984 thread,
++508,462 all-thread), and `import_3d_600k` heap counts (+2,405) and bytes
+(+371,598 thread, +371,576 all-thread). These post-merge results supersede
+the earlier nine-pass claim for the integrated tree; no baseline was raised.
+These four benches contain no video. The increased first-use pipeline counts
+and unchanged texture counts point to merged lazy initialization and full-canvas
+text storage; this attribution is an inference, not an isolation experiment.
+The video bench, `scrub_24`, passes its existing bounds.
+The paired decode timings above remain the completed pre-integration
+measurements and were not rerun. Strict clippy also flags imported scene3d
+argument counts and a shader fallback closure; the full affected-crate
+check completes with warnings. All nine color-depth render tests, the synthetic
+still bitmap/cache test, and the presenter video-preparation test pass. The
+conditional colordepth watch is finished; no recurring maintenance is required.
 
 ## Remaining closure work
 
-The original direct-upload defects are closed at max 0 in both Float16 and
+The original direct-upload defects are closed at max 0 in Unorm8, Float16 and
 Float32 source-storage tests. Canvas -> live -> Canvas cache switches use
 all three timestamps, with no cache flush between readings.
 
@@ -319,10 +337,18 @@ The native and app raw float buffers were already byte-identical. The
 regression stores and checks both the exact raw floats and the app's actual
 RGBA8 mapping; it does not replace or relax either reference.
 
-Depth-8 composition gates will run after the colordepth lane merges. The
-committed composition fixture includes its captured depth-8 references,
-while this base tests the available Float16/Float32 paths. The complete
-app playback/scrub/export and private-corpus gates remain integration work.
+Colordepth landed on integration at `eb25accb14`; this lane merged integration
+through `38f02d097f`. The source regression loops compare all 116 Canvas
+and 116 direct-live cases at each of Unorm8, Float16 and Float32, all exact.
+The composed regression now checks all six saved depth/time references
+(8/16/32 bits at 0.5/1.5 seconds), both byte-identical raw float readback and
+RGBA8 mapping. It also verifies the target format and that saved project
+depth overrides a Float32 export request. No references were recaptured,
+replaced or relaxed. All 16 targeted media tests pass. Native Unorm8 working
+storage retains native chroma siting/filtering; compatibility bitmap storage
+retains Chromium's centered bilinear conversion independently of target depth.
+The complete app playback/scrub/export and private-corpus gates remain
+integration work.
 
 The last Round 3 SDR gap, VP9 10-bit BT.2020 live at 1.125 seconds,
 pixel (86,107), is closed by the matrix order above: native and today both
@@ -335,7 +361,7 @@ working format -> default RWTMO gain curve -> sRGB. Collapsing the first
 two gamut transforms loses one-code ties. HLG also requires the CPU's exact
 byte-to-float values, reconstructed transfer constants, and reverse-nested
 FMA luminance accumulation. Direct HDR uses the same dot-before-translation
-matrix order as deep VP9, and retains encoded RGB. All 84 Round 4 source
+matrix order as deep VP9, and retains encoded RGB. All 126 Round 4 source
 comparisons and the independent three-signal RGB oracle are exact.
 
 Mastering/content-light driven gain curves, Dolby Vision, and unmeasured HDR
@@ -353,6 +379,12 @@ The previous integer reciprocal differed on 436 pairs; the new sequence matches
 all pairs and the reported transparent export's 176 differing pixels exactly.
 This applies to the shared level-1 PNG8 export seam at every project depth;
 neither premultiplied rendering nor alpha values are changed.
+
+After the colordepth merge, the three original transparent image captures at
+8/16/32 bits are exact in both native raw readback and actual PNG export
+(zero different pixels, max 0). The complete 65,536 channel/alpha capture
+table and half-code witnesses pass, as does the depth-8 translucent overlap
+PNG export regression. Original legacy export references remain unchanged.
 
 Source references: Chromium's
 [video renderer](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/media/renderers/paint_canvas_video_renderer.cc),
