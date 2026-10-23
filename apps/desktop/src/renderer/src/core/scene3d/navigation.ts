@@ -1,5 +1,7 @@
+import { engineGeometry } from './engine-access';
 import * as THREE from 'three';
 import {compositionRuntime} from './service';
+import {renderCamera} from './render-camera';
 import {layer3DRole} from './layers';
 import {parent3D,world3D} from '../../legacy/core/space-3d';
 import {viewportPose,applyViewportPose,getViewportMode,setViewportMode,viewportState,activeCameraLayer,viewPosition,orbitPose,type ViewPose} from './viewport';
@@ -39,13 +41,30 @@ export function frameView(start:ViewPose,box:THREE.Box3,fov:number,aspect:number
 }
 
 const comp=(PM:any)=>PM.curComp?.()||PM.proj;
+/** `Box3.expandByObject` of each object layer in the composition's three.js runtime (today's answer). */
+export function runtimeBoxes(PM:any,ids:readonly string[],time:number=PM.time):Record<string,number[]|null> {
+  const world=compositionRuntime(PM,time),out:Record<string,number[]|null>={};
+  for(const id of ids){const object=world.objects.get(id);if(!object){out[id]=null;continue;}
+    const b=new THREE.Box3().expandByObject(object);out[id]=b.isEmpty()?null:[b.min.x,b.min.y,b.min.z,b.max.x,b.max.y,b.max.z];}
+  return out;
+}
 /** World bounds of the selection (or everything, like Blender's View All); lights and cameras count as points. */
 export function viewportBounds(PM:any,selected=true,exclude:string|null=null):THREE.Box3 {
-  const world=compositionRuntime(PM),ids=new Set<string>(selected?selected3D(PM):[]),box=new THREE.Box3();
-  for(const layer of comp(PM).layers){
-    const role=layer3DRole(layer);if(!role||!PM.active(layer,PM.time)||layer.id===exclude)continue;
-    if(selected&&!ids.has(layer.id)&&!(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id)))continue;
-    if(role==='object'){const object=world.objects.get(layer.id);if(object)box.expandByObject(object);}
+  const ids=new Set<string>(selected?selected3D(PM):[]),box=new THREE.Box3();
+  const members=comp(PM).layers.filter((layer:any)=>{
+    const role=layer3DRole(layer);if(!role||!PM.active(layer,PM.time)||layer.id===exclude)return false;
+    return !selected||ids.has(layer.id)||(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id));
+  });
+  // With the native evaluator the objects' boxes come from the engine's
+  // geometry (pm-wasm; with "Use New Engine" on a question it cannot answer
+  // is a named failure, never the three.js boxes, which only the
+  // development modes' dual answers read); otherwise from the composition's
+  // three.js runtime.
+  const objects=members.filter((layer:any)=>layer3DRole(layer)==='object').map((layer:any)=>layer.id);
+  const engine=engineGeometry(PM, ['objectBoxes3d']);
+  const boxes=!objects.length?{}:engine?engine.objectBoxes3d(objects,PM.time,()=>runtimeBoxes(PM,objects,PM.time)):runtimeBoxes(PM,objects,PM.time);
+  for(const layer of members){
+    if(layer3DRole(layer)==='object'){const b=boxes[layer.id];if(b)box.union(new THREE.Box3(new THREE.Vector3(b[0],b[1],b[2]),new THREE.Vector3(b[3],b[4],b[5])));}
     else box.expandByPoint(new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,layer,PM.time))));
   }
   return box;
@@ -53,7 +72,7 @@ export function viewportBounds(PM:any,selected=true,exclude:string|null=null):TH
 const viewAspect=(PM:any)=>{const c=comp(PM);return (c?.w||16)/Math.max(1,c?.h||9);};
 const viewFov=(PM:any)=>{
   if(getViewportMode(PM)==='editor')return viewportState(PM).fov;
-  const camera=compositionRuntime(PM).camera;return camera instanceof THREE.PerspectiveCamera?camera.fov:50;
+  const camera=renderCamera(PM);return camera instanceof THREE.PerspectiveCamera?camera.fov:50;
 };
 /** Numpad . (View Selected) and Home (View All). Returns false when there is nothing to frame. */
 export function frameComposition(PM:any,selected=true):boolean {

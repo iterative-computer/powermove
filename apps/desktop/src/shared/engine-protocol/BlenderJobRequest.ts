@@ -11,7 +11,12 @@ import type { SurfaceRequest } from "./SurfaceRequest";
 /**
  * Run a Blender render job (job engine → host services).
  */
-export type BlenderJobRequest = { job: JobId, priority: PriorityClass, snapshot: SnapshotRef, workerScriptHash: ContentHash, assets: Array<BlenderAsset>, settings: BlenderSettings, surfaces: Array<SurfaceRequest>, 
+export type BlenderJobRequest = { job: JobId, priority: PriorityClass, 
+/**
+ * An explicit interactive renderFrame cache capture may run while playback
+ * continues. Automatic viewer previews and all other jobs remain paused.
+ */
+foregroundCapture: boolean, snapshot: SnapshotRef, workerScriptHash: ContentHash, assets: Array<BlenderAsset>, settings: BlenderSettings, surfaces: Array<SurfaceRequest>, 
 /**
  * Batch a frame's layers in one worker invocation (only when S7 shows equal surfaces).
  */

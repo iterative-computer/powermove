@@ -126,7 +126,10 @@ impl State {
             o.from_declaration = from_declaration;
             return;
         }
-        let previous = self.objects.last().and_then(|o| o.materials.last().cloned());
+        let previous = self
+            .objects
+            .last()
+            .and_then(|o| o.materials.last().cloned());
         if let Some(o) = self.objects.last_mut() {
             o.finalize(true);
         }
@@ -143,24 +146,48 @@ impl State {
 
     fn vertex_index(&self, value: &str) -> f64 {
         let i = js::parse_int(value);
-        (if i >= 0.0 { i - 1.0 } else { i + (self.vertices.len() / 3) as f64 }) * 3.0
+        (if i >= 0.0 {
+            i - 1.0
+        } else {
+            i + (self.vertices.len() / 3) as f64
+        }) * 3.0
     }
 
     fn normal_index(&self, value: &str) -> f64 {
         let i = js::parse_int(value);
-        (if i >= 0.0 { i - 1.0 } else { i + (self.normals.len() / 3) as f64 }) * 3.0
+        (if i >= 0.0 {
+            i - 1.0
+        } else {
+            i + (self.normals.len() / 3) as f64
+        }) * 3.0
     }
 
     fn uv_index(&self, value: &str) -> f64 {
         let i = js::parse_int(value);
-        (if i >= 0.0 { i - 1.0 } else { i + (self.uvs.len() / 2) as f64 }) * 2.0
+        (if i >= 0.0 {
+            i - 1.0
+        } else {
+            i + (self.uvs.len() / 2) as f64
+        }) * 2.0
     }
 
     fn push3(&mut self, which: u8, src_index: f64) {
-        let src = if which == 0 { &self.vertices } else { &self.normals };
-        let v = [at(src, src_index), at(src, src_index + 1.0), at(src, src_index + 2.0)];
+        let src = if which == 0 {
+            &self.vertices
+        } else {
+            &self.normals
+        };
+        let v = [
+            at(src, src_index),
+            at(src, src_index + 1.0),
+            at(src, src_index + 2.0),
+        ];
         let o = self.objects.last_mut().expect("an object");
-        let dst = if which == 0 { &mut o.vertices } else { &mut o.normals };
+        let dst = if which == 0 {
+            &mut o.vertices
+        } else {
+            &mut o.normals
+        };
         dst.extend(v);
     }
 
@@ -182,7 +209,11 @@ impl State {
     }
 
     fn add_face(&mut self, a: &str, b: &str, c: &str, uv: [Option<&str>; 3], n: [Option<&str>; 3]) {
-        let (ia, ib, ic) = (self.vertex_index(a), self.vertex_index(b), self.vertex_index(c));
+        let (ia, ib, ic) = (
+            self.vertex_index(a),
+            self.vertex_index(b),
+            self.vertex_index(c),
+        );
         for i in [ia, ib, ic] {
             self.push3(0, i);
         }
@@ -200,7 +231,13 @@ impl State {
             }
         } else {
             // addFaceNormal: (C − B) × (A − B), normalized.
-            let v = |i: f64| [at(&self.vertices, i), at(&self.vertices, i + 1.0), at(&self.vertices, i + 2.0)];
+            let v = |i: f64| {
+                [
+                    at(&self.vertices, i),
+                    at(&self.vertices, i + 1.0),
+                    at(&self.vertices, i + 2.0),
+                ]
+            };
             let (va, vb, vc) = (v(ia), v(ib), v(ic));
             let cb = [vc[0] - vb[0], vc[1] - vb[1], vc[2] - vb[2]];
             let ab = [va[0] - vb[0], va[1] - vb[1], va[2] - vb[2]];
@@ -251,7 +288,9 @@ pub fn parse_obj(text: &str) -> Vec<Object> {
     state.start_object("", false);
     for raw in text.split('\n') {
         let line = js::trim_start(raw);
-        let Some(first) = line.chars().next() else { continue };
+        let Some(first) = line.chars().next() else {
+            continue;
+        };
         match first {
             '#' => {}
             'v' => {
@@ -262,7 +301,11 @@ pub fn parse_obj(text: &str) -> Vec<Object> {
                         state.vertices.extend([f(1), f(2), f(3)]);
                         state.colors.push((data.len() >= 7).then(|| {
                             // setRGB(r, g, b, SRGBColorSpace): to linear working space.
-                            [srgb_to_linear(f(4)), srgb_to_linear(f(5)), srgb_to_linear(f(6))]
+                            [
+                                srgb_to_linear(f(4)),
+                                srgb_to_linear(f(5)),
+                                srgb_to_linear(f(6)),
+                            ]
                         }));
                     }
                     "vn" => state.normals.extend([f(1), f(2), f(3)]),
@@ -334,7 +377,9 @@ pub fn parse_obj(text: &str) -> Vec<Object> {
             }
             'o' | 'g' => {
                 // /^[og]\s*(.+)?/: the match stops at a line terminator.
-                let end = line.find(['\r', '\u{2028}', '\u{2029}']).unwrap_or(line.len());
+                let end = line
+                    .find(['\r', '\u{2028}', '\u{2029}'])
+                    .unwrap_or(line.len());
                 let name = js::trim(&line[1..end]).to_string();
                 state.start_object(&name, true);
             }
@@ -563,7 +608,17 @@ mod tests {
         assert_eq!(m.maps[0].1.url, "wood.png");
         assert_eq!(m.maps[0].1.scale, [2.0, 2.0]);
         // The first key filling a slot wins.
-        assert_eq!(m.maps[1], ("bumpMap", TextureParams { url: "b1.png".into(), scale: [1.0; 2], offset: [0.0; 2] }));
+        assert_eq!(
+            m.maps[1],
+            (
+                "bumpMap",
+                TextureParams {
+                    url: "b1.png".into(),
+                    scale: [1.0; 2],
+                    offset: [0.0; 2]
+                }
+            )
+        );
         // A repeated key keeps its first position and its last value.
         let again = parse_mtl("newmtl B\nmap_Kd a.png\nKd 1 0 0\nmap_Kd b.png\n");
         assert_eq!(again[0].1[1], ("map_kd".to_string(), "b.png".to_string()));

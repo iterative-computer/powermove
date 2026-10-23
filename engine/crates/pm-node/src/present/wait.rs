@@ -118,6 +118,7 @@ mod tests {
     fn key(w: u32) -> SvgRasterKey {
         SvgRasterKey {
             content: "ab".repeat(32),
+            texture: None,
             width: w,
             height: 2,
         }

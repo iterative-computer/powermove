@@ -48,6 +48,10 @@ export const GENERATED_MEDIA: Record<string, () => Uint8Array> = {
 
 export interface MediaSource { name: string; origin: 'fixture' | 'generated'; path: string; bytes: number; sha256: string }
 
+/** pm-render's synthetic still-class fixtures (PQ/HLG/cHRM PNG, CMYK JPEG, TIFF structures, AVIF classes), by file name. */
+export const STILLS2_DIR = path.join(repoRoot, 'engine/crates/pm-render/tests/fixtures/stills2');
+const isStills2 = (name: string) => !name.includes('/') && /\.(png|jpe?g|tiff|avif)$/i.test(name) && existsSync(path.join(STILLS2_DIR, name));
+
 /** Resolve a `media:` name to a file: fixtures from the repository, generated files from `<corpusDir>/media` (generate.ts output). */
 export function resolveMedia(name: string, corpusDir: string): MediaSource {
   const fixture = path.join(fixturesDir, name);
@@ -56,6 +60,7 @@ export function resolveMedia(name: string, corpusDir: string): MediaSource {
     return describe(name, 'fixture', fixture);
   }
   if (GENERATED_MEDIA[name]) return describe(name, 'generated', path.join(corpusDir, 'media', name));
+  if (isStills2(name)) return describe(name, 'fixture', path.join(STILLS2_DIR, name));
   throw new Error(`Unknown corpus media ${name}`);
 }
 

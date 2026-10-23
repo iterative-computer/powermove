@@ -5,16 +5,24 @@
 //! (`LTC_FLOAT_1` and `LTC_FLOAT_2`: RGBA f32 64 × 64, linear
 //! magnification, nearest minification, clamped).
 //!
-//! Map images decode through `pm-media` and only in the still classes the
-//! 2D renderer draws from the native reader (`crate::media::probe_still`
-//! with `StillReader::Native`); images with
-//! transparency are refused, since the premultiplication Chromium applies
-//! to an `ImageBitmap` uploaded to WebGL has not been measured. Both are
-//! decided statically ([`Textures::probe`], cached per file version), so
-//! the capability check routes such maps before a frame renders. A map's
-//! rows upload top row first, as WebGL uploads an `ImageBitmap` (which
-//! ignores `UNPACK_FLIP_Y_WEBGL`), so texture coordinate v = 0 samples the
-//! image's top row.
+//! Map images are today's level 1 content: the runtime's texture getter
+//! hands three.js the asset's `ImageBitmap`, the same Chromium bitmap image
+//! layers draw. Maps therefore read pm-render's level 1 still-compatibility
+//! bitmap ([`crate::media::level1_bitmap`]: PQ/HLG/cHRM/cICP PNG, CMYK
+//! JPEG, the TIFF structures, the AVIF classes, Chromium's gamma and ICC
+//! readings, and the deep or arithmetic JPEGs whose RGBA8 upload fails),
+//! in every class image layers draw, at every compat level. three.js
+//! uploads it into storage of `log2(max(w, h)) + 1` levels
+//! (`texStorage2D`, `texSubImage2D`). WebGL ignores every unpack flag for
+//! an `ImageBitmap` (`UNPACK_FLIP_Y_WEBGL`, `UNPACK_PREMULTIPLY_ALPHA_WEBGL`
+//! false, the colorspace conversion), so the texels are the bitmap's own
+//! premultiplied bytes, top row first (texture coordinate v = 0 samples the
+//! image's top row), which three.js then samples as straight alpha. A deep
+//! or arithmetic JPEG has no 8-bit bitmap; the importer keeps an image
+//! element whose `texSubImage2D` fails, leaving the storage zeroed
+//! (transparent black, not image layers' opaque black). Measured texel for
+//! texel through the app (`tests/threed_maps.rs`). Probes are decided once
+//! per file version ([`Textures::probe`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -43,8 +51,10 @@ struct MapKey {
 /// Why a map cannot be drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MapError {
-    /// Outside the classes this pass draws (routed to the legacy engine).
-    Unsupported(String),
+    /// A still outside the level 1 classes: the same feature an image
+    /// layer of the file reports (`crate::media::probe_image`), as both
+    /// read Chromium's bitmap.
+    Unsupported(crate::capability::Feature),
     Failed(String),
 }
 
@@ -310,6 +320,46 @@ impl Textures {
         Ok(t)
     }
 
+    /// Installs Chromium's SVG map bytes into the ordinary map cache.
+    /// The key includes the source file version, as it does for decoded stills.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_svg(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        path: &Path,
+        srgb: bool,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), MapError> {
+        let (len, modified) =
+            stamp(path).ok_or_else(|| MapError::Failed("SVG map is offline".into()))?;
+        let key = MapKey {
+            path: path.to_path_buf(),
+            len,
+            modified,
+            srgb,
+        };
+        if let Some(e) = self.maps.get_mut(&key) {
+            e.used = self.generation;
+            return Ok(());
+        }
+        let texture = self.upload_rgba(device, queue, encoder, width, height, rgba, srgb, true);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.maps
+            .retain(|k, _| k.path != key.path || k.srgb != srgb);
+        self.maps.insert(
+            key,
+            MapEntry {
+                texture: Arc::new(MapTexture { texture, view }),
+                used: self.generation,
+            },
+        );
+        Ok(())
+    }
+
     /// An RGBA8 texture from tight rows (top row first), with
     /// `generateMipmap`'s chain when `mips` (box filters, in linear light
     /// for sRGB textures).
@@ -346,7 +396,9 @@ impl Textures {
             format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_DST,
+                | wgpu::TextureUsages::COPY_DST
+                // Read back by the mip comparison test.
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         queue.write_texture(
@@ -445,10 +497,10 @@ impl Textures {
         (self.maps.len(), bytes)
     }
 
-    /// Whether `path` is a map image this pass draws: readable, in the
-    /// still classes the 2D renderer draws, and opaque (every alpha 255).
-    /// Decided once per file version (path, size, modification time), so
-    /// the capability check and the scene build can ask at every frame.
+    /// Whether `path` is a map image this pass draws: readable, and in the
+    /// still classes level 1 image layers draw. Decided once per file
+    /// version (path, size, modification time), so the capability check and
+    /// the scene build can ask at every frame.
     pub fn probe(path: &Path) -> Result<(), MapError> {
         type Probes = Mutex<HashMap<MapKey, Result<(), MapError>>>;
         static CACHE: OnceLock<Probes> = OnceLock::new();
@@ -476,46 +528,36 @@ impl Textures {
     }
 }
 
-/// Decodes a map image to tight RGBA8 rows, top row first.
+/// Decodes a map image to the RGBA8 texels three.js stores for it: tight
+/// rows, top row first, as Chromium's bitmap stores them.
 pub fn decode(
     path: &Path,
     pool: &pm_media::pool::FramePool,
 ) -> Result<(u32, u32, Vec<u8>), MapError> {
-    // Maps upload the native reader's samples, so they are probed in its
-    // classes, not in those of Chromium's compatibility bitmap.
-    match crate::media::probe_still(path, crate::media::StillReader::Native) {
-        Ok(()) => {}
-        Err(crate::media::ProbeIssue::Unsupported(f)) => {
-            return Err(MapError::Unsupported(format!("3D texture map image ({f})")));
-        }
+    let (bitmap, upload_fails) = match crate::media::level1_bitmap(path, pool) {
+        Ok(b) => b,
+        Err(crate::media::ProbeIssue::Unsupported(f)) => return Err(MapError::Unsupported(f)),
         Err(crate::media::ProbeIssue::Unreadable(m)) => return Err(MapError::Failed(m)),
+    };
+    let f = &bitmap.frame.format;
+    let (w, h) = (f.width, f.height);
+    if upload_fails {
+        // `texSubImage2D` failed: the storage stays zeroed.
+        return Ok((w as u32, h as u32, vec![0u8; w * h * 4]));
     }
-    // Maps upload stored samples: a PNG gamma Chromium or ImageIO would
-    // apply is not implemented for them.
-    if pm_media::image::png_gamma::png_gamma(path)
-        .map_err(|e| MapError::Failed(format!("{}: {e}", path.display())))?
-        .is_some()
-    {
-        return Err(MapError::Unsupported(
-            "3D texture map image (PNG gamma (gAMA))".into(),
-        ));
-    }
-    let still = pm_media::image::read(path, pool)
-        .map_err(|e| MapError::Failed(format!("{}: {e}", path.display())))?;
-    let f = &still.frame.format;
-    if f.planes.len() != 1
-        || f.planes[0].format != pm_media::frame::PlaneFormat::Rgba8
-        || f.rgba_premultiplied
-        || still.orientation != 1
-    {
-        return Err(MapError::Unsupported(format!(
-            "3D texture map image layout {}",
+    // Chromium's bitmap is one RGBA8 plane for every still class
+    // (`level1_bitmaps_are_rgba8` in `tests/threed_maps.rs` checks each
+    // fixture): another layout is an internal error, not a class.
+    if f.planes.len() != 1 || f.planes[0].format != pm_media::frame::PlaneFormat::Rgba8 {
+        debug_assert!(false, "a level 1 bitmap of layout {}", f.label);
+        return Err(MapError::Failed(format!(
+            "{}: the level 1 bitmap has layout {}",
+            path.display(),
             f.label
         )));
     }
-    let (w, h) = (f.width, f.height);
     let mut out = vec![0u8; w * h * 4];
-    still
+    bitmap
         .frame
         .with_planes(|planes| {
             let p = &planes[0];
@@ -526,11 +568,6 @@ pub fn decode(
             }
         })
         .map_err(|e| MapError::Failed(e.to_string()))?;
-    if out.chunks_exact(4).any(|px| px[3] != 255) {
-        return Err(MapError::Unsupported(
-            "3D texture maps with transparency".into(),
-        ));
-    }
     Ok((w as u32, h as u32, out))
 }
 

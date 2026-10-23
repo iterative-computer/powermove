@@ -151,7 +151,9 @@ export class PresentWorker {
 
   private terminate(): void {
     this.options.worker.terminate();
-    for (const presenter of this.sessions.values()) presenter.dropHeld();
+    // As on a worker crash, termination ends its GPU context. The viewer may
+    // keep its engine session on a replacement drawing, so return ownership.
+    for (const presenter of this.sessions.values()) presenter.releaseHeld();
     this.sessions.clear();
   }
 }
@@ -166,6 +168,8 @@ export type WorkerPresenterOptions = {
   generation?: number;
   hostOffsetUs?: () => number | null;
   onVsync?: (hint: VsyncHint) => void;
+  /** The worker could not read a frame of pool `generation` (`PresenterOptions.onUnusable`). */
+  onUnusable?: (generation: number, message: string) => void;
   parkTimeoutMs?: number;
   now?: () => number;
   timers?: Timers;
@@ -287,7 +291,11 @@ export class WorkerPresenter implements Presenter {
       if (pool.generation <= this.generation) return;
       const previous = this.generation;
       this.generation = pool.generation;
-      this.parked = this.parked.filter((p) => p.desc.poolGeneration === pool.generation);
+      this.parked = this.parked.filter((p) => {
+        if (p.desc.poolGeneration === pool.generation) return true;
+        this.options.link.release({ poolIndex: p.desc.poolIndex, seq: p.desc.seq });
+        return false;
+      });
       this.options.host.post({ type: 'pool', session, pool });
       if (previous) this.options.source.retire(previous);
     } else {
@@ -402,6 +410,9 @@ export class WorkerPresenter implements Presenter {
       case 'stats':
         this.remote = message.stats;
         return;
+      case 'unusable':
+        if (!this.disposed) this.options.onUnusable?.(message.generation, message.message);
+        return;
       case 'trace': {
         const resolve = this.traces.get(message.id);
         this.traces.delete(message.id);
@@ -441,16 +452,6 @@ export class WorkerPresenter implements Presenter {
       this.local.released++;
       this.options.link.release(release);
     }
-    this.inWorker.clear();
-  }
-
-  /**
-   * The worker was terminated without handing everything back (a stuck
-   * worker after dispose): its clones went with its realm, so the page's
-   * references close too. The engine reclaims the slots with the session.
-   */
-  dropHeld(): void {
-    for (const { frame } of this.inWorker.values()) frame.close();
     this.inWorker.clear();
   }
 

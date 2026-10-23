@@ -326,6 +326,92 @@ pub fn parameters(
     Ok(p)
 }
 
+/// Whether three r180's *draw program* binds a source attribute. A color
+/// material and its shadow depth/distance material can consume different
+/// inputs even when both draws use the same mesh.
+pub fn consumes_short_attribute(p: &Parameters, name: &str) -> bool {
+    let shadow = matches!(
+        p.shader_type.as_str(),
+        "MeshDepthMaterial" | "MeshDistanceMaterial"
+    );
+    // Chromium keeps the copied map's vertex UV input active in a depth
+    // program even without alpha testing. Fragment-only dead-code reasoning
+    // does not predict the linked WebGL attributes (capture regression).
+    let uv0 = if shadow {
+        p.map_uv.as_deref() == Some("uv")
+            || p.alpha_map_uv.as_deref() == Some("uv")
+            || p.displacement_map_uv.as_deref() == Some("uv")
+    } else {
+        [
+            &p.map_uv,
+            &p.alpha_map_uv,
+            &p.light_map_uv,
+            &p.ao_map_uv,
+            &p.emissive_map_uv,
+            &p.bump_map_uv,
+            &p.normal_map_uv,
+            &p.displacement_map_uv,
+            &p.metalness_map_uv,
+            &p.roughness_map_uv,
+            &p.anisotropy_map_uv,
+            &p.clearcoat_map_uv,
+            &p.clearcoat_normal_map_uv,
+            &p.clearcoat_roughness_map_uv,
+            &p.iridescence_map_uv,
+            &p.iridescence_thickness_map_uv,
+            &p.sheen_color_map_uv,
+            &p.sheen_roughness_map_uv,
+            &p.specular_map_uv,
+            &p.specular_color_map_uv,
+            &p.specular_intensity_map_uv,
+            &p.transmission_map_uv,
+            &p.thickness_map_uv,
+        ]
+        .into_iter()
+        .any(|uv| uv.as_deref() == Some("uv"))
+    };
+    let secondary_uv = |channel: &str| {
+        if shadow {
+            p.map_uv.as_deref() == Some(channel)
+                || p.alpha_map_uv.as_deref() == Some(channel)
+                || p.displacement_map_uv.as_deref() == Some(channel)
+        } else {
+            match channel {
+                "uv1" => p.vertex_uv1s,
+                "uv2" => p.vertex_uv2s,
+                "uv3" => p.vertex_uv3s,
+                _ => false,
+            }
+        }
+    };
+    match name {
+        // r180's physical vertex shader includes `beginnormal_vertex`
+        // unconditionally, so `normal` stays active under flat shading too.
+        // `meshbasic.glsl.js` includes it under `USE_ENVMAP || USE_SKINNING`,
+        // which also covers the viewport chrome's MeshBasicMaterial
+        // override on a skinned mesh (Chromium capture: GL error 1282).
+        "NORMAL" => match p.shader_type.as_str() {
+            "MeshDepthMaterial" | "MeshDistanceMaterial" => p.displacement_map,
+            "MeshLambertMaterial"
+            | "MeshPhongMaterial"
+            | "MeshStandardMaterial"
+            | "MeshPhysicalMaterial" => true,
+            // LineBasicMaterial shares `meshbasic_vert` (never skinned in glTF).
+            "MeshBasicMaterial" | "LineBasicMaterial" => p.skinning || p.env_map,
+            _ => false,
+        },
+        "TANGENT" => !shadow && p.vertex_tangents && !p.flat_shading,
+        // The depth and distance shaders include no color chunks, including
+        // when alpha testing their copied map/alphaMap.
+        "COLOR_0" => !shadow && p.vertex_colors,
+        "TEXCOORD_0" => uv0 || p.points_uvs,
+        "TEXCOORD_1" => secondary_uv("uv1"),
+        "TEXCOORD_2" => secondary_uv("uv2"),
+        "TEXCOORD_3" => secondary_uv("uv3"),
+        _ => false,
+    }
+}
+
 fn push_map(
     u: &mut Vec<(String, Vec<f64>)>,
     t: &mut Vec<(String, TextureRef)>,
@@ -678,5 +764,133 @@ pub fn shadow_uniforms(
     }
     if src.alpha_test > 0.0 {
         u.push(("alphaTest".into(), vec![src.alpha_test]));
+    }
+}
+
+#[cfg(test)]
+mod short_normal_tests {
+    use super::*;
+
+    fn params(shader_type: &str) -> Parameters {
+        Parameters {
+            shader_type: shader_type.into(),
+            ..Parameters::default()
+        }
+    }
+
+    /// Golden program reflection and draw verdicts captured by Electron,
+    /// independent of the native rule. Invalid Basic.normalMap mutations
+    /// throw in r180's uniform refresh even with complete NORMAL buffers.
+    #[test]
+    fn normal_and_tangent_inputs_match_chromium_matrix() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/short-normal-programs.json"
+        ))
+        .unwrap();
+        let rows = oracle["cases"].as_array().unwrap();
+        assert_eq!(rows.len(), 320);
+        let mut valid = 0;
+        let mut invalid = 0;
+        for row in rows {
+            let flags = &row["flags"];
+            let flag = |name: &str| flags[name].as_bool().unwrap();
+            let kind = row["kind"].as_str().unwrap();
+            if !row["preDrawException"].is_null() {
+                assert_eq!(kind, "Basic");
+                assert!(flag("normalMap"));
+                invalid += 1;
+                continue;
+            }
+            let mut p = params(&format!("Mesh{kind}Material"));
+            p.skinning = flag("skinning");
+            p.morph_normals = flag("morphNormals");
+            p.morph_targets = p.morph_normals;
+            p.env_map = flag("envMap");
+            p.flat_shading = flag("flatShading");
+            p.normal_map = flag("normalMap");
+            p.normal_map_object_space = p.normal_map && row["normalMapType"] == "object";
+            p.normal_map_tangent_space = p.normal_map && !p.normal_map_object_space;
+            p.vertex_tangents = row["tangents"].as_bool().unwrap() && p.normal_map;
+            p.normal_map_uv = p.normal_map.then(|| "uv".into());
+            let active = row["activeAttributes"].as_array().unwrap();
+            for (source, attribute) in [
+                ("NORMAL", "normal"),
+                ("TANGENT", "tangent"),
+                ("TEXCOORD_0", "uv"),
+            ] {
+                assert_eq!(
+                    consumes_short_attribute(&p, source),
+                    active.iter().any(|name| name == attribute),
+                    "{} {source}",
+                    row["caseId"]
+                );
+            }
+            valid += 1;
+        }
+        assert_eq!((valid, invalid), (272, 48));
+    }
+
+    /// Chromium (Electron 44, three r180) linked-attribute captures; see
+    /// `e2e/helpers/gltf-short-attributes.ts`.
+    #[test]
+    fn normal_follows_the_r180_vertex_programs() {
+        let mut basic = params("MeshBasicMaterial");
+        assert!(
+            !consumes_short_attribute(&basic, "NORMAL"),
+            "unskinned Basic"
+        );
+        basic.skinning = true;
+        assert!(consumes_short_attribute(&basic, "NORMAL"), "skinned Basic");
+        basic.skinning = false;
+        basic.env_map = true;
+        assert!(
+            consumes_short_attribute(&basic, "NORMAL"),
+            "env-mapped Basic"
+        );
+        basic.env_map = false;
+        basic.morph_normals = true;
+        basic.morph_targets = true;
+        assert!(
+            !consumes_short_attribute(&basic, "NORMAL"),
+            "Basic morph normals sit inside the skinning/env guard"
+        );
+
+        for kind in ["MeshStandardMaterial", "MeshPhysicalMaterial"] {
+            let mut lit = params(kind);
+            assert!(consumes_short_attribute(&lit, "NORMAL"), "{kind}");
+            lit.flat_shading = true;
+            assert!(consumes_short_attribute(&lit, "NORMAL"), "flat {kind}");
+            lit.skinning = true;
+            assert!(
+                consumes_short_attribute(&lit, "NORMAL"),
+                "skinned flat {kind}"
+            );
+            // USE_TANGENT requires `flatShading === false`.
+            lit.vertex_tangents = true;
+            assert!(
+                !consumes_short_attribute(&lit, "TANGENT"),
+                "flat {kind} tangent"
+            );
+            lit.flat_shading = false;
+            assert!(consumes_short_attribute(&lit, "TANGENT"), "{kind} tangent");
+        }
+
+        for kind in ["MeshDepthMaterial", "MeshDistanceMaterial"] {
+            let mut shadow = params(kind);
+            shadow.skinning = true;
+            assert!(
+                !consumes_short_attribute(&shadow, "NORMAL"),
+                "skinned {kind}"
+            );
+            shadow.displacement_map = true;
+            assert!(
+                consumes_short_attribute(&shadow, "NORMAL"),
+                "displaced {kind}"
+            );
+        }
+
+        let mut points = params("PointsMaterial");
+        points.skinning = true;
+        assert!(!consumes_short_attribute(&points, "NORMAL"));
     }
 }

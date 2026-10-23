@@ -378,6 +378,14 @@ impl EngineHost {
                 "fonts".into(),
                 serde_json::to_value(self.font_hub.stats()).unwrap_or_default(),
             );
+            #[cfg(target_os = "macos")]
+            object.insert(
+                "fontMemory".into(),
+                self.fonts
+                    .as_ref()
+                    .and_then(|service| serde_json::to_value(service.memory_usage()).ok())
+                    .unwrap_or_default(),
+            );
             let (asked, answered, failed) = self.broker.counts();
             object.insert(
                 "renderFonts".into(),

@@ -174,6 +174,11 @@ impl<'a> Poser<'a> {
                 if influence == 0.0 {
                     continue;
                 }
+                let source_len = g.morph.source_counts[0].get(k).copied().unwrap_or(t.count());
+                if i >= source_len {
+                    m = [f64::NAN; 3];
+                    break;
+                }
                 let d = &t.data[i * 3..i * 3 + 3];
                 for c in 0..3 {
                     m[c] += f64::from(d[c]) * influence;
@@ -183,6 +188,13 @@ impl<'a> Poser<'a> {
                 v[c] += m[c];
             }
         }
+        self.apply_bone(i, v)
+    }
+
+    /// `SkinnedMesh.applyBoneTransform`, also used on `normal + position`
+    /// by today's Blender snapshot (normal morphs are deliberately not read).
+    pub fn apply_bone(&self, i: usize, mut v: Vec3) -> Vec3 {
+        let g = &self.model.geometries[self.drawable.geometry];
         if let (Some(bones), Some(si), Some(sw)) = (&self.bones, &g.skin_index, &g.skin_weight) {
             // `applyBoneTransform` with an identity bind matrix.
             let base = math::apply(&math::IDENTITY, v);
@@ -221,11 +233,20 @@ fn expand_box(b: &mut (Vec3, Vec3), lo: Vec3, hi: Vec3, m: &Mat4) {
     }
 }
 
-/// `Box3.expandByPoint`.
+/// `Box3.expandByPoint` (`Math.min` and `Math.max`: a NaN coordinate
+/// makes the box NaN, which `loadGltf` refuses as a model without a
+/// measurable size).
 fn grow(b: &mut (Vec3, Vec3), p: Vec3) {
+    let js = |a: f64, v: f64, f: fn(f64, f64) -> f64| {
+        if a.is_nan() || v.is_nan() {
+            f64::NAN
+        } else {
+            f(a, v)
+        }
+    };
     for ((lo, hi), v) in b.0.iter_mut().zip(b.1.iter_mut()).zip(p) {
-        *lo = lo.min(v);
-        *hi = hi.max(v);
+        *lo = js(*lo, v, f64::min);
+        *hi = js(*hi, v, f64::max);
     }
 }
 

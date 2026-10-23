@@ -149,6 +149,15 @@ fn nullish(a: Option<f64>, b: f64) -> f64 {
 impl Primitive {
     /// `primitiveGeometry(source)` for `{ primitive, parameters }`. `None`
     /// for unknown names.
+    /// Whether `primitiveGeometry` builds anything for `name` (the schema's
+    /// primitives); for any other name it returns nothing.
+    pub fn known(name: &str) -> bool {
+        matches!(
+            name,
+            "box" | "sphere" | "plane" | "cone" | "cylinder" | "torus" | "capsule" | "icosahedron"
+        )
+    }
+
     pub fn from_parameters(name: &str, p: &Parameters) -> Option<Primitive> {
         let s = or(p.segments, 48.0);
         Some(match name {
