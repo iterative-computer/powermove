@@ -1,0 +1,131 @@
+/*
+ * Library viewer cards with "Use New Engine" on are today's cards, pixel for
+ * pixel (plan appendix C row C3; owner rule: no visible difference on an
+ * existing project). Each case launches the app twice, engine off then on,
+ * one Electron at a time, builds the same scene with the same viewer, opens
+ * the Library, and compares the two card images exactly.
+ *
+ * Run serially: pm-electron-lock bunx playwright test e2e/library-card-parity.spec.ts --workers=1
+ */
+import { writeFile } from 'node:fs/promises';
+import type { Page } from 'playwright';
+
+import { expect, launchApp, test } from './helpers/app';
+import { VIEWER_VARIANTS, useViewer, type ViewerVariant } from './helpers/viewer-fork';
+
+/** 2D at 200% panned, 2D at Fit, a 3D model through its camera, and in the right orthographic editor view. */
+type Scene = '2d' | '2d-fit' | '3d' | '3d-right';
+
+async function card<T = Buffer>(engine: '0' | '1', theme: string, variant: ViewerVariant, scene: Scene, then?: (page: Page, png: Buffer) => Promise<T>): Promise<T> {
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: engine } });
+  try {
+    await session.openEditor();
+    const { page } = session;
+    expect(await page.evaluate(() => !!(window as any).PM.EngineRender)).toBe(engine === '1');
+    await useViewer(page, session.userData, variant);
+    await page.evaluate(({ theme, scene }) => {
+      const PM = (window as any).PM;
+      PM.theme.apply(theme);
+      if (scene === '2d' || scene === '2d-fit') {
+        const project = PM.mkProject({ name: 'Card parity', w: 320, h: 180, fps: 30, dur: 2, bg: '#000000' });
+        const solid = PM.mkLayer('solid', { from: 0, dur: 2, d: { w: 120, h: 80, color: '#2040E0' } }, project);
+        solid.p['position.x'].v = 40; solid.p['position.y'].v = 30;
+        project.layers = [solid];
+        PM.replaceProject(project); PM.setTime(.5, { force: true });
+        PM.selectLayers(solid.id);
+        const viewer = PM.Kernel.services.get('viewer');
+        if (scene === '2d') { viewer.setZoom(2); viewer.pan = [-30, 16]; viewer.layout(); }
+      } else {
+        const api = PM.Kernel.api('card-parity');
+        api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 1.5, z: 7 } } });
+        api.scene3d.edit({ operation: 'add_light', light: { id: 'key', type: 'point', p: { x: -2, y: 3, z: 2, intensity: 30 } } });
+        api.scene3d.edit({ operation: 'add_object', object: { id: 'cube', source: { primitive: 'box' }, material: { p: { color: '#ff7733' } } } });
+        PM.selectLayers(['cube']);
+        const viewport = api.scene3d.viewport;
+        if (scene === '3d-right' && viewport.state().view.mode === 'camera') viewport.run('view.right');
+      }
+      PM.invalidate();
+    }, { theme, scene });
+    await settle(page);
+    await page.evaluate(() => (window as any).PM.LibraryUI.open());
+    const shown = page.locator('.library-card[data-panel-id="viewer"]');
+    await shown.scrollIntoViewIfNeeded();
+    await expect(shown.locator('.library-clone')).toBeAttached();
+    await expect(page.locator('[data-previews="ready"]')).toBeAttached();
+    await page.evaluate(() => document.fonts.ready);
+    await page.mouse.move(1, 1);
+    const png = await shown.screenshot({ animations: 'disabled' });
+    return then ? await then(page, png) : png as T;
+  } finally {
+    await session.close();
+  }
+}
+
+/** The viewer has drawn this scene: two samples a few frames apart agree. */
+async function settle(page: Page): Promise<void> {
+  await page.mouse.move(1, 1);
+  // With the engine on, its frames are on screen (no "Starting the engine…").
+  if (await page.evaluate(() => !!(window as any).PM.EngineRender)) {
+    await expect(page.locator('#panel-viewer #engine-present')).toHaveCSS('visibility', 'visible', { timeout: 20_000 });
+    await expect(page.locator('#panel-viewer [data-engine-status]')).toHaveCount(0, { timeout: 20_000 });
+  }
+  const sample = () => page.evaluate(async () => {
+    const stage = document.querySelector('#panel-viewer #stage') as HTMLElement;
+    const read = () => [...stage.querySelectorAll('canvas')].map((canvas) => {
+      if (getComputedStyle(canvas).visibility !== 'visible' || !canvas.width) return 0;
+      const copy = document.createElement('canvas'); copy.width = canvas.width; copy.height = canvas.height;
+      const context = copy.getContext('2d')!; context.drawImage(canvas, 0, 0);
+      const data = context.getImageData(0, 0, copy.width, copy.height).data;
+      let hash = 2166136261;
+      for (let index = 0; index < data.length; index += 7) hash = Math.imul(hash ^ data[index]!, 16777619) >>> 0;
+      return hash;
+    }).join(',');
+    const first = read();
+    for (let frame = 0; frame < 6; frame++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    return first === read() ? first : null;
+  });
+  await expect.poll(sample, { timeout: 15_000 }).not.toBeNull();
+}
+
+/** Compares two PNGs in a page: size, differing pixels, largest channel error. */
+async function compare(page: Page, a: Buffer, b: Buffer) {
+  return page.evaluate(async ({ a, b }) => {
+    const load = async (data: string) => { const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode(); return img; };
+    const [left, right] = [await load(a), await load(b)];
+    if (left.naturalWidth !== right.naturalWidth || left.naturalHeight !== right.naturalHeight) return { size: false, differing: -1, max: -1 };
+    const pixels = (img: HTMLImageElement) => {
+      const canvas = document.createElement('canvas'); canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+      const context = canvas.getContext('2d')!; context.drawImage(img, 0, 0);
+      return context.getImageData(0, 0, canvas.width, canvas.height).data;
+    };
+    const [p, q] = [pixels(left), pixels(right)];
+    let differing = 0, max = 0;
+    for (let index = 0; index < p.length; index += 4) {
+      let pixel = 0;
+      for (let channel = 0; channel < 4; channel++) pixel = Math.max(pixel, Math.abs(p[index + channel]! - q[index + channel]!));
+      if (pixel) differing++;
+      max = Math.max(max, pixel);
+    }
+    return { size: true, differing, max };
+  }, { a: a.toString('base64'), b: b.toString('base64') });
+}
+
+const cases: Array<{ theme: string; variant: ViewerVariant; scene: Scene }> = [
+  ...['light', 'dark'].flatMap(theme => VIEWER_VARIANTS.map(variant => ({ theme, variant, scene: '2d' as Scene }))),
+  ...(['2d-fit', '3d', '3d-right'] as Scene[]).flatMap(scene => VIEWER_VARIANTS.map(variant => ({ theme: 'dark', variant, scene }))),
+];
+
+for (const { theme, variant, scene } of cases) {
+  test(`Library card with the engine on is today's card: ${scene} in ${theme}, ${variant.name}`, async ({}, testInfo) => {
+    test.setTimeout(120_000);
+    const today = await card('0', theme, variant, scene);
+    await writeFile(testInfo.outputPath('card-engine-off.png'), today);
+    await testInfo.attach('Library card, engine off', { path: testInfo.outputPath('card-engine-off.png'), contentType: 'image/png' });
+    const result = await card('1', theme, variant, scene, async (page, engine) => {
+      await writeFile(testInfo.outputPath('card-engine-on.png'), engine);
+      await testInfo.attach('Library card, engine on', { path: testInfo.outputPath('card-engine-on.png'), contentType: 'image/png' });
+      return compare(page, today, engine);
+    });
+    expect(result).toEqual({ size: true, differing: 0, max: 0 });
+  });
+}

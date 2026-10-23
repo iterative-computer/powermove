@@ -120,15 +120,31 @@ for (const theme of ['light', 'dark']) for (const variant of VIEWER_VARIANTS) {
       const native = engine ? stage.querySelector<HTMLCanvasElement>('#engine-present') : inner.querySelector<HTMLCanvasElement>(':scope > #gl');
       let present = null;
       if (native && getComputedStyle(native).visibility === 'visible') {
-        const bitmap = document.createElement('canvas'); bitmap.width = native.width; bitmap.height = native.height;
-        bitmap.getContext('2d')!.drawImage(native, 0, 0);
         const css = getComputedStyle(native), box = native.getBoundingClientRect();
-        present = {
-          width: native.width, height: native.height, css: [css.width, css.height], hash: hashCanvas(bitmap),
-          parent: native.parentElement?.id,
-          // Where it sits in the stage, in stage CSS px.
-          offset: [box.left - stageBox.left, box.top - stageBox.top],
-        };
+        const todays = native.dataset.todaysCanvas?.split(' ').map(Number);
+        if (native.parentElement === stage && todays?.length === 6) {
+          /* A stage-level presentation shows the composition where today's
+             canvas sits (the viewer tags it per frame); the card shows that
+             canvas, at today's box and backing size. */
+          const [left, top, width, height, renderWidth, renderHeight] = todays as [number, number, number, number, number, number];
+          const sx = native.width / box.width, sy = native.height / box.height;
+          const bitmap = document.createElement('canvas'); bitmap.width = Math.round(renderWidth); bitmap.height = Math.round(renderHeight);
+          bitmap.getContext('2d')!.drawImage(native, left * sx, top * sy, width * sx, height * sy, 0, 0, bitmap.width, bitmap.height);
+          present = {
+            width: bitmap.width, height: bitmap.height, css: [`${width}px`, `${height}px`], hash: hashCanvas(bitmap),
+            parent: native.parentElement?.id,
+            offset: [box.left - stageBox.left + left, box.top - stageBox.top + top],
+          };
+        } else {
+          const bitmap = document.createElement('canvas'); bitmap.width = native.width; bitmap.height = native.height;
+          bitmap.getContext('2d')!.drawImage(native, 0, 0);
+          present = {
+            width: native.width, height: native.height, css: [css.width, css.height], hash: hashCanvas(bitmap),
+            parent: native.parentElement?.id,
+            // Where it sits in the stage, in stage CSS px.
+            offset: [box.left - stageBox.left, box.top - stageBox.top],
+          };
+        }
       }
       return {
         inner: [inner.style.left, inner.style.top, inner.style.width, inner.style.height],
@@ -265,8 +281,9 @@ for (const theme of ['light', 'dark']) for (const variant of VIEWER_VARIANTS) {
     const shown = after.present!;
     expect({ width: present.width, height: present.height, css: present.css, hash: present.hash, parent: present.parent })
       .toEqual({ width: shown.width, height: shown.height, css: shown.css, hash: shown.hash, parent: shown.parent });
-    // The picture keeps its place in the source stage's CSS box, even though
-    // the Library card itself has a different fixed size.
+    // The picture keeps its place in the source stage's CSS box (today's
+    // composition canvas box), even though the Library card itself has a
+    // different fixed size.
     const cardScale = clone.innerBox.width / (COMP.w * ZOOM);
     expect(clone.presentBox!.left - clone.stage.left).toBeCloseTo(shown.offset[0]! * cardScale, 1);
     expect(clone.presentBox!.top - clone.stage.top).toBeCloseTo(shown.offset[1]! * cardScale, 1);

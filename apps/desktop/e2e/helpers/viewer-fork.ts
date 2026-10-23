@@ -6,10 +6,11 @@
  * forks of viewers users can actually have: the viewers shipped in released
  * desktop builds, from before the engine (apiVersion 1, no engine
  * presentation of their own; they draw through `render.gl.init` and the
- * engine binds to their canvas). The engine-era viewer stands for a fork
- * made after this update (it presents by itself).
+ * engine binds to their canvas). A copy of the viewer at HEAD stands for a
+ * fork made after this update (it presents by itself).
  *
- * Refs are commit ids, so the fork does not move with any branch.
+ * Shipped viewers are pinned by commit id, so those forks do not move with
+ * any branch.
  */
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
@@ -34,8 +35,8 @@ export const VIEWER_VARIANTS: readonly ViewerVariant[] = [
   { name: 'fork of shipped viewer 1.0.8', ref: 'ded961354' },
   // Desktop v1.2.0 (tag `v1.2.0`): viewer 1.0.18, apiVersion 1.
   { name: 'fork of shipped viewer 1.0.18', ref: '07ed5fa17' },
-  // An engine-era viewer, as a fork made after the update would be.
-  { name: 'fork of an engine-era viewer', ref: '8d772dac8' },
+  // A fork made after this update: a copy of the viewer this build ships.
+  { name: 'fork of the current viewer', ref: 'HEAD' },
 ];
 
 /** The forks alone (for rows whose current-viewer case lives elsewhere). */
