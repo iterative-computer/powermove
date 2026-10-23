@@ -236,8 +236,22 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
           PM.Kernel.services.get('viewer').preview.show(id);
         }, { theme, id: ids['still-red.png'] });
         await expect(page.locator('#source-preview[data-open="true"]')).toBeVisible();
-        if (enabled) await expect.poll(() => page.locator('#source-preview canvas').evaluate((c: HTMLCanvasElement) => c.width)).toBeGreaterThan(1);
+        if (enabled) await page.waitForFunction(() => {
+          const monitor = (window as any).PM.EngineSourceMedia.monitorValue;
+          return monitor?.canvas.width > 1 && monitor.surface instanceof HTMLImageElement && monitor.surface.complete && monitor.surface.naturalWidth > 0;
+        });
         await page.locator('#source-preview').screenshot({ path: path.join(directory, `source-${theme}.png`), animations: 'disabled' });
+        const composition = await page.evaluate(() => {
+          const properties = ['z-index', 'transform', 'opacity', 'filter', 'backdrop-filter', 'will-change', 'isolation', 'contain', 'box-shadow', 'object-fit'];
+          return { dpr: devicePixelRatio, nodes: [...document.querySelectorAll<HTMLElement>('#source-preview, #source-preview .sp-media, #source-preview .sp-media > *, #source-preview .sp-foot')].map(element => {
+            const style = getComputedStyle(element), rect = element.getBoundingClientRect();
+            return { tag: element.tagName, classes: element.className, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+              client: [element.clientWidth, element.clientHeight], bitmap: element instanceof HTMLCanvasElement ? [element.width, element.height]
+                : element instanceof HTMLImageElement ? [element.naturalWidth, element.naturalHeight] : null,
+              style: Object.fromEntries(properties.map(property => [property, style.getPropertyValue(property)])) };
+          }) };
+        });
+        await writeFile(path.join(directory, `source-${theme}-composition.json`), JSON.stringify(composition, null, 2));
         await page.keyboard.press('Escape');
         await page.locator('.asset-list').screenshot({ path: path.join(directory, `assets-${theme}.png`), animations: 'disabled' });
         for (const name of Object.keys(measured)) await page.locator(`.asset-card[data-asset-id="${ids[name]}"] .asset-preview`).screenshot({ path: path.join(directory, `${name}-inline-${theme}.png`), animations: 'disabled' });

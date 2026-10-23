@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import type { CDPSession } from 'playwright';
 import { expect, launchApp, repoRoot, test } from './helpers/app';
 import { fixturePath, importFixture } from './helpers/media';
 
@@ -26,15 +27,34 @@ test('source filmstrip and monitor scrub cost no more than the current app', asy
     // Alternating order makes drift visible instead of giving one mode every warm run.
     for (const [round, enabled] of [[0, false], [0, true], [1, true], [1, false]] as const) {
       const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: enabled ? '1' : '0' } });
+      let nativeTrace = '';
+      const record = (chunk: Buffer) => { if (nativeTrace.length < 2 * 1024 * 1024) nativeTrace += chunk.toString(); };
+      const child = session.app.process();
+      let cpu: CDPSession | null = null;
+      child.stdout?.on('data', record); child.stderr?.on('data', record);
       try {
+        if (process.env.PM_SOURCE_CPU_PROFILE === '1') {
+          cpu = await session.page.context().newCDPSession(session.page);
+          await cpu.send('Profiler.enable'); await cpu.send('Profiler.start');
+        }
         await session.openEditor();
         await importFixture(session.page, 'h264-aac.mp4');
         await session.page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((a: any) => a.name === 'h264-aac.mp4'));
         if (enabled) await session.page.waitForFunction(() => !!(window as any).PM.EngineRender?.ready);
-        const measured = await session.page.evaluate(async enabled => {
+        const measured = await session.page.evaluate(async ({ enabled, profile }) => {
           const PM = (window as any).PM;
           const id = Object.values<any>(PM.proj.assets).find(a => a.name === 'h264-aac.mp4')!.id;
           const viewer = PM.Kernel.services.get('viewer');
+          const frameTrace: Record<string, number | null>[] = [];
+          if (enabled && profile) {
+            const source = PM.EngineSourceMedia, frame = source.frame.bind(source);
+            source.frame = async (...args: any[]) => {
+              const began = performance.now(), value = await frame(...args);
+              frameTrace.push({ began, time: args[1], width: args[2], height: args[3], elapsedMs: performance.now() - began,
+                mainMs: value.mainMs ?? null, waitedUs: value.waitedUs ?? null, renderUs: value.renderUs ?? null, revision: value.revision ?? null });
+              return value;
+            };
+          }
           const ticks = 705_600_000;
           const times = (scattered: boolean) => Array.from({ length: 24 }, (_, k) => Math.round(((scattered ? (k * 7) % 24 : k) * 1.9 / 24 + 1 / 60) * ticks) / ticks);
           const painted = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
@@ -82,11 +102,22 @@ test('source filmstrip and monitor scrub cost no more than the current app', asy
             }
             filmstripMs.push(performance.now() - began);
           }
-          return { scrubMs, filmstripMs, width: 320, height: 180 };
-        }, enabled);
+          return { scrubMs, filmstripMs, width: 320, height: 180,
+            sourceStats: enabled ? { ...PM.EngineSourceMedia.stats } : null, frameTrace };
+        }, { enabled, profile: process.env.PM_SOURCE_PROFILE === '1' });
         results.push({ enabled, round, ...measured });
         expect(session.diagnostics.pageErrors).toEqual([]);
-      } finally { await session.close(); }
+      } finally {
+        try {
+          if (cpu) {
+            const { profile } = await cpu.send('Profiler.stop');
+            await writeFile(path.join(directory, `${enabled ? 'native' : 'legacy'}-${round}.cpuprofile`), JSON.stringify(profile));
+          }
+        } finally { await cpu?.detach().catch(() => {}); await session.close(); }
+        child.stdout?.off('data', record); child.stderr?.off('data', record);
+        await writeFile(path.join(directory, `${enabled ? 'native' : 'legacy'}-${round}-stages.log`),
+          nativeTrace.split('\n').filter(line => /source-job-timing|pm source (?:filmstrip|job|frame|batch)|pm job renderer/.test(line)).join('\n'));
+      }
       await writeFile(path.join(directory, 'app-source-performance.json'), JSON.stringify(results, null, 2));
     }
     const percentile = (values: number[], p: number) => [...values].sort((a, b) => a - b)[Math.round((values.length - 1) * p)]!;
@@ -98,10 +129,10 @@ test('source filmstrip and monitor scrub cost no more than the current app', asy
         legacyFirst: results.find(r => !r.enabled)!.filmstripMs[0], nativeFirst: results.find(r => r.enabled)!.filmstripMs[0] }
     };
     await writeFile(path.join(directory, 'comparison.json'), JSON.stringify({ comparison, counters }, null, 2));
-    expect(comparison.monitor.nativeP50).toBeLessThanOrEqual(comparison.monitor.legacyP50);
-    expect(comparison.monitor.nativeP95).toBeLessThanOrEqual(comparison.monitor.legacyP95);
-    expect(comparison.filmstrip.nativeMedian).toBeLessThanOrEqual(comparison.filmstrip.legacyMedian);
-    expect(comparison.filmstrip.nativeFirst).toBeLessThanOrEqual(comparison.filmstrip.legacyFirst!);
+    expect.soft(comparison.monitor.nativeP50).toBeLessThanOrEqual(comparison.monitor.legacyP50);
+    expect.soft(comparison.monitor.nativeP95).toBeLessThanOrEqual(comparison.monitor.legacyP95);
+    expect.soft(comparison.filmstrip.nativeMedian).toBeLessThanOrEqual(comparison.filmstrip.legacyMedian);
+    expect.soft(comparison.filmstrip.nativeFirst).toBeLessThanOrEqual(comparison.filmstrip.legacyFirst!);
   } finally {
     try { await writeFile(path.join(directory, 'machine.json'), JSON.stringify({ ...machine, endedAt: new Date().toISOString(), loadAfter: os.loadavg() }, null, 2)); }
     finally { if (!evidence) await rm(directory, { recursive: true, force: true }); }
