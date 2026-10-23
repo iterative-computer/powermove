@@ -27,6 +27,7 @@ import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requir
 import { touchedDocument, writeDocument } from '../engine-doc/write';
 import { documentPending, waitForDocumentReady } from '../engine-doc/readiness';
 import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../../shared/engine-stamp';
+import { migrateProjectColorDepth } from '../../../shared/project-color';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -240,6 +241,7 @@ function loadBootProject() {
   catch (e) { console.warn('Saved project could not be loaded', raw.id, e); return emptyHomeProject(); }
 }
 function* hydrateSteps(p: any): Generator<void, any> {
+  p = migrateProjectColorDepth(p);
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
   Object.assign(base, p);
   // Loaded rates keep their float and gain their exact rational.

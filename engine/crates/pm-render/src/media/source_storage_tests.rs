@@ -69,6 +69,7 @@ fn source(
         Factors { x: 1, y: 1 },
         None,
         format,
+        format == wgpu::TextureFormat::Rgba8Unorm && precision != Precision::Unorm8,
     );
     gpu.queue.submit([encoder.finish()]);
     target
@@ -92,6 +93,7 @@ fn native_source_storage_preserves_negative_and_superwhite_values() {
             .iter()
             .flatten()
             .map(|&v| match precision {
+                Precision::Unorm8 => unreachable!("floating source test"),
                 Precision::Float16 => half_to_f32(f32_to_half(v)),
                 Precision::Float32 => v,
             })
@@ -287,7 +289,7 @@ fn compatibility_source_storage_rounds_directly_to_rgba8() {
         expected, rounded_via_half,
         "fixture must detect double rounding"
     );
-    for precision in [Precision::Float16, Precision::Float32] {
+    for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
         let target = source(
             &gpu,
             &pipelines,
@@ -381,7 +383,7 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
         alpha: AlphaMode::Opaque,
         tone_map: None,
     };
-    let converted = |format| {
+    let converted = |format, compatibility_storage| {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = convert_format(
             &gpu.device,
@@ -391,10 +393,15 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
             &normalized,
             &color,
             WorkingEncoding::Standard,
-            Precision::Float32,
+            if compatibility_storage || format == wgpu::TextureFormat::Rgba32Float {
+                Precision::Float32
+            } else {
+                Precision::Unorm8
+            },
             Factors { x: 2, y: 2 },
             None,
             format,
+            compatibility_storage,
         );
         gpu.queue.submit([encoder.finish()]);
         target
@@ -455,13 +462,19 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
     let native = reference(false);
     let expected: Vec<u8> = centered.iter().map(|&v| unorm(v)).collect();
     let wrong: Vec<u8> = native.iter().map(|&v| unorm(v)).collect();
-    assert!(expected.iter().zip(wrong).any(|(&a, b)| a.abs_diff(b) > 20));
-    let bitmap = converted(wgpu::TextureFormat::Rgba8Unorm);
+    assert!(expected.iter().zip(&wrong).any(|(&a, &b)| a.abs_diff(b) > 20));
+    let bitmap = converted(wgpu::TextureFormat::Rgba8Unorm, true);
     assert_eq!(
         read_raw(&gpu.device, &gpu.queue, &bitmap.texture).unwrap(),
         expected
     );
-    let float = converted(wgpu::TextureFormat::Rgba32Float);
+    let working8 = converted(wgpu::TextureFormat::Rgba8Unorm, false);
+    assert_eq!(
+        read_raw(&gpu.device, &gpu.queue, &working8.texture).unwrap(),
+        wrong,
+        "RGBA8 working storage keeps native chroma siting and filter"
+    );
+    let float = converted(wgpu::TextureFormat::Rgba32Float, false);
     let actual = read_f32(&gpu.device, &gpu.queue, &float.texture).unwrap();
     for (i, (&actual, &expected)) in actual.iter().zip(&native).enumerate() {
         assert!(

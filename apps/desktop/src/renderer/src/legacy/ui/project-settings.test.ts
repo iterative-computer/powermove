@@ -368,31 +368,25 @@ describe('Settings › Project › Media (new engine)', () => {
 });
 
 describe('Settings › Project › Color (new engine)', () => {
-  it('shows linear blending and precision only with the new engine, and applies each change', () => {
-    let settings: { linearBlending: boolean; precision: 'float16' | 'float32' } = { linearBlending: false, precision: 'float16' };
+  it('shows linear blending with the new engine and keeps Color depth as the sole precision control', () => {
+    let settings = { linearBlending: false };
     const applyProjectColor = vi.fn((patch: Partial<typeof settings>) => { settings = { ...settings, ...patch }; });
     const host = bridge({ projectColor: () => settings, applyProjectColor });
     const control = createProjectSettingsControl(host.api);
     expect([...control.element.querySelectorAll('.settings-section-heading > b')].map((node) => node.textContent))
       .toEqual(['Composition', 'Color', 'Export']);
     const linear = field(control, 'Blend in linear light') as HTMLButtonElement;
-    const precision = field(control, 'Precision') as HTMLSelectElement;
+    expect(control.element.querySelector('[aria-label="Precision"]')).toBeNull();
     expect(linear.className).toBe('toggle');
     expect(linear.getAttribute('aria-pressed')).toBe('false');
-    expect([...precision.options].map((option) => [option.value, option.textContent])).toEqual([['float16', '16-bit float'], ['float32', '32-bit float']]);
-    expect(precision.value).toBe('float16');
     linear.click();
     expect(applyProjectColor).toHaveBeenLastCalledWith({ linearBlending: true });
     expect(linear.getAttribute('aria-pressed')).toBe('true');
-    precision.value = 'float32';
-    change(precision);
-    expect(applyProjectColor).toHaveBeenLastCalledWith({ precision: 'float32' });
-    expect(applyProjectColor).toHaveBeenCalledTimes(2);
+    expect(applyProjectColor).toHaveBeenCalledTimes(1);
     // An edit made elsewhere (undo) shows on refresh.
-    settings = { linearBlending: false, precision: 'float16' };
+    settings = { linearBlending: false };
     control.refresh();
     expect(linear.classList.contains('on')).toBe(false);
-    expect(precision.value).toBe('float16');
     control.destroy();
   });
 });

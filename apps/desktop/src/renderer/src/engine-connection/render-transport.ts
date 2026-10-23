@@ -146,30 +146,31 @@ export interface TransportSession {
   readonly resyncPending: boolean;
   /** The revision the engine has applied (0: the document has not arrived). */
   readonly applied?: number;
-  uploadFallback(pixels: { key: string; width: number; height: number; rgba16f: Uint16Array }): void;
+  uploadFallback(pixels: { key: string; width: number; height: number; rgba16f: Uint16Array; rgba32f?: Float32Array }): void;
   post(event: Record<string, unknown> & { type: string }): boolean;
 }
 
 /** What draws fallback programs (ShaderFallbackRunner). `textures` are an
  *  effect's or a transition's (binary16 RGBA, GL row order). */
 export interface TransportFallbackRunner {
-  render(request: ShaderFallbackRequest, textures?: Uint16Array[]): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array }>;
-  renderSync(request: ShaderFallbackRequest, textures?: Uint16Array[]): { key: string; width: number; height: number; rgba16f: Uint16Array };
+  render(request: ShaderFallbackRequest, textures?: (Uint16Array | Float32Array)[]): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array; rgba32f?: Float32Array }>;
+  renderSync(request: ShaderFallbackRequest, textures?: (Uint16Array | Float32Array)[]): { key: string; width: number; height: number; rgba16f: Uint16Array; rgba32f?: Float32Array };
 }
 
 /** The textures a fallback request samples, from the answer that names it
  *  (main hands them back with `needsRenderer`; main/engine/fallback-inputs.ts). */
-export function fallbackTextures(reply: { fallbackTextures?: { key: string; textures: Uint8Array[] }[] }, request: ShaderFallbackRequest): Uint16Array[] {
+export function fallbackTextures(reply: { fallbackTextures?: { key: string; textures: Uint8Array[] }[] }, request: ShaderFallbackRequest): (Uint16Array | Float32Array)[] {
   const count = request.textures ?? 0;
   if (count === 0) return [];
   const found = reply.fallbackTextures?.find((t) => t.key === request.key);
-  const size = request.width * request.height * 8;
+  const stride = request.colorDepth === 32 ? 16 : 8;
+  const size = request.width * request.height * stride;
   if (!found || found.textures.length !== count || found.textures.some((t) => t.byteLength !== size)) {
     throw new EngineSnapshotError('internal', `The textures of program ${request.key.slice(0, 12)} did not arrive with the answer.`);
   }
   return found.textures.map((t) => {
     // Aligned copies: an IPC buffer may start at an odd offset.
-    const values = new Uint16Array(t.byteLength / 2);
+    const values = request.colorDepth === 32 ? new Float32Array(t.byteLength / 4) : new Uint16Array(t.byteLength / 2);
     new Uint8Array(values.buffer).set(t);
     return values;
   });
@@ -1107,7 +1108,7 @@ export class EngineRenderTransport {
     const uploaded: string[] = [];
     let compatUploaded: CompatNeed[] = [];
     const dependencies = new SnapshotDependencies();
-    let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
+    let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array; rgba32f?: Uint8Array }[] = [];
     // The window's producers go with every request (main's session then
     // asks for those layers), and the answers to a round's needs with the next.
     let compatEvents: EngineCompatEvent[] = this.answerers.size ? [{ type: 'compat', compat: 'producers', sources: [...this.answerers.keys()] }] : [];
@@ -1158,7 +1159,9 @@ export class EngineRenderTransport {
       for (const r of reply.fallback) {
         if (uploaded.includes(r.key)) throw new EngineSnapshotError('internal', `The engine asked again for program ${r.key.slice(0, 12)}.`);
         const pixels = runner.renderSync(r, fallbackTextures(reply, r));
-        fallbackPixels.push({ key: pixels.key, width: pixels.width, height: pixels.height, rgba16f: new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength) });
+        fallbackPixels.push({ key: pixels.key, width: pixels.width, height: pixels.height,
+          rgba16f: new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength),
+          ...(pixels.rgba32f ? { rgba32f: new Uint8Array(pixels.rgba32f.buffer, pixels.rgba32f.byteOffset, pixels.rgba32f.byteLength) } : {}) });
         uploaded.push(r.key);
       }
     }

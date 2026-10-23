@@ -114,7 +114,7 @@ export type NativeEngineOptions = {
   /** Runs a job engine fallback request in a window's runner
    *  (`shader-fallback-relay.ts`); without it such requests answer
    *  `unsupported` and the job fails naming the program. */
-  shaderFallback?: (session: number, request: ShaderFallbackRequest, textures: Uint16Array[]) => Promise<ShaderFallbackResult>;
+  shaderFallback?: (session: number, request: ShaderFallbackRequest, textures: (Uint16Array | Float32Array)[]) => Promise<ShaderFallbackResult>;
 };
 
 export type EngineProcessStatus = { state: SupervisorState; generation: number; pid: number | null; attempts: number };

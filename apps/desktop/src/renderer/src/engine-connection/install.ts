@@ -160,8 +160,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   let fallbackRunner: ShaderFallbackRunner | null = null;
   // The job engine's fallback requests (exports, agent stills) run in this
   // window's runner too: one WebGL2 context for the window (decision 19).
-  const offShaderFallback = native.onShaderFallback?.(async ({ request, textures }) =>
-    (await (fallbackRunner ??= new ShaderFallbackRunner()).render(request as ShaderFallbackRequest, textures)).rgba16f) ?? (() => {});
+  const offShaderFallback = native.onShaderFallback?.(async ({ request, textures }) => {
+    const { rgba16f, rgba32f } = await (fallbackRunner ??= new ShaderFallbackRunner()).render(request as ShaderFallbackRequest, textures);
+    return { rgba16f, ...(rgba32f ? { rgba32f } : {}) };
+  }) ?? (() => {});
   // One session owns this window's clock. A viewer attaches to it; closing
   // that channel retires presentation only, leaving pm-audio and time alive.
   let viewerHandlers: EngineViewerHandlers | null = null;

@@ -116,8 +116,8 @@ pub fn blend_channel(
 
 /// Today's composite of a premultiplied source over a premultiplied
 /// destination with a blend mode and layer alpha (`FRAG_COMPOSITE`):
-/// unpremultiply both (guarded at α > 0.0001), blend, mix by source alpha,
-/// and re-premultiply by the union alpha.
+/// unpremultiply both (guarded at α > 0.0001), blend their straight colors,
+/// then retain each premultiplied source where the other is translucent.
 pub fn legacy_composite(mode: BlendMode, src: [f64; 4], dst: [f64; 4], alpha: f64) -> [f64; 4] {
     let s = src.map(|v| v * alpha);
     let un = |p: [f64; 4]| -> [f64; 3] {
@@ -133,8 +133,7 @@ pub fn legacy_composite(mode: BlendMode, src: [f64; 4], dst: [f64; 4], alpha: f6
     let mut out = [0.0; 4];
     for i in 0..3 {
         let bc = legacy_blend(mode, dc[i], sc[i]);
-        let res = dc[i] * (1.0 - s[3]) + bc * s[3];
-        out[i] = res * a;
+        out[i] = (1.0 - s[3]) * dst[i] + (1.0 - dst[3]) * s[i] + s[3] * dst[3] * bc;
     }
     out[3] = a;
     out
@@ -174,7 +173,8 @@ pub fn blend_id(mode: BlendMode) -> i32 {
 /// [`legacy_composite`] in a project's setup: premultiplied source and
 /// destination in the working encoding, the blend per [`blend_channel`],
 /// and today's compositing formula (unpremultiply guarded at α > 0.0001,
-/// mix by source alpha, re-premultiply by the union alpha) in the working
+/// retain each source where the other is translucent, then add the blended
+/// contribution where both overlap) in the working
 /// encoding. Standard equals [`legacy_composite`].
 pub fn composite(
     mode: BlendMode,
@@ -198,7 +198,7 @@ pub fn composite(
     let mut out = [0.0; 4];
     for i in 0..3 {
         let bc = blend_channel(mode, working, domain, dc[i], sc[i]);
-        out[i] = (dc[i] * (1.0 - s[3]) + bc * s[3]) * a;
+        out[i] = (1.0 - s[3]) * dst[i] + (1.0 - dst[3]) * s[i] + s[3] * dst[3] * bc;
     }
     out[3] = a;
     out
@@ -318,6 +318,25 @@ mod tests {
         }
         assert_eq!(blend_mode_from_name("hard-mix"), BlendMode::Normal);
         assert_eq!(blend_id(BlendMode::Darken), 8);
+    }
+
+    #[test]
+    fn screen_blend_preserves_both_colors_over_transparency() {
+        let src = [0.5, 0.0, 0.0, 0.5];
+        let dst = [0.0, 0.25, 0.0, 0.5];
+        let expected = [0.5, 0.25, 0.0, 0.75];
+        assert_eq!(legacy_composite(BlendMode::Screen, src, dst, 1.0), expected);
+        assert_eq!(
+            composite(
+                BlendMode::Screen,
+                WorkingEncoding::Standard,
+                BlendDomain::HdrSafe,
+                src,
+                dst,
+                1.0,
+            ),
+            expected,
+        );
     }
 
     #[test]

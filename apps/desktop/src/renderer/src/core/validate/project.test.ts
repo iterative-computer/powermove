@@ -91,6 +91,14 @@ function serializedLegacyDemo(): string {
 }
 
 describe('sanitizeProject', () => {
+  it('normalizes Color depth and removes legacy precision from typed snapshots', () => {
+    const old = sanitizeProject({ color: { precision: 'float32', linearBlending: true } });
+    expect(old.colorDepth).toBe(32);
+    expect((old as any).color).toEqual({ linearBlending: true });
+    const current = sanitizeProject({ colorDepth: 8, color: { precision: 'float32' } });
+    expect(current.colorDepth).toBe(8);
+    expect('color' in current).toBe(false);
+  });
   it('preserves negative layer starts in saved and nested compositions', () => {
     const PM = legacyModel();
     const source = PM.mkProject({ dur: 10 });

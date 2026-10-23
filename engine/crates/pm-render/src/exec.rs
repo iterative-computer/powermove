@@ -491,13 +491,14 @@ impl Exec<'_> {
                         ) {
                             return;
                         }
-                        match self.scene3d.render(
+                        match self.scene3d.render_at_precision(
                             self.device,
                             self.queue,
                             encoder,
                             self.pool,
                             object,
                             self.depth_id,
+                            self.precision,
                         ) {
                             Ok(out) => {
                                 // The pass renders in GL row order.

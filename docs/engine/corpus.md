@@ -94,6 +94,36 @@ module state with the app.
 
 ## Layout
 
+### Explicit BLEND-1 main baseline recapture
+
+Decision BLEND-1 uses main's current premultiplied source-over blend equation,
+introduced in `2b1fa379a`, as the reference for the main-merged beta. Earlier
+captures contain `mix(dc, bc, s.a) * unionAlpha`. A reference may change only
+when the built app, with Use New Engine off, reproduces that original reference
+exactly after substituting only the historical equation. PNG comparisons use
+decoded pixels; float comparisons use every binary32 bit.
+
+The qualification covers primary corpus, SVG and text gates, including
+isolated-text captures. Its 30 distinct reference kinds comprise 20 float
+captures and ten opaque PNGs; three PNGs are shared by the SVG and text gates.
+Every original was reproduced exactly before recapture, and the independent
+artifact audit rechecked 11,462,400 binary32 patterns and 7,488,000 byte codes.
+
+`src/blend-main-recapture.ts` consumes an external comparison plan and uses the
+ordinary corpus page capture, media import and output helpers. It restores the
+current shader and independently repeats the current capture before publishing
+an explained comparison. An unexplained comparison retains its original
+reference and continues to fail. The tool changes no numerical bound.
+
+Original files remain intact. The selected sample's `png` or `float` record
+points to the newly captured file under `references/BLEND-1/`, and
+`sample.blendMainRecapture` records the original and corrected files, historical
+pixel capture, proof, app build hash and main-merged head. Its reason is
+`recaptured after main 2b1fa379a blend change`. The project record and manifest
+carry the same annotation, and active-file byte totals are updated. Verification
+checks the original pixels, exact attribution hashes and corrected records.
+Captured pixels and operational evidence remain outside Git.
+
 ### Explicit COMPCLOSE-1 reference correction
 
 The owner decision of 2026-10-19 keeps correct center-time video frames rather

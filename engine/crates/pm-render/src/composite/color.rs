@@ -2,7 +2,8 @@
 //! "Project color settings"; contract 4 `ProjectColor`).
 //!
 //! The document stores them at the root as
-//! `color: { mode, linearBlending, precision, blendDomain }`. An absent or
+//! `colorDepth: 8 | 16 | 32` plus `color: { mode, linearBlending, blendDomain }`.
+//! The old `color.precision` is read only when depth is absent. An absent or
 //! `null` field, and any absent key, is decision 1's default (Standard,
 //! linear blending off, 16-bit float, HDR-safe blend formulas), which is
 //! what migrated projects open with. A value this build does not know is
@@ -17,8 +18,7 @@ use pm_protocol::color::{BlendDomain, ColorMode, Precision, ProjectColor, Workin
 pub struct ColorSettings {
     pub working: WorkingEncoding,
     pub blend_domain: BlendDomain,
-    /// The project's intermediate precision (a floor for every render of
-    /// the project).
+    /// The project's authoritative intermediate storage precision.
     pub precision: Precision,
 }
 
@@ -41,16 +41,14 @@ impl ColorSettings {
 
 /// The project's `color` field, or why it cannot be read.
 pub fn project_color(root: &Node) -> Result<ProjectColor, String> {
-    let Some(color) = node::member(Some(root), "color") else {
-        return Ok(ProjectColor::DEFAULT);
-    };
-    let map = match color.kind() {
-        NodeKind::Null => return Ok(ProjectColor::DEFAULT),
-        NodeKind::Object(map) => map,
+    let mut out = ProjectColor::DEFAULT;
+    let color = node::member(Some(root), "color");
+    let map = match color.map(Node::kind) {
+        None | Some(NodeKind::Null) => None,
+        Some(NodeKind::Object(map)) => Some(map),
         _ => return Err("the project color setting is not an object".into()),
     };
-    let mut out = ProjectColor::DEFAULT;
-    for (key, value) in map.iter() {
+    for (key, value) in map.into_iter().flatten() {
         let key = key.to_string_lossy();
         let text = node::string(Some(value)).map(|s| s.to_string_lossy());
         match (key.as_str(), text.as_deref(), value.kind()) {
@@ -65,16 +63,16 @@ pub fn project_color(root: &Node) -> Result<ProjectColor, String> {
             _ => return Err(format!("project color setting {key} has an unknown value")),
         }
     }
+    // Main's setting wins over the engine's retired Precision field. A missing
+    // depth retains old native projects' precision until the file is migrated.
+    if let Some(depth) = node::member(Some(root), "colorDepth") {
+        out.precision = match depth.kind() {
+            NodeKind::Number(n) if *n == 8.0 => Precision::Unorm8,
+            NodeKind::Number(n) if *n == 32.0 => Precision::Float32,
+            _ => Precision::Float16, // normalizeColorDepth in the shipped app
+        };
+    }
     Ok(out)
-}
-
-/// Whether the project asks for 32-bit float intermediates through the
-/// current app's Settings › Project › Color depth (`colorDepth`: 8, 16, or
-/// 32 bits per channel; absent or anything else is 16, `normalizeColorDepth`).
-/// The current compositor falls back to 16 where the GPU lacks float
-/// rendering (`availableColorDepth`); the renderer does the same.
-pub fn color_depth_float32(root: &Node) -> bool {
-    matches!(node::member(Some(root), "colorDepth").map(Node::kind), Some(NodeKind::Number(n)) if *n == 32.0)
 }
 
 /// A premultiplied E-encoded color (hex solids, backgrounds) in the
@@ -113,16 +111,32 @@ mod tests {
     }
 
     #[test]
-    fn color_depth_32_asks_for_float32() {
-        assert!(color_depth_float32(&root(r#"{"colorDepth":32}"#)));
-        for other in [
-            r#"{}"#,
-            r#"{"colorDepth":16}"#,
-            r#"{"colorDepth":8}"#,
-            r#"{"colorDepth":"32"}"#,
+    fn color_depth_is_authoritative_and_legacy_precision_migrates() {
+        for (depth, precision) in [
+            (8, Precision::Unorm8),
+            (16, Precision::Float16),
+            (32, Precision::Float32),
         ] {
-            assert!(!color_depth_float32(&root(other)), "{other}");
+            let json = format!(r#"{{"colorDepth":{depth},"color":{{"precision":"float32"}}}}"#);
+            assert_eq!(project_color(&root(&json)).unwrap().precision, precision);
         }
+        for json in [
+            r#"{}"#,
+            r#"{"colorDepth":"32"}"#,
+            r#"{"colorDepth":64}"#,
+            r#"{"colorDepth":null}"#,
+        ] {
+            assert_eq!(
+                project_color(&root(json)).unwrap().precision,
+                Precision::Float16
+            );
+        }
+        assert_eq!(
+            project_color(&root(r#"{"color":{"precision":"float32"}}"#))
+                .unwrap()
+                .precision,
+            Precision::Float32
+        );
     }
 
     #[test]

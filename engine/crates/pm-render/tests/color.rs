@@ -87,11 +87,25 @@ fn render(
     t: f64,
     resolver: &MapResolver,
 ) -> Vec<f32> {
+    let mut doc = doc.clone();
+    doc["colorDepth"] = json!(if precision == Precision::Float32 {
+        32
+    } else {
+        16
+    });
     let request = RenderRequest::at_scale(Size::new(size.0, size.1), 1.0, precision);
     let frame = renderer
-        .render(&load(doc), "Ptest-root", ticks(t), &request, resolver)
+        .render(&load(&doc), "Ptest-root", ticks(t), &request, resolver)
         .unwrap();
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert_eq!(
+        frame.color.format(),
+        if precision == Precision::Float32 {
+            wgpu::TextureFormat::Rgba32Float
+        } else {
+            wgpu::TextureFormat::Rgba16Float
+        }
+    );
     renderer.read_rgba(&frame).unwrap()
 }
 
@@ -355,7 +369,8 @@ fn transparency(
     let path = media(name)?;
     let (w, h) = (320u32, 180u32);
     let (doc, resolver) = full_frame_video(&path, w, h, 3.0);
-    let doc = if linear_light { linear(doc) } else { doc };
+    let mut doc = if linear_light { linear(doc) } else { doc };
+    doc["colorDepth"] = json!(32);
     let mut r = Renderer::headless().unwrap();
     // The corpus files are tagged BT.601 (`smpte170m`); read them as Rec.709
     // so the source and the Rec.709 output share the matrix (the bar's
@@ -372,6 +387,7 @@ fn transparency(
             .render(&load(&doc), "Ptest-root", ticks(t), &request, &resolver)
             .unwrap();
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba32Float);
         let rgba = r.read_rgba(&frame).unwrap();
         // ProRes 4444 carries alpha: straight output, as its encoder input.
         let mut p = params();
@@ -503,7 +519,8 @@ fn invariant_1_420(linear_light: bool) {
     };
     let (w, h) = (320u32, 180u32);
     let (doc, resolver) = full_frame_video(&path, w, h, 5.0);
-    let doc = if linear_light { linear(doc) } else { doc };
+    let mut doc = if linear_light { linear(doc) } else { doc };
+    doc["colorDepth"] = json!(32);
     let mut r = Renderer::headless().unwrap();
     // Untagged SD reads as BT.601 (section 9); read it as Rec.709 to export
     // to Rec.709 with the same matrix.
@@ -517,6 +534,7 @@ fn invariant_1_420(linear_light: bool) {
         let frame = r
             .render(&load(&doc), "Ptest-root", ticks(t), &request, &resolver)
             .unwrap();
+        assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba32Float);
         let rgba = r.read_rgba(&frame).unwrap();
         let input = convert(
             &WorkingFrame {

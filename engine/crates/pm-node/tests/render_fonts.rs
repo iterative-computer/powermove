@@ -563,15 +563,17 @@ mod child {
             &painted.pixels,
             SnapshotPixels::Premultiplied,
         );
-        // The text plan's crop is `[x0, y0, x1, y1]`; `place_raster` takes
-        // `[x, y, w, h]`. The ink starts away from the canvas's corner here,
-        // so a stride mixed up between the two would streak the rows.
-        let [px0, py0, px1, py1] = painted.plan.crop;
+        // Level 1 keeps the full Canvas2D quad: its transparent border is
+        // part of the source geometry even when the ink has a smaller crop.
+        assert_eq!(painted.plan.crop, [0, 0, raster.width, raster.height]);
+        let [ink_left, ink_top, _, _] = painted.plan.scene.ink().expect("the layer has ink");
         assert!(
-            px0 > 0 || py0 > 0,
-            "an ink crop at the corner: {:?}",
-            painted.plan.crop
+            ink_left > 0 && ink_top > 0,
+            "exercise transparent canvas padding"
         );
+        // `place_raster` takes `[x, y, w, h]` from the plan's `[x0, y0, x1, y1]`
+        // crop (here the whole quad): the placed pixels are the raster's.
+        let [px0, py0, px1, py1] = painted.plan.crop;
         let placed = pm_node::present::snapshot::place_raster(
             &rgba,
             [px0, py0, px1 - px0, py1 - py0],
@@ -582,8 +584,13 @@ mod child {
         assert_eq!(
             pixels(&raster),
             placed.0,
-            "the raster is the registry's raster"
+            "the placed raster is the registry's raster"
         );
+        assert_eq!(
+            rgba.len(),
+            raster.width as usize * raster.height as usize * 4
+        );
+        assert_eq!(pixels(&raster), rgba, "the raster is the registry's raster");
         println!("layer raster: {}x{}", raster.width, raster.height);
         // Any scale, as today's `PM.raster` (`textRasterGeometry`): the
         // density is `min(scale, 8192 / w, 8192 / h)` of the same box, so

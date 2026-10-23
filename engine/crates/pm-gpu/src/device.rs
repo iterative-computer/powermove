@@ -95,7 +95,7 @@ impl Gpu {
     /// needs filtering (resampling layers) and blending (compositing).
     pub fn supports_precision(&self, precision: Precision) -> bool {
         match precision {
-            Precision::Float16 => true,
+            Precision::Unorm8 | Precision::Float16 => true,
             Precision::Float32 => self
                 .device
                 .features()

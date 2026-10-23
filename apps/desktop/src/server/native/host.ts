@@ -36,7 +36,7 @@ export type NativeSnapshot = { project: Record<string, any>; document: unknown; 
 export interface NativeBrowser {
   call(project: string, request: AgentToolRequestEvent): Promise<AgentToolResponseEvent>;
   compat(project: string, request: import('../../shared/engine-protocol').CompatFrameRequest): Promise<import('../../shared/engine-ipc').EngineCompatAnswer>;
-  shader(session: number, request: import('../../shared/engine-protocol').ShaderFallbackRequest, textures: Uint16Array[]): Promise<import('../../main/engine/shader-fallback-relay').ShaderFallbackResult>;
+  shader(session: number, request: import('../../shared/engine-protocol').ShaderFallbackRequest, textures: (Uint16Array | Float32Array)[]): Promise<import('../../main/engine/shader-fallback-relay').ShaderFallbackResult>;
   /** Agent import_media/replace_media: today's editor import in the project's tab (engine/document-host/import-media.ts). */
   importMedia(project: string, args: Record<string, unknown>, replace: boolean): Promise<Record<string, unknown>>;
   close(): Promise<void>;

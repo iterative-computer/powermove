@@ -1,6 +1,7 @@
 import { validateFrameRate } from '../../../../shared/frame-rate';
 import { CHANNELS_3D } from './space-3d';
 import { normalizeColorDepth } from '../../core/color-depth';
+import { migrateProjectColorDepth } from '../../../../shared/project-color';
 /* Ported from js/core/model.js — behavior-preserving. */
 import { normalizeExportDefaults, storedExportDefaults } from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
@@ -287,7 +288,7 @@ PM.cloneLayer = (L: any) => {
 PM.serialize = () => JSON.stringify({ v: PM.version, proj: PM.proj, ws: PM.WS && PM.WS.current }, null, 1);
 PM.deserialize = (json: any) => {
   const o = typeof json === 'string' ? JSON.parse(json) : json;
-  return o.proj || o;
+  return migrateProjectColorDepth(o.proj || o);
 };
 }
 

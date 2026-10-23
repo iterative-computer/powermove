@@ -15,8 +15,8 @@
 //! 4. the track matte (`applyTrackMatte`: the matte source rendered alone,
 //!    alpha or Rec.709 luma, optionally inverted, multiplied in),
 //! 5. the composite: premultiplied source-over for normal, else
-//!    `FRAG_COMPOSITE` (unpremultiply both, blend, mix by source alpha,
-//!    re-premultiply by the union alpha).
+//!    `FRAG_COMPOSITE` (unpremultiply both for the blend function, then combine
+//!    premultiplied source/destination contributions and their blended overlap).
 //!
 //! An adjustment layer runs its effects on the accumulator, masks the
 //! result, and composites it over the accumulator with its opacity and
@@ -42,7 +42,7 @@ use pm_protocol::color::BlendMode;
 
 use crate::plan::{CompPlan, Draw};
 
-pub use color::{ColorSettings, color_depth_float32, project_color};
+pub use color::{ColorSettings, project_color};
 pub use effects::{
     EffectHost, EffectPasses, Padding, PreparedEffects, PreparedTransition, TransitionPasses,
 };

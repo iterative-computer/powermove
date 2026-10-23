@@ -126,6 +126,11 @@ pub(crate) fn upload(
         )
     } else {
         match precision {
+            Precision::Unorm8 => (
+                wgpu::TextureFormat::Rgba8Unorm,
+                surface.pixels.iter().map(|v| code8(*v)).collect(),
+                4,
+            ),
             Precision::Float32 => (
                 wgpu::TextureFormat::Rgba32Float,
                 surface

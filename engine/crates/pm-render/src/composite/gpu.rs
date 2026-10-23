@@ -27,6 +27,8 @@ pub(crate) const FLAG_PATH_MASKS: i32 = 128;
 /// The device stores `rgba16float` outputs rounded to nearest (else toward
 /// zero; `super::half_store`).
 pub(crate) const FLAG_HALF_NEAREST: i32 = 256;
+/// Fused steps must retain the separate RGBA8 writes of the WebGL pipeline.
+pub(crate) const FLAG_UNORM8: i32 = 512;
 
 /// Which fragment entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +43,8 @@ pub(crate) enum Op {
     EncodeFlip,
 }
 
-const FORMATS: [wgpu::TextureFormat; 2] = [
+const FORMATS: [wgpu::TextureFormat; 3] = [
+    wgpu::TextureFormat::Rgba8Unorm,
     wgpu::TextureFormat::Rgba16Float,
     wgpu::TextureFormat::Rgba32Float,
 ];

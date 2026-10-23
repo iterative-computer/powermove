@@ -47,6 +47,7 @@ const FLAG_PATH_MASKS: i32 = 128;
 // The device stores `rgba16float` outputs rounded to nearest (probed;
 // `composite/half_store.rs`), else toward zero.
 const FLAG_HALF_NEAREST: i32 = 256;
+const FLAG_UNORM8: i32 = 512;
 
 @group(0) @binding(0) var<uniform> op: Op;
 @group(0) @binding(1) var ta: texture_2d<f32>;
@@ -117,6 +118,9 @@ fn half_rne(v: f32) -> f32 {
 }
 
 fn half(v: f32) -> f32 {
+    if (has(FLAG_UNORM8)) {
+        return round(clamp(v, 0.0, 1.0) * 255.0) / 255.0;
+    }
     if (has(FLAG_HALF)) {
         if (has(FLAG_HALF_NEAREST)) {
             return half_rne(v);
@@ -230,11 +234,9 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 // `FRAG_COMPOSITE`: the layer (`ta`) over the accumulator (`tb`) with a
-// blend mode, in the working encoding, evaluated as today's program
-// evaluates it at every pixel of the frame: outside the layer the
-// destination goes through `(d.rgb / d.a) · d.a`, whose result the half
-// float target truncates, so a translucent stack drifts by up to an ulp per
-// blend layer exactly as today's frames do (docs/engine/composite.md).
+// blend mode, in the working encoding. Both textures contain premultiplied
+// color; retain each source's unblended contribution wherever the other
+// source is translucent (docs/engine/composite.md).
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     var s = load_a(in.pos);
@@ -250,9 +252,9 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
         dc = d.rgb / d.a;
     }
     let bc = pm_blend_working(dc, sc, op.i.x, has(FLAG_LINEAR), has(FLAG_BLEND_IN_E));
-    let res = mix(dc, bc, s.a);
+    let res = (1.0 - s.a) * d.rgb + (1.0 - d.a) * s.rgb + s.a * d.a * bc;
     let a = s.a + d.a * (1.0 - s.a);
-    return vec4<f32>(res * a, a);
+    return vec4<f32>(res, a);
 }
 
 // A rectangle of `ta` (a padded pass) into a smaller target.

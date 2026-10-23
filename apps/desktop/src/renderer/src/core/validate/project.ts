@@ -1,6 +1,7 @@
 import { validateFrameRate } from '../../../../shared/frame-rate';
 import { CHANNELS_3D } from '../../legacy/core/space-3d';
 import { normalizeColorDepth } from '../color-depth';
+import { migrateProjectColorDepth } from '../../../../shared/project-color';
 import { canAnimateContent, isProperty } from '../../legacy/core/content-properties';
 import { adoptTemporalEase } from '../anim/temporal-ease';
 import { compactEditLog } from '../edit-log';
@@ -665,7 +666,7 @@ export function sanitizeProject(raw: unknown): Project {
     catch { input = {}; }
   }
   if (isRecord(input) && isRecord(input.proj)) input = input.proj;
-  const source = copyRecord(input);
+  const source = migrateProjectColorDepth(copyRecord(input));
   const w = finite(source.w, 1920) || 1920;
   const h = finite(source.h, 1080) || 1080;
   const fps = finite(source.fps, 30) || 30;

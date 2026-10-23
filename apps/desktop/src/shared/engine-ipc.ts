@@ -262,7 +262,7 @@ export type EngineSnapshotRequest = {
   document?: EngineSnapshotDocument;
   /** Shader fallback pixels drawn for an earlier `needsRenderer` answer of
    *  a `document` snapshot (a window's own session gets them on its port). */
-  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];
+  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array; rgba32f?: Uint8Array }[];
   /** The window's compatibility events for a `document` snapshot (its
    *  producers, and its answers to an earlier `needsRenderer` round's
    *  `compat` needs): main posts them on its session for the window before
@@ -393,5 +393,5 @@ export interface EngineBridge {
   answerCompat?(answer: EngineCompatAnswer): void;
   /** Runs the job engine's fallback requests in this window's runner
    *  (`run` answers each); returns an unsubscribe. */
-  onShaderFallback?(run: (job: { request: import('./engine-protocol').ShaderFallbackRequest; textures: Uint16Array[] }) => Promise<Uint16Array>): () => void;
+  onShaderFallback?(run: (job: { request: import('./engine-protocol').ShaderFallbackRequest; textures: (Uint16Array | Float32Array)[] }) => Promise<{ rgba16f: Uint16Array; rgba32f?: Float32Array }>): () => void;
 }
