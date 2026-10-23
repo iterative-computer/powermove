@@ -243,7 +243,7 @@ it('with main keeping the journal, appends each entry and never writes or delete
   assert.deepEqual(deleted, []);
 });
 
-it('keeps appending past the bound while the slot write is failing, and stops once main refuses, until the next checkpoint', async () => {
+it('keeps appending past the bound while the slot write is failing, and keeps sending (not keeping) entries once main refuses, until main has a slot that holds them', async () => {
   const MAX = 4 * 1024 * 1024;
   const { PM, appended, refuse } = mainJournalModel();
   let slotWrites = 0;
@@ -258,16 +258,24 @@ it('keeps appending past the bound while the slot write is failing, and stops on
   }
   assert.equal(slotWrites, 1, 'no checkpoint while the slot write fails');
   assert.deepEqual(appended.map(([, entry]) => entry.revision), [1, 2, 3], 'every edit is sent to main');
-  // Main refuses (its journal reached the store's limit): the window stops sending.
+  // Main refuses (its journal is closed): the window keeps sending, so main knows the last refused edit.
   refuse(true);
   PM.bus.emit('history:project-patch', { projectId: 'U1', revision: 4, patches: [{ path: ['name'], exists: true, value: 'Four' }] });
   await Promise.resolve(); await Promise.resolve();
   refuse(false);
   PM.bus.emit('history:project-patch', { projectId: 'U1', revision: 5, patches: [{ path: ['name'], exists: true, value: 'Five' }] });
-  assert.deepEqual(appended.map(([, entry]) => entry.revision), [1, 2, 3]);
-  // The next autosave checkpoints (its slot holds every edit), and appends resume.
+  assert.deepEqual(appended.map(([, entry]) => entry.revision), [1, 2, 3, 5]);
+  // A checkpoint posted is not a checkpoint on disk: still not kept, no checkpoint at the bound.
   PM.Projects.recover(PM.proj);
   assert.equal(slotWrites, 2);
-  PM.bus.emit('history:project-patch', { projectId: 'U1', revision: 6, patches: [{ path: ['name'], exists: true, value: 'Six' }] });
-  assert.deepEqual(appended.map(([, entry]) => entry.revision), [1, 2, 3, 6]);
+  for (let revision = 6; revision <= 8; revision++) {
+    PM.bus.emit('history:project-patch', { projectId: 'U1', revision, patches: [{ path: ['layers', revision], exists: true, value: { id: `L${revision}`, note: big } }] });
+  }
+  assert.equal(slotWrites, 2, 'the window keeps no copy while main refuses: no bound checkpoint');
+  // A flush finds the journal no longer failing (main reopened it): kept and bounded again.
+  PM.bus.emit('storage:saved', 'projectJournal.U1');
+  for (let revision = 9; revision <= 11; revision++) {
+    PM.bus.emit('history:project-patch', { projectId: 'U1', revision, patches: [{ path: ['layers', revision], exists: true, value: { id: `L${revision}`, note: big } }] });
+  }
+  assert.equal(slotWrites, 3, 'checkpointed at the bound again');
 });

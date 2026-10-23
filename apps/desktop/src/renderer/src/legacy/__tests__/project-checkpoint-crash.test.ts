@@ -641,5 +641,60 @@ describe('a disk that stays full', () => {
     await settle(PM, store, { failing: true });
     expect(PM.toast).toHaveBeenCalledTimes(2);
     full = false;
+    // An error nothing writes again ends its episode at the next flush: a later failure is shown.
+    await settle(PM, store);
+    await settle(PM, store);
+    full = true;
+    PM.Projects.recover(project);
+    await settle(PM, store, { failing: true });
+    expect(PM.toast).toHaveBeenCalledTimes(3);
+    full = false;
+  });
+});
+
+describe('a journal entry refused at the store limit (review probe, recheck 3)', () => {
+  it('leaves no gap: later entries are refused until a slot holding every edit lands', { timeout: 300_000 }, async () => {
+    const log: Op[] = [];
+    let refuse = false;
+    const store = createStore(await temporaryDirectory(), { fs: loggingFs(log), writeDelayMs: 0 });
+    await store.load();
+    // Slot writes refused, as for a project over the 256 MB slot limit.
+    const PM: any = openWindow(store, { refuse: key => refuse && key === 'project.G' });
+    const project: any = largeProject('G');
+    PM.proj = project;
+    const states: string[] = [];
+    const step = async (failing = false) => { await settle(PM, store, { failing }); states.push(JSON.stringify(project)); return log.length; };
+    const edit = (revision: number, member: string, value: unknown) => {
+      project.revision = revision;
+      project[member] = value;
+      PM.bus.emit('history:project-patch', { projectId: 'G', revision, patches: [{ path: [member], exists: true, value }, { path: ['revision'], exists: true, value: revision }] });
+    };
+
+    PM.Projects.put(project);
+    await step();
+    refuse = true;
+    PM.Projects.put(project);
+    // The journal near its 32 MiB limit; then a 2 MiB paste (refused) and a rename made in the same moment.
+    edit(8, 'blob', 'x'.repeat(31 * 1024 * 1024));
+    await step(true);
+    edit(9, 'paste', 'y'.repeat(2 * 1024 * 1024));
+    states.push(JSON.stringify(project));
+    edit(10, 'name', 'after paste');
+    await step(true);
+    // An autosave (its slot refused too), and another small edit.
+    PM.Projects.recover(project, 'data:image/jpeg;base64,AAAA');
+    edit(11, 'name', 'after autosave');
+    const refused = await step(true);
+    // Every crash so far recovers a state the document had (here: the one before the paste).
+    expect(jsonDiff(states[1]!, await recover(stateAfter(log, refused), 'G')), 'while refused').toEqual([]);
+    // The slot can be written again: it holds every edit, and the journal reopens.
+    refuse = false;
+    PM.Projects.recover(project, 'data:image/jpeg;base64,AAAA');
+    await step();
+    edit(12, 'name', 'after it saved');
+    await step();
+    expect(jsonDiff(states.at(-1)!, await recover(stateAfter(log, log.length), 'G')), 'after it saved').toEqual([]);
+    await expect(PM.store.flush()).resolves.toBeUndefined();
+    await expectEveryCrashPointSafe(log, states, 'G');
   });
 });

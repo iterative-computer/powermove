@@ -93,9 +93,16 @@ const checks = new Map<string, { project: object; again: boolean }>();
    since, until a slot write lands. */
 const unsaved = new Set<string>();
 /* Projects whose journal main refused (it reached the store's limit while
-   slot writes fail): this window stops appending until its next checkpoint.
-   The edits stay in the document, and the save error stays reported. */
+   slot writes fail). Main then refuses every later entry until a slot
+   holding all of them lands (project-durability.ts); this window keeps
+   sending them, so main knows the last one, but stops keeping its own copy
+   and checkpointing at the bound. The edits stay in the document and the
+   save error stays reported. It ends when a flush finds the journal no
+   longer failing (storage:saved), not when a checkpoint is merely posted. */
 const journalFull = new Set<string>();
+PM.bus?.on?.('storage:saved', (key: any) => {
+  if (typeof key === 'string' && key.startsWith(R.JOURNAL)) journalFull.delete(key.slice(R.JOURNAL.length));
+});
 PM.bus?.on?.('storage:error', (event: any) => {
   const key = typeof event?.key === 'string' ? event.key : '';
   const id = key.startsWith(R.SLOT) ? key.slice(R.SLOT.length) : key.startsWith(R.JOURNAL) ? key.slice(R.JOURNAL.length) : '';
@@ -124,7 +131,6 @@ function writeSlot(proj: any) {
   const envelope = { v: PM.version || '1.0.0', proj };
   if (PM.store.set(R.SLOT + proj.id, envelope) === false) throw new Error('Project storage is unavailable or full');
   unsaved.delete(proj.id);
-  journalFull.delete(proj.id);
   const text = typeof PM.store.writtenText === 'function' ? PM.store.writtenText(R.SLOT + proj.id) : null;
   if (text) {
     const entry = justWritten = { project: proj, token: changeToken(), text };
@@ -435,9 +441,9 @@ function append(entry: { projectId: string; revision: number; patches: any[] }) 
      brackets, the entries, and a comma between each two). */
   const measure = () => 2 + state.sizes.reduce((sum, size) => sum + size, 0) + Math.max(0, state.sizes.length - 1);
   if (mainKeepsJournal()) {
-    // Refused once (main's journal is full while slot writes fail): the edit stays in the document only.
-    if (journalFull.has(id)) return;
     PM.store.appendJournal(R.JOURNAL + id, item).catch(() => { journalFull.add(id); unsaved.add(id); });
+    // Refused (main's journal is closed): sent, so main knows, but not kept here.
+    if (journalFull.has(id)) return;
     supersede(state.entries, entry.patches, index => { state.sizes[index] = journalBytes(state.entries[index]); });
     state.entries.push(item);
     state.sizes.push(journalBytes(item));

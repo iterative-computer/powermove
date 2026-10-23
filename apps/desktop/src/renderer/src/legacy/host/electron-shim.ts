@@ -354,9 +354,11 @@ export function install(PM: PMRegistry): void {
   let tracks = 0;
   const digests = new Map<string, { digest: Promise<string | null>; chars: number }>();
   /* One toast per failure episode: a disk that stays full fails every
-     journal write (about one per edit) and every other key it writes. The
-     episode ends when a flush finds nothing failing. */
-  let toasted = false;
+     journal write (about one per edit) and every other key it writes. An
+     episode lasts while errors keep arriving: a flush with none since the
+     last one ends it, so an old error that never clears (nothing writes that
+     key again) does not hide a later project's failure. */
+  let episode = false, fresh = false;
   /* Save errors for writes main accepted but could not put on disk (and
      journal entries it refused): a flush learns from main which keys are still
      failing, and drops the others (a later write reached disk). */
@@ -371,8 +373,9 @@ export function install(PM: PMRegistry): void {
     if (String(event.error).includes('unknown store key')) {
       cached.delete(legacyKey(event.key));
     }
-    if (toasted) return;
-    toasted = true;
+    fresh = true;
+    if (episode) return;
+    episode = true;
     PM.toast(`Could not save ${event.key}: ${event.error}`);
   };
   const setSerializedSlot = (service: string, value: any): boolean => {
@@ -519,9 +522,14 @@ export function install(PM: PMRegistry): void {
       const result: any = await bridge.store.flush();
       if (Array.isArray(result?.failing)) {
         const still = new Set(result.failing);
-        for (const key of [...persistErrors]) if (!still.has(key)) { persistErrors.delete(key); saveErrors.delete(key); }
+        for (const key of [...persistErrors]) {
+          if (still.has(key)) continue;
+          persistErrors.delete(key); saveErrors.delete(key);
+          PM.bus?.emit('storage:saved', key);
+        }
       }
-      if (!saveErrors.size) toasted = false;
+      if (!fresh || !saveErrors.size) episode = false;
+      fresh = false;
       if (saveErrors.size) throw new Error([...saveErrors.values()][0]);
     }
   };
