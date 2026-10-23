@@ -157,6 +157,11 @@ fn a_playing_view_asks_for_the_next_frames_raster_override_layers_ahead() {
 }
 
 #[test]
+fn a_paused_idle_view_plans_the_frames_after_its_playhead_without_drawing_them() {
+    run_child("child_warm");
+}
+
+#[test]
 fn the_host_snapshots_sessions_it_opened_for_a_window() {
     run_child("child_host_session");
 }
@@ -2449,6 +2454,70 @@ fn svg_file(tag: &str) -> std::path::PathBuf {
     )
     .unwrap();
     path
+}
+
+#[test]
+#[ignore = "run by a_paused_idle_view_plans_the_frames_after_its_playhead_without_drawing_them"]
+fn child_warm() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    // A shape that grows every frame: each frame has a raster of its own.
+    let mut doc = shape_project(60.0);
+    doc["layers"][0]["d"] = json!({ "shape": "star", "w": 40, "h": 40, "points": 5, "radius": 6,
+        "stroke": 2, "strokeColor": "#FFD60A", "color": "#E8E2CF" });
+    for key in ["scale.x", "scale.y"] {
+        doc["layers"][0]["p"][key] = json!({ "v": 100, "expr": null, "kf": [
+            { "t": 0, "v": 50, "ease": "linear" }, { "t": 2, "v": 650, "ease": "linear" }
+        ] });
+    }
+    c.resync(2, 1, &doc);
+    c.event(Event::Viewer(viewer_state()));
+    // The paused frame, handed back.
+    let first = c.inbox.wait(Duration::from_secs(20), viewer_frame);
+    c.event(Event::ReleaseFrame(FrameRelease {
+        pool_index: first.pool_index,
+        seq: first.seq,
+    }));
+    let t = Instant::now();
+    let warmed = loop {
+        let stats = presenter_stats(&c);
+        let n = stats["warmedFrames"].as_u64().unwrap_or(0);
+        if n >= 48 || t.elapsed() > Duration::from_secs(15) {
+            break stats;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(warmed["warmedFrames"], json!(48), "{warmed}");
+    // Not before the view was idle a second, and then a frame a turn.
+    assert!(t.elapsed() >= Duration::from_millis(900), "{:?}", t.elapsed());
+    assert!(warmed["rastersAhead"].as_u64().unwrap_or(0) >= 20, "{warmed}");
+    // Nothing drawn or asked meanwhile.
+    assert!(
+        c.inbox.try_wait(Duration::from_millis(50), &mut viewer_frame).is_none(),
+        "the warm-up drew a frame"
+    );
+    // Play: the frames take what was drawn for them.
+    c.event(Event::Transport(TransportCommand::Play {
+        rate: PlaybackRate::NORMAL,
+    }));
+    let until = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < until {
+        if let Some(d) = c.inbox.try_wait(Duration::from_millis(20), &mut viewer_frame) {
+            c.event(Event::ReleaseFrame(FrameRelease {
+                pool_index: d.pool_index,
+                seq: d.seq,
+            }));
+        }
+    }
+    c.event(Event::Transport(TransportCommand::Pause));
+    let played = presenter_stats(&c);
+    assert!(played["rastersAheadTaken"].as_u64().unwrap_or(0) >= 15, "{played}");
+    println!(
+        "CHILD-OK warm ({} frames warmed, {} rasters ahead, {} taken)",
+        warmed["warmedFrames"], played["rastersAhead"], played["rastersAheadTaken"]
+    );
 }
 
 #[test]

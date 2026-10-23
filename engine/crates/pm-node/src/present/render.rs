@@ -477,6 +477,10 @@ pub struct Stats {
     pub rasters_ahead: u64,
     pub rasters_ahead_taken: u64,
     pub rasters_ahead_waited: u64,
+    /// Frames a paused, idle view planned ahead of its playhead, and the
+    /// render-thread time it took (µs).
+    pub warmed_frames: u64,
+    pub warm_us: i64,
     /// Planning time spent asking the next frames' compatibility needs
     /// while a playing frame waited for its own (µs).
     pub compat_asked_ahead_us: u64,
@@ -614,6 +618,11 @@ struct View {
     /// costs (µs, weighted toward the newest).
     last_drawn_k: Option<i64>,
     plan_ahead_cost_us: Option<f64>,
+    /// When the view last drew, or was asked for, anything (host µs), and
+    /// the paused warm-up's progress: revision, clock epoch, the playhead's
+    /// frame it started from and the next frame to plan.
+    last_active: i64,
+    warmed: Option<(Revision, u32, i64, i64)>,
     /// Level 1 SVG buckets the latest frame drew without (the window could
     /// not draw them): asked for again while it shows them.
     svg_without: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
@@ -742,6 +751,15 @@ const COMPAT_KEEP_AHEAD: i64 = 8;
 const PLAN_AHEAD_MARGIN_US: f64 = 2_000.0;
 /// A plan's cost before one was measured (µs).
 const PLAN_AHEAD_COST_US: f64 = 8_000.0;
+
+/// A paused view idle this long plans the frames after its playhead, one a
+/// turn, and has their level 1 rasters drawn ahead (`warm_ahead`): the first
+/// play after an open or a seek finds its text and shapes ready, as today's
+/// first play finds Chromium's canvas fast. Plans only: no media is decoded
+/// and no frame is drawn.
+const WARM_IDLE_US: i64 = 1_000_000;
+/// Frames after the playhead a paused view warms.
+const WARM_FRAMES: i64 = 48;
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -2268,6 +2286,8 @@ impl Thread {
             compat_asked_ahead: None,
             last_drawn_k: None,
             plan_ahead_cost_us: None,
+            last_active: 0,
+            warmed: None,
             svg_without: Vec::new(),
             requests: VecDeque::new(),
             retry: None,
@@ -3297,6 +3317,9 @@ impl Thread {
             .get_mut(&key)
             .and_then(|view| view.requests.pop_front())
         {
+            if let Some(view) = self.views.get_mut(&key) {
+                view.last_active = now();
+            }
             self.answer(key, id, &request, revision);
         }
         // A newer edit, view, or transport discontinuity must never wait
@@ -3357,6 +3380,9 @@ impl Thread {
             .get(&key)
             .is_some_and(|v| v.dirty && v.pool.is_some() && !v.clock.is_playing());
         if paused_dirty {
+            if let Some(view) = self.views.get_mut(&key) {
+                view.last_active = now();
+            }
             let media = self.views[&key].clock.media_at(now());
             // At most `MAX_IN_FLIGHT` frames wait on the GPU; the completion
             // thread sends this one (its descriptor is not sent here).
@@ -3374,6 +3400,9 @@ impl Thread {
             && view.clock.is_playing()
         {
             view.dirty = false;
+        }
+        if !paused_dirty {
+            self.warm_ahead(key);
         }
         // Playback: render ahead while frames are due and slots are free.
         loop {
@@ -3459,6 +3488,7 @@ impl Thread {
                     }
                     if drew && let Some(view) = self.views.get_mut(&key) {
                         view.last_drawn_k = Some(k);
+                        view.last_active = now();
                     }
                 }
                 Next::Skip { .. } => {
@@ -3578,6 +3608,72 @@ impl Thread {
     /// Renders the frame showing `media` into a free surface, waits for the
     /// GPU, and returns its descriptor. `timing` is `(shown_from, shown_for)`
     /// in host µs for timed frames.
+    /// A paused, idle view plans its next frame to warm ([`WARM_IDLE_US`],
+    /// [`WARM_FRAMES`]): its text is laid out and its level 1 shape and
+    /// path rasters are drawn ahead on threads of their own, so the first
+    /// play finds them. One plan a turn, only while nothing else waits.
+    fn warm_ahead(&mut self, key: Key) {
+        if !self.config.document || self.snapshots.waiting() {
+            return;
+        }
+        let t = now();
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let (Some(view), Some(doc)) = (self.views.get_mut(&key), self.docs.get_mut(&key)) else {
+            return;
+        };
+        if view.clock.is_playing()
+            || view.dirty
+            || view.pool.is_none()
+            || view.state.headless == Some(true)
+            || !view.requests.is_empty()
+            || view.external_wait.is_some()
+            || view.compat_waiting.is_some()
+            || t - view.last_active < WARM_IDLE_US
+        {
+            return;
+        }
+        let f = view.clock.frame_ticks();
+        if f <= 0 {
+            return;
+        }
+        let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        let epoch = view.clock.epoch();
+        let from = view.clock.media_at(t).div_euclid(f);
+        let next = match view.warmed {
+            Some((r, e, start, next)) if r == revision && e == epoch && start == from => next,
+            _ => from + 1,
+        };
+        if next > from + WARM_FRAMES {
+            return;
+        }
+        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let composition = view.state.composition.as_str().to_owned();
+        composer
+            .renderer()
+            .set_compat_rasters(self::compat_view(&self.compat, key, revision));
+        let time = view.clock.wrap(next * f);
+        // The needs are not asked: the window answers a paused frame's at
+        // once, and a play asks for its own.
+        let _ = composer.plan_ahead_at(
+            doc.document(),
+            &composition,
+            doc.media(),
+            Ticks::new(time.max(0)).unwrap_or(Ticks::ZERO),
+            &view.state,
+        );
+        composer.renderer().set_compat_rasters(None);
+        view.warmed = Some((revision, epoch, from, next + 1));
+        let ahead = composer.renderer().vector_ahead_stats();
+        let mut stats = self.stats();
+        stats.warmed_frames += 1;
+        stats.warm_us += now() - t;
+        stats.rasters_ahead = ahead.drawn;
+        stats.rasters_ahead_taken = ahead.taken;
+        stats.rasters_ahead_waited = ahead.waited;
+    }
+
     /// After playing frame `k` drew, the next [`COMPAT_KEEP_AHEAD`] frames
     /// are planned within a budget (`Composer::plan_ahead_at`, one frame
     /// per frame drawn once the span is planned): their raster-override
@@ -3608,14 +3704,11 @@ impl Thread {
         let target = k + COMPAT_KEEP_AHEAD * step;
         let mut at = match view.compat_asked_ahead {
             Some((r, e, j)) if r == revision && e == epoch && (j - k) * dir > 0 => j,
-            previous => {
-                // A seek, a new run or an edit: what was drawn ahead for
-                // the old line will not be drawn.
-                if previous.is_some_and(|(_, e, _)| e != epoch) {
-                    composer.renderer().forget_ahead();
-                }
-                k
-            }
+            // A seek, a new run or an edit starts from the frame drawn. What
+            // was drawn ahead stays: rasters are keyed by content (a run
+            // starting where a paused view warmed takes them), and what no
+            // frame takes goes after `AHEAD_KEEP_FRAMES` frames.
+            _ => k,
         };
         let cost_estimate = view.plan_ahead_cost_us.unwrap_or(PLAN_AHEAD_COST_US);
         let composition = view.state.composition.as_str().to_owned();

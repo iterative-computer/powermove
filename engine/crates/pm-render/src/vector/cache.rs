@@ -100,8 +100,9 @@ fn prefetch_workers() -> usize {
 /// Bytes of level 1 rasters drawn ahead (`VectorCache::prefetch_ahead`)
 /// and not yet taken by a frame; past it nothing more is drawn ahead.
 pub const AHEAD_MAX_BYTES: usize = 128 << 20;
-/// Frames a raster drawn ahead waits to be taken before it is dropped.
-pub const AHEAD_KEEP_FRAMES: u64 = 32;
+/// Frames a raster drawn ahead waits to be taken before it is dropped
+/// (more than a paused view warms ahead of its playhead).
+pub const AHEAD_KEEP_FRAMES: u64 = 64;
 
 type RasterKey = ([u8; 32], u8);
 type Drawn = Result<(u32, u32, Vec<u8>), String>;
