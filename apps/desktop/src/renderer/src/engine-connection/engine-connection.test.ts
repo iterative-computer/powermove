@@ -535,6 +535,38 @@ describe('the transport driver', () => {
     expect(after).toEqual(['seek', 'play']);
   });
 
+  it('starts a run from where a stopped line rests without seeking it there again', async () => {
+    const { connection, port } = await connected();
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    const clock = new HostClock(async () => 0);
+    (clock as unknown as { best: { offsetUs: number; rttUs: number } }).best = { offsetUs: 0, rttUs: 10 };
+    const driver = new EngineTransport(() => session, clock);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, revision: 3 } } as never, 5));
+    driver.refresh();
+    const moves = () => port.events('transport').map((e) => (e.message as { body: { command: string } }).body.command).filter((c) => c !== 'audioScrub');
+    const stopped = (seq: number, epoch: number, at: number) => port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq, epoch, state: 'stopped', hostTime: 0, mediaTime: ticks(at), rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    stopped(1, 1, 1.5);
+    // Resting at 1.5: Play only (a seek would present the paused frame again).
+    driver.play(1.5);
+    expect(moves()).toEqual(['play']);
+    // Paused again, before any newer sample: where it rests is not known yet.
+    driver.pause();
+    driver.play(1.5);
+    expect(moves()).toEqual(['play', 'pause', 'seek', 'play']);
+    // A newer stopped sample elsewhere, then a seek back to it: the seek counts.
+    driver.pause();
+    stopped(2, 2, 2);
+    driver.seek(1.5, false);
+    driver.play(1.5);
+    expect(moves().slice(-2)).toEqual(['seek', 'play']);
+    // Resting where the latest sample says and nothing sent since: Play only.
+    driver.pause();
+    stopped(3, 3, 1.5);
+    driver.play(1.5);
+    expect(moves().slice(-2)).toEqual(['pause', 'play']);
+  });
+
   it('sends J/K/L rates, play around, and the audio scrub switch, and follows a line at any rate', async () => {
     const { connection, port } = await connected();
     const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
