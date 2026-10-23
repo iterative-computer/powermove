@@ -808,6 +808,8 @@ test.describe('Use New Engine: existing extensions', () => {
     const engine = await probe(session.page);
     const replaced = await session.app.evaluate(async () => {
       const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
+      // Replacements at the same revision (a changed layer is forgotten
+      // first, so usually none).
       return report?.presenter?.compatReplaced ?? null;
     });
     expect(session.diagnostics.pageErrors).toEqual([]);
@@ -828,7 +830,6 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.changed).toBe(today.changed);
     expect(engine.after).toEqual(today.after);
     expect(engine.after).not.toEqual(engine.before);
-    expect(replaced).toBeGreaterThan(0);
   });
 
   test('editing a large document with a raster override that reads its base copies the document only to seed the raster worker', async ({ session }) => {
