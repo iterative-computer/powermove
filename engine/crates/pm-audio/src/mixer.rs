@@ -199,6 +199,8 @@ struct TodayVoice {
     len: u64,
     /// The clip for the mixer's range; `None` when today plays nothing.
     clip: Option<crate::today::Clip>,
+    /// The range changed since [`Self::clip`] was made.
+    stale: bool,
 }
 
 /// Whether a voice plays through the time stretch.
@@ -881,7 +883,10 @@ impl Mixer {
             .iter_mut()
             .chain(self.outgoing.iter_mut().flat_map(|g| g.voices.iter_mut()))
         {
-            voice.today = Today::Unbuilt;
+            if let Today::On(t) = &mut voice.today {
+                // The shape and the decode stay; the clip follows the range.
+                t.stale = true;
+            }
         }
     }
 
@@ -892,6 +897,20 @@ impl Mixer {
         plan: &VoicePlan,
         comps: &[pm_eval::Comp<'_>],
     ) -> Result<()> {
+        if let Today::On(t) = &mut self.voices[vi].today {
+            if t.stale {
+                t.clip = crate::today::Clip::new(
+                    &t.shape,
+                    &mut self.ev,
+                    comps,
+                    t.len,
+                    self.format.sample_rate as f64,
+                    self.today_range,
+                )?;
+                t.stale = false;
+            }
+            return Ok(());
+        }
         if !matches!(self.voices[vi].today, Today::Unbuilt) {
             return Ok(());
         }
@@ -934,6 +953,7 @@ impl Mixer {
                     conversion,
                     len,
                     clip,
+                    stale: false,
                 }))
             }
             _ => Today::Off,
@@ -948,16 +968,10 @@ impl Mixer {
         let Today::On(t) = &self.voices[vi].today else {
             return None;
         };
-        let Some(clip) = &t.clip else {
+        let p = self.format.sample_rate as f64;
+        let Some((x0, x1)) = t.shape.buffer_span(start, end, p, t.len) else {
             return Some(None);
         };
-        let first = clip.read.start_frame + self.today_range.origin;
-        let (a, b) = (start.max(first), end.min(first + clip.read.frames));
-        if b <= a {
-            return Some(None);
-        }
-        let x0 = clip.read.position(a - first).floor() as i64 - 1;
-        let x1 = clip.read.position(b - 1 - first).floor() as i64 + 2;
         Some(Some(match &t.conversion {
             None => (x0, x1),
             Some(c) => c.source_span(x0.max(0) as u64, (x1.max(0) as u64).min(c.len)),

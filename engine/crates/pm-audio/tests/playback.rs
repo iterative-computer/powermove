@@ -431,6 +431,64 @@ fn playback_equals_the_offline_render() {
     );
 }
 
+/// Today schedules a clip's gain envelope when playback starts, from the
+/// playhead: points one composition frame apart from there. A play from a
+/// time between frames therefore hears the eased key on the grid that starts
+/// at the play position, as an export of the range from there renders it,
+/// not the grid of a play from the project start.
+#[test]
+fn automation_steps_from_the_play_start() {
+    let dir = temp_dir("today-grid");
+    let file = dir.join("dc.wav");
+    write_wav(&file, SR, &[vec![0.5; SR as usize * 4]]);
+    let gain = r#"{"v":0.1,"kf":[{"t":0,"v":0.1,"i":"a","eo":[0.42,0],"ei":[0.58,1],"hold":false},{"t":3,"v":1.2,"i":"b","eo":[0.42,0],"ei":[0.58,1],"hold":false}],"expr":null}"#;
+    let doc = || {
+        project(
+            30.0,
+            4.0,
+            &[audio("A", "s", 0.0, 4.0, &format!(r#","gain":{gain}"#), "")],
+            &[],
+            "",
+        )
+    };
+    let (playback, mut dev, rig) = setup_doc(doc(), &[("s", &file)], SR, 2, 0.0);
+    let at = 1.01234;
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(at),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(120);
+    let played: Vec<f32> = dev
+        .log
+        .iter()
+        .flat_map(|(_, b)| b.iter().step_by(2).copied())
+        .collect();
+    let start = played.iter().position(|v| *v != 0.0).expect("audio played");
+    let first = pm_audio::offline::sample_of_ticks(ticks(at).get(), SR);
+    let n = 30_000;
+    let render = |t0: f64, origin: i64| {
+        let mut m = rig.mixer(doc(), "C", MixFormat::stereo(SR));
+        m.set_today_range(t0, f64::INFINITY, origin);
+        rig.render(&mut m, first, first + n as i64, 4096)[0].clone()
+    };
+    let from_play = render(first as f64 / SR as f64, first);
+    let from_zero = render(0.0, 0);
+    assert_ne!(from_play, from_zero, "the grids differ");
+    assert_eq!(
+        &played[start..start + n],
+        &from_play[..],
+        "played on the play start's grid"
+    );
+    drop(playback);
+}
+
 #[test]
 fn pause_seek_loop_and_scrub() {
     let dir = temp_dir("transport");

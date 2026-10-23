@@ -2891,6 +2891,13 @@ impl RenderThread {
                 self.boundary_due = true;
                 crate::preparation::wake_workers();
             }
+            if seg.rate > 0 && self.last_segment_end != Some(lo) {
+                // Today schedules every clip and its gain envelope when
+                // playback starts, seeks or wraps (`sync(time, true)`), from
+                // the playhead: a run starts today's model there.
+                let p = f64::from(self.transport.rate());
+                self.mixer.set_today_range(lo as f64 / p, f64::INFINITY, lo);
+            }
             let rendering = std::time::Instant::now();
             let mut result = {
                 let _render = crate::profile::timer(crate::profile::Kind::FirstRender);

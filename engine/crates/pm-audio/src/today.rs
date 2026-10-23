@@ -603,6 +603,31 @@ impl Shape {
         })
     }
 
+    /// The decoded buffer frames (at `rate`, `len` of them) that project
+    /// samples `[a, b)` can read whatever range today's model starts from,
+    /// with two frames of margin for the offset's rounding; `None` when the
+    /// clip is silent there.
+    pub(crate) fn buffer_span(&self, a: i64, b: i64, rate: f64, len: u64) -> Option<(i64, i64)> {
+        let layer_start = self.natural_start.max(0.0);
+        let audible = self
+            .dur
+            .max(0.0)
+            .min((len as f64 / rate - self.trim).max(0.0));
+        let start = layer_start.max(self.window.0);
+        let end = (layer_start + self.dur.max(0.0))
+            .min(self.window.1)
+            .min(layer_start + audible);
+        let (a, b) = (
+            a.max((start * rate).floor() as i64 - 1),
+            b.min((end * rate).ceil() as i64 + 1),
+        );
+        if b <= a {
+            return None;
+        }
+        let at = |s: i64| ((s as f64 / rate - layer_start + self.trim) * rate).floor() as i64;
+        Some((at(a) - 3, at(b - 1) + 4))
+    }
+
     /// A content field of the clip at master time `t`, as `resolveContent`
     /// on today's flattened clip evaluates it.
     fn field(&self, ev: &mut Evaluator, comps: &[Comp<'_>], key: &str, t: f64) -> Result<JsValue> {
