@@ -24,6 +24,25 @@ that host and session 0. Five earlier real-host runs answered their first
 probe in 30.98–45.91 ms, median 43.31 ms, without starting a job process.
 These timings exclude interactive-utility startup.
 
+The interactive engine holds that probe service in the same slot as the job
+engine's render service, so `jobs.is_some()` no longer means "this is the job
+engine". `Engine::has_job_service()` (job process and a service installed)
+now guards every job-only path: job submission, cancellation, agent frames,
+releasing agent frames waiting for a revision, and the service's Blender
+events. Review found the Blender guard missing: the paused viewer's Blender
+surfaces went to the probe service instead of the presenter, and Material
+Preview drew nothing in the native viewer (`engine-blender.spec.ts`).
+`tests/present_host.rs` now sends Blender progress and surfaces to an
+interactive engine that has both a presenter and a probe service. It also
+checks that ticks and pumps reach no job-only path, that probes still reach
+the service, and that agent frames and cancels are refused.
+
+The headless native host (`src/server/native/host.ts`) renders on the job
+engine as its main work, so it keeps the job engine resident (`eagerJobs`).
+Harnesses that measure agent snapshots during playback start their run the
+way an agent does (`AgentJobs.prepareRun`) rather than waiting for a job
+utility that no longer starts with the app.
+
 Agent frames retain their separate job host, frozen document revisions,
 JPEG behavior and job-slicer playback progress. They do not borrow the
 interactive preview as a snapshot shortcut. Opening an agent run begins job
@@ -53,6 +72,16 @@ Chromium release their references. A token prevents a late trim from racing
 a resumed presentation.
 Reopen renews the surface epoch and channel on the warm worker and painter.
 Crash handling remains separate and preserves the last frame.
+
+Closing a viewer channel prepares a detached drawing for the next viewer, as
+startup does. Only the final-tab suspension skips this, because it keeps its
+own drawing and passes `close({ keepsDrawing: true })`. A suspended viewer
+that is later disposed prepares one at that point. An interim revision had
+removed the preparation on every close and did not disclose it. With that
+change, a viewer created after a built-in viewer reload or update, a service
+replacement, or a fork binding its own canvas built its drawing cold (code
+alone about 220 ms, by the numbers above). That revision is reverted except
+for the suspension case, which the home-closed memory gate measures.
 
 `retireClosedPool` is an optional built-in-channel capability: it checks the
 connection, lease and preload launch after real channel headlessness. A
