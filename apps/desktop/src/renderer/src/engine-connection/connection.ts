@@ -221,6 +221,7 @@ export class EngineConnection {
       }
       return;
     }
+    if (body.kind === 'event') this.counters.receivedType(String((body.body as { type?: unknown })?.type));
     if (body.kind !== 'event' || message.session === null) return;
     this.sessions.get(message.session)?.(message, arrived);
   }

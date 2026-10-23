@@ -183,6 +183,8 @@ export type PresenterStats = {
    *  cost of presenting from a worker. */
   workerMessagesIn?: number;
   workerMessagesOut?: number;
+  /** The same by message type (`in:presented`, `out:frame`, …). */
+  workerMessages?: Record<string, number>;
 };
 
 export type TraceRecord = {

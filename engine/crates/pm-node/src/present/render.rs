@@ -916,6 +916,9 @@ struct View {
     /// frame it started from and the next frame to plan.
     last_active: i64,
     warmed: Option<(Revision, u32, i64, i64)>,
+    /// When a frame of this view last drew level 1 rasters of its own (host
+    /// µs): planning ahead runs only for views it can help.
+    ahead_useful_at: Option<i64>,
     /// Level 1 SVG buckets the latest frame drew without (the window could
     /// not draw them): asked for again while it shows them.
     svg_without: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
@@ -1133,6 +1136,12 @@ const PLAN_AHEAD_MARGIN_US: f64 = 2_000.0;
 /// that keeps planning from running decays per skipped chance.
 const PLAN_AHEAD_COST_US: f64 = 8_000.0;
 const PLAN_AHEAD_COST_DECAY: f64 = 0.9;
+/// How long after a frame last drew level 1 rasters of its own a view
+/// without a compatibility producer keeps planning ahead (µs). A view whose
+/// frames draw none gains nothing from it (the 500-layer synthetic project
+/// planned a frame ahead in every slack and drew 129 frames in 3 s at
+/// 120 Hz).
+const AHEAD_USEFUL_US: i64 = 2_000_000;
 
 /// A paused view idle this long plans the frames after its playhead, one a
 /// turn, and has their level 1 rasters drawn ahead (`warm_ahead`): the first
@@ -3219,6 +3228,7 @@ impl Thread {
             plan_ahead_cost_us: None,
             last_active: 0,
             warmed: None,
+            ahead_useful_at: None,
             svg_without: Vec::new(),
             requests: VecDeque::new(),
             retry: None,
@@ -4513,9 +4523,18 @@ impl Thread {
                     // The render thread's slack before the next frame: the
                     // next frames are planned in it (their raster-override
                     // needs asked, their rasters drawn ahead).
+                    let producing = self
+                        .compat
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .has_producers(key);
                     if let Some(view) = self.views.get(&key)
                         && view.clock.is_playing()
                         && let Some(k) = view.last_drawn_k
+                        && (producing
+                            || view
+                                .ahead_useful_at
+                                .is_some_and(|t| now() - t < AHEAD_USEFUL_US))
                     {
                         let slack = at - now() as f64;
                         let cost = view.plan_ahead_cost_us.unwrap_or(PLAN_AHEAD_COST_US);
@@ -4927,6 +4946,11 @@ impl Thread {
                 );
             }
             let stages = composer.renderer().last_stages();
+            // Whether planning ahead can help this view: its frames draw
+            // level 1 rasters, or wait for a producer's answers.
+            if stages.prefetched > 0 || stages.prefetch_us > 1_000 {
+                view.ahead_useful_at = Some(now());
+            }
             let prewarm = composer.renderer().effects().prewarm_stats();
             let memory = composer.renderer().memory();
             let gpu_ms: BTreeMap<String, f64> = composer

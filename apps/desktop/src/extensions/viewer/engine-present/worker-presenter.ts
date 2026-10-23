@@ -53,11 +53,15 @@ export class PresentWorker {
   /** Messages from and to the worker (the page's tasks for it). */
   messagesIn = 0;
   messagesOut = 0;
+  /** The same, by message type (diagnostics). */
+  readonly byType: Record<string, number> = {};
 
   constructor(private readonly options: PresentWorkerOptions) {
     this.timers = options.timers ?? { set: (fn, ms) => setTimeout(fn, ms) as unknown as number, clear: (id) => clearTimeout(id) };
     options.worker.addEventListener('message', (event) => {
       this.messagesIn++;
+      const type = `in:${String((event.data as { type?: unknown })?.type)}`;
+      this.byType[type] = (this.byType[type] ?? 0) + 1;
       this.onMessage(event.data);
     });
     options.worker.addEventListener('error', (event) => this.crashed(`presentation worker error: ${(event as ErrorEvent).message ?? 'unknown'}`));
@@ -77,6 +81,8 @@ export class PresentWorker {
   post(message: ToWorker, transfer?: Transferable[]): void {
     if (this.disposed || this.dead) return;
     this.messagesOut++;
+    const type = `out:${message.type}`;
+    this.byType[type] = (this.byType[type] ?? 0) + 1;
     this.options.worker.postMessage(message, transfer);
   }
 
@@ -264,7 +270,8 @@ export class WorkerPresenter implements Presenter {
       generation: this.generation,
       shownLate: r?.shownLate ?? 0,
       workerMessagesIn: this.options.host.messagesIn,
-      workerMessagesOut: this.options.host.messagesOut
+      workerMessagesOut: this.options.host.messagesOut,
+      workerMessages: { ...this.options.host.byType }
     };
   }
 

@@ -28,12 +28,14 @@ export type CountersSnapshot = {
   received: number;
   receivedBytes: number;
   presented: number;
+  /** Envelopes received, by event type (diagnostics). */
+  types: Record<string, number>;
 };
 
 const kinds = (): Record<EntryKind, number> => ({ port: 0, turn: 0, presented: 0, ipc: 0 });
 
 export class MainThreadCounters {
-  private readonly c: CountersSnapshot = { entries: kinds(), ms: kinds(), posted: 0, postedBytes: 0, received: 0, receivedBytes: 0, presented: 0 };
+  private readonly c: CountersSnapshot = { entries: kinds(), ms: kinds(), posted: 0, postedBytes: 0, received: 0, receivedBytes: 0, presented: 0, types: {} };
 
   constructor(private readonly now: () => number = () => performance.now()) {}
 
@@ -58,12 +60,16 @@ export class MainThreadCounters {
     this.c.receivedBytes += bytes;
   }
 
+  receivedType(type: string): void {
+    this.c.types[type] = (this.c.types[type] ?? 0) + 1;
+  }
+
   presentedFrame(): void {
     this.c.presented++;
   }
 
   snapshot(): CountersSnapshot {
-    return { ...this.c, entries: { ...this.c.entries }, ms: { ...this.c.ms } };
+    return { ...this.c, entries: { ...this.c.entries }, ms: { ...this.c.ms }, types: { ...this.c.types } };
   }
 }
 

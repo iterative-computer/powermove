@@ -463,7 +463,38 @@ function sum(records: Record<string, number>[]): Record<string, number> {
   return out;
 }
 
-type Run = { steps: StepRecord[]; loadAtStart: number[]; calibrationMs: number; beginFrame: string; webglTimer: string };
+type Run = { steps: StepRecord[]; loadAtStart: number[]; calibrationMs: number; beginFrame: string; webglTimer: string; enginePath?: Record<string, unknown> | null };
+
+/** The engine path's own counts on the page (`PM.EngineCounters`, the
+ *  viewer's worker messages by type), for the bigrender ratchet. */
+async function enginePathCounts(page: Page): Promise<Record<string, any> | null> {
+  return page.evaluate(() => {
+    const PM = (window as any).PM;
+    const counters = PM.EngineCounters?.snapshot?.() ?? null;
+    let worker: Record<string, number> | null = null;
+    try { worker = PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.()?.workerMessages ?? null; } catch { worker = null; }
+    return counters ? { ...counters, worker } : null;
+  }).catch(() => null);
+}
+
+function perStep(before: Record<string, any> | null, after: Record<string, any> | null, n: number): Record<string, unknown> | null {
+  if (!before || !after || n <= 0) return null;
+  const flat = (o: Record<string, any>, prefix = ''): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(o ?? {})) {
+      if (typeof v === 'number') out[prefix + k] = v;
+      else if (v && typeof v === 'object') Object.assign(out, flat(v, `${prefix}${k}.`));
+    }
+    return out;
+  };
+  const a = flat(before), b = flat(after);
+  const out: Record<string, number> = {};
+  for (const k of Object.keys(b)) {
+    const d = (b[k] ?? 0) - (a[k] ?? 0);
+    if (d) out[k] = Math.round((d / n) * 100) / 100;
+  }
+  return out;
+}
 
 async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[], options: { warmup?: number; gpuTime?: boolean } = {}): Promise<Run> {
   const loadAtStart = os.loadavg();
@@ -508,6 +539,7 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[], opt
     await cdp.send('Profiler.start');
   }
   const endTrace = await startTrace(cdp);
+  const pathBefore = mode === 'engine' ? await enginePathCounts(page) : null;
   const queryIndex: (number | null)[] = [];
   let report = mode === 'engine' ? await engineReport(session) : null;
   let counts = await page.evaluate(() => (window as any).__pmRig.counts());
@@ -539,6 +571,7 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[], opt
     counts = r.counts;
     report = next;
   }
+  const enginePath = mode === 'engine' ? perStep(pathBefore, await enginePathCounts(page), measured.length) : null;
   const tasks = await endTrace().catch(() => new Map<number, number>());
   measured.forEach((spec, i) => { steps[i]!.tasks = tasks.get(spec.k) ?? null; });
   if (gpuTime) {
@@ -552,7 +585,7 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[], opt
     await writeFile(path.join(profileDir, `rig-${mode}-${Date.now()}.cpuprofile`), JSON.stringify(profile));
   }
   await cdp.detach().catch(() => undefined);
-  return { steps, loadAtStart, calibrationMs, beginFrame, webglTimer };
+  return { steps, loadAtStart, calibrationMs, beginFrame, webglTimer, enginePath };
 }
 
 function summarize(row: string, mode: Mode, run: Run, extra: Record<string, unknown>) {
@@ -576,6 +609,7 @@ function summarize(row: string, mode: Mode, run: Run, extra: Record<string, unkn
     steps: s.length,
     presented: presented.length,
     fitBudget: fits.length,
+    enginePathPerStep: run.enginePath ?? null,
     fitCriterion: mode === 'engine' ? 'presented; page main, engine compose CPU, engine GPU-only each <= budget' : run.webglTimer.startsWith('EXT') ? 'presented; page main and WebGL GPU each <= budget' : 'presented; page main <= budget (WebGL GPU time not measured)',
     spanFit: spanFits,
     overBudget: s.length - fits.length,
