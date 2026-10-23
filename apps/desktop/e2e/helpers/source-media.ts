@@ -14,7 +14,8 @@ export async function renditionAudioFixture(directory: string): Promise<string> 
   const file = path.join(directory, 'rendition-audio.mov');
   await exec(sourceFfmpeg(), ['-hide_banner', '-loglevel', 'error', '-nostdin',
     '-i', fixturePath('prores422.mov'), '-i', fixturePath('tone.wav'),
-    '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'pcm_s16le', '-shortest', '-y', file],
+    // Picture outlasts the soundtrack, as browser source playback must do.
+    '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'pcm_s16le', '-y', file],
   { timeout: 60_000 });
   return file;
 }

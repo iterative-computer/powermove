@@ -122,12 +122,34 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
             frames[name].filmstripMs = performance.now() - began;
             frames[name].filmstripEqual = strip.every((frame: Uint8Array, n: number) => frame.every((v, i) => v === actual[n]![i]));
           }
+          // Source monitor fitting must preserve fractional edges and SVG text.
+          if (name === 'source.svg') {
+            frames[name].fits = [];
+            canvas.width = 317; canvas.height = 181;
+            for (const fit of ['contain', 'cover']) {
+              const scale = (fit === 'contain' ? Math.min : Math.max)(canvas.width / meta.w, canvas.height / meta.h);
+              const w = meta.w * scale, h = meta.h * scale;
+              context.clearRect(0, 0, canvas.width, canvas.height);
+              context.drawImage(asset.el, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+              const expected = context.getImageData(0, 0, canvas.width, canvas.height).data;
+              const reference = canvas.toDataURL('image/png');
+              let max = 0, changed = 0, native = null;
+              if (enabled) {
+                const received = (await source.frame(ids[name], 0, canvas.width, canvas.height, { fit })).data;
+                for (let i = 0; i < expected.length; i++) { const d = Math.abs(expected[i]! - received[i]!); max = Math.max(max, d); if (d) changed++; }
+                context.putImageData(new ImageData(new Uint8ClampedArray(received), canvas.width, canvas.height), 0, 0);
+                native = canvas.toDataURL('image/png');
+              }
+              frames[name].fits.push({ fit, max, changed, reference, native });
+            }
+          }
         }
         return frames;
       }, { enabled, ids });
       await writeFile(path.join(directory, 'measurements.json'), JSON.stringify(measured, null, 2));
       for (const [name, result] of Object.entries<any>(measured)) {
         for (const kind of ['reference', 'native', 'posterReference', 'posterNative']) if (result[kind]) await writeFile(path.join(directory, `${name}-${kind}.png`), Buffer.from(result[kind].split(',')[1], 'base64'));
+        for (const fit of result.fits ?? []) for (const kind of ['reference', 'native']) if (fit[kind]) await writeFile(path.join(directory, `${name}-${fit.fit}-${kind}.png`), Buffer.from(fit[kind].split(',')[1], 'base64'));
       }
 
       // The offline probe uses the production SourceAudio document and mixer.
@@ -234,8 +256,16 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
       for (const [index, frame] of monitor.pixels.entries()) {
         for (const kind of ['reference', 'native'] as const) if (frame[kind]) await writeFile(path.join(directory, `monitor-${index}-${kind}.png`), Buffer.from(frame[kind]!.split(',')[1]!, 'base64'));
       }
-      for (const name of ['h264-aac.mp4', 'tone.wav', 'prores422.mov']) {
-        await page.evaluate(id => (window as any).PM.Kernel.services.get('viewer').preview.toggle(id), ids[name]);
+      const lifecycle = [];
+      for (const name of ['h264-aac.mp4', 'tone.wav', 'prores422.mov', 'rendition-audio.mov']) {
+        await page.evaluate(({ id, enabled }) => {
+          const PM = (window as any).PM, preview = PM.Kernel.services.get('viewer').preview;
+          preview.show(id);
+          const source = enabled ? PM.EngineSourceMedia.monitorValue : document.querySelector('#source-preview video, #source-preview audio');
+          (window as any).__sourceEnd = false;
+          source.addEventListener('ended', () => { (window as any).__sourceEnd = true; }, { once: true });
+          preview.toggle(id);
+        }, { id: ids[name], enabled });
         await expect.poll(() => page.locator('#source-preview .sp-scrub').getAttribute('aria-valuenow')).not.toBe('0');
         if (enabled) {
           await expect(page.locator('#source-preview video, #source-preview audio')).toHaveCount(0);
@@ -247,10 +277,16 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
           source.currentTime = Math.max(0, source.duration - .05);
         });
         await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').preview.playing)).toBe(false);
+        lifecycle.push(await page.evaluate(({ name, enabled }) => {
+          const source = enabled ? (window as any).PM.EngineSourceMedia.monitorValue : document.querySelector('#source-preview video, #source-preview audio');
+          return { name, ended: (window as any).__sourceEnd, time: source.currentTime, duration: source.duration };
+        }, { name, enabled }));
         await page.locator('#source-preview .sp-scrub').focus(); await page.keyboard.press('Home');
         await page.keyboard.press('Escape');
       }
-      expect(await page.evaluate(() => (window as any).__sourceBrowserPlays)).toBe(enabled ? 0 : 3);
+      await writeFile(path.join(directory, 'source-monitor-lifecycle.json'), JSON.stringify(lifecycle, null, 2));
+      for (const result of lifecycle) expect.soft(result.ended, JSON.stringify(result)).toBe(true);
+      expect(await page.evaluate(() => (window as any).__sourceBrowserPlays)).toBe(enabled ? 0 : 4);
 
       const code = await page.evaluate(async ({ enabled, id, still }) => {
         const PM = (window as any).PM;
@@ -287,6 +323,7 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
       if (enabled) {
         for (const frame of monitor.pixels) expect(frame.max, `source monitor at ${frame.time}: ${JSON.stringify({ max: frame.max, changed: frame.changed })}; ${directory}`).toBe(0);
         for (const [name, result] of Object.entries<any>(measured)) {
+          for (const fit of result.fits ?? []) expect.soft(fit.max, `${name} ${fit.fit}: ${JSON.stringify({ max: fit.max, changed: fit.changed })}; ${directory}`).toBe(0);
           for (const metric of result.delta) expect(metric.max, `${name}: ${JSON.stringify(metric)}; ${directory}`).toBe(0);
           expect(result.posterDelta.max, `${name} poster: ${JSON.stringify(result.posterDelta)}; ${directory}`).toBe(0);
         }

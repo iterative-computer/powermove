@@ -12,6 +12,8 @@ test('source filmstrip and monitor scrub cost no more than the current app', asy
   const evidence = process.env.PM_SOURCE_EVIDENCE;
   const directory = evidence ? path.join(evidence, 'performance') : await mkdtemp(path.join(os.tmpdir(), 'pm-source-performance-'));
   await mkdir(directory, { recursive: true });
+  const machine = { startedAt: new Date().toISOString(), platform: `${os.platform()} ${os.release()} ${os.arch()}`,
+    cpus: os.cpus().length, loadBefore: os.loadavg() };
   const results: Array<{ enabled: boolean; round: number; scrubMs: number[]; filmstripMs: number[]; width: number; height: number }> = [];
   try {
     // This spec itself runs under pm-electron-lock. Build the probe beforehand;
@@ -100,5 +102,8 @@ test('source filmstrip and monitor scrub cost no more than the current app', asy
     expect(comparison.monitor.nativeP95).toBeLessThanOrEqual(comparison.monitor.legacyP95);
     expect(comparison.filmstrip.nativeMedian).toBeLessThanOrEqual(comparison.filmstrip.legacyMedian);
     expect(comparison.filmstrip.nativeFirst).toBeLessThanOrEqual(comparison.filmstrip.legacyFirst!);
-  } finally { if (!evidence) await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    try { await writeFile(path.join(directory, 'machine.json'), JSON.stringify({ ...machine, endedAt: new Date().toISOString(), loadAfter: os.loadavg() }, null, 2)); }
+    finally { if (!evidence) await rm(directory, { recursive: true, force: true }); }
+  }
 });
