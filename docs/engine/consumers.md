@@ -19,13 +19,21 @@ refresh change. Encoding waits out interaction and disposal releases its waits.
 Project thumbnails also pin save generation and playhead time before updating
 saved metadata. Neither path reads the hidden legacy canvas in engine mode.
 
-Library cards copy the actual native presentation canvas, including its current
-camera, shading, sampling and cropped canvas, alongside the existing overlay.
-The stage-level native canvas retains its source CSS size in the fixed-size card
-so its pixels keep the overlay's zoom/pan coordinate system. Legacy and custom
-canvases keep their original copy behavior, and a panel's own `library.render`
-callback still controls its card after copying. Frozen viewers without a callback
-use the same presented-image copy. No second render or snapshot changes the view.
+Library cards of paused full-composition 2D views request an idle snapshot through
+`EngineRenderTransport.thumbnails` at today's canvas backing size, before
+presentation scales it into the stage. The clone keeps the live canvas's CSS
+box and overlay, restores its original composition canvas, and removes its
+cloned presentation layer. A bound presenter in a pre-engine fork takes its backing
+size from the original canvas immediately before it. Captures reject document,
+time, view, engine, source-panel and Library-generation changes; stale captures
+retry while the card is still current. The presented frame must match the
+snapshot revision and time before its overlay is cloned. A panel's own
+`library.render` still runs after the pixels arrive and controls its card.
+
+Playback, cropped and 3D views retain the native presented-image copy. Playback
+never waits for an idle capture; opening the Library keeps playback running. The snapshot
+contract currently carries neither their crop nor their view override; the
+remaining C3 blocker and the required API are specified below.
 Section and Look thumbnails retain the synchronous compatibility API already
 backed by engine snapshots. Frozen render APIs retain their existing option and
 pixel semantics.
@@ -213,14 +221,10 @@ Every case of the 1.0.18 fork fails at activation on this branch (above).
   - Identical: 2D at 200% panned in light and dark with the current viewer, a
     fork of the current viewer and the fork of shipped viewer 1.0.8; 2D at Fit
     with the 1.0.8 fork.
-  - 2D at Fit, current viewer and its fork: 566 and 570 pixels differ, at most
-    5 levels, on the two rows where the solid's top and bottom edges fall at a
-    fractional position. The live viewer is exact; the card is not because the
-    engine presentation has already scaled the render-size frame into the
-    stage, and the card scales that region back to today's backing size. Exact
-    cards need the frame itself at render size (the presentation worker would
-    hand the Library the latest frame, or an `ImageBitmap` of it). The engine
-    presentation (bridge / 3D lanes) owns that; escalated.
+  - Round 5's 2D-at-Fit blocker (566/570 pixels, at most 5 levels) came
+    from scaling the stage presentation back to the composition backing size.
+    Round 6 replaces that copy with the backing-size snapshot described above;
+    exact on/off measurements are recorded in the validation section below.
   - 3D model through its camera and in the right orthographic view, current
     viewer and its fork: 240 to 365 pixels differ, at most 2 to 46 levels,
     along the cube's edges (same double-scaling signature; the maximum varies
@@ -241,6 +245,39 @@ Every case of the 1.0.18 fork fails at activation on this branch (above).
   - The fork of shipped viewer 1.0.18 fails to activate on this branch (see
     the round 5 notes); its cases fail until `feat/ne-mainmerge` lands.
   - Private-corpus customized forks remain unqualified by this lane.
+
+### C3 view snapshot contract still needed
+
+`EngineSnapshotOptions` (`engine-connection/render-transport.ts`) and
+`SnapshotRequest` (`pm-protocol/src/snapshot.rs`) have no editor-camera or
+composition-crop option. `viewSeq` is echoed in the result; it does not select
+or restore that view. `Thread::run_snapshot`
+(`pm-node/src/present/render.rs`) builds `RenderRequest` with `view: None`,
+`region: None`, derived full-composition scale and final sampling. Thus a
+thumbnail request cannot reproduce a 3D editor view. A second interactive
+presenter is unsafe: `engine.viewer.open` replaces the existing viewer channel
+(`engine-connection/install.ts`).
+
+The bridge/3D contract needed is an explicit **viewer snapshot** option on
+`EngineRenderTransport.thumbnails.request` and `SnapshotRequest`, carrying:
+
+- `view: ViewOverride`: editor camera matrix/projection, shading, X-ray and
+  Local View, using the existing protocol type; null camera retains the scene
+  camera while still preserving the other preview overrides.
+- `canvas: ViewerCanvas`: original backing width/height and composition crop,
+  using the existing type. Render at that backing size with per-axis scale
+  `width / crop.width`, `height / crop.height`, and crop origin, before any
+  stage presentation scaling. The Library keeps CSS placement itself.
+- The existing revision, time and `viewSeq`, checked against the requested
+  view. The answer must retain those identities or reject as stale.
+
+This explicit UI path must use the presentation's preview sampling, 3D shading
+and pixel conversion, without changing export or agent capture defaults or
+mutating the live viewer. It needs exact current/frozen-viewer camera and
+orthographic card gates in both themes. The raw frame before stage scaling
+would also satisfy this contract if returned at the same pinned identities.
+The current 3D copied-image differences remain blockers; no tolerance was
+changed and no legacy engine was substituted.
 
 ## Contracts transferred out of consumers
 
