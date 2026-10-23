@@ -268,6 +268,8 @@ fn check(
     effects: Option<&crate::effects::Effects>,
     fonts: bool,
 ) -> Vec<Unsupported> {
+    // One look at each media file per check (`media::StampFrame`).
+    let _stamps = crate::media::StampFrame::begin();
     let mut out = BTreeSet::new();
     let Some(root) = document.root() else {
         return vec![];

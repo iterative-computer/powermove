@@ -673,6 +673,11 @@ impl Effects {
             Status::Ready => {}
             Status::Refused(f) | Status::NeedsFallback(f) => return Err(f.clone()),
         }
+        pm_perf::cache(
+            pm_perf::Counter::ProgramCacheHits,
+            pm_perf::Counter::ProgramCacheMisses,
+            entry.program.is_some(),
+        );
         if entry.program.is_none() {
             let built = entry
                 .prepared

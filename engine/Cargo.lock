@@ -2262,6 +2262,7 @@ dependencies = [
  "objc2-metal",
  "objc2-quartz-core",
  "pm-media",
+ "pm-perf",
  "pm-protocol",
  "pollster",
  "rspirv",
@@ -2328,6 +2329,7 @@ dependencies = [
  "pm-media",
  "pm-model",
  "pm-node",
+ "pm-perf",
  "pm-protocol",
  "pm-render",
  "pm-text",
@@ -2344,6 +2346,29 @@ dependencies = [
  "napi-build",
  "pm-media",
  "pm-node",
+]
+
+[[package]]
+name = "pm-perf"
+version = "0.1.0"
+
+[[package]]
+name = "pm-perfbench"
+version = "0.1.0"
+dependencies = [
+ "pm-engine",
+ "pm-eval",
+ "pm-export",
+ "pm-gpu",
+ "pm-model",
+ "pm-node",
+ "pm-perf",
+ "pm-protocol",
+ "pm-render",
+ "pm-text",
+ "png",
+ "serde_json",
+ "wgpu",
 ]
 
 [[package]]
@@ -2384,6 +2409,7 @@ dependencies = [
  "pm-gpu",
  "pm-media",
  "pm-model",
+ "pm-perf",
  "pm-protocol",
  "pm-text",
  "pm-time",
@@ -3642,8 +3668,6 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 [[package]]
 name = "wgpu"
 version = "30.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "527ccdf43dd5b2e8676eed9984ce00e2bbb0a1b85b70c1969dcb6cd2eb55ab9e"
 dependencies = [
  "arrayvec",
  "bitflags",
@@ -3655,6 +3679,7 @@ dependencies = [
  "js-sys",
  "log",
  "naga",
+ "pm-perf",
  "portable-atomic",
  "profiling",
  "raw-window-handle",

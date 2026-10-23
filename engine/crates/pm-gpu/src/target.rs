@@ -125,8 +125,10 @@ impl TargetPool {
             usage,
         };
         if let Some(i) = self.free.iter().position(|(k, _)| *k == key) {
+            pm_perf::bump(pm_perf::Counter::TargetPoolHits);
             return self.free.swap_remove(i).1;
         }
+        pm_perf::bump(pm_perf::Counter::TargetPoolMisses);
         let target = Target::new(device, "pm working target", width, height, format, usage);
         self.live_bytes += target.bytes();
         self.created += 1;

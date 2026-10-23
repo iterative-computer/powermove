@@ -179,9 +179,13 @@ pub(crate) fn render(
             copy(encoder, &kept.target, target);
             prefix.reused_frames += 1;
             prefix.reused_draws += kept.draws.len() as u64;
+            pm_perf::bump(pm_perf::Counter::FramePrefixHits);
             kept.draws.len()
         }
-        _ => 0,
+        _ => {
+            pm_perf::bump(pm_perf::Counter::FramePrefixMisses);
+            0
+        }
     };
     let legend: Vec<String> = draws[..start].iter().map(|d| d.layer.clone()).collect();
     let clear = start == 0;

@@ -1,0 +1,34 @@
+[package]
+name = "pm-perfbench"
+description = "Deterministic engine benches and their ratchets (docs/engine/perfbench.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+pm-perf = { path = "../pm-perf" }
+pm-model = { path = "../pm-model" }
+pm-eval = { path = "../pm-eval" }
+pm-engine = { path = "../pm-engine" }
+pm-protocol = { path = "../pm-protocol", default-features = false }
+serde_json.workspace = true
+png = "0.18"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pm-node = { path = "../pm-node" }
+pm-render = { path = "../pm-render" }
+pm-gpu = { path = "../pm-gpu", default-features = false }
+pm-export = { path = "../pm-export" }
+pm-text = { path = "../pm-text", default-features = false, features = ["system"] }
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+
+[[test]]
+# The ratchet: every bench's counters against `baselines.json`. Runs on the
+# main thread (the CoreText registry the typing bench measures with).
+name = "ratchet"
+harness = false
+
+[[example]]
+name = "perfbench"
