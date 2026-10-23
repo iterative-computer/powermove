@@ -233,21 +233,32 @@ export class WorkerPresenter implements Presenter {
    * arrives (the engine reuses a slot only after the worker closed its clone
    * and released it) or when the session ends.
    */
-  private readonly direct: boolean;
+  private direct = false;
 
   constructor(private readonly options: WorkerPresenterOptions) {
     this.generation = options.generation ?? 0;
     this.now = options.now ?? (() => performance.now());
     this.timers = options.timers ?? { set: (fn, ms) => setTimeout(fn, ms) as unknown as number, clear: (id) => clearTimeout(id) };
     this.unsubscribe = options.source.onSurface((generation, poolIndex) => this.unpark(generation, poolIndex));
+    this.offerReleasePort();
+  }
+
+  /**
+   * Gives the worker a port to hand frames back on, once the link can make
+   * one: a session opened before the engine numbered it gets it with its
+   * first frame (frames before it went back through this thread).
+   */
+  private offerReleasePort(): void {
+    if (this.direct || this.disposed) return;
     let offered: { port: MessagePort; session: number } | null = null;
     try {
-      offered = options.link.releasePort?.() ?? null;
+      offered = this.options.link.releasePort?.() ?? null;
     } catch {
       offered = null;
     }
-    this.direct = offered !== null;
-    if (offered) options.host.post({ type: 'releasePort', session: options.session, port: offered.port, engineSession: offered.session }, [offered.port as unknown as Transferable]);
+    if (!offered) return;
+    this.direct = true;
+    this.options.host.post({ type: 'releasePort', session: this.options.session, port: offered.port, engineSession: offered.session }, [offered.port as unknown as Transferable]);
   }
 
   get isDisposed(): boolean {
@@ -299,13 +310,20 @@ export class WorkerPresenter implements Presenter {
 
   private readonly doneListeners = new Set<(seq: number) => void>();
 
-  /** The worker sends `done` only while someone listens (a reveal). */
+  /** Whether the worker sends `done` (`watchDone`). */
+  private watchingDone = false;
+
+  /** The worker sends `done` only while someone listens (a reveal). It is
+   *  told to stop at the first `done` nobody listened to, so a listener that
+   *  comes and goes every frame costs no message of its own. */
   onDone(listener: (seq: number) => void): () => void {
     this.doneListeners.add(listener);
-    if (this.doneListeners.size === 1 && !this.disposed) this.options.host.post({ type: 'watchDone', session: this.options.session, on: true });
+    if (!this.watchingDone && !this.disposed) {
+      this.watchingDone = true;
+      this.options.host.post({ type: 'watchDone', session: this.options.session, on: true });
+    }
     return () => {
-      if (!this.doneListeners.delete(listener) || this.doneListeners.size || this.disposed) return;
-      this.options.host.post({ type: 'watchDone', session: this.options.session, on: false });
+      this.doneListeners.delete(listener);
     };
   }
 
@@ -345,6 +363,7 @@ export class WorkerPresenter implements Presenter {
 
   private onFrame(desc: FrameDescriptor, arrivedMs: number): void {
     this.local.received++;
+    this.offerReleasePort();
     if (desc.poolGeneration < this.generation) {
       this.local.staleGeneration++;
       return;
@@ -368,6 +387,16 @@ export class WorkerPresenter implements Presenter {
   private send(desc: FrameDescriptor, frame: VideoFrame, arrivedMs: number): void {
     const k = this.direct ? `${desc.poolGeneration}:${desc.poolIndex}` : `${desc.poolIndex}:${desc.seq}`;
     this.inWorker.get(k)?.frame.close();
+    if (this.direct) {
+      // A frame of this slot sent before the worker had its release port:
+      // the slot came back, so the worker handed it back.
+      for (const [key, entry] of this.inWorker) {
+        if (key !== k && entry.release.poolIndex === desc.poolIndex) {
+          entry.frame.close();
+          this.inWorker.delete(key);
+        }
+      }
+    }
     let clone: VideoFrame;
     try {
       clone = frame.clone();
@@ -447,6 +476,11 @@ export class WorkerPresenter implements Presenter {
         return;
       case 'done':
         if (this.disposed) return;
+        if (!this.doneListeners.size && this.watchingDone) {
+          this.watchingDone = false;
+          this.options.host.post({ type: 'watchDone', session: this.options.session, on: false });
+          return;
+        }
         for (const listener of this.doneListeners) listener(message.seq);
         return;
       case 'vsync':

@@ -302,6 +302,32 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(releasedOnPort.map((bytes) => decodeEnvelope(bytes).message)).toContainEqual({ kind: 'event', body: { type: 'releaseFrame', poolIndex: 1, seq: 7 } });
   });
 
+  it('offers the release port once the session can make one (a session the engine had not numbered when it opened)', async () => {
+    const pair = new Pair();
+    const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0 });
+    const source = new Source();
+    const releasedOnPort: Uint8Array[] = [];
+    const port = { postMessage: (bytes: Uint8Array) => releasedOnPort.push(bytes), close: () => {} };
+    let numbered = false;
+    class LateLink extends Link {
+      releasePort() {
+        return numbered ? { port: port as unknown as MessagePort, session: 9 } : null;
+      }
+    }
+    const link = new LateLink();
+    const presenter = host.open({ link, source, displayHz: 120 });
+    numbered = true;
+    source.imports.add('1:1');
+    presenter.receive({ type: 'surfacePool', pool: { generation: 1, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8 } } as never, 0);
+    presenter.receive({ type: 'frame', frame: desc(1) }, 5);
+    await settle();
+    pair.painter.finishGpu();
+    await settle();
+    expect(pair.posted.filter((m) => m.type === 'releasePort')).toHaveLength(1);
+    expect(releasedOnPort).toHaveLength(1);
+    expect(link.releases).toEqual([]);
+  });
+
   it('sends a frame\'s GPU completion only while the page waits on it, and the newest one when it starts waiting', async () => {
     const { pair, source, presenter } = setup();
     source.imports.add('1:1');
@@ -325,12 +351,26 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(done).toEqual([1, 2]);
     off();
     await settle();
-    const before = pair.fromWorker.filter((m) => m.type === 'done').length;
+    // The first completion nobody waits for turns the watch off.
     presenter.receive({ type: 'frame', frame: desc(8) }, 7);
     await settle();
     pair.painter.finishGpu();
     await settle();
+    expect(pair.posted.filter((m) => m.type === 'watchDone').map((m) => (m as { on: boolean }).on)).toEqual([true, false]);
+    const before = pair.fromWorker.filter((m) => m.type === 'done').length;
+    presenter.receive({ type: 'frame', frame: desc(9) }, 8);
+    await settle();
+    pair.painter.finishGpu();
+    await settle();
     expect(pair.fromWorker.filter((m) => m.type === 'done')).toHaveLength(before);
+    // A listener that comes back every frame costs no watch message while on.
+    const seen: number[] = [];
+    for (let k = 0; k < 3; k++) {
+      const off2 = presenter.onDone!((seq) => seen.push(seq));
+      await settle();
+      off2();
+    }
+    expect(pair.posted.filter((m) => m.type === 'watchDone')).toHaveLength(3);
   });
 
   it('parks a descriptor on the page until its import arrives, and releases it undrawn after the park timeout', async () => {
