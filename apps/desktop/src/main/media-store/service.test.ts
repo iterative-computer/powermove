@@ -269,7 +269,9 @@ describe('MediaStoreService', () => {
   });
 
   it('lets a waiting job resume when its media is put, relinked in its project window, or found by key', async () => {
-    const svc = service();
+    // This tests job bindings; the relink tests cover recursive discovery.
+    // Stay inside this fixture instead of walking every other test's temp tree.
+    const svc = service({ relink: { spotlight: null, maxDirectories: 2, depth: 0 } });
     const gone = path.join(media, 'gone.mov');
     await settledFile(gone, bytes(2000, 3));
     const offlineLink = await svc.link(gone);
