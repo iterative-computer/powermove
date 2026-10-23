@@ -199,7 +199,7 @@ impl AngleHost {
         }
         let body = frame(
             &serde_json::json!({
-                "key": { "content": key.content, "width": key.width, "height": key.height },
+                "key": key,
                 "svg": { "$bin": 0 },
             }),
             &[svg],
@@ -453,6 +453,7 @@ mod tests {
             request: pm_protocol::svg_raster::SvgRasterRequest {
                 key: pm_protocol::svg_raster::SvgRasterKey {
                     content: "0".repeat(64),
+                    texture: None,
                     width: 4,
                     height: 4,
                 },

@@ -8,7 +8,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
 import { encodeFrame, decodeFrame } from '../../shared/wire';
-import type { ShaderFallbackRequest } from '../../shared/engine-protocol';
+import type { ShaderFallbackRequest, SvgRasterKey } from '../../shared/engine-protocol';
 
 export async function angleService(distDir: string, env: NodeJS.ProcessEnv) {
   let browser: Browser | null = null, page: Promise<Page> | null = null, closed = false;
@@ -33,11 +33,12 @@ export async function angleService(distDir: string, env: NodeJS.ProcessEnv) {
       const chunks: Buffer[] = []; let size = 0;
       for await (const chunk of request) { size += chunk.length; if (size > 1024 ** 3) throw new Error('Shader inputs exceed 1 GB'); chunks.push(chunk); }
       if (request.url === '/svg') {
-        const job = decodeFrame(Buffer.concat(chunks)) as { key: { content: string; width: number; height: number }; svg: Uint8Array };
-        const { content, width, height } = job.key ?? {};
-        if (typeof content !== 'string' || !/^[0-9a-f]{64}$/.test(content) || !Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 8192 || height > 8192 || !(job.svg instanceof Uint8Array)) throw new Error('invalid SVG raster request');
+        const job = decodeFrame(Buffer.concat(chunks)) as { key: SvgRasterKey; svg: Uint8Array };
+        const { content, width, height, texture } = job.key ?? {};
+        const maxEdge = texture === true ? 16384 : 8192;
+        if (typeof content !== 'string' || !/^[0-9a-f]{64}$/.test(content) || (texture !== undefined && texture !== true) || !Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > maxEdge || height > maxEdge || !(job.svg instanceof Uint8Array)) throw new Error('invalid SVG raster request');
         const current = await open();
-        const result = await current.evaluate(async ({ key, svg }) => (globalThis as any).runNativeSvgRaster(key, svg), { key: { content, width, height }, svg: Buffer.from(job.svg).toString('base64') });
+        const result = await current.evaluate(async ({ key, svg }) => (globalThis as any).runNativeSvgRaster(key, svg), { key: job.key, svg: Buffer.from(job.svg).toString('base64') });
         answer(result.ok ? { ok: true, pixels: Buffer.from(result.pixels, 'base64') } : result);
         return;
       }
