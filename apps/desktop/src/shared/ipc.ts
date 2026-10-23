@@ -606,6 +606,8 @@ export interface StoreDeleteRequest {
 export interface StoreErrorEvent {
   key: string;
   error: string;
+  /** A write main accepted did not reach disk (main forwards these to the window that wrote the key). */
+  unsaved?: true;
 }
 
 /* ── misc ────────────────────────────────────────────────── */

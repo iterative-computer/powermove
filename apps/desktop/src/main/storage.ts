@@ -252,7 +252,7 @@ class FileStore implements Store {
   }
 
   private receive(reply: StoreReply): void {
-    if (reply.type === 'error') { this.emitError(reply.key, reply.error); return; }
+    if (reply.type === 'error') { this.emitError(reply.key, reply.error, reply.unsaved === true); return; }
     if (reply.type === 'written') {
       if (this.unwritten.get(reply.key) === reply.id) this.unwritten.delete(reply.key);
       return;
@@ -305,7 +305,7 @@ class FileStore implements Store {
         this.unwritten.set(key, id);
       }
     } catch (error) {
-      for (const key of this.unwritten.keys()) this.emitError(key, `not saved: ${errorText(error)}`);
+      for (const key of this.unwritten.keys()) this.emitError(key, `not saved: ${errorText(error)}`, true);
     }
   }
 
@@ -336,8 +336,8 @@ class FileStore implements Store {
     return storeFileName(parsed);
   }
 
-  private emitError(key: string, error: string): void {
-    const event: StoreErrorEvent = { key, error };
+  private emitError(key: string, error: string, unsaved = false): void {
+    const event: StoreErrorEvent = unsaved ? { key, error, unsaved } : { key, error };
     for (const listener of this.listeners) {
       try {
         listener(event);
@@ -385,6 +385,19 @@ export function registerStoreIpc(
   const requireTrusted = (event: StoreIpcEvent, channel: string): void => {
     if (!ctx.isTrustedSender(event)) throw new IpcValidationError(channel, 'untrusted sender');
   };
+  /* A write main accepted can still fail to reach disk (ENOSPC, EIO, a
+     storage worker that stopped). Its writer is told, as it is of a refused
+     value: without this a window kept treating such a project checkpoint as
+     written, never wrote it again, and kept throwing nothing. */
+  type Writer = { send(channel: string, payload: unknown): void; isDestroyed?(): boolean };
+  const writers = new Map<string, Writer>();
+  const wrote = (event: StoreIpcEvent, key: string): void => { writers.set(key, event.sender as unknown as Writer); };
+  store.onError(event => {
+    if (!event.unsaved) return;
+    const writer = writers.get(event.key);
+    if (!writer || writer.isDestroyed?.()) return;
+    try { writer.send(IPC.storeError, { key: event.key, error: event.error } satisfies StoreErrorEvent); } catch { /* the window is closing */ }
+  });
   /* Writes arrive in bursts (a rename touches the registry and the slot), so
      the keys are coalesced into one message per turn of the event loop. A key
      is announced once its value is encoded, so a sibling's refill reads it
@@ -421,6 +434,7 @@ export function registerStoreIpc(
   ipcMain.handle(IPC.storeSetSerialized, async (event, payload: unknown) => {
     requireTrusted(event, IPC.storeSetSerialized);
     if (!isRecord(payload) || typeof payload.key !== 'string' || typeof payload.serialized !== 'string') throw new IpcValidationError(IPC.storeSetSerialized, 'expected key and serialized JSON');
+    wrote(event, payload.key);
     if (store.setSerialized) await store.setSerialized(payload.key, payload.serialized);
     else await store.set(payload.key, JSON.parse(payload.serialized));
     announce(payload.key, event.sender);
@@ -463,6 +477,7 @@ export function registerStoreIpc(
         throw new IpcValidationError(IPC.storeSet, 'expected { key, value }');
       }
       const request = payload as unknown as StoreSetRequest;
+      wrote(event, request.key);
       settleWrite(event, payload, request.key, store.set(request.key, request.value));
     } catch (error) {
       if (error instanceof IpcValidationError) {
@@ -480,6 +495,7 @@ export function registerStoreIpc(
         throw new IpcValidationError(IPC.storeDelete, 'expected { key }');
       }
       const request = payload as unknown as StoreDeleteRequest;
+      wrote(event, request.key);
       settleWrite(event, payload, request.key, store.delete(request.key));
     } catch (error) {
       if (error instanceof IpcValidationError) {

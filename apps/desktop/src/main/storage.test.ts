@@ -249,7 +249,7 @@ describe('file store', () => {
     await failing.flushAll();
 
     expect(JSON.parse(await fs.readFile(path.join(directory, 'theme.json'), 'utf8'))).toBe('old');
-    expect(events).toContainEqual({ key: 'theme', error: 'injected rename failure' });
+    expect(events).toContainEqual({ key: 'theme', error: 'injected rename failure', unsaved: true });
     await expect(fs.stat(path.join(directory, 'theme.json.tmp-failure'))).rejects.toMatchObject({
       code: 'ENOENT'
     });
@@ -539,11 +539,11 @@ describe('file store', () => {
     store.onError(event => errors.push(event));
     await store.load();
 
-    // A checkpoint whose persist fails, then the window's journal deletion and a newer journal.
-    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'New' } }));
+    // A checkpoint whose persist fails, then the window's journal deletion and entries made after it.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', cp: 'new', proj: { id: 'P', name: 'New' } }));
     await store.delete('projectJournal.P');
     await store.flushAll();
-    await store.setSerialized!('projectJournal.P', JSON.stringify([{ revision: 3, patches: [] }]));
+    await store.setSerialized!('projectJournal.P', JSON.stringify([{ revision: 3, cp: 'new', patches: [] }]));
     await store.flushAll();
     expect(errors.filter(event => event.error.includes('EIO')).map(event => event.key)).toEqual(['project.P']);
     expect(await fs.readFile(slotFile, 'utf8')).toBe(slot);
@@ -555,6 +555,12 @@ describe('file store', () => {
     await store.flushAll();
     expect(await fs.readFile(journalFile, 'utf8')).toBe(journal);
 
+    // The window, told, writes its journal again against the slot on disk (untagged: it has no id): written.
+    const repaired = JSON.stringify([{ revision: 2, patches: [] }, { revision: 3, patches: [{ path: ['name'], exists: true, value: 'Edited' }] }]);
+    await store.setSerialized!('projectJournal.P', repaired);
+    await store.flushAll();
+    expect(await fs.readFile(journalFile, 'utf8')).toBe(repaired);
+
     // Once a checkpoint is written, the journal follows it again.
     failing = false;
     await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'Newer' } }));
@@ -562,6 +568,60 @@ describe('file store', () => {
     await store.flushAll();
     expect(JSON.parse(await fs.readFile(slotFile, 'utf8')).proj.name).toBe('Newer');
     await expect(fs.stat(journalFile)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  /* A slot write still renaming when a newer one is refused (a project that
+     just crossed the size limit while its previous ~250 MB slot is written). */
+  async function inFlightThenRefused() {
+    const directory = await temporaryDirectory();
+    const slotFile = path.join(directory, 'project.P.json'), journalFile = path.join(directory, 'projectJournal.P.json');
+    await fs.writeFile(slotFile, JSON.stringify({ v: '1', cp: 'old', proj: { id: 'P', name: 'Old' } }));
+    await fs.writeFile(journalFile, JSON.stringify([{ revision: 2, cp: 'old', patches: [] }]));
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const store = createStore(directory, {
+      writeDelayMs: 0,
+      fs: { ...fs, rename: async (from: any, to: any) => { if (path.basename(String(to)) === 'project.P.json') await gate; return fs.rename(from, to); } }
+    });
+    await store.load();
+    const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+    // Checkpoint A (accepted; its rename waits), its journal deletion, an edit after it.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', cp: 'a', proj: { id: 'P', name: 'A' } }));
+    await store.delete('projectJournal.P');
+    await settle();
+    const edited = JSON.stringify([{ revision: 3, cp: 'a', patches: [{ path: ['name'], exists: true, value: 'A+edit' }] }]);
+    await store.setSerialized!('projectJournal.P', edited);
+    await settle();
+    // Checkpoint B is refused while A is still being written; the window deletes the journal after posting it.
+    await expect(store.setSerialized!('project.P', '{not json')).rejects.toThrow();
+    await store.delete('projectJournal.P');
+    await settle();
+    return { store, release, slotFile, journalFile, edited, settle };
+  }
+
+  it('keeps the journal when a checkpoint is refused while an earlier one is still being written', async () => {
+    const { store, release, slotFile, journalFile, edited } = await inFlightThenRefused();
+    release();
+    await store.flushAll();
+    await store.flushAll();
+    expect(JSON.parse(await fs.readFile(slotFile, 'utf8'))).toMatchObject({ cp: 'a', proj: { name: 'A' } });
+    expect(await fs.readFile(journalFile, 'utf8')).toBe(edited);
+  });
+
+  it('writes the window\'s repaired journal over the older slot, never an entry meant for the refused one (review probe)', async () => {
+    const { store, release, slotFile, journalFile, settle } = await inFlightThenRefused();
+    // Before the window hears of the refusal: an entry against checkpoint B (its id was 'b').
+    await store.setSerialized!('projectJournal.P', JSON.stringify([{ revision: 4, cp: 'b', patches: [{ path: ['layers'], exists: true, value: ['after B'] }] }]));
+    await settle();
+    release();
+    await store.flushAll();
+    expect(JSON.parse(await fs.readFile(journalFile, 'utf8'))).toEqual([{ revision: 3, cp: 'a', patches: [{ path: ['name'], exists: true, value: 'A+edit' }] }]);
+    // Told, the window writes everything since A again, against A.
+    const repaired = [{ revision: 3, cp: 'a', patches: [{ path: ['name'], exists: true, value: 'A+edit' }] }, { revision: 4, cp: 'a', patches: [{ path: ['layers'], exists: true, value: ['after B'] }] }];
+    await store.setSerialized!('projectJournal.P', JSON.stringify(repaired));
+    await store.flushAll();
+    expect(JSON.parse(await fs.readFile(slotFile, 'utf8')).cp).toBe('a');
+    expect(JSON.parse(await fs.readFile(journalFile, 'utf8'))).toEqual(repaired);
   });
 });
 
@@ -683,6 +743,26 @@ describe('store IPC and quit integration', () => {
     expect(broadcastChange).toHaveBeenCalledWith(['projects'], sender);
     await expect(handlers.get(IPC.storeSetSerialized)?.({ sender }, { key: 'theme', serialized: '"x"' })).rejects.toThrow('serialised value is too large');
     expect(broadcastChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells the window that wrote a key when that write did not reach disk, and nobody else', async () => {
+    const directory = await temporaryDirectory();
+    let failing = true;
+    const store = createStore(directory, { writeDelayMs: 0, fs: { ...fs, rename: async (from: any, to: any) => {
+      if (failing && path.basename(String(to)) === 'project.P.json') throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      return fs.rename(from, to);
+    } } });
+    await store.load();
+    const handlers = new Map<string, (...args: any[]) => unknown>();
+    const ipcMain = { handle: (channel: string, handler: (...args: any[]) => unknown) => handlers.set(channel, handler), on: () => ipcMain };
+    registerStoreIpc(ipcMain as unknown as Pick<IpcMain, 'handle' | 'on'>, store, { isTrustedSender: () => true });
+    const writer = { send: vi.fn(), isDestroyed: () => false }, other = { send: vi.fn(), isDestroyed: () => false };
+    await handlers.get(IPC.storeSetSerialized)?.({ sender: other }, { key: 'theme', serialized: '"dark"' });
+    await handlers.get(IPC.storeSetSerialized)?.({ sender: writer }, { key: 'project.P', serialized: JSON.stringify({ v: '1', proj: { id: 'P' } }) });
+    await store.flushAll();
+    expect(writer.send).toHaveBeenCalledWith(IPC.storeError, { key: 'project.P', error: expect.stringContaining('ENOSPC') });
+    expect(other.send).not.toHaveBeenCalled();
+    failing = false;
   });
 
   it('prevents the first quit until flushing completes, then quits once more', async () => {
