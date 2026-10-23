@@ -57,8 +57,10 @@ export const ENGINE_VIEWER_CHANGED = 'powermove:engine-viewer-changed';
 
 /** One viewer session on the interactive engine. */
 export interface EngineViewerChannel extends FrameLink {
-  /** Detaches this viewer. */
-  close(): void;
+  /** Detaches this viewer. `keepsDrawing`: the caller keeps its claimed
+   *  drawing for its own next session (the final-tab suspension), so the
+   *  connection need not prepare another for a later viewer. */
+  close(options?: { keepsDrawing?: boolean }): void;
   /** The built-in channel may retire this viewer's imports after GPU and
    * chrome readers drain. Custom channels can omit this capability. */
   retireClosedPool?(generation: number): number;
@@ -331,7 +333,7 @@ export class ViewerPresentation {
     this.hide(this.canvasElement, false);
     this.latestFrame = null;
     this.setStatus(null);
-    this.closeChannel();
+    this.closeChannel({ keepsDrawing: true });
     const drained = Promise.all(this.draining);
     void drained.then(() => {
       if (this.disposed || !this.suspended || token !== this.suspendToken) return;
@@ -1087,6 +1089,9 @@ export class ViewerPresentation {
 
   dispose(): void {
     if (this.disposed) return;
+    // A suspended viewer closed its channel keeping its drawing; that
+    // drawing goes now, so the connection prepares one for the next viewer.
+    const keptDrawing = this.suspended;
     this.disposed = true;
     this.suspendToken++;
     this.backendToken++;
@@ -1104,16 +1109,17 @@ export class ViewerPresentation {
     this.canvasElement.remove();
     this.setStatus(null);
     if (this.options.stage.dataset['engineStage'] === (this.options.role ?? 'viewer')) delete this.options.stage.dataset['engineStage'];
+    if (keptDrawing) this.options.service.drawingWarmup?.warm();
   }
 
-  private closeChannel(): void {
+  private closeChannel(options?: { keepsDrawing: true }): void {
     this.chromeLeases?.clear();
     this.chromeLeases = null;
     this.held = [];
     this.stopPresenter(this.presenter);
     this.presenter = null;
     const channel = this.channel;
-    channel?.close();
+    channel?.close(options);
     this.channel = null;
     const pools = [...this.poolLeases];
     this.poolLeases.clear();

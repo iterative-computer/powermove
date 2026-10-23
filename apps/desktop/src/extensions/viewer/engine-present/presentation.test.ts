@@ -87,9 +87,11 @@ class Channel implements EngineViewerChannel {
   release(release: FrameRelease): void {
     this.releases.push(release);
   }
-  close(): void {
+  closeOptions: Array<{ keepsDrawing?: boolean } | undefined> = [];
+  close(options?: { keepsDrawing?: boolean }): void {
     this.closed = true;
     this.closedLaunch = this.source.launch;
+    this.closeOptions.push(options);
   }
 }
 
@@ -242,6 +244,34 @@ const settleLong = async (): Promise<void> => {
 };
 
 describe('ViewerPresentation', () => {
+  it('leaves a prepared drawing for the next viewer except while suspended on the final-tab home screen', async () => {
+    const warms: string[] = [];
+    const warmup = { warm: () => { warms.push('warm'); }, take: () => null } as unknown as NonNullable<EngineViewerService['drawingWarmup']>;
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    // Disposed while presenting (extension reload, service replacement):
+    // the channel close asks the connection for a new drawing.
+    const replaced = Object.assign(new Service(), { drawingWarmup: warmup });
+    const first = new ViewerPresentation({ service: replaced, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    first.dispose();
+    await settle();
+    expect(replaced.channels[0]!.closeOptions).toEqual([undefined]);
+    expect(warms).toEqual([]);
+    // Suspended for the home screen: the channel closes keeping the
+    // drawing, so no second drawing is prepared while home.
+    const home = Object.assign(new Service(), { drawingWarmup: warmup });
+    const second = new ViewerPresentation({ service: home, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    second.suspend();
+    await settle();
+    expect(home.channels[0]!.closeOptions).toEqual([{ keepsDrawing: true }]);
+    expect(warms).toEqual([]);
+    // Disposed while suspended: its kept drawing goes, so it prepares one.
+    second.dispose();
+    await settle();
+    expect(warms).toEqual(['warm']);
+  });
+
   it('suspends only the viewer channel, trims after draining, and reopens a fresh surface epoch on the same drawing', async () => {
     const service = new Service();
     const painter = new Painter();

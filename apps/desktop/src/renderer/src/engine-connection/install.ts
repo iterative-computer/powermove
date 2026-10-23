@@ -513,7 +513,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           if (lease === viewerLease) opened.sendViewerState({ ...state, headless: false } as never);
         },
         release: (release) => opened.release(release),
-        close: () => {
+        close: (options) => {
           if (lease !== viewerLease || viewerHandlers !== handlers || opened.closed) return;
           // `sendViewerState` can merely queue headless while the document
           // has no session id or its first resync is pending. A new viewer
@@ -526,6 +526,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           retirementLaunch = launch;
           authorizedRetirement = launch !== null && source.stats().launch === launch && c.ready && !c.closed;
           transport.refresh();
+          // A viewer that goes away (extension reload or update, service
+          // replacement, a fork binding its own canvas) leaves a prepared
+          // drawing for the next one, as at startup. The final-tab
+          // suspension keeps its own drawing: a second one would only hold
+          // memory on the home screen.
+          if (!options?.keepsDrawing) drawingWarmup.warm();
         },
         retireClosedPool: (generation) => {
           // A replacement viewer may claim the same pool before an old GPU
