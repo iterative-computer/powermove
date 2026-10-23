@@ -48,6 +48,29 @@ function setup(view?: () => Partial<ViewParams>) {
 }
 
 describe('EngineCanvasBinding (render.gl.init/resize with the engine on)', () => {
+  it('keeps a bound-only canvas dormant until its caller resizes it', () => {
+    const { binding, made, canvas } = setup();
+    binding.bind(canvas);
+    binding.refresh(); // A project/document-ready notification, without render.gl.resize.
+    expect(binding.bound).toBe(canvas);
+    expect(binding.presenting).toBe(false);
+    expect(made).toHaveLength(0);
+
+    binding.resize(960, 540);
+    expect(made).toHaveLength(1);
+    const first = made[0]!;
+    const canvasState = first.updates.at(-1)!.params.canvas;
+    binding.refresh();
+    expect(made).toHaveLength(1);
+    expect(first.updates.at(-1)!.params.canvas).toEqual(canvasState);
+
+    binding.unbind();
+    binding.bind(canvas);
+    binding.refresh();
+    expect(made).toHaveLength(1);
+    expect(binding.presenting).toBe(false);
+  });
+
   it('refreshes a fork’s camera and shading on its existing presenter without changing its canvas crop', () => {
     let shading: ViewParams['shading'] = 'solid';
     const camera = { view: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -2, -3, -4, 1], projection: { kind: 'orthographic', halfHeight: 3, near: .01, far: 100 } } as NonNullable<ViewParams['camera']>;
