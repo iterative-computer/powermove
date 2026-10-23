@@ -60,7 +60,11 @@ fn render_with(
 ) -> (Vec<f32>, Vec<pm_render::LayerFailure>) {
     let mut doc = doc.clone();
     if doc.get("colorDepth").is_none() && doc["color"].get("precision").is_none() {
-        doc["colorDepth"] = json!(match precision { Precision::Unorm8 => 8, Precision::Float16 => 16, Precision::Float32 => 32 });
+        doc["colorDepth"] = json!(match precision {
+            Precision::Unorm8 => 8,
+            Precision::Float16 => 16,
+            Precision::Float32 => 32,
+        });
     }
     let w = doc["w"].as_u64().unwrap() as u32;
     let h = doc["h"].as_u64().unwrap() as u32;
@@ -215,6 +219,32 @@ fn blend_modes_match_the_reference() {
         }
     }
     assert_eq!(checked, 3 * 2 * 5 * 9 * 2);
+}
+
+#[test]
+fn depth_eight_screen_blend_preserves_color_over_transparency() {
+    let mut renderer = Renderer::headless().unwrap();
+    let mut top = layer(
+        "top",
+        "solid",
+        json!({ "color": "#FF000080", "w": 8, "h": 8 }),
+        0.0,
+        0.0,
+        1.0,
+    );
+    top["blend"] = json!("screen");
+    let bottom = layer(
+        "bottom",
+        "solid",
+        json!({ "color": "#00FF0080", "w": 8, "h": 8 }),
+        0.0,
+        0.0,
+        1.0,
+    );
+    let mut doc = project(8, 8, 1.0, no_fill(), vec![top, bottom]);
+    doc["colorDepth"] = json!(8);
+    let got = px(&render(&mut renderer, &doc, Precision::Unorm8), 8, 4, 4);
+    assert_eq!(got.map(|v| (v * 255.0).round() as u8), [128, 128, 0, 192]);
 }
 
 /// A styled group (blend mode, opacity) composites its members first, then

@@ -234,11 +234,9 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 // `FRAG_COMPOSITE`: the layer (`ta`) over the accumulator (`tb`) with a
-// blend mode, in the working encoding, evaluated as today's program
-// evaluates it at every pixel of the frame: outside the layer the
-// destination goes through `(d.rgb / d.a) · d.a`, whose result the half
-// float target truncates, so a translucent stack drifts by up to an ulp per
-// blend layer exactly as today's frames do (docs/engine/composite.md).
+// blend mode, in the working encoding. Both textures contain premultiplied
+// color; retain each source's unblended contribution wherever the other
+// source is translucent (docs/engine/composite.md).
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     var s = load_a(in.pos);
@@ -254,9 +252,9 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
         dc = d.rgb / d.a;
     }
     let bc = pm_blend_working(dc, sc, op.i.x, has(FLAG_LINEAR), has(FLAG_BLEND_IN_E));
-    let res = mix(dc, bc, s.a);
+    let res = (1.0 - s.a) * d.rgb + (1.0 - d.a) * s.rgb + s.a * d.a * bc;
     let a = s.a + d.a * (1.0 - s.a);
-    return vec4<f32>(res * a, a);
+    return vec4<f32>(res, a);
 }
 
 // A rectangle of `ta` (a padded pass) into a smaller target.
