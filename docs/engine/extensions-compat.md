@@ -148,8 +148,10 @@ raster for a shape the viewport misses, and it fills the viewport with a
 plain rectangle's color when the viewport lies inside its fill. A wrapper sees
 those calls, and the typewriter fixture sizes its canvas from what it gets.
 `pm_render::compat_crop` ports the three functions; `compat_quad` plans the
-same decision from the request's region (viewer frames only: not exports,
-not snapshots), for top-level layers of the root composition without paths,
+same decision from the viewer's complete canvas, including its pan buffer
+(`RenderRequest.preview_canvas`), or the request's region when no canvas
+was supplied (viewer frames only: not exports, not snapshots), for top-level
+layers of the root composition without paths,
 renderable effects, masks, track matte or transitions (and, for text,
 without animators, styles or typography anchoring). The window travels with
 the need (`CompatNeed.crop`; `Native`, `Reuse` and `Pixels` carry it back) and
@@ -596,6 +598,127 @@ presented. Latency from the edit to its `frame:rendered`, p50/p95/max:
 The engine is slower than today with and without the override. These are
 gaps (below).
 
+### Round nine: a sync capture owns its needs, a preview owns its canvas
+
+**Synchronous captures.** The timeout came from outstanding-ask bookkeeping,
+not the raster worker, its mirror, fonts, or the asynchronous GPU readback.
+The viewer could already have asked for the capture's exact raster and
+started preparing it asynchronously. `CompatStore::to_ask` suppressed that
+need in the snapshot's reply and put the job in `waiting_for`. The window
+was blocked in `sendSync`, so it could not finish the preparation that
+would release the job. The first capture expired at the unchanged 5 s bound.
+
+`SnapshotRequest.compat_uploaded` now names the needs the capture itself
+answered and posted after its last dependency round. The engine returns
+every missing need not in that list, including a viewer's outstanding one.
+Only an explicitly posted answer whose same-class snapshot ask is still
+outstanding at this revision waits for the two ports' delivery race. A
+terminal answer clears that ask, including a reuse rejected after eviction.
+A later viewer or asynchronous thumbnail ask cannot make a synchronous
+retry wait for work that needs its blocked window. The queued job's wait
+tag carries the same class and revision fence, so a replacement ask also
+wakes a retry that was already waiting when the old answer was rejected.
+Synchronous, main-owned-document, and asynchronous capture rounds all carry
+the list. It has the same 256-need bound and scale/crop validation as a
+compatibility request. Viewer ask suppression, snapshot deadlines, and
+queue/memory bounds are unchanged. A native regression leaves a real viewer
+need unanswered, requires the synchronous capture to return it, marks the
+retry, and verifies that the independently arriving pixels complete it.
+Store regressions also cover eviction, a rejected reuse, a newer viewer or
+thumbnail ask, and a marker from another revision.
+
+**Deep zoom.** Three separate causes had been hidden by the initial missing
+high-density callback:
+
+- The original typewriter fixture's identity fragment has no `viewportSafe`
+  declaration. Today's viewer correctly retains a composition-sized canvas
+  for it, so screen zoom alone cannot require density 24 or 32. The original
+  entry and its metadata remain covered by the other compatibility gates;
+  the zoom gate uses a separate entry that declares this identity fragment
+  safe. It pins full preview quality and supplies a matching canvas for the
+  custom 16x request instead of inheriting the built-in viewer's 8x canvas.
+- At 16x on a 2x display, that canvas derives density 32. Internal
+  `RenderRequest::validate` incorrectly applied the ordinary frame scale
+  cap of 16 before compatibility planning. A preview canvas now accepts its
+  finite positive derived density. Wire frame requests, exports, and final
+  captures keep their scale limits, and texture/allocation bounds still
+  apply. The validation regression checks each boundary and invalid axis.
+- Source crop planning used the screen-visible render region. Today's
+  compositor passes wrappers the complete canvas, including its pan buffer.
+  `RenderRequest.preview_canvas` carries that distinction: source clipping
+  uses the complete canvas while presentation still renders just its region.
+  A native regression distinguishes the 512-square canvas from its central
+  256-square presentation region and keeps exports uncropped.
+
+**Synchronous viewport picking.** The full public set also exposed a
+regression in all four viewport API contexts: `glyphsIn` returned `[]`
+before the first matching native chrome frame. Integration had put the
+native-readiness return ahead of hit-geometry updates. Pending glyph hits
+now use strict synchronous wasm `active/world3D` queries, as the other
+viewport hit tests do, and `glyphsIn` flushes scheduled geometry updates.
+Unavailable viewports clear their cached hits. Drawing still waits for
+matched native chrome metadata. The flag-on path never constructs the
+reference scene. Picking also refreshes geometry at the caller's current
+time when an older presented frame has the same revision and view sequence.
+The compiled probes check an immediate seek out of a light's active range
+and back in the same task, in addition to the original 104 member checks.
+Unit coverage checks current transforms and time, exclusions, and an
+unavailable native API.
+
+On the rebuilt thin-LTO addon (`protocol-8e74d7bb9f0c4b33`), the two blocker
+gates pass together under two SHA256 load workers. At 8x the plain text's
+crop is `(2048,768,2304,1536)` at density 24; at 16x it is
+`(2816,1280,1280,1024)` at density 32. Both equal the legacy function applied
+to the actual canvas, including its pan buffer. The typed layer gets no
+crop, frames match the requested time and current view sequence, and text
+pixels change after seeking. The synchronous empty/partial/full captures
+match today's geometry and pixels (max 1, no channel values over 1).
+
+The final loaded cadence campaign runs each changing-base gate 20 times,
+with two SHA256 workers, one Playwright worker, and native/viewer traces.
+All 60 runs pass the original assertions. Each presents 90 distinct frames,
+all answered by the window, with no skipped frames, presenter drops,
+repeated engine times, or synchronous base loads. Measured ranges:
+
+| Gate | Pass | Longest gap, engine / today | First advancing frame, engine / today |
+| --- | --- | --- | --- |
+| Typewriter keyed 0→100% | 20/20 | 42–51 / 44–52 ms | 76–90 / 196–320 ms |
+| Animated ellipse size | 20/20 | 42–50 / 35–43 ms | 61–85 / 159–323 ms |
+| Animated path vertices | 20/20 | 42–49 / 35–43 ms | 67–87 / 209–303 ms |
+
+The per-run one-minute load average ranges from 17.9 to 39.7. An initial
+campaign passed 59/60: one size run showed 72 distinct frames and a 329 ms
+gap (today 90 and 43 ms), nine late presenter drops, and no main-thread long
+task. That run had no frame trace, so its cause is unproven. It is retained
+in the report rather than attributed to readback or canvas refinement.
+The final traced size campaign has no recurrence; its longest timed native
+render is 18.2 ms. Diagnostics now retain complete preparation, bitmap,
+worker-reply and worker-conversion timings, and every cadence run collects
+native status after the measured span instead of relying on the last
+periodic sample.
+
+The final capture campaign passes 10/10 synchronous typewriter runs alone
+and 10/10 zoom-then-synchronous-capture pairs, under the same two SHA256
+load workers. The raw report confirms their actual start-time order, one
+Playwright worker, no retries, and no skips. All empty/partial/full pixel
+comparisons stay within 1, with no channel value over 1. These run after
+the complete public set in one serial, prebuilt Playwright command.
+
+All 38 public gates pass across the seven compatibility spec files,
+including all four compiled viewport contexts, the 104 member probes and
+the immediate-seek checks. The long loop presents 300 distinct frames and
+45 after wrapping, with no skips, repeated engine times, or presenter
+drops. Its longest engine gap is 48 ms (today 35 ms); the wrap gap is 28 ms
+(today 32 ms). The large-document gate presents all 60 edits with no extra
+document copies, reseeds, or render-thread turns over 100 ms. Its engine
+p50/p95/max is 52/66/86 ms, without the override 33/35/36 ms, and today
+18/22/28 ms; the latency-parity gap remains.
+
+The final native build passes all 154 `pm-node` library tests and all 14
+snapshot parent regressions, including the withheld viewer need and the
+queued upload rejected after eviction. The existing parent tests invoke
+their isolated child processes; no public gate is skipped.
+
 ### Earlier measurements (2026-10-19, before round-three integration)
 
 Playback (`engine-extension-compat.spec.ts`, a shape override, 3 s at 30
@@ -753,9 +876,8 @@ f0a927e3 (PROTOCOL_BUILD `protocol-243ac2c6ec3d6e99`):
   passed with the engine on. They assert selection, notifications and
   disposal, input handling, tools, cursor and wire picking, modal transforms,
   walk, extrusion/cancellation and non-applicable cases, not just names.
-  The member inventory is exhaustive against the public interfaces. The
-  3D lane is still unmerged here; this proves the current facade's behavior,
-  not that every internal 3D computation has been replaced.
+  The member inventory is exhaustive against the public interfaces. Native
+  3D geometry and chrome-plane rendering have separate gates.
 - The sandbox probe (`fixtures/compat-corpus/api-probe-sandbox`) as a Store
   install at apiVersion 1, 2 and 3: `project.get` resolves to a frozen
   snapshot, the reactive reads stay synchronous, `project.snapshot` resolves
@@ -821,21 +943,6 @@ new ids through a typed accessor; none is added in this lane.
   path (patch, render, presentation: the presenter and document lanes).
   The override adds 9 to 25 ms at p50: the window's base preparation and
   the answer's round trip, now started at the edit (`prepareShown`).
-- **A synchronous capture timed out right after the zoom gate.** Running
-  the typewriter preview/disposal gate after the moat's zoom 8/16 gate made
-  its first synchronous `renderFrameTo` time out at 5 s, 3 times in 3
-  runs. Run alone, it passed. At the timeout the window had answered one
-  need, with two asynchronous base preparations still in flight, and the
-  raster worker had finished one job (`layerRastersOffThread` 1, no
-  reseeds). The worker may be waiting on something the blocked window
-  must answer (suspected: the font service), but this is not confirmed.
-  Logs are outside the repository (/tmp/ne-w5/extcompat-r8-*.log).
-- **The zoom 8 and 16 crop gate** (`engine-compat-moat.spec.ts`) fails
-  after the merge. At zoom 8 the viewer keeps the whole 480×270 canvas
-  under a 3840×2160 CSS box (integration's canvas hold) and sends no
-  refined view, so the override is never asked at a density over 16. The
-  gate needs the viewer lane's refine-after-navigation behavior with a
-  programmatic zoom; it is not loosened here.
 - A paused redraw re-asks only the needs the engine asked for most
   recently (the frame on screen). A wrapper whose output follows its own
   state is asked again for other frames and densities only after a
