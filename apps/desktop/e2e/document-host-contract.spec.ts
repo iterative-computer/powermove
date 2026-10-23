@@ -167,6 +167,7 @@ test('the native no-window workspace bytes match the existing hidden host includ
     // pm-cli scope honours the same pin (DEFS-4): within one 8-bit step of
     // the desktop's frame, a native control beyond it, named failures.
     expect(result.scopePinned.deviation).toBeLessThanOrEqual(1 / 255 + 1e-6);
+    expect(result.scopePinned.meanDeviation).toBeLessThanOrEqual(0.05 / 255);
     expect(result.scopePinned.nativeControlDeviation).toBeGreaterThan(1 / 255 + 1e-6);
     expect(result.scopePinned.noHelperExit4).toBe(true);
     expect(result.scopePinned.missingBrowser).toBe(true);

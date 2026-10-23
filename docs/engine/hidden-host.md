@@ -175,8 +175,12 @@ copy must match the desktop's pixels and leave `angle-parity` empty. A missing
 browser must fail by name. `pm-cli scope` runs on the same pinned project
 with the forged native verification in place: its channel statistics must match
 `pm-cli scope --frame` of the desktop's frame 0 within one 8-bit step (the PNG
-holds bytes, scope measures the 32-bit render). With only the pin removed, the
-native scope must deviate by more than that step. Without a helper it must exit
+holds dithered bytes, scope measures the 32-bit render), and every channel mean
+within 0.05 of a step. The 239×137 fixture is measured at the export's 240×138.
+With only the pin removed, the native scope must deviate by more than one step.
+Measured 2026-10-23: largest statistic deviation 0.96 of a step (dither: blue
+181/182 against 181.04), largest mean deviation 0.0002 of a step, native control
+0.97 (247 steps, in red). Without a helper it must exit
 4 naming the effect, and with a missing browser it must fail with
 `chromium-unavailable`; neither writes `scope.json`. The `scope_*` tests in
 `cargo test -p pm-cli --test definitions` cover a shader layer and a runner-only
