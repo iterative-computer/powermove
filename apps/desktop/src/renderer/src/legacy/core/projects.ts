@@ -129,15 +129,46 @@ const checks = new Map<string, { project: object; again: boolean }>();
    autosave checkpoints even when the journal has entries: a later write
    repairs the failure, as it did before checkpoints were checked. */
 const unsaved = new Set<string>();
+/* The journal as it stands against the checkpoint before the newest one
+   (its id, null for a slot without one), kept until the next checkpoint. When
+   the newest slot write fails, that older slot is the one on disk, and main
+   keeps its journal (store-engine.ts). The window then goes back to it:
+   everything journaled since is appended to it, tagged with its id, and
+   written, and later edits keep being appended to it. Every edit stays on
+   disk through the failure (D1). */
+const bases = new Map<string, { cp: string | null; entries: any[] }>();
+/* The checkpoint id of a slot this window read (Projects.get), for a project
+   it has not checkpointed: its first journal entries are tagged with it, and
+   it is the base if that first checkpoint fails. A write of the slot by
+   another window forgets it. */
+const onDisk = new Map<string, string | null>();
+PM.bus?.on?.('store:external', (keys: any) => {
+  for (const key of Array.isArray(keys) ? keys : []) if (typeof key === 'string' && key.startsWith(R.SLOT)) onDisk.delete(key.slice(R.SLOT.length));
+});
 PM.bus?.on?.('storage:error', (event: any) => {
   const key = typeof event?.key === 'string' ? event.key : '';
   const id = key.startsWith(R.SLOT) ? key.slice(R.SLOT.length) : key.startsWith(R.JOURNAL) ? key.slice(R.JOURNAL.length) : '';
   if (!id) return;
   slots.delete(id);
   unsaved.add(id);
-  // Main may hold an older checkpoint than the one posted: journal untagged, as before, until the next.
-  if (key.startsWith(R.SLOT)) checkpoints.delete(id);
+  if (key.startsWith(R.SLOT)) restoreBase(id);
 });
+
+/** After a failed checkpoint: the journal against the slot before it, with everything since (see `bases`). */
+function restoreBase(id: string): void {
+  const base = bases.get(id);
+  bases.delete(id);
+  if (!base) { checkpoints.delete(id); return; }
+  const since = (written?.id === id ? written.entries : journal(id)).map((entry: any) => {
+    const { cp: _cp, ...rest } = entry ?? {};
+    return base.cp === null ? rest : { ...rest, cp: base.cp };
+  });
+  if (base.cp === null) checkpoints.delete(id); else checkpoints.set(id, base.cp);
+  const entries = [...base.entries, ...since];
+  written = { id, entries, sizes: entries.map(item => journalBytes(item)) };
+  if (PM.store.setAsync) void PM.store.setAsync(R.JOURNAL + id, entries.slice());
+  else PM.store.set(R.JOURNAL + id, entries);
+}
 
 /*
  * Checkpoint ids. Main writes a project's journal to disk only after the slot
@@ -172,11 +203,17 @@ R.writtenJSON = (proj: any): string | null => {
 };
 
 function writeSlot(proj: any) {
+  // The journal against the slot this one replaces, should this one fail.
+  const previous = checkpoints.has(proj.id) ? checkpoints.get(proj.id)! : onDisk.get(proj.id);
+  const prior = previous === undefined ? null
+    : (written?.id === proj.id ? written.entries : journal(proj.id)).filter((entry: any) => typeof entry?.cp !== 'string' || entry.cp === previous);
   const cp = checkpointId();
   const envelope = { v: PM.version || '1.0.0', cp, proj };
   if (PM.store.set(R.SLOT + proj.id, envelope) === false) throw new Error('Project storage is unavailable or full');
   unsaved.delete(proj.id);
+  if (prior) bases.set(proj.id, { cp: previous ?? null, entries: prior }); else bases.delete(proj.id);
   checkpoints.set(proj.id, cp);
+  onDisk.delete(proj.id);
   const text = typeof PM.store.writtenText === 'function' ? PM.store.writtenText(R.SLOT + proj.id) : null;
   if (text) {
     const entry = justWritten = { project: proj, token: changeToken(), text, cp };
@@ -346,6 +383,7 @@ R.get = (id: any) => {
   if (!project) return null;
   project = clone(project);
   const cp = raw && typeof raw === 'object' && typeof raw.cp === 'string' ? raw.cp : null;
+  if (!checkpoints.has(id)) onDisk.set(id, cp);
   for (const entry of journal(id)) {
     // An entry for another checkpoint is already in this slot (see checkpointId).
     if (cp !== null && typeof entry?.cp === 'string' && entry.cp !== cp) continue;
@@ -409,7 +447,7 @@ R.pickBoot = ({ open = R.openProjects(), metas = R.list(), get = R.get, getState
 };
 
 R.remove = (id: any) => {
-  slots.delete(id); checkpoints.delete(id);
+  slots.delete(id); checkpoints.delete(id); bases.delete(id); onDisk.delete(id);
   R.saveList(R.list().filter((x: any) => x.id !== id));
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
@@ -439,7 +477,7 @@ R.restore = (id: any) => {
   return true;
 };
 R.destroy = (id: any) => {
-  slots.delete(id); checkpoints.delete(id);
+  slots.delete(id); checkpoints.delete(id); bases.delete(id); onDisk.delete(id);
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
   try { PM.store.del(R.STATE + id); } catch (e) { }
@@ -483,7 +521,7 @@ function append(entry: { projectId: string; revision: number; patches: any[] }) 
     return { id: entry.projectId, entries, sizes: entries.map(item => journalBytes(item)) };
   })();
   supersede(state.entries, entry.patches, index => { state.sizes[index] = journalBytes(state.entries[index]); });
-  const cp = checkpoints.get(entry.projectId);
+  const cp = checkpoints.get(entry.projectId) ?? onDisk.get(entry.projectId);
   const item: any = { revision: Number(entry.revision) || 0, patches: entry.patches };
   if (cp) item.cp = cp;
   state.entries.push(item);
@@ -491,9 +529,15 @@ function append(entry: { projectId: string; revision: number; patches: any[] }) 
   /* Keep the journal bounded even before the next debounced checkpoint
      (its JSON: brackets, the entries, and a comma between each two). */
   const bytes = 2 + state.sizes.reduce((sum, size) => sum + size, 0) + Math.max(0, state.sizes.length - 1);
-  if (bytes > MAX_JOURNAL_BYTES) {
-    written = null;
+  /* Past the bound the project is checkpointed instead, unless its slot
+     write is failing: then the journal is all that holds these edits on disk,
+     and it keeps growing (up to the store's own limit) while the save error
+     stays reported, until a checkpoint lands. */
+  if (bytes > MAX_JOURNAL_BYTES && !unsaved.has(entry.projectId)) {
+    // Kept as the base should that checkpoint fail (writeSlot).
+    written = state;
     if (PM.proj?.id === entry.projectId) R.put(PM.proj);
+    if (written === state) written = null;
     return;
   }
   /* Serialized off the edit's task when the store can (the journal is a

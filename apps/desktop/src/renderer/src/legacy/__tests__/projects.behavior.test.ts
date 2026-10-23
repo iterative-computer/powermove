@@ -217,3 +217,36 @@ it('keeps autosaving projects stamped for this reader', () => {
   PM.bus.emit('history:project-patch', { projectId: 'C1', revision: 1, patches: [{ path: ['name'], exists: true, value: 'Journaled' }] });
   assert.equal(PM.Projects.get('C1').name, 'Journaled');
 });
+
+it('tags the first journal entries with the checkpoint of the slot it read, before checkpointing itself', () => {
+  const { PM, mem } = projectsModel();
+  mem.set('project.T1', { v: '1.0.0', cp: 'disk', proj: { id: 'T1', name: 'Read', revision: 1, layers: [{ id: 'L1', name: 'Layer' }] } });
+  PM.proj = PM.Projects.get('T1');
+  PM.bus.emit('history:project-patch', { projectId: 'T1', revision: 2, patches: [{ path: ['layers', 0, 'name'], exists: true, value: 'Edited' }] });
+  assert.equal(mem.get('projectJournal.T1')[0].cp, 'disk');
+  // Another window writing the slot forgets it: untagged, replayed over whatever slot is there.
+  PM.bus.emit('store:external', ['project.T1']);
+  PM.bus.emit('history:project-patch', { projectId: 'T1', revision: 3, patches: [{ path: ['name'], exists: true, value: 'Renamed' }] });
+  assert.equal(mem.get('projectJournal.T1').at(-1).cp, undefined);
+});
+
+it('keeps journaling past the bound while the slot write is failing, instead of checkpointing again', () => {
+  const MAX = 4 * 1024 * 1024;
+  const { PM, mem } = projectsModel();
+  let slotWrites = 0;
+  const set = PM.store.set;
+  PM.store.set = (key, value) => { if (key === 'project.U1') slotWrites++; return set(key, value); };
+  PM.proj = { id: 'U1', name: 'Full disk', revision: 0, layers: [] };
+  PM.Projects.put(PM.proj);
+  const first = mem.get('project.U1').cp;
+  PM.Projects.put(PM.proj);
+  PM.bus.emit('storage:error', { key: 'project.U1', error: 'ENOSPC' });
+  assert.equal(slotWrites, 2);
+  const big = 'x'.repeat(MAX / 2);
+  for (let revision = 1; revision <= 3; revision++) {
+    PM.bus.emit('history:project-patch', { projectId: 'U1', revision, patches: [{ path: ['layers', revision - 1], exists: true, value: { id: `L${revision}`, note: big } }] });
+  }
+  assert.equal(slotWrites, 2, 'no checkpoint while the slot write fails');
+  const journal = mem.get('projectJournal.U1');
+  assert.deepEqual(journal.map(entry => [entry.revision, entry.cp]), [[1, first], [2, first], [3, first]], 'every edit, against the slot on disk');
+});

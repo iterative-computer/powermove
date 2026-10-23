@@ -18,7 +18,7 @@ import path from 'node:path';
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
+import { bridge as currentBridge, installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import type { PMRegistry } from '../registry';
 import { install as installShim } from '../host/electron-shim';
 import { install as installProjects } from '../core/projects';
@@ -52,7 +52,7 @@ afterEach(async () => {
 });
 
 /** Failures to inject: return an error to fail that operation (before it changes anything). */
-type Faults = { writeFile?: (file: string) => Error | null; rename?: (to: string) => Error | null };
+type Faults = { writeFile?: (file: string) => Error | null; rename?: (to: string) => Error | null; gate?: (to: string) => Promise<void> | null };
 const failure = (code: string, message: string) => Object.assign(new Error(`${code}: ${message}`), { code });
 
 /** The file system, logging every operation that changes what a restart reads. */
@@ -66,6 +66,7 @@ function loggingFs(log: Op[], faults: Faults = {}): StoreFileSystem {
       log.push({ kind: 'write', file: String(file), data: typeof data === 'string' ? data : Buffer.from(data).toString('utf8') });
     }) as any,
     rename: (async (from: any, to: any) => {
+      await faults.gate?.(String(to));
       const fault = faults.rename?.(String(to));
       if (fault) throw fault;
       await nodeFs.rename(from, to);
@@ -111,43 +112,54 @@ async function recover(files: Map<string, string>, id: string): Promise<string |
   for (const [name, data] of files) await nodeFs.writeFile(path.join(directory, name), data);
   const store = createStore(directory);
   await store.load();
-  const PM: any = openWindow(store);
-  const project = PM.Projects.get(id);
-  await nodeFs.rm(directory, { recursive: true, force: true });
-  return project ? JSON.stringify(project) : null;
+  const window = (globalThis as any).window, bridge = currentBridge();
+  try {
+    const PM: any = openWindow(store, { transient: true });
+    const project = PM.Projects.get(id);
+    return project ? JSON.stringify(project) : null;
+  } finally {
+    (globalThis as any).window = window;
+    if (bridge) installBridgeForTests(bridge as any);
+    await nodeFs.rm(directory, { recursive: true, force: true });
+  }
 }
 
 /** A window whose store reaches `store` the way preload and main's IPC do. */
-function openWindow(store: Store) {
+function openWindow(store: Store, options: { refuse?: (key: string) => boolean; transient?: boolean } = {}) {
+  // vi.fn keeps every call's arguments (the shim's listeners, so the whole window) until the file ends.
+  const spy = (): any => options.transient ? () => undefined : vi.fn();
   const listeners = new Map<string, Array<(payload: any) => void>>();
   const PM: PMRegistry = {
-    uid: (prefix: string) => `${prefix}1`, toast: vi.fn(), version: '1.0.0',
+    uid: (prefix: string) => `${prefix}1`, toast: spy(), version: '1.0.0',
     bus: {
       on: (event: string, listener: (payload: any) => void) => { listeners.set(event, [...listeners.get(event) ?? [], listener]); return () => {}; },
       emit: (event: string, payload?: any) => { for (const listener of listeners.get(event) ?? []) listener(payload); },
     },
-    CodexBridge: { progress: vi.fn(), trace: vi.fn(), resolve: vi.fn() }, AgentArtifacts: { resolve: vi.fn() }, WindowCapture: { resolve: vi.fn() },
+    CodexBridge: { progress: spy(), trace: spy(), resolve: spy() }, AgentArtifacts: { resolve: spy() }, WindowCapture: { resolve: spy() },
     store: {},
   };
   const bridge: any = {
     store: {
       bootstrapSerializedSync: () => ({ ...store.bootstrapSerialized!(), __powermoveAsyncStore: 'true' }),
       getEncodedSync: (key: string) => store.getEncodedSerialized!(key),
-      setSerialized: (key: string, serialized: string) => store.setSerialized!(key, JSON.parse(JSON.stringify(serialized))),
+      // A refusal reaches the window as the invoke's rejection (main's storage IPC).
+      setSerialized: (key: string, serialized: string) => store.setSerialized!(key, options.refuse?.(key) ? '{refused' : JSON.parse(JSON.stringify(serialized))),
       set: (key: string, value: unknown) => { void Promise.resolve(store.set(key, structuredClone(value))).catch(() => undefined); },
       delete: (key: string) => { void Promise.resolve(store.delete(key)).catch(() => undefined); },
       flush: () => store.flushAll(),
-      onError: (cb: (event: { key: string; error: string }) => void) => store.onError?.(cb) ?? (() => {}),
+      // As main's storage IPC: a write that did not reach disk is reported to its writer (this window).
+      onError: (cb: (event: { key: string; error: string }) => void) => store.onError?.((event: any) => { if (event.unsaved) cb({ key: event.key, error: event.error }); }) ?? (() => {}),
     },
-    setTheme: vi.fn(), log: vi.fn(), onMenuCommand: vi.fn(),
-    codex: { run: vi.fn(), cancel: vi.fn(), requestComputerConsent: vi.fn() }, artifacts: { read: vi.fn(), reveal: vi.fn() }, captureWindow: vi.fn(), saveFile: vi.fn(),
+    setTheme: spy(), log: spy(), onMenuCommand: spy(),
+    codex: { run: spy(), cancel: spy(), requestComputerConsent: spy() }, artifacts: { read: spy(), reveal: spy() }, captureWindow: spy(), saveFile: spy(),
   };
-  vi.stubGlobal('window', {
+  // A transient window (a recovery) is not registered with vi.stubGlobal, whose record of each replaced value kept every one alive.
+  (options.transient ? (value: unknown) => { (globalThis as any).window = value; } : (value: unknown) => vi.stubGlobal('window', value))({
     powermove: bridge, TextEncoder, structuredClone, console, setTimeout,
     atob: (value: string) => Buffer.from(value, 'base64').toString('binary'),
     btoa: (value: string) => Buffer.from(value, 'binary').toString('base64'),
-    document: { readyState: 'loading', addEventListener: vi.fn(), documentElement: { classList: { add: vi.fn() } } },
-    addEventListener: vi.fn(),
+    document: { readyState: 'loading', addEventListener: spy(), documentElement: { classList: { add: spy() } } },
+    addEventListener: spy(),
   });
   installBridgeForTests(bridge);
   installShim(PM);
@@ -398,6 +410,98 @@ describe('a project checkpoint that fails to reach disk', () => {
     expect(slotWrites()).toBe(2);
     expect(flushed).toBe('flushed');
     await expectEveryCrashPointSafe(log, states, 'E');
+  });
+});
+
+describe('edits while a checkpoint is failing', () => {
+  const edit = (PM: any, project: any, revision: number, layer: number, name: string) => {
+    project.revision = revision;
+    project.layers[layer].name = name;
+    PM.bus.emit('history:project-patch', { projectId: project.id, revision, patches: [{ path: ['layers', layer, 'name'], exists: true, value: name }, { path: ['revision'], exists: true, value: revision }] });
+  };
+
+  it('are on disk as they are made, through a failing slot write (D1)', { timeout: 120_000 }, async () => {
+    const log: Op[] = [];
+    let failRename = false;
+    const store = createStore(await temporaryDirectory(), {
+      fs: loggingFs(log, { rename: to => failRename && path.basename(to) === 'project.D.json' ? failure('EIO', 'i/o error, rename') : null }),
+      writeDelayMs: 0,
+    });
+    await store.load();
+    const PM: any = openWindow(store);
+    const project = largeProject('D');
+    PM.proj = project;
+    const states: string[] = [];
+    const step = async (failing = false) => { await settle(PM, store, { failing }); states.push(JSON.stringify(project)); return log.length; };
+
+    PM.Projects.put(project);
+    await step();
+    edit(PM, project, 8, 0, 'Before');
+    await step();
+    failRename = true;
+    PM.Projects.put(project);
+    await step(true);
+    // Edits while every slot write fails: each is on disk once settled.
+    const marks: number[] = [];
+    for (const [index, name] of ['First', 'Second', 'Third'].entries()) {
+      edit(PM, project, 9 + index, 1 + index, name);
+      marks.push(await step(true));
+    }
+    PM.Projects.recover(project, 'data:image/jpeg;base64,AAAA');
+    marks.push(await step(true));
+    for (const [index, at] of marks.entries()) {
+      expect(jsonDiff(states[3 + index]!, await recover(stateAfter(log, at), 'D')), `settled edit ${index}`).toEqual([]);
+    }
+    failRename = false;
+    PM.Projects.recover(project, 'data:image/jpeg;base64,AAAA');
+    const healed = await step();
+    expect(jsonDiff(states.at(-1)!, await recover(stateAfter(log, healed), 'D')), 'after the disk recovers').toEqual([]);
+    await expectEveryCrashPointSafe(log, states, 'D');
+  });
+
+  it('a checkpoint refused while the one before it is still being written loses no edit (review probe)', { timeout: 120_000 }, async () => {
+    const log: Op[] = [];
+    let gate: Promise<void> | null = null;
+    let release = () => {};
+    let refuse = false;
+    const store = createStore(await temporaryDirectory(), {
+      fs: loggingFs(log, { gate: to => path.basename(to) === 'project.Q.json' ? gate : null }),
+      writeDelayMs: 0,
+    });
+    await store.load();
+    const PM: any = openWindow(store, { refuse: key => refuse && key === 'project.Q' });
+    const project = largeProject('Q');
+    PM.proj = project;
+    const states: string[] = [];
+    const step = async (failing = false) => { await settle(PM, store, { failing }); states.push(JSON.stringify(project)); return log.length; };
+    const tick = () => new Promise(resolve => setTimeout(resolve, 20));
+
+    PM.Projects.put(project);
+    await step();
+    // Checkpoint A, whose rename waits; an edit against it.
+    gate = new Promise<void>(resolve => { release = resolve; });
+    edit(PM, project, 8, 0, 'Before A');
+    states.push(JSON.stringify(project));
+    PM.Projects.put(project);
+    await tick();
+    edit(PM, project, 9, 1, 'Against A');
+    await tick();
+    states.push(JSON.stringify(project));
+    // Checkpoint B is refused (the project crossed the size limit); an edit after it.
+    refuse = true;
+    PM.Projects.put(project);
+    await tick();
+    edit(PM, project, 10, 2, 'After B');
+    await tick();
+    states.push(JSON.stringify(project));
+    release();
+    const settled = await step(true);
+    expect(jsonDiff(states.at(-1)!, await recover(stateAfter(log, settled), 'Q')), 'settled while refused').toEqual([]);
+    refuse = false;
+    PM.Projects.recover(project, 'data:image/jpeg;base64,AAAA');
+    await step();
+    expect(jsonDiff(states.at(-1)!, await recover(stateAfter(log, log.length), 'Q')), 'after the next autosave').toEqual([]);
+    await expectEveryCrashPointSafe(log, states, 'Q');
   });
 });
 
