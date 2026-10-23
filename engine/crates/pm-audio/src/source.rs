@@ -454,9 +454,10 @@ impl SourceCache {
                 Ok(mp3) => Decoder::Mp3(Box::new(mp3), 0),
                 Err(_) => Decoder::Ffmpeg(Box::new(decoder)),
             }
-        } else if crate::chromium::decodes(&info.codec) {
+        } else if crate::chromium::decodes(&info.codec) && crate::chromium::plays_today(&info) {
             // Today's own FFmpeg where this process has it (the app's
-            // engine processes); our FFmpeg elsewhere (the CLI, tests).
+            // engine processes); our FFmpeg elsewhere (the CLI, tests) and
+            // for files longer than today plays at all.
             match crate::chromium::ChromiumDecoder::open(path, info.channels()) {
                 Ok(Some(d)) => {
                     // Today's buffer length (its own priming and padding):

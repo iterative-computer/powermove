@@ -99,3 +99,155 @@ fn todays_length_is_counted_off_the_opening_thread() {
     let _ = first;
     cache.shutdown();
 }
+
+/// A stereo AAC file of `seconds` (a chirp over noise, so every block
+/// differs) in `dir`, encoded by our FFmpeg.
+fn long_aac(dir: &std::path::Path, seconds: u32, name: &str) -> std::path::PathBuf {
+    let file = dir.join(name);
+    let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/ffmpeg/out")
+        })
+        .join("bin/ffmpeg");
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(format!(
+            "aevalsrc=0.3*sin(2*PI*(200+t*3)*t)+0.05*(random(0)-0.5)|0.3*sin(2*PI*(300+t*2)*t):s=48000:d={seconds}"
+        ))
+        .args(["-c:a", "aac", "-b:a", "192k"])
+        .arg(&file)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg failed");
+    file
+}
+
+fn read_block(
+    cache: &pm_audio::SourceCache,
+    source: &std::sync::Arc<pm_audio::source::Source>,
+    k: usize,
+    n: usize,
+) -> Vec<Vec<f32>> {
+    let b = pm_audio::source::BLOCK;
+    let m = (n - k * b).min(b);
+    let mut planar = vec![vec![0f32; m]; source.channels()];
+    let mut views: Vec<&mut [f32]> = planar.iter_mut().map(|c| &mut c[..]).collect();
+    cache
+        .read(source, (k * b) as i64, m, &mut views, true)
+        .unwrap();
+    planar
+}
+
+/// Issue A8 (review round 9): AAC is the common video soundtrack, and an
+/// unprepared seek on it must not wait for a decode from the file's start.
+/// Today decodes the whole file once (`decodeAudioData`) and plays the
+/// buffer; here every open of a file reads its one shared whole decode, so
+/// a seek anywhere (forward, or far back) is a copy once the decode has
+/// passed it, the samples equal one sequential decode bit for bit, and the
+/// memory is the decoded samples (never the file's bytes), freed with the
+/// last open.
+#[test]
+fn seeks_read_the_shared_whole_decode() {
+    let Some(lib) = chromium_ffmpeg() else {
+        eprintln!("no Electron libffmpeg in this checkout; skipping");
+        return;
+    };
+    // SAFETY: set before any thread opens a source in this process.
+    unsafe { std::env::set_var("POWERMOVE_CHROMIUM_FFMPEG", &lib) };
+    let dir = tempfile::tempdir().unwrap();
+    // Five minutes: within today's 128 MiB budget, so today plays it.
+    let file = long_aac(dir.path(), 300, "five-minutes.m4a");
+    let b = pm_audio::source::BLOCK;
+
+    // The sequential decode, read in order.
+    let opened = std::time::Instant::now();
+    let mut seq = pm_audio::chromium::ChromiumDecoder::open(&file, 2)
+        .unwrap()
+        .expect("today's decoder");
+    let n = seq.count_frames().unwrap() as usize;
+    eprintln!("whole decode from open: {:?}", opened.elapsed());
+    assert!(n > 299 * 48_000, "{n}");
+    let mut reference: Vec<Vec<f32>> = (0..2).map(|_| Vec::with_capacity(n)).collect();
+    seq.seek_anchored(0).unwrap();
+    while seq.read(&mut reference, b).unwrap() > 0 {}
+    assert_eq!(reference[0].len(), n);
+
+    // Memory: the decoded samples in whole blocks, not the file.
+    let resident = pm_audio::chromium::resident_bytes_of(&file).unwrap();
+    assert_eq!(resident, n.div_ceil(b) * b * 2 * 4, "decoded samples only");
+    let file_bytes = std::fs::metadata(&file).unwrap().len() as usize;
+    eprintln!("resident {resident} B for a {file_bytes} B file of {n} frames");
+
+    // A cold cache (small budget, so blocks are evicted and read again):
+    // the last block first, then far back, then forward.
+    let cache = pm_audio::SourceCache::new(4 * b * 2 * 4, 0);
+    cache.set_blocking_lengths(true);
+    let source = cache.open(&file, None).unwrap();
+    assert_eq!(source.length(), Some(n as u64), "today's length");
+    let blocks = n.div_ceil(b);
+    let at = |seconds: usize| seconds * 48_000 / b;
+    let order = [
+        blocks - 1,
+        at(240),
+        at(200),
+        0,
+        at(120),
+        at(280),
+        at(10),
+        blocks - 2,
+    ];
+    let mut worst = std::time::Duration::ZERO;
+    for &k in &order {
+        let started = std::time::Instant::now();
+        let got = read_block(&cache, &source, k, n);
+        worst = worst.max(started.elapsed());
+        for (c, ch) in got.iter().enumerate() {
+            let want = &reference[c][k * b..k * b + ch.len()];
+            assert!(
+                ch.iter().zip(want).all(|(a, w)| a.to_bits() == w.to_bits()),
+                "block {k} channel {c} equals the sequential decode"
+            );
+        }
+    }
+    eprintln!("slowest cold block read: {worst:?}");
+    // A3's 120 ms bound, with a wide margin for a loaded machine: a copy.
+    assert!(worst < std::time::Duration::from_millis(40), "{worst:?}");
+    cache.shutdown();
+    drop(source);
+    drop(cache);
+    drop(seq);
+    assert_eq!(
+        pm_audio::chromium::resident_bytes_of(&file),
+        None,
+        "freed with the last open"
+    );
+}
+
+/// A file longer than today plays (its decoded buffer is past today's
+/// 128 MiB budget, so today refuses it) decodes with Powermove's random-
+/// access decoder: no whole decode is held for it.
+#[test]
+fn files_today_refuses_keep_random_access() {
+    let Some(lib) = chromium_ffmpeg() else {
+        eprintln!("no Electron libffmpeg in this checkout; skipping");
+        return;
+    };
+    // SAFETY: set before any thread opens a source in this process.
+    unsafe { std::env::set_var("POWERMOVE_CHROMIUM_FFMPEG", &lib) };
+    let dir = tempfile::tempdir().unwrap();
+    let file = long_aac(dir.path(), 420, "seven-minutes.m4a");
+    let cache = pm_audio::SourceCache::new(16 << 20, 0);
+    let source = cache.open(&file, None).unwrap();
+    assert!(!pm_audio::chromium::plays_today(&source.info));
+    assert_eq!(pm_audio::chromium::resident_bytes_of(&file), None);
+    let n = source.length().unwrap() as usize;
+    let b = pm_audio::source::BLOCK;
+    let started = std::time::Instant::now();
+    let got = read_block(&cache, &source, (n / b) - 1, n);
+    eprintln!("cold read near the end: {:?}", started.elapsed());
+    assert!(got[0].iter().any(|v| *v != 0.0));
+    assert_eq!(pm_audio::chromium::resident_bytes_of(&file), None);
+    cache.shutdown();
+}
