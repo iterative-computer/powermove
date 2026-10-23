@@ -1716,6 +1716,7 @@ impl Renderer {
                 pyramids: &mut self.pyramids,
                 failures: Vec::new(),
                 unsupported: Vec::new(),
+                twins: crate::exec::comp_twins(&plan),
                 comps: Vec::new(),
             };
             // Generic renders flip GL rows into the caller's top-down target.

@@ -129,20 +129,60 @@ pub(crate) struct Exec<'a> {
     pub pyramids: &'a mut crate::sampling::gpu::PyramidCache,
     pub failures: Vec<LayerFailure>,
     pub unsupported: Vec<Unsupported>,
-    /// Nested compositions this frame already rendered, by their plan
-    /// (`resolve_content`): a composition drawn twice with the same plan
-    /// (a precomp used by two layers at one time) samples one target. An
-    /// entry lives as long as its target is in `taken` (a motion-blur
-    /// sample gives its targets back early and drops its entries).
+    /// Nested compositions of this frame's plan whose plans are equal
+    /// ([`comp_twins`]): (a later one, the first), by plan address.
+    pub twins: Vec<(usize, usize)>,
+    /// Targets of the first of such compositions this frame rendered
+    /// (`resolve_content`): a composition drawn twice with the same plan (a
+    /// precomp used by two layers at one time) samples one target. An entry
+    /// lives as long as its target is in `taken` (a motion-blur sample gives
+    /// its targets back early and drops its entries).
     pub comps: Vec<RenderedComp>,
 }
 
-/// A nested composition's target this frame, and what it was rendered from.
+/// A nested composition's target this frame, by its plan's address.
 pub(crate) struct RenderedComp {
-    plan: CompPlan,
-    region: Option<Region>,
+    first: usize,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+}
+
+/// The nested compositions (not group passes) of `plan` whose plans equal an
+/// earlier one's: (its address, the earlier one's). The addresses are
+/// identities within the plan, which outlives the frame's `Exec`; they are
+/// never read through.
+pub(crate) fn comp_twins(plan: &CompPlan) -> Vec<(usize, usize)> {
+    fn content<'p>(c: &'p Content, out: &mut Vec<&'p CompPlan>) {
+        match c {
+            Content::Placed(p) => content(&p.content, out),
+            Content::Texture { source: Source::Comp(child), .. } => {
+                if !child.group {
+                    out.push(child);
+                }
+                walk(child, out);
+            }
+            Content::Texture { source: Source::Accumulate(child), .. } => walk(child, out),
+            _ => {}
+        }
+    }
+    fn walk<'p>(plan: &'p CompPlan, out: &mut Vec<&'p CompPlan>) {
+        for d in &plan.draws {
+            content(&d.content, out);
+        }
+    }
+    let mut comps = Vec::new();
+    walk(plan, &mut comps);
+    let mut twins = Vec::new();
+    for (j, later) in comps.iter().enumerate() {
+        if let Some(first) = comps[..j].iter().find(|first| ***first == **later) {
+            twins.push((plan_address(later), plan_address(first)));
+        }
+    }
+    twins
+}
+
+fn plan_address(plan: &CompPlan) -> usize {
+    std::ptr::from_ref(plan) as usize
 }
 
 /// `m3(M)`: a 2×3 matrix as the column-major mat3 uniform, in f32.
@@ -275,12 +315,12 @@ impl Exec<'_> {
                         // in this frame: its target holds exactly the pixels
                         // rendering it again would draw.
                         let accumulate = matches!(source, Source::Accumulate(_));
+                        let address = plan_address(child);
                         if !accumulate
                             && !self.depth_id
-                            && let Some(kept) = self
-                                .comps
-                                .iter()
-                                .find(|c| c.region == child_region && c.plan == **child)
+                            && let Some(&(_, first)) =
+                                self.twins.iter().find(|(later, _)| *later == address)
+                            && let Some(kept) = self.comps.iter().find(|c| c.first == first)
                         {
                             let texture = kept.texture.clone();
                             r.view = Some(kept.view.clone());
@@ -320,6 +360,8 @@ impl Exec<'_> {
                         };
                         if !accumulate
                             && !self.depth_id
+                            && !group
+                            && self.twins.iter().any(|(_, first)| *first == address)
                             && reported
                                 == (
                                     self.failures.len(),
@@ -329,8 +371,7 @@ impl Exec<'_> {
                                 )
                         {
                             self.comps.push(RenderedComp {
-                                plan: (**child).clone(),
-                                region: child_region,
+                                first: address,
                                 texture: target.texture.clone(),
                                 view: target.view.clone(),
                             });
