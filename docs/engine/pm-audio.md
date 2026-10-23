@@ -399,6 +399,16 @@ speed 1.2 (AUDIO-4). The nested-composition silence (a precomposition's `trim`
 channel read as a number, NaN through the mix) is fixed with a regression test
 (`tests/mixer.rs`).
 
+Export compatibility (2026-10-23): `Mixer::new_legacy_export` now reproduces
+the offline exporter's source timing even for speed 1.2. Audio clip speed
+and sourceTime are ignored there; explicitly remapped precompositions and
+embedded soundtracks are omitted as in today's audio walk. Normal playback
+retains retiming. Sample-bit regressions cover nested trims, fades and gain
+automation, unchanged playback speed, and remapped-precomposition omission.
+The rebuilt app's strict media comparisons then matched all four formats
+for basic, automation, advanced and 1080p projects, plus advanced AAC and
+Opus sources. The separate WebM throughput gate is recorded in `export.md`.
+
 ### Allocations in the real-time render (glitch-safety rule)
 
 The producer's render must not allocate once warm. `tests/render_allocations.rs`

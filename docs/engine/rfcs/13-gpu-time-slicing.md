@@ -95,8 +95,12 @@ restarts.
     (export sheet and render queue), and utility QoS while it is active.
     Their render, encoder, and CPU conversion threads refresh their own class
     at frame, GPU band, and row boundaries, then the render lane returns to
-    utility at job exit. Agent exports, snapshots, background and generation
-    work, and job infrastructure remain at utility QoS. No engine-owned job
+    utility at job exit. The job process's JavaScript transport thread follows
+    the same policy while at least one user export is running, including
+    between native calls; otherwise it uses utility. This shared transport
+    can also carry agent messages during a user export. Dedicated agent,
+    snapshot, background and generation workers remain at utility QoS.
+    No engine-owned job
     thread enters Darwin's background state (S8: no GPU effect, and slower
     reaction to signals). The private `setGPUPriority:` is not used (Jude's decision,
     S8 recommendation 11). External encoder processes are outside this
@@ -119,8 +123,9 @@ playback, and sends `playbackStopped` itself when the interactive engine
 dies (`apps/desktop/src/main/engine/native-engine.ts`). The interactive
 engine sends `frameDone` on the direct port (`Engine::signal_deadline`);
 the job engine feeds every signal to `JobSlicer`. Job infrastructure starts
-at utility QoS (`pm-node`); only user-started export workers change class
-under invariant 10. Notes: `docs/engine/host-processes.md`.
+at utility QoS (`pm-node`); user-started export workers and the shared
+JavaScript transport during their active work change class under
+invariant 10. Notes: `docs/engine/host-processes.md`.
 
 ## Phase 0 results
 

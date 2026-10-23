@@ -168,6 +168,11 @@ fixtures).
   default when playback stops. Its render and encoder threads refresh at
   frame and GPU band boundaries; parallel CPU conversion workers refresh
   during rows. The render lane returns to utility after each user job.
+  The job process's JavaScript transport thread also follows this policy
+  while at least one user export is running, and keeps that class between
+  native calls. It returns to utility when no user export is running.
+  This shared thread can carry concurrent agent messages; their dedicated
+  workers retain utility QoS. Queued user jobs alone do not raise it.
   macOS threads do not inherit their creator's QoS, so engine threads start
   through `pm_engine::qos::spawn_engine_thread` and scoped export workers set
   their own class. Chromium's IO and IPC threads in the job process keep
