@@ -14,6 +14,22 @@ test('graph editor exposes its state and keeps value and speed navigation usable
     gl.readPixels(Math.floor(gl.drawingBufferWidth / 2), Math.floor(gl.drawingBufferHeight / 2), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
     return Array.from(pixel);
   });
+  /* With the engine on, also the pixel the viewer shows: the composition's
+     centre on the presented canvas, once its frame is the current one. */
+  const presentedPixel = () => page.evaluate(() => {
+    const PM = (window as any).PM;
+    const stage = PM.Kernel.services.get('viewer').stage as HTMLElement;
+    const native = stage.querySelector<HTMLCanvasElement>('#engine-present');
+    if (!native || getComputedStyle(native).visibility !== 'visible') return null;
+    const inner = stage.querySelector<HTMLElement>('#stage-inner')!.getBoundingClientRect();
+    const box = native.getBoundingClientRect();
+    const copy = document.createElement('canvas'); copy.width = native.width; copy.height = native.height;
+    const context = copy.getContext('2d')!;
+    context.drawImage(native, 0, 0);
+    const x = Math.floor((inner.left + inner.width / 2 - box.left) * native.width / box.width);
+    const y = Math.floor((inner.top + inner.height / 2 - box.top) * native.height / box.height);
+    return Array.from(context.getImageData(x, y, 1, 1).data);
+  });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.waitForFunction(() => Boolean((window as any).PM.Kernel.services.get('timeline').cv));
   await page.evaluate(() => {
@@ -39,6 +55,7 @@ test('graph editor exposes its state and keeps value and speed navigation usable
   await expect(graph).toHaveAttribute('aria-pressed', 'true');
   const initialPixel = await viewerPixel();
   expect(initialPixel).toEqual([96, 123, 255, 255]);
+  if (await page.evaluate(() => !!(window as any).PM.EngineRender)) await expect.poll(presentedPixel, { timeout: 10_000 }).toEqual(initialPixel);
   await page.keyboard.press('Shift+F3');
   await expect(graph).toHaveAttribute('aria-pressed', 'false');
   await page.keyboard.press('Shift+F3');
@@ -86,6 +103,7 @@ test('graph editor exposes its state and keeps value and speed navigation usable
   await page.screenshot({ path: info.outputPath('value-graph-fitted.png') });
   console.log('GRAPH_SAMPLES', samples);
   expect(await viewerPixel()).toEqual(initialPixel);
+  if (await page.evaluate(() => !!(window as any).PM.EngineRender)) await expect.poll(presentedPixel, { timeout: 10_000 }).toEqual(initialPixel);
   await page.locator('.panel[data-panel="timeline"]').screenshot({ path: info.outputPath('graph-panel.png') });
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
