@@ -1582,6 +1582,41 @@ impl Renderer {
         if request.validate().is_err() {
             return Vec::new();
         }
+        // Drawing ahead, a layer the producer has not answered yet is
+        // planned as it is drawn without a wrapper (the pass-through most
+        // wrappers answer): its own shape rasters are drawn ahead too, and
+        // a frame whose answer turns out otherwise draws a source of another
+        // key (what was drawn ahead for it is never used). The needs are
+        // recorded for asking as before.
+        let speculative = (rasters && self.compat.is_some()).then(|| {
+            std::sync::Arc::new(Speculative {
+                inner: self.compat.clone().expect("checked"),
+                missing: std::sync::Mutex::new(Vec::new()),
+            })
+        });
+        let held = speculative
+            .as_ref()
+            .map(|s| self.compat.replace(s.clone() as std::sync::Arc<dyn crate::compat::CompatRasters>));
+        let needs = self.plan_ahead_with(document, composition, time, request, assets, rasters);
+        if let Some(held) = held {
+            self.compat = held;
+        }
+        match speculative {
+            Some(s) => std::mem::take(&mut *s.missing.lock().unwrap_or_else(|e| e.into_inner())),
+            None => needs,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan_ahead_with(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        rasters: bool,
+    ) -> Vec<crate::compat::CompatNeed> {
         let Ok(comp) = Comp::resolve(document, composition) else {
             return Vec::new();
         };
@@ -2410,5 +2445,47 @@ impl std::ops::DerefMut for SvgWaiting<'_> {
 impl Drop for SvgWaiting<'_> {
     fn drop(&mut self) {
         (self.renderer.svg_wait, self.renderer.svg_skip_failed) = self.restore;
+    }
+}
+
+/// The producer's answers for a frame planned ahead
+/// ([`Renderer::plan_ahead`]): a missing answer is planned as a
+/// pass-through, and recorded as a need.
+struct Speculative {
+    inner: std::sync::Arc<dyn crate::compat::CompatRasters>,
+    missing: std::sync::Mutex<Vec<crate::compat::CompatNeed>>,
+}
+
+impl crate::compat::CompatRasters for Speculative {
+    fn producing(&self, source: crate::compat::CompatSource) -> bool {
+        self.inner.producing(source)
+    }
+
+    fn answer(
+        &self,
+        composition: &str,
+        layer: &str,
+        time: f64,
+        scale: f64,
+        source: crate::compat::CompatSource,
+        crop: Option<pm_protocol::common::PixelRect>,
+    ) -> crate::compat::CompatAnswer {
+        match self.inner.answer(composition, layer, time, scale, source, crop) {
+            crate::compat::CompatAnswer::Missing => {
+                self.missing
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(crate::compat::CompatNeed {
+                        composition: composition.into(),
+                        layer: layer.into(),
+                        time: crate::compat::ticks_of(time),
+                        source,
+                        scale,
+                        crop,
+                    });
+                crate::compat::CompatAnswer::Native
+            }
+            answer => answer,
+        }
     }
 }

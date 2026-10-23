@@ -749,8 +749,10 @@ const COMPAT_KEEP_AHEAD: i64 = 8;
 /// plan's measured cost and this margin: planning ahead on a frame's own
 /// turn cost PMV3 15 to 80 ms a frame and made it skip frames.
 const PLAN_AHEAD_MARGIN_US: f64 = 2_000.0;
-/// A plan's cost before one was measured (µs).
+/// A plan's cost before one was measured (µs), and how a cost estimate
+/// that keeps planning from running decays per skipped chance.
 const PLAN_AHEAD_COST_US: f64 = 8_000.0;
+const PLAN_AHEAD_COST_DECAY: f64 = 0.9;
 
 /// A paused view idle this long plans the frames after its playhead, one a
 /// turn, and has their level 1 rasters drawn ahead (`warm_ahead`): the first
@@ -3509,6 +3511,10 @@ impl Thread {
                         let cost = view.plan_ahead_cost_us.unwrap_or(PLAN_AHEAD_COST_US);
                         if slack > cost + PLAN_AHEAD_MARGIN_US {
                             self.keep_compat_asked(key, k, slack - PLAN_AHEAD_MARGIN_US);
+                        } else if let Some(view) = self.views.get_mut(&key) {
+                            // A cost measured on a cold plan decays, so the
+                            // next frames are tried again once caches warm.
+                            view.plan_ahead_cost_us = Some(cost * PLAN_AHEAD_COST_DECAY);
                         }
                     }
                     break;
@@ -4069,10 +4075,19 @@ impl Thread {
                             .ceil()
                             .clamp(1.0, 240.0) as i64;
                         let step = if view.clock.rate().num < 0 { -stride } else { stride };
+                        // Only plans that fit the budget at their measured
+                        // cost: a cold plan of a large project takes
+                        // hundreds of ms, and the frame waiting here draws
+                        // only after this turn (PMV3's first play spent 4 s
+                        // of its render thread here).
+                        let cost = view.plan_ahead_cost_us.unwrap_or(PLAN_AHEAD_COST_US);
                         for ahead in 1..=COMPAT_ASK_AHEAD {
-                            if asking.elapsed() > COMPAT_ASK_AHEAD_BUDGET {
+                            if asking.elapsed().as_micros() as f64 + cost
+                                > COMPAT_ASK_AHEAD_BUDGET.as_micros() as f64
+                            {
                                 break;
                             }
+                            let one = std::time::Instant::now();
                             let at = view.clock.wrap((k + ahead * step) * f);
                             let later = composer.compat_needs_at(
                                 doc.document(),
@@ -4087,6 +4102,9 @@ impl Thread {
                                 later,
                                 std::time::Instant::now(),
                             ));
+                            let us = one.elapsed().as_micros() as f64;
+                            view.plan_ahead_cost_us =
+                                Some(view.plan_ahead_cost_us.map_or(us, |c| c + 0.25 * (us - c)));
                         }
                         composer.renderer().set_compat_rasters(None);
                         self.stats().compat_asked_ahead_us +=

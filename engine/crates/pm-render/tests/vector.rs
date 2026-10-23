@@ -914,6 +914,58 @@ fn rasters_drawn_ahead_of_a_frame_are_taken_by_it_and_draw_the_same_pixels() {
     assert_eq!(ahead.vector_ahead_stats().bytes, 0);
 }
 
+/// A raster override that has not answered a frame planned ahead: its
+/// layers are planned as pass-throughs (their rasters drawn ahead) and named
+/// as needs; once the producer passes them through, the frame takes them.
+#[test]
+fn rasters_are_drawn_ahead_for_layers_a_producer_has_not_answered_yet() {
+    use pm_render::compat::{CompatAnswer, CompatRasters, CompatSource};
+    struct Producer(std::sync::atomic::AtomicBool);
+    impl CompatRasters for Producer {
+        fn producing(&self, _: CompatSource) -> bool {
+            true
+        }
+        fn answer(&self, _: &str, _: &str, _: f64, _: f64, _: CompatSource, _: Option<pm_protocol::common::PixelRect>) -> CompatAnswer {
+            if self.0.load(std::sync::atomic::Ordering::Relaxed) { CompatAnswer::Native } else { CompatAnswer::Missing }
+        }
+    }
+    let mut layers: Vec<Value> = Vec::new();
+    for i in 0..6 {
+        let mut l = layer(
+            &format!("s{i}"),
+            "shape",
+            json!({ "shape": "star", "w": 40 + 7 * i, "h": 40, "points": 5, "radius": 6,
+                    "stroke": 2, "strokeColor": "#FFD60A", "color": "#F72585" }),
+            30.0 + 30.0 * i as f64,
+            80.0,
+            2.0,
+        );
+        set(&mut l, "scale.x", json!({ "v": 100, "expr": null, "kf": [
+            { "t": 0, "v": 60, "ease": "linear" }, { "t": 2, "v": 180, "ease": "linear" }
+        ] }));
+        layers.push(l);
+    }
+    let doc = load(&project(W, H, 2.0, no_fill(), layers));
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let producer = std::sync::Arc::new(Producer(std::sync::atomic::AtomicBool::new(false)));
+    let mut ahead = Renderer::headless().unwrap();
+    ahead.set_compat_rasters(Some(producer.clone()));
+    let needs = ahead.plan_ahead(&doc, "Ptest-root", ticks(0.5), &request, &MapResolver::default(), true);
+    assert!(!needs.is_empty(), "the unanswered layers are named");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(ahead.vector_ahead_stats().drawn >= 4, "{:?}", ahead.vector_ahead_stats());
+    // The producer passes them through: the frame takes what was drawn.
+    producer.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    let frame = ahead.render(&doc, "Ptest-root", ticks(0.5), &request, &MapResolver::default()).expect("render");
+    let a = ahead.read_rgba(&frame).unwrap();
+    let mut own = Renderer::headless().unwrap();
+    let frame = own.render(&doc, "Ptest-root", ticks(0.5), &request, &MapResolver::default()).expect("render");
+    let b = own.read_rgba(&frame).unwrap();
+    assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "same pixels");
+    let stats = ahead.vector_ahead_stats();
+    assert_eq!(stats.taken, stats.drawn, "{stats:?}");
+}
+
 /// Bigrender round 2: a large paths layer's own raster is drawn only over
 /// the window a frame samples (today draws the whole bitmap; the window's
 /// pixels are the bitmap's there), in viewer frames and exports alike: the
