@@ -467,13 +467,13 @@ impl Renderer {
         self.prefix.clear(&mut self.pool);
     }
 
-    /// The draw reuse's counters (with the frames drawn from a kept bottom
-    /// and the draws those did not draw again).
     /// The channel memo's hits and misses so far (`pm_eval` `channel_memo`).
     pub fn channel_memo_stats(&self) -> (u64, u64) {
         self.evaluator.channel_memo_stats()
     }
 
+    /// The draw reuse's counters (with the frames drawn from a kept bottom
+    /// and the draws those did not draw again).
     pub fn draw_reuse_stats(&self) -> crate::reuse::ReuseStats {
         crate::reuse::ReuseStats {
             prefix_frames: self.prefix.reused_frames,

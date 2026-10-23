@@ -294,5 +294,8 @@ fn is_element(layers: &[Node], node: &Node) -> bool {
     let start = layers.as_ptr() as usize;
     let size = std::mem::size_of::<Node>();
     let at = address(node);
-    size != 0 && at >= start && at < start + layers.len() * size && (at - start) % size == 0
+    size != 0
+        && at >= start
+        && at < start + std::mem::size_of_val(layers)
+        && (at - start).is_multiple_of(size)
 }
