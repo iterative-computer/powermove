@@ -1,23 +1,34 @@
 /** Capture the shipped compositor at every project depth.
- * Build the desktop first, then run under pm-electron-lock:
- *   bun engine/corpus/src/color-depth.ts <output-directory-outside-repo>
+ * Build the desktop and prepare the runner outside the Electron lock:
+ *   bun engine/corpus/src/color-depth.ts <external-directory> --prepare
+ * Then capture under pm-electron-lock:
+ *   bun engine/corpus/src/color-depth.ts <external-directory>
  * All images/documents stay outside Git; the isolated app profile is removed
  * by launchLegacyApp.close() on success and failure.
  */
 import path from 'node:path';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { launchLegacyApp } from './app';
 import { repoRoot } from './catalog';
 import { newProject } from './doc';
 import { encodePng } from './png';
 
+
 const out = path.resolve(process.argv[2] ?? '');
 if (!process.argv[2] || out === repoRoot || out.startsWith(repoRoot + path.sep)) throw new Error('Supply an output directory outside the repository');
 mkdirSync(out, { recursive: true });
+const bundlePath = path.join(out, 'fallback.bundle.js');
+if (process.argv.includes('--prepare')) {
+  const { build } = await import(path.join(repoRoot, 'apps/desktop/node_modules/esbuild/lib/main.js'));
+  const bundle = await build({ stdin: { contents: `export { ShaderFallbackRunner } from './src/renderer/src/engine-connection/shader-fallback';`, resolveDir: path.join(repoRoot, 'apps/desktop') }, bundle: true, write: false, format: 'iife', globalName: 'DepthFallback', target: 'es2022' });
+  writeFileSync(bundlePath, bundle.outputFiles[0]!.text);
+  process.exit(0);
+}
+const fallbackBundle = readFileSync(bundlePath, 'utf8');
 const gradient = { type: 'linear', angle: 27, stops: [
   { id: 'a', color: '#101420', position: 0 }, { id: 'b', color: '#484262', position: 100 },
 ] };
-const projects = ['gradient', 'blend-stack', 'masked-matte', 'blur', 'glow', 'vector', 'text'].map(kind => {
+const projects = (process.argv.includes('--fallback-only') ? [] : ['gradient', 'blend-stack', 'masked-matte', 'blur', 'glow', 'vector', 'text']).map(kind => {
   const b = newProject(`depth/${kind}`, { name: `Color depth ${kind}`, w: 320, h: 180, dur: 2, backgroundFill: gradient });
   if (kind !== 'gradient') {
     const l = b.add(b.layer(kind === 'vector' ? 'shape' : kind === 'text' ? 'text' : 'solid', {
@@ -40,6 +51,31 @@ const projects = ['gradient', 'blend-stack', 'masked-matte', 'blur', 'glow', 've
 const app = await launchLegacyApp();
 const samples: any[] = [];
 try {
+  await app.evaluateScript(`(()=>{${fallbackBundle}; globalThis.DepthFallback = DepthFallback; return true;})()`);
+  const fallback = await app.evaluate(async () => {
+    const runner = new (window as any).DepthFallback.ShaderFallbackRunner();
+    try {
+      const request = { key: 'depth-eight', layer: 'test', width: 256, height: 4, colorDepth: 8,
+        vertex: '#version 300 es\nin vec2 a_pos; void main(){gl_Position=vec4(a_pos*2.-1.,0,1);}',
+        fragment: '#version 300 es\nprecision highp float; uniform highp sampler2D image; out vec4 o; void main(){o=texelFetch(image,ivec2(gl_FragCoord.xy),0);}',
+        calls: [{ fn: '1i', name: 'image', v: [0] }], textures: 1,
+        units: [{ unit: 0, texture: 0, chain: true }], morePasses: [[], []], stage: 'test', message: '' };
+      const input = Uint16Array.from({ length: 256 * 4 * 4 }, (_, i) => i % 256);
+      let differing = 0, compared = 0;
+      for (let i = 0; i < 3; i++) {
+        const sync = runner.renderSync(request, [input]);
+        const asyncResult = await runner.render(request, [input]);
+        for (const pixels of [sync.rgba16f, asyncResult.rgba16f]) for (let j = 0; j < input.length; j++) {
+          compared++; if (pixels[j] !== input[j]) differing++;
+        }
+        runner.renderSync({ ...request, key: 'depth-sixteen', colorDepth: 16 }, [new Uint16Array(input.length).fill(0x3800)]);
+      }
+      if (differing) throw new Error(`RGBA8 fallback changed ${differing}/${compared} codes`);
+      return { compared, differing, passes: 3, depthSwitches: 3 };
+    } finally { runner.dispose(); }
+  });
+  writeFileSync(path.join(out, 'fallback.json'), JSON.stringify(fallback, null, 2));
+  console.log(`Fallback exact codes: ${fallback.compared}, differences: ${fallback.differing}`);
   for (const { kind, doc } of projects) for (const depth of [8, 16, 32]) {
     const sample = await app.evaluate(async ({ doc, depth }) => {
       const PM = (window as any).PM;
@@ -70,5 +106,5 @@ try {
     samples.push({ id, depth, width: 320, height: 180, time: .5, dither: sample.dither, supported: sample.supported });
     console.log(`Captured ${id}`);
   }
-  writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({ samples }, null, 2));
+  if (samples.length) writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({ samples }, null, 2));
 } finally { await app.close(); }

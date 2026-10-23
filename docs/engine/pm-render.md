@@ -346,8 +346,8 @@ transitions; blend modes other than normal; motion blur; 2.5D layers and 3D
 groups; adjustment layers with effects; `compat` level 2; non-default project
 color; `requiresEngine`; Blender rendering; SVG images; animated images and
 sequences; unreadable media; the 3D limits above; request options (view
-override, 32-bit precision on a device without `rgba32float` filtering and
-blending). A render that still meets something unsupported fails with
+override). DEPTH-1 now follows the shipped compositor's 32-to-16 fallback
+on a device without `rgba32float` filtering and blending. A render that still meets something unsupported fails with
 `RenderError::Unsupported` rather than drawing it wrong; `render_into` then
 leaves the caller's targets untouched (the presenter keeps its last frame).
 Media caches key video sources and stills by file size and modification
@@ -480,4 +480,6 @@ The WebGL shader fallback request carries the working color depth. At depth
 8 its existing 16-bit wire slots carry exact byte codes, so the runner uploads
 and renders into RGBA8 and reads `UNSIGNED_BYTE`; no half-float stage precedes
 the working target. Older requests omit the field and continue to use RGBA16F.
-An 8-bit fallback parity capture remains to be measured.
+The targeted WebGL runner check preserves 24,576 byte codes across readback,
+three passes and depth switches. Full shader-corpus qualification at all
+depths remains required; see `color-depth.md` for current blockers.
