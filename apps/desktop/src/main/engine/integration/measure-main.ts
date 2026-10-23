@@ -210,7 +210,13 @@ async function main(): Promise<void> {
     });
     const engine = installed.engine!;
     await waitFor('the interactive engine', async () => engine.status().interactive.state === 'ready');
-    if (cfg.agentSnapshots) await waitFor('the job engine', async () => engine.status().job.state === 'ready');
+    if (cfg.agentSnapshots) {
+      // The job utility starts on demand. An agent run starts and holds it
+      // while the agent sets up (AgentJobs.prepareRun); do the same, so the
+      // measured window sees the warm utility an agent run sees.
+      await (installed.agentJobs ? installed.agentJobs.prepareRun('measure-agent-run') : engine.ensureReady('job'));
+      await waitFor('the job engine', async () => engine.status().job.state === 'ready');
+    }
     const playbackSignals: Array<[number, boolean]> = [];
     engine.listen({ playback: (playing) => playbackSignals.push([performance.now(), playing]) });
     // The C′ prototype: host the engine's remote layer over the page.
