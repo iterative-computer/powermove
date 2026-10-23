@@ -8,11 +8,16 @@
 
 mod support;
 
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use pm_export::pipeline::Sink;
 use pm_export::render::*;
-use pm_protocol::color::Precision;
-use pm_protocol::common::{Size, TICKS_PER_SECOND, Ticks};
+use pm_export::{Error, Overwrite};
+use pm_protocol::color::{OutputColor, Precision, QuickTimeTag};
+use pm_protocol::common::{FrameRate, Size, TICKS_PER_SECOND, TickRange, Ticks};
+use pm_protocol::priority::{AlphaOutput, ExportFormat, ExportSettings, QualityTier, WebmCodec};
 use pm_render::{RenderRequest, Renderer};
 use serde_json::json;
 use support::doc::*;
@@ -116,6 +121,144 @@ fn frames(
             .rgba
         })
         .collect()
+}
+
+struct GpuCapture {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pixels: Vec<Vec<f32>>,
+    textures: Vec<wgpu::Texture>,
+}
+
+impl Sink for GpuCapture {
+    type Output = Self;
+
+    fn gpu_frames(&self) -> bool {
+        true
+    }
+
+    fn video_gpu(
+        &mut self,
+        _index: u64,
+        texture: &wgpu::Texture,
+        _frame: Option<&pm_export::WorkingFrame>,
+    ) -> Result<(), Error> {
+        // The sink's GPU read is complete before it returns the source target.
+        self.pixels.push(
+            pm_gpu::readback::read_f32(&self.device, &self.queue, texture)
+                .map_err(|e| Error::Encode(e.to_string()))?,
+        );
+        self.textures.push(texture.clone());
+        Ok(())
+    }
+
+    fn video(&mut self, _: u64, _: &pm_export::EncoderInput) -> Result<(), Error> {
+        Err(Error::InvalidFrame("GPU capture received CPU input".into()))
+    }
+
+    fn audio(&mut self, _: &[f32]) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Self::Output, Error> {
+        Ok(self)
+    }
+}
+
+#[test]
+fn whole_gpu_targets_return_only_after_sink_reads_and_are_reused() {
+    let doc = document(solid_fill("#14161C"));
+    let frames = 8u64;
+    let job = ExportJob {
+        document: Arc::new(doc),
+        composition: "Ptest-root".into(),
+        settings: ExportSettings {
+            format: ExportFormat::Webm {
+                codec: WebmCodec::Vp9,
+            },
+            alpha: AlphaOutput::None,
+            quality: QualityTier::High,
+            size: Size::new(320, 180),
+            frame_rate: FrameRate::new(30, 1),
+            range: TickRange {
+                start: Ticks::ZERO,
+                end: seconds(frames as f64 / 30.0),
+            },
+            audio: false,
+            motion_blur: false,
+            color: OutputColor::Rec709QuickTime {
+                candidate: QuickTimeTag::Cicp1_13_1,
+            },
+            precision: Precision::Float16,
+            dither: false,
+            draft_from_proxies: false,
+            delivery: Default::default(),
+        },
+        media: Arc::new(MediaPaths::default()),
+        destination: "/unused.webm".into(),
+        overwrite: Overwrite::Fail,
+        mode: None,
+        seed: 7,
+    };
+    let plan = plan_export(&job).unwrap();
+    let timeline = plan.timeline;
+    let request = plan.request.clone();
+    assert_eq!(timeline.frames, frames);
+    let mut renderer = Renderer::headless().unwrap();
+    let sink = GpuCapture {
+        device: renderer.device().clone(),
+        queue: renderer.queue().clone(),
+        pixels: Vec::new(),
+        textures: Vec::new(),
+    };
+    let captured = run_export_into(
+        &mut renderer,
+        &job,
+        plan,
+        sink,
+        &Unrestricted,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(captured.pixels.len(), frames as usize);
+    let distinct: HashSet<_> = captured.textures.iter().cloned().collect();
+    assert!(
+        distinct.len() <= 3,
+        "{} whole-frame targets allocated",
+        distinct.len()
+    );
+    assert!(
+        distinct.len() < captured.textures.len(),
+        "no target was reused"
+    );
+    for n in 0..frames {
+        let mut fresh = Renderer::headless().unwrap();
+        let expected = render_frame(
+            &mut fresh,
+            &job.document,
+            &job.composition,
+            timeline.tick(n),
+            &request,
+            &job.media,
+            &Unrestricted,
+            7,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(
+            captured.pixels[n as usize]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .rgba
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            "GPU frame {n} differs from a fresh render",
+        );
+    }
 }
 
 #[test]

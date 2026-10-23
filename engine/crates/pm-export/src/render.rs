@@ -283,6 +283,8 @@ pub struct ReadFrame {
     pub rgba: Vec<f32>,
     /// Owned GPU frame for a GPU-capable sink.
     pub gpu: Option<wgpu::Texture>,
+    /// Whole-frame target held until a GPU sink has finished reading it.
+    gpu_target: Option<pm_render::Frame>,
     pub width: u32,
     pub height: u32,
     /// Layers that failed and drew nothing (section 8 isolation).
@@ -436,6 +438,7 @@ fn render_bands(
         rgba.clear();
     }
     let mut gpu_frame: Option<wgpu::Texture> = None;
+    let mut gpu_target: Option<pm_render::Frame> = None;
     let mut failures = Vec::new();
     let mut y = 0u32;
     while y < h {
@@ -557,9 +560,12 @@ fn render_bands(
             }
         }
         failures.append(&mut frame.failures);
-        // A whole GPU frame's texture is still owned by the encoder thread.
-        // Other targets can be reused after their readback or band copy.
-        if !gpu || !whole {
+        // A whole GPU target cannot return to the renderer until the sink's
+        // GPU conversion has completed. A band copy and CPU readback have
+        // completed above, so their targets can be reused immediately.
+        if gpu && whole {
+            gpu_target = Some(frame);
+        } else {
             renderer.recycle(frame);
         }
         y += band;
@@ -567,6 +573,7 @@ fn render_bands(
     Ok(ReadFrame {
         rgba,
         gpu: gpu_frame,
+        gpu_target,
         width: w,
         height: h,
         failures,
@@ -1189,7 +1196,12 @@ impl Progress {
 }
 
 enum Rendered {
-    Frame(u64, Vec<f32>, Option<wgpu::Texture>),
+    Frame(
+        u64,
+        Vec<f32>,
+        Option<wgpu::Texture>,
+        Option<pm_render::Frame>,
+    ),
     Failed(JobError),
 }
 
@@ -1282,9 +1294,9 @@ where
         )
     });
     let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
-    // The encoder gives each frame's pixels back for a later frame to read
-    // into (docs/engine/perfbench.md).
-    let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+    // The encoder returns pixels and completed whole GPU targets for later
+    // frames to reuse (docs/engine/perfbench.md).
+    let (back_tx, back_rx) = std::sync::mpsc::channel::<(Vec<f32>, Option<pm_render::Frame>)>();
     let qos = crate::par::current_qos();
     std::thread::scope(|scope| {
         let encoder_gate = gate;
@@ -1294,8 +1306,10 @@ where
             encoder_gate.sync_worker_qos();
             let mut last_preview: Option<Instant> = None;
             for expected in 0..frames {
-                let (n, rgba, texture) = match rx.recv() {
-                    Ok(Rendered::Frame(n, rgba, texture)) => (n, rgba, texture),
+                let (n, rgba, texture, gpu_target) = match rx.recv() {
+                    Ok(Rendered::Frame(n, rgba, texture, gpu_target)) => {
+                        (n, rgba, texture, gpu_target)
+                    }
                     Ok(Rendered::Failed(e)) => return Err(e),
                     Err(_) => return Err(JobError::Cancelled),
                 };
@@ -1329,7 +1343,9 @@ where
                 } else {
                     None
                 };
-                let _ = back_tx.send(rgba);
+                // `push_gpu` has completed every source-texture GPU read.
+                // On an error above, the target is dropped instead of reused.
+                let _ = back_tx.send((rgba, gpu_target));
                 if let Some((mixer, rate, last)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
                     let first = first.min(*last);
@@ -1382,10 +1398,14 @@ where
             // GPU frames without readback do not discard a sampled frame's
             // allocation before the next sampled readback.
             if n >= PIXEL_BUFFERS
-                && let Ok(rgba) = back_rx.recv()
-                && !rgba.is_empty()
+                && let Ok((rgba, gpu_target)) = back_rx.recv()
             {
-                available_pixels.push(rgba);
+                if let Some(frame) = gpu_target {
+                    renderer.recycle(frame);
+                }
+                if !rgba.is_empty() {
+                    available_pixels.push(rgba);
+                }
             }
             let frame_request = match blender.as_deref_mut() {
                 None => Ok(request.clone()),
@@ -1457,7 +1477,10 @@ where
             render_ns += frame_started.elapsed().as_nanos();
             match rendered {
                 Ok(f) => {
-                    if tx.send(Rendered::Frame(n, f.rgba, f.gpu)).is_err() {
+                    if tx
+                        .send(Rendered::Frame(n, f.rgba, f.gpu, f.gpu_target))
+                        .is_err()
+                    {
                         break;
                     }
                 }

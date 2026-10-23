@@ -27,6 +27,8 @@ pub trait Sink {
         false
     }
     /// A working texture and optional diagnostic/verification readback.
+    /// Complete all GPU reads of `texture` before returning: the producer
+    /// may reuse its target after a successful return.
     fn video_gpu(
         &mut self,
         _index: u64,
