@@ -14,9 +14,18 @@ applies its source interpretation. A non-default SVG interpretation currently
 fails with a named error because Chromium's raster exchange does not carry the
 source transform. A required rendition that has not reached the store is a
 named error. The interactive path reuses the renderer's media
-decoder/cache and source GPU pass. Snapshot cancellation removes queued work;
-a decode/readback already running on the render thread completes before the
-next command is handled.
+decoder/cache and source GPU pass. Source snapshots use a separate exact
+Export-purpose decode worker: it preserves the existing VideoToolbox pixel
+format, keeps its decoder session warm, and uses bounded neighbouring-frame
+prefetch during drags. After a jump it may fill up to 64 contiguous frames
+within the same GOP, capped by half its share of the decoded-frame lease;
+new exact requests preempt that work. It never returns a scrub stand-in. Composition's
+Display worker and job filmstrips keep their existing decode purposes.
+Snapshot cancellation removes queued work; a decode/readback already running
+on the render thread completes before the next command is handled. Small
+source output targets and staging buffers are reused; each retained target
+and staging category is bounded to 16 MiB. Large one-off interactive
+snapshots are still allowed.
 
 Untagged VP9 display renditions use Chromium's existing I420-to-RGBA8
 conversion before fitting. The source-display cache identity is separate
@@ -60,11 +69,25 @@ The renderer registers `engine.source` only with Use New Engine enabled.
 Assets live posters and inline thumbnails use its source pixels; import,
 replacement, and restore backfill persist the same WebP/JPEG poster format.
 The source viewer keeps its existing controls and keyboard interactions,
-using a canvas and engine audio voice. Code export sends frozen originals
-to browser-rendition jobs. Setting-off branches retain their current browser
-capture and conversion behavior. Source jobs pin old storage-key references
-before waiting for a cold engine and remove their scratch output and media
-session after success, failure, or cancellation.
+using native RGBA frames and an engine audio voice. Stills present through
+an image element, matching the original compositor layer beneath the
+transport shadow; its lossless PNG is encoded from engine pixels. Video
+presents directly through a canvas without image encoding. Raw canvas pixels
+alone do not certify CSS video-element colour or overlay compositing. Code
+export sends frozen originals to browser-rendition jobs. Setting-off branches
+retain their current browser capture and conversion behavior.
+
+Source frame jobs reuse bounded, frozen, source-only sessions across poster
+saves and unrelated edits; source replacements retain separate bindings for
+in-flight requests. A real frame prepare warms the user job lane from poster
+or monitor use. Filmstrips use bounded GPU chunks and one packed RGBA8 IPC
+reply. There is no PNG encoding or per-frame IPC in that path. Session and
+scratch-output ownership, revision advancement, cancellation and cache bounds
+are specified in RFC 12. Browser renditions keep per-request isolation.
+The monitor measures its CSS size in ResizeObserver, preserving client-size
+rounding and override padding without forcing layout on every seek. Its
+ImageData view borrows the received RGBA buffer when it has ArrayBuffer
+storage, avoiding another full-frame copy.
 
 `e2e/engine-source-media.spec.ts` is the app gate for both settings: exact
 source, encoded-poster, actual inline-image and monitor-canvas comparisons,
@@ -78,9 +101,14 @@ pairs alternating app sessions with native `pm-perfbench` counters on one
 examples before running these specs under `pm-electron-lock`; no build runs
 inside the lock. Targeted Rust and unit passes do not certify app parity,
 relative performance or direct device/DAC output.
-Exact source-viewer transport-shadow screenshot parity and filmstrip/scrub
-latency at or below the current app remain cutover blockers; passing source
-frame pixels and decoded/mixed PCM does not waive either gate.
+Still source-viewer transport-shadow captures now match exactly in both
+themes after preserving image-element compositing. Filmstrip/scrub latency
+must still meet the unchanged current-app gate. A separate public untagged
+H.264 full-size monitor capture differs between Chromium's CSS video element
+and the native RGBA canvas; matching Canvas2D reference bytes does not certify
+that video-element colour path. This visible colour difference remains a
+cutover blocker. Direct device/DAC output, the broader private corpus and
+non-default interpreted SVG colour remain unmeasured or unsupported as above.
 
 Production media I/O for plan section 13, built from the S6 spike
 (`docs/engine/spikes/S6.md`, `engine/spikes/s6-decode`). Crates:
