@@ -412,3 +412,23 @@ fn mp3_blocks_equal_todays_sequential_decode() {
     assert!(worst < 1e-5, "aligned with FFmpeg's decode: {worst}");
     cache.shutdown();
 }
+
+#[test]
+fn rebuilding_a_mix_releases_decoders_but_keeps_unchanged_sample_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("tone.wav");
+    std::fs::copy(fixtures().join("tone.wav"), &file).unwrap();
+    let cache = SourceCache::new(8 << 20, 0);
+    let first = cache.open(&file, None).unwrap();
+    let id = first.id();
+    cache.block(&first, 0, true).unwrap();
+    let released = std::sync::Arc::downgrade(&first);
+    drop(first);
+    assert!(released.upgrade().is_none(), "the registry must not retain a decoder");
+    let again = cache.open(&file, None).unwrap();
+    assert_eq!(again.id(), id, "a mix rebuild must keep warm block keys");
+    let hits = cache.stats().hits;
+    cache.block(&again, 0, true).unwrap();
+    assert_eq!(cache.stats().hits, hits + 1);
+    cache.shutdown();
+}

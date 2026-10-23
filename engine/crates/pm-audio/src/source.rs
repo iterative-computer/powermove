@@ -122,6 +122,7 @@ impl Block {
 type BlockKey = (u64, u64);
 /// A file and its FFmpeg stream index (the best audio stream when `None`).
 type SourceKey = (PathBuf, Option<usize>);
+type SourceIdentity = (u64, Option<(u64, Option<std::time::SystemTime>)>);
 
 struct Entry {
     block: Arc<Block>,
@@ -251,6 +252,10 @@ pub struct CacheStats {
 /// Shared by every mixer and render in one process.
 pub struct SourceCache {
     sources: Mutex<HashMap<SourceKey, Weak<Source>>>,
+    /// Sample identity survives a metadata-only Source being dropped. No file
+    /// handles or PCM live here; a changed file receives a fresh block key.
+    source_ids: Mutex<HashMap<SourceKey, SourceIdentity>>,
+
     blocks: Mutex<Blocks>,
     ready: Condvar,
     work: Condvar,
@@ -306,6 +311,7 @@ impl SourceCache {
         }
         let cache = Arc::new(SourceCache {
             sources: Mutex::default(),
+            source_ids: Mutex::default(),
             blocks: Mutex::default(),
             ready: Condvar::new(),
             work: Condvar::new(),
@@ -438,12 +444,25 @@ impl SourceCache {
     /// FFmpeg stream index, the best audio stream when `None`.
     pub fn open(&self, path: &Path, stream: Option<usize>) -> Result<Arc<Source>> {
         let key = (path.to_owned(), stream);
+        let fingerprint = std::fs::metadata(path)
+            .ok()
+            .map(|m| (m.len(), m.modified().ok()));
+        let id = {
+            let mut ids = lock(&self.source_ids);
+            let entry = ids
+                .entry(key.clone())
+                .or_insert_with(|| (self.next_id.fetch_add(1, Ordering::Relaxed), fingerprint));
+            if entry.1 != fingerprint {
+                *entry = (self.next_id.fetch_add(1, Ordering::Relaxed), fingerprint);
+            }
+            entry.0
+        };
         if let Some(s) = lock(&self.sources).get(&key).and_then(Weak::upgrade) {
             // A length counted since this source opened replaces it (the
             // next mix build takes the exact length).
             let stale = matches!(&*lock(&s.decoder), Decoder::Chromium(..))
                 && crate::chromium::known_length(path).is_some_and(|n| s.info.length != Some(n));
-            if !stale {
+            if s.id == id && !stale {
                 return Ok(s.clone());
             }
         }
@@ -481,13 +500,14 @@ impl SourceCache {
             Decoder::Ffmpeg(Box::new(decoder))
         };
         let source = Arc::new(Source {
-            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            id,
             info,
             decoder: Mutex::new(decoder),
         });
         let mut sources = lock(&self.sources);
         sources.retain(|_, source| source.strong_count() > 0);
         if let Some(existing) = sources.get(&key).and_then(Weak::upgrade)
+            && existing.id == source.id
             && existing.info.length == source.info.length
         {
             return Ok(existing.clone());
@@ -505,6 +525,7 @@ impl SourceCache {
             .filter_map(|(_, s)| s.upgrade().map(|s| s.id))
             .collect();
         sources.retain(|(p, _), _| p != path);
+        lock(&self.source_ids).retain(|(p, _), _| p != path);
         drop(sources);
         let mut blocks = lock(&self.blocks);
         let keys: Vec<BlockKey> = blocks
@@ -524,7 +545,10 @@ impl SourceCache {
     /// an in-flight render remain pinned until that render releases them.
     /// Sources are weakly indexed: the last mix/read also closes its PCM spool.
     pub fn memory_pressure(&self) {
-        lock(&self.sources).retain(|_, source| source.strong_count() > 0);
+        let mut sources = lock(&self.sources);
+        sources.retain(|_, source| source.strong_count() > 0);
+        lock(&self.source_ids).retain(|key, _| sources.contains_key(key));
+        drop(sources);
         let mut blocks = lock(&self.blocks);
         blocks
             .map
