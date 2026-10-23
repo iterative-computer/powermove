@@ -441,11 +441,17 @@ impl Engine {
 
     /// Installs the render and export service (contracts 12 and 13), or the
     /// interactive engine's lightweight media probe service. Only the job
-    /// engine accepts jobs and agent frames.
+    /// engine accepts jobs and agent frames, takes the service's Blender
+    /// events, and releases agent frames waiting for a revision; the
+    /// interactive engine uses its service for `ProbeMedia` alone (its
+    /// outbox, host calls, and session and port closes).
     pub fn set_job_service(&mut self, service: Box<dyn JobService>) {
         self.jobs = Some(service);
     }
 
+    /// Whether this engine runs jobs and agent frames: the job engine with
+    /// its service installed. A probe service in the interactive engine is
+    /// not one.
     pub fn has_job_service(&self) -> bool {
         self.config.process == EngineProcess::Job && self.jobs.is_some()
     }
@@ -668,10 +674,10 @@ impl Engine {
             }
         }
         self.flush_document_updates(now, &mut out);
-        if self.jobs.is_some() {
+        if self.has_job_service() {
             self.release_waiting_frames(now, &mut out);
-            self.drain_jobs(&mut out);
         }
+        self.drain_jobs(&mut out);
         self.drain_presenter(&mut out);
         out.0
     }
@@ -977,18 +983,10 @@ impl Engine {
             Request::Snapshot(snapshot) if kind == PeerKind::Host && self.presenter.is_some() => {
                 self.snapshot(port, id, snapshot, revision, out)
             }
-            Request::SubmitJob(job)
-                if self.config.process == EngineProcess::Job
-                    && self.jobs.is_some()
-                    && kind == PeerKind::Host =>
-            {
+            Request::SubmitJob(job) if self.has_job_service() && kind == PeerKind::Host => {
                 self.submit_job(port, id, job, out)
             }
-            Request::CancelJobs(cancel)
-                if self.config.process == EngineProcess::Job
-                    && self.jobs.is_some()
-                    && kind == PeerKind::Host =>
-            {
+            Request::CancelJobs(cancel) if self.has_job_service() && kind == PeerKind::Host => {
                 let cancelled = self.jobs.as_mut().expect("checked").cancel(&cancel);
                 self.respond(
                     port,
@@ -999,11 +997,7 @@ impl Engine {
                     out,
                 );
             }
-            Request::AgentFrames(request)
-                if self.config.process == EngineProcess::Job
-                    && self.jobs.is_some()
-                    && kind == PeerKind::Host =>
-            {
+            Request::AgentFrames(request) if self.has_job_service() && kind == PeerKind::Host => {
                 self.agent_frames(port, id, session, revision, request, now, out)
             }
             Request::ProbeMedia(probe) if self.jobs.is_some() && kind == PeerKind::Host => {
@@ -1567,10 +1561,11 @@ impl Engine {
                 }
             }
             (event @ (Event::BlenderProgress(_) | Event::BlenderSurface(_)), PeerKind::Host)
-                if self.jobs.is_some() =>
+                if self.has_job_service() =>
             {
                 // Contract 11: surfaces and progress of the job engine's
-                // Blender requests.
+                // Blender requests. The interactive engine's probe service
+                // never asks for Blender: its events are the viewer's.
                 self.jobs.as_mut().expect("checked").host_event(&event);
             }
             (event @ (Event::BlenderProgress(_) | Event::BlenderSurface(_)), PeerKind::Host)
@@ -2202,10 +2197,10 @@ impl Engine {
         let mut out = Out::default();
         self.retry_media(now, &mut out);
         self.flush_document_updates(now, &mut out);
-        if self.jobs.is_some() {
+        if self.has_job_service() {
             self.release_waiting_frames(now, &mut out);
-            self.drain_jobs(&mut out);
         }
+        self.drain_jobs(&mut out);
         self.drain_presenter(&mut out);
         self.flush_inflight(&mut out);
         let active = !self.sessions.is_empty();
