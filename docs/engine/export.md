@@ -470,9 +470,14 @@ description below records the earlier implementation and is superseded for
 offline media by this decision.
 
 Media that is still loading is not offline. With the setting off (and when an
-engine export comes back to the current exporter), an export waits up to 30 s
-for referenced media that is still loading, then goes on as before: it is
-never refused for it, and only clips that are offline are asked about.
+engine export comes back to the current exporter), an export waits for the
+project's media restore and for referenced media that is still loading, 30 s
+in all. It shows the export sheet ("Waiting for media…") with Cancel while it
+waits, and then goes on as before: it is never refused for it. Only clips the
+finished restore found missing are asked about; a restore still running at the
+deadline asks nothing, as today. Beta-list bug fix: media that finishes during
+the wait is in the export (today an export started at once and rendered it
+absent).
 
 ### Beta decision EXPORT-1 (2026-10-21)
 

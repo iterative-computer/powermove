@@ -594,19 +594,33 @@ async function run(opts: any) {
       if (engine) return engine;
     }
     if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.offlineExport) {
-      await PM.projectAssetsReady;
-      if (PM.proj !== p) return { cancelled: true };
       const referenced = referencedClips(p);
-      /* Media still loading is not offline. The export waits for it, for a
-         while, and then goes on as it always has: it is never refused for
-         it, and only media that is really offline is asked about. */
+      /* Media still loading is not offline. The export waits for the
+         project's media restore and for referenced media still loading, 30 s
+         in all, showing the export sheet ("Waiting for media…", Cancel), and
+         then goes on as it always has: it is never refused for it. Media that
+         finishes in time is in the export; only media the restore found
+         missing is asked about. */
+      let restored = false;
+      void Promise.resolve(PM.projectAssetsReady).then(() => { restored = true; }, () => { restored = true; });
+      await Promise.resolve();
       const loading = () => referenced.filter((clip) => PM.assets?.loading?.has(clip.asset));
-      for (const deadline = Date.now() + X.mediaWaitMs; loading().length && Date.now() < deadline;) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        if (PM.proj !== p) return { cancelled: true };
+      let sheet: any = null;
+      try {
+        for (const deadline = Date.now() + X.mediaWaitMs; (!restored || loading().length) && Date.now() < deadline;) {
+          if (!sheet) { sheet = progressUI(1); sheet.waiting('Waiting for media…'); }
+          await new Promise(resolve => setTimeout(resolve, 100));
+          if (X.cancel || PM.proj !== p) return { cancelled: true };
+        }
+      } finally {
+        // Closing the sheet marks a running export cancelled; keep the outcome.
+        const cancelled = X.cancel;
+        sheet?.mod.close();
+        X.cancel = cancelled;
       }
       const pending = new Set(loading().map((clip) => clip.asset));
-      const clips = referenced.filter((clip) => !pending.has(clip.asset) && !PM.assets?.get(clip.asset));
+      // A restore still running at the deadline has not found anything missing yet: as today, no question.
+      const clips = restored ? referenced.filter((clip) => !pending.has(clip.asset) && !PM.assets?.get(clip.asset)) : [];
       if (clips.length) {
         const choice = await bridge.offlineExport(clips);
         if (choice === 'locate') locateMedia(clips.map((clip) => clip.asset));
