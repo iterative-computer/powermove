@@ -164,6 +164,12 @@ test('the native no-window workspace bytes match the existing hidden host includ
     expect(result.cliPinnedFrames).toEqual({ node: 6, direct: 6 });
     expect(result.cliPinNegativeControl).toBe(true);
     expect(result.cliMissingBrowser).toBe(true);
+    // pm-cli scope honours the same pin (DEFS-4): within one 8-bit step of
+    // the desktop's frame, a native control beyond it, named failures.
+    expect(result.scopePinned.deviation).toBeLessThanOrEqual(1 / 255 + 1e-6);
+    expect(result.scopePinned.nativeControlDeviation).toBeGreaterThan(1 / 255 + 1e-6);
+    expect(result.scopePinned.noHelperExit4).toBe(true);
+    expect(result.scopePinned.missingBrowser).toBe(true);
   } finally { if (!process.env['POWERMOVE_NATIVE_PARITY_EVIDENCE']) rmSync(evidence, { recursive: true, force: true }); }
 });
 

@@ -179,12 +179,46 @@ try {
     if (evidence) { await cp(folder, path.join(evidence, `cli-${mode}-png`), { recursive: true }); await writeFile(path.join(evidence, `cli-${mode}.log`), answer.stdout + answer.stderr); }
     cliOutputs[mode] = frames.length;
   }
+  // pm-cli scope honours the same pins (DEFS-4): its stats of the pinned
+  // program match the scopes of the desktop's own frame 0 within 8-bit
+  // quantization (the PNG holds bytes; scope measures the 32-bit render).
+  const scopeOf = async (args, env = cliEnv) => JSON.parse((await run(binary, ['scope', ...args], { env, timeout: 120000, maxBuffer: 4 * 1024 * 1024 })).stdout);
+  const quantum = 1 / 255 + 1e-6, statKeys = ['min', 'max', 'mean', 'p001', 'p50', 'p999'], channels = ['red', 'green', 'blue', 'luma'];
+  const scopeDeviation = (a, b) => Math.max(...channels.flatMap(c => statKeys.map(k => Math.abs(a[c][k] - b[c][k]))));
+  const scopeFiles = ['waveform.png', 'parade.png', 'vectorscope.png'];
+  const scopeReference = await scopeOf(['--frame', before[0], '-o', path.join(root, 'scope-desktop')]);
+  const scopePinnedDir = path.join(root, 'scope-pinned');
+  const scopePinned = await scopeOf([cliSource.path, '-o', scopePinnedDir, '--definitions', definitions]);
+  assert.equal(scopePinned.width, scopeReference.width); assert.equal(scopePinned.height, scopeReference.height);
+  const scopePinnedDeviation = scopeDeviation(scopePinned, scopeReference);
+  assert(scopePinnedDeviation <= quantum, `pinned scope differs from the desktop frame by ${scopePinnedDeviation}: ${JSON.stringify({ scopePinned, scopeReference })}`);
+  const scopeImagesEqual = (await Promise.all(scopeFiles.map(async f => (await readFile(path.join(scopePinnedDir, f))).equals(await readFile(path.join(root, 'scope-desktop', f)))))).every(Boolean);
+  if (evidence) { await cp(scopePinnedDir, path.join(evidence, 'scope-pinned'), { recursive: true }); await cp(path.join(root, 'scope-desktop'), path.join(evidence, 'scope-desktop'), { recursive: true }); }
+  // No helper: the pinned program is not headless-renderable (exit 4), no scopes.
+  const scopeNoHelper = path.join(root, 'scope-no-helper');
+  await assert.rejects(run(binary, ['scope', cliSource.path, '-o', scopeNoHelper, '--definitions', definitions],
+    { env: { ...cliEnv, POWERMOVE_ANGLE_HELPER: path.join(root, 'no-helper.cjs') }, timeout: 120000 }),
+    error => error.code === 4 && /not headless-renderable/.test(error.stderr) && /host-parity\.effect/.test(error.stderr));
+  assert(!existsSync(path.join(scopeNoHelper, 'scope.json')), 'scope without a helper wrote scopes');
+  // A missing browser is named; nothing is measured.
+  const scopeMissing = path.join(root, 'scope-missing-browser');
+  await assert.rejects(run(binary, ['scope', cliSource.path, '-o', scopeMissing, '--definitions', definitions],
+    { env: { ...cliEnv, POWERMOVE_CHROMIUM: path.join(root, 'missing-chromium') }, timeout: 120000 }), error => /chromium-unavailable/.test(error.stderr));
+  assert(!existsSync(path.join(scopeMissing, 'scope.json')), 'scope with a missing browser wrote scopes');
   const negative = path.join(root, 'cli-native-control.png');
+  let scopeNativeDeviation;
   try {
     for (const pin of pinsBefore) await rm(path.join(pins, pin.name));
     await run(binary, ['render', cliSource.path, '-o', negative, '--format', 'still', '--definitions', definitions], { env: cliEnv, timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
     assert(!pixels(negative).equals(pixels(before[0])), 'removing the persisted pin must expose different native pixels');
+    // The same control for scope: with only the forged native verification
+    // left, scope measures native pixels, which must not match the desktop.
+    const scopeNative = await scopeOf([cliSource.path, '-o', path.join(root, 'scope-native-control'), '--definitions', definitions]);
+    scopeNativeDeviation = scopeDeviation(scopeNative, scopeReference);
+    assert(scopeNativeDeviation > quantum, `the scope pin control must measure different native pixels (deviation ${scopeNativeDeviation})`);
   } finally { for (const pin of pinsBefore) await writeFile(path.join(pins, pin.name), pin.bytes); }
+  Object.assign(result, { scopePinned: { deviation: scopePinnedDeviation, imagesEqual: scopeImagesEqual, nativeControlDeviation: scopeNativeDeviation, noHelperExit4: true, missingBrowser: true } });
+  if (evidence) await writeFile(path.join(evidence, 'result.json'), JSON.stringify(result, null, 2));
   // First probes. Neither the CLIs nor the hidden host compare with the
   // desktop's Electron runner, so a program the desktop has not decided yet
   // must be probed against their own ANGLE reference and leave no `.native`
