@@ -985,8 +985,13 @@ impl Mixer {
         let p = self.format.sample_rate;
         let root = self.doc.root();
         let t0 = self.today_playhead.unwrap_or(self.today_range.t0);
+        let standard = self.standard_content;
         let shape = root
-            .and_then(|root| crate::today::Shape::new(plan, comps, root, Some((&mut self.ev, t0))));
+            .and_then(|root| crate::today::Shape::new(plan, comps, root, Some((&mut self.ev, t0))))
+            .map(|mut shape| {
+                shape.standard = standard;
+                shape
+            });
         let source = &plan.source;
         let built = match (shape, source.length()) {
             (Some(shape), Some(frames)) => {
@@ -3603,6 +3608,103 @@ mod prepared_tests {
             .render(192_000, 4096, &mut expected, &options)
             .unwrap();
         assert_eq!(actual, expected);
+    }
+
+    /// Under the standard evaluator, today's model evaluates a keyframed
+    /// level field from its track prepared once per shape: bit for bit what
+    /// `evP` gives (eased and linear keys, a keyed fade, a held key, and a
+    /// channel with an expression, which keeps `evP`).
+    #[test]
+    fn prepared_level_tracks_equal_ev_p() {
+        let f = Fixture::new();
+        let key = |t: f64, v: f64, interp: &str, i: usize| {
+            format!(
+                r#"{{"t":{t},"v":{v},"i":"k{i}","inInterp":"{interp}","outInterp":"{interp}","inEase":{{"speed":0,"influence":33}},"outEase":{{"speed":0.4,"influence":60}}}}"#
+            )
+        };
+        let gains = [
+            format!(
+                r#"{{"v":0.5,"kf":[{},{},{}],"expr":null}}"#,
+                key(0.0, 0.2, "bezier", 0),
+                key(1.3, 0.9, "bezier", 1),
+                key(2.9, 0.1, "bezier", 2)
+            ),
+            format!(
+                r#"{{"v":0.5,"kf":[{},{}],"expr":null}}"#,
+                key(0.4, 1.0, "linear", 0),
+                key(2.2, 0.3, "hold", 1)
+            ),
+            format!(
+                r#"{{"v":0.5,"kf":[{},{}],"expr":"value * 0.5"}}"#,
+                key(0.0, 0.2, "linear", 0),
+                key(3.0, 0.8, "linear", 1)
+            ),
+            "0.7".to_string(),
+        ];
+        let fade = format!(
+            r#"{{"v":0.2,"kf":[{},{}],"expr":null}}"#,
+            key(0.0, 0.1, "linear", 0),
+            key(2.0, 0.8, "linear", 1)
+        );
+        let layers: Vec<String> = gains
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                format!(
+                    r#"{{"id":"v{i}","type":"audio","from":{},"dur":3.5,"on":true,"d":{{"asset":"s","gain":{g},"trim":0,"fadeIn":{fade},"fadeOut":0.3,"speed":1}}}}"#,
+                    0.25 * i as f64
+                )
+            })
+            .collect();
+        let doc = Arc::new(Document::new(
+            Some(
+                parse(&format!(
+                    r#"{{"id":"P","compId":"C","fps":30,"dur":5,"layers":[{}],"comps":{{}}}}"#,
+                    layers.join(",")
+                ))
+                .unwrap(),
+            ),
+            1,
+        ));
+        let graph = Arc::new(
+            MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
+                Some(f.dir.path().join("tone.wav"))
+            })
+            .unwrap(),
+        );
+        let render = |standard: bool| {
+            let mut m = Mixer::new(
+                MixFormat::stereo(48_000),
+                doc.clone(),
+                graph.clone(),
+                Evaluator::new(),
+                f.cache.clone(),
+            );
+            m.standard_content(standard);
+            let mut out = vec![vec![]; 2];
+            let options = RenderOptions {
+                wait: true,
+                ..Default::default()
+            };
+            for (start, n) in [(0i64, 48_000usize * 4), (55_555, 70_000)] {
+                m.set_today_playback(start);
+                let mut chunk = vec![vec![]; 2];
+                m.render(start, n, &mut chunk, &options).unwrap();
+                for (o, c) in out.iter_mut().zip(chunk) {
+                    o.extend(c);
+                }
+            }
+            out
+        };
+        let (fast, slow) = (render(true), render(false));
+        assert!(fast[0].iter().any(|v| *v != 0.0));
+        assert!(
+            fast.iter()
+                .flatten()
+                .zip(slow.iter().flatten())
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "prepared tracks equal evP"
+        );
     }
 
     #[test]

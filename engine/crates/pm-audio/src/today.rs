@@ -565,6 +565,13 @@ pub(crate) struct Shape {
     pub(crate) precomp_trim_animated: bool,
     step: f64,
     keys: Vec<f64>,
+    /// The evaluator is the standard one (no hooks override channels), so a
+    /// keyframed level field without an expression evaluates as `evP` does
+    /// from its track prepared once ([`Shape::field`]).
+    pub(crate) standard: bool,
+    /// The prepared tracks of `gain`, `fadeIn` and `fadeOut` (`None`: not a
+    /// plain keyframed channel), prepared on first use.
+    tracks: [std::sync::OnceLock<Option<Arc<pm_eval::keyframes::PreparedTrack>>>; 3],
 }
 
 fn is_property(n: Option<&Node>) -> bool {
@@ -738,6 +745,8 @@ impl Shape {
             precomp_trim_animated,
             step: 1.0 / fps.max(30.0),
             keys,
+            standard: false,
+            tracks: Default::default(),
         })
     }
 
@@ -799,6 +808,9 @@ impl Shape {
         };
         if is_property(value) {
             let tau = local_tau(self.from, self.natural_start, t);
+            if let Some(v) = self.prepared_field(ev, layer, value, key, tau) {
+                return Ok(v);
+            }
             Ok(ev.ev_p(
                 comp,
                 Some(layer),
@@ -811,6 +823,42 @@ impl Shape {
         } else {
             Ok(node::js_value_opt(value))
         }
+    }
+
+    /// `evP(L, prop, T)` for a level field that is a plain keyframed channel
+    /// (no expression, a non-empty `kf` array) under the standard evaluator:
+    /// `evalKfs(kf, T − L.from)` from the track prepared once per shape,
+    /// instead of preparing it again at every point (a long keyed clip's
+    /// track costs about 0.1 ms to prepare, its value 20 ns). `None` for
+    /// anything else, which `evP` evaluates.
+    fn prepared_field(
+        &self,
+        ev: &mut Evaluator,
+        layer: &Node,
+        prop: Option<&Node>,
+        key: &str,
+        tau: f64,
+    ) -> Option<JsValue> {
+        if !self.standard {
+            return None;
+        }
+        let slot = match key {
+            "gain" => 0,
+            "fadeIn" => 1,
+            "fadeOut" => 2,
+            _ => return None,
+        };
+        let p = prop?;
+        let kf = node::member(Some(p), "kf");
+        let track = self.tracks[slot].get_or_init(|| {
+            let plain = !node::get(p, b"expr").truthy()
+                && node::array(kf).is_some_and(|keys| !keys.is_empty());
+            plain.then(|| Arc::new(pm_eval::keyframes::PreparedTrack::prepare(kf, ev.springs())))
+        });
+        let track = track.as_ref()?;
+        // `localTime`: `T − L.from`, as `evP` reads it.
+        let tl = tau - node::get(layer, b"from").to_js().to_number();
+        track.value(kf, tl, false, ev.springs()).ok()
     }
 
     /// `gainAt(layer, local, audible)`.

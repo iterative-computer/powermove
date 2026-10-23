@@ -18,7 +18,7 @@
  * toggles it by +0.1). PM_AUDIO_CLIP_SECONDS (default 10) sets the clips'
  * and project's length. PM_AUDIO_START_KEYFRAMED=gain keys each clip's gain
  * every PM_AUDIO_KEY_STEP seconds (default 1) along the whole clip, and a
- * gain edit scales the keys. PM_AUDIO_START_LAYER=video plays the file as a
+ * gain edit changes the level of each clip's key nearest the play position. PM_AUDIO_START_LAYER=video plays the file as a
  * video layer's soundtrack (embedded audio). PM_AUDIO_START_TARGETS lists
  * the seek targets (seconds, comma separated; the defaults are 4, or 2 and
  * 3 for cold seeks), cycled per sample. PM_AUDIO_LOOP_RANGE (default 4,6)
@@ -87,7 +87,8 @@ if (distinct !== 'none' && distinct !== 'trim') throw new Error('PM_AUDIO_START_
 if (order !== 'today-native' && order !== 'native-today') throw new Error('PM_AUDIO_START_ORDER must be today-native or native-today');
 const trimStep = distinct === 'trim' ? 0.0613 : 0;
 const targets = process.env.PM_AUDIO_START_TARGETS ? process.env.PM_AUDIO_START_TARGETS.split(',').map(Number) : waitMs === 0 ? [2, 3] : [4];
-if (!targets.length || targets.some(t => !(t >= 0 && t < clipSeconds))) throw new Error('PM_AUDIO_START_TARGETS must lie within the clips');
+// Play from past the work area's end starts at its start (today and native).
+if (!targets.length || targets.some(t => !(t >= 0 && t < clipSeconds && t < loopRange[1]))) throw new Error('PM_AUDIO_START_TARGETS must lie within the clips and before the work area end');
 const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs, observeMs, voices, speed, clipSeconds, keyframed, keyStep, layerKind, loopRange, settleMs, edit, loopSeconds, stressThreads, distinct, trims: Array.from({ length: voices }, (_, i) => i * trimStep), targets };
 result.controlReadyWaitMs = readyWaitMs;
 const modes = process.env.PM_AUDIO_START_MODE === 'today' ? [false] : process.env.PM_AUDIO_START_MODE === 'native' ? [true] : order === 'today-native' ? [false, true] : [true, false];
@@ -293,8 +294,9 @@ for (const native of modes) {
             const key = layer.type === 'video' ? 'audioGain' : 'gain';
             const level = (run % 2 ? 0.5 : 1) / PM.proj.layers.length;
             if (edit === 'gain' && typeof layer.d[key] === 'object') {
-              layer.d[key].kf.forEach((k: any, i: number) => { k.v = level * (i % 2 ? 0.5 : 1); });
-              layer.d[key].v = level;
+              // A keyframe edit: the key at the play position changes level.
+              const k = layer.d[key].kf.reduce((best: any, k: any) => Math.abs(k.t - target) < Math.abs(best.t - target) ? k : best);
+              k.v = level;
             } else if (edit === 'gain') layer.d[key] = level;
             if (edit === 'speed') layer.d.speed = run % 2 ? speed + 0.1 : speed;
           }
@@ -350,7 +352,7 @@ for (const native of modes) {
                 throw new Error(`ordinary start must be complete and simultaneous: ${JSON.stringify(timing)}`);
               }
               if (process.platform === 'darwin' && (!['device-workgroup', 'custom-audio-interval', 'mach-time-constraint'].includes(timing.producerScheduling)
-                || timing.workerWorkgroupJoins + timing.workerMachJoins === 0 || timing.workerSchedulingFailures !== 0 || timing.producerMachError !== null || timing.producerHintError !== null || timing.schedulingComputationOverruns !== 0 || timing.schedulingConstraintOverruns !== 0 || timing.schedulingRestoreFailures !== 0 || timing.schedulingHintFailures !== 0 || timing.schedulingConstraintReadbackFailures !== 0 || timing.schedulingIntervalFailures !== 0 || timing.schedulingIntervalExpired !== 0 || timing.profileWorkerLogDrops !== 0 || timing.profileWorkerFlushFailures !== 0 || idlePoolFailed(timing))) {
+                || ((speed !== 1 || timing.idlePoolSincePlay?.jobClaims > 0) && timing.workerWorkgroupJoins + timing.workerMachJoins === 0) || timing.workerSchedulingFailures !== 0 || timing.producerMachError !== null || timing.producerHintError !== null || timing.schedulingComputationOverruns !== 0 || timing.schedulingConstraintOverruns !== 0 || timing.schedulingRestoreFailures !== 0 || timing.schedulingHintFailures !== 0 || timing.schedulingConstraintReadbackFailures !== 0 || timing.schedulingIntervalFailures !== 0 || timing.schedulingIntervalExpired !== 0 || timing.profileWorkerLogDrops !== 0 || timing.profileWorkerFlushFailures !== 0 || idlePoolFailed(timing))) {
                 throw new Error(`audio threads did not enter a real-time schedule: ${JSON.stringify(timing)}`);
               }
               // Distinct signals must not be served by a shared immutable head.
