@@ -6198,7 +6198,14 @@ impl Thread {
                 // the job waits for them; the rest are named.
                 let tags: Vec<String> = needs
                     .iter()
-                    .map(|n| super::compat::CompatStore::tag(job.key, n))
+                    .map(|n| {
+                        super::compat::CompatStore::snapshot_tag(
+                            job.key,
+                            n,
+                            revision,
+                            job.request.class,
+                        )
+                    })
                     .collect();
                 let fresh = self.compat_store().snapshot_needs(
                     job.key,

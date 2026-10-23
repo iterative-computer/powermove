@@ -2490,6 +2490,18 @@ fn child_compat_viewer_pending() {
     };
     assert_eq!(snapshot_needs, viewer_needs);
 
+    // Queue the marked retry while its answer is still in flight. If the
+    // later message rejects that answer, this already-queued wait must end.
+    let mut retry = frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000);
+    retry.compat_uploaded = snapshot_needs.clone();
+    c.snapshot(41, retry, Some(1), WINDOW, session);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(200), &mut answer(41))
+            .is_none(),
+        "the posted answer has not arrived yet"
+    );
+
     // A renderer can first reuse a surface the store already evicted. That
     // terminal rejection must return a fresh need even when the snapshot's
     // retry says it posted the old answer. The viewer may re-ask meanwhile.
@@ -2528,9 +2540,6 @@ fn child_compat_viewer_pending() {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
-    let mut retry = frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000);
-    retry.compat_uploaded = snapshot_needs.clone();
-    c.snapshot(41, retry, Some(1), WINDOW, session);
     let snapshot_needs = match c.inbox.wait(Duration::from_secs(20), answer(41)) {
         Ok(SnapshotOutcome::NeedsRenderer { compat, .. }) => compat,
         other => {

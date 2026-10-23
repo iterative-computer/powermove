@@ -783,11 +783,25 @@ impl CompatStore {
         )
     }
 
+    /// A queued capture waits only for its own class and revision, not a
+    /// viewer/async re-ask made after that upload completed or was rejected.
+    pub fn snapshot_tag(
+        key: Key,
+        need: &CompatNeed,
+        revision: Revision,
+        class: SnapshotClass,
+    ) -> String {
+        format!(
+            "{}:snapshot:{}:{class:?}",
+            Self::tag(key, need),
+            revision.get()
+        )
+    }
+
     /// Whether the need named `tag` is asked and not answered.
     pub fn outstanding(&self, tag: &str) -> bool {
-        self.asked
-            .keys()
-            .any(|(key, composition, layer, time, source, scale, crop)| {
+        self.asked.iter().any(
+            |((key, composition, layer, time, source, scale, crop), asked)| {
                 let need = CompatNeed {
                     composition: composition.clone(),
                     layer: layer.clone(),
@@ -797,7 +811,11 @@ impl CompatStore {
                     crop: *crop,
                 };
                 Self::tag(*key, &need) == tag
-            })
+                    || asked.snapshot.is_some_and(|class| {
+                        Self::snapshot_tag(*key, &need, asked.revision, class) == tag
+                    })
+            },
+        )
     }
 
     /// Answers and outstanding asks (status).
@@ -1183,6 +1201,8 @@ mod tests {
                     ),
                     vec![need.clone()]
                 );
+                let queued = CompatStore::snapshot_tag(s, &need, revision, SnapshotClass::Sync);
+                assert!(store.outstanding(&queued));
                 if reuse {
                     assert_eq!(
                         store.apply(
@@ -1209,6 +1229,7 @@ mod tests {
                     assert!(store.get(s, &id("L0", "k")).is_none());
                 }
                 assert!(!store.outstanding(&CompatStore::tag(s, &need)));
+                assert!(!store.outstanding(&queued));
                 match other {
                     0 => {}
                     1 => {
@@ -1230,6 +1251,11 @@ mod tests {
                     }
                     _ => unreachable!(),
                 }
+                assert_eq!(store.outstanding(&CompatStore::tag(s, &need)), other != 0);
+                assert!(
+                    !store.outstanding(&queued),
+                    "queued capture must wake: reuse={reuse}, other={other}"
+                );
                 // The old upload marker must never turn a settled/rejected
                 // answer, or another consumer's new ask, back into a wait.
                 assert_eq!(
@@ -1281,6 +1307,8 @@ mod tests {
             store.snapshot_needs(s, r3, vec![need.clone()], &[], now, SnapshotClass::Sync),
             vec![need.clone()]
         );
+        let queued = CompatStore::snapshot_tag(s, &need, r3, SnapshotClass::Sync);
+        assert!(store.outstanding(&queued));
         assert_eq!(
             store.snapshot_needs(
                 s,
@@ -1292,6 +1320,7 @@ mod tests {
             ),
             vec![need.clone()]
         );
+        assert!(!store.outstanding(&queued));
     }
 
     #[test]
