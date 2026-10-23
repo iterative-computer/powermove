@@ -1,6 +1,7 @@
 # Engine memory
 
-P7 remains open. In the current five-pair campaign, combined engine-on physical
+MEM-1 is on the owner’s beta list with the round-3 measurements below; no
+further memory campaign is scheduled in this lane. Combined engine-on physical
 footprint exceeds today by 128.3 MiB at initial home, 110.9 MiB with an empty
 project, and 139.0 MiB with the generated text corpus. Last-tab cleanup saves
 104.6 MiB against its same-build control, but does not close the project-open
@@ -62,6 +63,19 @@ in-flight requests, active jobs, probes, frames, compiles and queued work.
 Requests racing retirement cancel it or await stop before restarting.
 Accepted exports retain their sessions through completion. Cold launch is
 still measurable; prewarming overlaps it with agent preparation.
+
+JOBCOLD-1 also prewarms when the user opens the export settings sheet. A
+window-owned, non-expiring hold pauses the 60 s idle exit until that sheet
+closes. Each stacked sheet has a separate id. Export and queue preflight
+retain their own holds while media bindings and definitions settle, covering
+the handoff after the settings sheet closes. Offline prompts and save panels
+acquire independent holds through job acceptance, cancellation or error,
+including callers that skip the settings sheet. Main releases all of a page’s holds on navigation, renderer
+loss, window closure and host disposal. Once the last hold closes, the normal
+quiet countdown resumes; accepted jobs remain protected by their sessions.
+Background queue resumption after relaunch may still pay a cold start, as
+accepted by the owner. These lifecycle changes were functionally tested after
+the frozen round-3 memory campaign; no new footprint delta is claimed.
 
 ## Viewer lifecycle
 
@@ -349,6 +363,24 @@ alpha ProRes, each 24 frames/one save dialog. Text exports use the native job
 engine; the earlier legacy-routing expectation was corrected. Temporary
 outputs and profiles were removed. No QoS implementation was changed.
 
+The supervision review follow-up built the plain-Node native host with the
+real addon and FFmpeg environment and ran its gated integration file: 3/3
+passed, no skips. Its fixture now explicitly requests eager jobs before
+waiting for job readiness. Every other `NativeEngine` construction in tests
+and harnesses was audited: eager fixtures declare it; on-demand fixtures
+request readiness or work before waiting. JOBCOLD-1 passed 69 distinct
+focused unit tests, including independent stacked sheets, long-lived holds,
+queued idle callbacks, owner loss, panel errors and media/definition
+preflight. The app build and Svelte check passed (one existing warning).
+The standard Node typecheck still reports two existing TS6307 inclusion
+errors in the canonical JSON test/compositions/registry imports; no changed
+file reports a type error. A hidden Electron regression spec now exercises
+sheet, slow-preflight and save-panel holds past a diagnostic one-second idle
+deadline, then checks retirement after dismissal. That follow-up spec and
+the export rerun were queued but not executed because another lane acquired
+a long exclusive reservation; the queue was cancelled without launching an
+app. The existing round-3 export result above remains historical evidence.
+
 ## Reproduction and next work
 
 `scripts/measure-engine-memory.mjs` measures prebuilt app trees. Set
@@ -362,10 +394,11 @@ is enabled by default. Wrap only the actual Electron command with the shared
 `nice -n 15`, and use one Playwright worker. Raw profiles, traces, footprint,
 vmmap and operational reports stay outside Git.
 
-The remaining project-open physical gaps are release blockers for P7. Next
-work needs symbolized PartitionAlloc call-site attribution, coordinated font
-registry generation release, and page/compositor allocation attribution with
-matching engine-off trace controls. Actual Metal heap residency remains
-unavailable through these public counters. Document and frame-cache cuts
+The owner accepted the remaining project-open physical gaps onto the beta
+list as MEM-1. Future attribution work needs symbolized PartitionAlloc
+call-site attribution, coordinated font registry generation release, and
+page/compositor allocation attribution with matching engine-off trace
+controls. Actual Metal heap residency remains unavailable through these
+public counters. Document and frame-cache cuts
 belong with their owning lanes. Existing shaders, formats, compatibility
 contracts, crash isolation and initial viewer latency remain requirements.
