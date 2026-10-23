@@ -20,7 +20,7 @@
 //!
 //! Random access as today has it: `decodeAudioData` decodes the whole file
 //! once and playback reads the buffer. Here one sequential decode per file
-//! ([`Whole`]) runs on its own thread from the first open, reading the file
+//! ([`Whole`]) runs on its own thread from the first sample read, reading the file
 //! through the I/O context (never holding its bytes), and every open of the
 //! file reads the decoded samples it shares: a seek anywhere, forward or
 //! back, copies samples once the decode has passed them. The samples equal
@@ -277,14 +277,14 @@ pub const TODAYS_BUDGET: u64 = 128 << 20;
 /// context's rate × channels × 4 bytes) fits [`TODAYS_BUDGET`]. The context
 /// runs at the device's rate, unknown here, so the estimate takes the lower
 /// of the file's rate and 44.1 kHz: a file today plays is never taken for
-/// one it refuses (a refused file near the line may still decode whole,
-/// using at most the budget × its rate / 44.1 kHz). Today's files decode
-/// whole, as today ([`ChromiumDecoder`]); longer ones, which today cannot
-/// play, use Powermove's random-access decoder (the plan's "no length
-/// limit") so their memory stays the block cache's.
+/// one it refuses (a refused file near the line may still use the exact
+/// sequential decoder). The sequential PCM is spooled to disk, so both
+/// paths keep resident samples in SourceCache's bounded block LRU. Longer
+/// files use Powermove's random-access decoder; the budget never refuses a
+/// stream that the engine can play (LONG-1).
 pub fn plays_today(info: &pm_media::audio::AudioStreamInfo) -> bool {
     let Some(frames) = info.length else {
-        // No container length: decoded whole, under the hard cap.
+        // No container length: exact sequential PCM goes to the disk spool.
         return true;
     };
     let rate = f64::from(info.sample_rate.max(1));

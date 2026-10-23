@@ -4,7 +4,8 @@
 //! A block always decodes from its own anchor ([`AudioDecoder::seek_anchored`]),
 //! so its samples depend only on the file and the block index: a render is
 //! the same whatever was rendered before it, and the preview equals the
-//! export. Nothing holds a whole file; there is no length limit.
+//! export. Resident samples live in the block LRU; exact sequential
+//! Chromium decodes use temporary PCM spools on disk. There is no length limit.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -301,7 +302,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl SourceCache {
-    /// A cache holding at most about `budget_bytes` of decoded samples, with
+    /// A cache holding at most about `budget_bytes` of decoded samples (with
+    /// today's 128 MiB ceiling), with
     /// `workers` background decode threads for prefetch (0 for none: every
     /// block then decodes on the thread that asks for it).
     pub fn new(budget_bytes: usize, workers: usize) -> Arc<SourceCache> {

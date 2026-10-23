@@ -69,9 +69,9 @@ fn aac_and_opus_decode_as_today() {
     }
 }
 
-/// Playback never waits for today's length: the first open takes the
-/// container's length and counts today's on a background thread; a later
-/// open of the same file takes today's.
+/// Opening a restored source only reads metadata. Its first sample read
+/// starts the background spool and learns today's decoded length; later
+/// mix builds take that exact length.
 #[test]
 fn restored_sources_decode_lazily_and_count_length_on_first_read() {
     let Some(lib) = chromium_ffmpeg() else {
@@ -152,8 +152,8 @@ fn read_block(
 /// buffer; here every open of a file reads its one shared whole decode, so
 /// a seek anywhere (forward, or far back) is a copy once the decode has
 /// passed it, the samples equal one sequential decode bit for bit, and the
-/// memory is the decoded samples (never the file's bytes), freed with the
-/// last open.
+/// shared PCM lives on disk, while the source cache alone budgets resident
+/// sample blocks. The anonymous spool closes with its last reader.
 #[test]
 fn seeks_read_the_shared_whole_decode() {
     let Some(lib) = chromium_ffmpeg() else {
