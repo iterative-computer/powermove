@@ -335,7 +335,7 @@ export class PowermoveAgentToolBridge {
 
   private prepareRun(session: PowermoveAgentToolSession): void {
     const engineJobs = this.options.engineJobs;
-    if (session.context !== 'project' || session.inspectionOnly || session.transactionSession || !engineJobs?.available || !engineJobs.prepareRun) return;
+    if (session.context !== 'project' || session.transactionSession || !engineJobs?.available || !engineJobs.prepareRun) return;
     // Renew a bounded hold on each tool call. The first launch overlaps model
     // preparation; later calls keep a long-running agent session warm.
     void Promise.resolve().then(() => {

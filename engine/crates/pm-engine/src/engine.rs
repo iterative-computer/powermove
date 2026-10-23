@@ -439,16 +439,15 @@ impl Engine {
         self.presenter.is_some()
     }
 
-    /// Installs the render and export service (contracts 12 and 13). Only
-    /// the job engine runs jobs and agent frames.
+    /// Installs the render and export service (contracts 12 and 13), or the
+    /// interactive engine's lightweight media probe service. Only the job
+    /// engine accepts jobs and agent frames.
     pub fn set_job_service(&mut self, service: Box<dyn JobService>) {
-        if self.config.process == EngineProcess::Job {
-            self.jobs = Some(service);
-        }
+        self.jobs = Some(service);
     }
 
     pub fn has_job_service(&self) -> bool {
-        self.jobs.is_some()
+        self.config.process == EngineProcess::Job && self.jobs.is_some()
     }
 
     /// Sends what the job service produced off this thread: its responses,
@@ -978,10 +977,18 @@ impl Engine {
             Request::Snapshot(snapshot) if kind == PeerKind::Host && self.presenter.is_some() => {
                 self.snapshot(port, id, snapshot, revision, out)
             }
-            Request::SubmitJob(job) if self.jobs.is_some() && kind == PeerKind::Host => {
+            Request::SubmitJob(job)
+                if self.config.process == EngineProcess::Job
+                    && self.jobs.is_some()
+                    && kind == PeerKind::Host =>
+            {
                 self.submit_job(port, id, job, out)
             }
-            Request::CancelJobs(cancel) if self.jobs.is_some() && kind == PeerKind::Host => {
+            Request::CancelJobs(cancel)
+                if self.config.process == EngineProcess::Job
+                    && self.jobs.is_some()
+                    && kind == PeerKind::Host =>
+            {
                 let cancelled = self.jobs.as_mut().expect("checked").cancel(&cancel);
                 self.respond(
                     port,
@@ -992,7 +999,11 @@ impl Engine {
                     out,
                 );
             }
-            Request::AgentFrames(request) if self.jobs.is_some() && kind == PeerKind::Host => {
+            Request::AgentFrames(request)
+                if self.config.process == EngineProcess::Job
+                    && self.jobs.is_some()
+                    && kind == PeerKind::Host =>
+            {
                 self.agent_frames(port, id, session, revision, request, now, out)
             }
             Request::ProbeMedia(probe) if self.jobs.is_some() && kind == PeerKind::Host => {

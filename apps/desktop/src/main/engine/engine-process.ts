@@ -11,6 +11,7 @@
  * and dispatch: rendering lanes run on the engine's own threads.
  */
 import type { MessagePortMain } from 'electron';
+import { getHeapStatistics } from 'node:v8';
 
 import type { EngineBootstrap, EngineControl, EngineNotice } from './ports';
 
@@ -94,6 +95,27 @@ function main(): void {
     if (!traceOn || typeof engine.presentTrace !== 'function' || !json.startsWith('{') || !json.endsWith('}')) return json;
     return `${json.slice(0, -1)}${json.length > 2 ? ',' : ''}"presentTrace":${engine.presentTrace()}}`;
   };
+  // Measurement runs opt in to Node/V8 attribution. Keep ordinary status
+  // reports cheap; the memory counters are sampled only when requested.
+  const runtimeMemoryOn = process.env['POWERMOVE_ENGINE_RUNTIME_MEMORY'] === '1';
+  const withRuntimeMemory = (json: string): string => {
+    if (!runtimeMemoryOn || !json.startsWith('{') || !json.endsWith('}')) return json;
+    const usage = process.memoryUsage();
+    const heap = getHeapStatistics();
+    const runtimeMemory = {
+      rss: usage.rss,
+      heapUsed: usage.heapUsed,
+      heapTotal: usage.heapTotal,
+      external: usage.external,
+      arrayBuffers: usage.arrayBuffers,
+      v8Physical: heap.total_physical_size,
+      v8Available: heap.total_available_size,
+      v8Limit: heap.heap_size_limit,
+      v8Malloced: heap.malloced_memory,
+      v8PeakMalloced: heap.peak_malloced_memory
+    };
+    return `${json.slice(0, -1)}${json.length > 2 ? ',' : ''}"runtimeMemory":${JSON.stringify(runtimeMemory)}}`;
+  };
   const shutdown = (): void => {
     for (const port of ports.values()) port.close();
     ports.clear();
@@ -135,7 +157,7 @@ function main(): void {
       const lost = engine.simulateGpuLoss?.() === true;
       notify({ type: 'log', level: 'warn', message: lost ? 'simulated a GPU device loss' : 'this engine does not present; no GPU device to lose' });
     } else if (message?.type === 'status' && Number.isSafeInteger(message.id)) {
-      notify({ type: 'status', id: message.id, json: withPresentTrace(engine.status()) });
+      notify({ type: 'status', id: message.id, json: withRuntimeMemory(withPresentTrace(engine.status())) });
     } else if (message?.type === 'shutdown') {
       shutdown();
     }

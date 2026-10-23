@@ -24,7 +24,9 @@ use pm_bridge::rendezvous::{Client, SendRight};
 use pm_bridge::wire::{PixelFormat, SurfaceInfo};
 use pm_engine::document::DocumentUpdate;
 use pm_engine::{Action, LogLevel};
-use pm_gpu::bridge_out::display::{DisplayParams, DisplayTransform, WorkingTexture};
+use pm_gpu::bridge_out::display::{
+    DisplayParams, DisplayTransform, WORKING_FORMAT, WorkingTexture,
+};
 use pm_gpu::bridge_out::pool::SurfacePool;
 #[cfg(feature = "remote-layer")]
 use pm_gpu::bridge_out::remote_layer::{
@@ -607,8 +609,8 @@ pub struct Stats {
     /// IOSurface allocation sizes; target and cache bytes are nominal texel
     /// counts. Lease reservations are not included.
     pub allocations: AllocationInventory,
-    /// Rests at which idle GPU memory was released, and the bytes freed
-    /// in all (`Thread::release_at_rest`).
+    /// Rests at which idle GPU memory was released, and nominal bytes freed
+    /// from tracked idle targets. Full device retirement is not byte-counted.
     pub rest_releases: u64,
     pub rest_released_bytes: u64,
     #[serde(skip)]
@@ -788,7 +790,9 @@ struct Live {
     spec: PoolSpec,
     pool: SurfacePool,
     ledger: PoolLedger,
-    working: WorkingTexture,
+    /// Scratch target; released after a quiet rest and recreated before the
+    /// next frame. The exported surfaces and their generation stay live.
+    working: Option<WorkingTexture>,
     /// The bridge test source; `None` for documents.
     source: Option<TestSource>,
     /// The C′ prototype's layer for this pool's size and format.
@@ -914,9 +918,11 @@ impl SnapshotPoller {
                 // work for milliseconds on a loaded machine).
                 pm_bridge::set_thread_user_interactive();
                 for (device, lost) in rx {
-                    if let Err(error) = device.poll(wgpu::PollType::Wait {
-                        submission_index: None,
-                        timeout: Some(Duration::from_secs(2)),
+                    if let Err(error) = objc2::rc::autoreleasepool(|_| {
+                        device.poll(wgpu::PollType::Wait {
+                            submission_index: None,
+                            timeout: Some(Duration::from_secs(2)),
+                        })
                     }) {
                         let _ = back.send(Command::SnapshotPollFailed {
                             lost,
@@ -1026,9 +1032,9 @@ struct Rest {
 }
 
 /// How long the presenter must have drawn nothing (no frame, snapshot, or
-/// playback) before it frees its idle intermediate targets, its cached
-/// snapshot attachment and its staging buffers. They are recreated by the
-/// next frame (docs/engine/memory.md, "At rest").
+/// playback) before it frees idle intermediate targets, viewer scratch
+/// textures, the cached snapshot attachment and staging buffers. They are
+/// recreated by the next frame (docs/engine/memory.md, "At rest").
 pub const REST_RELEASE_US: i64 = 2_000_000;
 
 /// Most waveform requests that wait for media answers at once.
@@ -1135,7 +1141,7 @@ pub fn run(
         svg: super::svg::SvgState::default(),
         rest: Rest::default(),
     };
-    thread.check_in();
+    objc2::rc::autoreleasepool(|_| thread.check_in());
     let mut last_inventory_us = 0;
     loop {
         let timeout = thread.next_wake();
@@ -1144,15 +1150,17 @@ pub fn run(
             Ok(command) => {
                 let started = now();
                 let what = command_name(&command);
-                if !thread.apply(command) {
+                if !objc2::rc::autoreleasepool(|_| thread.apply(command)) {
                     break;
                 }
                 thread.note_turn(what, started);
                 while let Ok(command) = rx.try_recv() {
                     let started = now();
                     let what = command_name(&command);
-                    if matches!(command, Command::Shutdown) || !thread.apply(command) {
-                        thread.shutdown();
+                    if matches!(command, Command::Shutdown)
+                        || !objc2::rc::autoreleasepool(|_| thread.apply(command))
+                    {
+                        objc2::rc::autoreleasepool(|_| thread.shutdown());
                         return;
                     }
                     thread.note_turn(what, started);
@@ -1161,18 +1169,18 @@ pub fn run(
             Err(RecvTimeoutError::Timeout) => {}
         }
         let started = now();
-        thread.work();
+        objc2::rc::autoreleasepool(|_| thread.work());
         thread.note_turn("work", started);
         let sampled_at_us = now();
-        thread.release_at_rest(sampled_at_us);
+        objc2::rc::autoreleasepool(|_| thread.release_at_rest(sampled_at_us));
         if thread.config.allocation_inventory
             && sampled_at_us.saturating_sub(last_inventory_us) >= 50_000
         {
-            thread.snapshot_allocations(sampled_at_us);
+            objc2::rc::autoreleasepool(|_| thread.snapshot_allocations(sampled_at_us));
             last_inventory_us = sampled_at_us;
         }
     }
-    thread.shutdown();
+    objc2::rc::autoreleasepool(|_| thread.shutdown());
 }
 
 /// A render-thread turn longer than this is a stall (diagnostics: the
@@ -1216,17 +1224,22 @@ fn command_name(command: &Command) -> &'static str {
 
 impl Thread {
     /// Frees idle GPU memory once nothing was drawn for [`REST_RELEASE_US`]:
-    /// the renderer's idle intermediate targets, the cached snapshot
-    /// attachment and the snapshot staging buffers. Surfaces on screen,
-    /// working targets, the kept bottom of the last frame and every content
-    /// cache stay. Done once per rest; any frame or snapshot starts a new one.
+    /// the renderer's idle intermediate targets, viewer scratch textures,
+    /// the cached snapshot attachment and staging buffers. Exported surface
+    /// pools remain live. With no remaining session, the device and its
+    /// composer go too. Done once per rest; any frame or snapshot starts a
+    /// new one.
     fn release_at_rest(&mut self, now_us: i64) {
         let seen = {
             let stats = self.stats();
             (stats.frames, stats.snapshots)
         };
         if seen != self.rest.seen || self.rest.since == 0 {
-            self.rest = Rest { seen, since: now_us, released: false };
+            self.rest = Rest {
+                seen,
+                since: now_us,
+                released: false,
+            };
             return;
         }
         if self.rest.released || now_us - self.rest.since < REST_RELEASE_US {
@@ -1235,15 +1248,23 @@ impl Thread {
         let busy = !self.pending_snapshots.is_empty()
             || self.snapshots.waiting()
             || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
-            || self
-                .views
-                .values()
-                .any(|v| v.clock.is_playing() || v.dirty || v.awaiting.is_some() || !v.requests.is_empty());
+            || self.views.values().any(|v| {
+                v.clock.is_playing() || v.dirty || v.awaiting.is_some() || !v.requests.is_empty()
+            });
         let Some(gpu) = self.gpu.as_mut() else {
             self.rest.released = true;
             return;
         };
         if busy || gpu.snapshot_readback.in_flight() {
+            return;
+        }
+        if self.views.is_empty() && self.docs.is_empty() {
+            // The completion thread no longer owns a submitted frame's
+            // device, and every session's readback was cancelled on close.
+            // A later project creates a fresh device through `gpu()`.
+            self.gpu = None;
+            self.rest.released = true;
+            self.stats().rest_releases += 1;
             return;
         }
         let mut freed = gpu.snapshot_target.take().map_or(0, |t| t.bytes());
@@ -1252,6 +1273,15 @@ impl Thread {
         freed -= gpu.snapshot_readback.capacity_bytes();
         if let Some(composer) = gpu.composer.as_mut() {
             freed += composer.renderer().release_idle_targets();
+        }
+        for view in self.views.values_mut() {
+            if let Some(live) = view.pool.as_mut()
+                && let Some(working) = live.working.take()
+            {
+                freed += u64::from(working.size.width)
+                    * u64::from(working.size.height)
+                    * u64::from(WORKING_FORMAT.block_copy_size(None).unwrap_or(8));
+            }
         }
         self.rest.released = true;
         let mut stats = self.stats();
@@ -1291,15 +1321,15 @@ impl Thread {
                 .depth
                 .as_ref()
                 .map(|live| SurfaceAllocation::of(live.spec, &live.pool));
-            let working_target_bytes = view.pool.as_ref().map_or(0, |live| {
-                u64::from(live.working.size.width)
-                    * u64::from(live.working.size.height)
-                    * u64::from(
-                        pm_gpu::bridge_out::display::WORKING_FORMAT
-                            .block_copy_size(None)
-                            .unwrap_or(8),
-                    )
-            });
+            let working_target_bytes = view
+                .pool
+                .as_ref()
+                .and_then(|live| live.working.as_ref())
+                .map_or(0, |working| {
+                    u64::from(working.size.width)
+                        * u64::from(working.size.height)
+                        * u64::from(WORKING_FORMAT.block_copy_size(None).unwrap_or(8))
+                });
             inventory.color_surface_bytes += color.as_ref().map_or(0, |pool| pool.iosurface_bytes);
             inventory.depth_surface_bytes += depth.as_ref().map_or(0, |pool| pool.iosurface_bytes);
             inventory.working_target_bytes += working_target_bytes;
@@ -2484,6 +2514,12 @@ impl Thread {
         self.docs.remove(&key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
+        if self.views.is_empty() && self.docs.is_empty() {
+            // A still-open session may already have completed its idle
+            // cleanup. Start a new rest when the final session closes so
+            // the device is retired even if no more frames arrive.
+            self.rest = Rest::default();
+        }
         if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
             composer.forget_definitions(key);
         }
@@ -3266,7 +3302,7 @@ impl Thread {
             spec.count,
         )
         .map_err(|e| e.to_string())?;
-        let working = WorkingTexture::new(&gpu.device, spec.size);
+        let working = Some(WorkingTexture::new(&gpu.device, spec.size));
         let source = (!document).then(|| TestSource::new(&gpu.device, spec.size, extra_passes));
         let bridge = self.bridge.as_ref().ok_or("no bridge")?;
         let format = match spec.format {
@@ -4353,6 +4389,10 @@ impl Thread {
         let view = self.views.get_mut(&key)?;
         let live = view.pool.as_mut()?;
         let index = live.ledger.free()?;
+        let size = live.spec.size;
+        let working = live
+            .working
+            .get_or_insert_with(|| WorkingTexture::new(&gpu.device, size));
         let seq = view.next_seq;
         let start = now();
         let overlay;
@@ -4443,7 +4483,7 @@ impl Thread {
                 assets,
                 Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
                 &render_state,
-                &live.working,
+                working,
                 depth_slot
                     .as_ref()
                     .map(|(_, _, depth, coverage)| (depth, coverage)),
@@ -4797,7 +4837,7 @@ impl Thread {
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             live.source
                 .as_ref()?
-                .encode(&gpu.queue, &mut encoder, &live.working, &frame);
+                .encode(&gpu.queue, &mut encoder, working, &frame);
             gpu.queue.submit([encoder.finish()]);
         }
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -4811,7 +4851,7 @@ impl Thread {
             &gpu.device,
             &gpu.queue,
             &mut encoder,
-            &live.working,
+            working,
             surface,
             params,
         ) {
@@ -6433,6 +6473,7 @@ mod tests {
     #[test]
     fn idle_gpu_memory_goes_once_the_viewer_rests() {
         let (mut thread, _) = preview_thread();
+        thread.docs.insert(preview_key(), ViewDocument::default());
         let gpu = thread.gpu.insert({
             let g = pm_gpu::Gpu::new("rest release test").expect("a Metal device");
             Gpu {
@@ -6458,7 +6499,10 @@ mod tests {
         let t0 = 1_000_000;
         thread.release_at_rest(t0);
         thread.release_at_rest(t0 + REST_RELEASE_US - 1);
-        assert!(thread.gpu.as_ref().unwrap().snapshot_target.is_some(), "too early");
+        assert!(
+            thread.gpu.as_ref().unwrap().snapshot_target.is_some(),
+            "too early"
+        );
         // A frame starts a new rest.
         thread.stats().frames += 1;
         thread.release_at_rest(t0 + REST_RELEASE_US + 1);
@@ -6473,6 +6517,118 @@ mod tests {
         // Once per rest.
         thread.release_at_rest(t0 + 4 * REST_RELEASE_US);
         assert_eq!(thread.stats().rest_releases, 1);
+
+        // Closing the final session drops the device after the same rest
+        // bound. A new session will create it on its first render.
+        assert!(thread.apply(Command::Close { key: preview_key() }));
+        thread.release_at_rest(t0 + 5 * REST_RELEASE_US);
+        thread.release_at_rest(t0 + 6 * REST_RELEASE_US);
+        assert!(thread.gpu.is_none());
+        assert_eq!(thread.stats().rest_releases, 2);
+        assert!(thread.gpu().is_some());
+    }
+
+    #[test]
+    fn rested_working_texture_recreates_without_changing_a_frame_or_pool() {
+        use pm_protocol::color::ViewerColorSpace;
+        use pm_protocol::frame::MediaPreference;
+
+        let (mut thread, _) = preview_thread();
+        thread.config.document = false;
+        let key = preview_key();
+        let size = Size::new(1496, 904);
+        thread.configure(
+            key,
+            ViewerState {
+                headless: None,
+                composition: "main".into(),
+                size,
+                device_pixel_ratio: 1.0,
+                zoom: 1.0,
+                pan: [0.0, 0.0],
+                resolution: PreviewResolution::Full,
+                media: MediaPreference::Automatic,
+                color_space: ViewerColorSpace::Srgb,
+                view: None,
+                play_every_frame: false,
+                edr: false,
+                view_seq: Seq::new(1).unwrap(),
+                vsync: None,
+                depth_id: None,
+                chrome_selection: None,
+                canvas: None,
+                surface_epoch: None,
+            },
+            None,
+            None,
+        );
+        let spec = PoolSpec {
+            generation: 7,
+            size,
+            format: SurfaceFormat::Bgra8Unorm,
+            count: 4,
+        };
+        let live = {
+            let gpu = thread.gpu().expect("a Metal device");
+            Live {
+                spec,
+                pool: SurfacePool::new(&gpu.device, spec.generation, size, spec.format, spec.count)
+                    .unwrap(),
+                ledger: PoolLedger::new(spec.count as usize),
+                working: Some(WorkingTexture::new(&gpu.device, size)),
+                source: Some(TestSource::new(&gpu.device, size, 0)),
+                remote: None,
+            }
+        };
+        let view = thread.views.get_mut(&key).unwrap();
+        view.pool = Some(live);
+        view.dirty = false;
+
+        let first = thread.render(key, 0, -1, None, false, false).unwrap();
+        let first_pixels = thread.views[&key].pool.as_ref().unwrap().pool.surfaces
+            [first.pool_index as usize]
+            .iosurface
+            .read();
+        let allocated_before =
+            pm_gpu::device::allocated_bytes(&thread.gpu.as_ref().unwrap().device);
+        thread.apply(Command::Release {
+            key,
+            release: FrameRelease {
+                pool_index: first.pool_index,
+                seq: first.seq,
+            },
+        });
+        let t0 = 1_000_000;
+        thread.release_at_rest(t0);
+        thread.release_at_rest(t0 + REST_RELEASE_US + 1);
+        let live = thread.views[&key].pool.as_ref().unwrap();
+        assert!(live.working.is_none());
+        assert_eq!(live.spec.generation, spec.generation);
+        assert_eq!(live.pool.len(), spec.count as usize);
+        assert_eq!(
+            thread.stats().rest_released_bytes,
+            u64::from(size.width * size.height * 8)
+        );
+        let allocated_at_rest =
+            pm_gpu::device::allocated_bytes(&thread.gpu.as_ref().unwrap().device);
+
+        // The same sequence drives both the pattern and display dither.
+        thread.views.get_mut(&key).unwrap().next_seq = first.seq.get();
+        let started = std::time::Instant::now();
+        let second = thread.render(key, 0, -1, None, false, false).unwrap();
+        let resumed_us = started.elapsed().as_micros();
+        let live = thread.views[&key].pool.as_ref().unwrap();
+        assert!(live.working.is_some());
+        assert_eq!(live.spec.generation, spec.generation);
+        let second_pixels = live.pool.surfaces[second.pool_index as usize]
+            .iosurface
+            .read();
+        assert_eq!(first_pixels, second_pixels);
+        let allocated_after = pm_gpu::device::allocated_bytes(&thread.gpu.as_ref().unwrap().device);
+        eprintln!(
+            "first frame after scratch rest: {resumed_us} us; Metal bytes before/rest/after: {allocated_before:?}/{allocated_at_rest:?}/{allocated_after:?}"
+        );
+        assert!(resumed_us < 50_000, "first resumed frame exceeded 50 ms");
     }
 
     #[test]

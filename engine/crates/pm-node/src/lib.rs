@@ -147,16 +147,20 @@ impl EngineHost {
                 engine.set_presenter(Box::new(bridge));
             }
             // The job engine renders exports and agent frames (sections 17
-            // and 20). Its lanes wake the utility process through the sink,
-            // which then calls `pump`. `POWERMOVE_ENGINE_JOBS=0` turns it off.
-            if process == EngineProcess::Job
-                && env(JOBS_ENV).as_deref() != Some("0")
-                && let Some(sink) = sink
-            {
+            // and 20). The interactive engine needs only CPU media facts;
+            // its probe worker starts on first use. Both wake the utility
+            // process through the sink, which then calls `pump`.
+            if let Some(sink) = sink {
                 let wake: jobs::Wake = std::sync::Arc::new(move || sink(Vec::new()));
-                let service = jobs::JobEngineService::start_with_fonts(wake, render_fonts.clone())?;
-                job_stats = Some(service.stats_handle());
-                engine.set_job_service(Box::new(service));
+                if process == EngineProcess::Interactive {
+                    engine
+                        .set_job_service(Box::new(jobs::JobEngineService::start_probes_only(wake)));
+                } else if env(JOBS_ENV).as_deref() != Some("0") {
+                    let service =
+                        jobs::JobEngineService::start_with_fonts(wake, render_fonts.clone())?;
+                    job_stats = Some(service.stats_handle());
+                    engine.set_job_service(Box::new(service));
+                }
             }
         }
         #[cfg(not(target_os = "macos"))]

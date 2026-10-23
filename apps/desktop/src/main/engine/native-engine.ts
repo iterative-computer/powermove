@@ -64,6 +64,9 @@ const STAGED_PER_LAUNCH = 16;
  *  exits; it holds a Node runtime, a Metal device, and its caches
  *  (docs/engine/memory.md, "Process lifetime"). */
 export const JOB_IDLE_MS = 60_000;
+/** A lost agent-session finish signal cannot pin a job utility forever.
+ *  Tool calls renew this hold while the run is still active. */
+export const JOB_RUN_HOLD_MS = 30 * 60_000;
 
 /** Whether a job engine report shows nothing that needs the process: no
  *  session (exports, agent frames, validations hold one), nothing in
@@ -203,6 +206,7 @@ export class NativeEngine {
   private jobOutstanding = 0;
   private jobActivity = 0;
   private jobIdleTimer: { cancel(): void } | null = null;
+  private jobRunHolds = new Map<string, { cancel(): void }>();
   /** Set while main checks an idle job utility and stops it; job requests
    *  wait for it, then start a new utility if it stopped. */
   private retiring: Promise<void> | null = null;
@@ -293,6 +297,8 @@ export class NativeEngine {
     this.jobDemanded = false;
     this.jobIdleTimer?.cancel();
     this.jobIdleTimer = null;
+    for (const hold of this.jobRunHolds.values()) hold.cancel();
+    this.jobRunHolds.clear();
     for (const cancel of this.cancelReadiness) cancel();
     await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop(), this.blender?.dispose()]);
   }
@@ -505,11 +511,45 @@ export class NativeEngine {
     }
   }
 
+  /** Keep an agent run's already-started job utility available across model
+   *  thinking pauses. Idempotent by run id, renewed by later tool calls. */
+  holdJobRun(run: string): void {
+    if (!this.started || this.stopping) return;
+    this.jobRunHolds.get(run)?.cancel();
+    this.jobActivity++;
+    this.jobIdleTimer?.cancel();
+    this.jobIdleTimer = null;
+    const schedule = this.options.schedule ?? ((fn: () => void, ms: number) => {
+      const timer = setTimeout(fn, ms);
+      timer.unref?.();
+      return { cancel: () => clearTimeout(timer) };
+    });
+    const hold = schedule(() => {
+      if (this.jobRunHolds.get(run) === hold) this.releaseJobRun(run);
+    }, JOB_RUN_HOLD_MS);
+    this.jobRunHolds.set(run, hold);
+  }
+
+  /** Release a completed or cancelled run. The ordinary quiet countdown
+   *  resumes once the last run ends; active sessions and jobs remain protected
+   *  by the engine's status report. */
+  releaseJobRun(run: string): void {
+    const hold = this.jobRunHolds.get(run);
+    if (!hold) return;
+    hold.cancel();
+    this.jobRunHolds.delete(run);
+    if (!this.jobRunHolds.size) this.touchJob();
+  }
+
   /** Records job activity and restarts the idle countdown. */
   private touchJob(): void {
     this.jobActivity++;
     if (this.options.eagerJobs || !this.started || this.stopping) return;
     this.jobIdleTimer?.cancel();
+    if (this.jobRunHolds.size) {
+      this.jobIdleTimer = null;
+      return;
+    }
     const schedule = this.options.schedule ?? ((fn: () => void, ms: number) => {
       const timer = setTimeout(fn, ms);
       timer.unref?.();
@@ -529,15 +569,15 @@ export class NativeEngine {
    */
   private async retireIdleJob(): Promise<void> {
     const launch = this.supervisors.job.current;
-    if (!launch || launch.exiting || this.stopping || !this.started || this.retiring || this.jobOutstanding ||
-      this.readiness.has('job') || this.probes.size) return;
+    if (!launch || launch.exiting || this.stopping || !this.started || this.retiring || this.jobOutstanding || this.jobRunHolds.size ||
+      this.readiness.has('job')) return;
     const stamp = this.jobActivity;
     let release = (): void => {};
     this.retiring = new Promise<void>((resolve) => { release = resolve; });
     let retired = false;
     try {
       const report = await launch.report(2000);
-      if (stamp !== this.jobActivity || this.jobOutstanding || this.supervisors.job.current !== launch || !jobReportIdle(report)) return;
+      if (stamp !== this.jobActivity || this.jobOutstanding || this.jobRunHolds.size || this.supervisors.job.current !== launch || !jobReportIdle(report)) return;
       this.jobDemanded = false;
       await this.supervisors.job.stop();
       retired = true;
@@ -564,10 +604,10 @@ export class NativeEngine {
     this.services.setDraftSession(session, draft);
   }
 
-  /** Interpret Footage's facts of an asset's file. Main resolves the asset
-   *  (the media store) and mints a `mediaRead` handle bound to the job
-   *  engine's host port and session 0; the job engine resolves it, reads
-   *  the file, and answers `mediaFacts`. The handle is revoked after. */
+  /** Interpret Footage's facts of an asset's file. The interactive utility
+   *  is already running and serves CPU-only probes without starting the job
+   *  utility. Its host port and session 0 own the short-lived mediaRead
+   *  capability, so another utility cannot resolve it. */
   async probeMedia(asset: string, interpret: string | null): Promise<MediaFacts> {
     const slot = this.probes.get(asset);
     if (slot) {
@@ -599,15 +639,15 @@ export class NativeEngine {
   }
 
   private async probeOnce(asset: string, interpret: string | null): Promise<MediaFacts> {
-    await this.ensureReady('job');
-    const launch = this.supervisors.job.current;
-    if (!launch) throw new Error('the job engine is not running');
+    await this.ensureReady('interactive');
+    const launch = this.supervisors.interactive.current;
+    if (!launch) throw new Error('the interactive engine is not running');
     const resolved = await this.options.resolveAsset?.(asset);
     if (!resolved) throw new Error('The asset’s file is not available.');
     const handle = this.handles.mint({ kind: { kind: 'mediaRead', asset }, session: 0, port: launch.hostPort, path: resolved.path });
     try {
-      const answer = await this.request('job', { type: 'probeMedia', handle, interpret });
-      if (answer.type !== 'mediaFacts') throw new Error(`the job engine answered ${answer.type}`);
+      const answer = await this.request('interactive', { type: 'probeMedia', handle, interpret });
+      if (answer.type !== 'mediaFacts') throw new Error(`the interactive engine answered ${answer.type}`);
       const { type: _type, ...facts } = answer;
       return facts as MediaFacts;
     } finally {

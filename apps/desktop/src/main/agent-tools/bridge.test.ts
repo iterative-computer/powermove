@@ -58,7 +58,7 @@ async function rpc(child: ChildProcessWithoutNullStreams, message: Record<string
 }
 
 describe('native Powermove agent tool bridge', () => {
-  it('starts the render utility in the background for an editable project run only', async () => {
+  it('starts the render utility for project runs, including read-only frame inspection', async () => {
     const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
     let finishStartup!: () => void;
     const startup = new Promise<void>((resolve) => { finishStartup = resolve; });
@@ -77,10 +77,11 @@ describe('native Powermove agent tool bridge', () => {
       await bridge.openSession({ runId: 'inspect-plan', owner: owner as never, baseRevision: 0, inspectionOnly: true });
       await bridge.openSession({ runId: 'app-run1', owner: owner as never, baseRevision: 0, context: 'app' });
       await bridge.openSession({ runId: 'transaction', owner: owner as never, baseRevision: 0, transactionSession: project });
-      expect(prepareRun).toHaveBeenCalledTimes(1);
+      expect(prepareRun).toHaveBeenCalledTimes(2);
+      expect(prepareRun).toHaveBeenCalledWith('inspect-plan');
       await bridge.callTool(project, 'get_project_state', {});
       await Promise.resolve();
-      expect(prepareRun).toHaveBeenCalledTimes(2);
+      expect(prepareRun).toHaveBeenCalledTimes(3);
       await project.finish(true);
       await Promise.resolve();
       expect(finishRun).toHaveBeenCalledWith('editable');

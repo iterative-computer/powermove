@@ -28,6 +28,7 @@ napi-derive = { version = "3.6", optional = true }
 # The frame bridge's engine side (plan section 18): the presenter, its pools,
 # and the check-in with main.
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
 pm-bridge = { path = "../pm-bridge" }
 pm-gpu = { path = "../pm-gpu", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
