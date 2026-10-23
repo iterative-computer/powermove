@@ -384,5 +384,6 @@ playback cadence tail is issue P4 (perf3 lane).
 The earlier Precision-floor/export-promotion description is superseded by
 [Project color depth](color-depth.md). The single saved depth selects RGBA8,
 f16 or f32 intermediates; fused mask/matte passes reproduce the separate
-8-bit stores. The current byte-exact text residual and qualification limits
-are recorded in that note and remain blockers.
+8-bit stores. The level-1 text sampling residual is resolved, and all 21
+depth-corpus output images are byte-exact. The remaining qualification limits
+are recorded in that note.

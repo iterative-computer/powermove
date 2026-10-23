@@ -127,5 +127,6 @@ project renders. Source conversion keys distinguish unorm8 from both floats.
 Contract 4 adds `Precision::Unorm8`; draft version 0 remains draft and its
 source build identity changes. Old peers fail draft-build negotiation rather
 than interpreting an unknown precision. Existing enum spellings are unchanged.
-The shader-fallback request adds depth 8/16 selection: depth 8 transports exact
-byte codes in the existing four u16 slots per pixel, avoiding f16 rounding.
+The shader-fallback request carries depth 8/16/32: depth 8 transports exact
+byte codes in the existing four u16 slots per pixel, depth 16 uses binary16,
+and depth 32 uses binary32 bands without f16 rounding.

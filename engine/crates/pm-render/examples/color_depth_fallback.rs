@@ -22,7 +22,9 @@ fn main() {
         serde_json::from_slice(&std::fs::read(dir.join("project.json")).unwrap()).unwrap();
     let document =
         pm_model::Document::new(Some(pm_model::json::parse(&value.to_string()).unwrap()), 1);
-    assert_eq!(value["colorDepth"], 32);
+    let depth = value["colorDepth"].as_u64().unwrap() as u8;
+    assert!(matches!(depth, 8 | 32));
+    let suffix = if depth == 32 { "f32" } else { "u16" };
     let mut renderer = Renderer::headless().unwrap();
     let mut definitions = pm_render::all_builtin_definitions();
     definitions.definitions.push(
@@ -52,26 +54,42 @@ fn main() {
                 let mut missing = false;
                 for request in requests {
                     assert_eq!(
-                        request.color_depth, 32,
-                        "float32 project must ask for float32 runner"
+                        request.color_depth, depth,
+                        "runner depth must equal the saved project depth"
                     );
                     let key = &request.key;
                     let textures = renderer.fallback_textures(key).unwrap_or_default();
                     for (index, texture) in textures.iter().enumerate() {
-                        assert!(texture.rgba16f.is_empty(), "no half storage at depth32");
-                        let bits = texture.rgba32f.as_ref().expect("float32 texture");
-                        assert!(
-                            bits.iter().any(|bits| {
-                                let value = f32::from_bits(*bits);
-                                pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(value))
+                        let bytes = if depth == 32 {
+                            assert!(texture.rgba16f.is_empty(), "no half storage at depth32");
+                            let bits = texture.rgba32f.as_ref().expect("float32 texture");
+                            assert!(
+                                bits.iter().any(|bits| {
+                                    let value = f32::from_bits(*bits);
+                                    pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(
+                                        value,
+                                    ))
                                     .to_bits()
-                                    != *bits
-                            }),
-                            "the effect witness must carry values binary16 cannot represent"
-                        );
+                                        != *bits
+                                }),
+                                "the effect must carry values binary16 cannot represent"
+                            );
+                            pm_render::shader_layers::fallback::float_bytes(bits)
+                        } else {
+                            assert!(texture.rgba32f.is_none());
+                            assert!(
+                                texture.rgba16f.iter().all(|code| *code <= 255),
+                                "8-bit wire carries byte codes"
+                            );
+                            texture
+                                .rgba16f
+                                .iter()
+                                .flat_map(|code| code.to_le_bytes())
+                                .collect()
+                        };
                         std::fs::write(
-                            dir.join("requests").join(format!("{key}-{index}.f32")),
-                            pm_render::shader_layers::fallback::float_bytes(bits),
+                            dir.join("requests").join(format!("{key}-{index}.{suffix}")),
+                            bytes,
                         )
                         .unwrap();
                     }
@@ -80,30 +98,46 @@ fn main() {
                         serde_json::to_vec_pretty(&request).unwrap(),
                     )
                     .unwrap();
-                    let answer = dir.join("pixels").join(format!("{key}.f32"));
+                    let answer = dir.join("pixels").join(format!("{key}.{suffix}"));
                     if answer.exists() {
                         let bytes = std::fs::read(answer).unwrap();
-                        assert_eq!(
-                            bytes.len(),
-                            request.width as usize * request.height as usize * 16
-                        );
-                        let bits = pm_render::shader_layers::fallback::float_bits(&bytes);
-                        assert!(
-                            bits.iter().any(|bits| {
-                                let value = f32::from_bits(*bits);
-                                pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(value))
+                        let (rgba16f, rgba32f) = if depth == 32 {
+                            assert_eq!(
+                                bytes.len(),
+                                request.width as usize * request.height as usize * 16
+                            );
+                            let bits = pm_render::shader_layers::fallback::float_bits(&bytes);
+                            assert!(
+                                bits.iter().any(|bits| {
+                                    let value = f32::from_bits(*bits);
+                                    pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(
+                                        value,
+                                    ))
                                     .to_bits()
-                                    != *bits
-                            }),
-                            "runner output must distinguish float32 from a half-float transport"
-                        );
+                                        != *bits
+                                }),
+                                "runner output must distinguish float32 from half transport"
+                            );
+                            (Vec::new(), Some(bits))
+                        } else {
+                            assert_eq!(
+                                bytes.len(),
+                                request.width as usize * request.height as usize * 8
+                            );
+                            let codes: Vec<u16> = bytes
+                                .chunks_exact(2)
+                                .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
+                                .collect();
+                            assert!(codes.iter().all(|code| *code <= 255));
+                            (codes, None)
+                        };
                         renderer.put_fallback_pixels(
                             key.clone(),
                             pm_render::shader_layers::FallbackPixels {
                                 width: request.width,
                                 height: request.height,
-                                rgba16f: Vec::new(),
-                                rgba32f: Some(bits),
+                                rgba16f,
+                                rgba32f,
                             },
                         );
                         answered += 1;
@@ -157,7 +191,7 @@ fn main() {
                             != value.to_bits()
                     })
                     .count();
-                std::fs::write(dir.join("parity.json"), serde_json::to_vec_pretty(&json!({"depth":32,"answeredRequests":answered,"differentChannels":different_channels,"differentFloatBits":different_bits,"halfControlDifferences":half_control_differences,"maxCv":max_cv,"pass":different_bits == 0})).unwrap()).unwrap();
+                std::fs::write(dir.join("parity.json"), serde_json::to_vec_pretty(&json!({"depth":depth,"answeredRequests":answered,"differentChannels":different_channels,"differentFloatBits":different_bits,"halfControlDifferences":half_control_differences,"maxCv":max_cv,"pass":different_bits == 0})).unwrap()).unwrap();
                 assert!(answered >= 2, "must exercise shader and effect fallback");
                 assert_eq!(
                     different_channels, 0,
@@ -165,14 +199,16 @@ fn main() {
                 );
                 assert_eq!(
                     different_bits, 0,
-                    "float32 shader/effect proof requires exact working values"
+                    "shader/effect proof requires exact working values"
                 );
-                assert!(
-                    half_control_differences > 0,
-                    "the reference must detect half-float transport rounding"
-                );
+                if depth == 32 {
+                    assert!(
+                        half_control_differences > 0,
+                        "the reference must detect half-float transport rounding"
+                    );
+                }
                 println!(
-                    "float32 shader/effect: {answered} requests, {different_channels} byte differences, {different_bits} float-bit differences, max {max_cv} CV"
+                    "depth {depth} shader/effect: {answered} requests, {different_channels} byte differences, {different_bits} float-bit differences, max {max_cv} CV"
                 );
                 return;
             }

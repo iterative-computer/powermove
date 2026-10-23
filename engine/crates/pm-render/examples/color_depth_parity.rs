@@ -12,7 +12,7 @@ use std::{
     time::Instant,
 };
 
-fn export_depth8(
+fn export_png(
     r: &mut Renderer,
     doc: Arc<pm_model::Document>,
     comp: &str,
@@ -138,7 +138,11 @@ fn main() {
         let comp = pm_eval::node::string(pm_eval::node::member(doc.root(), "compId"))
             .unwrap()
             .to_string_lossy();
-        let req = RenderRequest::sized(Size::new(w, h), Precision::Float32);
+        let mut req = RenderRequest::sized(Size::new(w, h), Precision::Float32);
+        req.background = !s["transparent"].as_bool().unwrap_or(false);
+        if let Some(samples) = s["mbSamples"].as_u64().filter(|n| *n > 0) {
+            req.motion_blur = pm_render::motion::MotionBlur::Samples(samples.try_into().unwrap());
+        }
         let frame = r
             .render(
                 &doc,
@@ -149,6 +153,10 @@ fn main() {
             )
             .unwrap();
         assert!(frame.failures.is_empty(), "{id}: {:?}", frame.failures);
+        assert_eq!(frame.color.format(), r.device_target_format(&doc, &req));
+        if s["depth"] == 8 {
+            assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba8Unorm);
+        }
         let pixels = r.read_rgba(&frame).unwrap();
         let bytes = std::fs::read(dir.join(format!("{id}.rgba32f"))).unwrap();
         let reference: Vec<f32> = bytes
@@ -164,21 +172,21 @@ fn main() {
             .zip(ref_bytes.chunks_exact(4))
             .filter(|(a, b)| a != b)
             .count();
-        let export_different = if s["depth"] == 8 {
-            assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba8Unorm);
-            let different = export_depth8(
-                &mut r,
-                Arc::clone(&doc),
-                &comp,
-                s,
-                dir.join(format!("{id}.export.png")),
-                &ref_bytes,
-            );
-            println!("{id} exported PNG: different={different}");
-            Some(different)
-        } else {
-            None
-        };
+        let export_different =
+            if s["exportReference"].is_string() || (s["depth"] == 8 && s["exportPng"] != false) {
+                let different = export_png(
+                    &mut r,
+                    Arc::clone(&doc),
+                    &comp,
+                    s,
+                    dir.join(format!("{id}.export.png")),
+                    &ref_bytes,
+                );
+                println!("{id} exported PNG: different={different}");
+                Some(different)
+            } else {
+                None
+            };
         let max_cv = pixels
             .iter()
             .zip(&reference)
@@ -252,13 +260,13 @@ fn main() {
         }
         support::write_png(&dir.join(format!("{id}.diff.png")), w, h, &diff);
         let mut timings = Vec::new();
-        for _ in 0..12 {
+        for _ in 0..s["warmFrames"].as_u64().unwrap_or(12) {
             let started = Instant::now();
             let frame = r
                 .render(
                     &doc,
                     &comp,
-                    support::ticks(0.5),
+                    support::ticks(s["time"].as_f64().unwrap()),
                     &req,
                     &MapResolver::default(),
                 )
@@ -270,13 +278,13 @@ fn main() {
             drop(frame);
         }
         timings.sort_by(f64::total_cmp);
+        let p50 = timings.get(timings.len() / 2).copied();
         println!(
-            "{id}: different={different}, max={max_cv:.6} CV, p50={:.3} ms, pool={} B",
-            timings[6],
+            "{id}: different={different}, max={max_cv:.6} CV, p50={p50:?} ms, pool={} B",
             r.target_pool_bytes()
         );
         failures += usize::from(!pass);
-        results.push(json!({"id":id,"depth":s["depth"],"pass":pass,"differentPixels":different,"exportDifferentPixels":export_different,"maxCv":max_cv,"source":source_result,"p50Ms":timings[6],"targetPoolBytes":r.target_pool_bytes(),"outputBytes":frame.color.bytes()}));
+        results.push(json!({"id":id,"depth":s["depth"],"pass":pass,"differentPixels":different,"exportDifferentPixels":export_different,"maxCv":max_cv,"source":source_result,"p50Ms":p50,"targetPoolBytes":r.target_pool_bytes(),"outputBytes":frame.color.bytes()}));
     }
     std::fs::write(
         dir.join("parity.json"),

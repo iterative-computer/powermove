@@ -194,8 +194,9 @@ function agentFormat(input: ExportVideoInput): { format: DeliveryFormat; deliver
 }
 
 /** The job engine's settings for a format and the sheet's delivery options:
- *  tags, audio coding, start timecode and reel, precision (exports render at
- *  32-bit, amendment 8), and dither (on for 8-bit outputs, section 17). */
+ *  tags, audio coding, start timecode and reel, a Float32 wire hint (the
+ *  project's colorDepth selects working precision), and dither for outputs
+ *  at 8 bits or less. */
 export function wireSettings(input: {
   format: DeliveryFormat;
   delivery: DeliveryOptions;
@@ -246,9 +247,8 @@ export function wireSettings(input: {
  *  pixels, the composition rate, all or the work area, ProRes 4444 (straight
  *  alpha when asked) or H.264 at the High tier (16 Mbps), Rec.709 (QuickTime
  *  and Safari) tags; or a preset's or another delivery format's. Exports
- *  render at 32-bit precision (amendment 8 asks for it whenever a source
- *  exceeds 10 bits; agent exports do not inspect sources first), and 8-bit
- *  outputs are dithered (section 17). */
+ *  use the project's colorDepth despite the Float32 wire hint, and delivery
+ *  formats at 8 bits or less are dithered (section 17). */
 export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput): ExportSettings {
   const project = asProject(projectValue);
   const rate = resolveFrameRate(project['fps'], project['fpsRational']);

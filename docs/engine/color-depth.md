@@ -16,10 +16,8 @@ project and color object, so callers' source documents are preserved.
 The protocol's `ProjectColor.precision` remains a derived transport value for
 the native engine: depths 8, 16, and 32 map to Unorm8, Float16, and Float32.
 The native renderer selects its working format from the same `colorDepth`
-setting. A 32-bit depth alone
-does not require a native-engine stamp; linear blending and other native-only
-features still do.
-
+setting. A 32-bit depth alone does not require a native-engine stamp; linear
+blending and other native-only features still do.
 
 `Renderer::target_format` describes the requested project format;
 `device_target_format` applies the shipped compositor's 32-to-16 hardware
@@ -33,7 +31,6 @@ project depth. Request hints no longer silently promote an 8-bit or 16-bit
 project when a source or delivery format has more bits. The direct CLI's ANGLE
 sidecar and the native hidden host carry binary32 input and output for depth-32
 shader fallback, and retain u16 wire slots for depth 8 and 16.
-
 
 ## Storage and render boundaries
 
@@ -59,10 +56,15 @@ runner uses RGBA32F/FLOAT throughout, with `OES_texture_float_linear` enabled.
 Inputs, results, PBO reads, session bands, snapshot relays and job scratch files
 carry little-endian binary32 values in `rgba32f`; the legacy `rgba16f` field is
 empty. No binary16 conversion occurs. Cache keys, byte budgets and validation
-retain the requested depth. Native compiled shaders also use float32 targets.
-Asynchronous frame
-snapshots accept mapped RGBA8 rows directly, preserving row order and the
-existing premultiplied/straight/opaque snapshot encoding.
+retain the requested depth.
+
+Source-cache format tags keep the prior float16/float32 encodings. Parity
+verdicts and persisted probe pins use a new depth-scoped namespace at **every**
+depth, including 16. Old unscoped pins are re-probed on first use; their keys
+are not preserved. This changes first-use work, not the rendered result. Native
+compiled shaders also use float32 targets. Asynchronous frame snapshots accept
+mapped RGBA8 rows directly, preserving row order and the existing
+premultiplied/straight/opaque snapshot encoding.
 
 ## Qualification
 
@@ -125,18 +127,44 @@ video-parity lane owns that engine-wide source issue; the depth lane retains
 all six failing comparisons and their source evidence. No tolerance is applied
 to that gate.
 
-`color-depth-alpha.ts` captures an actual legacy transparent PNG with
-overlapping solids and a blurred layer. The reference has 113 alpha codes.
-The premultiplied frame is exact; the decoded PNG differs at 176 pixels by
-one RGB code, with unchanged alpha. The existing level-1 Canvas compatibility
-conversion applies to RGBA8 PNG delivery from every project depth. That shared
-image-export issue is routed to the video/image lane; the gate retains the
-failure independently from composition parity. Fresh rotated
-text sources and compositions are exact at all three depths, including a
-new runner retention run with zero differing byte codes or binary32 bits.
-Capture preparation happens outside the Electron lock; a prebuilt opt-in
-Playwright batch holds a shared slot only for actual app execution. Each app
-profile is removed in `finally`.
+`color-depth-alpha.ts` captures actual legacy transparent PNGs with
+identical overlapping solids and a blurred layer at depths 8, 16 and 32.
+Every readback and PNG contains 113 alpha codes. All three premultiplied
+frames match, including raw floats. Decoded PNGs differ at 176 / 2,968 / 179
+pixels respectively, each by one RGB code with unchanged alpha. This now
+observes the shared level-1 Canvas conversion issue at all depths; it remains
+routed to the video/image lane, with each strict export failure retained.
+Fresh rotated text sources and compositions are exact at all three depths,
+including runner retention with zero differing byte codes or binary32 bits.
+Capture preparation happens outside the Electron lock; prebuilt opt-in
+Playwright batches hold a shared slot only for actual app execution. Each
+app profile is removed in `finally`.
+
+The extended depth-8 gate (`color-depth-expanded.ts`) adds 52 composition
+captures: every registered blend mode over opaque and transparent backdrops;
+layer, group and precomp motion blur at 3/6/16/20 samples with translation,
+rotation, scaling and partial alpha; all four transitions in and out; masked
+adjustment chains; nested transformed precomps; hard and feathered Bezier
+path masks; every track-matte mode; and blur, glow, shadow, color and levels
+effects. All 52 compare byte for byte, with raw CV 0. This is a composition
+gate; separate actual PNG exports and the delivery-format matrix cover export.
+
+The extended gate exposed a shared blend defect over translucent destinations.
+The former native equation mixed straight colors by source alpha and then
+multiplied by union alpha, which attenuated the source twice. Native WGSL
+and the CPU reference now match today's premultiplied blend expression:
+`(1-sa)*dst.rgb + (1-da)*src.rgb + sa*da*blend(dst/da,src/sa)`.
+This fixes the eight non-normal transparent blend cases and the nested
+screen-blended precomp. An independent CPU expectation and an RGBA8 GPU
+witness preserve red/green source contributions over a translucent backdrop.
+No tolerance or reference fixture was changed to obtain the 52-image pass.
+
+A separate depth-8 shader layer, transformed and screen-blended at partial
+opacity over a gradient, uses a registered three-pass user effect. Both
+production first-use parity requests settle through the actual WebGL runner;
+all 8,192 final channels match today's app in byte codes and normalized float
+bits. The same harness retains the independent binary32 proof at depth 32.
+
 The seven depth-8 slice projects also export through the native PNG job with
 the app's Float32 request hint and dither enabled; all decoded PNG pixels
 match the app readback. The full 8-bit delivery matrix, independent codec
@@ -159,7 +187,6 @@ the seven pairs. The source and counts are `pm-perfbench/examples/color_depth.rs
 timings are informational under concurrent machine load. These synthetic
 qualification scenes do not replace the integration owner's complete native-app
 corpus gate.
-
 
 For comparison with today's compositor, the counter example also has a
 `--composition` mode using the production `render_snapshot_into` endpoint.
