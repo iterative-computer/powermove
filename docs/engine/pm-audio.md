@@ -351,6 +351,30 @@ speed 1.2 (AUDIO-4). The nested-composition silence (a precomposition's `trim`
 channel read as a number, NaN through the mix) is fixed with a regression test
 (`tests/mixer.rs`).
 
+### A7/A8 campaign, today's model build (2026-10-22, 20:00–20:05 PDT)
+
+`tools/playback-gates.ts`, paired hidden apps (today, then the engine, one row
+counterbalanced), 16 speed-1.5 voices, 30 edit-then-play samples per mode, MacBook
+Pro speakers at 48 kHz, one exclusive Electron reservation; raw JSON outside the
+repository. Latency from the edit and Play to the first scheduled presentation, ms:
+
+| Row | Today p50 / p95 / max | Engine p50 / p95 / max |
+|---|---|---|
+| A7 60 s loop, then gain edit | 30.61 / 32.42 / 32.73 | 19.49 / 20.29 / 20.33 |
+| speed edit | 31.13 / 32.61 / 32.63 | 26.85 / 27.75 / 29.58 |
+| speed edit, 16 distinct trims (engine first) | 29.63 / 32.33 / 32.73 | 29.22 / 30.12 / 30.90 |
+| cold same-task seek (2 s / 3 s) | 29.92 / 32.31 / 32.52 | 25.19 / 26.38 / 26.60 |
+| 4 load threads: A7 60 s loop, then gain edit | 31.24 / 32.43 / 32.44 | 19.57 / 20.30 / 20.31 |
+| 4 load threads: speed edit, distinct trims | 30.32 / 32.62 / 32.76 | **32.20 / 33.79 / 33.85** |
+| 4 load threads: cold seek | 29.82 / 32.21 / 32.51 | 28.01 / 28.92 / 29.22 |
+
+A7: both 60 s loops (plain and loaded) had 0 underruns, 0 starved renders and 0
+overloads in the engine; today 0 underrun events. Every engine start had 0 program
+underruns, 0 omitted prefix frames and 0 start spread. The loaded distinct-trim row
+is 1.0–1.9 ms slower than today (16 independent vocoder pre-rolls on 4 cores under
+load): an A8 miss, not qualified. The headless cold-start bound (AUDIO-2,
+10.67 ms) still fails intermittently at machine load 19–41 (12.3 ms measured).
+
 ## Pitch (`conform`, `stretch`, `pm-stretch`)
 
 Plan section 16: "pitch preserved by default (Signalsmith Stretch, our own binding) or
