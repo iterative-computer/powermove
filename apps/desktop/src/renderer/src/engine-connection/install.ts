@@ -268,8 +268,13 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if (!sessions.size) return;
       flushing = true;
       try {
+        const before = PM.EngineDoc?.barrier?.revision ?? null;
         PM.EngineDoc?.barrier?.flush();
         noteVersion();
+        // An edit while paused: the producers prepare the frame on screen at
+        // the new revision now, beside the engine's render that will ask
+        // for it (today draws an edit in the frame it happens).
+        if (before !== null && (PM.EngineDoc?.barrier?.revision ?? null) !== before) renderTransport.prepareShown();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {

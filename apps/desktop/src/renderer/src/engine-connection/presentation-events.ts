@@ -90,6 +90,11 @@ export class PresentedEvents {
   emitted = 0;
   /** Redraw requests answered with the frame on screen (`redraw`). */
   redraws = 0;
+  /** The revision of the frame on screen, once one was. */
+  get shownRevision(): number | null {
+    return this.last?.frame.revision ?? null;
+  }
+
   /** Why the latest redraw request announced nothing (diagnostics). */
   lastRedraw: string | null = null;
   /** Main-thread time the emissions' listeners took (ms), and the slowest. */

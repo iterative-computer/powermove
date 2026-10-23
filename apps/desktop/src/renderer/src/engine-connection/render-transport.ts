@@ -762,6 +762,13 @@ export class EngineRenderTransport {
     return changed;
   }
 
+  /** An edit while paused: prepares the frames around the playhead at the
+   *  new revision at once (the paused warm-up the engine's ask would start). */
+  prepareShown(): void {
+    if (this.options.playing?.() || !this.ahead.size || !this.preparers.size) return;
+    this.presentedWhilePlaying(true);
+  }
+
   private answerNeed(need: CompatNeed, session: TransportSession, prepared = false, refresh = false): boolean {
     const answerer = this.answerers.get(need.source);
     // A producer that asks for a frame from inside its own answer (an
