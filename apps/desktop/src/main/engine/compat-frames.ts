@@ -24,8 +24,10 @@ import { ProtocolError } from './protocol';
 /** Largest answer inline (pm_protocol INLINE_PIXEL_BYTES). */
 export const INLINE_PIXEL_BYTES = 1024 * 1024;
 export const ASK_TIMEOUT_MS = 30_000;
-/** Asks in flight (pm-node jobs/compat.rs keeps its turns within it). */
-export const MAX_ASKS = 128;
+/** Asks in flight (pm-node jobs/compat.rs keeps its turns within it): a
+ *  large project's export frame names hundreds of layers, and each turn is
+ *  a round trip through this process and the window. */
+export const MAX_ASKS = 1024;
 export const SEGMENT_ORPHAN_MS = 60_000;
 const MAX_EDGE = 16384;
 
